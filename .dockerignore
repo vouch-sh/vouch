@@ -36,6 +36,6 @@ config/deploy.yml
 .DS_Store
 ._*
 
-# Other crates not needed for server
-crates/vouch-cli/
-crates/vouch-agent/
+# Other crates - keep Cargo.toml for workspace resolution, exclude src
+crates/vouch-cli/src/
+crates/vouch-agent/src/
