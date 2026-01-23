@@ -3,7 +3,7 @@
 
 service: vouch
 
-image: ghcr.io/vouch-sh/vouch
+image: vouch-sh/vouch
 
 servers:
   web:
@@ -52,9 +52,3 @@ builder:
   arch: amd64
   #cache:
   #  type: registry
-
-# Keep 3 old containers for rollback
-retain_containers: 3
-
-# Wait up to 30 seconds for container to be ready
-deploy_timeout: 30
