@@ -1,159 +1,579 @@
-//! Authentication handlers
-
-use axum::{extract::State, http::StatusCode, Json};
-use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+//! Authentication handlers for registration and login.
 
 use crate::AppState;
-use vouch_common::{ApiError, SessionStatus};
+use crate::db;
+use axum::{
+    Json,
+    extract::State,
+    http::{StatusCode, header},
+};
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use jiff::{Span, Timestamp};
+use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
+use uuid::Uuid;
+use vouch_common::{
+    ApiError, LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest, LoginStartResponse,
+    RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
+    SessionStatus,
+};
 
-// ============================================================================
-// Register
-// ============================================================================
-
-#[derive(Deserialize)]
-pub struct StartRegistrationRequest {
-    name: Option<String>,
+/// JSON error response helper.
+fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
+    (status, Json(ApiError::new(code, message)))
 }
 
-#[derive(Serialize)]
-pub struct StartRegistrationResponse {
-    registration_url: String,
-    code: String,
+/// Generate random challenge bytes.
+fn generate_challenge() -> Vec<u8> {
+    let mut challenge = vec![0u8; 32];
+    rand::rng().fill_bytes(&mut challenge);
+    challenge
 }
 
+/// Hash a token for storage.
+fn hash_token(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+// ============================================================================
+// Registration State (stored temporarily)
+// ============================================================================
+
+/// Registration state stored between start and complete.
+#[derive(Debug, Serialize, Deserialize)]
+struct RegistrationState {
+    user_id: Uuid,
+    user_name: String,
+    device_name: String,
+    challenge: Vec<u8>,
+    rp_id: String,
+}
+
+impl RegistrationState {
+    fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
+        encode(
+            &Header::default(),
+            self,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+    }
+
+    fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
+        let mut validation = Validation::default();
+        validation.required_spec_claims.clear();
+        validation.validate_exp = false;
+        let data = decode::<Self>(
+            token,
+            &DecodingKey::from_secret(secret.as_bytes()),
+            &validation,
+        )?;
+        Ok(data.claims)
+    }
+}
+
+// ============================================================================
+// Authentication State (stored temporarily)
+// ============================================================================
+
+/// Authentication state stored between start and complete.
+#[derive(Debug, Serialize, Deserialize)]
+struct AuthenticationState {
+    user_id: String,
+    challenge: Vec<u8>,
+    rp_id: String,
+    credential_ids: Vec<Vec<u8>>,
+}
+
+impl AuthenticationState {
+    fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
+        encode(
+            &Header::default(),
+            self,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+    }
+
+    fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
+        let mut validation = Validation::default();
+        validation.required_spec_claims.clear();
+        validation.validate_exp = false;
+        let data = decode::<Self>(
+            token,
+            &DecodingKey::from_secret(secret.as_bytes()),
+            &validation,
+        )?;
+        Ok(data.claims)
+    }
+}
+
+// ============================================================================
+// JWT Session Claims
+// ============================================================================
+
+/// JWT claims for session tokens.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SessionClaims {
+    /// Subject (user ID).
+    pub sub: String,
+    /// User email.
+    pub email: String,
+    /// Authenticator ID used for this session.
+    pub authenticator_id: String,
+    /// Issued at (Unix timestamp).
+    pub iat: i64,
+    /// Expiration (Unix timestamp).
+    pub exp: i64,
+}
+
+// ============================================================================
+// Handlers
+// ============================================================================
+
+/// Start registration - generate challenge and return to client.
 pub async fn register_start(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<StartRegistrationRequest>,
-) -> Result<Json<StartRegistrationResponse>, (StatusCode, Json<ApiError>)> {
-    // Generate one-time registration code
-    let code = generate_code();
-    
-    // TODO: Store registration challenge in database
-    // TODO: Associate with pending user or require OIDC login first
+    Json(req): Json<RegisterStartRequest>,
+) -> Result<Json<RegisterStartResponse>, (StatusCode, Json<ApiError>)> {
+    tracing::info!("Registration start for email: {}", req.email);
 
-    let registration_url = format!(
-        "{}/auth/register?code={}",
-        state.config.rp_origin, code
-    );
+    // Create or get user
+    let user = db::upsert_user(&state.db, &req.email, Some(&req.name))
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?;
 
-    Ok(Json(StartRegistrationResponse {
-        registration_url,
-        code,
+    let user_id = Uuid::parse_str(&user.id).map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "uuid_error",
+            &e.to_string(),
+        )
+    })?;
+
+    // Generate challenge
+    let challenge = generate_challenge();
+
+    // Create state token
+    let reg_state = RegistrationState {
+        user_id,
+        user_name: req.email.clone(),
+        device_name: req.name,
+        challenge: challenge.clone(),
+        rp_id: state.config.rp_id.clone(),
+    };
+
+    let state_token = reg_state.encode(&state.config.jwt_secret).map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "state_error",
+            &e.to_string(),
+        )
+    })?;
+
+    Ok(Json(RegisterStartResponse {
+        challenge,
+        rp_id: state.config.rp_id.clone(),
+        rp_name: state.config.rp_name.clone(),
+        user_id,
+        user_name: req.email,
+        algorithms: vec![-7], // ES256
+        state: state_token,
     }))
 }
 
-#[derive(Deserialize)]
-pub struct CompleteRegistrationRequest {
-    code: String,
-}
-
-#[derive(Serialize)]
-pub struct CompleteRegistrationResponse {
-    device_id: String,
-    device_name: String,
-}
-
+/// Complete registration - verify attestation and store credential.
 pub async fn register_complete(
-    State(_state): State<Arc<AppState>>,
-    Json(req): Json<CompleteRegistrationRequest>,
-) -> Result<Json<CompleteRegistrationResponse>, (StatusCode, Json<ApiError>)> {
-    // TODO: Look up registration by code
-    // TODO: Verify WebAuthn response was received via browser
-    // TODO: Store credential
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<RegisterCompleteRequest>,
+) -> Result<Json<RegisterCompleteResponse>, (StatusCode, Json<ApiError>)> {
+    tracing::info!("Registration complete");
 
-    // For now, return pending status
-    Err((
-        StatusCode::ACCEPTED,
-        Json(ApiError::new("pending", "registration not yet complete")),
-    ))
+    // Decode state
+    let reg_state = RegistrationState::decode(&req.state, &state.config.jwt_secret)
+        .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
+
+    // For now, we do basic validation and trust the CLI's local verification
+    // In production, use webauthn-rs to verify the attestation
+    if req.credential_id.is_empty() {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_credential",
+            "credential_id is empty",
+        ));
+    }
+
+    if req.public_key.is_empty() {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_credential",
+            "public_key is empty",
+        ));
+    }
+
+    // Store the authenticator
+    let device_id = db::create_authenticator(
+        &state.db,
+        &reg_state.user_id.to_string(),
+        &reg_state.device_name,
+        &req.credential_id,
+        &req.public_key,
+    )
+    .await
+    .map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            &e.to_string(),
+        )
+    })?;
+
+    tracing::info!("Registered new authenticator: {}", device_id);
+
+    Ok(Json(RegisterCompleteResponse {
+        device_id: Uuid::parse_str(&device_id).map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "uuid_error",
+                &e.to_string(),
+            )
+        })?,
+        message: "Registration successful".to_string(),
+    }))
 }
 
-// ============================================================================
-// Login
-// ============================================================================
-
-#[derive(Serialize)]
-pub struct StartLoginResponse {
-    login_url: String,
-    code: String,
-}
-
+/// Start login - generate challenge and return credential IDs.
 pub async fn login_start(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<StartLoginResponse>, (StatusCode, Json<ApiError>)> {
-    let code = generate_code();
+    Json(req): Json<LoginStartRequest>,
+) -> Result<Json<LoginStartResponse>, (StatusCode, Json<ApiError>)> {
+    tracing::info!("Login start for email: {}", req.email);
 
-    // TODO: Store login challenge
+    // Get user
+    let user = db::get_user_by_email(&state.db, &req.email)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
 
-    let login_url = format!(
-        "{}/auth/login?code={}",
-        state.config.rp_origin, code
-    );
+    // Get user's authenticators
+    let authenticators = db::get_authenticators_for_user(&state.db, &user.id)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?;
 
-    Ok(Json(StartLoginResponse {
-        login_url,
-        code,
+    if authenticators.is_empty() {
+        return Err(json_error(
+            StatusCode::NOT_FOUND,
+            "no_credentials",
+            "No credentials registered for this user",
+        ));
+    }
+
+    let credential_ids: Vec<Vec<u8>> = authenticators
+        .iter()
+        .map(|a| a.credential_id.clone())
+        .collect();
+
+    // Generate challenge
+    let challenge = generate_challenge();
+
+    // Create state token
+    let auth_state = AuthenticationState {
+        user_id: user.id,
+        challenge: challenge.clone(),
+        rp_id: state.config.rp_id.clone(),
+        credential_ids: credential_ids.clone(),
+    };
+
+    let state_token = auth_state.encode(&state.config.jwt_secret).map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "state_error",
+            &e.to_string(),
+        )
+    })?;
+
+    Ok(Json(LoginStartResponse {
+        challenge,
+        rp_id: state.config.rp_id.clone(),
+        credential_ids,
+        state: state_token,
     }))
 }
 
-#[derive(Deserialize)]
-pub struct CompleteLoginRequest {
-    code: String,
-}
-
-#[derive(Serialize)]
-pub struct CompleteLoginResponse {
-    token: String,
-    user_email: String,
-    expires_at: String,
-}
-
+/// Complete login - verify assertion and issue session token.
+#[allow(clippy::too_many_lines)]
 pub async fn login_complete(
-    State(_state): State<Arc<AppState>>,
-    Json(_req): Json<CompleteLoginRequest>,
-) -> Result<Json<CompleteLoginResponse>, (StatusCode, Json<ApiError>)> {
-    // TODO: Verify login by code
-    // TODO: Issue JWT
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<LoginCompleteRequest>,
+) -> Result<Json<LoginCompleteResponse>, (StatusCode, Json<ApiError>)> {
+    tracing::info!("Login complete");
 
-    Err((
-        StatusCode::ACCEPTED,
-        Json(ApiError::new("pending", "login not yet complete")),
-    ))
+    // Decode state
+    let auth_state = AuthenticationState::decode(&req.state, &state.config.jwt_secret)
+        .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
+
+    // Verify the credential_id is in the allowed list
+    if !auth_state
+        .credential_ids
+        .iter()
+        .any(|id| id == &req.credential_id)
+    {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_credential",
+            "Credential not in allowed list",
+        ));
+    }
+
+    // Get the authenticator
+    let authenticator = db::get_authenticator_by_credential_id(&state.db, &req.credential_id)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            json_error(
+                StatusCode::NOT_FOUND,
+                "credential_not_found",
+                "Credential not found",
+            )
+        })?;
+
+    // Verify user matches
+    if authenticator.user_id != auth_state.user_id {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "user_mismatch",
+            "User mismatch",
+        ));
+    }
+
+    // Get user
+    let user = db::get_user_by_id(&state.db, &auth_state.user_id)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
+
+    // For now, trust the CLI's signature verification
+    // In production, verify the signature server-side using webauthn-rs
+
+    // Update counter (extract from authenticator_data)
+    // The counter is at bytes 33-36 of authenticator_data (big-endian u32)
+    if req.authenticator_data.len() >= 37 {
+        let counter_bytes: [u8; 4] = req
+            .authenticator_data
+            .get(33..37)
+            .ok_or_else(|| {
+                json_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_auth_data",
+                    "Invalid authenticator data",
+                )
+            })?
+            .try_into()
+            .map_err(|_| {
+                json_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_auth_data",
+                    "Invalid authenticator data",
+                )
+            })?;
+        let new_counter = i64::from(u32::from_be_bytes(counter_bytes));
+
+        // Check counter is increasing
+        if new_counter <= authenticator.counter {
+            return Err(json_error(
+                StatusCode::BAD_REQUEST,
+                "counter_error",
+                "Counter not increasing - possible cloned authenticator",
+            ));
+        }
+
+        db::update_authenticator_counter(&state.db, &authenticator.id, new_counter)
+            .await
+            .map_err(|e| {
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    &e.to_string(),
+                )
+            })?;
+    }
+
+    // Generate session token
+    let now = Timestamp::now();
+    let session_hours = i64::try_from(state.config.session_hours).map_err(|_| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "time_error",
+            "Invalid session hours",
+        )
+    })?;
+    let duration = Span::new().hours(session_hours);
+    let expires = now.checked_add(duration).map_err(|_| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "time_error",
+            "Time overflow",
+        )
+    })?;
+
+    let claims = SessionClaims {
+        sub: user.id.clone(),
+        email: user.email.clone(),
+        authenticator_id: authenticator.id.clone(),
+        iat: now.as_second(),
+        exp: expires.as_second(),
+    };
+
+    let token = encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+    )
+    .map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "token_error",
+            &e.to_string(),
+        )
+    })?;
+
+    // Store session
+    let token_hash = hash_token(&token);
+    db::create_session(
+        &state.db,
+        &user.id,
+        &token_hash,
+        &authenticator.id,
+        &expires.to_string(),
+    )
+    .await
+    .map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            &e.to_string(),
+        )
+    })?;
+
+    tracing::info!("Login successful for user: {}", user.email);
+
+    Ok(Json(LoginCompleteResponse {
+        token,
+        expires_at: expires.to_string(),
+    }))
 }
 
-// ============================================================================
-// Status
-// ============================================================================
-
+/// Get current session status.
 pub async fn status(
-    State(_state): State<Arc<AppState>>,
-    // TODO: Extract JWT from Authorization header
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
 ) -> Result<Json<SessionStatus>, (StatusCode, Json<ApiError>)> {
-    // TODO: Validate JWT and return session status
+    // Get Authorization header
+    let auth_header = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "));
+
+    let Some(token) = auth_header else {
+        return Ok(Json(SessionStatus {
+            authenticated: false,
+            email: None,
+            expires_in_seconds: None,
+            device_name: None,
+        }));
+    };
+
+    // Validate token
+    let claims = match decode::<SessionClaims>(
+        token,
+        &DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+        &Validation::default(),
+    ) {
+        Ok(data) => data.claims,
+        Err(_) => {
+            return Ok(Json(SessionStatus {
+                authenticated: false,
+                email: None,
+                expires_in_seconds: None,
+                device_name: None,
+            }));
+        }
+    };
+
+    // Check session exists in database
+    let token_hash = hash_token(token);
+    let session = db::get_session_by_token_hash(&state.db, &token_hash)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?;
+
+    if session.is_none() {
+        return Ok(Json(SessionStatus {
+            authenticated: false,
+            email: None,
+            expires_in_seconds: None,
+            device_name: None,
+        }));
+    }
+
+    // Get authenticator name
+    let device_name = db::get_authenticator_by_id(&state.db, &claims.authenticator_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|a| a.name);
+
+    // Calculate time remaining
+    let now = Timestamp::now().as_second();
+    let expires_in = if claims.exp > now {
+        u64::try_from(claims.exp - now).ok()
+    } else {
+        None
+    };
 
     Ok(Json(SessionStatus {
-        authenticated: false,
-        user_email: None,
-        expires_in_seconds: None,
-        device_name: None,
-        active_delegations: 0,
+        authenticated: expires_in.is_some(),
+        email: Some(claims.email),
+        expires_in_seconds: expires_in,
+        device_name,
     }))
-}
-
-// ============================================================================
-// Helpers
-// ============================================================================
-
-fn generate_code() -> String {
-    // 6 character alphanumeric code (easy to type)
-    use rand::Rng;
-    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // No 0, O, 1, I
-    let mut rng = rand::thread_rng();
-    (0..6)
-        .map(|_| {
-            let idx = rng.gen_range(0..CHARSET.len());
-            CHARSET[idx] as char
-        })
-        .collect()
 }

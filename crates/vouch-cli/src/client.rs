@@ -1,109 +1,104 @@
-//! HTTP client for vouch server API
+//! HTTP client for communicating with vouch server.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use reqwest::Client;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use vouch_common::ApiError;
 
-/// Client for vouch server API
+use crate::config::Config;
+
+/// HTTP client wrapper for vouch server API.
 pub struct VouchClient {
-    http: Client,
+    client: Client,
     base_url: String,
 }
 
 impl VouchClient {
-    /// Create a new client
+    /// Create a new client for the given server URL.
     pub fn new(base_url: &str) -> Result<Self> {
-        let http = Client::builder()
-            .user_agent(format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .timeout(std::time::Duration::from_secs(30))
+        let client = Client::builder()
             .build()
             .context("failed to create HTTP client")?;
 
         Ok(Self {
-            http,
+            client,
             base_url: base_url.trim_end_matches('/').to_string(),
         })
     }
 
-    /// POST request
-    pub async fn post<T: Serialize, R: DeserializeOwned>(
-        &self,
-        path: &str,
-        body: &T,
-        token: Option<&str>,
-    ) -> Result<R> {
-        let url = format!("{}{}", self.base_url, path);
-        
-        let mut req = self.http.post(&url).json(body);
-        
-        if let Some(token) = token {
-            req = req.bearer_auth(token);
-        }
-
-        let resp = req.send().await.context("request failed")?;
-        self.handle_response(resp).await
-    }
-
-    /// GET request
-    pub async fn get<R: DeserializeOwned>(
-        &self,
-        path: &str,
-        token: Option<&str>,
-    ) -> Result<R> {
-        let url = format!("{}{}", self.base_url, path);
-        
-        let mut req = self.http.get(&url);
-        
-        if let Some(token) = token {
-            req = req.bearer_auth(token);
-        }
-
-        let resp = req.send().await.context("request failed")?;
-        self.handle_response(resp).await
-    }
-
-    /// DELETE request
-    pub async fn delete<R: DeserializeOwned>(
-        &self,
-        path: &str,
-        token: Option<&str>,
-    ) -> Result<R> {
-        let url = format!("{}{}", self.base_url, path);
-        
-        let mut req = self.http.delete(&url);
-        
-        if let Some(token) = token {
-            req = req.bearer_auth(token);
-        }
-
-        let resp = req.send().await.context("request failed")?;
-        self.handle_response(resp).await
-    }
-
-    /// Handle response, extracting errors
-    async fn handle_response<R: DeserializeOwned>(
-        &self,
-        resp: reqwest::Response,
-    ) -> Result<R> {
-        let status = resp.status();
-        
-        if status.is_success() {
-            let body = resp.json().await.context("failed to parse response")?;
-            Ok(body)
-        } else {
-            // Try to parse as API error
-            let error: ApiError = resp
-                .json()
-                .await
-                .unwrap_or_else(|_| ApiError::new("unknown", format!("HTTP {}", status)));
-            
-            anyhow::bail!("{}: {}", error.code, error.error)
-        }
-    }
-
-    /// Get the base URL
+    /// Get the base URL.
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Get a reference to the raw reqwest client.
+    pub fn raw_client(&self) -> &Client {
+        &self.client
+    }
+
+    /// POST a JSON request and get a JSON response.
+    pub async fn post<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
+    where
+        Req: Serialize,
+        Resp: DeserializeOwned,
+    {
+        let url = format!("{}{}", self.base_url, path);
+        tracing::debug!("POST {}", url);
+
+        let response = self
+            .client
+            .post(&url)
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("failed to connect to {url}"))?;
+
+        self.handle_response(response).await
+    }
+
+    /// GET a JSON response with authentication.
+    pub async fn get_authenticated<Resp>(&self, path: &str) -> Result<Resp>
+    where
+        Resp: DeserializeOwned,
+    {
+        let config = Config::load()?;
+        let token = config
+            .token()
+            .context("not authenticated - run 'vouch login' first")?;
+
+        let url = format!("{}{}", self.base_url, path);
+        tracing::debug!("GET {} (authenticated)", url);
+
+        let response = self
+            .client
+            .get(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .with_context(|| format!("failed to connect to {url}"))?;
+
+        self.handle_response(response).await
+    }
+
+    /// Handle HTTP response, parsing JSON or error.
+    async fn handle_response<Resp>(&self, response: reqwest::Response) -> Result<Resp>
+    where
+        Resp: DeserializeOwned,
+    {
+        let status = response.status();
+
+        if status.is_success() {
+            response
+                .json()
+                .await
+                .context("failed to parse server response")
+        } else {
+            // Try to parse as API error
+            let error_text = response.text().await.unwrap_or_default();
+            if let Ok(api_error) = serde_json::from_str::<ApiError>(&error_text) {
+                bail!("{}: {}", api_error.code, api_error.message);
+            }
+            bail!("server error ({status}): {error_text}");
+        }
     }
 }

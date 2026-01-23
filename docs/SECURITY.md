@@ -1,222 +1,429 @@
 # Security Model
 
-This document describes vouch's security model, threat analysis, and security considerations.
+This document describes Vouch's security architecture, threat model, and incident response procedures.
 
-## Core Security Properties
+## Security Philosophy
 
-### 1. Hardware-Bound Authentication
+Vouch is designed around three core principles:
 
-All authentication requires physical interaction with a FIDO2 authenticator (YubiKey, Touch ID, etc.). This provides:
+1. **Hardware-bound only** — YubiKey 5 series required; no platform passkeys (Touch ID, Windows Hello)
+2. **Minimize credential lifetime** — Short-lived credentials (8 hours max) limit blast radius of compromise
+3. **Audit everything** — Every credential issuance is logged with provenance
 
-- **Phishing resistance** - The authenticator validates the origin, preventing credential theft via fake sites
-- **Presence verification** - A human must physically interact with the device
-- **Non-exportable keys** - Private keys never leave the authenticator
-
-### 2. Short-Lived Credentials
-
-vouch only issues credentials with short validity periods:
-
-| Credential Type | Default TTL | Maximum TTL |
-|-----------------|-------------|-------------|
-| Session token   | 8 hours     | 24 hours    |
-| GitHub token    | 1 hour      | 1 hour (GitHub limit) |
-| AWS credentials | 1 hour      | 12 hours (role-dependent) |
-| SSH certificate | 1 hour      | 24 hours    |
-| Delegation      | 1 hour      | 7 days      |
-
-Short TTLs limit the window of exposure if credentials are compromised.
-
-### 3. Audit Trail
-
-Every credential issuance is logged with:
-
-- User identity
-- Presence type (human_present vs human_delegated)
-- Delegation ID (if applicable)
-- Target service
-- Timestamp
-- Client IP and user agent
-
-This enables forensic analysis and compliance reporting.
+**Policy**: This is non-negotiable. Platform passkeys can be synced, backed up, and extracted. Hardware-bound credentials cannot. This is Vouch's key differentiator.
 
 ## Threat Model
 
-### Assets to Protect
+### What Vouch Protects Against
 
-1. **User identity** - Prevent impersonation
-2. **External service access** - Prevent unauthorized GitHub/AWS/SSH access
-3. **Audit integrity** - Prevent tampering with logs
+| Threat | Mitigation |
+|--------|------------|
+| **Credential theft** | Short-lived credentials expire before attackers can use them |
+| **MFA fatigue attacks** | No push notifications; physical touch required |
+| **Phishing** | YubiKey's origin binding prevents credential use on wrong domains |
+| **Malware on workstation** | Private keys never leave the YubiKey |
+| **Insider threats** | Audit trail with cryptographic attestation |
+| **Credential stuffing** | No passwords to stuff |
+| **Synced passkey extraction** | Hardware-bound only policy prevents syncable credentials |
 
-### Threat Actors
+### What Vouch Does NOT Protect Against
 
-| Actor | Capability | Goal |
-|-------|------------|------|
-| External attacker | Network access, phishing | Gain unauthorized access |
-| Malicious insider | Valid account | Exceed authorized access |
-| Compromised agent | Delegation token | Exceed delegated scope |
-| Compromised endpoint | Local access | Steal credentials |
+| Threat | Why | Mitigation |
+|--------|-----|------------|
+| **Physical YubiKey theft + known PIN** | Attacker has both factors | Use biometric YubiKey (Bio series), rotate PIN |
+| **Compromised Vouch server** | Server issues credentials | Self-host for high-security, monitor audit logs |
+| **Malware stealing session after login** | Session token in memory | Minimize session duration, endpoint protection |
+| **Supply chain attacks on CLI** | Compromised binary | Reproducible builds, code signing, open source auditing |
 
-### Attack Scenarios
+### Attacker Profiles
 
-#### 1. Phishing Attack
+#### Script Kiddie
+- **Capabilities**: Automated scanning, credential stuffing, phishing kits
+- **Vouch defense**: No passwords, origin-bound hardware auth, short-lived creds
 
-**Attack**: Attacker creates fake vouch login page to steal credentials.
+#### Sophisticated Attacker
+- **Capabilities**: Targeted phishing, malware, network interception
+- **Vouch defense**: Hardware attestation, hardware-bound only policy, audit logging
 
-**Mitigation**: FIDO2/WebAuthn validates the origin. Even if a user visits a fake site, the authenticator will refuse to sign the challenge because the origin doesn't match.
-
-**Residual risk**: None for authentication. Users could still be tricked into authorizing actions on the real site.
-
-#### 2. Session Token Theft
-
-**Attack**: Attacker steals session token from user's machine.
-
-**Mitigation**: 
-- Tokens are stored in memory, not on disk
-- Short TTL limits exposure window
-- Tokens are bound to client metadata (IP, user agent) for anomaly detection
-
-**Residual risk**: Attacker with local access during active session can use the token until it expires.
-
-#### 3. Delegation Scope Escape
-
-**Attack**: Malicious agent tries to access resources outside its delegation scope.
-
-**Mitigation**:
-- Server validates every credential request against delegation scope
-- Scope is enforced at issuance time, not just logged
-- Delegation tokens are cryptographically bound to their scope
-
-**Residual risk**: None if implementation is correct. Bugs in scope validation are critical vulnerabilities.
-
-#### 4. Server Compromise
-
-**Attack**: Attacker gains control of vouch server.
-
-**Mitigation**:
-- Server does not store long-lived credentials for external services
-- GitHub App private key should be stored in HSM/secure enclave
-- Database encryption at rest
-
-**Residual risk**: Compromised server can issue credentials for any user. This is the highest-impact attack.
-
-#### 5. Replay Attack
-
-**Attack**: Attacker captures and replays authentication messages.
-
-**Mitigation**:
-- FIDO2 challenges are single-use and time-limited (5 minutes)
-- Challenge state is stored server-side and invalidated after use
-- Authenticator counter prevents credential cloning
-
-**Residual risk**: None if implementation is correct.
+#### Nation-State
+- **Capabilities**: Zero-days, supply chain compromise, physical access
+- **Vouch defense**: Air-gapped deployment, HSM integration, reproducible builds
 
 ## Security Controls
 
-### Authentication
+### Authentication Layer
 
-- [ ] FIDO2/WebAuthn for all authentication
-- [ ] Single-use, time-limited challenges
-- [ ] Authenticator counter verification
-- [ ] User verification (PIN/biometric) required
+```
++------------------------------------------------------------------+
+|                    Authentication Controls                        |
+|                                                                   |
+|  +------------------+  +------------------+  +-----------------+  |
+|  |  FIDO2/WebAuthn  |  |   User Verify    |  |  Attestation    |  |
+|  |                  |  |                  |  |                 |  |
+|  | * Ed25519        |  | * PIN required   |  | * Hardware-     |  |
+|  | * Discoverable   |  | * UV flag set    |  |   bound only    |  |
+|  |   credential     |  | * No platform    |  | * AAGUID check  |  |
+|  | * RP binding     |  |   passkeys       |  | * YubiKey 5     |  |
+|  +------------------+  +------------------+  +-----------------+  |
++------------------------------------------------------------------+
+```
 
-### Session Management
+**WebAuthn Configuration:**
+```rust
+// Server-side WebAuthn options
+let options = PublicKeyCredentialCreationOptions {
+    challenge: random_bytes(32),
+    rp: RelyingParty { id: "vouch.sh", name: "Vouch" },
+    user: UserEntity { id, name, display_name },
 
-- [ ] JWT tokens with short expiry
-- [ ] Token hash stored in DB, not the token itself
-- [ ] Secure token generation (256-bit entropy)
-- [ ] Session invalidation on logout
+    // CRITICAL: Require hardware-bound authenticators
+    authenticator_selection: AuthenticatorSelection {
+        authenticator_attachment: Some(AuthenticatorAttachment::CrossPlatform),
+        resident_key: ResidentKeyRequirement::Required,  // Discoverable
+        user_verification: UserVerificationRequirement::Required,
+    },
 
-### Credential Issuance
+    // Reject platform authenticators
+    exclude_credentials: vec![],  // Could exclude known platform creds
 
-- [ ] Scope validation for all requests
-- [ ] Rate limiting per user
-- [ ] Audit logging for all issuance
-- [ ] No credential caching on server
+    attestation: AttestationConveyancePreference::Direct,
+};
+```
 
-### Delegation
+**Why these choices:**
+- `authenticatorAttachment: cross-platform` — Rejects platform passkeys (Touch ID, Windows Hello)
+- `residentKey: required` — Enables discoverable credential for email-less login
+- `userVerification: required` — Ensures PIN or biometric, not just presence
+- `attestation: direct` — Allows verifying authenticator is YubiKey 5 series
 
-- [ ] Cryptographic binding of scope to token
-- [ ] Revocation checked on every use
-- [ ] Use count limits enforced
-- [ ] Clear expiration enforcement
+### Hardware-Bound Enforcement
 
-### Infrastructure
+Vouch validates that authenticators are hardware-bound:
 
-- [ ] TLS for all connections
-- [ ] Database encryption at rest
-- [ ] Secrets in secure storage (not env vars in production)
-- [ ] Regular security updates
+```rust
+// Server validates attestation during enrollment
+fn validate_attestation(attestation: &AttestationObject) -> Result<(), Error> {
+    // Check AAGUID against allowlist of YubiKey 5 series
+    let allowed_aaguids = [
+        "2fc0579f-8113-47ea-b116-bb5a8db9202a",  // YubiKey 5 NFC
+        "c5ef55ff-ad9a-4b9f-b580-adebafe026d0",  // YubiKey 5Ci
+        "fa2b99dc-9e39-4257-8f92-4a30d23c4118",  // YubiKey 5 Nano
+        // ... other YubiKey 5 series AAGUIDs
+    ];
 
-## Cryptographic Choices
+    if !allowed_aaguids.contains(&attestation.aaguid) {
+        return Err(Error::UnsupportedAuthenticator(
+            "Only YubiKey 5 series authenticators are supported"
+        ));
+    }
 
-| Purpose | Algorithm | Rationale |
-|---------|-----------|-----------|
-| JWT signing | Ed25519 | Fast, small signatures, no known weaknesses |
-| Challenge generation | CSPRNG (256-bit) | Sufficient entropy for single-use values |
-| Token hashing | SHA-256 | Standard, fast, collision-resistant |
-| TLS | TLS 1.3 | Modern, secure, fast |
+    Ok(())
+}
+```
 
-We use `aws-lc-rs` as the cryptographic backend, which is FIPS-validated and maintained by AWS.
+### Discoverable Credentials
+
+Vouch uses discoverable credentials (resident keys) to enable email-less login:
+
+```rust
+// Login flow - no email required
+async fn login() -> Result<Session> {
+    // 1. Get challenge from server (no user identifier)
+    let challenge = server.get_challenge().await?;
+
+    // 2. Query YubiKey for discoverable credentials for this RP
+    let assertion = yubikey.get_assertion_with_discoverable(
+        "vouch.sh",     // RP ID
+        &challenge,
+        None,           // No allowed_credentials - discover from device
+        Some(&pin),     // PIN required
+    )?;
+
+    // 3. Server looks up user by credential_id
+    let session = server.complete_login(
+        assertion.credential_id,
+        assertion.authenticator_data,
+        assertion.signature,
+    ).await?;
+
+    Ok(session)
+}
+```
+
+**Security benefit**: The YubiKey identifies the user, not user-provided input. Eliminates username enumeration.
+
+### Enrollment Security (RFC 8628)
+
+Vouch uses RFC 8628 Device Authorization Grant for enrollment. Security considerations:
+
+```
+Device Code:   32 random bytes, SHA-256 hashed before storage
+User Code:     8 characters from 20-char alphabet (~40 bits entropy)
+               Format: XXXX-XXXX (no ambiguous chars: 0/O, 1/I/L)
+Expiration:    10 minutes (configurable)
+Polling:       5-second minimum interval, slow_down response
+OIDC State:    32 random bytes, prevents CSRF
+Nonce:         32 random bytes, prevents token replay
+```
+
+**Why this is secure:**
+- Device codes are never stored in plain text (SHA-256 hash only)
+- User codes have limited entropy but short expiration + rate limiting compensate
+- Brute-force protection: `slow_down` response for rapid polling
+- OIDC state parameter prevents authorization code injection
+- Nonce in ID token prevents replay attacks
+
+**Rate Limiting:**
+```
+POST /oauth/device/code    10 requests/minute per IP
+POST /oauth/token          1 request/5 seconds per device_code
+POST /device               5 attempts/code (then code is invalidated)
+```
+
+### Transport Layer
+
+All communication uses TLS 1.3 with:
+- AEAD ciphers only (AES-GCM, ChaCha20-Poly1305)
+- Certificate pinning for CLI → server communication
+- rustls (no OpenSSL)
+
+### Credential Layer
+
+**SSH Certificates:**
+```
+Certificate:
+    Type: user certificate
+    Public key: ssh-ed25519
+    Signing CA: vouch-ca (built-in Ed25519)
+    Key ID: user@example.com
+    Serial: 1705234567
+    Valid: 2024-01-14T10:00:00 to 2024-01-14T18:00:00 (8 hours)
+    Principals: user@example.com, user
+    Critical Options: (none)
+    Extensions:
+        permit-pty
+        permit-user-rc
+```
+
+**AWS Credentials:**
+- Obtained via `AssumeRoleWithWebIdentity` using Vouch as OIDC provider
+- Maximum duration: 1 hour
+- Role trust policy restricts to Vouch OIDC provider
+- Session tags include attestation timestamp
+
+### Audit Layer
+
+Every credential issuance generates an audit log entry:
+
+```json
+{
+  "timestamp": "2024-01-14T10:32:15.123Z",
+  "event_type": "credential_issued",
+  "user": {
+    "id": "usr_abc123",
+    "email": "user@example.com"
+  },
+  "session": {
+    "id": "sess_xyz789",
+    "authenticated_at": "2024-01-14T10:00:00Z",
+    "authenticator_aaguid": "2fc0579f-8113-47ea-b116-bb5a8db9202a",
+    "authenticator_type": "YubiKey 5 NFC"
+  },
+  "credential": {
+    "type": "ssh_certificate",
+    "fingerprint": "SHA256:...",
+    "principals": ["user@example.com", "user"],
+    "valid_until": "2024-01-14T18:00:00Z"
+  }
+}
+```
+
+Audit logs are:
+- Immutable (append-only storage)
+- Retained for compliance period (configurable, default 2 years)
+- Exportable to SIEM (Splunk, Datadog, etc.)
+
+## Memory Safety
+
+Vouch is written in Rust, providing:
+
+1. **No buffer overflows** — Bounds checking on all array access
+2. **No use-after-free** — Ownership system prevents dangling pointers
+3. **No data races** — Compiler-enforced thread safety
+
+For sensitive data handling:
+
+```rust
+use secrecy::{ExposeSecret, SecretString, SecretVec};
+use zeroize::Zeroize;
+
+// Session tokens wrapped in SecretString
+let session_token: SecretString = fetch_session_token()?;
+
+// Automatically zeroized when dropped
+// Debug output shows "[REDACTED]"
+
+// Explicit zeroization for extra-sensitive data
+let mut pin: SecretVec<u8> = SecretVec::new(read_pin()?);
+// ... use pin ...
+pin.zeroize();  // Explicit clear (also happens on drop)
+```
+
+## Supply Chain Security
+
+### Dependency Management
+
+```toml
+# Cargo.toml
+[dependencies]
+# Prefer crates with:
+# - Active maintenance
+# - Security audits
+# - Minimal transitive dependencies
+
+# Crypto: AWS-backed, FIPS-validated
+aws-lc-rs = "1.0"
+
+# No OpenSSL linking
+rustls = "0.23"
+```
+
+### Build Verification
+
+```bash
+# Reproducible builds
+cargo build --release --locked
+
+# Dependency audit
+cargo audit
+
+# Dependency review
+cargo vet
+```
+
+### Distribution
+
+- CLI binaries are signed with our release key
+- macOS binaries are notarized with Apple
+- Windows binaries are Authenticode signed
+- SHA256 checksums published with every release
+- Source releases include signed git tags
 
 ## Incident Response
 
-### Token Compromise
+### Severity Levels
 
-If a session token is compromised:
+| Level | Description | Response Time |
+|-------|-------------|---------------|
+| **Critical** | Active exploitation, credential theft | 1 hour |
+| **High** | Exploitable vulnerability, no active exploitation | 24 hours |
+| **Medium** | Vulnerability requiring unlikely conditions | 7 days |
+| **Low** | Minor issues, defense in depth | 30 days |
 
-1. User runs `vouch logout` to invalidate the session
-2. Server marks session as revoked in database
-3. All subsequent requests with that token are rejected
+### Response Procedure
 
-### Delegation Compromise
+1. **Triage** — Assess severity and scope
+2. **Contain** — Revoke affected credentials, disable vulnerable features
+3. **Investigate** — Root cause analysis
+4. **Remediate** — Deploy fix
+5. **Communicate** — Notify affected users
+6. **Review** — Post-incident analysis
 
-If a delegation token is compromised:
+### Communication Channels
 
-1. User runs `vouch delegate revoke <id>`
-2. Server marks delegation as revoked
-3. All subsequent requests with that token are rejected
-4. Review audit log for unauthorized actions
+- **Security advisories**: https://vouch.sh/security
+- **CVE assignments**: Via GitHub Security Advisories
+- **Status page**: https://status.vouch.sh
 
-### Server Compromise
+## Vulnerability Disclosure
 
-If the vouch server is compromised:
+### Reporting
 
-1. Rotate all signing keys
-2. Invalidate all sessions and delegations
-3. Rotate GitHub App private key
-4. Review audit logs
-5. Notify affected users
+Email: **security@vouch.sh**
 
-## Security Recommendations
+### What to Include
 
-### For Operators
+- Description of the vulnerability
+- Steps to reproduce
+- Potential impact
+- Any suggested fixes
 
-1. Run vouch server in isolated network segment
-2. Use HSM for signing key storage
-3. Enable database encryption
-4. Set up alerting on audit log anomalies
-5. Regular security assessments
+### What to Expect
 
-### For Users
+| Timeline | Action |
+|----------|--------|
+| 24 hours | Acknowledgment of report |
+| 72 hours | Initial assessment and severity |
+| 7 days | Estimated fix timeline |
+| 90 days | Public disclosure (coordinated) |
 
-1. Use a hardware security key (YubiKey) rather than platform authenticator
-2. Register multiple authenticators for backup
-3. Review active delegations regularly
-4. Use shortest practical TTL for delegations
-5. Scope delegations as narrowly as possible
+### Bug Bounty
 
-## Known Limitations
+We offer bounties for responsibly disclosed vulnerabilities:
 
-1. **Central authority** - vouch server is a single point of compromise
-2. **No offline mode** - Credentials cannot be issued without server connectivity
-3. **Trust in hardware** - Security depends on authenticator integrity
-4. **No key recovery** - Lost authenticator requires re-registration
+| Severity | Bounty |
+|----------|--------|
+| Critical (RCE, auth bypass) | $5,000 |
+| High (privilege escalation) | $2,500 |
+| Medium | $1,000 |
+| Low | $250 |
 
-## Reporting Security Issues
+Scope:
+- vouch CLI and agent
+- Vouch server (cloud and self-hosted)
+- Documentation errors that could lead to insecure configurations
 
-Please report security vulnerabilities to security@vouch.sh. Do not open public issues for security problems.
+Out of scope:
+- Social engineering
+- Denial of service
+- Issues in third-party dependencies (report upstream)
 
-We aim to:
-- Acknowledge reports within 24 hours
-- Provide an initial assessment within 72 hours
-- Release fixes within 30 days for critical issues
+## Security Hardening Guide
+
+### CLI Security
+
+```bash
+# Verify binary integrity before first use
+sha256sum /usr/local/bin/vouch
+# Compare with published checksum
+
+# Use secure file permissions
+chmod 700 ~/.vouch
+chmod 600 ~/.vouch/config.json
+
+# Verify YubiKey is genuine
+ykman fido info
+```
+
+### YubiKey Configuration
+
+```bash
+# Set strong PIN (8+ characters recommended)
+ykman fido access change-pin
+
+# Enable PIN complexity (if supported)
+ykman fido access pin-complexity enable
+
+# View registered credentials
+ykman fido credentials list
+```
+
+### Host SSH Configuration
+
+```bash
+# /etc/ssh/sshd_config
+
+# Trust Vouch CA for user certificates
+TrustedUserCAKeys /etc/ssh/vouch-ca.pub
+
+# Optionally restrict to specific principals
+AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u
+```
+
+## Security Contacts
+
+- **Security Team**: security@vouch.sh
+- **Bug Bounty**: bounty@vouch.sh
+- **Compliance**: compliance@vouch.sh
+
+For non-security issues, use GitHub Issues.

@@ -1,0 +1,41 @@
+# Git
+.git
+.gitignore
+
+# Rust build artifacts
+target/
+debug/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Documentation
+docs/
+*.md
+!crates/*/src/**/*.md
+
+# Tests (not needed in production image)
+tests/
+
+# Local development files
+.env
+.env.*
+*.db
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Kamal
+.kamal/
+config/deploy.yml
+
+# macOS
+.DS_Store
+._*
+
+# Other crates not needed for server
+crates/vouch-cli/
+crates/vouch-agent/

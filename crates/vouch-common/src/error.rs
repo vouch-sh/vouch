@@ -1,70 +1,72 @@
-//! Error types for vouch
+//! Error types for vouch.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Errors that can occur in vouch operations.
 #[derive(Debug, Error)]
 pub enum VouchError {
-    #[error("not authenticated - run 'vouch login' first")]
+    /// No valid session token found.
+    #[error("not authenticated")]
     NotAuthenticated,
 
-    #[error("session expired - run 'vouch login' to refresh")]
+    /// Session token has expired.
+    #[error("session expired")]
     SessionExpired,
 
-    #[error("no authenticator registered - run 'vouch register' first")]
-    NoAuthenticator,
+    /// No `YubiKey` or FIDO2 device found.
+    #[error("no YubiKey found - please insert your YubiKey")]
+    NoDevice,
 
-    #[error("authenticator error: {0}")]
-    AuthenticatorError(String),
+    /// Multiple devices found, need to select one.
+    #[error("multiple devices found - please ensure only one YubiKey is connected")]
+    MultipleDevices,
 
-    #[error("delegation not found: {0}")]
-    DelegationNotFound(String),
+    /// FIDO2 protocol error.
+    #[error("FIDO2 error: {0}")]
+    Fido2(String),
 
-    #[error("delegation expired")]
-    DelegationExpired,
+    /// User verification failed (wrong PIN, cancelled, etc.).
+    #[error("user verification failed: {0}")]
+    UserVerification(String),
 
-    #[error("delegation revoked")]
-    DelegationRevoked,
-
-    #[error("scope violation: {0}")]
-    ScopeViolation(String),
-
-    #[error("credential issuance failed: {0}")]
-    CredentialIssuanceFailed(String),
-
+    /// Server returned an error.
     #[error("server error: {0}")]
-    ServerError(String),
+    Server(String),
 
+    /// Network error communicating with server.
     #[error("network error: {0}")]
-    NetworkError(String),
+    Network(String),
 
+    /// Configuration error.
     #[error("configuration error: {0}")]
-    ConfigError(String),
+    Config(String),
 
-    #[error("agent not running - start with 'vouch agent start'")]
-    AgentNotRunning,
+    /// User not found.
+    #[error("user not found: {0}")]
+    UserNotFound(String),
+
+    /// Credential not found.
+    #[error("credential not found")]
+    CredentialNotFound,
 }
 
-/// API error response
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// API error response from server.
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ApiError {
-    pub error: String,
+    /// Error code (e.g., `not_authenticated`, `invalid_credential`).
     pub code: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub details: Option<serde_json::Value>,
+    /// Human-readable error message.
+    pub message: String,
 }
 
 impl ApiError {
-    pub fn new(code: impl Into<String>, error: impl Into<String>) -> Self {
+    /// Create a new API error.
+    #[must_use]
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             code: code.into(),
-            error: error.into(),
-            details: None,
+            message: message.into(),
         }
-    }
-
-    pub fn with_details(mut self, details: serde_json::Value) -> Self {
-        self.details = Some(details);
-        self
     }
 }

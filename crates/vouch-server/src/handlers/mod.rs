@@ -1,6 +1,7 @@
-//! HTTP request handlers
+//! HTTP request handlers.
 
+pub mod admin;
 pub mod auth;
-pub mod credentials;
-pub mod delegations;
-pub mod webauthn;
+pub mod device;
+pub mod enroll;
+pub mod landing;

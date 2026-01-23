@@ -1,105 +1,113 @@
-//! Authenticate and start a session
+//! Login command - authenticate with your `YubiKey`.
 
 use anyhow::{Context, Result};
-use colored::Colorize;
-use serde::{Deserialize, Serialize};
+use vouch_agent::{AgentClient, AgentError};
+use vouch_common::{
+    LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest, LoginStartResponse,
+};
 
 use crate::client::VouchClient;
 use crate::config::Config;
+use crate::fido2::{self, YubiKey};
 
-#[derive(Deserialize)]
-struct StartLoginResponse {
-    /// URL to open in browser for WebAuthn ceremony
-    login_url: String,
-    /// One-time code to complete login
-    code: String,
-}
+/// Run the login command.
+pub async fn run(server: &str, email: &str) -> Result<()> {
+    println!("Logging in as {email}...\n");
 
-#[derive(Serialize)]
-struct CompleteLoginRequest {
-    code: String,
-}
+    // Step 1: Wait for YubiKey to be inserted
+    let key = YubiKey::wait_for_device()?;
 
-#[derive(Deserialize)]
-struct CompleteLoginResponse {
-    token: String,
-    user_email: String,
-    expires_at: String,
-}
-
-pub async fn run(client: &VouchClient, config: &Config) -> Result<()> {
-    println!("{}", "Starting authentication...".bold());
-    println!();
-
-    // Start login flow
-    let resp: StartLoginResponse = client
-        .get("/v1/auth/login/start", None)
+    // Step 2: Start authentication with server
+    print!("Contacting server... ");
+    let client = VouchClient::new(server)?;
+    let start_resp: LoginStartResponse = client
+        .post(
+            "/v1/auth/login/start",
+            &LoginStartRequest {
+                email: email.to_string(),
+            },
+        )
         .await
         .context("failed to start login")?;
+    println!("ok");
 
-    println!("Opening browser for authentication...");
-    println!();
-    println!("If the browser doesn't open, visit:");
-    println!("  {}", resp.login_url.cyan());
-    println!();
-    println!("Verification code: {}", resp.code.yellow().bold());
-    println!();
-
-    // Open browser
-    if let Err(e) = open::that(&resp.login_url) {
-        tracing::warn!("failed to open browser: {}", e);
+    if start_resp.credential_ids.is_empty() {
+        anyhow::bail!("no credentials found for {email} - have you registered?");
     }
 
-    // Wait for user to complete login
-    println!("Waiting for authentication...");
-    println!("(Touch your YubiKey or use Touch ID when prompted)");
+    // Step 3: Prompt for PIN
     println!();
+    let pin = fido2::prompt_pin()?;
 
-    // Poll for completion
-    let mut attempts = 0;
-    let max_attempts = 60; // 2 minutes timeout
+    // Step 4: Perform FIDO2 authentication on device
+    println!("\nTouch your YubiKey...");
+    let result = key.authenticate(
+        &start_resp.rp_id,
+        &start_resp.challenge,
+        &start_resp.credential_ids,
+        &pin,
+    )?;
 
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        attempts += 1;
+    // Step 5: Complete authentication with server
+    print!("Completing login... ");
+    let complete_resp: LoginCompleteResponse = client
+        .post(
+            "/v1/auth/login/complete",
+            &LoginCompleteRequest {
+                state: start_resp.state,
+                credential_id: result.credential_id,
+                authenticator_data: result.authenticator_data,
+                signature: result.signature,
+                client_data_json: result.client_data_json,
+                user_handle: result.user_handle,
+            },
+        )
+        .await
+        .context("failed to complete login")?;
+    println!("ok\n");
 
-        if attempts > max_attempts {
-            anyhow::bail!("login timed out - please try again");
-        }
+    // Step 6: Store session in agent (if running) and config
+    let agent_stored = store_session_in_agent(email, &complete_resp).await;
 
-        let complete_req = CompleteLoginRequest {
-            code: resp.code.clone(),
-        };
+    // Also save to config as fallback
+    let mut config = Config::load()?;
+    config.save_token(&complete_resp.token)?;
 
-        match client
-            .post::<_, CompleteLoginResponse>("/v1/auth/login/complete", &complete_req, None)
-            .await
-        {
-            Ok(result) => {
-                // Save session
-                let mut config = config.clone();
-                config.set_session(result.token, result.user_email.clone())?;
+    println!("Login successful!");
+    println!("Session expires: {}", complete_resp.expires_at);
 
-                println!("{}", "✓ Authenticated successfully!".green().bold());
-                println!();
-                println!("  User:    {}", result.user_email);
-                println!("  Expires: {}", result.expires_at);
-                println!();
-                println!(
-                    "Run {} to get credentials.",
-                    "vouch get github".cyan()
-                );
-                return Ok(());
-            }
-            Err(e) => {
-                let err_str = e.to_string();
-                if err_str.contains("pending") || err_str.contains("not_complete") {
-                    // Still waiting, continue polling
-                    continue;
+    if agent_stored {
+        println!("\nYour identity is now available. Check with: vouch status");
+    } else {
+        println!("\nNote: Agent not running. Start it with: vouch-agent --foreground");
+        println!("Your identity is stored locally. Check with: vouch status");
+    }
+
+    Ok(())
+}
+
+/// Store session in the agent (if running).
+async fn store_session_in_agent(email: &str, response: &LoginCompleteResponse) -> bool {
+    match AgentClient::connect().await {
+        Ok(mut agent) => {
+            match agent
+                .store_session(&response.token, email, &response.expires_at)
+                .await
+            {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::debug!("Failed to store session in agent: {e}");
+                    false
                 }
-                // Real error
-                return Err(e);
             }
+        }
+        Err(AgentError::NotRunning) => {
+            tracing::debug!("Agent not running, session stored in config only");
+            false
+        }
+        Err(e) => {
+            tracing::debug!("Failed to connect to agent: {e}");
+            false
         }
     }
 }

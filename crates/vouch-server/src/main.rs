@@ -1,28 +1,22 @@
-//! vouch identity server
-//!
-//! Handles FIDO2 authentication, credential issuance, and delegation management.
+//! Vouch identity server.
 
 use anyhow::Result;
 use axum::{
-    routing::{delete, get, post},
     Router,
+    routing::{get, post},
 };
-use sqlx::sqlite::SqlitePoolOptions;
+use sqlx::SqlitePool;
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
+use tracing_subscriber::EnvFilter;
 
 mod config;
 mod db;
 mod handlers;
-mod services;
 
-use config::ServerConfig;
-
-/// Application state shared across handlers
+/// Shared application state.
 pub struct AppState {
-    pub db: sqlx::SqlitePool,
-    pub config: ServerConfig,
+    pub db: SqlitePool,
+    pub config: config::ServerConfig,
     pub webauthn: webauthn_rs::Webauthn,
 }
 
@@ -30,33 +24,30 @@ pub struct AppState {
 async fn main() -> Result<()> {
     // Initialize logging
     tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,vouch_server=debug".into()),
-        )
+        .with_env_filter(EnvFilter::from_default_env())
         .init();
 
-    tracing::info!("Starting vouch server...");
+    // Load configuration from environment
+    let mut config = config::ServerConfig::from_env()?;
+    tracing::info!("Starting vouch-server on {}", config.listen_addr);
 
-    // Load configuration
-    let config = ServerConfig::load()?;
-    
     // Connect to database
-    let db = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect(&config.database_url)
-        .await?;
+    let db = SqlitePool::connect(&config.database_url).await?;
+    tracing::info!("Connected to database");
 
     // Run migrations
     sqlx::migrate!("./migrations").run(&db).await?;
+    tracing::info!("Database migrations complete");
 
-    // Initialize WebAuthn
-    let webauthn = webauthn_rs::WebauthnBuilder::new(
-        &config.rp_id,
-        &config.rp_origin,
-    )?
-    .rp_name(&config.rp_name)
-    .build()?;
+    // Load configuration from database (overrides env vars where set)
+    config.load_from_db(&db).await?;
+    tracing::info!("Configuration loaded from database");
+
+    // Build WebAuthn instance
+    let rp_origin = url::Url::parse(&format!("https://{}", config.rp_id))?;
+    let webauthn_builder =
+        webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)?.rp_name(&config.rp_name);
+    let webauthn = webauthn_builder.build()?;
 
     // Create shared state
     let state = Arc::new(AppState {
@@ -67,41 +58,53 @@ async fn main() -> Result<()> {
 
     // Build router
     let app = Router::new()
-        // Health check
+        // Landing page
+        .route("/", get(handlers::landing::landing_page))
         .route("/health", get(|| async { "ok" }))
-        
-        // Authentication
-        .route("/v1/auth/register/start", post(handlers::auth::register_start))
-        .route("/v1/auth/register/complete", post(handlers::auth::register_complete))
-        .route("/v1/auth/login/start", get(handlers::auth::login_start))
-        .route("/v1/auth/login/complete", post(handlers::auth::login_complete))
+        // Legacy auth endpoints
+        .route(
+            "/v1/auth/register/start",
+            post(handlers::auth::register_start),
+        )
+        .route(
+            "/v1/auth/register/complete",
+            post(handlers::auth::register_complete),
+        )
+        .route("/v1/auth/login/start", post(handlers::auth::login_start))
+        .route(
+            "/v1/auth/login/complete",
+            post(handlers::auth::login_complete),
+        )
         .route("/v1/auth/status", get(handlers::auth::status))
-        
-        // Credentials
-        .route("/v1/credentials/github", post(handlers::credentials::github))
-        .route("/v1/credentials/aws", post(handlers::credentials::aws))
-        .route("/v1/credentials/ssh", post(handlers::credentials::ssh))
-        
-        // Delegations
-        .route("/v1/delegations", post(handlers::delegations::create))
-        .route("/v1/delegations", get(handlers::delegations::list))
-        .route("/v1/delegations/:id", get(handlers::delegations::show))
-        .route("/v1/delegations/:id", delete(handlers::delegations::revoke))
-        
-        // WebAuthn ceremony pages (browser-based)
-        .route("/auth/register", get(handlers::webauthn::register_page))
-        .route("/auth/login", get(handlers::webauthn::login_page))
-        
-        // Middleware
-        .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        // Device Authorization Grant (RFC 8628)
+        .route("/oauth/device/code", post(handlers::device::device_code))
+        .route("/oauth/token", post(handlers::device::device_token))
+        // Browser-based enrollment
+        .route("/device", get(handlers::enroll::device_verify_page))
+        .route("/device", post(handlers::enroll::device_verify_submit))
+        .route("/oauth/callback", get(handlers::enroll::oidc_callback))
+        .route(
+            "/enroll/webauthn/start",
+            post(handlers::enroll::browser_register_start),
+        )
+        .route(
+            "/enroll/webauthn/complete",
+            post(handlers::enroll::browser_register_complete),
+        )
+        // Admin setup wizard
+        .route("/admin/setup", get(handlers::admin::setup_page))
+        .route("/admin/setup/oidc", post(handlers::admin::setup_save_oidc))
+        .route("/admin/setup/test", post(handlers::admin::setup_test_oidc))
+        .route("/admin/users", get(handlers::admin::list_users))
+        .route(
+            "/admin/users/:id/delete",
+            post(handlers::admin::delete_user),
+        )
         .with_state(state);
 
     // Start server
-    let addr = format!("{}:{}", config.host, config.port);
-    tracing::info!("Listening on {}", addr);
-    
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
+    tracing::info!("Listening on {}", config.listen_addr);
     axum::serve(listener, app).await?;
 
     Ok(())

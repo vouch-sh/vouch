@@ -1,9 +1,6 @@
-//! CLI command implementations
+//! CLI command implementations.
 
-pub mod agent;
-pub mod config;
-pub mod delegate;
-pub mod get;
+pub mod enroll;
 pub mod login;
 pub mod logout;
 pub mod register;

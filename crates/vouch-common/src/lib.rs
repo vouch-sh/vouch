@@ -1,13 +1,7 @@
-//! Shared types and utilities for vouch
-//!
-//! This crate contains types shared between vouch-cli, vouch-server, and vouch-agent.
+//! Shared types for vouch CLI and server.
 
-pub mod credentials;
-pub mod delegation;
+pub mod api;
 pub mod error;
-pub mod session;
 
-pub use credentials::*;
-pub use delegation::*;
+pub use api::*;
 pub use error::*;
-pub use session::*;

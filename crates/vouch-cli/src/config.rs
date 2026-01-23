@@ -1,107 +1,97 @@
-//! Configuration management for vouch CLI
+//! Configuration and token storage for vouch CLI.
 
 use anyhow::{Context, Result};
-use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-/// CLI configuration
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// CLI configuration stored in ~/.config/vouch/config.json
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
-    /// Server URL override
-    pub server_url: Option<String>,
-    /// Cached session token
-    pub session_token: Option<String>,
-    /// User email (from last login)
-    pub user_email: Option<String>,
+    /// Vouch server URL.
+    server_url: Option<String>,
+    /// Current session token (JWT).
+    token: Option<String>,
 }
 
 impl Config {
-    /// Load config from disk
+    /// Load configuration from disk, or return defaults if not found.
     pub fn load() -> Result<Self> {
         let path = Self::config_path()?;
-        
-        if !path.exists() {
-            return Ok(Self::default());
-        }
 
-        let contents = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read config from {:?}", path))?;
-        
-        let config: Config = serde_json::from_str(&contents)
-            .with_context(|| "failed to parse config file")?;
-        
-        Ok(config)
+        if path.exists() {
+            let content = fs::read_to_string(&path)
+                .with_context(|| format!("failed to read config from {}", path.display()))?;
+            serde_json::from_str(&content)
+                .with_context(|| format!("failed to parse config from {}", path.display()))
+        } else {
+            Ok(Self::default())
+        }
     }
 
-    /// Save config to disk
+    /// Save configuration to disk.
     pub fn save(&self) -> Result<()> {
         let path = Self::config_path()?;
-        
+
         // Ensure parent directory exists
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create config directory {:?}", parent))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("failed to create config directory {}", parent.display())
+            })?;
         }
 
-        let contents = serde_json::to_string_pretty(self)?;
-        fs::write(&path, contents)
-            .with_context(|| format!("failed to write config to {:?}", path))?;
+        let content = serde_json::to_string_pretty(self).context("failed to serialize config")?;
 
-        // Restrict permissions on config file (contains session token)
+        // Write with restrictive permissions (0600)
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = fs::metadata(&path)?.permissions();
-            perms.set_mode(0o600);
-            fs::set_permissions(&path, perms)?;
+            use std::io::Write;
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(true).mode(0o600);
+            let mut file = options
+                .open(&path)
+                .with_context(|| format!("failed to create config file {}", path.display()))?;
+            file.write_all(content.as_bytes())
+                .with_context(|| format!("failed to write config to {}", path.display()))?;
+        }
+
+        #[cfg(not(unix))]
+        {
+            fs::write(&path, &content)
+                .with_context(|| format!("failed to write config to {}", path.display()))?;
         }
 
         Ok(())
     }
 
-    /// Get config file path
+    /// Get the configured server URL.
+    #[must_use]
+    pub fn server_url(&self) -> Option<&str> {
+        self.server_url.as_deref()
+    }
+
+    /// Get the current session token.
+    #[must_use]
+    pub fn token(&self) -> Option<&str> {
+        self.token.as_deref()
+    }
+
+    /// Save a new session token.
+    pub fn save_token(&mut self, token: &str) -> Result<()> {
+        self.token = Some(token.to_string());
+        self.save()
+    }
+
+    /// Clear the session token (logout).
+    pub fn clear_token(&mut self) -> Result<()> {
+        self.token = None;
+        self.save()
+    }
+
+    /// Get the path to the config file.
     fn config_path() -> Result<PathBuf> {
-        let dirs = ProjectDirs::from("sh", "vouch", "vouch")
-            .context("failed to determine config directory")?;
-        
-        Ok(dirs.config_dir().join("config.json"))
-    }
-
-    /// Get path for cached credentials
-    pub fn credentials_cache_path() -> Result<PathBuf> {
-        let dirs = ProjectDirs::from("sh", "vouch", "vouch")
-            .context("failed to determine cache directory")?;
-        
-        Ok(dirs.cache_dir().join("credentials"))
-    }
-
-    /// Get socket path for agent IPC
-    pub fn agent_socket_path() -> Result<PathBuf> {
-        let dirs = ProjectDirs::from("sh", "vouch", "vouch")
-            .context("failed to determine runtime directory")?;
-        
-        // Prefer XDG_RUNTIME_DIR on Linux, fall back to cache dir
-        let runtime_dir = dirs
-            .runtime_dir()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| dirs.cache_dir().to_path_buf());
-        
-        Ok(runtime_dir.join("vouch.sock"))
-    }
-
-    /// Clear session (logout)
-    pub fn clear_session(&mut self) -> Result<()> {
-        self.session_token = None;
-        self.user_email = None;
-        self.save()
-    }
-
-    /// Update session
-    pub fn set_session(&mut self, token: String, email: String) -> Result<()> {
-        self.session_token = Some(token);
-        self.user_email = Some(email);
-        self.save()
+        let config_dir = dirs::config_dir().context("could not determine config directory")?;
+        Ok(config_dir.join("vouch").join("config.json"))
     }
 }

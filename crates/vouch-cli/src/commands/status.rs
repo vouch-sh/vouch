@@ -1,60 +1,102 @@
-//! Show current session status
+//! Status command - show current session status.
 
 use anyhow::Result;
-use colored::Colorize;
+use vouch_agent::{AgentClient, AgentError, SessionInfo};
 use vouch_common::SessionStatus;
 
 use crate::client::VouchClient;
 use crate::config::Config;
 
-pub async fn run(client: &VouchClient, config: &Config) -> Result<()> {
-    let token = match &config.session_token {
-        Some(t) => t,
-        None => {
-            println!("{}", "Not authenticated".yellow());
-            println!();
-            println!("Run {} to authenticate.", "vouch login".cyan());
+/// Run the status command.
+pub async fn run(server: &str) -> Result<()> {
+    // First, try to get session from agent
+    match get_session_from_agent().await {
+        Ok(session) => {
+            print_agent_session(&session);
             return Ok(());
         }
-    };
-
-    let status: SessionStatus = client
-        .get("/v1/auth/status", Some(token))
-        .await?;
-
-    if status.authenticated {
-        println!("{}", "✓ Authenticated".green().bold());
-        println!();
-        
-        if let Some(email) = status.user_email {
-            println!("  User:        {}", email);
+        Err(AgentError::NotRunning) => {
+            // Agent not running, fall back to server check
+            tracing::debug!("Agent not running, checking server");
         }
-        
-        if let Some(device) = status.device_name {
-            println!("  Device:      {}", device);
+        Err(AgentError::NotAuthenticated) => {
+            println!("Not authenticated.");
+            println!("\nRun 'vouch login --email <email>' to authenticate.");
+            return Ok(());
         }
-        
-        if let Some(secs) = status.expires_in_seconds {
-            let hours = secs / 3600;
-            let mins = (secs % 3600) / 60;
-            if hours > 0 {
-                println!("  Expires in:  {}h {}m", hours, mins);
+        Err(AgentError::SessionExpired) => {
+            println!("Session expired.");
+            println!("\nRun 'vouch login --email <email>' to re-authenticate.");
+            return Ok(());
+        }
+        Err(e) => {
+            tracing::debug!("Agent error: {e}, falling back to server check");
+        }
+    }
+
+    // Fall back to config/server check
+    let config = Config::load()?;
+
+    if config.token().is_none() {
+        println!("Not authenticated.");
+        println!("\nRun 'vouch login --email <email>' to authenticate.");
+        return Ok(());
+    }
+
+    let client = VouchClient::new(server)?;
+
+    match client
+        .get_authenticated::<SessionStatus>("/v1/auth/status")
+        .await
+    {
+        Ok(status) => {
+            if status.authenticated {
+                println!("Authenticated");
+                if let Some(email) = &status.email {
+                    println!("  Email: {email}");
+                }
+                if let Some(device) = &status.device_name {
+                    println!("  Device: {device}");
+                }
+                if let Some(expires_in) = status.expires_in_seconds {
+                    print_expiry(expires_in);
+                }
+                println!("\nNote: Start the agent for faster status checks: vouch-agent --foreground");
             } else {
-                println!("  Expires in:  {}m", mins);
+                println!("Session expired.");
+                println!("\nRun 'vouch login --email <email>' to re-authenticate.");
             }
         }
-
-        if status.active_delegations > 0 {
-            println!(
-                "  Delegations: {} active",
-                status.active_delegations.to_string().cyan()
-            );
+        Err(e) => {
+            // Token might be invalid/expired
+            println!("Session invalid: {e}");
+            println!("\nRun 'vouch login --email <email>' to re-authenticate.");
         }
-    } else {
-        println!("{}", "Session expired".yellow());
-        println!();
-        println!("Run {} to re-authenticate.", "vouch login".cyan());
     }
 
     Ok(())
+}
+
+/// Get session from the agent.
+async fn get_session_from_agent() -> vouch_agent::Result<SessionInfo> {
+    let mut agent = AgentClient::connect().await?;
+    agent.get_session().await
+}
+
+/// Print session info from agent.
+fn print_agent_session(session: &SessionInfo) {
+    println!("Authenticated (via agent)");
+    println!("  Email: {}", session.user_email);
+    print_expiry(session.expires_in_seconds);
+}
+
+/// Print expiry time.
+fn print_expiry(expires_in: u64) {
+    let hours = expires_in / 3600;
+    let minutes = (expires_in % 3600) / 60;
+    if hours > 0 {
+        println!("  Expires in: {hours}h {minutes}m");
+    } else {
+        println!("  Expires in: {minutes}m");
+    }
 }

@@ -1,95 +1,35 @@
--- vouch database schema
--- Initial migration
-
--- Users (from OIDC identity provider)
-CREATE TABLE users (
+-- Users table
+CREATE TABLE IF NOT EXISTS users (
     id TEXT PRIMARY KEY,
-    email TEXT NOT NULL UNIQUE,
+    email TEXT UNIQUE NOT NULL,
     name TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- FIDO2 authenticators (YubiKeys, Touch ID, etc.)
-CREATE TABLE authenticators (
+-- Authenticators (FIDO2 credentials) table
+CREATE TABLE IF NOT EXISTS authenticators (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL REFERENCES users(id),
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     name TEXT NOT NULL,
-    -- WebAuthn credential data (stored as JSON)
-    credential_id BLOB NOT NULL UNIQUE,
+    credential_id BLOB UNIQUE NOT NULL,
     public_key BLOB NOT NULL,
     counter INTEGER NOT NULL DEFAULT 0,
-    -- Metadata
-    aaguid TEXT, -- Authenticator type identifier
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    last_used_at TEXT
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX idx_authenticators_user ON authenticators(user_id);
-CREATE INDEX idx_authenticators_credential ON authenticators(credential_id);
-
--- Sessions (active login sessions)
-CREATE TABLE sessions (
+-- Sessions table
+CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL REFERENCES users(id),
-    authenticator_id TEXT NOT NULL REFERENCES authenticators(id),
-    token_hash TEXT NOT NULL UNIQUE, -- SHA256 of JWT
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash TEXT UNIQUE NOT NULL,
+    authenticator_id TEXT NOT NULL REFERENCES authenticators(id) ON DELETE CASCADE,
     expires_at TEXT NOT NULL,
-    last_used_at TEXT NOT NULL DEFAULT (datetime('now')),
-    ip_address TEXT,
-    user_agent TEXT
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
-CREATE INDEX idx_sessions_user ON sessions(user_id);
-CREATE INDEX idx_sessions_token ON sessions(token_hash);
-
--- Pending authentication flows (registration/login)
-CREATE TABLE auth_flows (
-    code TEXT PRIMARY KEY,
-    flow_type TEXT NOT NULL, -- 'register' or 'login'
-    user_id TEXT REFERENCES users(id), -- NULL for registration
-    challenge BLOB NOT NULL,
-    state TEXT NOT NULL DEFAULT 'pending', -- 'pending', 'complete', 'expired'
-    result_data TEXT, -- JSON with result (credential ID, session token, etc.)
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at TEXT NOT NULL,
-    completed_at TEXT
-);
-
-CREATE INDEX idx_auth_flows_state ON auth_flows(state, expires_at);
-
--- Delegations (agent authorizations)
-CREATE TABLE delegations (
-    id TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL REFERENCES users(id),
-    name TEXT NOT NULL,
-    token_hash TEXT NOT NULL UNIQUE, -- SHA256 of delegation JWT
-    scope TEXT NOT NULL, -- JSON of DelegationScope
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    expires_at TEXT NOT NULL,
-    revoked INTEGER NOT NULL DEFAULT 0,
-    revoked_at TEXT,
-    use_count INTEGER NOT NULL DEFAULT 0,
-    max_uses INTEGER -- NULL = unlimited
-);
-
-CREATE INDEX idx_delegations_user ON delegations(user_id);
-CREATE INDEX idx_delegations_token ON delegations(token_hash);
-
--- Credential issuance audit log
-CREATE TABLE audit_log (
-    id TEXT PRIMARY KEY,
-    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
-    user_id TEXT NOT NULL REFERENCES users(id),
-    action TEXT NOT NULL, -- 'credential_issued', 'delegation_created', etc.
-    target_type TEXT NOT NULL, -- 'github', 'aws', 'ssh'
-    target_details TEXT, -- JSON with details
-    presence_type TEXT NOT NULL, -- 'human_present', 'human_delegated'
-    delegation_id TEXT REFERENCES delegations(id),
-    ip_address TEXT,
-    user_agent TEXT
-);
-
-CREATE INDEX idx_audit_log_user ON audit_log(user_id, timestamp);
-CREATE INDEX idx_audit_log_delegation ON audit_log(delegation_id);
+-- Indexes
+CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
+CREATE INDEX IF NOT EXISTS idx_authenticators_user ON authenticators(user_id);
+CREATE INDEX IF NOT EXISTS idx_authenticators_credential ON authenticators(credential_id);
+CREATE INDEX IF NOT EXISTS idx_sessions_token ON sessions(token_hash);
+CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);

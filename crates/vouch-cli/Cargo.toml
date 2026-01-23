@@ -6,12 +6,16 @@ license.workspace = true
 description = "Hardware-backed identity for developers"
 readme = "../../README.md"
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "vouch"
 path = "src/main.rs"
 
 [dependencies]
 vouch-common = { workspace = true }
+vouch-agent = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 reqwest = { workspace = true }
@@ -20,10 +24,9 @@ serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-directories = { workspace = true }
-
-# For opening browser during FIDO2 flow
-open = "5.3"
-
-# For colored terminal output
-colored = "2.1"
+ctap-hid-fido2 = { workspace = true }
+rpassword = { workspace = true }
+dirs = { workspace = true }
+base64 = { workspace = true }
+sha2 = { workspace = true }
+jiff = { workspace = true }

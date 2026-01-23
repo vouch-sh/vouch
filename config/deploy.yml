@@ -1,0 +1,60 @@
+# Kamal 2 deployment configuration for vouch-server
+# See: https://kamal-deploy.org/docs/configuration/overview/
+
+service: vouch
+
+image: ghcr.io/vouch/server
+
+servers:
+  web:
+    hosts:
+      - 10.0.57.35
+    options:
+      expose: "3000"
+
+proxy:
+  host: dev.vouch.sh
+  ssl: false
+  app_port: 3000
+  healthcheck:
+    interval: 3
+    path: /health
+    timeout: 3
+
+registry:
+  server: ghcr.io
+  username:
+    - KAMAL_REGISTRY_USERNAME
+  password:
+    - KAMAL_REGISTRY_PASSWORD
+
+env:
+  clear:
+    VOUCH_LISTEN_ADDR: "0.0.0.0:3000"
+    VOUCH_RP_ID: "dev.vouch.sh"
+    VOUCH_RP_NAME: "Vouch Dev"
+    VOUCH_VERIFICATION_URL: "https://dev.vouch.sh"
+    VOUCH_DATABASE_URL: "sqlite:/data/vouch.db?mode=rwc"
+    RUST_LOG: "info,vouch_server=debug"
+  secret:
+    - VOUCH_JWT_SECRET
+    - VOUCH_ADMIN_BOOTSTRAP_TOKEN
+
+volumes:
+  - "/opt/vouch/data:/data"
+
+# SSH configuration
+ssh:
+  user: kamal
+
+# Build configuration
+builder:
+  arch: amd64
+  cache:
+    type: registry
+
+# Keep 3 old containers for rollback
+retain_containers: 3
+
+# Wait up to 30 seconds for container to be ready
+deploy_timeout: 30

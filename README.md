@@ -1,217 +1,212 @@
-# vouch
+# Vouch
 
-**Hardware-backed identity for developers.**
+**Prove you're here.**
 
-One tap. Any credential. Full audit trail.
+Hardware-backed authentication that issues short-lived credentials only after a human touches a YubiKey. One touch, one PIN, one 8-hour session — then SSH, AWS, and GitHub just work.
 
 ```bash
-vouch login                              # Touch YubiKey → 8hr session
-vouch get github                         # → Short-lived token
-vouch delegate --name claude-agent \     # → AI agent gets scoped creds
-    --github-repo 'myorg/*' \
-    --ttl 1h
+$ vouch login
+🔑 Touch your YubiKey...
+Enter PIN: ****
+✓ Authenticated as you@company.com
+✓ Session valid for 8 hours
+
+$ ssh prod.example.com    # Just works
+$ aws s3 ls               # Just works
+$ git push origin main    # Just works
 ```
 
 ## The Problem
 
-Developers juggle too many long-lived secrets:
+Modern authentication is broken in three ways:
 
-- GitHub PATs that never expire
-- AWS access keys in `~/.aws/credentials`
-- SSH keys that stick around forever
+1. **Push notification fatigue** — Duo pings you 47 times a day. Users approve reflexively. MFA fatigue attacks succeed because humans are tired.
 
-These secrets get leaked, shared, and forgotten. When an AI coding assistant needs access, developers often just hand over their own credentials with no audit trail.
+2. **Credential sprawl** — Long-lived API keys in `~/.aws/credentials`. GitHub PATs that never expire. SSH keys from 2019 still floating around.
+
+3. **No presence verification** — Existing tools verify *devices* or *sessions*, but not that a *human* is actually there. A compromised laptop with cached credentials is indistinguishable from its owner.
 
 ## The Solution
 
-vouch replaces long-lived secrets with short-lived credentials issued on demand:
+Vouch requires **physical presence** for every credential issuance:
 
-1. **Hardware-bound authentication** - YubiKey or Touch ID required
-2. **Short-lived credentials** - Expire in minutes or hours, not years
-3. **Agent delegation** - Grant scoped access to AI assistants with full audit trail
-4. **No proxy required** - Unlike Teleport, vouch doesn't intercept your traffic
+| Traditional Auth | Vouch |
+|------------------|-------|
+| Password + SMS/Push | YubiKey touch + PIN |
+| Long-lived API keys | 8-hour certificates |
+| "Remember this device" | Per-session attestation |
+| Optional hardware MFA | **Mandatory** hardware MFA |
+| Device trust | Human presence proof |
 
-## Quick Start
+### How It Works
 
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         Your Machine                             │
+│                                                                  │
+│  ┌──────────┐     ┌──────────┐     ┌──────────────────────────┐ │
+│  │ YubiKey  │────▶│  vouch   │────▶│ Short-lived credentials  │ │
+│  │ (touch)  │     │  login   │     │ stored in system keychain│ │
+│  └──────────┘     └──────────┘     └──────────────────────────┘ │
+│                         │                      │                 │
+│                         ▼                      ▼                 │
+│                   ┌──────────┐          ┌──────────────┐        │
+│                   │  vouch   │          │ Native tools │        │
+│                   │  server  │          │ (ssh, aws,   │        │
+│                   │  (OIDC)  │          │  git, etc.)  │        │
+│                   └──────────┘          └──────────────┘        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+1. **`vouch login`** — Touch YubiKey, enter PIN, get 8-hour session
+2. **Vouch issues credentials** — SSH certificates, AWS STS tokens, GitHub App tokens
+3. **Tools just work** — Standard credential helpers, no wrappers needed
+
+## Key Features
+
+### Mandatory Hardware Presence
+Unlike optional MFA that can be bypassed, Vouch only issues credentials after FIDO2 verification. The credential itself carries proof of presence.
+
+### Short-Lived Everything
+- SSH certificates: 8 hours
+- AWS credentials: 1 hour (auto-refresh within session)
+- GitHub tokens: Per-operation
+
+No more rotating keys. No more revoking access. Credentials simply expire.
+
+### Zero-Friction Integration
+Vouch configures standard credential providers:
+- SSH: `IdentityAgent` pointing to vouch's signing agent
+- AWS: `credential_process` in `~/.aws/config`
+- Git: `credential.helper` in `~/.gitconfig`
+- Kubernetes: `exec` plugin in kubeconfig
+
+After `vouch login`, existing workflows are unchanged.
+
+### Agent Delegation (Coming Soon)
+Grant scoped, time-limited credentials to AI coding assistants:
 ```bash
-# Install
-cargo install vouch-cli
-
-# Register your YubiKey
-vouch register
-
-# Login (8-hour session)
-vouch login
-
-# Get GitHub credentials
-vouch get github
-
-# Configure git to use vouch
-vouch git-config --global
+$ vouch delegate --to claude-code --scope "github:read,write" --ttl 2h
 ```
-
-## Agent Delegation
-
-The killer feature: let AI agents act on your behalf with scoped, auditable credentials.
-
-```bash
-# Create a delegation for your AI coding agent
-vouch delegate create \
-    --name "claude-code" \
-    --github-repo "myorg/frontend" \
-    --github-branch "feature/*" \
-    --ttl 4h
-
-# Output:
-# ✓ Delegation created
-#   Name:       claude-code
-#   ID:         d7f3a2b1-...
-#   Expires:    2024-01-15T18:00:00Z
-#
-# Delegation token (give this to your agent):
-# eyJhbGciOiJFZDI1NTE5...
-```
-
-The agent uses this token to get credentials. Every action is logged with `presence_type: "human_delegated"` so you know exactly what the agent did.
-
-## How It Works
-
-```
-┌─────────────────┐       ┌─────────────────┐       ┌─────────────────┐
-│                 │       │                 │       │                 │
-│   vouch CLI     │──────▶│  vouch server   │──────▶│    GitHub       │
-│                 │       │                 │       │    AWS          │
-│   vouch agent   │       │  (your infra)   │       │    SSH hosts    │
-│                 │       │                 │       │                 │
-└─────────────────┘       └─────────────────┘       └─────────────────┘
-        │
-        │ FIDO2
-        ▼
-   ┌─────────┐
-   │ YubiKey │
-   │ TouchID │
-   └─────────┘
-```
-
-### Authentication Flow
-
-1. `vouch login` opens a browser window
-2. User authenticates with YubiKey/Touch ID (FIDO2/WebAuthn)
-3. Server issues a JWT session token (8 hour TTL)
-4. CLI stores token locally
-
-### Credential Issuance
-
-When you run `vouch get github`:
-
-1. CLI sends session token to server
-2. Server validates token, checks it's not expired
-3. Server uses GitHub App to generate installation token
-4. Server returns short-lived token to CLI
-5. Server logs the issuance to audit trail
-
-### Delegation Flow
-
-When an AI agent uses a delegation token:
-
-1. Agent requests credential with delegation token
-2. Server validates delegation is not expired/revoked
-3. Server checks requested scope is within delegation scope
-4. Server issues credential with `presence_type: human_delegated`
-5. Server logs with delegation ID for audit trail
-
-## Integrations
-
-### GitHub
-
-vouch uses a GitHub App to issue short-lived installation tokens.
-
-```bash
-# Get a token for git operations
-vouch get github
-
-# Or configure git to use vouch automatically
-vouch git-config --global
-git push  # vouch handles auth transparently
-```
-
-### AWS
-
-vouch acts as an OIDC identity provider, using AWS STS to issue temporary credentials.
-
-```bash
-# Get credentials as environment variables
-eval $(vouch get aws --role arn:aws:iam::123456789:role/dev)
-
-# Or configure AWS CLI to use vouch
-vouch aws-config --profile dev --role-arn arn:aws:iam::123456789:role/dev
-aws --profile dev s3 ls
-```
-
-### SSH
-
-vouch includes a certificate authority for signing short-lived SSH certificates.
-
-```bash
-# Get a signed certificate
-vouch get ssh --principal ubuntu
-
-# SSH to a host that trusts vouch CA
-ssh ubuntu@server
-```
-
-## Self-Hosting
-
-```bash
-# Run the server
-docker run -d \
-    -e VOUCH_RP_ID=auth.yourcompany.com \
-    -e VOUCH_RP_ORIGIN=https://auth.yourcompany.com \
-    -e VOUCH_JWT_SECRET=$(openssl rand -hex 32) \
-    -v vouch-data:/data \
-    ghcr.io/vouch-sh/vouch-server
-
-# Point CLI to your server
-export VOUCH_SERVER_URL=https://auth.yourcompany.com
-vouch register
-```
+Every action carries attestation of who delegated what to whom.
 
 ## Comparison
 
-| Aspect | vouch | Teleport | Tailscale | 1Password |
-|--------|-------|----------|-----------|-----------|
-| **Primary Focus** | Developer identity | Infrastructure access | Network mesh | Secret storage |
-| **Architecture** | Local agent | Proxy-based | WireGuard mesh | Cloud vault |
-| **Auth Method** | Hardware FIDO2 | SSO + certs | OAuth | Master password |
-| **Credential Scope** | Per-request capable | Session-level | Device-level | Manual retrieval |
-| **Agent Delegation** | ✅ First-class | ❌ | ❌ | ❌ |
-| **Audit Trail** | Human vs agent | User only | User only | User only |
+| Feature | Vouch | 1Password | Teleport | Okta |
+|---------|-------|-----------|----------|------|
+| Hardware presence required | ✅ Mandatory | ❌ Optional | ❌ Optional | ❌ Optional |
+| Short-lived credentials | ✅ 8hr certs | ❌ Stored secrets | ✅ Certs | ❌ Long-lived |
+| Self-serve setup | ✅ <5 min | ✅ | ❌ Complex | ❌ Enterprise |
+| Agent delegation | ✅ Built-in | ❌ | ❌ | ❌ |
+| Open source CLI | ✅ Apache 2.0 | ❌ | ⚠️ BSL | ❌ |
+| Air-gap support | ✅ | ❌ | ✅ | ❌ |
 
-## Project Structure
+## Quick Start
 
+### Install
+```bash
+# macOS
+brew install vouch-sh/tap/vouch
+
+# Linux
+curl -fsSL https://vouch.sh/install.sh | sh
+
+# From source
+cargo install --git https://github.com/vouch-sh/vouch vouch-cli
 ```
-crates/
-├── vouch-cli/      # CLI tool (`vouch` command)
-├── vouch-server/   # Identity server
-├── vouch-agent/    # Local credential agent
-└── vouch-common/   # Shared types
 
-docs/
-├── ARCHITECTURE.md # System design
-├── SECURITY.md     # Threat model
-└── DELEGATION.md   # Agent delegation design
+### Setup
+```bash
+# Register your YubiKey (one-time)
+vouch register
+
+# Configure integrations
+vouch setup ssh      # Configures SSH to use vouch certificates
+vouch setup aws      # Configures AWS credential_process
+vouch setup github   # Configures git credential helper
 ```
 
-## Status
+### Daily Use
+```bash
+# Start your day
+vouch login
 
-🚧 **Pre-alpha** — Not ready for production use.
+# Everything just works for 8 hours
+ssh prod-server
+aws s3 ls
+git push origin main
+kubectl get pods
 
-See [docs/ROADMAP.md](docs/ROADMAP.md) for planned features.
+# Check session status
+vouch status
+```
+
+## Requirements
+
+- **YubiKey 5 series** (firmware 5.2+) with FIDO2/WebAuthn support
+- **macOS** 12+, **Linux** (glibc 2.31+), or **Windows** 10+
+- For AWS: IAM role with OIDC federation configured
+- For GitHub: GitHub App installed in your organization
+- For SSH: CA public key distributed to target hosts
+
+## Architecture
+
+Vouch consists of:
+
+| Component | Description | Source |
+|-----------|-------------|--------|
+| `vouch` CLI | User-facing commands, credential helpers | Open source (Apache 2.0) |
+| `vouch-agent` | Background daemon, session management | Open source (Apache 2.0) |
+| Vouch Server | OIDC provider, certificate authority | Proprietary (SaaS or on-prem) |
+
+The CLI is fully open source for security auditing. The server is available as:
+- **Vouch Cloud** — Managed SaaS
+- **Vouch Enterprise** — Self-hosted, including air-gapped deployments
+
+## Enterprise Features
+
+Available in Vouch Enterprise:
+
+- **Air-gapped deployment** — Fully offline operation with on-premises CA
+- **SCIM provisioning** — Sync users from Okta, Azure AD, Google Workspace
+- **Audit logging** — Export to Splunk, Datadog, or your SIEM
+- **Custom CA integration** — Use your existing PKI
+- **SOC 2 Type II** — Compliance documentation available
+- **Priority support** — SLA-backed response times
+
+## Security
+
+Vouch is designed for high-security environments:
+
+- **Memory-safe implementation** — Written in Rust
+- **No credential storage** — Vouch never sees your private keys
+- **Cryptographic presence attestation** — FIDO2 with user verification
+- **Short-lived credentials** — Minimize blast radius of compromise
+- **Audit trail** — Every credential issuance logged with attestation
+
+See [SECURITY.md](docs/SECURITY.md) for our threat model and responsible disclosure policy.
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md) — System design and data flows
+- [Security Model](docs/SECURITY.md) — Threat model and controls
+- [Air-Gap Deployment](docs/AIRGAP.md) — On-premises installation guide
+- [Agent Delegation](docs/DELEGATION.md) — AI assistant credential management
+- [Roadmap](docs/ROADMAP.md) — Development milestones
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup.
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+The CLI is open source under Apache 2.0. We believe security tools should be auditable.
 
 ## License
 
-Apache-2.0
+- CLI and client libraries: [Apache 2.0](LICENSE)
+- Server: Proprietary (contact sales@vouch.sh)
+
+---
+
+**Vouch** — Prove you're here.
+
+[Website](https://vouch.sh) · [Documentation](https://docs.vouch.sh) · [GitHub](https://github.com/vouch-sh/vouch)
