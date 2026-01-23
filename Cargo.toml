@@ -1,0 +1,66 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/vouch-cli",
+    "crates/vouch-server",
+    "crates/vouch-common",
+    "crates/vouch-agent",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/vouch-sh/vouch"
+homepage = "https://vouch.sh"
+authors = ["Vouch Contributors"]
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+
+# Web framework (server)
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite", "migrate"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# FIDO2/WebAuthn
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+
+# Crypto
+aws-lc-rs = "1.12"
+base64 = "0.22"
+uuid = { version = "1.11", features = ["v4", "serde"] }
+
+# JWT
+jsonwebtoken = "9.3"
+
+# HTTP client (CLI)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# CLI
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# Error handling
+thiserror = "2.0"
+anyhow = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Time
+jiff = { version = "0.1", features = ["serde"] }
+
+# Config
+config = "0.14"
+directories = "5.0"
+
+# Internal crates
+vouch-common = { path = "crates/vouch-common" }

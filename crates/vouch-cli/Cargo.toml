@@ -1,0 +1,29 @@
+[package]
+name = "vouch-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Hardware-backed identity for developers"
+readme = "../../README.md"
+
+[[bin]]
+name = "vouch"
+path = "src/main.rs"
+
+[dependencies]
+vouch-common = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+directories = { workspace = true }
+
+# For opening browser during FIDO2 flow
+open = "5.3"
+
+# For colored terminal output
+colored = "2.1"
