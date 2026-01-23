@@ -231,7 +231,9 @@ impl OAuthError {
     pub fn invalid_grant() -> Self {
         Self {
             error: "invalid_grant".to_string(),
-            error_description: Some("The device code is invalid or has already been used".to_string()),
+            error_description: Some(
+                "The device code is invalid or has already been used".to_string(),
+            ),
         }
     }
 }

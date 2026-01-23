@@ -2,8 +2,8 @@
 
 use crate::error::{AgentError, Result};
 use crate::protocol::{
-    Request, Response, StoreSessionParams, INVALID_PARAMS, METHOD_NOT_FOUND, NOT_AUTHENTICATED,
-    SESSION_EXPIRED,
+    INVALID_PARAMS, METHOD_NOT_FOUND, NOT_AUTHENTICATED, Request, Response, SESSION_EXPIRED,
+    StoreSessionParams,
 };
 use crate::socket::{ensure_vouch_dir, remove_socket, socket_path};
 use crate::state::{AgentState, Session, SessionInfo};
@@ -158,7 +158,11 @@ async fn handle_store_session(request: &Request, state: &Arc<AgentState>) -> Res
         Some(p) => match serde_json::from_value(p.clone()) {
             Ok(params) => params,
             Err(e) => {
-                return Response::error(request.id, INVALID_PARAMS, &format!("invalid params: {e}"))
+                return Response::error(
+                    request.id,
+                    INVALID_PARAMS,
+                    &format!("invalid params: {e}"),
+                );
             }
         },
         None => return Response::error(request.id, INVALID_PARAMS, "missing params"),
@@ -172,7 +176,7 @@ async fn handle_store_session(request: &Request, state: &Arc<AgentState>) -> Res
                 request.id,
                 INVALID_PARAMS,
                 &format!("invalid expires_at: {e}"),
-            )
+            );
         }
     };
 

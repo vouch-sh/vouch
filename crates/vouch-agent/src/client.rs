@@ -1,7 +1,7 @@
 //! Agent client for CLI communication.
 
 use crate::error::{AgentError, Result};
-use crate::protocol::{Request, Response, StoreSessionParams, NOT_AUTHENTICATED, SESSION_EXPIRED};
+use crate::protocol::{NOT_AUTHENTICATED, Request, Response, SESSION_EXPIRED, StoreSessionParams};
 use crate::socket::socket_path;
 use crate::state::SessionInfo;
 

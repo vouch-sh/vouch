@@ -2,7 +2,9 @@
 
 use anyhow::{Context, Result};
 use std::io::{Write, stdout};
-use vouch_common::{DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse, OAuthError};
+use vouch_common::{
+    DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse, OAuthError,
+};
 
 use crate::client::VouchClient;
 use crate::config::Config;
@@ -113,7 +115,10 @@ enum PollError {
 }
 
 /// Make a single poll request.
-async fn poll_once(client: &VouchClient, request: &DeviceTokenRequest) -> Result<DeviceTokenResponse, PollError> {
+async fn poll_once(
+    client: &VouchClient,
+    request: &DeviceTokenRequest,
+) -> Result<DeviceTokenResponse, PollError> {
     let url = format!("{}/oauth/token", client.base_url());
 
     let response = client

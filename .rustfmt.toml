@@ -1,0 +1,18 @@
+# Rustfmt configuration for valkey-operator
+# See: https://rust-lang.github.io/rustfmt/
+
+# Use the 2024 edition style
+edition = "2024"
+
+# Maximum width of each line
+max_width = 100
+
+# Use spaces for indentation
+hard_tabs = false
+tab_spaces = 4
+
+# Use field init shorthand: `Foo { bar }` instead of `Foo { bar: bar }`
+use_field_init_shorthand = true
+
+# Newline style (native = platform-specific)
+newline_style = "Unix"

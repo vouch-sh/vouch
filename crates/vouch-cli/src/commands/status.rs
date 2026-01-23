@@ -61,7 +61,9 @@ pub async fn run(server: &str) -> Result<()> {
                 if let Some(expires_in) = status.expires_in_seconds {
                     print_expiry(expires_in);
                 }
-                println!("\nNote: Start the agent for faster status checks: vouch-agent --foreground");
+                println!(
+                    "\nNote: Start the agent for faster status checks: vouch-agent --foreground"
+                );
             } else {
                 println!("Session expired.");
                 println!("\nRun 'vouch login --email <email>' to re-authenticate.");

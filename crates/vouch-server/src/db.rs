@@ -422,7 +422,7 @@ pub async fn create_oidc_state(
 /// Get an OIDC state by state value.
 pub async fn get_oidc_state(pool: &SqlitePool, state: &str) -> Result<Option<OidcState>> {
     let oidc_state = sqlx::query_as::<_, OidcState>(
-        "SELECT id, state, device_auth_id, nonce, expires_at FROM oidc_states WHERE state = ?"
+        "SELECT id, state, device_auth_id, nonce, expires_at FROM oidc_states WHERE state = ?",
     )
     .bind(state)
     .fetch_optional(pool)
@@ -481,11 +481,10 @@ pub async fn get_config(pool: &SqlitePool, key: &str) -> Result<Option<String>> 
 /// Get all config values.
 #[allow(dead_code)]
 pub async fn get_all_config(pool: &SqlitePool) -> Result<Vec<ServerConfigRow>> {
-    let rows = sqlx::query_as::<_, ServerConfigRow>(
-        "SELECT key, value, updated_at FROM server_config",
-    )
-    .fetch_all(pool)
-    .await?;
+    let rows =
+        sqlx::query_as::<_, ServerConfigRow>("SELECT key, value, updated_at FROM server_config")
+            .fetch_all(pool)
+            .await?;
 
     Ok(rows)
 }

@@ -1,15 +1,15 @@
 //! Enrollment handlers for browser-based device authorization flow.
 
-use crate::db;
 use crate::AppState;
+use crate::db;
 use axum::{
     Form, Json,
     extract::{Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
 };
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use rand::RngCore;
@@ -405,7 +405,8 @@ const SUCCESS_HTML: &str = r#"<!DOCTYPE html>
 
 /// HTML page for errors.
 fn error_html(title: &str, message: &str) -> String {
-    format!(r#"<!DOCTYPE html>
+    format!(
+        r#"<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
@@ -442,7 +443,8 @@ fn error_html(title: &str, message: &str) -> String {
         <p>{message}</p>
     </div>
 </body>
-</html>"#)
+</html>"#
+    )
 }
 
 /// JSON error response helper.
@@ -466,8 +468,12 @@ pub async fn device_verify_submit(
 ) -> Response {
     // Normalize user code (uppercase, ensure dash)
     let user_code = form.user_code.to_uppercase().trim().to_string();
-    let user_code = if user_code.len() == 8 && !user_code.contains('-') {
-        format!("{}-{}", &user_code[..4], &user_code[4..])
+    let user_code = if user_code.chars().count() == 8 && !user_code.contains('-') {
+        format!(
+            "{}-{}",
+            user_code.chars().take(4).collect::<String>(),
+            user_code.chars().skip(4).collect::<String>()
+        )
     } else {
         user_code
     };
@@ -524,9 +530,7 @@ pub async fn device_verify_submit(
         let oidc_state = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
 
         // Store state
-        let state_expires = now
-            .checked_add(Span::new().minutes(10))
-            .unwrap_or(now);
+        let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
 
         if let Err(e) = db::create_oidc_state(
             &state.db,
@@ -550,17 +554,23 @@ pub async fn device_verify_submit(
     }
 
     // OIDC configured - redirect to OIDC provider
-    let oidc_issuer = state.config.oidc_issuer_url.as_ref().map_or("", String::as_str);
-    let client_id = state.config.oidc_client_id.as_ref().map_or("", String::as_str);
+    let oidc_issuer = state
+        .config
+        .oidc_issuer_url
+        .as_ref()
+        .map_or("", String::as_str);
+    let client_id = state
+        .config
+        .oidc_client_id
+        .as_ref()
+        .map_or("", String::as_str);
 
     // Generate state and nonce
     let oidc_state = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
     let nonce = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
 
     // Store state
-    let state_expires = now
-        .checked_add(Span::new().minutes(10))
-        .unwrap_or(now);
+    let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
 
     if let Err(e) = db::create_oidc_state(
         &state.db,
@@ -598,7 +608,9 @@ pub async fn oidc_callback(
 ) -> Response {
     // Check for error response
     if let Some(error) = params.error {
-        let desc = params.error_description.unwrap_or_else(|| "Unknown error".to_string());
+        let desc = params
+            .error_description
+            .unwrap_or_else(|| "Unknown error".to_string());
         return Html(error_html(&error, &desc)).into_response();
     }
 
@@ -630,12 +642,27 @@ pub async fn oidc_callback(
     }
 
     // Exchange code for tokens
-    let oidc_issuer = state.config.oidc_issuer_url.as_ref().map_or("", String::as_str);
-    let client_id = state.config.oidc_client_id.as_ref().map_or("", String::as_str);
-    let client_secret = state.config.oidc_client_secret.as_ref().map_or("", String::as_str);
+    let oidc_issuer = state
+        .config
+        .oidc_issuer_url
+        .as_ref()
+        .map_or("", String::as_str);
+    let client_id = state
+        .config
+        .oidc_client_id
+        .as_ref()
+        .map_or("", String::as_str);
+    let client_secret = state
+        .config
+        .oidc_client_secret
+        .as_ref()
+        .map_or("", String::as_str);
     let redirect_uri = format!("{}/oauth/callback", state.config.verification_base_url);
 
-    let token_url = format!("{}/token", oidc_issuer.replace("accounts.google.com", "oauth2.googleapis.com"));
+    let token_url = format!(
+        "{}/token",
+        oidc_issuer.replace("accounts.google.com", "oauth2.googleapis.com")
+    );
 
     let client = reqwest::Client::new();
     let token_response = match client
@@ -748,27 +775,63 @@ pub async fn browser_register_start(
     // Verify state token
     let oidc_state = db::get_oidc_state(&state.db, &req.oidc_state)
         .await
-        .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", &e.to_string()))?
-        .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "invalid_state", "Invalid state token"))?;
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_state",
+                "Invalid state token",
+            )
+        })?;
 
     // Check if expired
     let now = Timestamp::now();
     let expires_at: Timestamp = oidc_state.expires_at.parse().map_err(|_| {
-        json_error(StatusCode::INTERNAL_SERVER_ERROR, "time_error", "Invalid timestamp")
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "time_error",
+            "Invalid timestamp",
+        )
     })?;
 
     if now > expires_at {
-        return Err(json_error(StatusCode::BAD_REQUEST, "expired_state", "State has expired"));
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "expired_state",
+            "State has expired",
+        ));
     }
 
     // Get device auth request to verify it's still valid
     let device_auth = db::get_device_auth_by_id(&state.db, &oidc_state.device_auth_id)
         .await
-        .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", &e.to_string()))?
-        .ok_or_else(|| json_error(StatusCode::BAD_REQUEST, "invalid_request", "Invalid request"))?;
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| {
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "Invalid request",
+            )
+        })?;
 
     if device_auth.status != "pending" {
-        return Err(json_error(StatusCode::BAD_REQUEST, "already_used", "This code has already been used"));
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "already_used",
+            "This code has already been used",
+        ));
     }
 
     // Get email from nonce field (set during OIDC callback)
@@ -782,10 +845,20 @@ pub async fn browser_register_start(
     // Create or get user
     let user = db::upsert_user(&state.db, &user_email, None)
         .await
-        .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", &e.to_string()))?;
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?;
 
     let user_id = Uuid::parse_str(&user.id).map_err(|e| {
-        json_error(StatusCode::INTERNAL_SERVER_ERROR, "uuid_error", &e.to_string())
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "uuid_error",
+            &e.to_string(),
+        )
     })?;
 
     // Generate challenge
@@ -801,7 +874,11 @@ pub async fn browser_register_start(
     };
 
     let state_token = reg_state.encode(&state.config.jwt_secret).map_err(|e| {
-        json_error(StatusCode::INTERNAL_SERVER_ERROR, "state_error", &e.to_string())
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "state_error",
+            &e.to_string(),
+        )
     })?;
 
     Ok(Json(BrowserRegisterStartResponse {
@@ -829,39 +906,64 @@ pub async fn browser_register_complete(
 
     // Decode credential data
     let credential_id = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|e| {
-        json_error(StatusCode::BAD_REQUEST, "invalid_credential", &e.to_string())
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_credential",
+            &e.to_string(),
+        )
     })?;
 
-    let attestation_object = URL_SAFE_NO_PAD.decode(&req.attestation_object).map_err(|e| {
-        json_error(StatusCode::BAD_REQUEST, "invalid_attestation", &e.to_string())
-    })?;
+    let attestation_object = URL_SAFE_NO_PAD
+        .decode(&req.attestation_object)
+        .map_err(|e| {
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_attestation",
+                &e.to_string(),
+            )
+        })?;
 
     let client_data_json = URL_SAFE_NO_PAD.decode(&req.client_data_json).map_err(|e| {
-        json_error(StatusCode::BAD_REQUEST, "invalid_client_data", &e.to_string())
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_data",
+            &e.to_string(),
+        )
     })?;
 
     // Verify client data JSON
     let client_data: ClientData = serde_json::from_slice(&client_data_json).map_err(|e| {
-        json_error(StatusCode::BAD_REQUEST, "invalid_client_data", &e.to_string())
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_data",
+            &e.to_string(),
+        )
     })?;
 
     // Verify challenge
     let expected_challenge = URL_SAFE_NO_PAD.encode(&reg_state.challenge);
     if client_data.challenge != expected_challenge {
-        return Err(json_error(StatusCode::BAD_REQUEST, "challenge_mismatch", "Challenge mismatch"));
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "challenge_mismatch",
+            "Challenge mismatch",
+        ));
     }
 
     // Verify type
     if client_data.typ != "webauthn.create" {
-        return Err(json_error(StatusCode::BAD_REQUEST, "invalid_type", "Invalid ceremony type"));
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_type",
+            "Invalid ceremony type",
+        ));
     }
 
     // Extract public key from attestation object (CBOR encoded)
     // For simplicity, we'll store the raw attestation object and trust the browser's verification
     // In production, use webauthn-rs to properly verify the attestation
-    let public_key = extract_public_key_from_attestation(&attestation_object).map_err(|e| {
-        json_error(StatusCode::BAD_REQUEST, "invalid_attestation", &e)
-    })?;
+    let public_key = extract_public_key_from_attestation(&attestation_object)
+        .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_attestation", &e))?;
 
     // Store the authenticator
     let authenticator_id = db::create_authenticator(
@@ -872,7 +974,13 @@ pub async fn browser_register_complete(
         &public_key,
     )
     .await
-    .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", &e.to_string()))?;
+    .map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            &e.to_string(),
+        )
+    })?;
 
     // Mark device authorization as complete
     db::authorize_device_auth(
@@ -883,7 +991,13 @@ pub async fn browser_register_complete(
         &authenticator_id,
     )
     .await
-    .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, "db_error", &e.to_string()))?;
+    .map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            &e.to_string(),
+        )
+    })?;
 
     tracing::info!("Enrollment complete for: {}", reg_state.user_email);
 

@@ -47,6 +47,7 @@ impl YubiKey {
     /// Discover and connect to a `YubiKey`.
     ///
     /// Returns immediately if a device is found, or an error if not.
+    #[allow(dead_code)]
     pub fn discover() -> Result<Self> {
         let cfg = LibCfg::init();
         let device = FidoKeyHidFactory::create(&cfg)

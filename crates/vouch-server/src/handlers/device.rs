@@ -1,10 +1,10 @@
 //! Device Authorization Grant handlers (RFC 8628).
 
-use crate::db;
 use crate::AppState;
+use crate::db;
 use axum::{Json, extract::State, http::StatusCode};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
@@ -39,7 +39,7 @@ fn generate_user_code() -> String {
     let mut bytes = vec![0u8; 8];
     rand::rng().fill_bytes(&mut bytes);
 
-    let chars: String = bytes
+    let chars: Vec<char> = bytes
         .iter()
         .map(|b| {
             let idx = (*b as usize) % USER_CODE_ALPHABET.len();
@@ -47,7 +47,11 @@ fn generate_user_code() -> String {
         })
         .collect();
 
-    format!("{}-{}", &chars[..4], &chars[4..])
+    format!(
+        "{}-{}",
+        chars.iter().take(4).collect::<String>(),
+        chars.iter().skip(4).collect::<String>()
+    )
 }
 
 /// Hash a device code for storage.
@@ -73,8 +77,7 @@ pub async fn device_code(
 
     // Calculate expiration
     let now = Timestamp::now();
-    let expires_seconds =
-        i64::try_from(state.config.device_code_expires_seconds).unwrap_or(600);
+    let expires_seconds = i64::try_from(state.config.device_code_expires_seconds).unwrap_or(600);
     let duration = Span::new().seconds(expires_seconds);
     let expires_at = now.checked_add(duration).map_err(|_| {
         json_error(
@@ -139,55 +142,87 @@ pub async fn device_token(
     let device_code_hash = hash_device_code(&req.device_code);
     let request = db::get_device_auth_by_code_hash(&state.db, &device_code_hash)
         .await
-        .map_err(|_| oauth_error(StatusCode::INTERNAL_SERVER_ERROR, OAuthError::invalid_grant()))?
+        .map_err(|_| {
+            oauth_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                OAuthError::invalid_grant(),
+            )
+        })?
         .ok_or_else(|| oauth_error(StatusCode::BAD_REQUEST, OAuthError::invalid_grant()))?;
 
     // Check if expired
     let now = Timestamp::now();
-    let expires_at: Timestamp = request
-        .expires_at
-        .parse()
-        .map_err(|_| oauth_error(StatusCode::INTERNAL_SERVER_ERROR, OAuthError::invalid_grant()))?;
+    let expires_at: Timestamp = request.expires_at.parse().map_err(|_| {
+        oauth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            OAuthError::invalid_grant(),
+        )
+    })?;
 
     if now > expires_at {
-        return Err(oauth_error(StatusCode::BAD_REQUEST, OAuthError::expired_token()));
+        return Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            OAuthError::expired_token(),
+        ));
     }
 
     // Check polling rate
-    let allowed = db::update_device_auth_poll_time(&state.db, &request.id, request.interval_seconds)
-        .await
-        .map_err(|_| oauth_error(StatusCode::INTERNAL_SERVER_ERROR, OAuthError::invalid_grant()))?;
+    let allowed =
+        db::update_device_auth_poll_time(&state.db, &request.id, request.interval_seconds)
+            .await
+            .map_err(|_| {
+                oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    OAuthError::invalid_grant(),
+                )
+            })?;
 
     if !allowed {
-        return Err(oauth_error(StatusCode::BAD_REQUEST, OAuthError::slow_down()));
+        return Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            OAuthError::slow_down(),
+        ));
     }
 
     // Check status
     match request.status.as_str() {
-        "pending" => {
-            Err(oauth_error(
-                StatusCode::BAD_REQUEST,
-                OAuthError::authorization_pending(),
-            ))
-        }
-        "denied" => Err(oauth_error(StatusCode::BAD_REQUEST, OAuthError::access_denied())),
+        "pending" => Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            OAuthError::authorization_pending(),
+        )),
+        "denied" => Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            OAuthError::access_denied(),
+        )),
         "authorized" => {
             // Get user info and create session token
             let user_id = request.user_id.ok_or_else(|| {
-                oauth_error(StatusCode::INTERNAL_SERVER_ERROR, OAuthError::invalid_grant())
+                oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    OAuthError::invalid_grant(),
+                )
             })?;
             let user_email = request.user_email.ok_or_else(|| {
-                oauth_error(StatusCode::INTERNAL_SERVER_ERROR, OAuthError::invalid_grant())
+                oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    OAuthError::invalid_grant(),
+                )
             })?;
             let authenticator_id = request.authenticator_id.ok_or_else(|| {
-                oauth_error(StatusCode::INTERNAL_SERVER_ERROR, OAuthError::invalid_grant())
+                oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    OAuthError::invalid_grant(),
+                )
             })?;
 
             // Generate session token (reuse the auth module's session creation logic)
             let session_hours = i64::try_from(state.config.session_hours).unwrap_or(8);
             let duration = Span::new().hours(session_hours);
             let session_expires = now.checked_add(duration).map_err(|_| {
-                oauth_error(StatusCode::INTERNAL_SERVER_ERROR, OAuthError::invalid_grant())
+                oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    OAuthError::invalid_grant(),
+                )
             })?;
 
             // Create JWT claims
@@ -205,7 +240,10 @@ pub async fn device_token(
                 &jsonwebtoken::EncodingKey::from_secret(state.config.jwt_secret.as_bytes()),
             )
             .map_err(|_| {
-                oauth_error(StatusCode::INTERNAL_SERVER_ERROR, OAuthError::invalid_grant())
+                oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    OAuthError::invalid_grant(),
+                )
             })?;
 
             // Store session in database
@@ -224,7 +262,10 @@ pub async fn device_token(
             )
             .await
             .map_err(|_| {
-                oauth_error(StatusCode::INTERNAL_SERVER_ERROR, OAuthError::invalid_grant())
+                oauth_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    OAuthError::invalid_grant(),
+                )
             })?;
 
             let expires_in = u64::try_from(session_expires.as_second() - now.as_second())
@@ -239,6 +280,9 @@ pub async fn device_token(
                 email: user_email,
             }))
         }
-        _ => Err(oauth_error(StatusCode::INTERNAL_SERVER_ERROR, OAuthError::invalid_grant())),
+        _ => Err(oauth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            OAuthError::invalid_grant(),
+        )),
     }
 }

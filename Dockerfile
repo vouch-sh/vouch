@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # Build stage - using Debian with musl target for static binary
-FROM rust:1.92-bookworm AS builder
+FROM rust:1.93-trixie AS builder
 
 WORKDIR /app
 
@@ -20,12 +20,6 @@ COPY crates/vouch-common/Cargo.toml crates/vouch-common/
 COPY crates/vouch-server/Cargo.toml crates/vouch-server/
 COPY crates/vouch-cli/Cargo.toml crates/vouch-cli/
 COPY crates/vouch-agent/Cargo.toml crates/vouch-agent/
-
-# Create dummy source files for dependency caching
-RUN mkdir -p crates/vouch-common/src && echo "pub fn dummy() {}" > crates/vouch-common/src/lib.rs
-RUN mkdir -p crates/vouch-server/src && echo "fn main() {}" > crates/vouch-server/src/main.rs
-RUN mkdir -p crates/vouch-cli/src && echo "fn main() {}" > crates/vouch-cli/src/main.rs
-RUN mkdir -p crates/vouch-agent/src && echo "pub fn dummy() {}" > crates/vouch-agent/src/lib.rs && echo "fn main() {}" > crates/vouch-agent/src/main.rs
 
 # Build dependencies only (cached layer)
 RUN cargo build --release --target x86_64-unknown-linux-musl --package vouch-server 2>/dev/null || true

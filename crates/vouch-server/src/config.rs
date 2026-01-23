@@ -94,8 +94,8 @@ impl ServerConfig {
         let oidc_client_secret = std::env::var("VOUCH_OIDC_CLIENT_SECRET").ok();
 
         // Default verification URL to https://{rp_id}
-        let verification_base_url = std::env::var("VOUCH_VERIFICATION_URL")
-            .unwrap_or_else(|_| format!("https://{rp_id}"));
+        let verification_base_url =
+            std::env::var("VOUCH_VERIFICATION_URL").unwrap_or_else(|_| format!("https://{rp_id}"));
 
         let device_code_expires_seconds = std::env::var("VOUCH_DEVICE_CODE_EXPIRES")
             .ok()

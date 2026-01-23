@@ -1,8 +1,8 @@
 //! Admin handlers for server setup and user management.
 
+use crate::AppState;
 use crate::config::config_keys;
 use crate::db;
-use crate::AppState;
 use axum::{
     Form,
     extract::{Path, Query, State},
@@ -330,7 +330,8 @@ pub async fn setup_save_oidc(
     // Save to database
     let db = &state.db;
 
-    if let Err(e) = db::set_config(db, config_keys::OIDC_ISSUER, "https://accounts.google.com").await
+    if let Err(e) =
+        db::set_config(db, config_keys::OIDC_ISSUER, "https://accounts.google.com").await
     {
         tracing::error!("Failed to save OIDC issuer: {}", e);
         return Html(error_page(
@@ -351,8 +352,12 @@ pub async fn setup_save_oidc(
         .into_response();
     }
 
-    if let Err(e) =
-        db::set_config(db, config_keys::OIDC_CLIENT_SECRET, form.client_secret.trim()).await
+    if let Err(e) = db::set_config(
+        db,
+        config_keys::OIDC_CLIENT_SECRET,
+        form.client_secret.trim(),
+    )
+    .await
     {
         tracing::error!("Failed to save OIDC client secret: {}", e);
         return Html(error_page(
@@ -424,24 +429,26 @@ pub async fn setup_test_oidc(
     let discovery_url = "https://accounts.google.com/.well-known/openid-configuration";
 
     match client.get(discovery_url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            Html(success_page(
-                "Connection Successful",
-                &format!(
-                    "Successfully connected to Google's OIDC endpoint. Client ID: {}...{}",
-                    &client_id[..8.min(client_id.len())],
-                    &client_id[client_id.len().saturating_sub(4)..]
-                ),
-                &format!("/admin/setup?token={token}"),
-            ))
-            .into_response()
-        }
+        Ok(resp) if resp.status().is_success() => Html(success_page(
+            "Connection Successful",
+            &format!(
+                "Successfully connected to Google's OIDC endpoint. Client ID: {}...{}",
+                client_id.chars().take(8).collect::<String>(),
+                client_id
+                    .chars()
+                    .rev()
+                    .take(4)
+                    .collect::<String>()
+                    .chars()
+                    .rev()
+                    .collect::<String>()
+            ),
+            &format!("/admin/setup?token={token}"),
+        ))
+        .into_response(),
         Ok(resp) => Html(error_page(
             "Connection Failed",
-            &format!(
-                "Google OIDC endpoint returned status: {}",
-                resp.status()
-            ),
+            &format!("Google OIDC endpoint returned status: {}", resp.status()),
             &format!("/admin/setup?token={token}"),
         ))
         .into_response(),
