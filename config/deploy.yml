@@ -3,7 +3,7 @@
 
 service: vouch
 
-image: ghcr.io/vouch-sh/server
+image: ghcr.io/vouch-sh/vouch
 
 servers:
   web:
