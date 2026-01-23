@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# Build stage - using Debian for glibc build (webauthn-rs requires OpenSSL)
+# Build stage
 FROM rust:1.93-trixie AS builder
 
 WORKDIR /app
@@ -32,11 +32,17 @@ RUN touch crates/vouch-common/src/lib.rs crates/vouch-server/src/main.rs
 # Build the release binary
 RUN cargo build --release --package vouch-server
 
+# Create empty data directory marker
+RUN mkdir -p /data && touch /data/.keep
+
 # Runtime stage - minimal distroless image with glibc
-FROM gcr.io/distroless/cc-debian12:nonroot
+FROM gcr.io/distroless/cc-debian13:nonroot
 
 # Copy the binary
 COPY --from=builder /app/target/release/vouch-server /vouch-server
+
+# Create data directory with correct ownership
+COPY --from=builder --chown=nonroot:nonroot /data /data
 
 # Environment defaults
 ENV VOUCH_LISTEN_ADDR=0.0.0.0:3000

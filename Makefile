@@ -6,7 +6,7 @@ DOCKER ?= docker
 KAMAL ?= kamal
 
 # Docker image configuration
-IMAGE_NAME ?= vouch/server
+IMAGE_NAME ?= vouch-sh/server
 IMAGE_TAG ?= latest
 
 .PHONY: all build test run clean help docker-build docker-run deploy deploy-setup

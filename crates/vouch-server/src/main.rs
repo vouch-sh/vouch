@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
         .route("/admin/setup/test", post(handlers::admin::setup_test_oidc))
         .route("/admin/users", get(handlers::admin::list_users))
         .route(
-            "/admin/users/:id/delete",
+            "/admin/users/{id}/delete",
             post(handlers::admin::delete_user),
         )
         .with_state(state);
