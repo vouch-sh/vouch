@@ -66,8 +66,8 @@ LABEL org.opencontainers.image.source=https://github.com/vouch-sh/vouch
 # Copy the binary
 COPY --from=builder /app/target/release/vouch-server /vouch-server
 
-# Copy built CSS
-COPY --from=css-builder /app/crates/vouch-server/static/css/output.css /static/css/output.css
+# Copy built static assets (CSS)
+COPY --from=css-builder --chown=nonroot:nonroot /app/crates/vouch-server/static /static
 
 # Create data directory with correct ownership
 COPY --from=builder --chown=nonroot:nonroot /data /data
