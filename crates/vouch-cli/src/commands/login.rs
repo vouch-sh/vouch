@@ -3,8 +3,8 @@
 use anyhow::{Context, Result};
 use vouch_agent::{AgentClient, AgentError};
 use vouch_common::{
-    LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest, LoginStartResponse,
-    SessionCookie, write_cookie,
+    ClientContext, LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest,
+    LoginStartResponse, SessionCookie, write_cookie,
 };
 
 use crate::client::VouchClient;
@@ -61,6 +61,7 @@ pub async fn run(server: &str, email: &str) -> Result<()> {
                 signature: result.signature,
                 client_data_json: result.client_data_json,
                 user_handle: result.user_handle,
+                client_context: Some(ClientContext::current()),
             },
         )
         .await

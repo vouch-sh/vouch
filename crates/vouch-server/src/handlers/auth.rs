@@ -1,11 +1,12 @@
 //! Authentication handlers for registration and login.
 
 use crate::AppState;
-use crate::db;
+use crate::db::{self, AuthEventParams, AuthEventType};
+use crate::extractors::ClientInfo;
 use axum::{
     Json,
     extract::State,
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -330,13 +331,44 @@ pub async fn login_start(
 #[allow(clippy::too_many_lines)]
 pub async fn login_complete(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<LoginCompleteRequest>,
 ) -> Result<Json<LoginCompleteResponse>, (StatusCode, Json<ApiError>)> {
     tracing::info!("Login complete");
 
+    // Extract client info from headers
+    let client_info = ClientInfo::from_headers(&headers);
+
+    // Get client context from request (sent by CLI)
+    let client_ctx = req.client_context.as_ref();
+
     // Decode state
     let auth_state = AuthenticationState::decode(&req.state, &state.config.jwt_secret)
         .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
+
+    // Helper to log failed login attempts
+    let log_failure = |user_id: &str, authenticator_id: Option<&str>, reason: &str| {
+        let params = AuthEventParams {
+            user_id: user_id.to_string(),
+            event_type: AuthEventType::LoginFailed,
+            authenticator_id: authenticator_id.map(String::from),
+            client_ip: client_info.client_ip.clone(),
+            user_agent: client_info.user_agent.clone(),
+            client_hostname: client_ctx.and_then(|c| c.hostname.clone()),
+            client_os: client_ctx.and_then(|c| c.os.clone()),
+            client_arch: client_ctx.and_then(|c| c.arch.clone()),
+            client_version: client_ctx.and_then(|c| c.cli_version.clone()),
+            success: false,
+            failure_reason: Some(reason.to_string()),
+        };
+        // Spawn to avoid blocking the response
+        let db = state.db.clone();
+        tokio::spawn(async move {
+            if let Err(e) = db::insert_auth_event(&db, &params).await {
+                tracing::warn!("Failed to log auth event: {}", e);
+            }
+        });
+    };
 
     // Verify the credential_id is in the allowed list
     if !auth_state
@@ -344,6 +376,7 @@ pub async fn login_complete(
         .iter()
         .any(|id| id == &req.credential_id)
     {
+        log_failure(&auth_state.user_id, None, "invalid_credential");
         return Err(json_error(
             StatusCode::BAD_REQUEST,
             "invalid_credential",
@@ -362,6 +395,7 @@ pub async fn login_complete(
             )
         })?
         .ok_or_else(|| {
+            log_failure(&auth_state.user_id, None, "credential_not_found");
             json_error(
                 StatusCode::NOT_FOUND,
                 "credential_not_found",
@@ -371,6 +405,11 @@ pub async fn login_complete(
 
     // Verify user matches
     if authenticator.user_id != auth_state.user_id {
+        log_failure(
+            &auth_state.user_id,
+            Some(&authenticator.id),
+            "user_mismatch",
+        );
         return Err(json_error(
             StatusCode::BAD_REQUEST,
             "user_mismatch",
@@ -388,7 +427,14 @@ pub async fn login_complete(
                 &e.to_string(),
             )
         })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
+        .ok_or_else(|| {
+            log_failure(
+                &auth_state.user_id,
+                Some(&authenticator.id),
+                "user_not_found",
+            );
+            json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found")
+        })?;
 
     // For now, trust the CLI's signature verification
     // In production, verify the signature server-side using webauthn-rs
@@ -400,6 +446,7 @@ pub async fn login_complete(
             .authenticator_data
             .get(33..37)
             .ok_or_else(|| {
+                log_failure(&user.id, Some(&authenticator.id), "invalid_auth_data");
                 json_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_auth_data",
@@ -408,6 +455,7 @@ pub async fn login_complete(
             })?
             .try_into()
             .map_err(|_| {
+                log_failure(&user.id, Some(&authenticator.id), "invalid_auth_data");
                 json_error(
                     StatusCode::BAD_REQUEST,
                     "invalid_auth_data",
@@ -418,6 +466,7 @@ pub async fn login_complete(
 
         // Check counter is increasing
         if new_counter <= authenticator.counter {
+            log_failure(&user.id, Some(&authenticator.id), "counter_not_increasing");
             return Err(json_error(
                 StatusCode::BAD_REQUEST,
                 "counter_error",
@@ -492,6 +541,24 @@ pub async fn login_complete(
             &e.to_string(),
         )
     })?;
+
+    // Log successful login event
+    let auth_event_params = AuthEventParams {
+        user_id: user.id.clone(),
+        event_type: AuthEventType::LoginSuccess,
+        authenticator_id: Some(authenticator.id.clone()),
+        client_ip: client_info.client_ip,
+        user_agent: client_info.user_agent,
+        client_hostname: client_ctx.and_then(|c| c.hostname.clone()),
+        client_os: client_ctx.and_then(|c| c.os.clone()),
+        client_arch: client_ctx.and_then(|c| c.arch.clone()),
+        client_version: client_ctx.and_then(|c| c.cli_version.clone()),
+        success: true,
+        failure_reason: None,
+    };
+    if let Err(e) = db::insert_auth_event(&state.db, &auth_event_params).await {
+        tracing::warn!("Failed to log auth event: {}", e);
+    }
 
     tracing::info!("Login successful for user: {}", user.email);
 

@@ -5,13 +5,14 @@ use crate::config::config_keys;
 use crate::db;
 use askama::Template;
 use axum::{
-    Form,
+    Form, Json,
     extract::{Path, Query, State},
     http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
 };
 use serde::Deserialize;
 use std::sync::Arc;
+use vouch_common::{ApiError, AuthEventInfo, ListAuthEventsResponse};
 
 // ============================================================================
 // Templates
@@ -126,6 +127,23 @@ pub struct OidcTestForm {
     #[serde(default)]
     #[allow(dead_code)]
     _unused: Option<String>,
+}
+
+/// Query params for auth events API.
+#[derive(Debug, Deserialize)]
+pub struct AuthEventsQuery {
+    /// Admin token for authorization.
+    token: Option<String>,
+    /// Filter by user ID.
+    user_id: Option<String>,
+    /// Filter by event type (login_success, login_failed, enrollment, logout).
+    event_type: Option<String>,
+    /// Filter by client IP.
+    client_ip: Option<String>,
+    /// Filter by events since this ISO 8601 timestamp.
+    since: Option<String>,
+    /// Maximum number of events to return (default 100).
+    limit: Option<i64>,
 }
 
 // ============================================================================
@@ -420,4 +438,87 @@ pub async fn delete_user(
     tracing::info!("Deleted user: {}", user_id);
 
     Redirect::to(&format!("/admin/users?token={token}")).into_response()
+}
+
+// ============================================================================
+// Auth Events API
+// ============================================================================
+
+/// Helper for JSON error responses.
+fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
+    (status, Json(ApiError::new(code, message)))
+}
+
+/// List authentication events.
+/// GET /api/v1/admin/auth-events
+pub async fn list_auth_events(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<AuthEventsQuery>,
+) -> Result<Json<ListAuthEventsResponse>, (StatusCode, Json<ApiError>)> {
+    // Check authorization using token
+    let admin_query = AdminQuery {
+        token: query.token.clone(),
+    };
+    if !is_admin_authorized(&state, &admin_query) {
+        return Err(json_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Invalid or missing admin token",
+        ));
+    }
+
+    // Build query params
+    let db_query = db::AuthEventQuery {
+        user_id: query.user_id.clone(),
+        event_type: query.event_type.clone(),
+        client_ip: query.client_ip.clone(),
+        since: query.since.clone(),
+        limit: query.limit,
+    };
+
+    // Fetch events
+    let events = db::get_auth_events(&state.db, &db_query)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?;
+
+    // Get user emails for the events (for display)
+    // Build a map of user_id -> email
+    let mut user_emails: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for event in &events {
+        if !user_emails.contains_key(&event.user_id)
+            && let Ok(Some(user)) = db::get_user_by_id(&state.db, &event.user_id).await
+        {
+            user_emails.insert(event.user_id.clone(), user.email);
+        }
+    }
+
+    // Convert to API response type
+    let events: Vec<AuthEventInfo> = events
+        .into_iter()
+        .map(|e| AuthEventInfo {
+            id: e.id,
+            user_id: e.user_id.clone(),
+            user_email: user_emails.get(&e.user_id).cloned(),
+            event_type: e.event_type,
+            authenticator_id: e.authenticator_id,
+            client_ip: e.client_ip,
+            user_agent: e.user_agent,
+            client_hostname: e.client_hostname,
+            client_os: e.client_os,
+            client_arch: e.client_arch,
+            client_version: e.client_version,
+            success: e.success != 0,
+            failure_reason: e.failure_reason,
+            created_at: e.created_at,
+        })
+        .collect();
+
+    Ok(Json(ListAuthEventsResponse { events }))
 }

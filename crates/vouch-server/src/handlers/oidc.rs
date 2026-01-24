@@ -260,46 +260,45 @@ pub async fn authorize(
         && let Some((user, _session, authenticator)) =
             validate_session_token(&state, token).await.ok().flatten()
     {
-            // User is authenticated - issue authorization code
-            let now = Timestamp::now();
-            let exp = now
-                .checked_add(Span::new().minutes(5))
-                .map(|t| t.as_second())
-                .unwrap_or(now.as_second() + 300);
+        // User is authenticated - issue authorization code
+        let now = Timestamp::now();
+        let exp = now
+            .checked_add(Span::new().minutes(5))
+            .map(|t| t.as_second())
+            .unwrap_or(now.as_second() + 300);
 
-            let auth_code = AuthorizationCode {
-                client_id: params.client_id.clone(),
-                redirect_uri: params.redirect_uri.clone(),
-                user_id: user.id,
-                email: user.email,
-                authenticator_id: authenticator.id.clone(),
-                aaguid: authenticator.aaguid.clone(),
-                scope: params.scope.clone().unwrap_or_else(|| "openid".to_string()),
-                nonce: params.nonce.clone(),
-                code_challenge: params.code_challenge.clone(),
-                code_challenge_method: params.code_challenge_method.clone(),
-                iat: now.as_second(),
-                exp,
-            };
+        let auth_code = AuthorizationCode {
+            client_id: params.client_id.clone(),
+            redirect_uri: params.redirect_uri.clone(),
+            user_id: user.id,
+            email: user.email,
+            authenticator_id: authenticator.id.clone(),
+            aaguid: authenticator.aaguid.clone(),
+            scope: params.scope.clone().unwrap_or_else(|| "openid".to_string()),
+            nonce: params.nonce.clone(),
+            code_challenge: params.code_challenge.clone(),
+            code_challenge_method: params.code_challenge_method.clone(),
+            iat: now.as_second(),
+            exp,
+        };
 
-            match auth_code.encode(&state.config.jwt_secret) {
-                Ok(code) => {
-                    let mut redirect_url = format!("{}?code={}", params.redirect_uri, code);
-                    if let Some(state_param) = &params.state {
-                        redirect_url
-                            .push_str(&format!("&state={}", urlencoding::encode(state_param)));
-                    }
-                    return Redirect::to(&redirect_url).into_response();
+        match auth_code.encode(&state.config.jwt_secret) {
+            Ok(code) => {
+                let mut redirect_url = format!("{}?code={}", params.redirect_uri, code);
+                if let Some(state_param) = &params.state {
+                    redirect_url.push_str(&format!("&state={}", urlencoding::encode(state_param)));
                 }
-                Err(_) => {
-                    return Redirect::to(&format!(
+                return Redirect::to(&redirect_url).into_response();
+            }
+            Err(_) => {
+                return Redirect::to(&format!(
                         "{}?error=server_error&error_description=Failed%20to%20generate%20authorization%20code",
                         params.redirect_uri
                     ))
                     .into_response();
-                }
             }
         }
+    }
 
     // No valid session - show login page
     AuthorizeTemplate {

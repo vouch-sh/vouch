@@ -61,6 +61,45 @@ pub struct RegisterCompleteResponse {
 }
 
 // ============================================================================
+// Client Context (device/environment info sent with requests)
+// ============================================================================
+
+/// Context about the client environment, sent with authentication requests.
+/// This enables future anomaly detection (e.g., impossible travel, new device).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClientContext {
+    /// CLI version (from `CARGO_PKG_VERSION`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cli_version: Option<String>,
+    /// Operating system (e.g., "macos", "linux", "windows").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os: Option<String>,
+    /// OS version (e.g., "14.2.1").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_version: Option<String>,
+    /// CPU architecture (e.g., "aarch64", "x86_64").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub arch: Option<String>,
+    /// Client hostname.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
+}
+
+impl ClientContext {
+    /// Create a new client context with current system information.
+    #[must_use]
+    pub fn current() -> Self {
+        Self {
+            cli_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+            os: Some(std::env::consts::OS.to_string()),
+            os_version: None, // Filled in by CLI if available
+            arch: Some(std::env::consts::ARCH.to_string()),
+            hostname: gethostname::gethostname().to_str().map(String::from),
+        }
+    }
+}
+
+// ============================================================================
 // Login / Authentication
 // ============================================================================
 
@@ -99,6 +138,9 @@ pub struct LoginCompleteRequest {
     pub client_data_json: Vec<u8>,
     /// User handle returned by authenticator (may be empty for non-resident keys).
     pub user_handle: Option<Vec<u8>>,
+    /// Client context (device/environment info for anomaly detection).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_context: Option<ClientContext>,
 }
 
 /// Response after successful authentication.
@@ -320,4 +362,57 @@ pub struct DeleteKeyResponse {
     pub message: String,
     /// Number of sessions that were revoked.
     pub sessions_revoked: u64,
+}
+
+// ============================================================================
+// Authentication Events (Admin API)
+// ============================================================================
+
+/// Authentication event for audit/security review.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AuthEventInfo {
+    /// Unique identifier.
+    pub id: String,
+    /// User ID.
+    pub user_id: String,
+    /// User email (if available).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_email: Option<String>,
+    /// Event type (login_success, login_failed, enrollment, logout).
+    pub event_type: String,
+    /// Authenticator ID used (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authenticator_id: Option<String>,
+    /// Client IP address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_ip: Option<String>,
+    /// HTTP User-Agent header.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+    /// Client hostname (from CLI).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_hostname: Option<String>,
+    /// Client OS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_os: Option<String>,
+    /// Client architecture.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_arch: Option<String>,
+    /// CLI version.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_version: Option<String>,
+    /// Whether the event was successful.
+    pub success: bool,
+    /// Reason for failure (if applicable).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+    /// ISO 8601 timestamp when the event occurred.
+    pub created_at: String,
+}
+
+/// Response containing a list of authentication events.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListAuthEventsResponse {
+    /// List of authentication events.
+    pub events: Vec<AuthEventInfo>,
 }

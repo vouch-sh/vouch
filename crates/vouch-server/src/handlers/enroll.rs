@@ -1,12 +1,13 @@
 //! Enrollment handlers for browser-based device authorization flow.
 
 use crate::AppState;
-use crate::db;
+use crate::db::{self, AuthEventParams, AuthEventType};
+use crate::extractors::ClientInfo;
 use askama::Template;
 use axum::{
     Form, Json,
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use base64::Engine;
@@ -771,8 +772,12 @@ pub async fn browser_register_start(
 #[allow(clippy::unused_async, clippy::too_many_lines)]
 pub async fn browser_register_complete(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<BrowserRegisterCompleteRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    // Extract client info from headers (for auth event logging)
+    let client_info = ClientInfo::from_headers(&headers);
+
     // Decode state containing webauthn verification state
     let reg_state = BrowserRegistrationState::decode(&req.state, &state.config.jwt_secret)
         .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
@@ -889,6 +894,24 @@ pub async fn browser_register_complete(
             &e.to_string(),
         )
     })?;
+
+    // Log enrollment event
+    let auth_event_params = AuthEventParams {
+        user_id: reg_state.user_id.to_string(),
+        event_type: AuthEventType::Enrollment,
+        authenticator_id: Some(authenticator_id.clone()),
+        client_ip: client_info.client_ip,
+        user_agent: client_info.user_agent,
+        client_hostname: None, // Browser enrollment doesn't have hostname
+        client_os: None,
+        client_arch: None,
+        client_version: None,
+        success: true,
+        failure_reason: None,
+    };
+    if let Err(e) = db::insert_auth_event(&state.db, &auth_event_params).await {
+        tracing::warn!("Failed to log enrollment event: {}", e);
+    }
 
     tracing::info!(
         "Enrollment complete for: {} with {} (AAGUID: {})",

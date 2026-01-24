@@ -12,6 +12,7 @@ use tracing_subscriber::EnvFilter;
 
 mod config;
 mod db;
+mod extractors;
 mod handlers;
 
 /// Shared application state.
@@ -116,6 +117,11 @@ async fn main() -> Result<()> {
         .route(
             "/admin/users/{id}/delete",
             post(handlers::admin::delete_user),
+        )
+        // Admin API (JSON)
+        .route(
+            "/api/v1/admin/auth-events",
+            get(handlers::admin::list_auth_events),
         )
         // Static file serving for CSS, JS, and assets
         // Use /static in Docker, fall back to static for local development
