@@ -292,6 +292,119 @@ In-memory storage via IPC socket:
 - **Memory**: Uses `SecretString` with automatic zeroization
 - **Lifetime**: Cleared on agent shutdown or explicit logout
 
+## SCIM Security
+
+Vouch supports SCIM 2.0 (RFC 7643/7644) for user provisioning and de-provisioning from external identity providers. SCIM is a **launch requirement** for enterprise deployments.
+
+### De-Provisioning Behavior
+
+When a user is de-provisioned via SCIM (e.g., employee leaves the organization):
+
+| Action | Timing | Effect |
+|--------|--------|--------|
+| Active sessions invalidated | Immediate | All current sessions for the user are terminated |
+| Refresh tokens revoked | Immediate | No new access tokens can be issued |
+| Enrolled authenticators disabled | Immediate | YubiKey credentials cannot be used for login |
+| User record marked inactive | Immediate | User cannot re-enroll or authenticate |
+| Audit event logged | Immediate | De-provisioning recorded with source IdP info |
+
+**Key principle**: De-provisioning is immediate and complete. When someone leaves via SCIM, they lose all Vouch access instantly — no waiting for session expiration.
+
+```rust
+// SCIM de-provision handling
+async fn handle_scim_delete_user(user_id: &str, scim_request: &ScimRequest) -> Result<()> {
+    // 1. Invalidate all active sessions immediately
+    session_store.revoke_all_for_user(user_id).await?;
+
+    // 2. Revoke all refresh tokens
+    token_store.revoke_all_refresh_tokens(user_id).await?;
+
+    // 3. Disable all enrolled authenticators
+    authenticator_store.disable_all_for_user(user_id).await?;
+
+    // 4. Mark user as inactive
+    user_store.deactivate(user_id).await?;
+
+    // 5. Log audit event
+    audit_log.record(AuditEvent::ScimUserDeprovisioned {
+        user_id,
+        source_idp: scim_request.source_idp(),
+        timestamp: Timestamp::now(),
+    }).await?;
+
+    Ok(())
+}
+```
+
+### SCIM Endpoint Authentication
+
+SCIM endpoints require bearer token authentication:
+
+**Endpoint**: `POST /scim/v2/Users`, `DELETE /scim/v2/Users/:id`, etc.
+
+**Authentication**:
+- Bearer token in `Authorization` header
+- Token generated in Vouch admin portal per external IdP
+- Tokens are long-lived but can be rotated/revoked
+- Separate token per IdP integration (Okta, Azure AD, etc.)
+
+```bash
+# Example SCIM request from Okta
+curl -X DELETE https://vouch.example.com/scim/v2/Users/usr_abc123 \
+  -H "Authorization: Bearer scim_token_xyz789" \
+  -H "Content-Type: application/scim+json"
+```
+
+**Token Security**:
+- Tokens are hashed (Argon2id) before storage
+- Shown once at creation, never retrievable after
+- Bound to specific IdP and IP allowlist (optional)
+- Minimum 256 bits of entropy
+
+### SCIM Audit Logging
+
+All SCIM operations are logged for compliance and security monitoring:
+
+| Event | Logged Data |
+|-------|-------------|
+| `scim_user_created` | user_id, email, source_idp, scim_external_id, timestamp |
+| `scim_user_updated` | user_id, changed_fields, source_idp, timestamp |
+| `scim_user_deprovisioned` | user_id, email, source_idp, sessions_revoked_count, timestamp |
+| `scim_group_updated` | group_id, members_added, members_removed, source_idp, timestamp |
+| `scim_auth_failed` | source_ip, reason, attempted_operation, timestamp |
+
+**Log Entry Example (De-provisioning)**:
+```json
+{
+  "timestamp": "2024-01-14T10:32:15.123Z",
+  "event_type": "scim_user_deprovisioned",
+  "user": {
+    "id": "usr_abc123",
+    "email": "former.employee@company.com"
+  },
+  "source": {
+    "idp": "okta",
+    "scim_external_id": "00u1a2b3c4d5e6f7g8"
+  },
+  "effects": {
+    "sessions_revoked": 3,
+    "refresh_tokens_revoked": 2,
+    "authenticators_disabled": 1
+  }
+}
+```
+
+### SCIM vs Manual Enrollment
+
+| Aspect | SCIM Provisioning | Manual Enrollment |
+|--------|-------------------|-------------------|
+| User record creation | IdP pushes user info | User initiates enrollment |
+| Hardware enrollment | Still requires physical YubiKey | Requires physical YubiKey |
+| De-provisioning | Immediate via IdP | Manual admin action |
+| Group membership | Synced from IdP | Managed in Vouch |
+
+**Note**: SCIM pre-provisioning creates a user record, but they still cannot authenticate until they physically enroll a YubiKey. The security model remains: no credential without hardware.
+
 ## Client Credential Security
 
 OAuth client credentials issued through the application registration portal follow strict security practices.

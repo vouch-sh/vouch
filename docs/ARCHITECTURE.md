@@ -189,6 +189,11 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - OpenID Connect Core 1.0
 - OAuth 2.0 Device Authorization Grant (RFC 8628)
 - Proof Key for Code Exchange (PKCE, RFC 7636)
+- OAuth 2.0 Token Revocation (RFC 7009) — planned
+- OAuth 2.0 Token Introspection (RFC 7662) — planned
+- SCIM 2.0 (RFC 7643/7644) — launch requirement
+- OAuth 2.0 Security Best Current Practice (RFC 9700) — followed
+- DPoP (RFC 9449) — future consideration
 
 **Supported Grant Types:**
 | Grant Type | Use Case |
@@ -671,3 +676,63 @@ Vouch is inspired by Amazon's internal Midway system but differs in several ways
 | CA | External PKI | Built-in Ed25519 CA |
 | IdP | Internal | Google Workspace (extensible) |
 | Open source | No | CLI is open source |
+
+## Competitive Positioning
+
+### Vouch vs WorkOS
+
+| Aspect | WorkOS | Vouch |
+|--------|--------|-------|
+| **Target Customer** | B2B SaaS vendors | Enterprises (internal use) |
+| **Purpose** | "Make your app enterprise-ready" | "Secure internal access with hardware auth" |
+| **IdP Role** | Integrates with customer's IdP | IS the IdP |
+| **Direction** | Your app → customer's Okta/Entra | Your employees → Vouch → your apps |
+| **Hardware Focus** | None specific | YubiKey required |
+
+**Summary**: Not competitors. WorkOS helps SaaS companies add SSO/SCIM to sell to enterprises. Vouch IS the enterprise authentication system.
+
+- WorkOS customer: "I'm building a SaaS product and need to support customer SSO."
+- Vouch customer: "I'm an enterprise and need to secure my employees' access to internal tools."
+
+### Vouch vs AWS Verified Access
+
+| Aspect | AWS Verified Access | Vouch |
+|--------|---------------------|-------|
+| **What it is** | Zero-trust access gateway | Hardware-backed identity provider |
+| **Authentication** | Integrates with IdPs | IS the IdP |
+| **Where it runs** | AWS-hosted (network layer) | Self-hosted or cloud |
+| **Access Model** | Per-request evaluation | Session + short-lived credentials |
+| **Device Trust** | Via MDM integration | Via YubiKey hardware |
+| **VPN** | Replaces VPN | Complements/replaces VPN |
+
+**Summary**: Complementary, not competitive. AWS Verified Access needs an IdP to authenticate users — Vouch can be that IdP. Different layers: Vouch = identity layer, AWS VA = access layer.
+
+### Vouch vs Traditional IdPs (Okta, Auth0, etc.)
+
+| Feature | Vouch | Okta/Auth0/etc. | Platform Passkeys |
+|---------|-------|-----------------|-------------------|
+| Hardware required | Yes | Optional | No |
+| Syncable credentials | No | Yes | Yes |
+| Built-in SSH CA | Yes | No | No |
+| Discoverable login | Yes | No | Yes |
+| 8-hour sessions | Yes | Configurable | N/A |
+| Self-hosted | Yes | No | N/A |
+
+**Core differentiator**: Most identity systems allow platform passkeys (Touch ID, Windows Hello), TOTP/SMS, and push notifications. Vouch requires YubiKey 5 series only — hardware-bound, non-extractable, presence required.
+
+### Positioning Summary
+
+```
+                    Hardware Required
+                          │
+          Vouch ◄─────────┼─────────► Platform Passkeys
+     (YubiKey only)       │          (Touch ID, Windows Hello)
+                          │
+    Amazon Midway         │          Most IdPs
+    (internal only)       │          (Okta, Auth0, etc.)
+                          │
+                          │
+                    Software Optional
+```
+
+**Target customers**: Organizations where credential theft is an existential risk (finance, healthcare, critical infrastructure), compliance requires hardware tokens (SOC 2, FedRAMP, HIPAA), remote work makes "trust the network" obsolete, or platform passkeys are too risky (syncable = exfiltrable).

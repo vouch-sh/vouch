@@ -118,7 +118,15 @@ async fn main() -> Result<()> {
             post(handlers::admin::delete_user),
         )
         // Static file serving for CSS, JS, and assets
-        .nest_service("/static", ServeDir::new("static"))
+        // Use /static in Docker, fall back to static for local development
+        .nest_service(
+            "/static",
+            ServeDir::new(if std::path::Path::new("/static").exists() {
+                "/static"
+            } else {
+                "static"
+            }),
+        )
         .with_state(state);
 
     // Start server

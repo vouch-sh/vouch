@@ -293,6 +293,8 @@ ssh user@server
 - [x] Developer setup page (`/developer-setup`)
 - [x] Cookie file storage for CLI tools (`~/.vouch/cookie.txt`)
 - [ ] Token exchange for authorization_code grant
+- [ ] Token Revocation endpoint (RFC 7009)
+- [ ] Token Introspection endpoint (RFC 7662)
 - [ ] Admin IdP Portal (self-service external IdP configuration)
 - [ ] AWS STS integration
 - [ ] `vouch credential aws` command
@@ -304,6 +306,8 @@ GET  /.well-known/openid-configuration  # Discovery document
 GET  /oauth/jwks                         # Public keys
 GET  /oauth/authorize                    # Authorization endpoint
 POST /oauth/token                        # Token exchange (device + auth code)
+POST /oauth/revoke                       # Token revocation (RFC 7009)
+POST /oauth/introspect                   # Token introspection (RFC 7662)
 GET  /oauth/userinfo                     # User info endpoint
 ```
 
@@ -413,7 +417,10 @@ curl -X POST https://vouch.example.com/oauth/token \
   - [ ] Microsoft Entra ID integration
   - [ ] Generic OIDC provider support
   - [ ] Connection testing and validation
-- [ ] SCIM provisioning (Okta, Azure AD)
+- [ ] SCIM 2.0 de-provisioning (RFC 7643/7644) — **launch requirement**
+  - [ ] User de-provisioning (immediate session invalidation)
+  - [ ] SCIM endpoint authentication (bearer token)
+  - [ ] Audit logging for provisioning events
 - [ ] Audit log export (Splunk, Datadog)
 - [ ] Organization policies
 - [x] Self-service YubiKey management
@@ -454,6 +461,10 @@ curl -X POST https://vouch.example.com/oauth/token \
 ---
 
 ## Future Considerations (v1.0+)
+
+### Additional RFC Standards
+- **RFC 9449 (DPoP)** — Demonstrating Proof of Possession; sender-constrains tokens so stolen tokens can't be used. Aligns with Vouch's security-first positioning.
+- **RFC 8693 (Token Exchange)** — Exchange tokens between services; useful for microservices architectures.
 
 ### Federation
 - Cross-organization trust

@@ -61,6 +61,8 @@ RUN mkdir -p /data && touch /data/.keep
 # Runtime stage - minimal distroless image with glibc
 FROM gcr.io/distroless/cc-debian13:nonroot
 
+WORKDIR /
+
 LABEL org.opencontainers.image.source=https://github.com/vouch-sh/vouch
 
 # Copy the binary
