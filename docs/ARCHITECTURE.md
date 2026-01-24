@@ -49,6 +49,7 @@ $ git push origin main    # Just works
  |  |  * vouch login      (daily, CLI only, discoverable credential)     |  |
  |  |  * vouch status                                                    |  |
  |  |  * vouch logout                                                    |  |
+ |  |  * vouch keys list|remove                                          |  |
  |  |  * vouch setup ssh|aws|github                                      |  |
  |  +---------------------------------------------------------------------+  |
  |                    |                                                      |

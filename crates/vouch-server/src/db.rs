@@ -24,6 +24,7 @@ pub struct Authenticator {
     #[allow(dead_code)]
     pub public_key: Vec<u8>,
     pub counter: i64,
+    pub created_at: String,
 }
 
 /// Session record.
@@ -108,7 +109,7 @@ pub async fn get_authenticators_for_user(
     user_id: &str,
 ) -> Result<Vec<Authenticator>> {
     let authenticators = sqlx::query_as::<_, Authenticator>(
-        "SELECT id, user_id, name, credential_id, public_key, counter FROM authenticators WHERE user_id = ?"
+        "SELECT id, user_id, name, credential_id, public_key, counter, created_at FROM authenticators WHERE user_id = ?"
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -123,7 +124,7 @@ pub async fn get_authenticator_by_credential_id(
     credential_id: &[u8],
 ) -> Result<Option<Authenticator>> {
     let authenticator = sqlx::query_as::<_, Authenticator>(
-        "SELECT id, user_id, name, credential_id, public_key, counter FROM authenticators WHERE credential_id = ?"
+        "SELECT id, user_id, name, credential_id, public_key, counter, created_at FROM authenticators WHERE credential_id = ?"
     )
     .bind(credential_id)
     .fetch_optional(pool)
@@ -138,7 +139,7 @@ pub async fn get_authenticator_by_id(
     authenticator_id: &str,
 ) -> Result<Option<Authenticator>> {
     let authenticator = sqlx::query_as::<_, Authenticator>(
-        "SELECT id, user_id, name, credential_id, public_key, counter FROM authenticators WHERE id = ?"
+        "SELECT id, user_id, name, credential_id, public_key, counter, created_at FROM authenticators WHERE id = ?"
     )
     .bind(authenticator_id)
     .fetch_optional(pool)
@@ -615,4 +616,43 @@ pub async fn delete_user(pool: &SqlitePool, user_id: &str) -> Result<()> {
         .await?;
 
     Ok(())
+}
+
+// ============================================================================
+// Key Management
+// ============================================================================
+
+/// Count the number of authenticators for a user.
+pub async fn count_authenticators_for_user(pool: &SqlitePool, user_id: &str) -> Result<i64> {
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM authenticators WHERE user_id = ?")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(row.0)
+}
+
+/// Count the number of sessions for an authenticator.
+pub async fn count_sessions_for_authenticator(
+    pool: &SqlitePool,
+    authenticator_id: &str,
+) -> Result<i64> {
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM sessions WHERE authenticator_id = ?")
+        .bind(authenticator_id)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(row.0)
+}
+
+/// Delete an authenticator by ID.
+/// Returns the number of rows affected.
+/// Note: Due to CASCADE, this will also delete associated sessions.
+pub async fn delete_authenticator(pool: &SqlitePool, authenticator_id: &str) -> Result<u64> {
+    let result = sqlx::query("DELETE FROM authenticators WHERE id = ?")
+        .bind(authenticator_id)
+        .execute(pool)
+        .await?;
+
+    Ok(result.rows_affected())
 }

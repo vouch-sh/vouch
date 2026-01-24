@@ -282,3 +282,36 @@ pub struct BrowserRegisterCompleteRequest {
     /// Client data JSON (base64url encoded).
     pub client_data_json: String,
 }
+
+// ============================================================================
+// Key Management
+// ============================================================================
+
+/// Information about a registered security key.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct KeyInfo {
+    /// Unique identifier for the key.
+    pub id: String,
+    /// Human-readable name for the key.
+    pub name: String,
+    /// ISO 8601 timestamp when the key was registered.
+    pub created_at: String,
+    /// Whether this key was used to create the current session.
+    pub is_current_session: bool,
+}
+
+/// Response containing the list of registered keys.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListKeysResponse {
+    /// List of registered security keys.
+    pub keys: Vec<KeyInfo>,
+}
+
+/// Response after deleting a key.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeleteKeyResponse {
+    /// Confirmation message.
+    pub message: String,
+    /// Number of sessions that were revoked.
+    pub sessions_revoked: u64,
+}

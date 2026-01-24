@@ -50,5 +50,5 @@ ssh:
 # Build configuration
 builder:
   arch: amd64
-  #cache:
-  #  type: registry
+  cache:
+    type: registry

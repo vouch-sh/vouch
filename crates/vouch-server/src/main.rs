@@ -3,7 +3,7 @@
 use anyhow::Result;
 use axum::{
     Router,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use sqlx::SqlitePool;
 use std::sync::Arc;
@@ -91,6 +91,9 @@ async fn main() -> Result<()> {
             "/enroll/webauthn/complete",
             post(handlers::enroll::browser_register_complete),
         )
+        // Key management
+        .route("/v1/keys", get(handlers::keys::list_keys))
+        .route("/v1/keys/{id}", delete(handlers::keys::delete_key))
         // Admin setup wizard
         .route("/admin/setup", get(handlers::admin::setup_page))
         .route("/admin/setup/oidc", post(handlers::admin::setup_save_oidc))

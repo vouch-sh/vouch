@@ -80,6 +80,30 @@ impl VouchClient {
         self.handle_response(response).await
     }
 
+    /// DELETE with authentication.
+    pub async fn delete_authenticated<Resp>(&self, path: &str) -> Result<Resp>
+    where
+        Resp: DeserializeOwned,
+    {
+        let config = Config::load()?;
+        let token = config
+            .token()
+            .context("not authenticated - run 'vouch login' first")?;
+
+        let url = format!("{}{}", self.base_url, path);
+        tracing::debug!("DELETE {} (authenticated)", url);
+
+        let response = self
+            .client
+            .delete(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .with_context(|| format!("failed to connect to {url}"))?;
+
+        self.handle_response(response).await
+    }
+
     /// Handle HTTP response, parsing JSON or error.
     async fn handle_response<Resp>(&self, response: reqwest::Response) -> Result<Resp>
     where

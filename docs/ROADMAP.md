@@ -327,7 +327,9 @@ $ vouch credential aws --role arn:aws:iam::123456789:role/developer
 - [ ] SCIM provisioning (Okta, Azure AD)
 - [ ] Audit log export (Splunk, Datadog)
 - [ ] Organization policies
-- [ ] Self-service YubiKey management
+- [x] Self-service YubiKey management
+  - [x] `vouch keys list` - List registered keys
+  - [x] `vouch keys remove` - Remove a registered key
 
 ### v0.7 — Agent Delegation (Month 6)
 
