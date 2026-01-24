@@ -7,6 +7,7 @@ use axum::{
 };
 use sqlx::SqlitePool;
 use std::sync::Arc;
+use tower_http::services::ServeDir;
 use tracing_subscriber::EnvFilter;
 
 mod config;
@@ -58,9 +59,22 @@ async fn main() -> Result<()> {
 
     // Build router
     let app = Router::new()
-        // Landing page
-        .route("/", get(handlers::landing::landing_page))
+        // Landing page with smart routing
+        .route("/", get(handlers::home::home_page))
+        .route("/admin-setup", get(handlers::home::admin_setup_page))
+        .route(
+            "/developer-setup",
+            get(handlers::home::developer_setup_page),
+        )
         .route("/health", get(|| async { "ok" }))
+        // OIDC Provider endpoints
+        .route(
+            "/.well-known/openid-configuration",
+            get(handlers::oidc::discovery),
+        )
+        .route("/oauth/jwks", get(handlers::oidc::jwks))
+        .route("/oauth/authorize", get(handlers::oidc::authorize))
+        .route("/oauth/userinfo", get(handlers::oidc::userinfo))
         // Legacy auth endpoints
         .route(
             "/v1/auth/register/start",
@@ -103,6 +117,8 @@ async fn main() -> Result<()> {
             "/admin/users/{id}/delete",
             post(handlers::admin::delete_user),
         )
+        // Static file serving for CSS, JS, and assets
+        .nest_service("/static", ServeDir::new("static"))
         .with_state(state);
 
     // Start server

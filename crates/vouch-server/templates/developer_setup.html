@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+
+{% block title %}Developer Setup - Vouch{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center min-h-screen p-5">
+    <div class="card max-w-xl w-full">
+        <a href="/" class="inline-flex items-center gap-1.5 text-vouch-500 text-sm mb-6 hover:underline">&larr; Back to home</a>
+        <h1 class="text-3xl font-bold text-gray-900 mb-2">Get Started with Vouch</h1>
+        <p class="text-gray-600 mb-8">Install the CLI and enroll your YubiKey</p>
+
+        <!-- Step 1: Install the CLI -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">1</span>
+                <span class="text-lg font-semibold text-gray-900">Install the CLI</span>
+            </div>
+            <div class="ml-11">
+                <div class="flex gap-2 mb-2">
+                    <button class="tab tab-active" onclick="showTab('macos')">macOS</button>
+                    <button class="tab" onclick="showTab('linux')">Linux</button>
+                </div>
+
+                <div id="macos-tab" class="tab-content">
+                    <div class="code-block relative">
+                        <span class="text-gray-500 mr-2">$</span>brew install vouch-sh/tap/vouch
+                        <button onclick="copyCommand('brew install vouch-sh/tap/vouch')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-gray-700 text-gray-400 rounded text-xs hover:bg-gray-600 hover:text-white transition-colors">Copy</button>
+                    </div>
+                </div>
+
+                <div id="linux-tab" class="tab-content hidden">
+                    <div class="code-block relative">
+                        <span class="text-gray-500 mr-2">$</span>curl -fsSL https://vouch.sh/install.sh | sh
+                        <button onclick="copyCommand('curl -fsSL https://vouch.sh/install.sh | sh')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-gray-700 text-gray-400 rounded text-xs hover:bg-gray-600 hover:text-white transition-colors">Copy</button>
+                    </div>
+                </div>
+
+                {% if has_downloads %}
+                <p class="mt-4 text-sm text-gray-600">Or download directly:</p>
+                <div class="flex flex-wrap gap-3 mt-4">
+                    {% if let Some(url) = download_macos %}
+                    <a href="{{ url }}" class="download-btn">
+                        <span>&#x1F34E;</span>
+                        <span>macOS</span>
+                    </a>
+                    {% endif %}
+                    {% if let Some(url) = download_linux %}
+                    <a href="{{ url }}" class="download-btn">
+                        <span>&#x1F427;</span>
+                        <span>Linux</span>
+                    </a>
+                    {% endif %}
+                    {% if let Some(url) = download_windows %}
+                    <a href="{{ url }}" class="download-btn">
+                        <span>&#x1FA9F;</span>
+                        <span>Windows</span>
+                    </a>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+        </div>
+
+        <!-- Step 2: Enroll your YubiKey -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">2</span>
+                <span class="text-lg font-semibold text-gray-900">Enroll your YubiKey</span>
+            </div>
+            <div class="ml-11">
+                <div class="code-block relative">
+                    <span class="text-gray-500 mr-2">$</span>vouch enroll --server &lt;your-company-url&gt;
+                    <button onclick="copyCommand('vouch enroll --server ')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-gray-700 text-gray-400 rounded text-xs hover:bg-gray-600 hover:text-white transition-colors">Copy</button>
+                </div>
+                <p class="mt-2 text-sm text-gray-600">Your admin will give you the URL. This opens a browser to verify your identity and register your YubiKey.</p>
+            </div>
+        </div>
+
+        <!-- Step 3: Daily login -->
+        <div>
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">3</span>
+                <span class="text-lg font-semibold text-gray-900">Daily login</span>
+            </div>
+            <div class="ml-11">
+                <div class="code-block">
+                    <div class="text-gray-500"># Start your day with a single touch</div>
+                    <div><span class="text-gray-500">$</span> vouch login</div>
+                    <div>Enter PIN: ****</div>
+                    <div>Touch your YubiKey...</div>
+                    <div class="text-blue-400">&#x2713; Authenticated for 8 hours</div>
+                </div>
+                <p class="mt-2 text-sm text-gray-600">After login, your identity is available to SSH, AWS, Git, and other tools automatically.</p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function showTab(tab) {
+        document.querySelectorAll('.tab').forEach(el => {
+            el.classList.remove('tab-active');
+        });
+        event.target.classList.add('tab-active');
+
+        document.querySelectorAll('.tab-content').forEach(el => {
+            el.classList.add('hidden');
+        });
+        document.getElementById(tab + '-tab').classList.remove('hidden');
+    }
+
+    function copyCommand(text) {
+        navigator.clipboard.writeText(text).then(() => {
+            const btn = event.target;
+            const original = btn.textContent;
+            btn.textContent = 'Copied!';
+            setTimeout(() => btn.textContent = original, 2000);
+        });
+    }
+</script>
+{% endblock %}

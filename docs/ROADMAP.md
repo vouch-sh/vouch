@@ -281,20 +281,39 @@ ssh user@server
 
 **Goal**: Vouch acts as OIDC provider for AWS federation.
 
+**Status**: ✅ OIDC Provider core endpoints implemented.
+
 **Deliverables:**
-- [ ] OIDC discovery endpoint (`/.well-known/openid-configuration`)
-- [ ] JWKS endpoint (`/oauth/jwks`)
-- [ ] Token exchange endpoint (`/oauth/token`)
+- [x] OIDC discovery endpoint (`/.well-known/openid-configuration`)
+- [x] JWKS endpoint (`/oauth/jwks`)
+- [x] Authorization endpoint (`/oauth/authorize`)
+- [x] UserInfo endpoint (`/oauth/userinfo`)
+- [x] Smart landing page routing (two-persona: admin vs developer)
+- [x] Admin setup wizard page (`/admin-setup`)
+- [x] Developer setup page (`/developer-setup`)
+- [x] Cookie file storage for CLI tools (`~/.vouch/cookie.txt`)
+- [ ] Token exchange for authorization_code grant
 - [ ] AWS STS integration
 - [ ] `vouch credential aws` command
 - [ ] `vouch setup aws` command
 
 **OIDC Endpoints:**
 ```
-GET  /.well-known/openid-configuration
-GET  /oauth/jwks
-POST /oauth/token  (exchanges session token for OIDC ID token)
+GET  /.well-known/openid-configuration  # Discovery document
+GET  /oauth/jwks                         # Public keys
+GET  /oauth/authorize                    # Authorization endpoint
+POST /oauth/token                        # Token exchange (device + auth code)
+GET  /oauth/userinfo                     # User info endpoint
 ```
+
+**Landing Page Routing:**
+- If OIDC not configured → Show two-persona page (admin/developer)
+- If OIDC configured → Show org enrollment page
+
+**Session Storage:**
+- Cookie file at `~/.vouch/cookie.txt` (Netscape format)
+- Written on login, cleared on logout
+- 0600 permissions for security
 
 **AWS Credential Flow:**
 ```bash

@@ -4,6 +4,7 @@ use anyhow::{Context, Result};
 use vouch_agent::{AgentClient, AgentError};
 use vouch_common::{
     LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest, LoginStartResponse,
+    SessionCookie, write_cookie,
 };
 
 use crate::client::VouchClient;
@@ -73,6 +74,11 @@ pub async fn run(server: &str, email: &str) -> Result<()> {
     let mut config = Config::load()?;
     config.save_token(&complete_resp.token)?;
 
+    // Step 7: Write cookie file for CLI tools
+    if let Err(e) = write_session_cookie(server, &complete_resp) {
+        tracing::debug!("Failed to write cookie file: {e}");
+    }
+
     println!("Login successful!");
     println!("Session expires: {}", complete_resp.expires_at);
 
@@ -110,4 +116,28 @@ async fn store_session_in_agent(email: &str, response: &LoginCompleteResponse) -
             false
         }
     }
+}
+
+/// Write the session cookie file for CLI tools.
+fn write_session_cookie(server: &str, response: &LoginCompleteResponse) -> Result<()> {
+    // Extract domain from server URL
+    let url = url::Url::parse(server).context("failed to parse server URL")?;
+    let domain = url
+        .host_str()
+        .context("server URL has no host")?
+        .to_string();
+
+    // Parse expiration time
+    let expires_at: jiff::Timestamp = response
+        .expires_at
+        .parse()
+        .context("failed to parse expiration time")?;
+    let expires_unix = expires_at.as_second();
+
+    // Create and write cookie
+    let cookie = SessionCookie::new(&domain, &response.token, expires_unix);
+    write_cookie(&cookie)?;
+
+    tracing::debug!("Cookie written to ~/.vouch/cookie.txt");
+    Ok(())
 }

@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use vouch_agent::{AgentClient, AgentError};
+use vouch_common::clear_cookie;
 
 use crate::config::Config;
 
@@ -20,7 +21,16 @@ pub async fn run() -> Result<()> {
         config.clear_token()?;
     }
 
-    if had_token || agent_cleared {
+    // Clear cookie file
+    let cookie_cleared = match clear_cookie() {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::debug!("Failed to clear cookie file: {e}");
+            false
+        }
+    };
+
+    if had_token || agent_cleared || cookie_cleared {
         println!("Logged out successfully.");
     } else {
         println!("Not currently logged in.");

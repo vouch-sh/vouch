@@ -1,0 +1,16 @@
+{% extends "admin_base.html" %}
+
+{% block title %}Unauthorized{% endblock %}
+
+{% block nav %}{% endblock %}
+
+{% block content %}
+<div class="card text-center">
+    <h1 class="text-2xl font-bold text-red-600 mb-4">Unauthorized</h1>
+    <p class="text-gray-600 mb-4">You need a valid admin token to access this page.</p>
+    <p class="text-sm text-gray-400">
+        Set <code class="bg-gray-100 px-2 py-1 rounded">VOUCH_ADMIN_BOOTSTRAP_TOKEN</code> and visit<br>
+        <code class="bg-gray-100 px-2 py-1 rounded">/admin/setup?token=YOUR_TOKEN</code>
+    </p>
+</div>
+{% endblock %}

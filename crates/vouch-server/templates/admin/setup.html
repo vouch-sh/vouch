@@ -1,0 +1,73 @@
+{% extends "admin_base.html" %}
+
+{% block title %}Vouch Admin Setup{% endblock %}
+
+{% block content %}
+<div class="card mb-6">
+    <h1 class="text-2xl font-bold text-gray-900 mb-2">Vouch Admin Setup</h1>
+    <p class="text-gray-600">Configure your Vouch server for Google Workspace authentication.</p>
+</div>
+
+<div class="card mb-6">
+    <h2 class="text-lg font-semibold text-gray-900 mb-4">
+        Google OIDC Configuration
+        {% if oidc_configured %}
+        <span class="badge badge-success ml-2">Configured</span>
+        {% else %}
+        <span class="badge badge-warning ml-2">Not Configured</span>
+        {% endif %}
+    </h2>
+
+    <div class="mb-6">
+        <div class="flex items-center gap-3 mb-3">
+            <span class="step-number">1</span>
+            <span class="font-semibold text-gray-900">Create Google Cloud OAuth App</span>
+        </div>
+        <ol class="list-decimal list-inside space-y-2 text-sm text-gray-600 ml-11">
+            <li>Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank" class="text-vouch-500 hover:underline">Google Cloud Console</a> &rarr; APIs & Services &rarr; Credentials</li>
+            <li>Click "Create Credentials" &rarr; "OAuth 2.0 Client ID"</li>
+            <li>Choose "Web application" as the application type</li>
+            <li>Add this redirect URI:</li>
+        </ol>
+        <div class="ml-11 mt-2 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 font-mono text-sm break-all">
+            {{ redirect_uri }}
+        </div>
+    </div>
+
+    <div>
+        <div class="flex items-center gap-3 mb-3">
+            <span class="step-number">2</span>
+            <span class="font-semibold text-gray-900">Enter Credentials</span>
+        </div>
+        <form method="POST" action="/admin/setup/oidc?token={{ token }}" class="ml-11 space-y-4">
+            <div>
+                <label for="client_id" class="block text-sm font-medium text-gray-700 mb-1.5">Client ID</label>
+                <input type="text" id="client_id" name="client_id" placeholder="123456789.apps.googleusercontent.com" value="{{ current_client_id }}" required class="input-field font-mono">
+            </div>
+            <div>
+                <label for="client_secret" class="block text-sm font-medium text-gray-700 mb-1.5">Client Secret</label>
+                <input type="password" id="client_secret" name="client_secret" placeholder="GOCSPX-..." required class="input-field font-mono">
+            </div>
+            <div>
+                <label for="org_name" class="block text-sm font-medium text-gray-700 mb-1.5">Organization Name (optional)</label>
+                <input type="text" id="org_name" name="org_name" placeholder="Acme Corp" value="{{ current_org }}" class="input-field">
+            </div>
+            <div>
+                <label for="allowed_domains" class="block text-sm font-medium text-gray-700 mb-1.5">Allowed Email Domains (optional, comma-separated)</label>
+                <input type="text" id="allowed_domains" name="allowed_domains" placeholder="company.com, subsidiary.com" value="{{ current_domains }}" class="input-field">
+            </div>
+            <button type="submit" class="btn-primary">Save Configuration</button>
+        </form>
+    </div>
+</div>
+
+<div class="card">
+    <h2 class="text-lg font-semibold text-gray-900 mb-4">Test Configuration</h2>
+    <p class="text-gray-600 text-sm mb-4">Verify your OIDC settings work correctly before enabling.</p>
+    <form method="POST" action="/admin/setup/test?token={{ token }}">
+        <input type="hidden" name="client_id" value="{{ current_client_id }}">
+        <input type="hidden" name="client_secret" value="">
+        <button type="submit" class="btn-secondary" {% if !oidc_configured %}disabled{% endif %}>Test Connection</button>
+    </form>
+</div>
+{% endblock %}

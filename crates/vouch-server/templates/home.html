@@ -1,0 +1,51 @@
+{% extends "base.html" %}
+
+{% block title %}Vouch - Hardware-backed Identity Layer{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center min-h-screen p-5">
+    <div class="card max-w-3xl w-full">
+        <div class="text-5xl mb-4 text-center">&#x1F510;</div>
+        <h1 class="text-3xl font-bold text-gray-900 text-center mb-2">Vouch</h1>
+        <p class="text-gray-600 text-lg text-center mb-10">Hardware-backed identity layer for your team</p>
+
+        <div class="grid md:grid-cols-2 gap-6 mb-10">
+            <a href="/admin-setup" class="persona-card">
+                <div class="text-5xl mb-4">&#x1F454;</div>
+                <div class="text-xl font-semibold text-gray-900 mb-3">I'm an Admin</div>
+                <div class="text-gray-600 text-sm leading-relaxed mb-5">
+                    Set up Vouch for your team with Google Workspace in 5 minutes
+                </div>
+                <span class="btn-primary">Get Started</span>
+            </a>
+
+            <a href="/developer-setup" class="persona-card">
+                <div class="text-5xl mb-4">&#x1F4BB;</div>
+                <div class="text-xl font-semibold text-gray-900 mb-3">I'm a Developer</div>
+                <div class="text-gray-600 text-sm leading-relaxed mb-5">
+                    Your admin gave you a Vouch URL? Install the CLI and enroll your YubiKey
+                </div>
+                <span class="btn-primary">Install CLI</span>
+            </a>
+        </div>
+
+        <div class="bg-gray-50 rounded-xl p-6">
+            <h2 class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-4">How it works</h2>
+            <div class="flex flex-wrap gap-6">
+                <div class="flex-1 min-w-[180px] flex items-start gap-3">
+                    <span class="step-number">1</span>
+                    <span class="text-sm text-gray-600">Touch YubiKey + enter PIN to get an 8-hour session</span>
+                </div>
+                <div class="flex-1 min-w-[180px] flex items-start gap-3">
+                    <span class="step-number">2</span>
+                    <span class="text-sm text-gray-600">Session available to all your tools automatically</span>
+                </div>
+                <div class="flex-1 min-w-[180px] flex items-start gap-3">
+                    <span class="step-number">3</span>
+                    <span class="text-sm text-gray-600">SSH, AWS, Git, web apps - all just work</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

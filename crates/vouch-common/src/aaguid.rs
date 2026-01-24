@@ -262,7 +262,8 @@ pub fn extract_aaguid_from_auth_data(auth_data: &[u8]) -> Option<String> {
     }
 
     // AAGUID is at offset 37 (after rpIdHash + flags + signCount)
-    let aaguid_bytes = auth_data.get(37..53)?;
+    let aaguid_slice = auth_data.get(37..53)?;
+    let aaguid_bytes: [u8; 16] = aaguid_slice.try_into().ok()?;
 
     // Format as UUID string
     Some(format!(
@@ -287,6 +288,7 @@ pub fn extract_aaguid_from_auth_data(auth_data: &[u8]) -> Option<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::indexing_slicing)]
 mod tests {
     use super::*;
 

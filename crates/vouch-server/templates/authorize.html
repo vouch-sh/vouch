@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Sign in - Vouch{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center min-h-screen p-5">
+    <div class="card max-w-md w-full text-center">
+        <div class="text-5xl mb-4">&#x1F510;</div>
+        <h1 class="text-2xl font-bold text-gray-900 mb-2">Sign in to continue</h1>
+        <p class="text-gray-600 text-sm mb-6">Hardware authentication required</p>
+
+        <div class="bg-gray-50 rounded-lg p-4 mb-6 text-left">
+            <strong class="text-gray-800">{{ client_id }}</strong>
+            <p class="text-gray-600 text-sm mt-1">wants to access your Vouch identity</p>
+        </div>
+
+        <div class="bg-orange-50 border-l-4 border-orange-400 p-4 rounded-r-lg text-left">
+            <p class="text-orange-800 text-sm">Use the Vouch CLI to authenticate:</p>
+            <div class="code-block mt-2 text-sm">vouch login</div>
+            <p class="text-orange-700 text-xs mt-3">Then refresh this page.</p>
+        </div>
+    </div>
+</div>
+{% endblock %}

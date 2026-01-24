@@ -181,10 +181,39 @@ The authentication backend with built-in certificate authority.
 - Principals from user email
 
 #### OIDC Provider
-For AWS federation and other OIDC-capable services:
-- `GET /.well-known/openid-configuration`
-- `GET /oauth/jwks`
-- `POST /oauth/token` (exchanges session token for OIDC ID token)
+
+Vouch acts as a **standard OIDC provider**, allowing any application to integrate using off-the-shelf OIDC libraries - no Vouch SDK required.
+
+**Standard OIDC Endpoints:**
+- `GET /.well-known/openid-configuration` — Discovery document
+- `GET /oauth/jwks` — Public keys for token verification
+- `GET /oauth/authorize` — Authorization endpoint
+- `POST /oauth/token` — Token exchange (device flow + authorization code)
+- `GET /oauth/userinfo` — User info endpoint
+
+**ID Token Claims:**
+```json
+{
+  "iss": "https://vouch.yourcompany.com",
+  "sub": "user@company.com",
+  "email": "user@company.com",
+  "email_verified": true,
+  "hardware_verified": true,
+  "hardware_aaguid": "2fc0579f-8113-47ea-b116-bb5a8db9202a",
+  "iat": 1737849600,
+  "exp": 1737878400
+}
+```
+
+**Vouch-specific claims:**
+- `hardware_verified: true` — Indicates hardware authentication was used
+- `hardware_aaguid` — The AAGUID of the authenticator (identifies device model)
+
+**Why OIDC:**
+- Standard protocol, works with any language/framework
+- No vendor lock-in - apps can switch IdPs later
+- JWT tokens can be verified offline with public keys
+- Existing libraries handle all the complexity
 
 ## Authentication Flows
 
@@ -441,9 +470,56 @@ How it works:
 |-----------|--------|-----------|
 | Language | Rust | Consistency with CLI, performance |
 | Framework | Axum | Modern async, tower middleware |
+| Templates | Askama | Compile-time checked, type-safe HTML |
+| Styling | TailwindCSS | Utility-first, self-hosted (no CDN) |
 | Database | SQLite (MVP) / PostgreSQL | Simple to start, scales later |
 | SSH CA | Ed25519 (built-in) | No external dependencies |
 | JWT | jsonwebtoken | Standard, well-audited |
+
+## Session Storage
+
+Vouch stores session information in multiple locations for different use cases:
+
+### Agent IPC (Primary)
+
+The vouch-agent daemon stores the active session in memory, accessible via Unix socket IPC:
+
+```
+~/.vouch/agent.sock    # JSON-RPC 2.0 IPC socket
+```
+
+**Used by:** CLI tools, credential helpers
+
+### Config File (Fallback)
+
+When the agent is not running, sessions are stored in the config file:
+
+```
+~/.config/vouch/config.json
+```
+
+**Format:** JSON with `token` field containing the JWT session token
+
+### Cookie File (CLI Tools)
+
+For CLI tools that support Netscape cookie format (curl, wget, etc.):
+
+```
+~/.vouch/cookie.txt
+```
+
+**Format:** Netscape HTTP Cookie File
+```
+# Netscape HTTP Cookie File
+vouch.example.com	FALSE	/	TRUE	1737849600	vouch_session	<token>
+```
+
+**Use cases:**
+- SSH credential helper reads cookie, exchanges for certificate
+- AWS credential process reads cookie, gets OIDC token
+- CLI tools that need quick auth without browser flow
+
+**Security:** File permissions are set to 0600 (read/write for owner only)
 
 ## Security Properties
 

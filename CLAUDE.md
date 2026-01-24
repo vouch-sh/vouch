@@ -56,6 +56,25 @@ Add sparingly. Prefer:
 - `jiff` for time (not `chrono`)
 - `clap` for CLI parsing
 - `axum` for server (if needed)
+- `askama` for HTML templates (compile-time checked)
+
+### Frontend
+
+Keep it simple. No complex JavaScript frameworks.
+
+**Allowed:**
+- TailwindCSS — Utility-first CSS (self-hosted, no CDN)
+- Tailkit — Pre-built Tailwind components (we have full license)
+- HTMX — Server-driven interactivity when needed
+- Vanilla JavaScript — For WebAuthn APIs and simple UI interactions
+
+**Not allowed:**
+- jQuery
+- React, Vue, Angular, Svelte
+- Any npm/node.js build toolchain for JavaScript
+- External CDN dependencies
+
+**Rationale:** The server UI is for enrollment and admin tasks, not a complex SPA. Askama templates + TailwindCSS + minimal JS keeps it auditable and maintainable.
 
 ### Security Patterns
 

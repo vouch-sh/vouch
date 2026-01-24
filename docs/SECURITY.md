@@ -243,6 +243,55 @@ Audit logs are:
 - Retained for compliance period (configurable, default 2 years)
 - Exportable to SIEM (Splunk, Datadog, etc.)
 
+## Session Storage Security
+
+Vouch stores session tokens in multiple locations with appropriate security controls:
+
+### Cookie File (`~/.vouch/cookie.txt`)
+
+A Netscape-format cookie file for CLI tools that need session access:
+
+**Security Controls:**
+- **File permissions**: 0600 (read/write for owner only)
+- **Location**: User's home directory (`~/.vouch/`)
+- **Contents**: Session token + expiration timestamp
+- **Lifetime**: Cleared on logout or session expiration
+
+**Format:**
+```
+# Netscape HTTP Cookie File
+vouch.example.com	FALSE	/	TRUE	1737849600	vouch_session	<jwt-token>
+```
+
+**Why Netscape format:**
+- Compatible with curl (`-b` flag), wget, and other CLI tools
+- Industry standard for cookie storage
+- Simple text format, easy to audit
+
+**Risk mitigation:**
+- Tokens are short-lived (8 hours max)
+- File is deleted on logout
+- Restrictive permissions prevent unauthorized access
+- Token hash (not plaintext) is stored server-side for revocation
+
+### Config File (`~/.config/vouch/config.json`)
+
+Fallback storage when agent is not running:
+
+**Security Controls:**
+- **File permissions**: 0600
+- **Contents**: JWT token, server URL
+- **Cleared**: On logout via `vouch logout`
+
+### Agent Memory (Primary)
+
+In-memory storage via IPC socket:
+
+**Security Controls:**
+- **Socket permissions**: 0700 on socket directory
+- **Memory**: Uses `SecretString` with automatic zeroization
+- **Lifetime**: Cleared on agent shutdown or explicit logout
+
 ## Memory Safety
 
 Vouch is written in Rust, providing:

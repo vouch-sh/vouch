@@ -2,6 +2,7 @@
 
 use crate::AppState;
 use crate::db;
+use askama::Template;
 use axum::{
     Form, Json,
     extract::{Query, State},
@@ -17,6 +18,92 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 use vouch_common::{ApiError, BrowserRegisterCompleteRequest, BrowserRegisterStartResponse};
+
+// ============================================================================
+// Templates
+// ============================================================================
+
+/// Device code entry page template.
+#[derive(Template)]
+#[template(path = "device_verify.html")]
+pub struct DeviceVerifyTemplate {
+    pub error: Option<String>,
+}
+
+impl IntoResponse for DeviceVerifyTemplate {
+    fn into_response(self) -> Response {
+        match self.render() {
+            Ok(html) => Html(html).into_response(),
+            Err(e) => {
+                tracing::error!("Template render error: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
+    }
+}
+
+/// WebAuthn registration page template.
+#[derive(Template)]
+#[template(path = "enroll_webauthn.html")]
+pub struct EnrollWebauthnTemplate {
+    pub email: String,
+    pub state: String,
+    pub rp_id: String,
+}
+
+impl IntoResponse for EnrollWebauthnTemplate {
+    fn into_response(self) -> Response {
+        match self.render() {
+            Ok(html) => Html(html).into_response(),
+            Err(e) => {
+                tracing::error!("Template render error: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
+    }
+}
+
+/// Success page template.
+#[derive(Template)]
+#[template(path = "success.html")]
+pub struct SuccessTemplate;
+
+impl IntoResponse for SuccessTemplate {
+    fn into_response(self) -> Response {
+        match self.render() {
+            Ok(html) => Html(html).into_response(),
+            Err(e) => {
+                tracing::error!("Template render error: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
+    }
+}
+
+/// Error page template.
+#[derive(Template)]
+#[template(path = "error.html")]
+pub struct ErrorTemplate {
+    pub title: String,
+    pub message: String,
+    pub back_url: Option<String>,
+}
+
+impl IntoResponse for ErrorTemplate {
+    fn into_response(self) -> Response {
+        match self.render() {
+            Ok(html) => Html(html).into_response(),
+            Err(e) => {
+                tracing::error!("Template render error: {}", e);
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
+    }
+}
+
+// ============================================================================
+// Request/Response Types
+// ============================================================================
 
 /// Form data for user code submission.
 #[derive(Debug, Deserialize)]
@@ -93,6 +180,10 @@ impl BrowserRegistrationState {
     }
 }
 
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
 /// Generate random bytes.
 fn generate_random_bytes(len: usize) -> Vec<u8> {
     let mut bytes = vec![0u8; len];
@@ -100,363 +191,20 @@ fn generate_random_bytes(len: usize) -> Vec<u8> {
     bytes
 }
 
-/// HTML page for entering user code.
-const DEVICE_CODE_ENTRY_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vouch - Device Verification</title>
-    <style>
-        * { box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0;
-            padding: 20px;
-        }
-        .container {
-            background: white;
-            border-radius: 16px;
-            padding: 40px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            max-width: 400px;
-            width: 100%;
-        }
-        h1 {
-            margin: 0 0 8px;
-            font-size: 24px;
-            color: #1a1a2e;
-        }
-        p {
-            color: #666;
-            margin: 0 0 24px;
-            font-size: 14px;
-        }
-        input {
-            width: 100%;
-            padding: 16px;
-            font-size: 24px;
-            text-align: center;
-            border: 2px solid #e0e0e0;
-            border-radius: 8px;
-            margin-bottom: 16px;
-            text-transform: uppercase;
-            letter-spacing: 4px;
-            font-family: monospace;
-        }
-        input:focus {
-            outline: none;
-            border-color: #667eea;
-        }
-        button {
-            width: 100%;
-            padding: 16px;
-            font-size: 16px;
-            font-weight: 600;
-            color: white;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
-        button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
-        }
-        .error {
-            background: #fee;
-            color: #c00;
-            padding: 12px;
-            border-radius: 8px;
-            margin-bottom: 16px;
-            font-size: 14px;
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Enter Your Code</h1>
-        <p>Enter the code shown in your terminal to continue.</p>
-        {{ERROR}}
-        <form method="POST" action="/device">
-            <input type="text" name="user_code" placeholder="XXXX-XXXX" maxlength="9" required autofocus>
-            <button type="submit">Continue</button>
-        </form>
-    </div>
-</body>
-</html>"#;
-
-/// HTML page for `WebAuthn` registration.
-const WEBAUTHN_REGISTER_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vouch - Register Security Key</title>
-    <style>
-        * { box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0;
-            padding: 20px;
-        }
-        .container {
-            background: white;
-            border-radius: 16px;
-            padding: 40px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            max-width: 400px;
-            width: 100%;
-            text-align: center;
-        }
-        h1 { margin: 0 0 8px; font-size: 24px; color: #1a1a2e; }
-        p { color: #666; margin: 0 0 24px; font-size: 14px; }
-        .email { font-weight: 600; color: #333; }
-        .status {
-            padding: 20px;
-            border-radius: 8px;
-            margin: 20px 0;
-            font-size: 14px;
-        }
-        .status.waiting { background: #e8f4fc; color: #0066cc; }
-        .status.success { background: #e8f8e8; color: #006600; }
-        .status.error { background: #fee; color: #c00; }
-        .icon { font-size: 48px; margin-bottom: 16px; }
-        button {
-            padding: 16px 32px;
-            font-size: 16px;
-            font-weight: 600;
-            color: white;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            transition: transform 0.2s, box-shadow 0.2s;
-        }
-        button:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4); }
-        button:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="icon">🔐</div>
-        <h1>Register Security Key</h1>
-        <p>Registering as <span class="email">{{EMAIL}}</span></p>
-        <div id="status" class="status waiting">Click the button below, then touch your security key when it blinks.</div>
-        <button id="register-btn" onclick="startRegistration()">Register Security Key</button>
-    </div>
-    <script>
-        const stateToken = '{{STATE}}';
-        const rpId = '{{RP_ID}}';
-
-        async function startRegistration() {
-            const btn = document.getElementById('register-btn');
-            const status = document.getElementById('status');
-            btn.disabled = true;
-            status.className = 'status waiting';
-            status.textContent = 'Touch your security key when it blinks...';
-
-            try {
-                // Get registration options
-                const startResp = await fetch('/enroll/webauthn/start', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ oidc_state: stateToken })
-                });
-
-                if (!startResp.ok) {
-                    const err = await startResp.json();
-                    throw new Error(err.message || 'Failed to start registration');
-                }
-
-                const options = await startResp.json();
-
-                // Convert base64url to ArrayBuffer
-                const challenge = base64urlToBuffer(options.challenge);
-                const userId = base64urlToBuffer(options.user_id);
-
-                // Create credential
-                const credential = await navigator.credentials.create({
-                    publicKey: {
-                        challenge: challenge,
-                        rp: { id: options.rp_id, name: options.rp_name },
-                        user: {
-                            id: userId,
-                            name: options.user_email,
-                            displayName: options.user_display_name
-                        },
-                        pubKeyCredParams: options.algorithms.map(alg => ({
-                            type: 'public-key',
-                            alg: alg
-                        })),
-                        authenticatorSelection: {
-                            authenticatorAttachment: 'cross-platform',
-                            userVerification: 'required',
-                            residentKey: 'preferred'
-                        },
-                        timeout: 60000,
-                        attestation: 'direct'
-                    }
-                });
-
-                // Send credential to server
-                const attestationResponse = credential.response;
-                const completeResp = await fetch('/enroll/webauthn/complete', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        state: options.state,
-                        credential_id: bufferToBase64url(credential.rawId),
-                        attestation_object: bufferToBase64url(attestationResponse.attestationObject),
-                        client_data_json: bufferToBase64url(attestationResponse.clientDataJSON)
-                    })
-                });
-
-                if (!completeResp.ok) {
-                    const err = await completeResp.json();
-                    throw new Error(err.message || 'Failed to complete registration');
-                }
-
-                status.className = 'status success';
-                status.textContent = 'Success! You can close this window and return to your terminal.';
-                btn.style.display = 'none';
-
-            } catch (err) {
-                status.className = 'status error';
-                status.textContent = 'Error: ' + err.message;
-                btn.disabled = false;
-            }
-        }
-
-        function base64urlToBuffer(base64url) {
-            const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
-            const pad = base64.length % 4;
-            const padded = pad ? base64 + '='.repeat(4 - pad) : base64;
-            const binary = atob(padded);
-            const bytes = new Uint8Array(binary.length);
-            for (let i = 0; i < binary.length; i++) {
-                bytes[i] = binary.charCodeAt(i);
-            }
-            return bytes.buffer;
-        }
-
-        function bufferToBase64url(buffer) {
-            const bytes = new Uint8Array(buffer);
-            let binary = '';
-            for (let i = 0; i < bytes.length; i++) {
-                binary += String.fromCharCode(bytes[i]);
-            }
-            return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
-        }
-    </script>
-</body>
-</html>"#;
-
-/// HTML page for success.
-const SUCCESS_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vouch - Success</title>
-    <style>
-        * { box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0;
-        }
-        .container {
-            background: white;
-            border-radius: 16px;
-            padding: 40px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            max-width: 400px;
-            text-align: center;
-        }
-        .icon { font-size: 64px; margin-bottom: 16px; }
-        h1 { margin: 0 0 8px; font-size: 24px; color: #1a1a2e; }
-        p { color: #666; margin: 0; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="icon">✅</div>
-        <h1>Enrollment Complete</h1>
-        <p>You can close this window and return to your terminal.</p>
-    </div>
-</body>
-</html>"#;
-
-/// HTML page for errors.
-fn error_html(title: &str, message: &str) -> String {
-    format!(
-        r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Vouch - Error</title>
-    <style>
-        * {{ box-sizing: border-box; }}
-        body {{
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            margin: 0;
-        }}
-        .container {{
-            background: white;
-            border-radius: 16px;
-            padding: 40px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            max-width: 400px;
-            text-align: center;
-        }}
-        .icon {{ font-size: 64px; margin-bottom: 16px; }}
-        h1 {{ margin: 0 0 8px; font-size: 24px; color: #c00; }}
-        p {{ color: #666; margin: 0; }}
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="icon">❌</div>
-        <h1>{title}</h1>
-        <p>{message}</p>
-    </div>
-</body>
-</html>"#
-    )
-}
-
 /// JSON error response helper.
 fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
     (status, Json(ApiError::new(code, message)))
 }
 
+// ============================================================================
+// Handlers
+// ============================================================================
+
 /// Show device code entry page.
 /// GET /device
 #[allow(clippy::unused_async)]
-pub async fn device_verify_page() -> Html<String> {
-    Html(DEVICE_CODE_ENTRY_HTML.replace("{{ERROR}}", ""))
+pub async fn device_verify_page() -> impl IntoResponse {
+    DeviceVerifyTemplate { error: None }
 }
 
 /// Handle device code submission.
@@ -482,18 +230,16 @@ pub async fn device_verify_submit(
     let request = match db::get_device_auth_by_user_code(&state.db, &user_code).await {
         Ok(Some(req)) => req,
         Ok(None) => {
-            let html = DEVICE_CODE_ENTRY_HTML.replace(
-                "{{ERROR}}",
-                r#"<div class="error">Invalid code. Please check and try again.</div>"#,
-            );
-            return Html(html).into_response();
+            return DeviceVerifyTemplate {
+                error: Some("Invalid code. Please check and try again.".to_string()),
+            }
+            .into_response();
         }
         Err(_) => {
-            let html = DEVICE_CODE_ENTRY_HTML.replace(
-                "{{ERROR}}",
-                r#"<div class="error">An error occurred. Please try again.</div>"#,
-            );
-            return Html(html).into_response();
+            return DeviceVerifyTemplate {
+                error: Some("An error occurred. Please try again.".to_string()),
+            }
+            .into_response();
         }
     };
 
@@ -502,25 +248,28 @@ pub async fn device_verify_submit(
     let expires_at: Timestamp = match request.expires_at.parse() {
         Ok(ts) => ts,
         Err(_) => {
-            return Html(error_html("Error", "Invalid request state")).into_response();
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Invalid request state".to_string(),
+                back_url: None,
+            }
+            .into_response();
         }
     };
 
     if now > expires_at {
-        let html = DEVICE_CODE_ENTRY_HTML.replace(
-            "{{ERROR}}",
-            r#"<div class="error">This code has expired. Please request a new one.</div>"#,
-        );
-        return Html(html).into_response();
+        return DeviceVerifyTemplate {
+            error: Some("This code has expired. Please request a new one.".to_string()),
+        }
+        .into_response();
     }
 
     // Check if already used
     if request.status != "pending" {
-        let html = DEVICE_CODE_ENTRY_HTML.replace(
-            "{{ERROR}}",
-            r#"<div class="error">This code has already been used.</div>"#,
-        );
-        return Html(html).into_response();
+        return DeviceVerifyTemplate {
+            error: Some("This code has already been used.".to_string()),
+        }
+        .into_response();
     }
 
     // Check if OIDC is configured
@@ -542,15 +291,21 @@ pub async fn device_verify_submit(
         .await
         {
             tracing::error!("Failed to create state: {}", e);
-            return Html(error_html("Error", "Failed to create session state")).into_response();
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to create session state".to_string(),
+                back_url: None,
+            }
+            .into_response();
         }
 
         // Show WebAuthn registration page without email (will prompt for it)
-        let html = WEBAUTHN_REGISTER_HTML
-            .replace("{{STATE}}", &oidc_state)
-            .replace("{{EMAIL}}", "new user")
-            .replace("{{RP_ID}}", &state.config.rp_id);
-        return Html(html).into_response();
+        return EnrollWebauthnTemplate {
+            email: "new user".to_string(),
+            state: oidc_state,
+            rp_id: state.config.rp_id.clone(),
+        }
+        .into_response();
     }
 
     // OIDC configured - redirect to OIDC provider
@@ -582,7 +337,12 @@ pub async fn device_verify_submit(
     .await
     {
         tracing::error!("Failed to create OIDC state: {}", e);
-        return Html(error_html("Error", "Failed to create session state")).into_response();
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Failed to create session state".to_string(),
+            back_url: None,
+        }
+        .into_response();
     }
 
     // Build redirect URL
@@ -611,34 +371,75 @@ pub async fn oidc_callback(
         let desc = params
             .error_description
             .unwrap_or_else(|| "Unknown error".to_string());
-        return Html(error_html(&error, &desc)).into_response();
+        return ErrorTemplate {
+            title: error,
+            message: desc,
+            back_url: None,
+        }
+        .into_response();
     }
 
     // Get authorization code and state
     let Some(code) = params.code else {
-        return Html(error_html("Error", "Missing authorization code")).into_response();
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Missing authorization code".to_string(),
+            back_url: None,
+        }
+        .into_response();
     };
 
     let Some(oidc_state) = params.state else {
-        return Html(error_html("Error", "Missing state parameter")).into_response();
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Missing state parameter".to_string(),
+            back_url: None,
+        }
+        .into_response();
     };
 
     // Verify state
     let stored_state = match db::get_oidc_state(&state.db, &oidc_state).await {
         Ok(Some(s)) => s,
-        Ok(None) => return Html(error_html("Error", "Invalid state")).into_response(),
-        Err(_) => return Html(error_html("Error", "Failed to verify state")).into_response(),
+        Ok(None) => {
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Invalid state".to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
+        Err(_) => {
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to verify state".to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
     };
 
     // Check if state expired
     let now = Timestamp::now();
     let expires_at: Timestamp = match stored_state.expires_at.parse() {
         Ok(ts) => ts,
-        Err(_) => return Html(error_html("Error", "Invalid state")).into_response(),
+        Err(_) => {
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Invalid state".to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
     };
 
     if now > expires_at {
-        return Html(error_html("Error", "State has expired")).into_response();
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "State has expired".to_string(),
+            back_url: None,
+        }
+        .into_response();
     }
 
     // Exchange code for tokens
@@ -680,41 +481,78 @@ pub async fn oidc_callback(
         Ok(resp) => resp,
         Err(e) => {
             tracing::error!("Failed to exchange code: {}", e);
-            return Html(error_html("Error", "Failed to complete authentication")).into_response();
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to complete authentication".to_string(),
+                back_url: None,
+            }
+            .into_response();
         }
     };
 
     if !token_response.status().is_success() {
         let error_text = token_response.text().await.unwrap_or_default();
         tracing::error!("Token exchange failed: {}", error_text);
-        return Html(error_html("Error", "Failed to complete authentication")).into_response();
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Failed to complete authentication".to_string(),
+            back_url: None,
+        }
+        .into_response();
     }
 
     let tokens: OidcTokenResponse = match token_response.json().await {
         Ok(t) => t,
         Err(e) => {
             tracing::error!("Failed to parse token response: {}", e);
-            return Html(error_html("Error", "Failed to complete authentication")).into_response();
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to complete authentication".to_string(),
+                back_url: None,
+            }
+            .into_response();
         }
     };
 
     // Decode ID token (just extract claims, skip signature verification for now as we trust the token endpoint)
     let id_token_parts: Vec<&str> = tokens.id_token.split('.').collect();
     if id_token_parts.len() != 3 {
-        return Html(error_html("Error", "Invalid ID token")).into_response();
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Invalid ID token".to_string(),
+            back_url: None,
+        }
+        .into_response();
     }
 
     let Ok(claims_json) = URL_SAFE_NO_PAD.decode(id_token_parts.get(1).unwrap_or(&"")) else {
-        return Html(error_html("Error", "Invalid ID token")).into_response();
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Invalid ID token".to_string(),
+            back_url: None,
+        }
+        .into_response();
     };
 
     let claims: IdTokenClaims = match serde_json::from_slice(&claims_json) {
         Ok(c) => c,
-        Err(_) => return Html(error_html("Error", "Invalid ID token claims")).into_response(),
+        Err(_) => {
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Invalid ID token claims".to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
     };
 
     if !claims.email_verified {
-        return Html(error_html("Error", "Email not verified")).into_response();
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Email not verified".to_string(),
+            back_url: None,
+        }
+        .into_response();
     }
 
     // Check domain restriction
@@ -722,14 +560,15 @@ pub async fn oidc_callback(
         let email_domain = claims.email.split('@').nth(1).unwrap_or("");
         if !domains.iter().any(|d| d.eq_ignore_ascii_case(email_domain)) {
             let allowed_list = domains.join(", ");
-            return Html(error_html(
-                "Domain Not Allowed",
-                &format!(
+            return ErrorTemplate {
+                title: "Domain Not Allowed".to_string(),
+                message: format!(
                     "Only users from the following domains can enroll: {}. Your email ({}) is not from an allowed domain.",
                     allowed_list,
                     claims.email
                 ),
-            ))
+                back_url: None,
+            }
             .into_response();
         }
     }
@@ -750,19 +589,24 @@ pub async fn oidc_callback(
     .await
     {
         tracing::error!("Failed to create state: {}", e);
-        return Html(error_html("Error", "Failed to create session state")).into_response();
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Failed to create session state".to_string(),
+            back_url: None,
+        }
+        .into_response();
     }
 
     // Delete old state
     let _ = db::delete_oidc_state(&state.db, &oidc_state).await;
 
     // Show WebAuthn registration page
-    let html = WEBAUTHN_REGISTER_HTML
-        .replace("{{STATE}}", &new_state)
-        .replace("{{EMAIL}}", &claims.email)
-        .replace("{{RP_ID}}", &state.config.rp_id);
-
-    Html(html).into_response()
+    EnrollWebauthnTemplate {
+        email: claims.email,
+        state: new_state,
+        rp_id: state.config.rp_id.clone(),
+    }
+    .into_response()
 }
 
 /// Start browser-based `WebAuthn` registration.
@@ -928,7 +772,7 @@ pub async fn browser_register_start(
 pub async fn browser_register_complete(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BrowserRegisterCompleteRequest>,
-) -> Result<Html<&'static str>, (StatusCode, Json<ApiError>)> {
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
     // Decode state containing webauthn verification state
     let reg_state = BrowserRegistrationState::decode(&req.state, &state.config.jwt_secret)
         .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
@@ -1053,7 +897,7 @@ pub async fn browser_register_complete(
         aaguid.as_deref().unwrap_or("unknown")
     );
 
-    Ok(Html(SUCCESS_HTML))
+    Ok(SuccessTemplate)
 }
 
 /// Extract AAGUID from CBOR-encoded attestation object.

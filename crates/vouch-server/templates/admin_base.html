@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/css/output.css">
+    <title>{% block title %}Vouch Admin{% endblock %}</title>
+</head>
+<body class="min-h-screen bg-gray-100">
+    <div class="max-w-4xl mx-auto p-5">
+        {% block nav %}
+        <nav class="flex gap-4 mb-6">
+            <a href="/admin/setup?token={{ token }}" class="text-vouch-500 font-medium hover:underline">Setup</a>
+            <a href="/admin/users?token={{ token }}" class="text-vouch-500 font-medium hover:underline">Users</a>
+        </nav>
+        {% endblock %}
+        {% block content %}{% endblock %}
+    </div>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

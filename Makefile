@@ -9,16 +9,22 @@ KAMAL ?= kamal
 IMAGE_NAME ?= vouch-sh/vouch
 IMAGE_TAG ?= latest
 
-.PHONY: all build test run clean help docker-build docker-run deploy deploy-setup
+.PHONY: all build test run clean help docker-build docker-run deploy deploy-setup css-dev css-build
 
 all: build
 
 ##@ Build
 
-build: ## Build the vouch binary
+build: css-build ## Build the vouch binary (includes CSS)
 	$(CARGO) build --release
 
 ##@ Development
+
+css-dev: ## Watch and rebuild CSS (requires tailwindcss CLI)
+	cd crates/vouch-server && tailwindcss -i styles/input.css -o static/css/output.css --watch
+
+css-build: ## Build minified CSS for production
+	cd crates/vouch-server && tailwindcss -i styles/input.css -o static/css/output.css --minify
 
 run: ## Run the vouch CLI locally
 	RUST_LOG=info $(CARGO) run --bin vouch

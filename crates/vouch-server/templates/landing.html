@@ -1,0 +1,89 @@
+{% extends "base.html" %}
+
+{% block title %}Vouch - {{ org_name }}{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center min-h-screen p-5">
+    <div class="card max-w-xl w-full">
+        <div class="text-5xl mb-4">&#x1F510;</div>
+        <h1 class="text-3xl font-bold text-gray-900 mb-2">Welcome to Vouch</h1>
+        <p class="text-gray-600 text-lg mb-8">{{ org_name }}'s hardware-backed authentication system</p>
+
+        <div class="mb-8">
+            <div class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Enroll Your Security Key</div>
+            <div class="code-block relative">
+                <span class="text-gray-500 mr-2">$</span>vouch enroll --server {{ server_url }}
+                <button onclick="copyCommand(this, 'vouch enroll --server {{ server_url }}')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-gray-700 text-gray-400 rounded text-xs hover:bg-gray-600 hover:text-white transition-colors">Copy</button>
+            </div>
+            <div class="mt-2 bg-vouch-50 border-l-4 border-vouch-500 p-4 rounded-r-lg">
+                <p class="text-gray-600 text-sm">This command will open a browser window for verification. Have your YubiKey ready.</p>
+            </div>
+        </div>
+
+        {% if has_downloads %}
+        <div class="mb-8">
+            <div class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Download the CLI</div>
+            <div class="flex flex-wrap gap-3">
+                {% if let Some(url) = download_macos %}
+                <a href="{{ url }}" class="download-btn">
+                    <span>&#x1F34E;</span>
+                    <span>macOS</span>
+                </a>
+                {% endif %}
+                {% if let Some(url) = download_linux %}
+                <a href="{{ url }}" class="download-btn">
+                    <span>&#x1F427;</span>
+                    <span>Linux</span>
+                </a>
+                {% endif %}
+                {% if let Some(url) = download_windows %}
+                <a href="{{ url }}" class="download-btn">
+                    <span>&#x1FA9F;</span>
+                    <span>Windows</span>
+                </a>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+
+        <div class="mb-8">
+            <div class="text-sm font-semibold text-gray-700 uppercase tracking-wide mb-3">Already Enrolled?</div>
+            <div class="code-block relative">
+                <span class="text-gray-500 mr-2">$</span>vouch login --server {{ server_url }}
+                <button onclick="copyCommand(this, 'vouch login --server {{ server_url }}')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-gray-700 text-gray-400 rounded text-xs hover:bg-gray-600 hover:text-white transition-colors">Copy</button>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-3 gap-4 mt-6">
+            <div class="text-center p-4">
+                <div class="feature-icon">&#x1F511;</div>
+                <div class="text-xs text-gray-600">Hardware-backed authentication</div>
+            </div>
+            <div class="text-center p-4">
+                <div class="feature-icon">&#x23F1;&#xFE0F;</div>
+                <div class="text-xs text-gray-600">Short-lived credentials</div>
+            </div>
+            <div class="text-center p-4">
+                <div class="feature-icon">&#x1F6E1;&#xFE0F;</div>
+                <div class="text-xs text-gray-600">Phishing-resistant</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function copyCommand(btn, text) {
+        navigator.clipboard.writeText(text).then(() => {
+            const original = btn.textContent;
+            btn.textContent = 'Copied!';
+            btn.classList.add('text-green-400');
+            setTimeout(() => {
+                btn.textContent = original;
+                btn.classList.remove('text-green-400');
+            }, 2000);
+        });
+    }
+</script>
+{% endblock %}

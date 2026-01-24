@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+
+{% block title %}Vouch - Register Security Key{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center min-h-screen p-5">
+    <div class="card max-w-md w-full text-center">
+        <div class="text-5xl mb-4">&#x1F510;</div>
+        <h1 class="text-2xl font-bold text-gray-900 mb-2">Register Security Key</h1>
+        <p class="text-gray-600 text-sm mb-6">Registering as <span class="font-semibold text-gray-800">{{ email }}</span></p>
+
+        <div id="status" class="status-waiting mb-6">Click the button below, then touch your security key when it blinks.</div>
+
+        <button id="register-btn" onclick="startRegistration()" class="btn-primary">Register Security Key</button>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const stateToken = '{{ state }}';
+    const rpId = '{{ rp_id }}';
+
+    async function startRegistration() {
+        const btn = document.getElementById('register-btn');
+        const status = document.getElementById('status');
+        btn.disabled = true;
+        btn.classList.add('opacity-60', 'cursor-not-allowed');
+        status.className = 'status-waiting mb-6';
+        status.textContent = 'Touch your security key when it blinks...';
+
+        try {
+            // Get registration options
+            const startResp = await fetch('/enroll/webauthn/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ oidc_state: stateToken })
+            });
+
+            if (!startResp.ok) {
+                const err = await startResp.json();
+                throw new Error(err.message || 'Failed to start registration');
+            }
+
+            const options = await startResp.json();
+
+            // Convert base64url to ArrayBuffer
+            const challenge = base64urlToBuffer(options.challenge);
+            const userId = base64urlToBuffer(options.user_id);
+
+            // Create credential
+            const credential = await navigator.credentials.create({
+                publicKey: {
+                    challenge: challenge,
+                    rp: { id: options.rp_id, name: options.rp_name },
+                    user: {
+                        id: userId,
+                        name: options.user_email,
+                        displayName: options.user_display_name
+                    },
+                    pubKeyCredParams: options.algorithms.map(alg => ({
+                        type: 'public-key',
+                        alg: alg
+                    })),
+                    authenticatorSelection: {
+                        authenticatorAttachment: 'cross-platform',
+                        userVerification: 'required',
+                        residentKey: 'preferred'
+                    },
+                    timeout: 60000,
+                    attestation: 'direct'
+                }
+            });
+
+            // Send credential to server
+            const attestationResponse = credential.response;
+            const completeResp = await fetch('/enroll/webauthn/complete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    state: options.state,
+                    credential_id: bufferToBase64url(credential.rawId),
+                    attestation_object: bufferToBase64url(attestationResponse.attestationObject),
+                    client_data_json: bufferToBase64url(attestationResponse.clientDataJSON)
+                })
+            });
+
+            if (!completeResp.ok) {
+                const err = await completeResp.json();
+                throw new Error(err.message || 'Failed to complete registration');
+            }
+
+            status.className = 'status-success mb-6';
+            status.textContent = 'Success! You can close this window and return to your terminal.';
+            btn.style.display = 'none';
+
+        } catch (err) {
+            status.className = 'status-error mb-6';
+            status.textContent = 'Error: ' + err.message;
+            btn.disabled = false;
+            btn.classList.remove('opacity-60', 'cursor-not-allowed');
+        }
+    }
+
+    function base64urlToBuffer(base64url) {
+        const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+        const pad = base64.length % 4;
+        const padded = pad ? base64 + '='.repeat(4 - pad) : base64;
+        const binary = atob(padded);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes.buffer;
+    }
+
+    function bufferToBase64url(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+</script>
+{% endblock %}

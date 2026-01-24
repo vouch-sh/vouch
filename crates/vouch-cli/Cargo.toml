@@ -32,3 +32,4 @@ open = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
 jiff = { workspace = true }
+url = { workspace = true }

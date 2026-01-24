@@ -1,0 +1,112 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+/* Custom Vouch styles */
+@layer components {
+  .code-block {
+    @apply bg-gray-900 text-green-400 p-4 rounded-lg font-mono text-sm overflow-x-auto;
+  }
+
+  .btn-primary {
+    @apply inline-block px-6 py-3 bg-gradient-to-r from-vouch-500 to-purple-600 text-white font-semibold rounded-lg shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200;
+  }
+
+  .btn-secondary {
+    @apply inline-block px-6 py-3 bg-gray-600 text-white font-semibold rounded-lg hover:bg-gray-700 transition-colors duration-200;
+  }
+
+  .btn-danger {
+    @apply inline-block px-4 py-2 bg-red-600 text-white font-medium rounded-lg hover:bg-red-700 transition-colors duration-200;
+  }
+
+  .btn-small {
+    @apply px-3 py-1.5 text-sm;
+  }
+
+  .card {
+    @apply bg-white rounded-2xl p-8 shadow-xl;
+  }
+
+  .card-dark {
+    @apply bg-gray-800 rounded-2xl p-8 shadow-xl;
+  }
+
+  .input-field {
+    @apply w-full px-4 py-3 border-2 border-gray-200 rounded-lg text-base focus:outline-none focus:border-vouch-500 transition-colors duration-200;
+  }
+
+  .input-code {
+    @apply w-full px-4 py-4 text-2xl text-center font-mono uppercase tracking-widest border-2 border-gray-200 rounded-lg focus:outline-none focus:border-vouch-500 transition-colors duration-200;
+  }
+
+  .status-waiting {
+    @apply p-5 rounded-lg bg-blue-50 text-blue-700;
+  }
+
+  .status-success {
+    @apply p-5 rounded-lg bg-green-50 text-green-700;
+  }
+
+  .status-error {
+    @apply p-5 rounded-lg bg-red-50 text-red-700;
+  }
+
+  .alert-success {
+    @apply p-4 rounded-lg bg-green-100 text-green-800;
+  }
+
+  .alert-error {
+    @apply p-4 rounded-lg bg-red-100 text-red-800;
+  }
+
+  .alert-warning {
+    @apply p-4 rounded-lg bg-yellow-100 text-yellow-800;
+  }
+
+  .step-number {
+    @apply inline-flex items-center justify-center w-8 h-8 bg-gradient-to-r from-vouch-500 to-purple-600 text-white rounded-full font-semibold text-sm;
+  }
+
+  .feature-icon {
+    @apply text-2xl mb-2;
+  }
+
+  .download-btn {
+    @apply inline-flex items-center gap-2 px-5 py-3 bg-gray-100 border-2 border-gray-200 rounded-lg font-medium text-gray-700 hover:border-vouch-500 hover:bg-vouch-50 transition-all duration-200;
+  }
+
+  .persona-card {
+    @apply block border-2 border-gray-200 rounded-xl p-8 text-center transition-all duration-200 cursor-pointer no-underline text-inherit hover:border-vouch-500 hover:bg-vouch-50 hover:-translate-y-0.5 hover:shadow-lg;
+  }
+
+  .tab {
+    @apply px-4 py-2 border-none bg-gray-100 rounded-t-lg cursor-pointer text-sm text-gray-600;
+  }
+
+  .tab-active {
+    @apply bg-gray-900 text-green-400;
+  }
+
+  .badge {
+    @apply inline-block px-2 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .badge-success {
+    @apply bg-green-100 text-green-800;
+  }
+
+  .badge-warning {
+    @apply bg-yellow-100 text-yellow-800;
+  }
+}
+
+/* Dark mode styles */
+@layer utilities {
+  .dark .card {
+    @apply bg-gray-800 text-white;
+  }
+
+  .dark .input-field {
+    @apply bg-gray-700 border-gray-600 text-white;
+  }
+}

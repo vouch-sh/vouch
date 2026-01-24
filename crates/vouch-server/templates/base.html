@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html lang="en" class="{% block html_class %}{% endblock %}">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/static/css/output.css">
+    <title>{% block title %}Vouch{% endblock %}</title>
+    {% block head %}{% endblock %}
+</head>
+<body class="{% block body_class %}min-h-screen bg-gradient-to-br from-vouch-500 to-purple-600{% endblock %}">
+    {% block content %}{% endblock %}
+    {% block scripts %}{% endblock %}
+</body>
+</html>
