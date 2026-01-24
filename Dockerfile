@@ -1,6 +1,28 @@
 # syntax=docker/dockerfile:1
 
-# Build stage
+# CSS build stage - download and run standalone tailwindcss
+FROM debian:trixie-slim AS css-builder
+
+WORKDIR /app
+
+# Download standalone tailwindcss CLI
+RUN apt-get update && apt-get install -y curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-x64 \
+    && chmod +x tailwindcss-linux-x64
+
+# Copy files needed for CSS build
+COPY crates/vouch-server/tailwind.config.js crates/vouch-server/
+COPY crates/vouch-server/styles crates/vouch-server/styles
+COPY crates/vouch-server/templates crates/vouch-server/templates
+COPY crates/vouch-server/src crates/vouch-server/src
+
+# Build minified CSS
+RUN mkdir -p crates/vouch-server/static/css \
+    && cd crates/vouch-server \
+    && /app/tailwindcss-linux-x64 -i styles/input.css -o static/css/output.css --minify
+
+# Rust build stage
 FROM rust:1.93-trixie AS builder
 
 WORKDIR /app
@@ -42,6 +64,9 @@ LABEL org.opencontainers.image.source https://github.com/vouch-sh/vouch
 
 # Copy the binary
 COPY --from=builder /app/target/release/vouch-server /vouch-server
+
+# Copy built CSS
+COPY --from=css-builder /app/crates/vouch-server/static/css/output.css /static/css/output.css
 
 # Create data directory with correct ownership
 COPY --from=builder --chown=nonroot:nonroot /data /data
