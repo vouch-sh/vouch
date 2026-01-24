@@ -26,7 +26,9 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 ctap-hid-fido2 = { workspace = true }
 rpassword = { workspace = true }
+inquire = { workspace = true }
 dirs = { workspace = true }
+open = { workspace = true }
 base64 = { workspace = true }
 sha2 = { workspace = true }
 jiff = { workspace = true }

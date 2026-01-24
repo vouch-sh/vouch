@@ -67,8 +67,8 @@ struct BrowserRegistrationState {
     device_auth_id: String,
     user_id: Uuid,
     user_email: String,
-    challenge: Vec<u8>,
-    rp_id: String,
+    /// Serialized webauthn-rs PasskeyRegistration state for verification.
+    webauthn_state: webauthn_rs::prelude::PasskeyRegistration,
 }
 
 impl BrowserRegistrationState {
@@ -861,16 +861,40 @@ pub async fn browser_register_start(
         )
     })?;
 
-    // Generate challenge
-    let challenge = generate_random_bytes(32);
+    // Get any existing credentials for this user to exclude them
+    let existing_auths = db::get_authenticators_for_user(&state.db, &user.id)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?;
 
-    // Create registration state
+    let exclude_credentials: Vec<webauthn_rs::prelude::CredentialID> = existing_auths
+        .iter()
+        .map(|a| webauthn_rs::prelude::CredentialID::from(a.credential_id.clone()))
+        .collect();
+
+    // Use webauthn-rs to generate proper registration options with cryptographic verification
+    let (ccr, webauthn_state) = state
+        .webauthn
+        .start_passkey_registration(user_id, &user_email, &user_email, Some(exclude_credentials))
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "webauthn_error",
+                &e.to_string(),
+            )
+        })?;
+
+    // Create registration state with webauthn verification state
     let reg_state = BrowserRegistrationState {
         device_auth_id: device_auth.id,
         user_id,
         user_email: user_email.clone(),
-        challenge: challenge.clone(),
-        rp_id: state.config.rp_id.clone(),
+        webauthn_state,
     };
 
     let state_token = reg_state.encode(&state.config.jwt_secret).map_err(|e| {
@@ -881,14 +905,19 @@ pub async fn browser_register_start(
         )
     })?;
 
+    // Extract challenge from webauthn-rs generated options
+    // The challenge is exposed via the public_key.challenge field
+    let challenge_bytes: &[u8] = ccr.public_key.challenge.as_ref();
+    let challenge = URL_SAFE_NO_PAD.encode(challenge_bytes);
+
     Ok(Json(BrowserRegisterStartResponse {
-        challenge: URL_SAFE_NO_PAD.encode(&challenge),
+        challenge,
         rp_id: state.config.rp_id.clone(),
         rp_name: state.config.rp_name.clone(),
         user_id: URL_SAFE_NO_PAD.encode(user_id.as_bytes()),
         user_email: user_email.clone(),
         user_display_name: user_email,
-        algorithms: vec![-7], // ES256
+        algorithms: vec![-7, -257], // ES256, RS256
         state: state_token,
     }))
 }
@@ -900,12 +929,12 @@ pub async fn browser_register_complete(
     State(state): State<Arc<AppState>>,
     Json(req): Json<BrowserRegisterCompleteRequest>,
 ) -> Result<Html<&'static str>, (StatusCode, Json<ApiError>)> {
-    // Decode state
+    // Decode state containing webauthn verification state
     let reg_state = BrowserRegistrationState::decode(&req.state, &state.config.jwt_secret)
         .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
 
-    // Decode credential data
-    let credential_id = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|e| {
+    // Decode credential data from base64url
+    let credential_id_bytes = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|e| {
         json_error(
             StatusCode::BAD_REQUEST,
             "invalid_credential",
@@ -931,47 +960,65 @@ pub async fn browser_register_complete(
         )
     })?;
 
-    // Verify client data JSON
-    let client_data: ClientData = serde_json::from_slice(&client_data_json).map_err(|e| {
+    // Build the RegisterPublicKeyCredential for webauthn-rs verification
+    use webauthn_rs::prelude::Base64UrlSafeData;
+    let reg_credential = webauthn_rs_proto::RegisterPublicKeyCredential {
+        id: req.credential_id.clone(),
+        raw_id: Base64UrlSafeData::from(credential_id_bytes.clone()),
+        response: webauthn_rs_proto::AuthenticatorAttestationResponseRaw {
+            attestation_object: Base64UrlSafeData::from(attestation_object.clone()),
+            client_data_json: Base64UrlSafeData::from(client_data_json),
+            transports: None,
+        },
+        extensions: webauthn_rs_proto::RegistrationExtensionsClientOutputs::default(),
+        type_: "public-key".to_string(),
+    };
+
+    // Use webauthn-rs to verify the attestation
+    // This performs cryptographic verification of:
+    // - Challenge matches
+    // - Origin/RP ID matches
+    // - Attestation signature is valid
+    // - User presence (UP) and user verification (UV) flags
+    let passkey = state
+        .webauthn
+        .finish_passkey_registration(&reg_credential, &reg_state.webauthn_state)
+        .map_err(|e| {
+            tracing::warn!("WebAuthn verification failed: {}", e);
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "attestation_failed",
+                &format!("Attestation verification failed: {e}"),
+            )
+        })?;
+
+    // Extract AAGUID from the attestation object
+    // We parse it ourselves since webauthn-rs doesn't expose the AAGUID directly
+    let aaguid = extract_aaguid_from_attestation(&attestation_object);
+
+    // Determine device name from AAGUID if known
+    let device_name = aaguid
+        .as_deref()
+        .and_then(vouch_common::lookup_device_model)
+        .unwrap_or("Security Key");
+
+    // Serialize the passkey for storage (contains COSE public key)
+    let passkey_json = serde_json::to_vec(&passkey).map_err(|e| {
         json_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_client_data",
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "serialization_error",
             &e.to_string(),
         )
     })?;
 
-    // Verify challenge
-    let expected_challenge = URL_SAFE_NO_PAD.encode(&reg_state.challenge);
-    if client_data.challenge != expected_challenge {
-        return Err(json_error(
-            StatusCode::BAD_REQUEST,
-            "challenge_mismatch",
-            "Challenge mismatch",
-        ));
-    }
-
-    // Verify type
-    if client_data.typ != "webauthn.create" {
-        return Err(json_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_type",
-            "Invalid ceremony type",
-        ));
-    }
-
-    // Extract public key from attestation object (CBOR encoded)
-    // For simplicity, we'll store the raw attestation object and trust the browser's verification
-    // In production, use webauthn-rs to properly verify the attestation
-    let public_key = extract_public_key_from_attestation(&attestation_object)
-        .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_attestation", &e))?;
-
-    // Store the authenticator
+    // Store the authenticator with verified credential
     let authenticator_id = db::create_authenticator(
         &state.db,
         &reg_state.user_id.to_string(),
-        "Security Key",
-        &credential_id,
-        &public_key,
+        device_name,
+        &credential_id_bytes,
+        &passkey_json,
+        aaguid.as_deref(),
     )
     .await
     .map_err(|e| {
@@ -999,32 +1046,47 @@ pub async fn browser_register_complete(
         )
     })?;
 
-    tracing::info!("Enrollment complete for: {}", reg_state.user_email);
+    tracing::info!(
+        "Enrollment complete for: {} with {} (AAGUID: {})",
+        reg_state.user_email,
+        device_name,
+        aaguid.as_deref().unwrap_or("unknown")
+    );
 
     Ok(Html(SUCCESS_HTML))
 }
 
-/// Extract public key from CBOR-encoded attestation object.
-/// This is a simplified extraction - in production use webauthn-rs.
-fn extract_public_key_from_attestation(attestation: &[u8]) -> Result<Vec<u8>, String> {
-    // The attestation object is CBOR encoded with structure:
-    // { "authData": bytes, "fmt": string, "attStmt": map }
-    // The authData contains: rpIdHash (32) + flags (1) + counter (4) + attestedCredentialData
-    // attestedCredentialData: aaguid (16) + credIdLen (2) + credId (credIdLen) + credentialPublicKey (CBOR)
-
-    // For simplicity, we'll just store the entire attestation object as the "public key"
-    // This is not ideal but allows the credential to be stored and the enrollment to complete.
-    // The actual signature verification during login will use the credential_id to look up
-    // the authenticator and verify against the stored data.
-
-    // In a real implementation, you would parse the CBOR, extract authData,
-    // then extract the COSE public key from the attested credential data.
-
+/// Extract AAGUID from CBOR-encoded attestation object.
+///
+/// The attestation object structure (CBOR map):
+/// - `fmt`: attestation statement format
+/// - `attStmt`: attestation statement
+/// - `authData`: authenticator data containing AAGUID and credential public key
+///
+/// The authData structure:
+/// - rpIdHash: 32 bytes (SHA-256 of RP ID)
+/// - flags: 1 byte
+/// - signCount: 4 bytes (big-endian)
+/// - attestedCredentialData (if AT flag set):
+///   - aaguid: 16 bytes
+///   - credIdLen: 2 bytes (big-endian)
+///   - credId: credIdLen bytes
+///   - credentialPublicKey: COSE-encoded public key
+fn extract_aaguid_from_attestation(attestation: &[u8]) -> Option<String> {
     if attestation.len() < 37 {
-        return Err("Attestation too short".to_string());
+        return None;
     }
 
-    // Return the attestation object as-is for storage
-    // The actual public key extraction would require a CBOR parser
-    Ok(attestation.to_vec())
+    // Parse the CBOR attestation object
+    let value: ciborium::Value = ciborium::from_reader(attestation).ok()?;
+
+    // Extract authData from the map
+    let auth_data = value.as_map().and_then(|m| {
+        m.iter()
+            .find(|(k, _)| k.as_text() == Some("authData"))
+            .and_then(|(_, v)| v.as_bytes())
+    })?;
+
+    // Extract AAGUID from authenticator data
+    vouch_common::extract_aaguid_from_auth_data(auth_data)
 }

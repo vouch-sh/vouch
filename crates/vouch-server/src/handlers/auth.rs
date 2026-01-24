@@ -222,12 +222,15 @@ pub async fn register_complete(
     }
 
     // Store the authenticator
+    // Note: AAGUID extraction from CLI registration would require parsing the attestation_object
+    // For now, we pass None and the device name provided by the user
     let device_id = db::create_authenticator(
         &state.db,
         &reg_state.user_id.to_string(),
         &reg_state.device_name,
         &req.credential_id,
         &req.public_key,
+        None, // AAGUID not extracted in legacy CLI flow
     )
     .await
     .map_err(|e| {

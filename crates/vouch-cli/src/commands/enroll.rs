@@ -21,14 +21,30 @@ pub async fn run(server: &str) -> Result<()> {
         .await
         .context("Failed to start enrollment")?;
 
-    // Step 2: Display instructions
-    println!("To complete enrollment:");
-    println!();
-    println!("  1. Open this URL in your browser:");
-    println!("     {}", device_response.verification_uri);
-    println!();
-    println!("  2. Enter this code:");
-    println!("     {}", device_response.user_code);
+    // Step 2: Open browser and display instructions
+    let verification_url = &device_response.verification_uri;
+
+    // Try to open the browser automatically
+    match open::that(verification_url) {
+        Ok(()) => {
+            println!("Opening browser to complete enrollment...");
+            println!();
+            println!("  URL:  {verification_url}");
+            println!("  Code: {}", device_response.user_code);
+            println!();
+            println!("If the browser didn't open, visit the URL above and enter the code.");
+        }
+        Err(e) => {
+            tracing::debug!("Failed to open browser: {e}");
+            println!("To complete enrollment:");
+            println!();
+            println!("  1. Open this URL in your browser:");
+            println!("     {verification_url}");
+            println!();
+            println!("  2. Enter this code:");
+            println!("     {}", device_response.user_code);
+        }
+    }
     println!();
     println!("Waiting for browser authorization...");
 

@@ -298,6 +298,12 @@ pub struct KeyInfo {
     pub created_at: String,
     /// Whether this key was used to create the current session.
     pub is_current_session: bool,
+    /// Device model name (e.g., "YubiKey 5 NFC") if known from AAGUID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub device_model: Option<String>,
+    /// AAGUID (Authenticator Attestation GUID) identifying the authenticator model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub aaguid: Option<String>,
 }
 
 /// Response containing the list of registered keys.

@@ -54,17 +54,19 @@ enum Commands {
     /// End your current session.
     Logout,
     /// Manage registered security keys.
+    ///
+    /// Without a subcommand, opens an interactive menu.
     Keys {
         #[command(subcommand)]
-        command: KeysCommands,
+        command: Option<KeysCommands>,
     },
 }
 
 #[derive(Subcommand)]
 enum KeysCommands {
-    /// List all registered keys.
+    /// List all registered keys (non-interactive).
     List,
-    /// Remove a registered key.
+    /// Remove a registered key (non-interactive).
     Remove {
         /// Key ID to remove.
         id: String,
@@ -102,8 +104,11 @@ async fn main() -> Result<()> {
         Commands::Status => commands::status::run(&server).await,
         Commands::Logout => commands::logout::run().await,
         Commands::Keys { command } => match command {
-            KeysCommands::List => commands::keys::list(&server).await,
-            KeysCommands::Remove { id, force } => commands::keys::remove(&server, &id, force).await,
+            None => commands::keys::interactive(&server).await,
+            Some(KeysCommands::List) => commands::keys::list(&server).await,
+            Some(KeysCommands::Remove { id, force }) => {
+                commands::keys::remove(&server, &id, force).await
+            }
         },
     }
 }

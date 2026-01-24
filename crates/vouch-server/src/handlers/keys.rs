@@ -12,7 +12,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{DecodingKey, Validation, decode};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use vouch_common::{ApiError, DeleteKeyResponse, KeyInfo, ListKeysResponse};
+use vouch_common::{ApiError, DeleteKeyResponse, KeyInfo, ListKeysResponse, lookup_device_model};
 
 use super::auth::SessionClaims;
 
@@ -107,11 +107,20 @@ pub async fn list_keys(
     // Convert to KeyInfo
     let keys: Vec<KeyInfo> = authenticators
         .into_iter()
-        .map(|a| KeyInfo {
-            id: a.id.clone(),
-            name: a.name,
-            created_at: a.created_at,
-            is_current_session: a.id == claims.authenticator_id,
+        .map(|a| {
+            let device_model = a
+                .aaguid
+                .as_deref()
+                .and_then(lookup_device_model)
+                .map(String::from);
+            KeyInfo {
+                id: a.id.clone(),
+                name: a.name,
+                created_at: a.created_at,
+                is_current_session: a.id == claims.authenticator_id,
+                device_model,
+                aaguid: a.aaguid,
+            }
         })
         .collect();
 
