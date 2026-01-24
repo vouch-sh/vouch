@@ -221,16 +221,17 @@ pub async fn register_complete(
         ));
     }
 
+    // Extract AAGUID from attestation object
+    let aaguid = extract_aaguid_from_attestation(&req.attestation_object);
+
     // Store the authenticator
-    // Note: AAGUID extraction from CLI registration would require parsing the attestation_object
-    // For now, we pass None and the device name provided by the user
     let device_id = db::create_authenticator(
         &state.db,
         &reg_state.user_id.to_string(),
         &reg_state.device_name,
         &req.credential_id,
         &req.public_key,
-        None, // AAGUID not extracted in legacy CLI flow
+        aaguid.as_deref(),
     )
     .await
     .map_err(|e| {
@@ -579,4 +580,29 @@ pub async fn status(
         expires_in_seconds: expires_in,
         device_name,
     }))
+}
+
+/// Extract AAGUID from CBOR-encoded attestation object.
+///
+/// The attestation object structure (CBOR map):
+/// - `fmt`: attestation statement format
+/// - `attStmt`: attestation statement
+/// - `authData`: authenticator data containing AAGUID and credential public key
+fn extract_aaguid_from_attestation(attestation: &[u8]) -> Option<String> {
+    if attestation.len() < 37 {
+        return None;
+    }
+
+    // Parse the CBOR attestation object
+    let value: ciborium::Value = ciborium::from_reader(attestation).ok()?;
+
+    // Extract authData from the map
+    let auth_data = value.as_map().and_then(|m| {
+        m.iter()
+            .find(|(k, _)| k.as_text() == Some("authData"))
+            .and_then(|(_, v)| v.as_bytes())
+    })?;
+
+    // Extract AAGUID from authenticator data
+    vouch_common::extract_aaguid_from_auth_data(auth_data)
 }

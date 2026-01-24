@@ -3,7 +3,7 @@
 use anyhow::{Result, bail};
 use inquire::{
     Confirm, Select,
-    ui::{Color, RenderConfig, StyleSheet, Styled},
+    ui::{RenderConfig, Styled},
 };
 use vouch_common::{DeleteKeyResponse, KeyInfo, ListKeysResponse};
 
@@ -22,11 +22,6 @@ pub async fn interactive(server: &str) -> Result<()> {
             return Ok(());
         }
 
-        // Print header
-        println!();
-        println!("  {:<22} {:<18}", "MODEL/NAME", "REGISTERED");
-        println!("  {}", "-".repeat(50));
-
         // Build display options
         let options: Vec<String> = response.keys.iter().map(format_key_for_display).collect();
 
@@ -34,13 +29,16 @@ pub async fn interactive(server: &str) -> Result<()> {
         let mut menu_options = options.clone();
         menu_options.push("Exit".to_string());
 
-        // Configure the render style
+        // Print prompt on its own line
+        println!("\nSelect a key to manage:\n");
+
+        // Configure render to remove all prefixes for clean alignment
         let render_config = RenderConfig::default()
-            .with_highlighted_option_prefix(Styled::new("> ").with_fg(Color::LightCyan))
-            .with_help_message(StyleSheet::new().with_fg(Color::DarkGrey));
+            .with_prompt_prefix(Styled::new(""))
+            .with_highlighted_option_prefix(Styled::new(">"));
 
         // Show interactive menu (disable filtering to prevent accidental key presses)
-        let selection = Select::new("Select a key to manage:", menu_options)
+        let selection = Select::new("\n", menu_options)
             .with_render_config(render_config)
             .with_help_message("↑↓ to move, Enter to select, Esc to exit")
             .without_filtering()
