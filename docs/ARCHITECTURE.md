@@ -182,7 +182,34 @@ The authentication backend with built-in certificate authority.
 
 #### OIDC Provider
 
-Vouch acts as a **standard OIDC provider**, allowing any application to integrate using off-the-shelf OIDC libraries - no Vouch SDK required.
+Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 and OpenID Connect specifications. Any application can integrate using off-the-shelf OIDC libraries — no Vouch SDK required.
+
+**Standards Compliance:**
+- OAuth 2.0 (RFC 6749)
+- OpenID Connect Core 1.0
+- OAuth 2.0 Device Authorization Grant (RFC 8628)
+- Proof Key for Code Exchange (PKCE, RFC 7636)
+
+**Supported Grant Types:**
+| Grant Type | Use Case |
+|------------|----------|
+| `authorization_code` (with PKCE) | Web and native applications |
+| `urn:ietf:params:oauth:grant-type:device_code` | CLI tools, headless devices |
+
+**Supported Scopes:**
+| Scope | Claims Returned |
+|-------|-----------------|
+| `openid` | `sub`, `iss`, `aud`, `exp`, `iat` (required) |
+| `profile` | `name`, `preferred_username` |
+| `email` | `email`, `email_verified` |
+| `hardware` | `hardware_verified`, `hardware_aaguid` (Vouch-specific) |
+
+**Client Authentication Methods:**
+| Method | Description |
+|--------|-------------|
+| `client_secret_basic` | HTTP Basic Auth with client_id:client_secret |
+| `client_secret_post` | client_id and client_secret in request body |
+| `none` | Public clients (native apps with PKCE) |
 
 **Standard OIDC Endpoints:**
 - `GET /.well-known/openid-configuration` — Discovery document
@@ -214,6 +241,108 @@ Vouch acts as a **standard OIDC provider**, allowing any application to integrat
 - No vendor lock-in - apps can switch IdPs later
 - JWT tokens can be verified offline with public keys
 - Existing libraries handle all the complexity
+
+#### External Identity Provider Integration
+
+Vouch uses external identity providers (IdPs) to verify user identity during enrollment. This links a trusted corporate identity to a hardware-bound YubiKey credential.
+
+**Purpose:**
+- Verify the user is a member of your organization during enrollment
+- Pull user attributes (email, name, groups) from your existing identity system
+- No separate user database to maintain in Vouch
+
+**Self-Service Admin Portal:**
+
+Administrators configure external IdPs through the Vouch web interface — no config files or server restarts required.
+
+```
+Admin Portal → Settings → Identity Providers → Add Provider
+```
+
+**Configuration Steps:**
+1. Select provider type (Google Workspace, Microsoft Entra ID, Generic OIDC)
+2. Enter client credentials from the external IdP
+3. Configure allowed domains (e.g., `@company.com`)
+4. Test the connection
+5. Enable for user enrollment
+
+**Supported Providers:**
+
+| Provider | Status | Notes |
+|----------|--------|-------|
+| Google Workspace | ✅ Supported | First-class support, recommended |
+| Microsoft Entra ID | 🔜 Planned | Next priority |
+| Generic OIDC | 🔜 Planned | Any OIDC-compliant IdP |
+
+**Claims Mapping:**
+
+External IdP claims are mapped to Vouch user attributes:
+
+| External Claim | Vouch Attribute | Required |
+|----------------|-----------------|----------|
+| `email` | User email / principal | Yes |
+| `name` or `given_name`+`family_name` | Display name | No |
+| `groups` | Group memberships | No |
+
+**User Lifecycle:**
+- User exists in external IdP but not Vouch → Enrollment creates Vouch user
+- User removed from external IdP → Existing Vouch sessions continue until expiry; re-enrollment blocked
+- User's groups change in external IdP → Updated on next enrollment/re-enrollment
+
+#### Application Registration
+
+Developers register their applications through a self-service portal to obtain OAuth client credentials for integrating with Vouch.
+
+**Self-Service Portal:**
+
+```
+Web Portal → My Applications → Register New Application
+```
+
+**Registration Workflow:**
+
+1. **Authenticate** — User logs into Vouch (with YubiKey)
+2. **Navigate** — Go to "My Applications" section
+3. **Register** — Click "Register New Application"
+4. **Configure** — Provide application details:
+   - Application name (human-readable identifier)
+   - Application type (web, native, SPA, service)
+   - Redirect URIs (for authorization_code flow)
+   - Requested scopes
+5. **Receive Credentials** — Vouch generates:
+   - `client_id` — Public identifier for OAuth flows
+   - `client_secret` — Secret for confidential clients (not shown for public clients)
+6. **Manage** — View, rotate, or revoke credentials at any time
+
+**Application Types:**
+
+| Type | client_secret | PKCE Required | Use Case |
+|------|---------------|---------------|----------|
+| Web (confidential) | Yes | Recommended | Server-side web apps |
+| Native | No | Required | Desktop/mobile apps |
+| SPA | No | Required | Browser-only apps |
+| Service | Yes | N/A | Machine-to-machine (future) |
+
+**Credential Management:**
+
+Registered applications can be managed via the portal:
+- **View** — See application details and usage statistics
+- **Rotate** — Generate new client_secret (old secret remains valid for 24 hours)
+- **Revoke** — Immediately invalidate all tokens for an application
+- **Delete** — Remove the application registration entirely
+
+**API Access (Future):**
+
+Applications can also be managed programmatically:
+```bash
+# List applications
+curl -H "Authorization: Bearer $TOKEN" https://vouch.example.com/api/v1/applications
+
+# Create application
+curl -X POST -H "Authorization: Bearer $TOKEN" \
+  -d '{"name": "My App", "type": "web", "redirect_uris": ["https://myapp.com/callback"]}' \
+  https://vouch.example.com/api/v1/applications
+```
 
 ## Authentication Flows
 

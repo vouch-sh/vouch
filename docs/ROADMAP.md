@@ -293,6 +293,7 @@ ssh user@server
 - [x] Developer setup page (`/developer-setup`)
 - [x] Cookie file storage for CLI tools (`~/.vouch/cookie.txt`)
 - [ ] Token exchange for authorization_code grant
+- [ ] Admin IdP Portal (self-service external IdP configuration)
 - [ ] AWS STS integration
 - [ ] `vouch credential aws` command
 - [ ] `vouch setup aws` command
@@ -330,6 +331,69 @@ $ vouch credential aws --role arn:aws:iam::123456789:role/developer
 
 ---
 
+### Phase 7: Application Registration Portal (Weeks 13-14)
+
+**Goal**: Self-service portal for developers to register OAuth applications.
+
+**Status**: 📋 Planned
+
+**Deliverables:**
+- [ ] Application data model (clients, secrets, redirect URIs)
+- [ ] Self-service registration web UI
+- [ ] Client credential generation (client_id, client_secret)
+- [ ] Support for application types (web, native, SPA, service)
+- [ ] Credential rotation with grace period
+- [ ] Application revocation
+- [ ] Usage statistics per application
+- [ ] API endpoints for programmatic management
+
+**User Flow:**
+```
+1. User authenticates to Vouch (with YubiKey)
+2. User navigates to "My Applications" in web portal
+3. User clicks "Register New Application"
+4. User provides:
+   - Application name
+   - Redirect URIs (for authorization_code flow)
+   - Application type (web, native, SPA)
+5. Vouch generates:
+   - client_id (public identifier)
+   - client_secret (for confidential clients only)
+6. User can view/rotate/revoke credentials
+```
+
+**Application Types:**
+| Type | Description | PKCE | client_secret |
+|------|-------------|------|---------------|
+| Web | Server-side apps | Recommended | Yes |
+| Native | Desktop/mobile apps | Required | No |
+| SPA | Browser-only apps | Required | No |
+| Service | Machine-to-machine | N/A | Yes |
+
+**API Endpoints:**
+```
+GET    /api/v1/applications        # List user's applications
+POST   /api/v1/applications        # Register new application
+GET    /api/v1/applications/:id    # Get application details
+PATCH  /api/v1/applications/:id    # Update application
+DELETE /api/v1/applications/:id    # Delete application
+POST   /api/v1/applications/:id/rotate  # Rotate client_secret
+POST   /api/v1/applications/:id/revoke  # Revoke all tokens
+```
+
+**Verification:**
+```bash
+# After registering an application in the portal:
+curl -X POST https://vouch.example.com/oauth/token \
+  -d "grant_type=authorization_code" \
+  -d "code=$AUTH_CODE" \
+  -d "client_id=$CLIENT_ID" \
+  -d "client_secret=$CLIENT_SECRET" \
+  -d "redirect_uri=https://myapp.com/callback"
+```
+
+---
+
 ## Post-MVP Milestones
 
 ### v0.5 — GitHub Integration (Month 4)
@@ -343,6 +407,12 @@ $ vouch credential aws --role arn:aws:iam::123456789:role/developer
 ### v0.6 — Enterprise Features (Month 5)
 
 - [ ] Admin console (web UI)
+- [ ] Admin IdP Portal
+  - [ ] Self-service external IdP configuration
+  - [ ] Google Workspace integration
+  - [ ] Microsoft Entra ID integration
+  - [ ] Generic OIDC provider support
+  - [ ] Connection testing and validation
 - [ ] SCIM provisioning (Okta, Azure AD)
 - [ ] Audit log export (Splunk, Datadog)
 - [ ] Organization policies

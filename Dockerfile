@@ -47,6 +47,7 @@ RUN cargo build --release --package vouch-server 2>/dev/null || true
 COPY crates/vouch-common/src crates/vouch-common/src
 COPY crates/vouch-server/src crates/vouch-server/src
 COPY crates/vouch-server/migrations crates/vouch-server/migrations
+COPY crates/vouch-server/templates crates/vouch-server/templates
 
 # Touch files to ensure rebuild
 RUN touch crates/vouch-common/src/lib.rs crates/vouch-server/src/main.rs
@@ -60,7 +61,7 @@ RUN mkdir -p /data && touch /data/.keep
 # Runtime stage - minimal distroless image with glibc
 FROM gcr.io/distroless/cc-debian13:nonroot
 
-LABEL org.opencontainers.image.source https://github.com/vouch-sh/vouch
+LABEL org.opencontainers.image.source=https://github.com/vouch-sh/vouch
 
 # Copy the binary
 COPY --from=builder /app/target/release/vouch-server /vouch-server

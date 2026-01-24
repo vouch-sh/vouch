@@ -292,6 +292,158 @@ In-memory storage via IPC socket:
 - **Memory**: Uses `SecretString` with automatic zeroization
 - **Lifetime**: Cleared on agent shutdown or explicit logout
 
+## Client Credential Security
+
+OAuth client credentials issued through the application registration portal follow strict security practices.
+
+### Secret Storage
+
+Client secrets are **never stored in plaintext**:
+
+```rust
+// Client secret handling
+fn store_client_secret(secret: &str) -> StoredCredential {
+    // Generate random salt
+    let salt = generate_salt(16);
+
+    // Hash with Argon2id (memory-hard, resistant to GPU attacks)
+    let hash = argon2id::hash(
+        secret.as_bytes(),
+        &salt,
+        &Argon2Params {
+            memory_cost: 65536,  // 64 MB
+            time_cost: 3,
+            parallelism: 4,
+        }
+    );
+
+    StoredCredential { hash, salt }
+}
+```
+
+**Storage Properties:**
+| Property | Value |
+|----------|-------|
+| Algorithm | Argon2id |
+| Salt | 16 bytes, unique per secret |
+| Plaintext stored | Never |
+| Reversible | No |
+
+### Secret Generation
+
+Client secrets are cryptographically random:
+
+```rust
+// 32 bytes = 256 bits of entropy
+let secret = SecretString::new(base64url_encode(random_bytes(32)));
+// Example: "dGhpcyBpcyBhIHNlY3VyZSByYW5kb20gc2VjcmV0"
+```
+
+**Properties:**
+- 256 bits of entropy
+- Base64url encoding (URL-safe, no padding)
+- Shown once at creation, never retrievable after
+
+### Secret Rotation
+
+Client secrets can be rotated with a grace period:
+
+```
+1. User requests rotation via portal or API
+2. New secret generated and returned
+3. Old secret remains valid for 24 hours (configurable)
+4. After grace period, old secret is invalidated
+5. Audit log records rotation event
+```
+
+**Grace Period Rationale:**
+- Allows zero-downtime secret rotation
+- Applications can update configuration before old secret expires
+- Prevents lockouts from configuration timing issues
+
+### Scope Restrictions
+
+Each registered application has scoped permissions:
+
+```rust
+struct OAuthClient {
+    client_id: String,
+    allowed_scopes: Vec<Scope>,        // Maximum scopes client can request
+    allowed_redirect_uris: Vec<Url>,   // Validated redirect destinations
+    token_lifetime: Duration,           // Maximum token lifetime
+}
+```
+
+**Enforcement:**
+- Token requests cannot exceed `allowed_scopes`
+- Redirect URIs must exactly match registered values (no wildcards)
+- Tokens cannot exceed `token_lifetime` even if requested
+
+### Audit Logging
+
+All client credential operations are logged:
+
+| Event | Logged Data |
+|-------|-------------|
+| `client_created` | client_id, owner, allowed_scopes, created_at |
+| `client_updated` | client_id, changed_fields, updated_by, updated_at |
+| `secret_rotated` | client_id, rotated_by, grace_period_ends, rotated_at |
+| `client_revoked` | client_id, revoked_by, tokens_invalidated_count, revoked_at |
+| `client_deleted` | client_id, deleted_by, deleted_at |
+| `token_issued` | client_id, user_id (if applicable), scopes, expires_at |
+| `token_rejected` | client_id, reason, requested_scopes |
+
+**Log Entry Example:**
+```json
+{
+  "timestamp": "2024-01-14T10:32:15.123Z",
+  "event_type": "secret_rotated",
+  "client": {
+    "id": "cli_abc123",
+    "name": "My Application"
+  },
+  "actor": {
+    "user_id": "usr_xyz789",
+    "email": "developer@company.com"
+  },
+  "details": {
+    "grace_period_ends": "2024-01-15T10:32:15.123Z",
+    "reason": "scheduled_rotation"
+  }
+}
+```
+
+### Token Security
+
+Tokens issued to OAuth clients follow security best practices:
+
+**Access Tokens:**
+- Short-lived (default: 1 hour, max: 8 hours)
+- JWT format with standard claims
+- Bound to client_id and user (if applicable)
+- Include `hardware_verified` claim when backed by YubiKey session
+
+**Refresh Tokens:**
+- Not issued for public clients (native, SPA)
+- Rotation on use (new refresh token issued, old invalidated)
+- Absolute lifetime: 30 days
+- Revoked on logout or security event
+
+### Revocation
+
+Applications can be immediately revoked:
+
+```
+POST /api/v1/applications/:id/revoke
+```
+
+**Revocation Effects:**
+1. All access tokens immediately invalidated
+2. All refresh tokens immediately invalidated
+3. Client secret marked as revoked
+4. New token requests rejected
+5. Audit log records revocation
+
 ## Memory Safety
 
 Vouch is written in Rust, providing:
