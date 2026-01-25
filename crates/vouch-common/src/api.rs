@@ -104,21 +104,18 @@ impl ClientContext {
 // ============================================================================
 
 /// Request to start FIDO2 authentication.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct LoginStartRequest {
-    /// User's email address.
-    pub email: String,
-}
+/// Empty for discoverable credentials - the YubiKey identifies the user.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct LoginStartRequest {}
 
 /// Response containing challenge for FIDO2 authentication.
+/// For discoverable credentials, no credential_ids are needed.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginStartResponse {
     /// Random challenge bytes (32 bytes).
     pub challenge: Vec<u8>,
     /// Relying Party ID (domain).
     pub rp_id: String,
-    /// Credential IDs the user has registered.
-    pub credential_ids: Vec<Vec<u8>>,
     /// Authentication state token (opaque, returned to complete endpoint).
     pub state: String,
 }
@@ -136,8 +133,8 @@ pub struct LoginCompleteRequest {
     pub signature: Vec<u8>,
     /// Client data JSON (constructed by CLI).
     pub client_data_json: Vec<u8>,
-    /// User handle returned by authenticator (may be empty for non-resident keys).
-    pub user_handle: Option<Vec<u8>>,
+    /// User handle from discoverable credential (identifies the user).
+    pub user_handle: Vec<u8>,
     /// Client context (device/environment info for anomaly detection).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_context: Option<ClientContext>,
@@ -150,6 +147,8 @@ pub struct LoginCompleteResponse {
     pub token: String,
     /// ISO 8601 expiration timestamp.
     pub expires_at: String,
+    /// User's email address (identified from user_handle).
+    pub email: String,
 }
 
 // ============================================================================

@@ -52,7 +52,7 @@ Vouch aims to be the standard for hardware-backed authentication — proving a h
 cargo run --bin vouch-agent -- --foreground --verbose
 
 # Terminal 2: Use CLI
-vouch login --email test@example.com
+vouch login     # No email needed - YubiKey identifies user
 vouch status    # Shows "Authenticated (via agent)"
 vouch logout
 ```
@@ -136,11 +136,16 @@ cargo run --bin vouch -- enroll --server http://localhost:3000
 
 **Goal**: `vouch login` with no email, using passkey from YubiKey.
 
+**Status**: ✅ Complete - Discoverable credential login implemented.
+
 **Deliverables:**
-- [ ] CTAP2 discoverable credential retrieval
-- [ ] Server lookup by credential_id (no email in request)
-- [ ] Session token issuance
-- [ ] Agent session storage via IPC
+- [x] CTAP2 discoverable credential retrieval
+- [x] Server lookup by credential_id/user_handle (no email in request)
+- [x] Session token issuance with email in response
+- [x] Agent session storage via IPC
+- [x] CLI registration creates discoverable credentials (`.resident_key()`)
+- [x] Browser enrollment requires discoverable credentials (`residentKey: 'required'`)
+- [x] Database stores user_handle for credential lookup
 
 **Key Implementation:**
 ```rust
@@ -153,19 +158,20 @@ let assertion = device.get_assertion_with_discoverable(
 )?;
 
 // assertion.credential_id tells us which credential was used
-// Server looks up: credential_id → user@company.com
+// assertion.user.id (user_handle) identifies the user
+// Server looks up: credential_id → authenticator, user_handle → user@company.com
 ```
 
 **Server Changes:**
 - `POST /v1/auth/login/start` → No email in request, just return challenge
-- `POST /v1/auth/login/complete` → Look up user by credential_id
+- `POST /v1/auth/login/complete` → Look up user by credential_id + user_handle, return email
 
 **Verification:**
 ```bash
 vouch login
 # Touch your YubiKey...
 # Enter PIN: ****
-# ✓ Authenticated as user@company.com (8 hours)
+# ✓ Login successful as user@company.com!
 
 vouch status
 # Session: active

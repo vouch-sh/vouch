@@ -861,6 +861,8 @@ pub async fn browser_register_complete(
     })?;
 
     // Store the authenticator with verified credential
+    // user_handle is the user_id as bytes (for discoverable credentials)
+    let user_handle = reg_state.user_id.as_bytes().to_vec();
     let authenticator_id = db::create_authenticator(
         &state.db,
         &reg_state.user_id.to_string(),
@@ -868,6 +870,7 @@ pub async fn browser_register_complete(
         &credential_id_bytes,
         &passkey_json,
         aaguid.as_deref(),
+        Some(&user_handle),
     )
     .await
     .map_err(|e| {

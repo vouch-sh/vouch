@@ -44,11 +44,7 @@ enum Commands {
         email: String,
     },
     /// Authenticate with your `YubiKey`.
-    Login {
-        /// Your email address.
-        #[arg(long)]
-        email: String,
-    },
+    Login,
     /// Show current session status.
     Status,
     /// End your current session.
@@ -100,7 +96,7 @@ async fn main() -> Result<()> {
         Commands::Register { name, email } => {
             commands::register::run(&server, name.as_deref(), &email).await
         }
-        Commands::Login { email } => commands::login::run(&server, &email).await,
+        Commands::Login => commands::login::run(&server).await,
         Commands::Status => commands::status::run(&server).await,
         Commands::Logout => commands::logout::run().await,
         Commands::Keys { command } => match command {

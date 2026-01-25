@@ -12,42 +12,29 @@ use crate::config::Config;
 use crate::fido2::{self, YubiKey};
 
 /// Run the login command.
-pub async fn run(server: &str, email: &str) -> Result<()> {
-    println!("Logging in as {email}...\n");
+/// Uses discoverable credentials - the YubiKey identifies the user.
+pub async fn run(server: &str) -> Result<()> {
+    println!("Logging in...\n");
 
     // Step 1: Wait for YubiKey to be inserted
     let key = YubiKey::wait_for_device()?;
 
-    // Step 2: Start authentication with server
+    // Step 2: Start authentication with server (no email needed)
     print!("Contacting server... ");
     let client = VouchClient::new(server)?;
     let start_resp: LoginStartResponse = client
-        .post(
-            "/v1/auth/login/start",
-            &LoginStartRequest {
-                email: email.to_string(),
-            },
-        )
+        .post("/v1/auth/login/start", &LoginStartRequest {})
         .await
         .context("failed to start login")?;
     println!("ok");
-
-    if start_resp.credential_ids.is_empty() {
-        anyhow::bail!("no credentials found for {email} - have you registered?");
-    }
 
     // Step 3: Prompt for PIN
     println!();
     let pin = fido2::prompt_pin()?;
 
-    // Step 4: Perform FIDO2 authentication on device
+    // Step 4: Perform FIDO2 authentication using discoverable credential
     println!("\nTouch your YubiKey...");
-    let result = key.authenticate(
-        &start_resp.rp_id,
-        &start_resp.challenge,
-        &start_resp.credential_ids,
-        &pin,
-    )?;
+    let result = key.authenticate(&start_resp.rp_id, &start_resp.challenge, &pin)?;
 
     // Step 5: Complete authentication with server
     print!("Completing login... ");
@@ -69,7 +56,8 @@ pub async fn run(server: &str, email: &str) -> Result<()> {
     println!("ok\n");
 
     // Step 6: Store session in agent (if running) and config
-    let agent_stored = store_session_in_agent(email, &complete_resp).await;
+    // Use email from response (server identifies user from user_handle)
+    let agent_stored = store_session_in_agent(&complete_resp.email, &complete_resp).await;
 
     // Also save to config as fallback
     let mut config = Config::load()?;
@@ -80,7 +68,7 @@ pub async fn run(server: &str, email: &str) -> Result<()> {
         tracing::debug!("Failed to write cookie file: {e}");
     }
 
-    println!("Login successful!");
+    println!("Login successful as {}!", complete_resp.email);
     println!("Session expires: {}", complete_resp.expires_at);
 
     if agent_stored {

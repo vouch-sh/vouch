@@ -83,12 +83,11 @@ impl RegistrationState {
 // ============================================================================
 
 /// Authentication state stored between start and complete.
+/// Simplified for discoverable credentials - no user lookup needed upfront.
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthenticationState {
-    user_id: String,
     challenge: Vec<u8>,
     rp_id: String,
-    credential_ids: Vec<Vec<u8>>,
 }
 
 impl AuthenticationState {
@@ -226,6 +225,8 @@ pub async fn register_complete(
     let aaguid = extract_aaguid_from_attestation(&req.attestation_object);
 
     // Store the authenticator
+    // user_handle is the user_id as bytes (for discoverable credentials)
+    let user_handle = reg_state.user_id.as_bytes().to_vec();
     let device_id = db::create_authenticator(
         &state.db,
         &reg_state.user_id.to_string(),
@@ -233,6 +234,7 @@ pub async fn register_complete(
         &req.credential_id,
         &req.public_key,
         aaguid.as_deref(),
+        Some(&user_handle),
     )
     .await
     .map_err(|e| {
@@ -257,58 +259,21 @@ pub async fn register_complete(
     }))
 }
 
-/// Start login - generate challenge and return credential IDs.
+/// Start login - generate challenge for discoverable credential authentication.
+/// No email lookup needed - the YubiKey identifies the user via user_handle.
 pub async fn login_start(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<LoginStartRequest>,
+    Json(_req): Json<LoginStartRequest>,
 ) -> Result<Json<LoginStartResponse>, (StatusCode, Json<ApiError>)> {
-    tracing::info!("Login start for email: {}", req.email);
-
-    // Get user
-    let user = db::get_user_by_email(&state.db, &req.email)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
-
-    // Get user's authenticators
-    let authenticators = db::get_authenticators_for_user(&state.db, &user.id)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?;
-
-    if authenticators.is_empty() {
-        return Err(json_error(
-            StatusCode::NOT_FOUND,
-            "no_credentials",
-            "No credentials registered for this user",
-        ));
-    }
-
-    let credential_ids: Vec<Vec<u8>> = authenticators
-        .iter()
-        .map(|a| a.credential_id.clone())
-        .collect();
+    tracing::info!("Login start (discoverable credential flow)");
 
     // Generate challenge
     let challenge = generate_challenge();
 
-    // Create state token
+    // Create state token (simplified - no user info needed upfront)
     let auth_state = AuthenticationState {
-        user_id: user.id,
         challenge: challenge.clone(),
         rp_id: state.config.rp_id.clone(),
-        credential_ids: credential_ids.clone(),
     };
 
     let state_token = auth_state.encode(&state.config.jwt_secret).map_err(|e| {
@@ -322,19 +287,19 @@ pub async fn login_start(
     Ok(Json(LoginStartResponse {
         challenge,
         rp_id: state.config.rp_id.clone(),
-        credential_ids,
         state: state_token,
     }))
 }
 
 /// Complete login - verify assertion and issue session token.
+/// Uses discoverable credential flow: credential_id and user_handle identify the user.
 #[allow(clippy::too_many_lines)]
 pub async fn login_complete(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<LoginCompleteRequest>,
 ) -> Result<Json<LoginCompleteResponse>, (StatusCode, Json<ApiError>)> {
-    tracing::info!("Login complete");
+    tracing::info!("Login complete (discoverable credential flow)");
 
     // Extract client info from headers
     let client_info = ClientInfo::from_headers(&headers);
@@ -342,9 +307,18 @@ pub async fn login_complete(
     // Get client context from request (sent by CLI)
     let client_ctx = req.client_context.as_ref();
 
-    // Decode state
-    let auth_state = AuthenticationState::decode(&req.state, &state.config.jwt_secret)
+    // Decode state (only contains challenge and rp_id)
+    let _auth_state = AuthenticationState::decode(&req.state, &state.config.jwt_secret)
         .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
+
+    // Parse user_handle as UUID to identify the user
+    let user_id = Uuid::from_slice(&req.user_handle).map_err(|_| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_user_handle",
+            "Invalid user handle format",
+        )
+    })?;
 
     // Helper to log failed login attempts
     let log_failure = |user_id: &str, authenticator_id: Option<&str>, reason: &str| {
@@ -370,21 +344,7 @@ pub async fn login_complete(
         });
     };
 
-    // Verify the credential_id is in the allowed list
-    if !auth_state
-        .credential_ids
-        .iter()
-        .any(|id| id == &req.credential_id)
-    {
-        log_failure(&auth_state.user_id, None, "invalid_credential");
-        return Err(json_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_credential",
-            "Credential not in allowed list",
-        ));
-    }
-
-    // Get the authenticator
+    // Get the authenticator by credential_id
     let authenticator = db::get_authenticator_by_credential_id(&state.db, &req.credential_id)
         .await
         .map_err(|e| {
@@ -395,30 +355,30 @@ pub async fn login_complete(
             )
         })?
         .ok_or_else(|| {
-            log_failure(&auth_state.user_id, None, "credential_not_found");
+            log_failure(&user_id.to_string(), None, "credential_not_found");
             json_error(
                 StatusCode::NOT_FOUND,
                 "credential_not_found",
-                "Credential not found",
+                "Credential not registered with this server",
             )
         })?;
 
-    // Verify user matches
-    if authenticator.user_id != auth_state.user_id {
+    // Verify authenticator belongs to this user (from user_handle)
+    if authenticator.user_id != user_id.to_string() {
         log_failure(
-            &auth_state.user_id,
+            &user_id.to_string(),
             Some(&authenticator.id),
             "user_mismatch",
         );
         return Err(json_error(
-            StatusCode::BAD_REQUEST,
+            StatusCode::FORBIDDEN,
             "user_mismatch",
-            "User mismatch",
+            "Credential does not belong to this user",
         ));
     }
 
-    // Get user
-    let user = db::get_user_by_id(&state.db, &auth_state.user_id)
+    // Get user for email
+    let user = db::get_user_by_id(&state.db, &user_id.to_string())
         .await
         .map_err(|e| {
             json_error(
@@ -429,7 +389,7 @@ pub async fn login_complete(
         })?
         .ok_or_else(|| {
             log_failure(
-                &auth_state.user_id,
+                &user_id.to_string(),
                 Some(&authenticator.id),
                 "user_not_found",
             );
@@ -565,6 +525,7 @@ pub async fn login_complete(
     Ok(Json(LoginCompleteResponse {
         token,
         expires_at: expires.to_string(),
+        email: user.email,
     }))
 }
 

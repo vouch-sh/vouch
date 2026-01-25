@@ -34,8 +34,8 @@ pub struct AuthenticationResult {
     pub signature: Vec<u8>,
     /// Client data JSON.
     pub client_data_json: Vec<u8>,
-    /// User handle (may be empty for non-resident keys).
-    pub user_handle: Option<Vec<u8>>,
+    /// User handle (required for discoverable credentials).
+    pub user_handle: Vec<u8>,
 }
 
 /// Wrapper around a FIDO2 device (`YubiKey`).
@@ -108,9 +108,11 @@ impl YubiKey {
             PublicKeyCredentialUserEntity::new(Some(user_id), Some(user_name), Some(user_name));
 
         // Build make_credential arguments
+        // Use .resident_key() to create a discoverable credential (passkey)
         let args = MakeCredentialArgsBuilder::new(rp_id, &client_data_hash)
             .user_entity(&user)
             .pin(pin)
+            .resident_key()
             .build();
 
         // Execute make_credential
@@ -133,61 +135,48 @@ impl YubiKey {
         })
     }
 
-    /// Perform FIDO2 authentication (`get_assertion`).
+    /// Perform FIDO2 authentication using discoverable credentials.
     ///
-    /// This proves possession of a previously registered credential.
+    /// This uses the YubiKey's resident/discoverable credential to identify
+    /// the user without needing to provide credential IDs upfront.
     pub fn authenticate(
         &self,
         rp_id: &str,
         challenge: &[u8],
-        credential_ids: &[Vec<u8>],
         pin: &str,
     ) -> Result<AuthenticationResult> {
-        if credential_ids.is_empty() {
-            bail!("no credentials provided for authentication");
-        }
-
         // Build client data JSON (WebAuthn spec)
         let client_data = ClientData::new_get(challenge, rp_id);
         let client_data_json = client_data.to_json()?;
         let client_data_hash = sha256(&client_data_json);
 
-        // Use the first credential ID for now
-        // The ctap-hid-fido2 library wants a single credential ID
-        let credential_id = credential_ids
-            .first()
-            .context("no credential IDs provided")?;
-
-        // Build get_assertion arguments
+        // Build get_assertion arguments without credential_id (discoverable flow)
         let args = GetAssertionArgsBuilder::new(rp_id, &client_data_hash)
             .pin(pin)
-            .credential_id(credential_id)
             .build();
 
         // Execute get_assertion
         let assertions = self
             .device
             .get_assertion_with_args(&args)
-            .context("FIDO2 authentication failed - check your PIN and touch the YubiKey")?;
+            .context("No credentials found for this service. Have you registered?")?;
 
         let assertion = assertions
             .into_iter()
             .next()
             .context("no assertion returned")?;
 
-        // Get user handle if user ID is not empty
-        let user_handle = if assertion.user.id.is_empty() {
-            None
-        } else {
-            Some(assertion.user.id)
-        };
+        // Discoverable credentials must return a user handle
+        if assertion.user.id.is_empty() {
+            bail!("Credential is not discoverable. Please re-register with `vouch register`");
+        }
 
         Ok(AuthenticationResult {
             credential_id: assertion.credential_id,
             authenticator_data: assertion.auth_data,
             signature: assertion.signature,
             client_data_json,
-            user_handle,
+            user_handle: assertion.user.id,
         })
     }
 }

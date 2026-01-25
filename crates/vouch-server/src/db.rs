@@ -27,6 +27,9 @@ pub struct Authenticator {
     pub created_at: String,
     /// AAGUID (Authenticator Attestation GUID) identifies the authenticator model.
     pub aaguid: Option<String>,
+    /// User handle stored in discoverable credentials (resident keys).
+    #[allow(dead_code)]
+    pub user_handle: Option<Vec<u8>>,
 }
 
 /// Session record.
@@ -62,6 +65,7 @@ pub async fn upsert_user(pool: &SqlitePool, email: &str, name: Option<&str>) -> 
 }
 
 /// Get a user by email.
+#[allow(dead_code)]
 pub async fn get_user_by_email(pool: &SqlitePool, email: &str) -> Result<Option<User>> {
     let user = sqlx::query_as::<_, User>("SELECT id, email, name FROM users WHERE email = ?")
         .bind(email)
@@ -89,11 +93,12 @@ pub async fn create_authenticator(
     credential_id: &[u8],
     public_key: &[u8],
     aaguid: Option<&str>,
+    user_handle: Option<&[u8]>,
 ) -> Result<String> {
     let id = Uuid::new_v4().to_string();
 
     sqlx::query(
-        "INSERT INTO authenticators (id, user_id, name, credential_id, public_key, counter, aaguid) VALUES (?, ?, ?, ?, ?, 0, ?)"
+        "INSERT INTO authenticators (id, user_id, name, credential_id, public_key, counter, aaguid, user_handle) VALUES (?, ?, ?, ?, ?, 0, ?, ?)"
     )
     .bind(&id)
     .bind(user_id)
@@ -101,6 +106,7 @@ pub async fn create_authenticator(
     .bind(credential_id)
     .bind(public_key)
     .bind(aaguid)
+    .bind(user_handle)
     .execute(pool)
     .await?;
 
@@ -113,7 +119,7 @@ pub async fn get_authenticators_for_user(
     user_id: &str,
 ) -> Result<Vec<Authenticator>> {
     let authenticators = sqlx::query_as::<_, Authenticator>(
-        "SELECT id, user_id, name, credential_id, public_key, counter, created_at, aaguid FROM authenticators WHERE user_id = ?"
+        "SELECT id, user_id, name, credential_id, public_key, counter, created_at, aaguid, user_handle FROM authenticators WHERE user_id = ?"
     )
     .bind(user_id)
     .fetch_all(pool)
@@ -128,7 +134,7 @@ pub async fn get_authenticator_by_credential_id(
     credential_id: &[u8],
 ) -> Result<Option<Authenticator>> {
     let authenticator = sqlx::query_as::<_, Authenticator>(
-        "SELECT id, user_id, name, credential_id, public_key, counter, created_at, aaguid FROM authenticators WHERE credential_id = ?"
+        "SELECT id, user_id, name, credential_id, public_key, counter, created_at, aaguid, user_handle FROM authenticators WHERE credential_id = ?"
     )
     .bind(credential_id)
     .fetch_optional(pool)
@@ -143,7 +149,7 @@ pub async fn get_authenticator_by_id(
     authenticator_id: &str,
 ) -> Result<Option<Authenticator>> {
     let authenticator = sqlx::query_as::<_, Authenticator>(
-        "SELECT id, user_id, name, credential_id, public_key, counter, created_at, aaguid FROM authenticators WHERE id = ?"
+        "SELECT id, user_id, name, credential_id, public_key, counter, created_at, aaguid, user_handle FROM authenticators WHERE id = ?"
     )
     .bind(authenticator_id)
     .fetch_optional(pool)
