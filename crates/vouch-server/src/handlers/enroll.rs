@@ -74,8 +74,10 @@ async fn create_enrollment_session_cookie(
     .ok()?;
 
     // Build cookie with security attributes
+    // Use SameSite=Lax (not Strict) because the redirect from Google OAuth
+    // would otherwise prevent the cookie from being sent on the subsequent navigation
     Some(format!(
-        "{}={}; Path=/enroll; HttpOnly; Secure; SameSite=Strict; Max-Age={}",
+        "{}={}; Path=/enroll; HttpOnly; Secure; SameSite=Lax; Max-Age={}",
         ENROLL_COOKIE_NAME,
         token,
         ENROLL_SESSION_MINUTES * 60
@@ -89,28 +91,77 @@ pub async fn get_enrollment_session_from_cookie(
     headers: &HeaderMap,
 ) -> Option<EnrollmentSession> {
     // Get Cookie header
-    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
+    let cookie_header = match headers.get(header::COOKIE) {
+        Some(h) => match h.to_str() {
+            Ok(s) => s,
+            Err(_) => {
+                tracing::debug!("get_enrollment_session: cookie header not valid UTF-8");
+                return None;
+            }
+        },
+        None => {
+            tracing::debug!("get_enrollment_session: no Cookie header present");
+            return None;
+        }
+    };
+
+    tracing::debug!(
+        "get_enrollment_session: looking for {} cookie",
+        ENROLL_COOKIE_NAME
+    );
 
     // Parse cookies to find vouch_enroll
     for cookie in cookie_header.split(';') {
         let cookie = cookie.trim();
         if let Some(value) = cookie.strip_prefix(&format!("{}=", ENROLL_COOKIE_NAME)) {
+            tracing::debug!(
+                "get_enrollment_session: found {} cookie",
+                ENROLL_COOKIE_NAME
+            );
+
             // Hash the token to look up session
             let token_hash = hex::encode(digest::digest(&SHA256, value.as_bytes()));
 
-            // Look up session and check if valid
-            if let Ok(Some(session)) =
-                db::get_enrollment_session_by_token_hash(&state.db, &token_hash).await
-                && let Ok(expires) = Timestamp::strptime("%Y-%m-%d %H:%M:%S", &session.expires_at)
-                && expires > Timestamp::now()
-            {
+            // Look up session
+            let session =
+                match db::get_enrollment_session_by_token_hash(&state.db, &token_hash).await {
+                    Ok(Some(s)) => {
+                        tracing::debug!("get_enrollment_session: found session in database");
+                        s
+                    }
+                    Ok(None) => {
+                        tracing::debug!("get_enrollment_session: session not found in database");
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::debug!("get_enrollment_session: database error: {}", e);
+                        continue;
+                    }
+                };
+
+            // Check if expired
+            let expires = match Timestamp::strptime("%Y-%m-%d %H:%M:%S", &session.expires_at) {
+                Ok(ts) => ts,
+                Err(e) => {
+                    tracing::debug!("get_enrollment_session: failed to parse expiration: {}", e);
+                    continue;
+                }
+            };
+
+            if expires > Timestamp::now() {
                 // Update last used timestamp
                 let _ = db::touch_enrollment_session(&state.db, &session.id).await;
                 return Some(session);
+            } else {
+                tracing::debug!("get_enrollment_session: session expired");
             }
         }
     }
 
+    tracing::debug!(
+        "get_enrollment_session: {} cookie not found in header",
+        ENROLL_COOKIE_NAME
+    );
     None
 }
 
@@ -690,12 +741,13 @@ pub async fn oidc_callback(
     let _ = db::delete_oidc_state(&state.db, &oidc_state).await;
 
     tracing::info!("Enrollment session created for: {}", claims.email);
+    tracing::debug!("Setting cookie and redirecting to /enroll/keys");
 
     // Redirect to keys page with session cookie
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(header::LOCATION, "/enroll/keys")
-        .header(header::SET_COOKIE, cookie)
+        .header(header::SET_COOKIE, &cookie)
         .body(Body::empty())
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
@@ -704,10 +756,18 @@ pub async fn oidc_callback(
 /// GET /enroll/keys
 /// Authentication is via cookie (set by oidc_callback).
 pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    tracing::debug!("enroll_keys_page: checking for enrollment session cookie");
+
     // Get enrollment session from cookie
     let session = match get_enrollment_session_from_cookie(&state, &headers).await {
-        Some(s) => s,
+        Some(s) => {
+            tracing::debug!("enroll_keys_page: found valid session for {}", s.user_email);
+            s
+        }
         None => {
+            tracing::debug!(
+                "enroll_keys_page: no valid session found, redirecting to /enroll/start"
+            );
             // No valid session - redirect to start enrollment
             return Redirect::to("/enroll/start").into_response();
         }
