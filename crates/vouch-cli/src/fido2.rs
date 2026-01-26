@@ -205,6 +205,14 @@ impl YubiKey {
         let client_data = ClientData::new_get(challenge, rp_id);
         let client_data_json = client_data.to_json()?;
         let client_data_hash = sha256(&client_data_json);
+        tracing::debug!(
+            "authenticate: client_data_json={}",
+            String::from_utf8_lossy(&client_data_json)
+        );
+        tracing::debug!(
+            "authenticate: client_data_hash={}",
+            hex::encode(&client_data_hash)
+        );
 
         // Build get_assertion arguments without credential_id (discoverable flow)
         let args = GetAssertionArgsBuilder::new(rp_id, &client_data_hash)

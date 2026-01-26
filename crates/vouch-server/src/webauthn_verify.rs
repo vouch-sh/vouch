@@ -311,7 +311,15 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
     }
 
     // 7. Build signed data: authenticator_data || SHA-256(client_data_json)
+    tracing::debug!(
+        "verify_assertion: client_data_json={}",
+        String::from_utf8_lossy(client_data_json)
+    );
     let client_data_hash = digest::digest(&SHA256, client_data_json);
+    tracing::debug!(
+        "verify_assertion: client_data_hash={}",
+        hex::encode(client_data_hash.as_ref())
+    );
     let mut signed_data = Vec::with_capacity(authenticator_data.len() + 32);
     signed_data.extend_from_slice(authenticator_data);
     signed_data.extend_from_slice(client_data_hash.as_ref());
