@@ -67,10 +67,13 @@ fn hash_device_code(code: &str) -> String {
 
 /// Start device authorization flow.
 /// POST /oauth/device/code
+///
+/// RFC 8628 Section 3.1: The client makes a request using
+/// "application/x-www-form-urlencoded" format.
 #[allow(clippy::unused_async)]
 pub async fn device_code(
     State(state): State<Arc<AppState>>,
-    Json(_req): Json<DeviceCodeRequest>,
+    axum::Form(_req): axum::Form<DeviceCodeRequest>,
 ) -> Result<Json<DeviceCodeResponse>, (StatusCode, Json<ApiError>)> {
     tracing::info!("Device authorization request");
 
@@ -309,8 +312,9 @@ mod tests {
         // RFC 8628 Section 3.2: Device code response must contain required fields
         let (app, _state) = test_app().await;
 
+        // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
         let (status, body) =
-            http_post_json(&app, "/oauth/device/code", r#"{"client_id": "test"}"#, &[]).await;
+            http_post_form(&app, "/oauth/device/code", "client_id=test", &[]).await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -345,8 +349,9 @@ mod tests {
         // RFC 8628 Section 3.2: interval field is OPTIONAL but recommended
         let (app, _state) = test_app().await;
 
+        // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
         let (status, body) =
-            http_post_json(&app, "/oauth/device/code", r#"{"client_id": "test"}"#, &[]).await;
+            http_post_form(&app, "/oauth/device/code", "client_id=test", &[]).await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -370,8 +375,9 @@ mod tests {
         // RFC 8628 Section 6.1: User code format recommendations
         let (app, _state) = test_app().await;
 
+        // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
         let (status, body) =
-            http_post_json(&app, "/oauth/device/code", r#"{"client_id": "test"}"#, &[]).await;
+            http_post_form(&app, "/oauth/device/code", "client_id=test", &[]).await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -398,8 +404,9 @@ mod tests {
 
         // Generate multiple codes to test the character set
         for _ in 0..5 {
+            // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
             let (status, body) =
-                http_post_json(&app, "/oauth/device/code", r#"{"client_id": "test"}"#, &[]).await;
+                http_post_form(&app, "/oauth/device/code", "client_id=test", &[]).await;
 
             assert_eq!(status, StatusCode::OK);
             let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -439,9 +446,9 @@ mod tests {
         // RFC 8628 Section 3.5: Pending authorization returns authorization_pending
         let (app, _state) = test_app().await;
 
-        // Create a device auth request
+        // Create a device auth request (RFC 8628 Section 3.1: form-urlencoded)
         let (status, body) =
-            http_post_json(&app, "/oauth/device/code", r#"{"client_id": "test"}"#, &[]).await;
+            http_post_form(&app, "/oauth/device/code", "client_id=test", &[]).await;
         assert_eq!(status, StatusCode::OK);
         let code_resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         let device_code = code_resp["device_code"].as_str().expect("device_code");
@@ -663,5 +670,50 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         assert_eq!(error["code"], "unsupported_grant_type");
+    }
+
+    // ========================================================================
+    // RFC 8628 Content-Type Enforcement Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_rfc8628_device_code_rejects_json_content_type() {
+        // RFC 8628 Section 3.1: Device authorization endpoint MUST use
+        // application/x-www-form-urlencoded, not JSON
+        let (app, _state) = test_app().await;
+
+        // Attempt to use JSON content-type (should be rejected)
+        let (status, _body) =
+            http_post_json(&app, "/oauth/device/code", r#"{"client_id": "test"}"#, &[]).await;
+
+        // Axum's Form extractor returns 415 Unsupported Media Type for JSON
+        assert_eq!(
+            status,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Device code endpoint should reject JSON content-type per RFC 8628"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rfc8628_token_endpoint_rejects_json_content_type() {
+        // RFC 8628 Section 3.4 / RFC 6749 Section 4.1.3: Token endpoint MUST use
+        // application/x-www-form-urlencoded, not JSON
+        let (app, _state) = test_app().await;
+
+        // Attempt to use JSON content-type (should be rejected)
+        let (status, _body) = http_post_json(
+            &app,
+            "/oauth/token",
+            r#"{"grant_type": "urn:ietf:params:oauth:grant-type:device_code", "device_code": "test"}"#,
+            &[],
+        )
+        .await;
+
+        // Axum's Form extractor returns 415 Unsupported Media Type for JSON
+        assert_eq!(
+            status,
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Token endpoint should reject JSON content-type per RFC 8628/6749"
+        );
     }
 }
