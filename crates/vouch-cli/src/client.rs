@@ -104,6 +104,32 @@ impl VouchClient {
         self.handle_response(response).await
     }
 
+    /// POST a JSON request with authentication and get a JSON response.
+    pub async fn post_authenticated<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
+    where
+        Req: Serialize,
+        Resp: DeserializeOwned,
+    {
+        let config = Config::load()?;
+        let token = config
+            .token()
+            .context("not authenticated - run 'vouch login' first")?;
+
+        let url = format!("{}{}", self.base_url, path);
+        tracing::debug!("POST {} (authenticated)", url);
+
+        let response = self
+            .client
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .json(body)
+            .send()
+            .await
+            .with_context(|| format!("failed to connect to {url}"))?;
+
+        self.handle_response(response).await
+    }
+
     /// Handle HTTP response, parsing JSON or error.
     async fn handle_response<Resp>(&self, response: reqwest::Response) -> Result<Resp>
     where

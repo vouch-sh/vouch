@@ -1,0 +1,196 @@
+//! SSH setup command.
+//!
+//! Configures SSH to use Vouch-issued certificates.
+
+use anyhow::{Context, Result};
+use std::fs;
+use std::path::PathBuf;
+use vouch_common::SshCaPublicKeyResponse;
+
+use crate::client::VouchClient;
+
+/// Get the SSH config path (~/.ssh/config).
+fn ssh_config_path() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home.join(".ssh").join("config"))
+}
+
+/// Get the known hosts path (~/.ssh/known_hosts).
+fn known_hosts_path() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home.join(".ssh").join("known_hosts"))
+}
+
+/// Get the CA public key path.
+fn ca_key_path(server: &str) -> Result<PathBuf> {
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    // Sanitize server URL for filename
+    let safe_host = server
+        .replace("https://", "")
+        .replace("http://", "")
+        .replace([':', '/'], "_");
+    Ok(home.join(".ssh").join(format!("vouch_ca_{safe_host}.pub")))
+}
+
+/// Get the default SSH key path (~/.ssh/id_ed25519_vouch).
+fn default_key_path() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home.join(".ssh").join("id_ed25519_vouch"))
+}
+
+/// Run the SSH setup command.
+///
+/// This command:
+/// 1. Downloads the CA public key from the server
+/// 2. Saves it to ~/.ssh/
+/// 3. Optionally updates ~/.ssh/known_hosts to trust the CA for host verification
+/// 4. Optionally updates ~/.ssh/config to use the Vouch SSH agent
+/// 5. Shows instructions for SSH config
+pub async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
+    let client = VouchClient::new(server)?;
+
+    // Download CA public key
+    println!("Downloading SSH CA public key from server...");
+    let ca_response: SshCaPublicKeyResponse = client
+        .get_authenticated("/v1/credentials/ssh/ca")
+        .await
+        .context("failed to get SSH CA public key")?;
+
+    // Save CA public key
+    let ca_path = ca_key_path(server)?;
+    let ca_content = format!("{} {}\n", ca_response.public_key, ca_response.comment);
+
+    // Ensure .ssh directory exists
+    if let Some(parent) = ca_path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+        }
+    }
+
+    fs::write(&ca_path, &ca_content)
+        .with_context(|| format!("failed to write {}", ca_path.display()))?;
+    println!("Saved CA public key: {}", ca_path.display());
+
+    // If hosts are specified, add TrustedUserCAKeys entry to known_hosts
+    if let Some(host_patterns) = hosts {
+        add_trusted_ca_to_known_hosts(&ca_path, host_patterns)?;
+    }
+
+    // Configure SSH to use the Vouch SSH agent
+    configure_ssh_agent()?;
+
+    println!();
+    println!("SSH CA setup complete!");
+    println!();
+    println!("To trust user certificates signed by this CA, configure your SSH servers:");
+    println!();
+    println!("  1. Copy the CA public key to each server:");
+    println!(
+        "     scp {} root@server:/etc/ssh/vouch_ca.pub",
+        ca_path.display()
+    );
+    println!();
+    println!("  2. Add to /etc/ssh/sshd_config:");
+    println!("     TrustedUserCAKeys /etc/ssh/vouch_ca.pub");
+    println!();
+    println!("  3. Restart SSH:");
+    println!("     systemctl restart sshd");
+    println!();
+    println!("Users can then authenticate with:");
+    println!("  vouch login");
+    println!("  vouch credential ssh");
+    println!("  ssh user@server");
+
+    Ok(())
+}
+
+/// Configure SSH agent in ~/.ssh/config.
+fn configure_ssh_agent() -> Result<()> {
+    let config_path = ssh_config_path()?;
+    let key_path = default_key_path()?;
+    let cert_path = PathBuf::from(format!("{}-cert.pub", key_path.display()));
+    let agent_socket = vouch_agent::ssh_agent_socket_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "~/.vouch/ssh-agent.sock".to_string());
+
+    // Read existing config
+    let existing = if config_path.exists() {
+        fs::read_to_string(&config_path)
+            .with_context(|| format!("failed to read {}", config_path.display()))?
+    } else {
+        String::new()
+    };
+
+    // Check if Vouch config already exists
+    if existing.contains("# Vouch SSH Agent") || existing.contains(&agent_socket) {
+        println!("SSH config already configured for Vouch");
+        return Ok(());
+    }
+
+    // Add Vouch SSH agent configuration
+    let vouch_config = format!(
+        r#"
+# Vouch SSH Agent Configuration
+# Added by: vouch setup ssh
+Host *
+    IdentityAgent {}
+    IdentityFile {}
+    CertificateFile {}
+"#,
+        agent_socket,
+        key_path.display(),
+        cert_path.display()
+    );
+
+    let new_config = format!("{existing}{vouch_config}");
+    fs::write(&config_path, new_config)
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    println!("Updated SSH config: {}", config_path.display());
+    println!("  Added IdentityAgent directive for Vouch SSH agent");
+
+    Ok(())
+}
+
+/// Add a @cert-authority entry to known_hosts for the given host patterns.
+fn add_trusted_ca_to_known_hosts(ca_path: &PathBuf, host_patterns: &str) -> Result<()> {
+    let known_hosts_path = known_hosts_path()?;
+    let ca_pub_key = fs::read_to_string(ca_path)?;
+    // Remove comment and trailing newline
+    let ca_pub_key = ca_pub_key
+        .lines()
+        .next()
+        .unwrap_or("")
+        .split_whitespace()
+        .take(2)
+        .collect::<Vec<_>>()
+        .join(" ");
+
+    // Create entry
+    let entry = format!("@cert-authority {} {}\n", host_patterns, ca_pub_key);
+
+    // Read existing known_hosts
+    let existing = if known_hosts_path.exists() {
+        fs::read_to_string(&known_hosts_path)?
+    } else {
+        String::new()
+    };
+
+    // Check if entry already exists
+    if existing.contains(&ca_pub_key) {
+        println!("CA already trusted in known_hosts");
+        return Ok(());
+    }
+
+    // Append entry
+    let new_content = format!("{existing}{entry}");
+    fs::write(&known_hosts_path, new_content)?;
+    println!("Added CA to known_hosts for hosts: {}", host_patterns);
+
+    Ok(())
+}

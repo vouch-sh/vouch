@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+
+{% block title %}New Application - Vouch{% endblock %}
+
+{% block body_class %}min-h-screen bg-gray-100{% endblock %}
+
+{% block content %}
+<div class="max-w-2xl mx-auto p-6">
+    <div class="mb-6">
+        <h1 class="text-2xl font-bold text-gray-900">Register New Application</h1>
+        <p class="text-gray-600">Create an OAuth application to integrate with Vouch.</p>
+    </div>
+
+    <div class="bg-white rounded-lg shadow p-6">
+        <form action="/applications/new" method="POST" class="space-y-6">
+            <div>
+                <label for="name" class="block text-sm font-medium text-gray-700">Application Name</label>
+                <input type="text" name="name" id="name" required
+                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-vouch-500 focus:ring-vouch-500 sm:text-sm"
+                    placeholder="My Application">
+                <p class="mt-1 text-sm text-gray-500">A friendly name for your application.</p>
+            </div>
+
+            <div>
+                <label for="description" class="block text-sm font-medium text-gray-700">Description (optional)</label>
+                <textarea name="description" id="description" rows="2"
+                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-vouch-500 focus:ring-vouch-500 sm:text-sm"
+                    placeholder="Brief description of your application"></textarea>
+            </div>
+
+            <div>
+                <label class="block text-sm font-medium text-gray-700 mb-2">Application Type</label>
+                <div class="space-y-3">
+                    <label class="flex items-start p-3 border rounded-lg cursor-pointer hover:bg-gray-50">
+                        <input type="radio" name="application_type" value="web" checked
+                            class="mt-0.5 h-4 w-4 text-vouch-600 focus:ring-vouch-500 border-gray-300">
+                        <div class="ml-3">
+                            <span class="block text-sm font-medium text-gray-900">Web Application</span>
+                            <span class="block text-sm text-gray-500">Server-side app with secure backend. Uses client secret.</span>
+                        </div>
+                    </label>
+                    <label class="flex items-start p-3 border rounded-lg cursor-pointer hover:bg-gray-50">
+                        <input type="radio" name="application_type" value="spa"
+                            class="mt-0.5 h-4 w-4 text-vouch-600 focus:ring-vouch-500 border-gray-300">
+                        <div class="ml-3">
+                            <span class="block text-sm font-medium text-gray-900">Single Page Application</span>
+                            <span class="block text-sm text-gray-500">Browser-only app. Uses PKCE, no client secret.</span>
+                        </div>
+                    </label>
+                    <label class="flex items-start p-3 border rounded-lg cursor-pointer hover:bg-gray-50">
+                        <input type="radio" name="application_type" value="native"
+                            class="mt-0.5 h-4 w-4 text-vouch-600 focus:ring-vouch-500 border-gray-300">
+                        <div class="ml-3">
+                            <span class="block text-sm font-medium text-gray-900">Native Application</span>
+                            <span class="block text-sm text-gray-500">Desktop or mobile app. Uses PKCE, no client secret.</span>
+                        </div>
+                    </label>
+                    <label class="flex items-start p-3 border rounded-lg cursor-pointer hover:bg-gray-50">
+                        <input type="radio" name="application_type" value="service"
+                            class="mt-0.5 h-4 w-4 text-vouch-600 focus:ring-vouch-500 border-gray-300">
+                        <div class="ml-3">
+                            <span class="block text-sm font-medium text-gray-900">Service / Machine-to-Machine</span>
+                            <span class="block text-sm text-gray-500">Backend service with no user interaction. Uses client credentials.</span>
+                        </div>
+                    </label>
+                </div>
+            </div>
+
+            <div id="redirect-uris-section">
+                <label for="redirect_uris" class="block text-sm font-medium text-gray-700">Redirect URIs</label>
+                <textarea name="redirect_uris" id="redirect_uris" rows="3"
+                    class="mt-1 block w-full rounded-md border-gray-300 shadow-sm focus:border-vouch-500 focus:ring-vouch-500 sm:text-sm font-mono"
+                    placeholder="https://example.com/callback
+https://localhost:3000/callback"></textarea>
+                <p class="mt-1 text-sm text-gray-500">One URI per line. Where users are redirected after authentication.</p>
+            </div>
+
+            <div class="flex justify-end space-x-3">
+                <a href="/applications" class="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50">
+                    Cancel
+                </a>
+                <button type="submit" class="px-4 py-2 bg-vouch-600 hover:bg-vouch-700 text-white rounded-md text-sm font-medium">
+                    Create Application
+                </button>
+            </div>
+        </form>
+    </div>
+</div>
+
+<script>
+    // Hide redirect URIs for service type
+    document.querySelectorAll('input[name="application_type"]').forEach(radio => {
+        radio.addEventListener('change', function() {
+            const section = document.getElementById('redirect-uris-section');
+            const textarea = document.getElementById('redirect_uris');
+            if (this.value === 'service') {
+                section.style.display = 'none';
+                textarea.required = false;
+            } else {
+                section.style.display = 'block';
+                textarea.required = true;
+            }
+        });
+    });
+</script>
+{% endblock %}

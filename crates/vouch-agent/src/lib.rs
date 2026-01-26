@@ -27,13 +27,16 @@
 //! ```
 
 pub mod client;
+pub mod daemon;
 pub mod error;
 pub mod protocol;
 pub mod server;
 pub mod socket;
+pub mod ssh_agent;
 pub mod state;
 
 // Re-export commonly used types
 pub use client::AgentClient;
 pub use error::{AgentError, Result};
+pub use ssh_agent::{SshAgentServer, SshAgentState, SshCredentials, ssh_agent_socket_path};
 pub use state::SessionInfo;

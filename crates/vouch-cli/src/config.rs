@@ -6,6 +6,10 @@ use std::fs;
 use std::path::PathBuf;
 
 /// CLI configuration stored in ~/.config/vouch/config.json
+///
+/// Note: The token is stored as a plain string for serialization purposes.
+/// The config file is protected with 0600 permissions on Unix systems.
+/// In memory, the token is only exposed when needed for API calls.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Vouch server URL.

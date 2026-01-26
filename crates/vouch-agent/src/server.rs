@@ -3,9 +3,10 @@
 use crate::error::{AgentError, Result};
 use crate::protocol::{
     INVALID_PARAMS, METHOD_NOT_FOUND, NOT_AUTHENTICATED, Request, Response, SESSION_EXPIRED,
-    StoreSessionParams,
+    StoreSessionParams, StoreSshCredentialsParams,
 };
 use crate::socket::{ensure_vouch_dir, remove_socket, socket_path};
+use crate::ssh_agent::{SshAgentState, SshCredentials};
 use crate::state::{AgentState, Session, SessionInfo};
 
 use jiff::Timestamp;
@@ -18,12 +19,13 @@ use tracing::{debug, error, info, warn};
 /// Agent server.
 pub struct AgentServer {
     state: Arc<AgentState>,
+    ssh_state: Arc<SshAgentState>,
 }
 
 impl AgentServer {
     /// Create a new agent server.
-    pub fn new(state: Arc<AgentState>) -> Self {
-        Self { state }
+    pub fn new(state: Arc<AgentState>, ssh_state: Arc<SshAgentState>) -> Self {
+        Self { state, ssh_state }
     }
 
     /// Run the server, listening on the Unix socket.
@@ -62,8 +64,9 @@ impl AgentServer {
             match listener.accept().await {
                 Ok((stream, _)) => {
                     let state = Arc::clone(&self.state);
+                    let ssh_state = Arc::clone(&self.ssh_state);
                     tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, state).await {
+                        if let Err(e) = handle_connection(stream, state, ssh_state).await {
                             debug!("Connection error: {e}");
                         }
                     });
@@ -77,7 +80,11 @@ impl AgentServer {
 }
 
 /// Handle a single client connection.
-async fn handle_connection(mut stream: UnixStream, state: Arc<AgentState>) -> Result<()> {
+async fn handle_connection(
+    mut stream: UnixStream,
+    state: Arc<AgentState>,
+    ssh_state: Arc<SshAgentState>,
+) -> Result<()> {
     loop {
         // Read 4-byte length prefix
         let mut len_buf = [0u8; 4];
@@ -115,19 +122,26 @@ async fn handle_connection(mut stream: UnixStream, state: Arc<AgentState>) -> Re
         debug!("Request: method={}", request.method);
 
         // Handle request
-        let response = handle_request(&request, &state).await;
+        let response = handle_request(&request, &state, &ssh_state).await;
         send_response(&mut stream, &response).await?;
     }
 }
 
 /// Handle a JSON-RPC request.
-async fn handle_request(request: &Request, state: &Arc<AgentState>) -> Response {
+async fn handle_request(
+    request: &Request,
+    state: &Arc<AgentState>,
+    ssh_state: &Arc<SshAgentState>,
+) -> Response {
     match request.method.as_str() {
         "ping" => handle_ping(request),
         "get_session" => handle_get_session(request, state).await,
         "store_session" => handle_store_session(request, state).await,
-        "clear_session" => handle_clear_session(request, state).await,
+        "clear_session" => handle_clear_session(request, state, ssh_state).await,
         "get_token" => handle_get_token(request, state).await,
+        "store_ssh_credentials" => handle_store_ssh_credentials(request, ssh_state).await,
+        "clear_ssh_credentials" => handle_clear_ssh_credentials(request, ssh_state).await,
+        "has_ssh_credentials" => handle_has_ssh_credentials(request, ssh_state).await,
         _ => Response::error(request.id, METHOD_NOT_FOUND, "method not found"),
     }
 }
@@ -193,9 +207,14 @@ async fn handle_store_session(request: &Request, state: &Arc<AgentState>) -> Res
 }
 
 /// Handle `clear_session` request.
-async fn handle_clear_session(request: &Request, state: &Arc<AgentState>) -> Response {
+async fn handle_clear_session(
+    request: &Request,
+    state: &Arc<AgentState>,
+    ssh_state: &Arc<SshAgentState>,
+) -> Response {
     state.clear_session().await;
-    info!("Session cleared");
+    ssh_state.clear_credentials().await;
+    info!("Session and SSH credentials cleared");
     Response::success(request.id, true)
 }
 
@@ -205,6 +224,72 @@ async fn handle_get_token(request: &Request, state: &Arc<AgentState>) -> Respons
         Some(token) => Response::success(request.id, token),
         None => Response::error(request.id, NOT_AUTHENTICATED, "not authenticated"),
     }
+}
+
+/// Handle `store_ssh_credentials` request.
+async fn handle_store_ssh_credentials(
+    request: &Request,
+    ssh_state: &Arc<SshAgentState>,
+) -> Response {
+    let params: StoreSshCredentialsParams = match &request.params {
+        Some(p) => match serde_json::from_value(p.clone()) {
+            Ok(params) => params,
+            Err(e) => {
+                return Response::error(
+                    request.id,
+                    INVALID_PARAMS,
+                    &format!("invalid params: {e}"),
+                );
+            }
+        },
+        None => return Response::error(request.id, INVALID_PARAMS, "missing params"),
+    };
+
+    // Load credentials from files
+    let key_path = std::path::Path::new(&params.key_path);
+    let cert_path = std::path::Path::new(&params.cert_path);
+
+    match SshCredentials::load(key_path, cert_path) {
+        Ok(creds) => {
+            // Parse session expiration if provided
+            let session_expires_at = params
+                .session_expires_at
+                .as_ref()
+                .and_then(|s| s.parse::<Timestamp>().ok());
+
+            // Store credentials with session linkage
+            ssh_state
+                .store_credentials(creds, session_expires_at, params.server_url)
+                .await;
+
+            info!("SSH credentials stored with session linkage");
+            Response::success(request.id, true)
+        }
+        Err(e) => {
+            warn!("Failed to load SSH credentials: {e}");
+            Response::error(
+                request.id,
+                INVALID_PARAMS,
+                &format!("failed to load credentials: {e}"),
+            )
+        }
+    }
+}
+
+/// Handle `clear_ssh_credentials` request.
+async fn handle_clear_ssh_credentials(
+    request: &Request,
+    ssh_state: &Arc<SshAgentState>,
+) -> Response {
+    ssh_state.clear_credentials().await;
+    info!("SSH credentials cleared");
+    Response::success(request.id, true)
+}
+
+/// Handle `has_ssh_credentials` request.
+async fn handle_has_ssh_credentials(request: &Request, ssh_state: &Arc<SshAgentState>) -> Response {
+    let has_creds = ssh_state.has_credentials().await;
+    Response::success(request.id, has_creds)
 }
 
 /// Send a response over the stream.

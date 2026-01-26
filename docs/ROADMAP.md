@@ -22,8 +22,10 @@ Vouch aims to be the standard for hardware-backed authentication — proving a h
 - [x] Session state management (store, retrieve, clear)
 - [x] CLI client for agent communication
 - [x] CLI commands integrated (login stores, status reads, logout clears)
-- [ ] Certificate cache infrastructure (Phase 5)
-- [ ] Daemon lifecycle - launchd/systemd integration (future)
+- [x] Certificate cache infrastructure
+- [x] Background cleanup tasks (sessions, device auth, OIDC states, events)
+- [x] Graceful shutdown with signal handling
+- [x] Daemon lifecycle - daemonization with PID file, --stop, --status, logging
 
 **Files:**
 | File | Description |
@@ -185,12 +187,14 @@ vouch status
 
 **Goal**: Built-in SSH CA that signs user certificates.
 
+**Status**: ✅ Complete - SSH CA implemented with Ed25519 signing.
+
 **Deliverables:**
-- [ ] Ed25519 CA key generation and storage
-- [ ] SSH certificate signing endpoint
-- [ ] Principal extraction from user email
-- [ ] Certificate TTL aligned with session expiry
-- [ ] CA public key export for hosts
+- [x] Ed25519 CA key generation and storage
+- [x] SSH certificate signing endpoint
+- [x] Principal extraction from user email
+- [x] Certificate TTL aligned with session expiry
+- [x] CA public key export for hosts
 
 **Server Implementation:**
 ```rust
@@ -220,11 +224,17 @@ async fn issue_ssh_cert(
 }
 ```
 
+**Files:**
+| File | Description |
+|------|-------------|
+| `crates/vouch-server/src/ssh_ca.rs` | SSH CA implementation (key gen, signing) |
+| `crates/vouch-server/src/handlers/credentials.rs` | SSH certificate endpoints |
+| `crates/vouch-common/src/api.rs` | SSH request/response types |
+
 **New Dependencies:**
 | Crate | Purpose |
 |-------|---------|
-| `ed25519-dalek` | Ed25519 signing for SSH CA |
-| `ssh-key` | SSH key/certificate parsing |
+| `ssh-key` | SSH key/certificate parsing and signing |
 
 ---
 
@@ -232,13 +242,23 @@ async fn issue_ssh_cert(
 
 **Goal**: `vouch setup ssh` configures everything automatically.
 
+**Status**: ✅ Complete - SSH agent protocol implemented, auto-config working.
+
 **Deliverables:**
-- [ ] SSH keypair generation (`~/.ssh/id_ed25519_vouch`)
-- [ ] SSH agent protocol implementation
-- [ ] SSH agent socket at `~/.vouch/ssh-agent.sock`
-- [ ] `~/.ssh/config` modification
-- [ ] Certificate refresh within session
-- [ ] `vouch setup ssh` command
+- [x] SSH keypair generation (`~/.ssh/id_ed25519_vouch`)
+- [x] SSH agent protocol implementation
+- [x] SSH agent socket at `~/.vouch/ssh-agent.sock`
+- [x] `~/.ssh/config` modification (IdentityAgent, IdentityFile, CertificateFile)
+- [x] Certificate refresh within session
+- [x] Certificate cache infrastructure
+- [x] `vouch setup ssh` command
+- [x] `vouch credential ssh` command
+
+**Files:**
+| File | Description |
+|------|-------------|
+| `crates/vouch-cli/src/commands/credential/ssh.rs` | SSH certificate credential command |
+| `crates/vouch-cli/src/commands/setup/ssh.rs` | SSH CA setup command |
 
 **SSH Agent Protocol:**
 ```rust
@@ -287,7 +307,7 @@ ssh user@server
 
 **Goal**: Vouch acts as OIDC provider for AWS federation.
 
-**Status**: ✅ OIDC Provider core endpoints implemented.
+**Status**: ✅ Complete - OIDC Provider, Admin IdP Portal, and AWS integration implemented.
 
 **Deliverables:**
 - [x] OIDC discovery endpoint (`/.well-known/openid-configuration`)
@@ -298,13 +318,13 @@ ssh user@server
 - [x] Admin setup wizard page (`/admin-setup`)
 - [x] Developer setup page (`/developer-setup`)
 - [x] Cookie file storage for CLI tools (`~/.vouch/cookie.txt`)
-- [ ] Token exchange for authorization_code grant
-- [ ] Token Revocation endpoint (RFC 7009)
-- [ ] Token Introspection endpoint (RFC 7662)
-- [ ] Admin IdP Portal (self-service external IdP configuration)
-- [ ] AWS STS integration
-- [ ] `vouch credential aws` command
-- [ ] `vouch setup aws` command
+- [x] Token exchange for authorization_code grant
+- [x] Token Revocation endpoint (RFC 7009)
+- [x] Token Introspection endpoint (RFC 7662)
+- [x] Admin IdP Portal (self-service external IdP configuration)
+- [x] AWS STS integration
+- [x] `vouch credential aws` command
+- [x] `vouch setup aws` command
 
 **OIDC Endpoints:**
 ```
@@ -345,17 +365,26 @@ $ vouch credential aws --role arn:aws:iam::123456789:role/developer
 
 **Goal**: Self-service portal for developers to register OAuth applications.
 
-**Status**: 📋 Planned
+**Status**: ✅ Complete
 
 **Deliverables:**
-- [ ] Application data model (clients, secrets, redirect URIs)
-- [ ] Self-service registration web UI
-- [ ] Client credential generation (client_id, client_secret)
-- [ ] Support for application types (web, native, SPA, service)
-- [ ] Credential rotation with grace period
-- [ ] Application revocation
-- [ ] Usage statistics per application
-- [ ] API endpoints for programmatic management
+- [x] Application data model (clients, secrets, redirect URIs)
+- [x] Self-service registration web UI
+- [x] Client credential generation (client_id, client_secret)
+- [x] Support for application types (web, native, SPA, service)
+- [x] Credential rotation with grace period
+- [x] Application revocation
+- [x] Usage statistics per application
+- [x] API endpoints for programmatic management
+- [x] Token endpoint validation of registered clients
+
+**Files:**
+| File | Description |
+|------|-------------|
+| `crates/vouch-server/migrations/008_oauth_clients.sql` | OAuth clients schema |
+| `crates/vouch-server/src/handlers/applications.rs` | Web UI and API handlers |
+| `crates/vouch-server/src/db.rs` | CRUD operations for OAuth clients |
+| `crates/vouch-server/templates/applications/` | Portal UI templates |
 
 **User Flow:**
 ```
@@ -417,16 +446,18 @@ curl -X POST https://vouch.example.com/oauth/token \
 ### v0.6 — Enterprise Features (Month 5)
 
 - [ ] Admin console (web UI)
-- [ ] Admin IdP Portal
-  - [ ] Self-service external IdP configuration
-  - [ ] Google Workspace integration
-  - [ ] Microsoft Entra ID integration
-  - [ ] Generic OIDC provider support
-  - [ ] Connection testing and validation
-- [ ] SCIM 2.0 de-provisioning (RFC 7643/7644) — **launch requirement**
-  - [ ] User de-provisioning (immediate session invalidation)
-  - [ ] SCIM endpoint authentication (bearer token)
-  - [ ] Audit logging for provisioning events
+- [x] Admin IdP Portal
+  - [x] Self-service external IdP configuration
+  - [x] Google Workspace integration
+  - [x] Microsoft Entra ID integration
+  - [x] Generic OIDC provider support
+  - [x] Connection testing and validation
+- [x] SCIM 2.0 de-provisioning (RFC 7643/7644) — **launch requirement**
+  - [x] User provisioning (create, update, list, get)
+  - [x] User de-provisioning (immediate session invalidation)
+  - [x] SCIM endpoint authentication (bearer token)
+  - [x] Audit logging for provisioning events
+  - [x] SCIM token management API
 - [ ] Audit log export (Splunk, Datadog)
 - [ ] Organization policies
 - [x] Self-service YubiKey management
@@ -468,9 +499,9 @@ curl -X POST https://vouch.example.com/oauth/token \
 
 ## Future Considerations (v1.0+)
 
-### Additional RFC Standards
-- **RFC 9449 (DPoP)** — Demonstrating Proof of Possession; sender-constrains tokens so stolen tokens can't be used. Aligns with Vouch's security-first positioning.
-- **RFC 8693 (Token Exchange)** — Exchange tokens between services; useful for microservices architectures.
+### Additional RFC Standards (Implemented)
+- **RFC 9449 (DPoP)** ✅ — Demonstrating Proof of Possession; sender-constrains tokens so stolen tokens can't be used. Full implementation with signature verification for ES256, RS256, and EdDSA algorithms, JTI replay prevention, nonce management, and discovery endpoint support.
+- **RFC 8693 (Token Exchange)** ✅ — Exchange tokens between services; useful for microservices architectures. Full implementation with delegation policies, audience validation, scope downgrading, and policy-based TTL limits.
 
 ### Federation
 - Cross-organization trust
@@ -529,8 +560,15 @@ Tracked but not blocking releases:
 - [ ] Reproducible builds
 - [ ] Fuzzing for FIDO2 parsing
 - [ ] Performance benchmarks
-- [ ] Integration test suite
-- [ ] CLI shell completions
+- [x] Integration test suite (34 tests covering RFC compliance)
+  - Device authorization lifecycle (RFC 8628)
+  - OAuth client registration and management
+  - SCIM user provisioning (RFC 7643/7644)
+  - Session and token management
+  - Authentication event logging
+  - Cascade delete behavior
+- [x] CLI shell completions (bash, zsh, fish, powershell, elvish)
+- [x] `vouch doctor` diagnostic command (YubiKey, agent, server, session, SSH config)
 - [ ] Internationalization
 - [ ] Windows support
 

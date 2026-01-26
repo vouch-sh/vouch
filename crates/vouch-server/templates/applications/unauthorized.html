@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+
+{% block title %}Unauthorized - Vouch{% endblock %}
+
+{% block body_class %}min-h-screen bg-gray-100{% endblock %}
+
+{% block content %}
+<div class="max-w-md mx-auto p-6">
+    <div class="bg-white rounded-lg shadow p-6">
+        <div class="text-center">
+            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-yellow-100">
+                <svg class="h-6 w-6 text-yellow-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                </svg>
+            </div>
+            <h1 class="mt-3 text-xl font-bold text-gray-900">Sign In Required</h1>
+            <p class="mt-2 text-gray-600">You need to be signed in to manage applications.</p>
+        </div>
+
+        <div class="mt-6 flex justify-center">
+            <a href="/" class="px-6 py-2 bg-vouch-600 hover:bg-vouch-700 text-white rounded-md text-sm font-medium">
+                Sign In
+            </a>
+        </div>
+    </div>
+</div>
+{% endblock %}

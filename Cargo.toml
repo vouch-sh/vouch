@@ -38,15 +38,19 @@ string_slice = "warn"
 
 [workspace.dependencies]
 # Async runtime (exact version, minimal features)
-tokio = { version = "=1.49.0", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "sync"] }
+tokio = { version = "=1.49.0", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
 
 # CLI
 clap = { version = "=4.5.54", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context"] }
+clap_complete = { version = "=4.5.54", default-features = false }
 
 # Serialization
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
 serde_json = { version = "=1.0.149", default-features = false, features = ["std"] }
 ciborium = { version = "=0.2.2", default-features = false }
+
+# Unix system calls (daemon support)
+libc = { version = "=0.2.174", default-features = false }
 
 # FIDO2 (CLI - direct device communication)
 ctap-hid-fido2 = { version = "=3.5.8", default-features = false }
@@ -66,6 +70,7 @@ sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-toki
 
 # JWT
 jsonwebtoken = { version = "=10.2.0", default-features = false, features = ["aws_lc_rs"] }
+
 
 # Error handling
 thiserror = { version = "=2.0.18", default-features = false }
@@ -97,9 +102,9 @@ gethostname = { version = "=1.0.1", default-features = false }
 open = { version = "=5.3.2", default-features = false }
 
 # Crypto
-rand = { version = "=0.9.2", default-features = false, features = ["std", "std_rng"] }
+aws-lc-rs = { version = "=1.12.6", default-features = false }
 base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
-sha2 = { version = "=0.10.9", default-features = false, features = ["std"] }
+hex = { version = "=0.4.3", default-features = false, features = ["std"] }
 
 # URL parsing
 url = { version = "=2.5.8", default-features = false }
@@ -107,6 +112,15 @@ urlencoding = { version = "=2.1.3", default-features = false }
 
 # Secrets (zeroize on drop)
 secrecy = { version = "=0.10.3", default-features = false, features = ["serde"] }
+
+# Constant-time comparison (for secure token comparison)
+subtle = { version = "=2.6.1", default-features = false }
+
+# SSH keys and certificates
+ssh-key = { version = "=0.6.7", default-features = false, features = ["std", "ed25519", "p256", "encryption", "rand_core"] }
+
+# Ed25519 signing (for SSH agent)
+ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["std"] }
 
 # Internal
 vouch-common = { path = "crates/vouch-common" }

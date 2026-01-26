@@ -1,7 +1,7 @@
 //! Vouch CLI - Hardware-backed identity for developers.
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod client;
@@ -56,6 +56,20 @@ enum Commands {
         #[command(subcommand)]
         command: Option<KeysCommands>,
     },
+    /// Obtain credentials for various services.
+    Credential {
+        #[command(subcommand)]
+        command: CredentialCommands,
+    },
+    /// Configure integrations.
+    Setup {
+        #[command(subcommand)]
+        command: SetupCommands,
+    },
+    /// Generate shell completions.
+    Completions(commands::completions::CompletionsArgs),
+    /// Check your Vouch environment for common issues.
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -69,6 +83,48 @@ enum KeysCommands {
         /// Skip confirmation prompt.
         #[arg(short, long)]
         force: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CredentialCommands {
+    /// Obtain temporary AWS credentials.
+    Aws {
+        /// AWS IAM role ARN to assume.
+        #[arg(long)]
+        role: String,
+        /// Session name for the assumed role.
+        #[arg(long)]
+        session_name: Option<String>,
+    },
+    /// Obtain an SSH certificate.
+    Ssh {
+        /// Path to SSH private key (default: ~/.ssh/id_ed25519_vouch).
+        #[arg(long)]
+        key: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SetupCommands {
+    /// Configure AWS CLI/SDK to use Vouch credentials.
+    Aws {
+        /// AWS profile name to configure.
+        #[arg(long, default_value = "vouch")]
+        profile: String,
+        /// AWS IAM role ARN to assume.
+        #[arg(long)]
+        role: String,
+        /// Add the profile to ~/.aws/config.
+        #[arg(long)]
+        add_profile: bool,
+    },
+    /// Configure SSH to use Vouch certificates.
+    Ssh {
+        /// Host patterns to trust with this CA (e.g., "*.example.com").
+        /// If specified, adds entry to ~/.ssh/known_hosts.
+        #[arg(long)]
+        hosts: Option<String>,
     },
 }
 
@@ -106,5 +162,29 @@ async fn main() -> Result<()> {
                 commands::keys::remove(&server, &id, force).await
             }
         },
+        Commands::Credential { command } => match command {
+            CredentialCommands::Aws { role, session_name } => {
+                commands::credential::aws::run(&server, &role, session_name.as_deref()).await
+            }
+            CredentialCommands::Ssh { key } => {
+                commands::credential::ssh::run(&server, key.as_deref()).await
+            }
+        },
+        Commands::Setup { command } => match command {
+            SetupCommands::Aws {
+                profile,
+                role,
+                add_profile,
+            } => commands::setup::aws::run(&profile, &role, add_profile).await,
+            SetupCommands::Ssh { hosts } => {
+                commands::setup::ssh::run(&server, hosts.as_deref()).await
+            }
+        },
+        Commands::Completions(args) => {
+            let mut cmd = Cli::command();
+            commands::completions::run(&args, &mut cmd);
+            Ok(())
+        }
+        Commands::Doctor => commands::doctor::run(&server).await,
     }
 }

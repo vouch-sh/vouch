@@ -49,7 +49,7 @@ check: ## Run cargo check
 ##@ Testing
 
 test: ## Run unit tests
-	$(CARGO) test --test unit
+	$(CARGO) test
 
 ##@ Docker
 

@@ -415,3 +415,49 @@ pub struct ListAuthEventsResponse {
     /// List of authentication events.
     pub events: Vec<AuthEventInfo>,
 }
+
+// ============================================================================
+// SSH Credentials
+// ============================================================================
+
+/// Request to obtain an SSH certificate.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SshCertificateRequest {
+    /// User's SSH public key (OpenSSH format, e.g., "ssh-ed25519 AAAA...").
+    pub public_key: String,
+}
+
+/// Response containing the signed SSH certificate.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SshCertificateResponse {
+    /// Signed SSH certificate (OpenSSH format).
+    pub certificate: String,
+    /// Certificate validity period in seconds.
+    pub valid_for_seconds: u64,
+    /// Principals (usernames) the certificate is valid for.
+    pub principals: Vec<String>,
+    /// Certificate serial number.
+    pub serial: u64,
+}
+
+/// Response containing the SSH CA public key.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct SshCaPublicKeyResponse {
+    /// SSH CA public key (OpenSSH format).
+    pub public_key: String,
+    /// Key comment/identifier.
+    pub comment: String,
+}
+
+// ============================================================================
+// AWS Credentials
+// ============================================================================
+
+/// Response containing an OIDC ID token for AWS STS.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AwsTokenResponse {
+    /// OIDC ID token for use with AWS STS AssumeRoleWithWebIdentity.
+    pub id_token: String,
+    /// Token validity period in seconds.
+    pub expires_in: u64,
+}

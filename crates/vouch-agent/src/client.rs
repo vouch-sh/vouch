@@ -1,7 +1,10 @@
 //! Agent client for CLI communication.
 
 use crate::error::{AgentError, Result};
-use crate::protocol::{NOT_AUTHENTICATED, Request, Response, SESSION_EXPIRED, StoreSessionParams};
+use crate::protocol::{
+    NOT_AUTHENTICATED, Request, Response, SESSION_EXPIRED, StoreSessionParams,
+    StoreSshCredentialsParams,
+};
 use crate::socket::socket_path;
 use crate::state::SessionInfo;
 
@@ -183,6 +186,82 @@ impl AgentClient {
             .as_str()
             .map(ToString::to_string)
             .ok_or_else(|| AgentError::Protocol("invalid token".to_string()))
+    }
+
+    /// Store SSH credentials in the agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AgentError::Protocol` if the request fails.
+    pub async fn store_ssh_credentials(&mut self, key_path: &str, cert_path: &str) -> Result<()> {
+        self.store_ssh_credentials_with_session(key_path, cert_path, None, None)
+            .await
+    }
+
+    /// Store SSH credentials in the agent with session linkage.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AgentError::Protocol` if the request fails.
+    pub async fn store_ssh_credentials_with_session(
+        &mut self,
+        key_path: &str,
+        cert_path: &str,
+        session_expires_at: Option<&str>,
+        server_url: Option<&str>,
+    ) -> Result<()> {
+        let params = StoreSshCredentialsParams {
+            key_path: key_path.to_string(),
+            cert_path: cert_path.to_string(),
+            session_expires_at: session_expires_at.map(String::from),
+            server_url: server_url.map(String::from),
+        };
+
+        let response = self
+            .call("store_ssh_credentials", Some(serde_json::to_value(params)?))
+            .await?;
+
+        if let Some(error) = response.error {
+            return Err(AgentError::Protocol(error.message));
+        }
+
+        Ok(())
+    }
+
+    /// Clear SSH credentials from the agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AgentError::Protocol` if the request fails.
+    pub async fn clear_ssh_credentials(&mut self) -> Result<()> {
+        let response = self.call("clear_ssh_credentials", None).await?;
+
+        if let Some(error) = response.error {
+            return Err(AgentError::Protocol(error.message));
+        }
+
+        Ok(())
+    }
+
+    /// Check if SSH credentials are loaded.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AgentError::Protocol` if the request fails.
+    pub async fn has_ssh_credentials(&mut self) -> Result<bool> {
+        let response = self.call("has_ssh_credentials", None).await?;
+
+        if let Some(error) = response.error {
+            return Err(AgentError::Protocol(error.message));
+        }
+
+        let result = response
+            .result
+            .ok_or_else(|| AgentError::Protocol("missing result".to_string()))?;
+
+        result
+            .as_bool()
+            .ok_or_else(|| AgentError::Protocol("invalid result".to_string()))
     }
 }
 

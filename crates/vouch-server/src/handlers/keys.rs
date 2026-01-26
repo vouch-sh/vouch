@@ -2,6 +2,7 @@
 
 use crate::AppState;
 use crate::db;
+use aws_lc_rs::digest::{self, SHA256};
 use axum::{
     Json,
     extract::{Path, State},
@@ -10,7 +11,6 @@ use axum::{
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{DecodingKey, Validation, decode};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use vouch_common::{ApiError, DeleteKeyResponse, KeyInfo, ListKeysResponse, lookup_device_model};
 
@@ -23,9 +23,8 @@ fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Jso
 
 /// Hash a token for storage/lookup.
 fn hash_token(token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    URL_SAFE_NO_PAD.encode(hasher.finalize())
+    let hash = digest::digest(&SHA256, token.as_bytes());
+    URL_SAFE_NO_PAD.encode(hash.as_ref())
 }
 
 /// Extract and validate session from Authorization header.
@@ -51,7 +50,7 @@ async fn extract_session(
     // Validate JWT
     let claims = decode::<SessionClaims>(
         token,
-        &DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
         &Validation::default(),
     )
     .map_err(|_| {

@@ -33,6 +33,10 @@ pub enum AgentError {
     /// Socket path error.
     #[error("socket path error: {0}")]
     SocketPath(String),
+
+    /// Configuration or daemon lifecycle error.
+    #[error("daemon error: {0}")]
+    Config(String),
 }
 
 /// Result type for agent operations.

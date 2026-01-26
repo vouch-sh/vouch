@@ -18,6 +18,7 @@ vouch-common = { workspace = true }
 vouch-agent = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
+clap_complete = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -30,6 +31,7 @@ inquire = { workspace = true }
 dirs = { workspace = true }
 open = { workspace = true }
 base64 = { workspace = true }
-sha2 = { workspace = true }
+aws-lc-rs = { workspace = true }
 jiff = { workspace = true }
 url = { workspace = true }
+ssh-key = { workspace = true }

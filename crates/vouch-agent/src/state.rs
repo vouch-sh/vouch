@@ -14,7 +14,7 @@ pub struct Session {
     /// User's email address.
     user_email: String,
     /// When the session expires.
-    expires_at: Timestamp,
+    pub expires_at: Timestamp,
     /// When the user authenticated.
     authenticated_at: Timestamp,
 }

@@ -10,7 +10,6 @@ use ctap_hid_fido2::fidokey::get_assertion::GetAssertionArgsBuilder;
 use ctap_hid_fido2::fidokey::make_credential::MakeCredentialArgsBuilder;
 use ctap_hid_fido2::public_key_credential_user_entity::PublicKeyCredentialUserEntity;
 use ctap_hid_fido2::verifier;
-use sha2::{Digest, Sha256};
 
 /// Result of FIDO2 registration (`make_credential`).
 pub struct RegistrationResult {
@@ -224,7 +223,7 @@ impl ClientData {
 
 /// Compute SHA-256 hash.
 fn sha256(data: &[u8]) -> Vec<u8> {
-    let mut hasher = Sha256::new();
-    hasher.update(data);
-    hasher.finalize().to_vec()
+    aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, data)
+        .as_ref()
+        .to_vec()
 }

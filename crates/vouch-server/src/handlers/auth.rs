@@ -3,6 +3,9 @@
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::extractors::ClientInfo;
+use crate::webauthn_verify;
+use aws_lc_rs::digest::{self, SHA256};
+use aws_lc_rs::rand as aws_rand;
 use axum::{
     Json,
     extract::State,
@@ -12,9 +15,8 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use rand::RngCore;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use uuid::Uuid;
 use vouch_common::{
@@ -29,17 +31,22 @@ fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Jso
 }
 
 /// Generate random challenge bytes.
+///
+/// # Panics
+/// Panics if the system RNG fails, which should never happen on a correctly
+/// functioning system. This is acceptable during request handling as an RNG
+/// failure indicates a critical system problem.
+#[allow(clippy::expect_used)]
 fn generate_challenge() -> Vec<u8> {
     let mut challenge = vec![0u8; 32];
-    rand::rng().fill_bytes(&mut challenge);
+    aws_rand::fill(&mut challenge).expect("RNG failure");
     challenge
 }
 
 /// Hash a token for storage.
 fn hash_token(token: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(token.as_bytes());
-    URL_SAFE_NO_PAD.encode(hasher.finalize())
+    let hash = digest::digest(&SHA256, token.as_bytes());
+    URL_SAFE_NO_PAD.encode(hash.as_ref())
 }
 
 // ============================================================================
@@ -173,13 +180,15 @@ pub async fn register_start(
         rp_id: state.config.rp_id.clone(),
     };
 
-    let state_token = reg_state.encode(&state.config.jwt_secret).map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "state_error",
-            &e.to_string(),
-        )
-    })?;
+    let state_token = reg_state
+        .encode(state.config.jwt_secret.expose_secret())
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "state_error",
+                &e.to_string(),
+            )
+        })?;
 
     Ok(Json(RegisterStartResponse {
         challenge,
@@ -200,7 +209,7 @@ pub async fn register_complete(
     tracing::info!("Registration complete");
 
     // Decode state
-    let reg_state = RegistrationState::decode(&req.state, &state.config.jwt_secret)
+    let reg_state = RegistrationState::decode(&req.state, state.config.jwt_secret.expose_secret())
         .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
 
     // For now, we do basic validation and trust the CLI's local verification
@@ -276,13 +285,15 @@ pub async fn login_start(
         rp_id: state.config.rp_id.clone(),
     };
 
-    let state_token = auth_state.encode(&state.config.jwt_secret).map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "state_error",
-            &e.to_string(),
-        )
-    })?;
+    let state_token = auth_state
+        .encode(state.config.jwt_secret.expose_secret())
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "state_error",
+                &e.to_string(),
+            )
+        })?;
 
     Ok(Json(LoginStartResponse {
         challenge,
@@ -308,8 +319,9 @@ pub async fn login_complete(
     let client_ctx = req.client_context.as_ref();
 
     // Decode state (only contains challenge and rp_id)
-    let _auth_state = AuthenticationState::decode(&req.state, &state.config.jwt_secret)
-        .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
+    let auth_state =
+        AuthenticationState::decode(&req.state, state.config.jwt_secret.expose_secret())
+            .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
 
     // Parse user_handle as UUID to identify the user
     let user_id = Uuid::from_slice(&req.user_handle).map_err(|_| {
@@ -396,54 +408,53 @@ pub async fn login_complete(
             json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found")
         })?;
 
-    // For now, trust the CLI's signature verification
-    // In production, verify the signature server-side using webauthn-rs
+    // Server-side WebAuthn signature verification
+    // Build expected origin from RP ID
+    let expected_origin = format!("https://{}", auth_state.rp_id);
+    let expected_challenge = URL_SAFE_NO_PAD.encode(&auth_state.challenge);
 
-    // Update counter (extract from authenticator_data)
-    // The counter is at bytes 33-36 of authenticator_data (big-endian u32)
-    if req.authenticator_data.len() >= 37 {
-        let counter_bytes: [u8; 4] = req
-            .authenticator_data
-            .get(33..37)
-            .ok_or_else(|| {
-                log_failure(&user.id, Some(&authenticator.id), "invalid_auth_data");
-                json_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_auth_data",
-                    "Invalid authenticator data",
-                )
-            })?
-            .try_into()
-            .map_err(|_| {
-                log_failure(&user.id, Some(&authenticator.id), "invalid_auth_data");
-                json_error(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_auth_data",
-                    "Invalid authenticator data",
-                )
-            })?;
-        let new_counter = i64::from(u32::from_be_bytes(counter_bytes));
+    // Get stored counter from authenticator
+    let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
 
-        // Check counter is increasing
-        if new_counter <= authenticator.counter {
-            log_failure(&user.id, Some(&authenticator.id), "counter_not_increasing");
-            return Err(json_error(
-                StatusCode::BAD_REQUEST,
-                "counter_error",
-                "Counter not increasing - possible cloned authenticator",
-            ));
-        }
+    // Verify the WebAuthn assertion server-side
+    let verification_result = webauthn_verify::verify_assertion(
+        &req.authenticator_data,
+        &req.client_data_json,
+        &req.signature,
+        &authenticator.public_key,
+        &auth_state.rp_id,
+        &expected_challenge,
+        &expected_origin,
+        stored_counter,
+        true, // require_user_verification
+    )
+    .map_err(|e| {
+        log_failure(&user.id, Some(&authenticator.id), &e.to_string());
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "signature_verification_failed",
+            &e.to_string(),
+        )
+    })?;
 
-        db::update_authenticator_counter(&state.db, &authenticator.id, new_counter)
-            .await
-            .map_err(|e| {
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    &e.to_string(),
-                )
-            })?;
-    }
+    tracing::info!(
+        "WebAuthn assertion verified for user {}: counter={}, uv={}",
+        user.email,
+        verification_result.counter,
+        verification_result.user_verified
+    );
+
+    // Update counter in database
+    let new_counter = i64::from(verification_result.counter);
+    db::update_authenticator_counter(&state.db, &authenticator.id, new_counter)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?;
 
     // Generate session token
     let now = Timestamp::now();
@@ -474,7 +485,7 @@ pub async fn login_complete(
     let token = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+        &EncodingKey::from_secret(state.config.jwt_secret_bytes()),
     )
     .map_err(|e| {
         json_error(
@@ -552,7 +563,7 @@ pub async fn status(
     // Validate token
     let claims = match decode::<SessionClaims>(
         token,
-        &DecodingKey::from_secret(state.config.jwt_secret.as_bytes()),
+        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
         &Validation::default(),
     ) {
         Ok(data) => data.claims,

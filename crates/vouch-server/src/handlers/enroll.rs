@@ -4,6 +4,7 @@ use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::extractors::ClientInfo;
 use askama::Template;
+use aws_lc_rs::rand as aws_rand;
 use axum::{
     Form, Json,
     extract::{Query, State},
@@ -14,7 +15,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
-use rand::RngCore;
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -186,9 +187,13 @@ impl BrowserRegistrationState {
 // ============================================================================
 
 /// Generate random bytes.
+///
+/// # Panics
+/// Panics if the system RNG fails.
+#[allow(clippy::expect_used)]
 fn generate_random_bytes(len: usize) -> Vec<u8> {
     let mut bytes = vec![0u8; len];
-    rand::rng().fill_bytes(&mut bytes);
+    aws_rand::fill(&mut bytes).expect("RNG failure");
     bytes
 }
 
@@ -454,11 +459,7 @@ pub async fn oidc_callback(
         .oidc_client_id
         .as_ref()
         .map_or("", String::as_str);
-    let client_secret = state
-        .config
-        .oidc_client_secret
-        .as_ref()
-        .map_or("", String::as_str);
+    let client_secret = state.config.oidc_client_secret_exposed().unwrap_or("");
     let redirect_uri = format!("{}/oauth/callback", state.config.verification_base_url);
 
     let token_url = format!(
@@ -742,13 +743,15 @@ pub async fn browser_register_start(
         webauthn_state,
     };
 
-    let state_token = reg_state.encode(&state.config.jwt_secret).map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "state_error",
-            &e.to_string(),
-        )
-    })?;
+    let state_token = reg_state
+        .encode(state.config.jwt_secret.expose_secret())
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "state_error",
+                &e.to_string(),
+            )
+        })?;
 
     // Extract challenge from webauthn-rs generated options
     // The challenge is exposed via the public_key.challenge field
@@ -779,8 +782,9 @@ pub async fn browser_register_complete(
     let client_info = ClientInfo::from_headers(&headers);
 
     // Decode state containing webauthn verification state
-    let reg_state = BrowserRegistrationState::decode(&req.state, &state.config.jwt_secret)
-        .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
+    let reg_state =
+        BrowserRegistrationState::decode(&req.state, state.config.jwt_secret.expose_secret())
+            .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
 
     // Decode credential data from base64url
     let credential_id_bytes = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|e| {
