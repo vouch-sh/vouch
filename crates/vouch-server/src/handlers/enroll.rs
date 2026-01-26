@@ -138,6 +138,18 @@ struct IdTokenClaims {
     email_verified: bool,
     #[allow(dead_code)]
     nonce: Option<String>,
+    /// Google Workspace hosted domain (e.g., "acme.com").
+    /// Only present for Workspace accounts, not consumer Gmail.
+    hd: Option<String>,
+}
+
+/// Data passed through OIDC state for enrollment.
+/// Encoded as JSON in the nonce field of oidc_states table.
+#[derive(Debug, Serialize, Deserialize)]
+struct EnrollmentData {
+    email: String,
+    /// Google Workspace hosted domain (None for personal accounts like gmail.com).
+    hd: Option<String>,
 }
 
 /// Client data JSON structure from `WebAuthn` response.
@@ -575,17 +587,23 @@ pub async fn oidc_callback(
         }
     }
 
-    // Store email in state for WebAuthn registration
-    // Update the OIDC state to include the email (we'll use a new state token)
+    // Store enrollment data (email + hd) in state for WebAuthn registration
     let new_state = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
     let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
 
-    // Create new state with email embedded
+    // Encode enrollment data as JSON
+    let enrollment_data = EnrollmentData {
+        email: claims.email.clone(),
+        hd: claims.hd.clone(),
+    };
+    let enrollment_json = serde_json::to_string(&enrollment_data).unwrap_or_default();
+
+    // Create new state with enrollment data embedded in nonce field
     if let Err(e) = db::create_oidc_state(
         &state.db,
         &new_state,
         &stored_state.device_auth_id,
-        &claims.email, // Store email in nonce field
+        &enrollment_json,
         &state_expires.to_string(),
     )
     .await
@@ -680,24 +698,55 @@ pub async fn browser_register_start(
         ));
     }
 
-    // Get email from nonce field (set during OIDC callback)
-    let user_email = if oidc_state.nonce.is_empty() {
+    // Get enrollment data from nonce field (set during OIDC callback)
+    let (user_email, hosted_domain) = if oidc_state.nonce.is_empty() {
         // Non-OIDC flow - use a placeholder email for now
-        "user@localhost".to_string()
+        ("user@localhost".to_string(), None)
     } else {
-        oidc_state.nonce.clone()
+        // Try to parse as EnrollmentData JSON, fall back to plain email for backwards compatibility
+        match serde_json::from_str::<EnrollmentData>(&oidc_state.nonce) {
+            Ok(data) => (data.email, data.hd),
+            Err(_) => (oidc_state.nonce.clone(), None),
+        }
     };
 
-    // Create or get user
-    let user = db::upsert_user(&state.db, &user_email, None)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?;
+    // Handle organization based on hosted domain
+    let (org_id, is_first_user) = if let Some(domain) = &hosted_domain {
+        // Workspace user - get or create organization
+        let (org, is_new) = db::get_or_create_org_by_domain(&state.db, domain, None, None)
+            .await
+            .map_err(|e| {
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    &e.to_string(),
+                )
+            })?;
+        (Some(org.id), is_new)
+    } else {
+        // Personal account (e.g., gmail.com) - no organization
+        (None, false)
+    };
+
+    // First user from a domain becomes the org admin
+    let is_org_admin = is_first_user && org_id.is_some();
+
+    // Create or get user with organization
+    let user = db::upsert_user_with_org(
+        &state.db,
+        &user_email,
+        None,
+        org_id.as_deref(),
+        is_org_admin,
+    )
+    .await
+    .map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            &e.to_string(),
+        )
+    })?;
 
     let user_id = Uuid::parse_str(&user.id).map_err(|e| {
         json_error(
@@ -963,4 +1012,115 @@ fn extract_aaguid_from_attestation(attestation: &[u8]) -> Option<String> {
 
     // Extract AAGUID from authenticator data
     vouch_common::extract_aaguid_from_auth_data(auth_data)
+}
+
+// ============================================================================
+// Direct Enrollment (Browser-only, no CLI)
+// ============================================================================
+
+/// Marker for direct enrollment (no CLI device authorization)
+const DIRECT_ENROLL_MARKER: &str = "direct-enroll";
+
+/// Start direct browser enrollment (no CLI required).
+/// GET /enroll/start
+///
+/// This initiates OIDC authentication directly from the browser,
+/// without requiring the CLI to create a device authorization request.
+/// After successful enrollment, the user can download the CLI and login.
+pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response {
+    // Check if OIDC is configured
+    if !state.config.oidc_configured() {
+        return ErrorTemplate {
+            title: "Not Configured".to_string(),
+            message: "Identity provider is not configured. Please contact your administrator."
+                .to_string(),
+            back_url: Some("/".to_string()),
+        }
+        .into_response();
+    }
+
+    let now = Timestamp::now();
+
+    // Create a "virtual" device auth request for direct enrollment
+    // This allows us to reuse the existing OIDC callback flow
+    let expires_at = now
+        .checked_add(Span::new().minutes(10))
+        .unwrap_or(now)
+        .to_string();
+
+    let device_auth_id = match db::create_device_auth_request(
+        &state.db,
+        DIRECT_ENROLL_MARKER, // marker instead of real device code hash
+        DIRECT_ENROLL_MARKER, // marker instead of real user code
+        &expires_at,
+        5,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!("Failed to create direct enrollment request: {}", e);
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to start enrollment. Please try again.".to_string(),
+                back_url: Some("/".to_string()),
+            }
+            .into_response();
+        }
+    };
+
+    // Build OIDC authorization URL
+    let oidc_issuer = state
+        .config
+        .oidc_issuer_url
+        .as_ref()
+        .map_or("", String::as_str);
+    let client_id = state
+        .config
+        .oidc_client_id
+        .as_ref()
+        .map_or("", String::as_str);
+
+    // Generate state and nonce
+    let oidc_state = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
+    let nonce = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
+
+    // Store state
+    let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
+
+    if let Err(e) = db::create_oidc_state(
+        &state.db,
+        &oidc_state,
+        &device_auth_id,
+        &nonce,
+        &state_expires.to_string(),
+    )
+    .await
+    {
+        tracing::error!("Failed to create OIDC state: {}", e);
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Failed to start enrollment. Please try again.".to_string(),
+            back_url: Some("/".to_string()),
+        }
+        .into_response();
+    }
+
+    // Build authorization URL
+    let redirect_uri = format!("{}/oauth/callback", state.config.verification_base_url);
+    let auth_url = format!(
+        "{}/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid%20email%20profile&state={}&nonce={}",
+        oidc_issuer.trim_end_matches('/'),
+        urlencoding::encode(client_id),
+        urlencoding::encode(&redirect_uri),
+        oidc_state,
+        nonce
+    );
+
+    Redirect::to(&auth_url).into_response()
+}
+
+/// Check if a device auth request is for direct enrollment.
+pub fn is_direct_enrollment(device_auth: &db::DeviceAuthRequest) -> bool {
+    device_auth.user_code == DIRECT_ENROLL_MARKER
 }

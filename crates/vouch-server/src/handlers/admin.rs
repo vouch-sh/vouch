@@ -204,34 +204,79 @@ fn is_admin_authorized(state: &AppState, query: &AdminQuery) -> bool {
     false
 }
 
+/// Admin authorization result with context.
+pub struct AdminAuthResult {
+    /// Whether the admin is authorized.
+    pub authorized: bool,
+    /// Bootstrap token if used (None for cookie auth).
+    pub token: Option<String>,
+    /// Admin email if authenticated via cookie.
+    pub admin_email: Option<String>,
+    /// Organization ID if admin is scoped to an org (None for global admin).
+    pub org_id: Option<String>,
+    /// Whether this is a global admin (bootstrap token or config-listed email).
+    pub is_global_admin: bool,
+}
+
 /// Check if the request is authorized for admin access (async version with cookie support).
-#[allow(dead_code)]
 async fn is_admin_authorized_async(
     state: &AppState,
     query: &AdminQuery,
     headers: &HeaderMap,
-) -> (bool, Option<String>) {
-    // Check bootstrap token first
+) -> AdminAuthResult {
+    // Check bootstrap token first (global admin)
     if let Some(token) = &query.token
         && state.config.verify_bootstrap_token(token)
     {
-        return (true, query.token.clone());
+        return AdminAuthResult {
+            authorized: true,
+            token: query.token.clone(),
+            admin_email: None,
+            org_id: None,
+            is_global_admin: true,
+        };
     }
 
     // Check admin session cookie
     if let Some(email) = get_admin_session_from_cookie(state, headers).await {
-        // Verify email is in admin list
-        if state
+        // Check if email is in global admin list
+        let is_global = state
             .config
             .admin_emails
             .iter()
-            .any(|e| e.eq_ignore_ascii_case(&email))
-        {
-            return (true, None);
+            .any(|e| e.eq_ignore_ascii_case(&email));
+
+        if is_global {
+            return AdminAuthResult {
+                authorized: true,
+                token: None,
+                admin_email: Some(email),
+                org_id: None,
+                is_global_admin: true,
+            };
+        }
+
+        // Check if user is an org admin
+        if let Ok(Some(user)) = db::get_user_by_email(&state.db, &email).await {
+            if user.is_org_admin {
+                return AdminAuthResult {
+                    authorized: true,
+                    token: None,
+                    admin_email: Some(email),
+                    org_id: user.org_id,
+                    is_global_admin: false,
+                };
+            }
         }
     }
 
-    (false, None)
+    AdminAuthResult {
+        authorized: false,
+        token: None,
+        admin_email: None,
+        org_id: None,
+        is_global_admin: false,
+    }
 }
 
 /// Extract admin email from session cookie if valid.
@@ -563,15 +608,30 @@ pub async fn setup_test_oidc(
 /// GET /admin/users
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<AdminQuery>,
 ) -> Response {
-    if !is_admin_authorized(&state, &query) {
+    let auth = is_admin_authorized_async(&state, &query, &headers).await;
+
+    if !auth.authorized {
         return AdminUnauthorizedTemplate.into_response();
     }
 
-    let token = query.token.as_deref().unwrap_or("").to_string();
+    let token = auth.token.as_deref().unwrap_or("").to_string();
 
-    let users = match db::list_users_with_auth_count(&state.db).await {
+    // Scope users by organization for non-global admins
+    let users = if auth.is_global_admin {
+        // Global admin sees all users
+        db::list_users_with_auth_count(&state.db).await
+    } else if let Some(org_id) = &auth.org_id {
+        // Org admin sees only their org's users
+        db::list_users_with_auth_count_by_org(&state.db, org_id).await
+    } else {
+        // Personal account admin (shouldn't happen, but handle gracefully)
+        Ok(vec![])
+    };
+
+    let users = match users {
         Ok(u) => u,
         Err(e) => {
             tracing::error!("Failed to list users: {}", e);
@@ -593,14 +653,33 @@ pub async fn list_users(
 /// POST /admin/users/:id/delete
 pub async fn delete_user(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Query(query): Query<AdminQuery>,
     Path(user_id): Path<String>,
 ) -> Response {
-    if !is_admin_authorized(&state, &query) {
+    let auth = is_admin_authorized_async(&state, &query, &headers).await;
+
+    if !auth.authorized {
         return AdminUnauthorizedTemplate.into_response();
     }
 
-    let token = query.token.as_deref().unwrap_or("").to_string();
+    let token = auth.token.as_deref().unwrap_or("").to_string();
+
+    // For non-global admins, verify the user belongs to their org
+    if !auth.is_global_admin {
+        if let Ok(Some(target_user)) = db::get_user_by_id(&state.db, &user_id).await {
+            if target_user.org_id != auth.org_id {
+                return AdminMessageTemplate {
+                    page_title: "Error".to_string(),
+                    title: "Unauthorized".to_string(),
+                    message: "You can only delete users from your organization.".to_string(),
+                    back_url: format!("/admin/users?token={token}"),
+                    is_error: true,
+                }
+                .into_response();
+            }
+        }
+    }
 
     if let Err(e) = db::delete_user(&state.db, &user_id).await {
         tracing::error!("Failed to delete user: {}", e);

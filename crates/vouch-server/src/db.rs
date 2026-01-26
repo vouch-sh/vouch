@@ -12,6 +12,20 @@ pub struct User {
     pub email: String,
     #[allow(dead_code)]
     pub name: Option<String>,
+    /// Organization ID (NULL for personal accounts like gmail.com).
+    pub org_id: Option<String>,
+    /// Whether this user is an admin of their organization.
+    pub is_org_admin: bool,
+}
+
+/// Organization record for domain-based multi-tenancy.
+#[derive(Debug, sqlx::FromRow)]
+pub struct Organization {
+    pub id: String,
+    pub domain: String,
+    pub name: Option<String>,
+    pub created_at: String,
+    pub created_by_user_id: Option<String>,
 }
 
 /// Authenticator (credential) record.
@@ -56,10 +70,45 @@ pub async fn upsert_user(pool: &SqlitePool, email: &str, name: Option<&str>) -> 
         .await?;
 
     // Fetch the user
-    let user = sqlx::query_as::<_, User>("SELECT id, email, name FROM users WHERE email = ?")
-        .bind(email)
-        .fetch_one(pool)
-        .await?;
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, email, name, org_id, is_org_admin FROM users WHERE email = ?",
+    )
+    .bind(email)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(user)
+}
+
+/// Create or get a user by email, associating them with an organization.
+pub async fn upsert_user_with_org(
+    pool: &SqlitePool,
+    email: &str,
+    name: Option<&str>,
+    org_id: Option<&str>,
+    is_org_admin: bool,
+) -> Result<User> {
+    let id = Uuid::new_v4().to_string();
+
+    // Try to insert with org info, ignore if exists
+    sqlx::query(
+        "INSERT OR IGNORE INTO users (id, email, name, org_id, is_org_admin) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(email)
+    .bind(name)
+    .bind(org_id)
+    .bind(is_org_admin)
+    .execute(pool)
+    .await?;
+
+    // Fetch the user
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, email, name, org_id, is_org_admin FROM users WHERE email = ?",
+    )
+    .bind(email)
+    .fetch_one(pool)
+    .await?;
 
     Ok(user)
 }
@@ -67,20 +116,24 @@ pub async fn upsert_user(pool: &SqlitePool, email: &str, name: Option<&str>) -> 
 /// Get a user by email.
 #[allow(dead_code)]
 pub async fn get_user_by_email(pool: &SqlitePool, email: &str) -> Result<Option<User>> {
-    let user = sqlx::query_as::<_, User>("SELECT id, email, name FROM users WHERE email = ?")
-        .bind(email)
-        .fetch_optional(pool)
-        .await?;
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, email, name, org_id, is_org_admin FROM users WHERE email = ?",
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await?;
 
     Ok(user)
 }
 
 /// Get a user by ID.
 pub async fn get_user_by_id(pool: &SqlitePool, user_id: &str) -> Result<Option<User>> {
-    let user = sqlx::query_as::<_, User>("SELECT id, email, name FROM users WHERE id = ?")
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?;
+    let user = sqlx::query_as::<_, User>(
+        "SELECT id, email, name, org_id, is_org_admin FROM users WHERE id = ?",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
 
     Ok(user)
 }
@@ -608,13 +661,16 @@ pub struct UserWithAuthCount {
     pub name: Option<String>,
     pub created_at: String,
     pub authenticator_count: i64,
+    pub org_id: Option<String>,
+    pub is_org_admin: bool,
 }
 
 /// List all users with their authenticator counts.
 pub async fn list_users_with_auth_count(pool: &SqlitePool) -> Result<Vec<UserWithAuthCount>> {
     let users = sqlx::query_as::<_, UserWithAuthCount>(
         "SELECT u.id, u.email, u.name, u.created_at,
-                (SELECT COUNT(*) FROM authenticators a WHERE a.user_id = u.id) as authenticator_count
+                (SELECT COUNT(*) FROM authenticators a WHERE a.user_id = u.id) as authenticator_count,
+                u.org_id, u.is_org_admin
          FROM users u
          ORDER BY u.email",
     )
@@ -622,6 +678,138 @@ pub async fn list_users_with_auth_count(pool: &SqlitePool) -> Result<Vec<UserWit
     .await?;
 
     Ok(users)
+}
+
+/// List users in a specific organization with their authenticator counts.
+pub async fn list_users_with_auth_count_by_org(
+    pool: &SqlitePool,
+    org_id: &str,
+) -> Result<Vec<UserWithAuthCount>> {
+    let users = sqlx::query_as::<_, UserWithAuthCount>(
+        "SELECT u.id, u.email, u.name, u.created_at,
+                (SELECT COUNT(*) FROM authenticators a WHERE a.user_id = u.id) as authenticator_count,
+                u.org_id, u.is_org_admin
+         FROM users u
+         WHERE u.org_id = ?
+         ORDER BY u.email",
+    )
+    .bind(org_id)
+    .fetch_all(pool)
+    .await?;
+
+    Ok(users)
+}
+
+// ============================================================================
+// Organization Management
+// ============================================================================
+
+/// Get an organization by domain.
+pub async fn get_org_by_domain(pool: &SqlitePool, domain: &str) -> Result<Option<Organization>> {
+    let org = sqlx::query_as::<_, Organization>(
+        "SELECT id, domain, name, created_at, created_by_user_id FROM organizations WHERE domain = ?",
+    )
+    .bind(domain)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(org)
+}
+
+/// Get an organization by ID.
+pub async fn get_org_by_id(pool: &SqlitePool, org_id: &str) -> Result<Option<Organization>> {
+    let org = sqlx::query_as::<_, Organization>(
+        "SELECT id, domain, name, created_at, created_by_user_id FROM organizations WHERE id = ?",
+    )
+    .bind(org_id)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(org)
+}
+
+/// Create a new organization.
+pub async fn create_organization(
+    pool: &SqlitePool,
+    domain: &str,
+    name: Option<&str>,
+    created_by_user_id: Option<&str>,
+) -> Result<Organization> {
+    let id = Uuid::new_v4().to_string();
+
+    sqlx::query(
+        "INSERT INTO organizations (id, domain, name, created_by_user_id) VALUES (?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(domain)
+    .bind(name)
+    .bind(created_by_user_id)
+    .execute(pool)
+    .await?;
+
+    let org = sqlx::query_as::<_, Organization>(
+        "SELECT id, domain, name, created_at, created_by_user_id FROM organizations WHERE id = ?",
+    )
+    .bind(&id)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(org)
+}
+
+/// Get or create an organization by domain.
+/// Returns (org, is_new) tuple where is_new indicates if the org was just created.
+pub async fn get_or_create_org_by_domain(
+    pool: &SqlitePool,
+    domain: &str,
+    name: Option<&str>,
+    created_by_user_id: Option<&str>,
+) -> Result<(Organization, bool)> {
+    // Check if org exists
+    if let Some(org) = get_org_by_domain(pool, domain).await? {
+        return Ok((org, false));
+    }
+
+    // Create new org
+    let org = create_organization(pool, domain, name, created_by_user_id).await?;
+    Ok((org, true))
+}
+
+/// Update a user's organization membership.
+pub async fn set_user_org(
+    pool: &SqlitePool,
+    user_id: &str,
+    org_id: Option<&str>,
+    is_org_admin: bool,
+) -> Result<()> {
+    sqlx::query("UPDATE users SET org_id = ?, is_org_admin = ? WHERE id = ?")
+        .bind(org_id)
+        .bind(is_org_admin)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Count users in an organization.
+pub async fn count_users_in_org(pool: &SqlitePool, org_id: &str) -> Result<i64> {
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE org_id = ?")
+        .bind(org_id)
+        .fetch_one(pool)
+        .await?;
+
+    Ok(row.0)
+}
+
+/// List all organizations.
+pub async fn list_organizations(pool: &SqlitePool) -> Result<Vec<Organization>> {
+    let orgs = sqlx::query_as::<_, Organization>(
+        "SELECT id, domain, name, created_at, created_by_user_id FROM organizations ORDER BY domain",
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(orgs)
 }
 
 /// Delete a user and all associated data.
