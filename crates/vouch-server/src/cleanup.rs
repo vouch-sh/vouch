@@ -103,6 +103,17 @@ pub async fn run_cleanup(
         }
     }
 
+    // Clean up expired enrollment sessions
+    match db::delete_expired_enrollment_sessions(db).await {
+        Ok(count) if count > 0 => {
+            tracing::info!("Cleaned up {count} expired enrollment sessions");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("Failed to clean up expired enrollment sessions: {e}");
+        }
+    }
+
     // Clean up old auth events
     if let Ok(cutoff) = now.checked_sub(auth_events_retention_days.days()) {
         let cutoff_str = cutoff.to_string();

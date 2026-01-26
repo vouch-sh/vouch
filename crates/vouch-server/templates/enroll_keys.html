@@ -63,7 +63,6 @@
 
 {% block scripts %}
 <script>
-    const stateToken = '{{ state }}';
     const rpId = '{{ rp_id }}';
     let keysData = [];
 
@@ -74,7 +73,9 @@
         showLoading();
 
         try {
-            const response = await fetch(`/enroll/keys?state=${encodeURIComponent(stateToken)}`);
+            const response = await fetch('/enroll/keys/api', {
+                credentials: 'same-origin'
+            });
 
             if (!response.ok) {
                 const err = await response.json();
@@ -161,9 +162,10 @@
         }
 
         try {
-            const response = await fetch(`/enroll/keys/${keyId}?state=${encodeURIComponent(stateToken)}`, {
+            const response = await fetch(`/enroll/keys/${keyId}`, {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
                 body: JSON.stringify({ name: newName })
             });
 
@@ -199,8 +201,9 @@
         }
 
         try {
-            const response = await fetch(`/enroll/keys/${keyId}?state=${encodeURIComponent(stateToken)}`, {
-                method: 'DELETE'
+            const response = await fetch(`/enroll/keys/${keyId}`, {
+                method: 'DELETE',
+                credentials: 'same-origin'
             });
 
             if (!response.ok) {
@@ -222,11 +225,11 @@
         btn.textContent = 'Starting registration...';
 
         try {
-            // Get registration options
+            // Get registration options (no body needed - auth via cookie)
             const startResp = await fetch('/enroll/webauthn/start', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ oidc_state: stateToken })
+                credentials: 'same-origin'
             });
 
             if (!startResp.ok) {
@@ -240,6 +243,13 @@
             // Convert base64url to ArrayBuffer
             const challenge = base64urlToBuffer(options.challenge);
             const userId = base64urlToBuffer(options.user_id);
+
+            // Build excludeCredentials from server response
+            const excludeCredentials = (options.exclude_credential_ids || []).map(id => ({
+                type: 'public-key',
+                id: base64urlToBuffer(id),
+                transports: ['usb', 'nfc']
+            }));
 
             // Create credential
             const credential = await navigator.credentials.create({
@@ -255,6 +265,7 @@
                         type: 'public-key',
                         alg: alg
                     })),
+                    excludeCredentials: excludeCredentials,
                     authenticatorSelection: {
                         authenticatorAttachment: 'cross-platform',
                         userVerification: 'required',
@@ -272,6 +283,7 @@
             const completeResp = await fetch('/enroll/webauthn/complete', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
+                credentials: 'same-origin',
                 body: JSON.stringify({
                     state: options.state,
                     credential_id: bufferToBase64url(credential.rawId),
@@ -289,7 +301,10 @@
             loadKeys();
 
         } catch (err) {
-            if (err.name === 'NotAllowedError') {
+            if (err.name === 'InvalidStateError') {
+                // This error occurs when the key is already registered
+                alert('This security key is already registered. Please use a different key.');
+            } else if (err.name === 'NotAllowedError') {
                 alert('Registration was cancelled or timed out.');
             } else {
                 alert('Registration failed: ' + err.message);

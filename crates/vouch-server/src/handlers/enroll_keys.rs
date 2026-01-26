@@ -1,31 +1,25 @@
-//! Key management handlers during enrollment (using OIDC state authentication).
+//! Key management handlers during enrollment (using cookie-based authentication).
 //!
 //! These endpoints allow users to manage their security keys during the enrollment flow,
-//! before they have a session token. Authentication is via the OIDC state token.
+//! before they have a session token. Authentication is via the enrollment session cookie.
 
 use crate::AppState;
 use crate::db;
 use axum::{
     Json,
-    extract::{Path, Query, State},
-    http::StatusCode,
+    extract::{Path, State},
+    http::{HeaderMap, StatusCode},
 };
-use serde::Deserialize;
 use std::sync::Arc;
 use vouch_common::{
     ApiError, DeleteKeyResponse, KeyInfo, ListKeysResponse, RenameKeyRequest, RenameKeyResponse,
     lookup_device_model,
 };
 
+use super::enroll::get_enrollment_session_from_cookie;
 use super::json_error;
 
-/// Query parameters containing the OIDC state token.
-#[derive(Debug, Deserialize)]
-pub struct StateQuery {
-    pub state: String,
-}
-
-/// Data extracted from enrollment state.
+/// Data extracted from enrollment session.
 #[derive(Debug)]
 struct EnrollmentAuth {
     user_id: String,
@@ -33,90 +27,36 @@ struct EnrollmentAuth {
     email: String,
 }
 
-/// Enrollment data embedded in OIDC state nonce field.
-#[derive(Debug, Deserialize)]
-struct EnrollmentData {
-    email: String,
-    #[allow(dead_code)]
-    hd: Option<String>,
-}
-
-/// Validate OIDC state and extract user info.
-async fn validate_enrollment_state(
+/// Validate enrollment session from cookie and extract user info.
+async fn validate_enrollment_cookie(
     state: &AppState,
-    oidc_state: &str,
+    headers: &HeaderMap,
 ) -> Result<EnrollmentAuth, (StatusCode, Json<ApiError>)> {
-    // Look up the OIDC state
-    let stored_state = db::get_oidc_state(&state.db, oidc_state)
+    // Get enrollment session from cookie
+    let session = get_enrollment_session_from_cookie(state, headers)
         .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
         .ok_or_else(|| {
             json_error(
                 StatusCode::UNAUTHORIZED,
-                "invalid_state",
-                "Invalid or expired state token",
+                "invalid_session",
+                "Invalid or expired enrollment session",
             )
         })?;
 
-    // Check if expired
-    let now = jiff::Timestamp::now();
-    let expires_at: jiff::Timestamp = stored_state.expires_at.parse().map_err(|_| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "time_error",
-            "Invalid timestamp",
-        )
-    })?;
-
-    if now > expires_at {
-        return Err(json_error(
-            StatusCode::UNAUTHORIZED,
-            "expired_state",
-            "State has expired",
-        ));
-    }
-
-    // Extract email from enrollment data stored in nonce
-    let email = if stored_state.nonce.is_empty() {
-        "user@localhost".to_string()
-    } else {
-        match serde_json::from_str::<EnrollmentData>(&stored_state.nonce) {
-            Ok(data) => data.email,
-            Err(_) => stored_state.nonce.clone(),
-        }
-    };
-
-    // Look up user by email
-    let user = db::get_user_by_email(&state.db, &email)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
-
     Ok(EnrollmentAuth {
-        user_id: user.id,
-        email,
+        user_id: session.user_id,
+        email: session.user_email,
     })
 }
 
 /// List all registered keys for the user (during enrollment).
-/// GET /enroll/keys?state=<oidc_state>
+/// GET /enroll/keys/api
+/// Authentication is via cookie.
 pub async fn list_keys(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<StateQuery>,
+    headers: HeaderMap,
 ) -> Result<Json<ListKeysResponse>, (StatusCode, Json<ApiError>)> {
-    let auth = validate_enrollment_state(&state, &query.state).await?;
+    let auth = validate_enrollment_cookie(&state, &headers).await?;
 
     // Get all authenticators for this user
     let authenticators = db::get_authenticators_for_user(&state.db, &auth.user_id)
@@ -153,14 +93,15 @@ pub async fn list_keys(
 }
 
 /// Rename a security key (during enrollment).
-/// PATCH /enroll/keys/{id}?state=<oidc_state>
+/// PATCH /enroll/keys/{id}
+/// Authentication is via cookie.
 pub async fn rename_key(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(key_id): Path<String>,
-    Query(query): Query<StateQuery>,
     Json(req): Json<RenameKeyRequest>,
 ) -> Result<Json<RenameKeyResponse>, (StatusCode, Json<ApiError>)> {
-    let auth = validate_enrollment_state(&state, &query.state).await?;
+    let auth = validate_enrollment_cookie(&state, &headers).await?;
 
     // Validate name
     let name = req.name.trim();
@@ -224,13 +165,14 @@ pub async fn rename_key(
 }
 
 /// Delete a security key (during enrollment).
-/// DELETE /enroll/keys/{id}?state=<oidc_state>
+/// DELETE /enroll/keys/{id}
+/// Authentication is via cookie.
 pub async fn delete_key(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(key_id): Path<String>,
-    Query(query): Query<StateQuery>,
 ) -> Result<Json<DeleteKeyResponse>, (StatusCode, Json<ApiError>)> {
-    let auth = validate_enrollment_state(&state, &query.state).await?;
+    let auth = validate_enrollment_cookie(&state, &headers).await?;
 
     // Get the authenticator to verify ownership
     let authenticator = db::get_authenticator_by_id(&state.db, &key_id)

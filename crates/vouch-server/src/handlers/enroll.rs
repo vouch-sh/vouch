@@ -1,14 +1,17 @@
 //! Enrollment handlers for browser-based device authorization flow.
 
 use crate::AppState;
-use crate::db::{self, AuthEventParams, AuthEventType};
+use crate::db::{self, AuthEventParams, AuthEventType, EnrollmentSession};
 use crate::extractors::ClientInfo;
 use crate::impl_template_response;
 use askama::Template;
+use aws_lc_rs::digest::{self, SHA256};
+use aws_lc_rs::rand as aws_rand;
 use axum::{
     Form, Json,
+    body::Body,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
 use base64::Engine;
@@ -25,6 +28,91 @@ use vouch_common::{
 };
 
 use super::{generate_random_bytes, json_error};
+
+// ============================================================================
+// Enrollment Session Cookie Management
+// ============================================================================
+
+/// Enrollment session cookie name.
+const ENROLL_COOKIE_NAME: &str = "vouch_enroll";
+
+/// Enrollment session duration (30 minutes).
+const ENROLL_SESSION_MINUTES: i64 = 30;
+
+/// Create an enrollment session cookie.
+/// Returns the Set-Cookie header value, or None on failure.
+async fn create_enrollment_session_cookie(
+    state: &AppState,
+    user_id: &str,
+    user_email: &str,
+    device_auth_id: Option<&str>,
+) -> Option<String> {
+    // Generate random token
+    let mut token_bytes = [0u8; 32];
+    aws_rand::fill(&mut token_bytes).ok()?;
+    let token = URL_SAFE_NO_PAD.encode(token_bytes);
+
+    // Hash for storage
+    let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
+
+    // Calculate expiration
+    let expires = Timestamp::now()
+        .checked_add(Span::new().minutes(ENROLL_SESSION_MINUTES))
+        .ok()?;
+    let expires_str = expires.strftime("%Y-%m-%d %H:%M:%S").to_string();
+
+    // Store session
+    db::create_enrollment_session(
+        &state.db,
+        user_id,
+        user_email,
+        &token_hash,
+        device_auth_id,
+        &expires_str,
+    )
+    .await
+    .ok()?;
+
+    // Build cookie with security attributes
+    Some(format!(
+        "{}={}; Path=/enroll; HttpOnly; Secure; SameSite=Strict; Max-Age={}",
+        ENROLL_COOKIE_NAME,
+        token,
+        ENROLL_SESSION_MINUTES * 60
+    ))
+}
+
+/// Get enrollment session from cookie.
+/// Returns the session if valid, None otherwise.
+pub async fn get_enrollment_session_from_cookie(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Option<EnrollmentSession> {
+    // Get Cookie header
+    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
+
+    // Parse cookies to find vouch_enroll
+    for cookie in cookie_header.split(';') {
+        let cookie = cookie.trim();
+        if let Some(value) = cookie.strip_prefix(&format!("{}=", ENROLL_COOKIE_NAME)) {
+            // Hash the token to look up session
+            let token_hash = hex::encode(digest::digest(&SHA256, value.as_bytes()));
+
+            // Look up session and check if valid
+            if let Ok(Some(session)) =
+                db::get_enrollment_session_by_token_hash(&state.db, &token_hash).await
+                && let Ok(expires) = Timestamp::strptime("%Y-%m-%d %H:%M:%S", &session.expires_at)
+                && expires > Timestamp::now()
+            {
+                // Update last used timestamp
+                let _ = db::touch_enrollment_session(&state.db, &session.id).await;
+                return Some(session);
+            }
+        }
+    }
+
+    None
+}
 
 // ============================================================================
 // Templates
@@ -47,11 +135,11 @@ pub struct EnrollWebauthnTemplate {
 }
 
 /// Key management page template (shown after OAuth callback).
+/// Authentication is via cookie, not state token in template.
 #[derive(Template)]
 #[template(path = "enroll_keys.html")]
 pub struct EnrollKeysTemplate {
     pub email: String,
-    pub state: String,
     pub rp_id: String,
 }
 
@@ -114,15 +202,6 @@ struct IdTokenClaims {
     nonce: Option<String>,
     /// Google Workspace hosted domain (e.g., "acme.com").
     /// Only present for Workspace accounts, not consumer Gmail.
-    hd: Option<String>,
-}
-
-/// Data passed through OIDC state for enrollment.
-/// Encoded as JSON in the nonce field of oidc_states table.
-#[derive(Debug, Serialize, Deserialize)]
-struct EnrollmentData {
-    email: String,
-    /// Google Workspace hosted domain (None for personal accounts like gmail.com).
     hd: Option<String>,
 }
 
@@ -541,142 +620,21 @@ pub async fn oidc_callback(
         }
     }
 
-    // Store enrollment data (email + hd) in state for WebAuthn registration
-    let new_state = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
-    let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
-
-    // Encode enrollment data as JSON
-    let enrollment_data = EnrollmentData {
-        email: claims.email.clone(),
-        hd: claims.hd.clone(),
-    };
-    let enrollment_json = serde_json::to_string(&enrollment_data).unwrap_or_default();
-
-    // Create new state with enrollment data embedded in nonce field
-    if let Err(e) = db::create_oidc_state(
-        &state.db,
-        &new_state,
-        &stored_state.device_auth_id,
-        &enrollment_json,
-        &state_expires.to_string(),
-    )
-    .await
-    {
-        tracing::error!("Failed to create state: {}", e);
-        return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "Failed to create session state".to_string(),
-            back_url: None,
-        }
-        .into_response();
-    }
-
-    // Delete old state
-    let _ = db::delete_oidc_state(&state.db, &oidc_state).await;
-
-    // Show key management page (handles both new and existing users)
-    EnrollKeysTemplate {
-        email: claims.email,
-        state: new_state,
-        rp_id: state.config.rp_id.clone(),
-    }
-    .into_response()
-}
-
-/// Start browser-based `WebAuthn` registration.
-/// POST /enroll/webauthn/start
-#[allow(clippy::unused_async)]
-pub async fn browser_register_start(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<vouch_common::BrowserRegisterStartRequest>,
-) -> Result<Json<BrowserRegisterStartResponse>, (StatusCode, Json<ApiError>)> {
-    // Verify state token
-    let oidc_state = db::get_oidc_state(&state.db, &req.oidc_state)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
-        .ok_or_else(|| {
-            json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_state",
-                "Invalid state token",
-            )
-        })?;
-
-    // Check if expired
-    let now = Timestamp::now();
-    let expires_at: Timestamp = oidc_state.expires_at.parse().map_err(|_| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "time_error",
-            "Invalid timestamp",
-        )
-    })?;
-
-    if now > expires_at {
-        return Err(json_error(
-            StatusCode::BAD_REQUEST,
-            "expired_state",
-            "State has expired",
-        ));
-    }
-
-    // Get device auth request to verify it's still valid
-    let device_auth = db::get_device_auth_by_id(&state.db, &oidc_state.device_auth_id)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
-        .ok_or_else(|| {
-            json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                "Invalid request",
-            )
-        })?;
-
-    if device_auth.status != "pending" {
-        return Err(json_error(
-            StatusCode::BAD_REQUEST,
-            "already_used",
-            "This code has already been used",
-        ));
-    }
-
-    // Get enrollment data from nonce field (set during OIDC callback)
-    let (user_email, hosted_domain) = if oidc_state.nonce.is_empty() {
-        // Non-OIDC flow - use a placeholder email for now
-        ("user@localhost".to_string(), None)
-    } else {
-        // Try to parse as EnrollmentData JSON, fall back to plain email for backwards compatibility
-        match serde_json::from_str::<EnrollmentData>(&oidc_state.nonce) {
-            Ok(data) => (data.email, data.hd),
-            Err(_) => (oidc_state.nonce.clone(), None),
-        }
-    };
-
     // Handle organization based on hosted domain
-    let (org_id, is_first_user) = if let Some(domain) = &hosted_domain {
+    let (org_id, is_first_user) = if let Some(domain) = &claims.hd {
         // Workspace user - get or create organization
-        let (org, is_new) = db::get_or_create_org_by_domain(&state.db, domain, None, None)
-            .await
-            .map_err(|e| {
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    &e.to_string(),
-                )
-            })?;
-        (Some(org.id), is_new)
+        match db::get_or_create_org_by_domain(&state.db, domain, None, None).await {
+            Ok((org, is_new)) => (Some(org.id), is_new),
+            Err(e) => {
+                tracing::error!("Failed to get/create organization: {}", e);
+                return ErrorTemplate {
+                    title: "Error".to_string(),
+                    message: "Failed to process organization".to_string(),
+                    back_url: None,
+                }
+                .into_response();
+            }
+        }
     } else {
         // Personal account (e.g., gmail.com) - no organization
         (None, false)
@@ -686,23 +644,102 @@ pub async fn browser_register_start(
     let is_org_admin = is_first_user && org_id.is_some();
 
     // Create or get user with organization
-    let user = db::upsert_user_with_org(
+    let user = match db::upsert_user_with_org(
         &state.db,
-        &user_email,
+        &claims.email,
         None,
         org_id.as_deref(),
         is_org_admin,
     )
     .await
-    .map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db_error",
-            &e.to_string(),
-        )
-    })?;
+    {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!("Failed to create/get user: {}", e);
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to create user".to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
+    };
 
-    let user_id = Uuid::parse_str(&user.id).map_err(|e| {
+    // Create enrollment session cookie
+    let cookie = match create_enrollment_session_cookie(
+        &state,
+        &user.id,
+        &claims.email,
+        Some(&stored_state.device_auth_id),
+    )
+    .await
+    {
+        Some(c) => c,
+        None => {
+            tracing::error!("Failed to create enrollment session");
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to create session".to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
+    };
+
+    // Delete the OIDC state (it's been consumed)
+    let _ = db::delete_oidc_state(&state.db, &oidc_state).await;
+
+    tracing::info!("Enrollment session created for: {}", claims.email);
+
+    // Redirect to keys page with session cookie
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, "/enroll/keys")
+        .header(header::SET_COOKIE, cookie)
+        .body(Body::empty())
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+/// Serve the key management page.
+/// GET /enroll/keys
+/// Authentication is via cookie (set by oidc_callback).
+pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    // Get enrollment session from cookie
+    let session = match get_enrollment_session_from_cookie(&state, &headers).await {
+        Some(s) => s,
+        None => {
+            // No valid session - redirect to start enrollment
+            return Redirect::to("/enroll/start").into_response();
+        }
+    };
+
+    EnrollKeysTemplate {
+        email: session.user_email,
+        rp_id: state.config.rp_id.clone(),
+    }
+    .into_response()
+}
+
+/// Start browser-based `WebAuthn` registration.
+/// POST /enroll/webauthn/start
+/// Authentication is via cookie (set by oidc_callback).
+#[allow(clippy::unused_async)]
+pub async fn browser_register_start(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Result<Json<BrowserRegisterStartResponse>, (StatusCode, Json<ApiError>)> {
+    // Get enrollment session from cookie
+    let enroll_session = get_enrollment_session_from_cookie(&state, &headers)
+        .await
+        .ok_or_else(|| {
+            json_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_session",
+                "Invalid or expired enrollment session",
+            )
+        })?;
+
+    let user_id = Uuid::parse_str(&enroll_session.user_id).map_err(|e| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "uuid_error",
@@ -710,8 +747,11 @@ pub async fn browser_register_start(
         )
     })?;
 
+    let user_email = enroll_session.user_email.clone();
+    let device_auth_id = enroll_session.device_auth_id.clone().unwrap_or_default();
+
     // Get any existing credentials for this user to exclude them
-    let existing_auths = db::get_authenticators_for_user(&state.db, &user.id)
+    let existing_auths = db::get_authenticators_for_user(&state.db, &enroll_session.user_id)
         .await
         .map_err(|e| {
             json_error(
@@ -724,6 +764,12 @@ pub async fn browser_register_start(
     let exclude_credentials: Vec<webauthn_rs::prelude::CredentialID> = existing_auths
         .iter()
         .map(|a| webauthn_rs::prelude::CredentialID::from(a.credential_id.clone()))
+        .collect();
+
+    // Build exclude_credential_ids for browser (base64url encoded)
+    let exclude_credential_ids: Vec<String> = existing_auths
+        .iter()
+        .map(|a| URL_SAFE_NO_PAD.encode(&a.credential_id))
         .collect();
 
     // Use webauthn-rs to generate proper registration options with cryptographic verification
@@ -740,7 +786,7 @@ pub async fn browser_register_start(
 
     // Create registration state with webauthn verification state
     let reg_state = BrowserRegistrationState {
-        device_auth_id: device_auth.id,
+        device_auth_id,
         user_id,
         user_email: user_email.clone(),
         webauthn_state,
@@ -770,6 +816,7 @@ pub async fn browser_register_start(
         user_display_name: user_email,
         algorithms: vec![-7, -257], // ES256, RS256
         state: state_token,
+        exclude_credential_ids,
     }))
 }
 

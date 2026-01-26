@@ -316,6 +316,10 @@ pub struct BrowserRegisterStartResponse {
     pub algorithms: Vec<i32>,
     /// Registration state token.
     pub state: String,
+    /// Credential IDs to exclude (base64url encoded).
+    /// Used to prevent duplicate registrations of the same key.
+    #[serde(default)]
+    pub exclude_credential_ids: Vec<String>,
 }
 
 /// Request to complete browser-based `WebAuthn` registration.

@@ -177,8 +177,9 @@ async fn main() -> Result<()> {
             "/enroll/webauthn/complete",
             post(handlers::enroll::browser_register_complete),
         )
-        // Key management during enrollment (uses ?state= query param for auth)
-        .route("/enroll/keys", get(handlers::enroll_keys::list_keys))
+        // Key management during enrollment (uses cookie for auth)
+        .route("/enroll/keys", get(handlers::enroll::enroll_keys_page))
+        .route("/enroll/keys/api", get(handlers::enroll_keys::list_keys))
         .route(
             "/enroll/keys/{id}",
             patch(handlers::enroll_keys::rename_key).delete(handlers::enroll_keys::delete_key),

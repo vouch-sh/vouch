@@ -2226,6 +2226,100 @@ pub async fn delete_expired_admin_sessions(pool: &SqlitePool) -> Result<u64> {
 }
 
 // ============================================================================
+// Enrollment Sessions
+// ============================================================================
+
+/// Enrollment session record (for key management during enrollment).
+#[derive(Debug, sqlx::FromRow)]
+pub struct EnrollmentSession {
+    pub id: String,
+    pub user_id: String,
+    pub user_email: String,
+    #[allow(dead_code)]
+    pub session_token_hash: String,
+    pub device_auth_id: Option<String>,
+    pub expires_at: String,
+    #[allow(dead_code)]
+    pub created_at: String,
+    #[allow(dead_code)]
+    pub last_used_at: String,
+}
+
+/// Create a new enrollment session.
+pub async fn create_enrollment_session(
+    pool: &SqlitePool,
+    user_id: &str,
+    user_email: &str,
+    session_token_hash: &str,
+    device_auth_id: Option<&str>,
+    expires_at: &str,
+) -> Result<String> {
+    let id = Uuid::now_v7().to_string();
+
+    sqlx::query(
+        "INSERT INTO enrollment_sessions (id, user_id, user_email, session_token_hash, device_auth_id, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&id)
+    .bind(user_id)
+    .bind(user_email)
+    .bind(session_token_hash)
+    .bind(device_auth_id)
+    .bind(expires_at)
+    .execute(pool)
+    .await?;
+
+    Ok(id)
+}
+
+/// Get an enrollment session by token hash.
+pub async fn get_enrollment_session_by_token_hash(
+    pool: &SqlitePool,
+    token_hash: &str,
+) -> Result<Option<EnrollmentSession>> {
+    let session = sqlx::query_as::<_, EnrollmentSession>(
+        "SELECT id, user_id, user_email, session_token_hash, device_auth_id, expires_at, created_at, last_used_at
+         FROM enrollment_sessions
+         WHERE session_token_hash = ?",
+    )
+    .bind(token_hash)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(session)
+}
+
+/// Update enrollment session last used timestamp.
+pub async fn touch_enrollment_session(pool: &SqlitePool, id: &str) -> Result<()> {
+    sqlx::query("UPDATE enrollment_sessions SET last_used_at = datetime('now') WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    Ok(())
+}
+
+/// Delete an enrollment session.
+#[allow(dead_code)]
+pub async fn delete_enrollment_session(pool: &SqlitePool, id: &str) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM enrollment_sessions WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Delete expired enrollment sessions (for cleanup task).
+pub async fn delete_expired_enrollment_sessions(pool: &SqlitePool) -> Result<u64> {
+    let result = sqlx::query("DELETE FROM enrollment_sessions WHERE expires_at < datetime('now')")
+        .execute(pool)
+        .await?;
+
+    Ok(result.rows_affected())
+}
+
+// ============================================================================
 // SSH Certificate Revocation
 // ============================================================================
 
