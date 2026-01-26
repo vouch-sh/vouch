@@ -7,6 +7,7 @@ pub mod common;
 pub mod credentials;
 pub mod device;
 pub mod enroll;
+pub mod enroll_keys;
 pub mod home;
 pub mod keys;
 pub mod landing;

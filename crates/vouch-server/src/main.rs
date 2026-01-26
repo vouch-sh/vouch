@@ -3,7 +3,7 @@
 use anyhow::Result;
 use axum::{
     Router,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
 };
 use clap::Parser;
 use sqlx::SqlitePool;
@@ -177,9 +177,18 @@ async fn main() -> Result<()> {
             "/enroll/webauthn/complete",
             post(handlers::enroll::browser_register_complete),
         )
-        // Key management
+        // Key management during enrollment (uses ?state= query param for auth)
+        .route("/enroll/keys", get(handlers::enroll_keys::list_keys))
+        .route(
+            "/enroll/keys/{id}",
+            patch(handlers::enroll_keys::rename_key).delete(handlers::enroll_keys::delete_key),
+        )
+        // Key management (authenticated API)
         .route("/v1/keys", get(handlers::keys::list_keys))
-        .route("/v1/keys/{id}", delete(handlers::keys::delete_key))
+        .route(
+            "/v1/keys/{id}",
+            patch(handlers::keys::rename_key).delete(handlers::keys::delete_key),
+        )
         // Credential issuance
         .route(
             "/v1/credentials/ssh",

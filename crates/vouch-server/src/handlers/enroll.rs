@@ -46,6 +46,15 @@ pub struct EnrollWebauthnTemplate {
     pub rp_id: String,
 }
 
+/// Key management page template (shown after OAuth callback).
+#[derive(Template)]
+#[template(path = "enroll_keys.html")]
+pub struct EnrollKeysTemplate {
+    pub email: String,
+    pub state: String,
+    pub rp_id: String,
+}
+
 /// Success page template.
 #[derive(Template)]
 #[template(path = "success.html")]
@@ -63,6 +72,7 @@ pub struct ErrorTemplate {
 impl_template_response!(
     DeviceVerifyTemplate,
     EnrollWebauthnTemplate,
+    EnrollKeysTemplate,
     SuccessTemplate,
     ErrorTemplate,
 );
@@ -564,8 +574,8 @@ pub async fn oidc_callback(
     // Delete old state
     let _ = db::delete_oidc_state(&state.db, &oidc_state).await;
 
-    // Show WebAuthn registration page
-    EnrollWebauthnTemplate {
+    // Show key management page (handles both new and existing users)
+    EnrollKeysTemplate {
         email: claims.email,
         state: new_state,
         rp_id: state.config.rp_id.clone(),
@@ -967,12 +977,12 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
 
     // Generate unique codes for this direct enrollment attempt
     // user_code needs to be unique per the database constraint
-    let unique_suffix = URL_SAFE_NO_PAD.encode(&generate_random_bytes(8));
+    let unique_suffix = URL_SAFE_NO_PAD.encode(generate_random_bytes(8));
     let user_code = format!("{}{}", DIRECT_ENROLL_PREFIX, unique_suffix);
     let device_code_hash = format!(
         "{}{}",
         DIRECT_ENROLL_PREFIX,
-        URL_SAFE_NO_PAD.encode(&generate_random_bytes(16))
+        URL_SAFE_NO_PAD.encode(generate_random_bytes(16))
     );
 
     let device_auth_id = match db::create_device_auth_request(

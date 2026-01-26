@@ -1,0 +1,341 @@
+{% extends "base.html" %}
+
+{% block title %}Vouch - Security Keys{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center min-h-screen p-5">
+    <div class="card max-w-lg w-full">
+        <div class="text-center mb-6">
+            <div class="text-5xl mb-4">&#x1F511;</div>
+            <h1 class="text-2xl font-bold text-gray-900 mb-2">Security Keys</h1>
+            <p class="text-gray-600 text-sm">Signed in as <span class="font-semibold text-gray-800">{{ email }}</span></p>
+        </div>
+
+        <!-- Loading state -->
+        <div id="loading" class="text-center py-8">
+            <div class="animate-spin inline-block w-8 h-8 border-4 border-vouch-500 border-t-transparent rounded-full"></div>
+            <p class="text-gray-500 mt-2">Loading your keys...</p>
+        </div>
+
+        <!-- Keys list (hidden until loaded) -->
+        <div id="keys-container" class="hidden">
+            <!-- Empty state -->
+            <div id="empty-state" class="hidden text-center py-8">
+                <p class="text-gray-500 mb-4">No security keys registered yet.</p>
+                <button onclick="addNewKey()" class="btn-primary">
+                    Register Your First Security Key
+                </button>
+            </div>
+
+            <!-- Keys list -->
+            <div id="keys-list" class="hidden">
+                <div class="space-y-3 mb-6" id="keys-items"></div>
+
+                <button onclick="addNewKey()" class="btn-secondary w-full">
+                    + Add Another Security Key
+                </button>
+            </div>
+        </div>
+
+        <!-- Error state -->
+        <div id="error-state" class="hidden text-center py-8">
+            <p class="text-red-600 mb-4" id="error-message"></p>
+            <button onclick="loadKeys()" class="btn-secondary">Try Again</button>
+        </div>
+
+        <!-- CLI guidance section -->
+        <div class="border-t mt-6 pt-4">
+            <p class="text-sm text-gray-500 mb-2">You can also manage keys from the command line:</p>
+            <div class="bg-gray-50 rounded p-3 font-mono text-xs text-gray-700 space-y-1">
+                <div><span class="text-gray-400">#</span> List all keys</div>
+                <div>vouch keys list</div>
+                <div class="mt-2"><span class="text-gray-400">#</span> Remove a key</div>
+                <div>vouch keys remove &lt;KEY_ID&gt;</div>
+                <div class="mt-2"><span class="text-gray-400">#</span> Rename a key</div>
+                <div>vouch keys rename &lt;KEY_ID&gt; "New Name"</div>
+                <div class="mt-2"><span class="text-gray-400">#</span> Add another key</div>
+                <div>vouch register</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const stateToken = '{{ state }}';
+    const rpId = '{{ rp_id }}';
+    let keysData = [];
+
+    // Load keys on page load
+    document.addEventListener('DOMContentLoaded', loadKeys);
+
+    async function loadKeys() {
+        showLoading();
+
+        try {
+            const response = await fetch(`/enroll/keys?state=${encodeURIComponent(stateToken)}`);
+
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.message || 'Failed to load keys');
+            }
+
+            const data = await response.json();
+            keysData = data.keys;
+            renderKeys();
+        } catch (err) {
+            showError(err.message);
+        }
+    }
+
+    function showLoading() {
+        document.getElementById('loading').classList.remove('hidden');
+        document.getElementById('keys-container').classList.add('hidden');
+        document.getElementById('error-state').classList.add('hidden');
+    }
+
+    function showError(message) {
+        document.getElementById('loading').classList.add('hidden');
+        document.getElementById('keys-container').classList.add('hidden');
+        document.getElementById('error-state').classList.remove('hidden');
+        document.getElementById('error-message').textContent = message;
+    }
+
+    function renderKeys() {
+        document.getElementById('loading').classList.add('hidden');
+        document.getElementById('error-state').classList.add('hidden');
+        document.getElementById('keys-container').classList.remove('hidden');
+
+        if (keysData.length === 0) {
+            document.getElementById('empty-state').classList.remove('hidden');
+            document.getElementById('keys-list').classList.add('hidden');
+        } else {
+            document.getElementById('empty-state').classList.add('hidden');
+            document.getElementById('keys-list').classList.remove('hidden');
+
+            const container = document.getElementById('keys-items');
+            container.innerHTML = keysData.map((key, index) => `
+                <div class="border rounded-lg p-4 bg-white" data-key-id="${key.id}">
+                    <div class="flex items-start justify-between">
+                        <div class="flex-1 min-w-0 mr-4">
+                            <div class="flex items-center gap-2 mb-1">
+                                <input
+                                    type="text"
+                                    class="key-name font-medium text-gray-900 bg-transparent border-b border-transparent hover:border-gray-300 focus:border-vouch-500 focus:outline-none transition-colors w-full"
+                                    value="${escapeHtml(key.name)}"
+                                    data-key-id="${key.id}"
+                                    data-original="${escapeHtml(key.name)}"
+                                    onblur="handleNameBlur(this)"
+                                    onkeydown="handleNameKeydown(event, this)"
+                                />
+                            </div>
+                            <div class="text-sm text-gray-500">
+                                ${key.device_model ? `<span class="mr-3">${escapeHtml(key.device_model)}</span>` : ''}
+                                <span>Added ${formatDate(key.created_at)}</span>
+                            </div>
+                        </div>
+                        <button
+                            onclick="deleteKey('${key.id}', '${escapeHtml(key.name)}')"
+                            class="text-gray-400 hover:text-red-500 p-1 ${keysData.length <= 1 ? 'hidden' : ''}"
+                            title="Delete key"
+                        >
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            `).join('');
+        }
+    }
+
+    async function handleNameBlur(input) {
+        const keyId = input.dataset.keyId;
+        const original = input.dataset.original;
+        const newName = input.value.trim();
+
+        if (newName === original || newName === '') {
+            input.value = original;
+            return;
+        }
+
+        try {
+            const response = await fetch(`/enroll/keys/${keyId}?state=${encodeURIComponent(stateToken)}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name: newName })
+            });
+
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.message || 'Failed to rename key');
+            }
+
+            input.dataset.original = newName;
+            // Update local data
+            const key = keysData.find(k => k.id === keyId);
+            if (key) key.name = newName;
+        } catch (err) {
+            alert('Failed to rename key: ' + err.message);
+            input.value = original;
+        }
+    }
+
+    function handleNameKeydown(event, input) {
+        if (event.key === 'Enter') {
+            event.preventDefault();
+            input.blur();
+        }
+        if (event.key === 'Escape') {
+            input.value = input.dataset.original;
+            input.blur();
+        }
+    }
+
+    async function deleteKey(keyId, keyName) {
+        if (!confirm(`Delete key "${keyName}"? This action cannot be undone.`)) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/enroll/keys/${keyId}?state=${encodeURIComponent(stateToken)}`, {
+                method: 'DELETE'
+            });
+
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.message || 'Failed to delete key');
+            }
+
+            // Reload keys
+            loadKeys();
+        } catch (err) {
+            alert('Failed to delete key: ' + err.message);
+        }
+    }
+
+    async function addNewKey() {
+        const btn = event.target;
+        const originalText = btn.textContent;
+        btn.disabled = true;
+        btn.textContent = 'Starting registration...';
+
+        try {
+            // Get registration options
+            const startResp = await fetch('/enroll/webauthn/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ oidc_state: stateToken })
+            });
+
+            if (!startResp.ok) {
+                const err = await startResp.json();
+                throw new Error(err.message || 'Failed to start registration');
+            }
+
+            const options = await startResp.json();
+            btn.textContent = 'Touch your security key...';
+
+            // Convert base64url to ArrayBuffer
+            const challenge = base64urlToBuffer(options.challenge);
+            const userId = base64urlToBuffer(options.user_id);
+
+            // Create credential
+            const credential = await navigator.credentials.create({
+                publicKey: {
+                    challenge: challenge,
+                    rp: { id: options.rp_id, name: options.rp_name },
+                    user: {
+                        id: userId,
+                        name: options.user_email,
+                        displayName: options.user_display_name
+                    },
+                    pubKeyCredParams: options.algorithms.map(alg => ({
+                        type: 'public-key',
+                        alg: alg
+                    })),
+                    authenticatorSelection: {
+                        authenticatorAttachment: 'cross-platform',
+                        userVerification: 'required',
+                        residentKey: 'required'
+                    },
+                    timeout: 60000,
+                    attestation: 'direct'
+                }
+            });
+
+            btn.textContent = 'Completing registration...';
+
+            // Send credential to server
+            const attestationResponse = credential.response;
+            const completeResp = await fetch('/enroll/webauthn/complete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    state: options.state,
+                    credential_id: bufferToBase64url(credential.rawId),
+                    attestation_object: bufferToBase64url(attestationResponse.attestationObject),
+                    client_data_json: bufferToBase64url(attestationResponse.clientDataJSON)
+                })
+            });
+
+            if (!completeResp.ok) {
+                const err = await completeResp.json();
+                throw new Error(err.message || 'Failed to complete registration');
+            }
+
+            // Reload keys to show the new one
+            loadKeys();
+
+        } catch (err) {
+            if (err.name === 'NotAllowedError') {
+                alert('Registration was cancelled or timed out.');
+            } else {
+                alert('Registration failed: ' + err.message);
+            }
+        } finally {
+            btn.disabled = false;
+            btn.textContent = originalText;
+        }
+    }
+
+    function formatDate(dateStr) {
+        if (!dateStr) return '';
+        // SQLite datetime format is "YYYY-MM-DD HH:MM:SS"
+        const date = new Date(dateStr.replace(' ', 'T') + 'Z');
+        return date.toLocaleDateString(undefined, {
+            year: 'numeric',
+            month: 'short',
+            day: 'numeric'
+        });
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function base64urlToBuffer(base64url) {
+        const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+        const pad = base64.length % 4;
+        const padded = pad ? base64 + '='.repeat(4 - pad) : base64;
+        const binary = atob(padded);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes.buffer;
+    }
+
+    function bufferToBase64url(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+</script>
+{% endblock %}

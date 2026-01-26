@@ -883,6 +883,21 @@ pub async fn delete_authenticator(pool: &SqlitePool, authenticator_id: &str) -> 
     Ok(result.rows_affected())
 }
 
+/// Update an authenticator's name.
+pub async fn update_authenticator_name(
+    pool: &SqlitePool,
+    authenticator_id: &str,
+    name: &str,
+) -> Result<bool> {
+    let result = sqlx::query("UPDATE authenticators SET name = ? WHERE id = ?")
+        .bind(name)
+        .bind(authenticator_id)
+        .execute(pool)
+        .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
 // ============================================================================
 // Authentication Events
 // ============================================================================

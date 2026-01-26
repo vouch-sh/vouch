@@ -1,11 +1,13 @@
-//! Key management commands - list and remove registered security keys.
+//! Key management commands - list, rename, and remove registered security keys.
 
 use anyhow::{Result, bail};
 use inquire::{
     Confirm, Select,
     ui::{RenderConfig, Styled},
 };
-use vouch_common::{DeleteKeyResponse, KeyInfo, ListKeysResponse};
+use vouch_common::{
+    DeleteKeyResponse, KeyInfo, ListKeysResponse, RenameKeyRequest, RenameKeyResponse,
+};
 
 use crate::client::VouchClient;
 
@@ -242,6 +244,40 @@ pub async fn remove(server: &str, key_id: &str, force: bool) -> Result<()> {
     if response.sessions_revoked > 0 {
         println!("  {} session(s) revoked.", response.sessions_revoked);
     }
+
+    Ok(())
+}
+
+/// Rename a registered key (non-interactive).
+pub async fn rename(server: &str, key_id: &str, new_name: &str) -> Result<()> {
+    let client = VouchClient::new(server)?;
+
+    // Validate name
+    let new_name = new_name.trim();
+    if new_name.is_empty() {
+        bail!("Name cannot be empty");
+    }
+    if new_name.len() > 100 {
+        bail!("Name must be 100 characters or less");
+    }
+
+    // First, verify the key exists
+    let keys_response: ListKeysResponse = client.get_authenticated("/v1/keys").await?;
+    let key = keys_response.keys.iter().find(|k| k.id == key_id);
+
+    if key.is_none() {
+        bail!("Key not found: {key_id}");
+    }
+
+    // Rename the key
+    let req = RenameKeyRequest {
+        name: new_name.to_string(),
+    };
+    let response: RenameKeyResponse = client
+        .patch_authenticated(&format!("/v1/keys/{key_id}"), &req)
+        .await?;
+
+    println!("{}", response.message);
 
     Ok(())
 }

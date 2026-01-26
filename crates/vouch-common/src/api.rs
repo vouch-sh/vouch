@@ -363,6 +363,20 @@ pub struct DeleteKeyResponse {
     pub sessions_revoked: u64,
 }
 
+/// Request to rename a security key.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RenameKeyRequest {
+    /// New name for the key.
+    pub name: String,
+}
+
+/// Response after renaming a key.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RenameKeyResponse {
+    /// Confirmation message.
+    pub message: String,
+}
+
 // ============================================================================
 // Authentication Events (Admin API)
 // ============================================================================

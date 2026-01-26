@@ -84,6 +84,13 @@ enum KeysCommands {
         #[arg(short, long)]
         force: bool,
     },
+    /// Rename a registered key.
+    Rename {
+        /// Key ID to rename.
+        id: String,
+        /// New name for the key.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -160,6 +167,9 @@ async fn main() -> Result<()> {
             Some(KeysCommands::List) => commands::keys::list(&server).await,
             Some(KeysCommands::Remove { id, force }) => {
                 commands::keys::remove(&server, &id, force).await
+            }
+            Some(KeysCommands::Rename { id, name }) => {
+                commands::keys::rename(&server, &id, &name).await
             }
         },
         Commands::Credential { command } => match command {
