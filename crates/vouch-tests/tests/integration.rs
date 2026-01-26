@@ -1545,20 +1545,20 @@ mod session {
 /// ES256 (ECDSA P-256) signature verification tests.
 /// These tests replicate the exact flow used by real YubiKeys.
 mod es256_flow {
+    use aws_lc_rs::digest::{SHA256, digest};
     use aws_lc_rs::rand::SystemRandom;
     use aws_lc_rs::signature::{
-        EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING, ECDSA_P256_SHA256_FIXED_SIGNING,
+        ECDSA_P256_SHA256_ASN1_SIGNING, ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair,
     };
-    use aws_lc_rs::digest::{digest, SHA256};
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use ciborium::Value;
-    use vouch_server::{RealCoseVerifier, CoseVerifier};
+    use vouch_server::{CoseVerifier, RealCoseVerifier};
 
     /// Build a COSE EC2 key for ES256 (P-256) in the format used by cose_key_to_cbor.
     fn build_cose_ec2_key(x: &[u8], y: &[u8]) -> Vec<u8> {
         let map: Vec<(Value, Value)> = vec![
-            (Value::Integer(1.into()), Value::Integer(2.into())),    // kty = EC2
+            (Value::Integer(1.into()), Value::Integer(2.into())), // kty = EC2
             (Value::Integer(3.into()), Value::Integer((-7_i64).into())), // alg = ES256 (-7)
             (Value::Integer((-1_i64).into()), Value::Integer(1.into())), // crv = P-256 (1)
             (Value::Integer((-2_i64).into()), Value::Bytes(x.to_vec())), // x
@@ -1600,15 +1600,20 @@ mod es256_flow {
         // Generate an ECDSA P-256 key pair (ASN.1/DER signatures)
         let pkcs8_bytes = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng)
             .expect("Failed to generate key pair");
-        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8_bytes.as_ref())
-            .expect("Failed to parse key pair");
+        let key_pair =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8_bytes.as_ref())
+                .expect("Failed to parse key pair");
 
         // Extract the public key (uncompressed SEC1 format: 0x04 || x || y)
         let public_key = key_pair.public_key();
         let public_key_bytes = public_key.as_ref();
 
         // SEC1 uncompressed point is 65 bytes: 0x04 + 32 bytes x + 32 bytes y
-        assert_eq!(public_key_bytes.len(), 65, "Public key should be 65 bytes (SEC1 uncompressed)");
+        assert_eq!(
+            public_key_bytes.len(),
+            65,
+            "Public key should be 65 bytes (SEC1 uncompressed)"
+        );
         assert_eq!(public_key_bytes[0], 0x04, "First byte should be 0x04");
 
         let x = &public_key_bytes[1..33];
@@ -1635,18 +1640,32 @@ mod es256_flow {
         let signature_bytes = signature.as_ref();
 
         println!("ES256 DER test:");
-        println!("  public_key_bytes (SEC1): {} bytes", public_key_bytes.len());
+        println!(
+            "  public_key_bytes (SEC1): {} bytes",
+            public_key_bytes.len()
+        );
         println!("  x: {}", hex::encode(x));
         println!("  y: {}", hex::encode(y));
-        println!("  cose_key: {} bytes = {}", cose_key.len(), hex::encode(&cose_key));
-        println!("  signature: {} bytes (should be 70-72 for DER)", signature_bytes.len());
+        println!(
+            "  cose_key: {} bytes = {}",
+            cose_key.len(),
+            hex::encode(&cose_key)
+        );
+        println!(
+            "  signature: {} bytes (should be 70-72 for DER)",
+            signature_bytes.len()
+        );
         println!("  message: {} bytes", message.len());
 
         // Verify using the server's verification code
         let verifier = RealCoseVerifier::new();
         let result = verifier.verify(&cose_key, &message, signature_bytes);
 
-        assert!(result.is_ok(), "ES256 DER signature verification should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "ES256 DER signature verification should succeed: {:?}",
+            result
+        );
     }
 
     /// Test ES256 signature verification with raw/fixed format (like browser WebAuthn).
@@ -1657,8 +1676,9 @@ mod es256_flow {
         // Generate an ECDSA P-256 key pair (fixed/raw signatures - r||s format)
         let pkcs8_bytes = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
             .expect("Failed to generate key pair");
-        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8_bytes.as_ref())
-            .expect("Failed to parse key pair");
+        let key_pair =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8_bytes.as_ref())
+                .expect("Failed to parse key pair");
 
         // Extract the public key
         let public_key = key_pair.public_key();
@@ -1688,13 +1708,20 @@ mod es256_flow {
         let signature_bytes = signature.as_ref();
 
         println!("ES256 FIXED test:");
-        println!("  signature: {} bytes (should be 64 for fixed)", signature_bytes.len());
+        println!(
+            "  signature: {} bytes (should be 64 for fixed)",
+            signature_bytes.len()
+        );
 
         // Verify using the server's verification code
         let verifier = RealCoseVerifier::new();
         let result = verifier.verify(&cose_key, &message, signature_bytes);
 
-        assert!(result.is_ok(), "ES256 FIXED signature verification should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "ES256 FIXED signature verification should succeed: {:?}",
+            result
+        );
     }
 
     /// Test that simulates the exact browser enrollment + CLI login flow.
@@ -1708,8 +1735,9 @@ mod es256_flow {
         // webauthn-rs extracts x, y from attestation and we call cose_key_to_cbor
         let pkcs8_bytes = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng)
             .expect("Failed to generate key pair");
-        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8_bytes.as_ref())
-            .expect("Failed to parse key pair");
+        let key_pair =
+            EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8_bytes.as_ref())
+                .expect("Failed to parse key pair");
 
         let public_key = key_pair.public_key();
         let public_key_bytes = public_key.as_ref();
@@ -1720,7 +1748,11 @@ mod es256_flow {
         let stored_cose_key = build_cose_ec2_key(x, y);
 
         println!("=== BROWSER ENROLLMENT ===");
-        println!("Stored COSE key ({} bytes): {}", stored_cose_key.len(), hex::encode(&stored_cose_key));
+        println!(
+            "Stored COSE key ({} bytes): {}",
+            stored_cose_key.len(),
+            hex::encode(&stored_cose_key)
+        );
 
         // === CLI LOGIN ===
         // CLI constructs client_data_json and gets assertion from YubiKey
@@ -1744,11 +1776,29 @@ mod es256_flow {
         let signature = key_pair.sign(&rng, &signed_data).expect("Failed to sign");
 
         println!("=== CLI LOGIN ===");
-        println!("client_data_json: {}", String::from_utf8_lossy(&client_data_json));
-        println!("client_data_hash: {}", hex::encode(client_data_hash.as_ref()));
-        println!("auth_data ({} bytes): {}", auth_data.len(), hex::encode(&auth_data));
-        println!("signed_data ({} bytes): {}", signed_data.len(), hex::encode(&signed_data));
-        println!("signature ({} bytes): {}", signature.as_ref().len(), hex::encode(signature.as_ref()));
+        println!(
+            "client_data_json: {}",
+            String::from_utf8_lossy(&client_data_json)
+        );
+        println!(
+            "client_data_hash: {}",
+            hex::encode(client_data_hash.as_ref())
+        );
+        println!(
+            "auth_data ({} bytes): {}",
+            auth_data.len(),
+            hex::encode(&auth_data)
+        );
+        println!(
+            "signed_data ({} bytes): {}",
+            signed_data.len(),
+            hex::encode(&signed_data)
+        );
+        println!(
+            "signature ({} bytes): {}",
+            signature.as_ref().len(),
+            hex::encode(signature.as_ref())
+        );
 
         // === SERVER VERIFICATION ===
         // Server receives: auth_data, client_data_json, signature
@@ -1761,16 +1811,146 @@ mod es256_flow {
         server_signed_data.extend_from_slice(server_client_data_hash.as_ref());
 
         println!("=== SERVER VERIFICATION ===");
-        println!("server_client_data_hash: {}", hex::encode(server_client_data_hash.as_ref()));
-        println!("server_signed_data ({} bytes): {}", server_signed_data.len(), hex::encode(&server_signed_data));
+        println!(
+            "server_client_data_hash: {}",
+            hex::encode(server_client_data_hash.as_ref())
+        );
+        println!(
+            "server_signed_data ({} bytes): {}",
+            server_signed_data.len(),
+            hex::encode(&server_signed_data)
+        );
 
         // Verify the message matches what was signed
-        assert_eq!(signed_data, server_signed_data, "Server should construct same signed_data");
+        assert_eq!(
+            signed_data, server_signed_data,
+            "Server should construct same signed_data"
+        );
 
         let verifier = RealCoseVerifier::new();
         let result = verifier.verify(&stored_cose_key, &server_signed_data, signature.as_ref());
 
-        assert!(result.is_ok(), "Browser enrollment + CLI login ES256 flow should succeed: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Browser enrollment + CLI login ES256 flow should succeed: {:?}",
+            result
+        );
+    }
+
+    /// Diagnostic test using actual data from production logs.
+    /// This helps identify parsing/verification issues.
+    #[test]
+    fn test_parse_production_cose_key() {
+        // This is the actual stored_public_key_hex from the login logs
+        let stored_key_hex = "a50102032620012158203ff01435ac5cca700aff1a0bfd61776ef85b60085c47a39f26b8932a596528f022582047332d1c68fe933c56b2fcf502fe2cb74cb8d2f8a4eb0c7f61a92f6bd0893328";
+        let stored_key = hex::decode(stored_key_hex).expect("Failed to decode hex");
+
+        println!("Stored key length: {} bytes", stored_key.len());
+        println!("Stored key hex: {}", stored_key_hex);
+
+        // Parse the CBOR
+        let parsed: ciborium::Value =
+            ciborium::from_reader(&stored_key[..]).expect("Failed to parse CBOR");
+
+        let map = parsed.as_map().expect("Should be a map");
+        println!("Map has {} entries", map.len());
+
+        let mut kty: Option<i128> = None;
+        let mut alg: Option<i128> = None;
+        let mut crv: Option<i128> = None;
+        let mut x_bytes: Option<Vec<u8>> = None;
+        let mut y_bytes: Option<Vec<u8>> = None;
+
+        for (k, v) in map {
+            if let ciborium::Value::Integer(key) = k {
+                let key_i128: i128 = (*key).into();
+                match key_i128 {
+                    1 => {
+                        if let ciborium::Value::Integer(val) = v {
+                            kty = Some((*val).into());
+                        }
+                    }
+                    3 => {
+                        if let ciborium::Value::Integer(val) = v {
+                            alg = Some((*val).into());
+                        }
+                    }
+                    -1 => {
+                        if let ciborium::Value::Integer(val) = v {
+                            crv = Some((*val).into());
+                        }
+                    }
+                    -2 => {
+                        if let ciborium::Value::Bytes(bytes) = v {
+                            x_bytes = Some(bytes.clone());
+                        }
+                    }
+                    -3 => {
+                        if let ciborium::Value::Bytes(bytes) = v {
+                            y_bytes = Some(bytes.clone());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        println!("kty = {:?} (expected 2 for EC2)", kty);
+        println!("alg = {:?} (expected -7 for ES256)", alg);
+        println!("crv = {:?} (expected 1 for P-256)", crv);
+        println!(
+            "x = {:?} ({:?} bytes)",
+            x_bytes.as_ref().map(hex::encode),
+            x_bytes.as_ref().map(|b| b.len())
+        );
+        println!(
+            "y = {:?} ({:?} bytes)",
+            y_bytes.as_ref().map(hex::encode),
+            y_bytes.as_ref().map(|b| b.len())
+        );
+
+        assert_eq!(kty, Some(2), "kty should be 2 (EC2)");
+        assert_eq!(alg, Some(-7), "alg should be -7 (ES256)");
+        assert_eq!(crv, Some(1), "crv should be 1 (P-256)");
+        assert_eq!(
+            x_bytes.as_ref().map(|b| b.len()),
+            Some(32),
+            "x should be 32 bytes"
+        );
+        assert_eq!(
+            y_bytes.as_ref().map(|b| b.len()),
+            Some(32),
+            "y should be 32 bytes"
+        );
+
+        // Now try to verify using the RealCoseVerifier (without a real signature)
+        // Just to make sure the key can be parsed by the verification code
+        let verifier = RealCoseVerifier::new();
+
+        // Create a dummy message and signature - this will fail verification
+        // but should NOT fail parsing
+        let dummy_message = [0u8; 69];
+        let dummy_signature = [0u8; 72];
+
+        let result = verifier.verify(&stored_key, &dummy_message, &dummy_signature);
+        // We expect SignatureInvalid, NOT InvalidCoseKey
+        println!(
+            "Verification result (expected SignatureInvalid): {:?}",
+            result
+        );
+
+        // The key should parse correctly even if signature is invalid
+        match result {
+            Err(e) => {
+                let err_str = format!("{:?}", e);
+                assert!(
+                    !err_str.contains("InvalidCoseKey"),
+                    "Key parsing should succeed, got: {}",
+                    err_str
+                );
+            }
+            Ok(_) => panic!("Should not succeed with dummy signature"),
+        }
     }
 
     /// Test that COSE key encoding matches expected format.
@@ -1785,8 +1965,8 @@ mod es256_flow {
         println!("COSE key hex: {}", hex::encode(&cose_key));
 
         // Parse it back
-        let parsed: ciborium::Value = ciborium::from_reader(&cose_key[..])
-            .expect("Failed to parse COSE key");
+        let parsed: ciborium::Value =
+            ciborium::from_reader(&cose_key[..]).expect("Failed to parse COSE key");
 
         let map = parsed.as_map().expect("Should be a map");
 

@@ -458,8 +458,22 @@ pub async fn login_complete(
         req.authenticator_data.len()
     );
     tracing::info!(
+        "login_complete: authenticator_data_hex={}",
+        hex::encode(&req.authenticator_data)
+    );
+    tracing::info!(
+        "login_complete: signature_hex={}",
+        hex::encode(&req.signature)
+    );
+    tracing::info!(
         "login_complete: client_data_json={}",
         String::from_utf8_lossy(&req.client_data_json)
+    );
+    // Compute and log the client_data_hash for comparison
+    let debug_hash = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &req.client_data_json);
+    tracing::info!(
+        "login_complete: client_data_hash={}",
+        hex::encode(debug_hash.as_ref())
     );
 
     // Verify the WebAuthn assertion server-side
