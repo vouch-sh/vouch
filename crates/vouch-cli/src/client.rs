@@ -56,6 +56,27 @@ impl VouchClient {
         self.handle_response(response).await
     }
 
+    /// POST a form-encoded request and get a JSON response.
+    /// Used for OAuth endpoints which require application/x-www-form-urlencoded.
+    pub async fn post_form<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
+    where
+        Req: Serialize,
+        Resp: DeserializeOwned,
+    {
+        let url = format!("{}{}", self.base_url, path);
+        tracing::debug!("POST {} (form)", url);
+
+        let response = self
+            .client
+            .post(&url)
+            .form(body)
+            .send()
+            .await
+            .with_context(|| format!("failed to connect to {url}"))?;
+
+        self.handle_response(response).await
+    }
+
     /// GET a JSON response with authentication.
     pub async fn get_authenticated<Resp>(&self, path: &str) -> Result<Resp>
     where

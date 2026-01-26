@@ -15,9 +15,9 @@ pub async fn run(server: &str) -> Result<()> {
 
     println!("Starting enrollment...\n");
 
-    // Step 1: Request device code
+    // Step 1: Request device code (RFC 8628 requires form encoding)
     let device_response: DeviceCodeResponse = client
-        .post("/oauth/device/code", &DeviceCodeRequest::default())
+        .post_form("/oauth/device/code", &DeviceCodeRequest::default())
         .await
         .context("Failed to start enrollment")?;
 
@@ -141,10 +141,11 @@ async fn poll_once(
 ) -> Result<DeviceTokenResponse, PollError> {
     let url = format!("{}/oauth/token", client.base_url());
 
+    // RFC 8628 Section 3.4: Token endpoint requires application/x-www-form-urlencoded
     let response = client
         .raw_client()
         .post(&url)
-        .json(request)
+        .form(request)
         .send()
         .await
         .map_err(|e| PollError::Other(e.to_string()))?;
