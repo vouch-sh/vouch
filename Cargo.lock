@@ -3645,6 +3645,7 @@ dependencies = [
  "anyhow",
  "aws-lc-rs",
  "base64 0.22.1",
+ "ciborium",
  "clap",
  "clap_complete",
  "ctap-hid-fido2",

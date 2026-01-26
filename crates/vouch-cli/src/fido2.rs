@@ -7,7 +7,7 @@ use ctap_hid_fido2::FidoKeyHid;
 use ctap_hid_fido2::FidoKeyHidFactory;
 use ctap_hid_fido2::LibCfg;
 use ctap_hid_fido2::fidokey::get_assertion::GetAssertionArgsBuilder;
-use ctap_hid_fido2::fidokey::make_credential::MakeCredentialArgsBuilder;
+use ctap_hid_fido2::fidokey::make_credential::{Attestation, MakeCredentialArgsBuilder};
 use ctap_hid_fido2::public_key_credential_user_entity::PublicKeyCredentialUserEntity;
 use ctap_hid_fido2::verifier;
 
@@ -40,6 +40,54 @@ pub struct AuthenticationResult {
 /// Wrapper around a FIDO2 device (`YubiKey`).
 pub struct YubiKey {
     device: FidoKeyHid,
+}
+
+/// Build a CBOR-encoded attestation object from parsed attestation fields.
+///
+/// The attestation object structure (per WebAuthn spec):
+/// - fmt: attestation format string
+/// - authData: authenticator data bytes
+/// - attStmt: attestation statement map
+fn build_attestation_object(attestation: &Attestation) -> Result<Vec<u8>> {
+    use ciborium::Value;
+
+    // Build attStmt map
+    let mut att_stmt = Vec::new();
+    att_stmt.push((
+        Value::Text("alg".into()),
+        Value::Integer(attestation.attstmt_alg.into()),
+    ));
+    att_stmt.push((
+        Value::Text("sig".into()),
+        Value::Bytes(attestation.attstmt_sig.clone()),
+    ));
+
+    if !attestation.attstmt_x5c.is_empty() {
+        let x5c: Vec<Value> = attestation
+            .attstmt_x5c
+            .iter()
+            .map(|cert| Value::Bytes(cert.clone()))
+            .collect();
+        att_stmt.push((Value::Text("x5c".into()), Value::Array(x5c)));
+    }
+
+    // Build attestation object map
+    let attestation_obj = Value::Map(vec![
+        (
+            Value::Text("fmt".into()),
+            Value::Text(attestation.fmt.clone()),
+        ),
+        (
+            Value::Text("authData".into()),
+            Value::Bytes(attestation.auth_data.clone()),
+        ),
+        (Value::Text("attStmt".into()), Value::Map(att_stmt)),
+    ]);
+
+    let mut buf = Vec::new();
+    ciborium::into_writer(&attestation_obj, &mut buf)
+        .context("failed to encode attestation object")?;
+    Ok(buf)
 }
 
 impl YubiKey {
@@ -129,7 +177,7 @@ impl YubiKey {
         Ok(RegistrationResult {
             credential_id: verify_result.credential_id,
             public_key: verify_result.credential_public_key.der,
-            attestation_object: attestation.auth_data,
+            attestation_object: build_attestation_object(&attestation)?,
             client_data_json,
         })
     }

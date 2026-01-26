@@ -35,3 +35,4 @@ aws-lc-rs = { workspace = true }
 jiff = { workspace = true }
 url = { workspace = true }
 ssh-key = { workspace = true }
+ciborium = { workspace = true }
