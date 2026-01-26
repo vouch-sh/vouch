@@ -42,7 +42,7 @@ tokio = { version = "=1.49.0", default-features = false, features = ["rt-multi-t
 
 # CLI
 clap = { version = "=4.5.54", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context"] }
-clap_complete = { version = "=4.5.54", default-features = false }
+clap_complete = { version = "=4.5.65", default-features = false }
 
 # Serialization
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
@@ -50,7 +50,7 @@ serde_json = { version = "=1.0.149", default-features = false, features = ["std"
 ciborium = { version = "=0.2.2", default-features = false }
 
 # Unix system calls (daemon support)
-libc = { version = "=0.2.174", default-features = false }
+libc = { version = "=0.2.180", default-features = false }
 
 # FIDO2 (CLI - direct device communication)
 ctap-hid-fido2 = { version = "=3.5.8", default-features = false }
@@ -84,25 +84,25 @@ tracing-subscriber = { version = "=0.3.22", default-features = false, features =
 jiff = { version = "=0.2.18", default-features = false, features = ["std", "serde"] }
 
 # IDs
-uuid = { version = "=1.19.0", default-features = false, features = ["v7", "serde", "std"] }
+uuid = { version = "=1.20.0", default-features = false, features = ["v7", "serde", "std"] }
 
 # Password input (CLI)
 rpassword = { version = "=7.4.0", default-features = false }
 
 # Interactive prompts (CLI)
-inquire = { version = "=0.7.5", default-features = false, features = ["crossterm"] }
+inquire = { version = "=0.9.2", default-features = false, features = ["crossterm"] }
 
 # Config paths (CLI)
 dirs = { version = "=6.0.0", default-features = false }
 
 # Hostname (for client context)
-gethostname = { version = "=1.0.1", default-features = false }
+gethostname = { version = "=1.1.0", default-features = false }
 
 # Browser launching (CLI)
-open = { version = "=5.3.2", default-features = false }
+open = { version = "=5.3.3", default-features = false }
 
 # Crypto
-aws-lc-rs = { version = "=1.12.6", default-features = false }
+aws-lc-rs = { version = "=1.15.4", default-features = false }
 base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
 hex = { version = "=0.4.3", default-features = false, features = ["std"] }
 
@@ -120,7 +120,7 @@ subtle = { version = "=2.6.1", default-features = false }
 ssh-key = { version = "=0.6.7", default-features = false, features = ["std", "ed25519", "p256", "encryption", "rand_core"] }
 
 # Ed25519 signing (for SSH agent)
-ed25519-dalek = { version = "=2.1.1", default-features = false, features = ["std"] }
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
 
 # Internal
 vouch-common = { path = "crates/vouch-common" }
