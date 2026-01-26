@@ -410,6 +410,18 @@ fn verify_es256(
     // Extract y coordinate (label -3)
     let y = get_cose_bytes(map, -3)?;
 
+    tracing::debug!(
+        "verify_es256: x_len={}, y_len={}, sig_len={}, msg_len={}",
+        x.len(),
+        y.len(),
+        signature.len(),
+        message.len()
+    );
+    tracing::debug!("verify_es256: x_hex={}", hex::encode(&x));
+    tracing::debug!("verify_es256: y_hex={}", hex::encode(&y));
+    tracing::debug!("verify_es256: sig_hex={}", hex::encode(signature));
+    tracing::debug!("verify_es256: msg_hex={}", hex::encode(message));
+
     // Build uncompressed SEC1 point: 0x04 || x || y
     let mut point = Vec::with_capacity(1 + x.len() + y.len());
     point.push(0x04);
@@ -419,16 +431,20 @@ fn verify_es256(
     // Try raw format first (64 bytes, r || s) - used by browser WebAuthn
     // Then try DER/ASN.1 format (70-72 bytes) - used by CTAP2/YubiKey
     if signature.len() == 64 {
+        tracing::debug!("verify_es256: using FIXED (raw) format");
         let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, &point);
-        public_key
-            .verify(message, signature)
-            .map_err(|_| VerifyError::SignatureInvalid)
+        public_key.verify(message, signature).map_err(|e| {
+            tracing::warn!("verify_es256 FIXED failed: {:?}", e);
+            VerifyError::SignatureInvalid
+        })
     } else {
+        tracing::debug!("verify_es256: using ASN1 (DER) format");
         // DER-encoded signature from CTAP2
         let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, &point);
-        public_key
-            .verify(message, signature)
-            .map_err(|_| VerifyError::SignatureInvalid)
+        public_key.verify(message, signature).map_err(|e| {
+            tracing::warn!("verify_es256 ASN1 failed: {:?}", e);
+            VerifyError::SignatureInvalid
+        })
     }
 }
 
