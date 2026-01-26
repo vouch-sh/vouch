@@ -180,6 +180,46 @@ POST /oauth/token          1 request/5 seconds per device_code
 POST /device               5 attempts/code (then code is invalidated)
 ```
 
+### Key Registration Security
+
+Vouch enforces a secure key registration model:
+
+**First Key Registration:**
+- First key MUST be registered via browser enrollment (`vouch enroll`)
+- Browser flow requires OIDC authentication (Google, etc.)
+- Email comes from verified OIDC provider, never self-asserted
+- WebAuthn registration happens in browser with `excludeCredentials`
+
+**Additional Key Registration:**
+- Requires existing authentication (`vouch login` first)
+- CLI registration endpoint (`/v1/auth/register/start`) requires valid session token
+- Email is derived from session claims, not from request
+- Prevents unauthorized key addition to accounts
+
+**Duplicate Key Prevention:**
+- Server returns `excludeCredentials` list to prevent re-registering same key
+- Server-side check before storing: returns HTTP 409 if credential_id already exists
+- Applies to both browser and CLI registration flows
+
+```
+User Workflow:
+  First-time enrollment:
+    vouch enroll → Browser → Google Sign-in → WebAuthn → Session token
+
+  Adding additional keys:
+    vouch login      → Authenticate with existing key
+    vouch register   → Add new key (requires valid session)
+```
+
+**Email Binding:**
+| Flow | Email Source | Verified By |
+|------|--------------|-------------|
+| `vouch enroll` | Google ID token | Google (OIDC) |
+| `vouch register` | Session token | Previously verified via OIDC |
+| `vouch login` | Stored in user record | Looked up via credential's user_handle |
+
+The email is never self-asserted. It always traces back to the original OIDC verification.
+
 ### Transport Layer
 
 All communication uses TLS 1.3 with:

@@ -45,12 +45,16 @@ $ git push origin main    # Just works
  |  +---------------------------------------------------------------------+  |
  |  |                           vouch CLI                                 |  |
  |  |                                                                     |  |
- |  |  * vouch enroll     (one-time, opens browser)                      |  |
+ |  |  * vouch enroll     (one-time, opens browser, first key)           |  |
  |  |  * vouch login      (daily, CLI only, discoverable credential)     |  |
+ |  |  * vouch register   (add backup key, requires login first)         |  |
  |  |  * vouch status                                                    |  |
  |  |  * vouch logout                                                    |  |
- |  |  * vouch keys list|remove                                          |  |
- |  |  * vouch setup ssh|aws|github                                      |  |
+ |  |  * vouch keys        (interactive menu, or list|remove|rename)     |  |
+ |  |  * vouch credential ssh|aws                                        |  |
+ |  |  * vouch setup ssh|aws                                             |  |
+ |  |  * vouch doctor     (diagnostic checks)                            |  |
+ |  |  * vouch completions (shell completions)                           |  |
  |  +---------------------------------------------------------------------+  |
  |                    |                                                      |
  |                    | IPC (Unix socket)                                    |
@@ -189,17 +193,19 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - OpenID Connect Core 1.0
 - OAuth 2.0 Device Authorization Grant (RFC 8628)
 - Proof Key for Code Exchange (PKCE, RFC 7636)
-- OAuth 2.0 Token Revocation (RFC 7009) — planned
-- OAuth 2.0 Token Introspection (RFC 7662) — planned
-- SCIM 2.0 (RFC 7643/7644) — launch requirement
+- OAuth 2.0 Token Revocation (RFC 7009)
+- OAuth 2.0 Token Introspection (RFC 7662)
+- OAuth 2.0 Token Exchange (RFC 8693)
+- SCIM 2.0 (RFC 7643/7644)
+- DPoP (RFC 9449) — Demonstrating Proof of Possession
 - OAuth 2.0 Security Best Current Practice (RFC 9700) — followed
-- DPoP (RFC 9449) — future consideration
 
 **Supported Grant Types:**
 | Grant Type | Use Case |
 |------------|----------|
 | `authorization_code` (with PKCE) | Web and native applications |
-| `urn:ietf:params:oauth:grant-type:device_code` | CLI tools, headless devices |
+| `urn:ietf:params:oauth:grant-type:device_code` | CLI tools, headless devices (RFC 8628) |
+| `urn:ietf:params:oauth:grant-type:token-exchange` | Service-to-service delegation (RFC 8693) |
 
 **Supported Scopes:**
 | Scope | Claims Returned |
@@ -217,10 +223,12 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 | `none` | Public clients (native apps with PKCE) |
 
 **Standard OIDC Endpoints:**
-- `GET /.well-known/openid-configuration` — Discovery document
-- `GET /oauth/jwks` — Public keys for token verification
+- `GET /.well-known/openid-configuration` — Discovery document (RFC 8414)
+- `GET /oauth/jwks` — Public keys for token verification (RFC 7517)
 - `GET /oauth/authorize` — Authorization endpoint
-- `POST /oauth/token` — Token exchange (device flow + authorization code)
+- `POST /oauth/token` — Token issuance (device code, authorization code, token exchange)
+- `POST /oauth/revoke` — Token revocation (RFC 7009)
+- `POST /oauth/introspect` — Token introspection (RFC 7662)
 - `GET /oauth/userinfo` — User info endpoint
 
 **ID Token Claims:**
@@ -459,6 +467,67 @@ Uses discoverable credential from YubiKey:
 ```
 
 **Key insight**: The YubiKey's discoverable credential (passkey) identifies the user. No email needed for daily login.
+
+### Adding Additional Keys (CLI, Requires Login)
+
+After initial enrollment, users can add backup keys via CLI:
+
+```
++--------+     +-----------+     +--------------+     +----------+
+|  User  |     |   vouch   |     |    Server    |     | YubiKey  |
+|        |     |   CLI     |     |              |     | (new)    |
++---+----+     +-----+-----+     +------+-------+     +----+-----+
+    |                |                  |                  |
+    | vouch login    |  (with existing key)                |
+    |--------------->|                  |                  |
+    |                |  [... standard login flow ...]      |
+    |                |                  |                  |
+    | vouch register |                  |                  |
+    | --name "Backup"|                  |                  |
+    |--------------->|                  |                  |
+    |                |                  |                  |
+    |                | POST /v1/auth/register/start        |
+    |                | Authorization: Bearer <token>       |
+    |                |----------------->|                  |
+    |                |                  |                  |
+    |                |                  | Verify session   |
+    |                |                  | Get user from    |
+    |                |                  | session claims   |
+    |                |                  | Return challenge |
+    |                |                  | + excludeCredIDs |
+    |                |                  |                  |
+    |                | Challenge +      |                  |
+    |                | exclude list     |                  |
+    |                |<-----------------|                  |
+    |                |                  |                  |
+    |                | CTAP2: makeCredential               |
+    |                |----------------------------------->|
+    |                |                  |                  |
+    |  Touch key     |                  |                  |
+    |  Enter PIN     |                  |                  |
+    |<---------------|                  |                  |
+    |                |                  |                  |
+    |                | Attestation      |                  |
+    |                |<-----------------------------------|
+    |                |                  |                  |
+    |                | POST /v1/auth/register/complete     |
+    |                |----------------->|                  |
+    |                |                  |                  |
+    |                |                  | Check duplicate  |
+    |                |                  | Store credential |
+    |                |                  |                  |
+    |                | Success          |                  |
+    |                |<-----------------|                  |
+    |                |                  |                  |
+    | "Key added"    |                  |                  |
+    |<---------------|                  |                  |
+```
+
+**Security controls:**
+- Requires valid session token (must `vouch login` first)
+- Email comes from session claims (OIDC-verified), not user input
+- Server checks for duplicate credential_id before storing
+- `excludeCredentials` list prevents re-registering same physical key
 
 ### Credential Request (Transparent)
 

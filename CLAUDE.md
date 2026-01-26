@@ -13,16 +13,19 @@ vouch/
 ├── crates/
 │   ├── vouch-cli/        # User-facing CLI binary
 │   ├── vouch-agent/      # Background daemon for session/cert management
+│   ├── vouch-server/     # Auth server with OIDC provider, SSH CA
 │   └── vouch-common/     # Shared types, FIDO2 helpers, API client
 ├── docs/                 # Architecture, security model, guides
 └── tests/                # Integration tests
 ```
 
 **Key flows:**
-1. `vouch register` → FIDO2 makeCredential → store public key on server
+1. `vouch enroll` → Browser OIDC → WebAuthn in browser → CLI receives session token (first key)
 2. `vouch login` → FIDO2 getAssertion → receive session token
-3. `vouch credential ssh` → exchange session for SSH certificate
-4. Native tools (ssh, aws, git) call vouch helpers transparently
+3. `vouch register` → (requires login) → FIDO2 makeCredential → add additional key
+4. `vouch credential ssh` → exchange session for SSH certificate
+5. `vouch credential aws` → exchange session for AWS temporary credentials
+6. Native tools (ssh, aws) call vouch helpers transparently via `credential_process`
 
 ## Code Conventions
 
@@ -170,10 +173,12 @@ cargo clippy --all-targets -- -D warnings
 | Need | Location |
 |------|----------|
 | CLI commands | `crates/vouch-cli/src/commands/` |
-| Agent IPC | `crates/vouch-agent/src/ipc.rs` |
-| Session types | `crates/vouch-common/src/types.rs` |
-| FIDO2 helpers | `crates/vouch-common/src/fido2.rs` |
-| API client | `crates/vouch-common/src/api.rs` |
+| Agent IPC | `crates/vouch-agent/src/` |
+| API types | `crates/vouch-common/src/api.rs` |
+| Server handlers | `crates/vouch-server/src/handlers/` |
+| SSH CA | `crates/vouch-server/src/ssh_ca.rs` |
+| Database | `crates/vouch-server/src/db.rs` |
+| HTML templates | `crates/vouch-server/templates/` |
 | Integration tests | `tests/` |
 
 ## Key Design Decisions
@@ -182,7 +187,7 @@ cargo clippy --all-targets -- -D warnings
 2. **Rust for memory safety** — Security tool must be secure
 3. **YubiKey-only for MVP** — Consistent security properties
 4. **8-hour sessions** — Balance security and usability
-5. **step-ca for PKI** — Battle-tested, OIDC provisioner works perfectly
+5. **Built-in SSH CA** — Ed25519 signing, no external dependencies
 6. **MDM for distribution** — Don't build what Jamf/Kandji already do
 
 ## Questions to Ask
@@ -195,9 +200,21 @@ Before implementing a feature:
 
 ## External Resources
 
-- [FIDO2 Spec](https://fidoalliance.org/specs/fido-v2.0-ps-20190130/fido-client-to-authenticator-protocol-v2.0-ps-20190130.html)
-- [WebAuthn Spec](https://www.w3.org/TR/webauthn-2/)
-- [step-ca Docs](https://smallstep.com/docs/step-ca/)
-- [ctap-hid-fido2 Crate](https://crates.io/crates/ctap-hid-fido2)
-- [Why Strong Authentication Is Your Most Important Security Control](https://www.linkedin.com/pulse/why-strong-authentication-your-most-important-security-schmidt-unm0e/)
-- [Amazon Midway](https://midway-auth.amazon.com)
+**Specifications:**
+- [FIDO2/CTAP2](https://fidoalliance.org/specs/fido-v2.0-ps-20190130/fido-client-to-authenticator-protocol-v2.0-ps-20190130.html)
+- [WebAuthn Level 2](https://www.w3.org/TR/webauthn-2/)
+- [RFC 6749 - OAuth 2.0](https://www.rfc-editor.org/rfc/rfc6749)
+- [RFC 7636 - PKCE](https://www.rfc-editor.org/rfc/rfc7636)
+- [RFC 8628 - Device Authorization Grant](https://www.rfc-editor.org/rfc/rfc8628)
+- [RFC 7009 - Token Revocation](https://www.rfc-editor.org/rfc/rfc7009)
+- [RFC 7662 - Token Introspection](https://www.rfc-editor.org/rfc/rfc7662)
+- [RFC 8693 - Token Exchange](https://www.rfc-editor.org/rfc/rfc8693)
+- [RFC 9449 - DPoP](https://www.rfc-editor.org/rfc/rfc9449)
+- [RFC 7643/7644 - SCIM 2.0](https://www.rfc-editor.org/rfc/rfc7643)
+
+**Crates:**
+- [ctap-hid-fido2](https://crates.io/crates/ctap-hid-fido2) — Pure Rust FIDO2/CTAP2
+- [ssh-key](https://crates.io/crates/ssh-key) — SSH key/certificate handling
+
+**Reference:**
+- [Amazon Midway](https://midway-auth.amazon.com) — Inspiration for hardware-backed auth

@@ -461,8 +461,10 @@ curl -X POST https://vouch.example.com/oauth/token \
 - [ ] Audit log export (Splunk, Datadog)
 - [ ] Organization policies
 - [x] Self-service YubiKey management
+  - [x] `vouch keys` - Interactive key management menu
   - [x] `vouch keys list` - List registered keys
   - [x] `vouch keys remove` - Remove a registered key
+  - [x] `vouch keys rename` - Rename a registered key
 
 ### v0.7 — Agent Delegation (Month 6)
 
