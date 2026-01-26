@@ -1541,3 +1541,322 @@ mod session {
         );
     }
 }
+
+/// ES256 (ECDSA P-256) signature verification tests.
+/// These tests replicate the exact flow used by real YubiKeys.
+mod es256_flow {
+    use aws_lc_rs::rand::SystemRandom;
+    use aws_lc_rs::signature::{
+        EcdsaKeyPair, KeyPair, ECDSA_P256_SHA256_ASN1_SIGNING, ECDSA_P256_SHA256_FIXED_SIGNING,
+    };
+    use aws_lc_rs::digest::{digest, SHA256};
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
+    use ciborium::Value;
+    use vouch_server::{RealCoseVerifier, CoseVerifier};
+
+    /// Build a COSE EC2 key for ES256 (P-256) in the format used by cose_key_to_cbor.
+    fn build_cose_ec2_key(x: &[u8], y: &[u8]) -> Vec<u8> {
+        let map: Vec<(Value, Value)> = vec![
+            (Value::Integer(1.into()), Value::Integer(2.into())),    // kty = EC2
+            (Value::Integer(3.into()), Value::Integer((-7_i64).into())), // alg = ES256 (-7)
+            (Value::Integer((-1_i64).into()), Value::Integer(1.into())), // crv = P-256 (1)
+            (Value::Integer((-2_i64).into()), Value::Bytes(x.to_vec())), // x
+            (Value::Integer((-3_i64).into()), Value::Bytes(y.to_vec())), // y
+        ];
+
+        let mut buf = Vec::new();
+        ciborium::into_writer(&Value::Map(map), &mut buf).expect("Failed to encode COSE key");
+        buf
+    }
+
+    /// Build client data JSON for WebAuthn get assertion.
+    fn build_client_data_json(challenge: &[u8], origin: &str) -> Vec<u8> {
+        let challenge_b64 = URL_SAFE_NO_PAD.encode(challenge);
+        let json = format!(
+            r#"{{"type":"webauthn.get","challenge":"{}","origin":"{}","crossOrigin":false}}"#,
+            challenge_b64, origin
+        );
+        json.into_bytes()
+    }
+
+    /// Build authenticator data for the given RP ID.
+    fn build_authenticator_data(rp_id: &str, counter: u32) -> Vec<u8> {
+        let rp_id_hash = digest(&SHA256, rp_id.as_bytes());
+        let flags = 0x05u8; // UP (0x01) + UV (0x04)
+
+        let mut auth_data = Vec::with_capacity(37);
+        auth_data.extend_from_slice(rp_id_hash.as_ref()); // 32 bytes
+        auth_data.push(flags); // 1 byte
+        auth_data.extend_from_slice(&counter.to_be_bytes()); // 4 bytes
+        auth_data
+    }
+
+    /// Test ES256 signature verification with DER format (like CTAP2/YubiKey).
+    #[test]
+    fn test_es256_der_signature_verification() {
+        let rng = SystemRandom::new();
+
+        // Generate an ECDSA P-256 key pair (ASN.1/DER signatures)
+        let pkcs8_bytes = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng)
+            .expect("Failed to generate key pair");
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8_bytes.as_ref())
+            .expect("Failed to parse key pair");
+
+        // Extract the public key (uncompressed SEC1 format: 0x04 || x || y)
+        let public_key = key_pair.public_key();
+        let public_key_bytes = public_key.as_ref();
+
+        // SEC1 uncompressed point is 65 bytes: 0x04 + 32 bytes x + 32 bytes y
+        assert_eq!(public_key_bytes.len(), 65, "Public key should be 65 bytes (SEC1 uncompressed)");
+        assert_eq!(public_key_bytes[0], 0x04, "First byte should be 0x04");
+
+        let x = &public_key_bytes[1..33];
+        let y = &public_key_bytes[33..65];
+
+        // Build COSE key (same format as cose_key_to_cbor produces)
+        let cose_key = build_cose_ec2_key(x, y);
+
+        // Build the message to sign (authenticator_data || SHA256(client_data_json))
+        let rp_id = "dev.vouch.sh";
+        let challenge = [0x42u8; 32];
+        let origin = format!("https://{}", rp_id);
+
+        let auth_data = build_authenticator_data(rp_id, 1);
+        let client_data_json = build_client_data_json(&challenge, &origin);
+        let client_data_hash = digest(&SHA256, &client_data_json);
+
+        let mut message = Vec::with_capacity(auth_data.len() + 32);
+        message.extend_from_slice(&auth_data);
+        message.extend_from_slice(client_data_hash.as_ref());
+
+        // Sign the message (produces DER-encoded signature)
+        let signature = key_pair.sign(&rng, &message).expect("Failed to sign");
+        let signature_bytes = signature.as_ref();
+
+        println!("ES256 DER test:");
+        println!("  public_key_bytes (SEC1): {} bytes", public_key_bytes.len());
+        println!("  x: {}", hex::encode(x));
+        println!("  y: {}", hex::encode(y));
+        println!("  cose_key: {} bytes = {}", cose_key.len(), hex::encode(&cose_key));
+        println!("  signature: {} bytes (should be 70-72 for DER)", signature_bytes.len());
+        println!("  message: {} bytes", message.len());
+
+        // Verify using the server's verification code
+        let verifier = RealCoseVerifier::new();
+        let result = verifier.verify(&cose_key, &message, signature_bytes);
+
+        assert!(result.is_ok(), "ES256 DER signature verification should succeed: {:?}", result);
+    }
+
+    /// Test ES256 signature verification with raw/fixed format (like browser WebAuthn).
+    #[test]
+    fn test_es256_fixed_signature_verification() {
+        let rng = SystemRandom::new();
+
+        // Generate an ECDSA P-256 key pair (fixed/raw signatures - r||s format)
+        let pkcs8_bytes = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+            .expect("Failed to generate key pair");
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8_bytes.as_ref())
+            .expect("Failed to parse key pair");
+
+        // Extract the public key
+        let public_key = key_pair.public_key();
+        let public_key_bytes = public_key.as_ref();
+
+        let x = &public_key_bytes[1..33];
+        let y = &public_key_bytes[33..65];
+
+        // Build COSE key
+        let cose_key = build_cose_ec2_key(x, y);
+
+        // Build the message to sign
+        let rp_id = "dev.vouch.sh";
+        let challenge = [0x42u8; 32];
+        let origin = format!("https://{}", rp_id);
+
+        let auth_data = build_authenticator_data(rp_id, 1);
+        let client_data_json = build_client_data_json(&challenge, &origin);
+        let client_data_hash = digest(&SHA256, &client_data_json);
+
+        let mut message = Vec::with_capacity(auth_data.len() + 32);
+        message.extend_from_slice(&auth_data);
+        message.extend_from_slice(client_data_hash.as_ref());
+
+        // Sign the message (produces fixed 64-byte r||s signature)
+        let signature = key_pair.sign(&rng, &message).expect("Failed to sign");
+        let signature_bytes = signature.as_ref();
+
+        println!("ES256 FIXED test:");
+        println!("  signature: {} bytes (should be 64 for fixed)", signature_bytes.len());
+
+        // Verify using the server's verification code
+        let verifier = RealCoseVerifier::new();
+        let result = verifier.verify(&cose_key, &message, signature_bytes);
+
+        assert!(result.is_ok(), "ES256 FIXED signature verification should succeed: {:?}", result);
+    }
+
+    /// Test that simulates the exact browser enrollment + CLI login flow.
+    /// Browser enrollment stores public key via webauthn-rs (cose_key_to_cbor).
+    /// CLI login gets assertion from YubiKey (DER signature) and sends to server.
+    #[test]
+    fn test_browser_enrollment_cli_login_es256_flow() {
+        let rng = SystemRandom::new();
+
+        // === BROWSER ENROLLMENT ===
+        // webauthn-rs extracts x, y from attestation and we call cose_key_to_cbor
+        let pkcs8_bytes = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, &rng)
+            .expect("Failed to generate key pair");
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_ASN1_SIGNING, pkcs8_bytes.as_ref())
+            .expect("Failed to parse key pair");
+
+        let public_key = key_pair.public_key();
+        let public_key_bytes = public_key.as_ref();
+        let x = &public_key_bytes[1..33];
+        let y = &public_key_bytes[33..65];
+
+        // This is what cose_key_to_cbor produces during browser enrollment
+        let stored_cose_key = build_cose_ec2_key(x, y);
+
+        println!("=== BROWSER ENROLLMENT ===");
+        println!("Stored COSE key ({} bytes): {}", stored_cose_key.len(), hex::encode(&stored_cose_key));
+
+        // === CLI LOGIN ===
+        // CLI constructs client_data_json and gets assertion from YubiKey
+        let rp_id = "dev.vouch.sh";
+        let challenge = [0xABu8; 32]; // Different challenge for login
+        let origin = format!("https://{}", rp_id);
+
+        // CLI builds client_data_json
+        let client_data_json = build_client_data_json(&challenge, &origin);
+        let client_data_hash = digest(&SHA256, &client_data_json);
+
+        // YubiKey builds authenticator_data and signs
+        let auth_data = build_authenticator_data(rp_id, 1);
+
+        // YubiKey signs: authenticator_data || client_data_hash
+        let mut signed_data = Vec::with_capacity(auth_data.len() + 32);
+        signed_data.extend_from_slice(&auth_data);
+        signed_data.extend_from_slice(client_data_hash.as_ref());
+
+        // YubiKey produces DER signature
+        let signature = key_pair.sign(&rng, &signed_data).expect("Failed to sign");
+
+        println!("=== CLI LOGIN ===");
+        println!("client_data_json: {}", String::from_utf8_lossy(&client_data_json));
+        println!("client_data_hash: {}", hex::encode(client_data_hash.as_ref()));
+        println!("auth_data ({} bytes): {}", auth_data.len(), hex::encode(&auth_data));
+        println!("signed_data ({} bytes): {}", signed_data.len(), hex::encode(&signed_data));
+        println!("signature ({} bytes): {}", signature.as_ref().len(), hex::encode(signature.as_ref()));
+
+        // === SERVER VERIFICATION ===
+        // Server receives: auth_data, client_data_json, signature
+        // Server looks up stored_cose_key from database
+        // Server builds signed_data and verifies
+
+        let server_client_data_hash = digest(&SHA256, &client_data_json);
+        let mut server_signed_data = Vec::with_capacity(auth_data.len() + 32);
+        server_signed_data.extend_from_slice(&auth_data);
+        server_signed_data.extend_from_slice(server_client_data_hash.as_ref());
+
+        println!("=== SERVER VERIFICATION ===");
+        println!("server_client_data_hash: {}", hex::encode(server_client_data_hash.as_ref()));
+        println!("server_signed_data ({} bytes): {}", server_signed_data.len(), hex::encode(&server_signed_data));
+
+        // Verify the message matches what was signed
+        assert_eq!(signed_data, server_signed_data, "Server should construct same signed_data");
+
+        let verifier = RealCoseVerifier::new();
+        let result = verifier.verify(&stored_cose_key, &server_signed_data, signature.as_ref());
+
+        assert!(result.is_ok(), "Browser enrollment + CLI login ES256 flow should succeed: {:?}", result);
+    }
+
+    /// Test that COSE key encoding matches expected format.
+    #[test]
+    fn test_cose_key_encoding_format() {
+        // Build a COSE key and verify it can be parsed correctly
+        let x = [0x11u8; 32];
+        let y = [0x22u8; 32];
+
+        let cose_key = build_cose_ec2_key(&x, &y);
+
+        println!("COSE key hex: {}", hex::encode(&cose_key));
+
+        // Parse it back
+        let parsed: ciborium::Value = ciborium::from_reader(&cose_key[..])
+            .expect("Failed to parse COSE key");
+
+        let map = parsed.as_map().expect("Should be a map");
+
+        // Extract and verify each field
+        let mut found_kty = false;
+        let mut found_alg = false;
+        let mut found_crv = false;
+        let mut found_x = false;
+        let mut found_y = false;
+
+        for (k, v) in map {
+            if let ciborium::Value::Integer(key) = k {
+                let key_i128: i128 = (*key).into();
+                match key_i128 {
+                    1 => {
+                        // kty
+                        if let ciborium::Value::Integer(val) = v {
+                            let val_i128: i128 = (*val).into();
+                            assert_eq!(val_i128, 2, "kty should be 2 (EC2)");
+                            found_kty = true;
+                            println!("kty = {}", val_i128);
+                        }
+                    }
+                    3 => {
+                        // alg
+                        if let ciborium::Value::Integer(val) = v {
+                            let val_i128: i128 = (*val).into();
+                            assert_eq!(val_i128, -7, "alg should be -7 (ES256)");
+                            found_alg = true;
+                            println!("alg = {}", val_i128);
+                        }
+                    }
+                    -1 => {
+                        // crv
+                        if let ciborium::Value::Integer(val) = v {
+                            let val_i128: i128 = (*val).into();
+                            assert_eq!(val_i128, 1, "crv should be 1 (P-256)");
+                            found_crv = true;
+                            println!("crv = {}", val_i128);
+                        }
+                    }
+                    -2 => {
+                        // x
+                        if let ciborium::Value::Bytes(bytes) = v {
+                            assert_eq!(bytes.len(), 32, "x should be 32 bytes");
+                            assert_eq!(&bytes[..], &x[..], "x should match");
+                            found_x = true;
+                            println!("x = {} ({} bytes)", hex::encode(bytes), bytes.len());
+                        }
+                    }
+                    -3 => {
+                        // y
+                        if let ciborium::Value::Bytes(bytes) = v {
+                            assert_eq!(bytes.len(), 32, "y should be 32 bytes");
+                            assert_eq!(&bytes[..], &y[..], "y should match");
+                            found_y = true;
+                            println!("y = {} ({} bytes)", hex::encode(bytes), bytes.len());
+                        }
+                    }
+                    _ => {
+                        println!("Unknown key: {}", key_i128);
+                    }
+                }
+            }
+        }
+
+        assert!(found_kty, "Should have kty");
+        assert!(found_alg, "Should have alg");
+        assert!(found_crv, "Should have crv");
+        assert!(found_x, "Should have x");
+        assert!(found_y, "Should have y");
+    }
+}

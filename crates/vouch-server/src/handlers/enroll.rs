@@ -1097,7 +1097,44 @@ pub async fn browser_register_complete(
     // Extract COSE public key and convert to raw CBOR bytes for storage
     // This ensures compatibility with our server-side WebAuthn verification
     let cose_key = passkey.get_public_key();
+
+    // Debug logging to understand the key structure
+    tracing::info!(
+        "browser_register_complete: cose_key type={:?}",
+        cose_key.type_
+    );
+    match &cose_key.key {
+        webauthn_rs::prelude::COSEKeyType::EC_EC2(ec2) => {
+            tracing::info!(
+                "browser_register_complete: EC2 key curve={:?}, x_len={}, y_len={}, x_hex={}, y_hex={}",
+                ec2.curve,
+                ec2.x.len(),
+                ec2.y.len(),
+                hex::encode(&ec2.x),
+                hex::encode(&ec2.y)
+            );
+        }
+        webauthn_rs::prelude::COSEKeyType::EC_OKP(okp) => {
+            tracing::info!(
+                "browser_register_complete: OKP key curve={:?}, x_len={}",
+                okp.curve,
+                okp.x.len()
+            );
+        }
+        webauthn_rs::prelude::COSEKeyType::RSA(rsa) => {
+            tracing::info!(
+                "browser_register_complete: RSA key n_len={}, e_len={}",
+                rsa.n.len(),
+                rsa.e.len()
+            );
+        }
+    }
+
     let public_key_cbor = cose_key_to_cbor(cose_key)?;
+    tracing::info!(
+        "browser_register_complete: stored_cbor_hex={}",
+        hex::encode(&public_key_cbor)
+    );
 
     // Store the authenticator with verified credential
     // user_handle is the user_id as bytes (for discoverable credentials)

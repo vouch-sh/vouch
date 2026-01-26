@@ -450,6 +450,18 @@ pub async fn login_complete(
     // Get stored counter from authenticator
     let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
 
+    // Debug logging for signature verification
+    tracing::info!(
+        "login_complete: stored_public_key_hex={}, sig_len={}, auth_data_len={}",
+        hex::encode(&authenticator.public_key),
+        req.signature.len(),
+        req.authenticator_data.len()
+    );
+    tracing::info!(
+        "login_complete: client_data_json={}",
+        String::from_utf8_lossy(&req.client_data_json)
+    );
+
     // Verify the WebAuthn assertion server-side
     let verification_result = webauthn_verify::verify_assertion(
         &req.authenticator_data,

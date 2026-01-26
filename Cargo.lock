@@ -3749,6 +3749,9 @@ name = "vouch-tests"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "aws-lc-rs",
+ "base64 0.22.1",
+ "ciborium",
  "hex",
  "serde",
  "serde_json",
