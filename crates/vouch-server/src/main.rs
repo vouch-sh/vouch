@@ -167,6 +167,8 @@ async fn main() -> Result<()> {
         .route("/device", get(handlers::enroll::device_verify_page))
         .route("/device", post(handlers::enroll::device_verify_submit))
         .route("/oauth/callback", get(handlers::enroll::oidc_callback))
+        // Direct enrollment (browser-only, no CLI required)
+        .route("/enroll/start", get(handlers::enroll::direct_enroll_start))
         .route(
             "/enroll/webauthn/start",
             post(handlers::enroll::browser_register_start),

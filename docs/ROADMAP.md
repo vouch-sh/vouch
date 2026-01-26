@@ -553,6 +553,33 @@ curl -X POST https://vouch.example.com/oauth/token \
 
 ---
 
+## Distribution & Deployment
+
+### CLI Distribution
+- [ ] GitHub Releases with pre-compiled binaries (macOS, Linux, Windows)
+- [ ] SBOM (Software Bill of Materials) for each release
+- [ ] SLSA attestations for supply chain security
+- [ ] Homebrew tap (`vouch-sh/tap/vouch`)
+- [ ] APT/RPM repositories
+
+### Server Distribution
+- [ ] Docker images (multi-arch: amd64, arm64)
+- [ ] Helm charts for Kubernetes deployment
+- [ ] Terraform modules (AWS, GCP, Azure)
+- [ ] docker-compose examples
+
+### Multi-Tenancy (dev.vouch.sh)
+- [x] Organizations table with domain-based isolation
+- [x] `hd` claim extraction from Google OIDC
+- [x] Personal accounts (gmail.com) with no org
+- [x] First user from domain becomes org admin
+- [x] Org-scoped admin views
+- [x] Direct browser enrollment (no CLI required)
+- [ ] Organization settings (name, branding)
+- [ ] Usage metrics per organization
+
+---
+
 ## Technical Debt & Improvements
 
 Tracked but not blocking releases:
