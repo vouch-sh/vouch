@@ -22,12 +22,9 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
-use vouch_common::{
-    ApiError, BrowserRegisterCompleteRequest, BrowserRegisterStartResponse,
-    extract_aaguid_from_attestation, validate_hardware_attestation,
-};
+use vouch_common::{ApiError, BrowserRegisterCompleteRequest, BrowserRegisterStartResponse};
 
-use super::{generate_random_bytes, json_error};
+use super::{generate_random_bytes, json_error, validate_registration_attestation};
 
 // ============================================================================
 // COSE Key Serialization
@@ -917,6 +914,12 @@ pub async fn browser_register_start(
             )
         })?;
 
+    tracing::info!(
+        "browser_register_start: user {} has {} existing credentials",
+        enroll_session.user_email,
+        existing_auths.len()
+    );
+
     let exclude_credentials: Vec<webauthn_rs::prelude::CredentialID> = existing_auths
         .iter()
         .map(|a| webauthn_rs::prelude::CredentialID::from(a.credential_id.clone()))
@@ -925,7 +928,15 @@ pub async fn browser_register_start(
     // Build exclude_credential_ids for browser (base64url encoded)
     let exclude_credential_ids: Vec<String> = existing_auths
         .iter()
-        .map(|a| URL_SAFE_NO_PAD.encode(&a.credential_id))
+        .map(|a| {
+            let encoded = URL_SAFE_NO_PAD.encode(&a.credential_id);
+            tracing::debug!(
+                "Excluding credential: {} (len={})",
+                encoded,
+                a.credential_id.len()
+            );
+            encoded
+        })
         .collect();
 
     // Use webauthn-rs to generate proper registration options with cryptographic verification
@@ -1073,22 +1084,14 @@ pub async fn browser_register_complete(
             )
         })?;
 
-    // Validate attestation format - reject software passkeys and platform authenticators
-    let validation = validate_hardware_attestation(&attestation_object);
-    if let (Some(code), Some(message)) = (validation.error_code(), validation.error_message()) {
-        tracing::warn!("Rejected registration: {}", code);
-        return Err(json_error(StatusCode::BAD_REQUEST, code, message));
-    }
-
-    // Extract AAGUID from the attestation object (for logging, not blocking)
-    // We parse it ourselves since webauthn-rs doesn't expose the AAGUID directly
-    let aaguid = extract_aaguid_from_attestation(&attestation_object);
-
-    // Determine device name from AAGUID if known
-    let device_name = aaguid
-        .as_deref()
-        .and_then(vouch_common::lookup_device_model)
-        .unwrap_or("Security Key");
+    // Validate attestation and check for duplicates
+    let validated = validate_registration_attestation(
+        &state.db,
+        &reg_state.user_id.to_string(),
+        &reg_state.user_email,
+        &attestation_object,
+    )
+    .await?;
 
     // Extract COSE public key and convert to raw CBOR bytes for storage
     // This ensures compatibility with our server-side WebAuthn verification
@@ -1101,10 +1104,10 @@ pub async fn browser_register_complete(
     let authenticator_id = db::create_authenticator(
         &state.db,
         &reg_state.user_id.to_string(),
-        device_name,
+        &validated.device_name,
         &credential_id_bytes,
         &public_key_cbor,
-        aaguid.as_deref(),
+        validated.aaguid.as_deref(),
         Some(&user_handle),
     )
     .await
@@ -1154,8 +1157,8 @@ pub async fn browser_register_complete(
     tracing::info!(
         "Enrollment complete for: {} with {} (AAGUID: {})",
         reg_state.user_email,
-        device_name,
-        aaguid.as_deref().unwrap_or("unknown")
+        validated.device_name,
+        validated.aaguid.as_deref().unwrap_or("unknown")
     );
 
     Ok(SuccessTemplate)

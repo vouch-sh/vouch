@@ -18,5 +18,5 @@ pub mod scim;
 // Re-export commonly used utilities
 pub use common::{
     extract_session, extract_session_with_email, generate_challenge, generate_random_bytes,
-    hash_token, json_error,
+    hash_token, json_error, validate_registration_attestation,
 };

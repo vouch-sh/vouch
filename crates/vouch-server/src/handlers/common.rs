@@ -9,7 +9,8 @@ use axum::http::{StatusCode, header};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jsonwebtoken::{DecodingKey, Validation};
-use vouch_common::ApiError;
+use sqlx::SqlitePool;
+use vouch_common::{ApiError, extract_aaguid_from_attestation, validate_hardware_attestation};
 
 use super::auth::SessionClaims;
 
@@ -215,4 +216,93 @@ macro_rules! impl_template_response {
             }
         )*
     };
+}
+
+// ============================================================================
+// Registration Validation
+// ============================================================================
+
+/// Result of validating a registration attestation.
+pub struct ValidatedAttestation {
+    /// The AAGUID extracted from the attestation (if available).
+    pub aaguid: Option<String>,
+    /// The device name determined from the AAGUID.
+    pub device_name: String,
+}
+
+/// Validate a WebAuthn registration attestation.
+///
+/// This performs common validation for both CLI and browser registration:
+/// 1. Validates the attestation is from a hardware authenticator (not software/platform)
+/// 2. Extracts the AAGUID from the attestation
+/// 3. Checks for duplicate AAGUID (same physical device already registered)
+/// 4. Determines the device name from the AAGUID
+///
+/// # Errors
+///
+/// Returns an error if:
+/// - The attestation is from a software passkey or platform authenticator
+/// - The same physical device (by AAGUID) is already registered for this user
+pub async fn validate_registration_attestation(
+    db: &SqlitePool,
+    user_id: &str,
+    user_email: &str,
+    attestation_object: &[u8],
+) -> Result<ValidatedAttestation, (StatusCode, Json<ApiError>)> {
+    // Validate attestation format - reject software passkeys and platform authenticators
+    let validation = validate_hardware_attestation(attestation_object);
+    if let (Some(code), Some(message)) = (validation.error_code(), validation.error_message()) {
+        tracing::warn!("Rejected registration: {}", code);
+        return Err(json_error(StatusCode::BAD_REQUEST, code, message));
+    }
+
+    // Extract AAGUID from the attestation object
+    let aaguid = extract_aaguid_from_attestation(attestation_object);
+
+    // Check for duplicate AAGUID - prevent same physical device from being registered twice
+    if let Some(ref aaguid_str) = aaguid {
+        let existing_auths = db::get_authenticators_for_user(db, user_id)
+            .await
+            .map_err(|e| {
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    &e.to_string(),
+                )
+            })?;
+
+        let has_duplicate = existing_auths
+            .iter()
+            .any(|a| a.aaguid.as_deref() == Some(aaguid_str.as_str()));
+
+        if has_duplicate {
+            let device_name =
+                vouch_common::lookup_device_model(aaguid_str).unwrap_or("This security key");
+            tracing::warn!(
+                "Rejected duplicate device registration: user={}, aaguid={}",
+                user_email,
+                aaguid_str
+            );
+            return Err(json_error(
+                StatusCode::CONFLICT,
+                "duplicate_device",
+                &format!(
+                    "{} is already registered. Each physical security key can only be registered once.",
+                    device_name
+                ),
+            ));
+        }
+    }
+
+    // Determine device name from AAGUID if known
+    let device_name = aaguid
+        .as_deref()
+        .and_then(vouch_common::lookup_device_model)
+        .unwrap_or("Security Key")
+        .to_string();
+
+    Ok(ValidatedAttestation {
+        aaguid,
+        device_name,
+    })
 }

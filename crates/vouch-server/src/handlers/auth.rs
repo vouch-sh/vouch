@@ -20,10 +20,10 @@ use uuid::Uuid;
 use vouch_common::{
     ApiError, LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest, LoginStartResponse,
     RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
-    SessionStatus, extract_aaguid_from_attestation, validate_hardware_attestation,
+    SessionStatus,
 };
 
-use super::{generate_challenge, hash_token, json_error};
+use super::{generate_challenge, hash_token, json_error, validate_registration_attestation};
 
 // ============================================================================
 // Registration State (stored temporarily)
@@ -258,15 +258,14 @@ pub async fn register_complete(
         ));
     }
 
-    // Validate attestation format - reject software passkeys and platform authenticators
-    let validation = validate_hardware_attestation(&req.attestation_object);
-    if let (Some(code), Some(message)) = (validation.error_code(), validation.error_message()) {
-        tracing::warn!("Rejected registration: {}", code);
-        return Err(json_error(StatusCode::BAD_REQUEST, code, message));
-    }
-
-    // Extract AAGUID from attestation object (for logging, not blocking)
-    let aaguid = extract_aaguid_from_attestation(&req.attestation_object);
+    // Validate attestation and check for duplicates
+    let validated = validate_registration_attestation(
+        &state.db,
+        &reg_state.user_id.to_string(),
+        &reg_state.user_name,
+        &req.attestation_object,
+    )
+    .await?;
 
     // Store the authenticator
     // user_handle is the user_id as bytes (for discoverable credentials)
@@ -277,7 +276,7 @@ pub async fn register_complete(
         &reg_state.device_name,
         &req.credential_id,
         &req.public_key,
-        aaguid.as_deref(),
+        validated.aaguid.as_deref(),
         Some(&user_handle),
     )
     .await
