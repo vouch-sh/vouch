@@ -15,9 +15,9 @@ pub async fn run(server: &str) -> Result<()> {
 
     println!("Starting enrollment...\n");
 
-    // Step 1: Request device code (RFC 8628 requires form encoding)
+    // Step 1: Request device code
     let device_response: DeviceCodeResponse = client
-        .post_form("/oauth/device/code", &DeviceCodeRequest::default())
+        .post("/oauth/device/code", &DeviceCodeRequest::default())
         .await
         .context("Failed to start enrollment")?;
 
