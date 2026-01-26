@@ -440,12 +440,8 @@ pub async fn token(
             };
             match super::device::device_token(State(state), Json(device_req)).await {
                 Ok(resp) => {
-                    // Convert DeviceTokenResponse to compatible format
-                    Json(serde_json::json!({
-                        "access_token": resp.access_token,
-                        "token_type": resp.token_type,
-                        "expires_in": resp.expires_in,
-                    })).into_response()
+                    // Return the DeviceTokenResponse directly (includes email field)
+                    resp.into_response()
                 }
                 Err((status, json)) => (status, json).into_response(),
             }
