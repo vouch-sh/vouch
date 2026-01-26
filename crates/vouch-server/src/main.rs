@@ -131,6 +131,9 @@ async fn main() -> Result<()> {
             get(handlers::home::developer_setup_page),
         )
         .route("/health", get(|| async { "ok" }))
+        // Legal pages
+        .route("/privacy", get(handlers::legal::privacy_page))
+        .route("/terms", get(handlers::legal::terms_page))
         // OIDC Provider endpoints
         .route(
             "/.well-known/openid-configuration",
