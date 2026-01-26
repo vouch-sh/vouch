@@ -985,7 +985,7 @@ pub async fn admin_login_start(State(state): State<Arc<AppState>>) -> Response {
     }
 
     let redirect_uri = format!("{}/admin/callback", state.config.verification_base_url);
-    let nonce = uuid::Uuid::new_v4().to_string();
+    let nonce = uuid::Uuid::now_v7().to_string();
 
     // Create signed state token with expiration
     let exp = Timestamp::now()

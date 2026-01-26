@@ -798,6 +798,28 @@ pub async fn browser_register_complete(
         )
     })?;
 
+    // Check for duplicate credential registration before proceeding
+    if let Some(_existing) = db::get_authenticator_by_credential_id(&state.db, &credential_id_bytes)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?
+    {
+        tracing::warn!(
+            "Rejected duplicate credential registration for user: {}",
+            reg_state.user_id
+        );
+        return Err(json_error(
+            StatusCode::CONFLICT,
+            "credential_already_registered",
+            "This security key is already registered",
+        ));
+    }
+
     let attestation_object = URL_SAFE_NO_PAD
         .decode(&req.attestation_object)
         .map_err(|e| {

@@ -59,8 +59,12 @@ pub struct Session {
 }
 
 /// Create or get a user by email.
+///
+/// Note: This function is primarily used for testing. In production, users are
+/// created via the OIDC enrollment flow using `upsert_user_with_org`.
+#[allow(dead_code)]
 pub async fn upsert_user(pool: &SqlitePool, email: &str, name: Option<&str>) -> Result<User> {
-    let id = Uuid::new_v4().to_string();
+    let id = Uuid::now_v7().to_string();
 
     // Try to insert, ignore if exists
     sqlx::query("INSERT OR IGNORE INTO users (id, email, name) VALUES (?, ?, ?)")
@@ -89,7 +93,7 @@ pub async fn upsert_user_with_org(
     org_id: Option<&str>,
     is_org_admin: bool,
 ) -> Result<User> {
-    let id = Uuid::new_v4().to_string();
+    let id = Uuid::now_v7().to_string();
 
     // Try to insert with org info, ignore if exists
     sqlx::query(
@@ -149,7 +153,7 @@ pub async fn create_authenticator(
     aaguid: Option<&str>,
     user_handle: Option<&[u8]>,
 ) -> Result<String> {
-    let id = Uuid::new_v4().to_string();
+    let id = Uuid::now_v7().to_string();
 
     sqlx::query(
         "INSERT INTO authenticators (id, user_id, name, credential_id, public_key, counter, aaguid, user_handle) VALUES (?, ?, ?, ?, ?, 0, ?, ?)"
@@ -235,7 +239,7 @@ pub async fn create_session(
     authenticator_id: &str,
     expires_at: &str,
 ) -> Result<String> {
-    let id = Uuid::new_v4().to_string();
+    let id = Uuid::now_v7().to_string();
 
     sqlx::query(
         "INSERT INTO sessions (id, user_id, token_hash, authenticator_id, expires_at) VALUES (?, ?, ?, ?, ?)"
@@ -627,7 +631,7 @@ pub async fn get_admin_users(pool: &SqlitePool) -> Result<Vec<AdminUser>> {
 /// Add an admin user.
 #[allow(dead_code)]
 pub async fn add_admin_user(pool: &SqlitePool, email: &str) -> Result<String> {
-    let id = Uuid::new_v4().to_string();
+    let id = Uuid::now_v7().to_string();
 
     sqlx::query("INSERT OR IGNORE INTO admin_users (id, email) VALUES (?, ?)")
         .bind(&id)
@@ -739,7 +743,7 @@ pub async fn create_organization(
     name: Option<&str>,
     created_by_user_id: Option<&str>,
 ) -> Result<Organization> {
-    let id = Uuid::new_v4().to_string();
+    let id = Uuid::now_v7().to_string();
 
     sqlx::query(
         "INSERT INTO organizations (id, domain, name, created_by_user_id) VALUES (?, ?, ?, ?)",
@@ -1113,7 +1117,7 @@ pub async fn create_scim_token(
     description: Option<&str>,
     expires_at: Option<&str>,
 ) -> Result<String> {
-    let id = Uuid::new_v4().to_string();
+    let id = Uuid::now_v7().to_string();
 
     sqlx::query(
         "INSERT INTO scim_tokens (id, token_hash, description, expires_at) VALUES (?, ?, ?, ?)",
@@ -1311,7 +1315,7 @@ pub async fn create_scim_user(
     external_id: Option<&str>,
     active: bool,
 ) -> Result<ScimUserRecord> {
-    let id = Uuid::new_v4().to_string();
+    let id = Uuid::now_v7().to_string();
 
     sqlx::query("INSERT INTO users (id, email, name, external_id, active) VALUES (?, ?, ?, ?, ?)")
         .bind(&id)
@@ -1532,8 +1536,8 @@ pub async fn create_oauth_client(
     application_type: OAuthClientType,
     redirect_uris: &[String],
 ) -> Result<(OAuthClient, String)> {
-    let id = Uuid::new_v4().to_string();
-    let client_id = Uuid::new_v4().to_string();
+    let id = Uuid::now_v7().to_string();
+    let client_id = Uuid::now_v7().to_string();
     let redirect_uris_json = serde_json::to_string(redirect_uris)?;
 
     sqlx::query(
@@ -1681,7 +1685,7 @@ pub async fn create_oauth_client_secret(
     description: Option<&str>,
     expires_at: Option<&str>,
 ) -> Result<OAuthClientSecret> {
-    let id = Uuid::new_v4().to_string();
+    let id = Uuid::now_v7().to_string();
 
     sqlx::query(
         "INSERT INTO oauth_client_secrets (id, oauth_client_id, secret_hash, description, expires_at)
@@ -2746,7 +2750,7 @@ mod tests {
         let user_id = user.id;
 
         // Create authenticator (simplified - normally needs more fields)
-        let auth_id = uuid::Uuid::new_v4().to_string();
+        let auth_id = uuid::Uuid::now_v7().to_string();
         sqlx::query(
             "INSERT INTO authenticators (id, user_id, name, credential_id, public_key, counter, created_at, user_handle) VALUES (?, ?, ?, ?, ?, 0, datetime('now'), ?)"
         )
@@ -2891,7 +2895,7 @@ mod tests {
             .expect("Failed to create user");
 
         // Create authenticator
-        let auth_id = Uuid::new_v4().to_string();
+        let auth_id = Uuid::now_v7().to_string();
         sqlx::query(
             "INSERT INTO authenticators (id, user_id, name, credential_id, public_key, counter, created_at, user_handle) VALUES (?, ?, ?, ?, ?, 0, datetime('now'), ?)"
         )
@@ -3482,7 +3486,7 @@ mod tests {
             .expect("Failed to create user");
 
         // Create authenticator
-        let auth_id = Uuid::new_v4().to_string();
+        let auth_id = Uuid::now_v7().to_string();
         sqlx::query(
             "INSERT INTO authenticators (id, user_id, name, credential_id, public_key, counter, created_at, user_handle) VALUES (?, ?, ?, ?, ?, 0, datetime('now'), ?)"
         )

@@ -119,14 +119,46 @@ pub struct SessionClaims {
 // ============================================================================
 
 /// Start registration - generate challenge and return to client.
+///
+/// This endpoint requires authentication. Users must first enroll via OIDC
+/// (`vouch enroll`) to register their first key. After that, they can add
+/// additional keys via this endpoint after logging in with an existing key.
 pub async fn register_start(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<RegisterStartRequest>,
 ) -> Result<Json<RegisterStartResponse>, (StatusCode, Json<ApiError>)> {
-    tracing::info!("Registration start for email: {}", req.email);
+    // Require authentication
+    let session = super::extract_session(&state, &headers).await?;
+    let user_id = Uuid::parse_str(&session.claims.sub).map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "uuid_error",
+            &e.to_string(),
+        )
+    })?;
+    let user_email = &session.claims.email;
 
-    // Create or get user
-    let user = db::upsert_user(&state.db, &req.email, Some(&req.name))
+    tracing::info!(
+        "Registration start for authenticated user: {} (adding key: {})",
+        user_email,
+        req.name
+    );
+
+    // Verify user exists (should always exist if they have a valid session)
+    let user = db::get_user_by_id(&state.db, &session.claims.sub)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
+
+    // Get existing credentials to exclude
+    let existing_auths = db::get_authenticators_for_user(&state.db, &user.id)
         .await
         .map_err(|e| {
             json_error(
@@ -136,13 +168,10 @@ pub async fn register_start(
             )
         })?;
 
-    let user_id = Uuid::parse_str(&user.id).map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "uuid_error",
-            &e.to_string(),
-        )
-    })?;
+    let exclude_credential_ids: Vec<Vec<u8>> = existing_auths
+        .iter()
+        .map(|a| a.credential_id.clone())
+        .collect();
 
     // Generate challenge
     let challenge = generate_challenge();
@@ -150,7 +179,7 @@ pub async fn register_start(
     // Create state token
     let reg_state = RegistrationState {
         user_id,
-        user_name: req.email.clone(),
+        user_name: user.email.clone(),
         device_name: req.name,
         challenge: challenge.clone(),
         rp_id: state.config.rp_id.clone(),
@@ -171,9 +200,10 @@ pub async fn register_start(
         rp_id: state.config.rp_id.clone(),
         rp_name: state.config.rp_name.clone(),
         user_id,
-        user_name: req.email,
+        user_name: user.email,
         algorithms: vec![-7], // ES256
         state: state_token,
+        exclude_credential_ids,
     }))
 }
 
@@ -203,6 +233,28 @@ pub async fn register_complete(
             StatusCode::BAD_REQUEST,
             "invalid_credential",
             "public_key is empty",
+        ));
+    }
+
+    // Check for duplicate credential registration
+    if let Some(_existing) = db::get_authenticator_by_credential_id(&state.db, &req.credential_id)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?
+    {
+        tracing::warn!(
+            "Rejected duplicate credential registration for user: {}",
+            reg_state.user_id
+        );
+        return Err(json_error(
+            StatusCode::CONFLICT,
+            "credential_already_registered",
+            "This security key is already registered",
         ));
     }
 

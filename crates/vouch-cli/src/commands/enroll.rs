@@ -57,6 +57,10 @@ pub async fn run(server: &str) -> Result<()> {
 
     println!("\nEnrollment successful!");
     println!("Enrolled as: {}", token_response.email);
+    println!();
+    println!("To add additional keys:");
+    println!("  1. vouch login");
+    println!("  2. vouch register --name \"Backup Key\"");
 
     Ok(())
 }

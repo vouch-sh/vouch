@@ -8,12 +8,15 @@ use uuid::Uuid;
 // ============================================================================
 
 /// Request to start FIDO2 registration.
+///
+/// Note: Email is not included in this request. For first-time enrollment,
+/// users must use the browser-based OIDC flow (`vouch enroll`). This CLI
+/// registration endpoint requires authentication, and the email is derived
+/// from the session token.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterStartRequest {
     /// Human-readable name for the authenticator (e.g., "My `YubiKey` 5").
     pub name: String,
-    /// User's email address.
-    pub email: String,
 }
 
 /// Response containing challenge for FIDO2 registration.
@@ -34,6 +37,10 @@ pub struct RegisterStartResponse {
     pub algorithms: Vec<i32>,
     /// Registration state token (opaque, returned to complete endpoint).
     pub state: String,
+    /// Credential IDs to exclude (already registered for this user).
+    /// Used to prevent duplicate registrations of the same key.
+    #[serde(default)]
+    pub exclude_credential_ids: Vec<Vec<u8>>,
 }
 
 /// Request to complete FIDO2 registration with authenticator response.

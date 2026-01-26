@@ -33,15 +33,12 @@ struct Cli {
 enum Commands {
     /// Enroll with browser-based OIDC + `WebAuthn` (recommended for new users).
     Enroll,
-    /// Register a new `YubiKey` with the server.
+    /// Register an additional `YubiKey` (requires login first).
     Register {
         /// Human-readable name for this `YubiKey` (e.g., "My `YubiKey` 5").
         /// Defaults to "`YubiKey`" if not specified.
         #[arg(long)]
         name: Option<String>,
-        /// Your email address.
-        #[arg(long)]
-        email: String,
     },
     /// Authenticate with your `YubiKey`.
     Login,
@@ -156,9 +153,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Enroll => commands::enroll::run(&server).await,
-        Commands::Register { name, email } => {
-            commands::register::run(&server, name.as_deref(), &email).await
-        }
+        Commands::Register { name } => commands::register::run(&server, name.as_deref()).await,
         Commands::Login => commands::login::run(&server).await,
         Commands::Status => commands::status::run(&server).await,
         Commands::Logout => commands::logout::run().await,

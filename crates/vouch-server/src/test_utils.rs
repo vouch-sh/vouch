@@ -376,7 +376,7 @@ pub async fn create_test_user(pool: &SqlitePool, email: &str) -> crate::db::User
 
 /// Create a test authenticator for a user.
 pub async fn create_test_authenticator(pool: &SqlitePool, user_id: &str) -> String {
-    let auth_id = uuid::Uuid::new_v4().to_string();
+    let auth_id = uuid::Uuid::now_v7().to_string();
     sqlx::query(
         "INSERT INTO authenticators (id, user_id, name, credential_id, public_key, counter, created_at, user_handle) VALUES (?, ?, ?, ?, ?, 0, datetime('now'), ?)"
     )
