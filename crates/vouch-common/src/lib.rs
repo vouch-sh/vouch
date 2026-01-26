@@ -7,7 +7,10 @@ pub mod clock;
 pub mod cookie;
 pub mod error;
 
-pub use aaguid::{extract_aaguid_from_auth_data, lookup_device_model};
+pub use aaguid::{
+    extract_aaguid_from_auth_data, extract_public_key_from_attestation,
+    extract_public_key_from_auth_data, lookup_device_model,
+};
 pub use api::*;
 pub use attestation::{
     AttestationFormat, AttestationValidation, extract_aaguid_from_attestation,

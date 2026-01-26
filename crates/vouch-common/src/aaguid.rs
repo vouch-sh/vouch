@@ -287,6 +287,65 @@ pub fn extract_aaguid_from_auth_data(auth_data: &[u8]) -> Option<String> {
     ))
 }
 
+/// Extract the COSE-encoded public key from authenticator data.
+///
+/// The authenticator data structure (for registration with AT flag):
+/// - rpIdHash: 32 bytes
+/// - flags: 1 byte
+/// - signCount: 4 bytes
+/// - attestedCredentialData (if AT flag set):
+///   - aaguid: 16 bytes
+///   - credIdLen: 2 bytes (big-endian)
+///   - credId: credIdLen bytes
+///   - credentialPublicKey: COSE-encoded (remaining bytes)
+///
+/// Returns the raw COSE public key bytes if present and valid.
+#[must_use]
+pub fn extract_public_key_from_auth_data(auth_data: &[u8]) -> Option<Vec<u8>> {
+    // Minimum length: rpIdHash(32) + flags(1) + signCount(4) + aaguid(16) + credIdLen(2) = 55
+    if auth_data.len() < 55 {
+        return None;
+    }
+
+    // Check AT flag (bit 6) to see if attested credential data is present
+    let flags = auth_data.get(32)?;
+    if flags & 0x40 == 0 {
+        // AT flag not set, no attested credential data
+        return None;
+    }
+
+    // Credential ID length is at offset 53-54 (big-endian)
+    let cred_id_len_bytes: [u8; 2] = auth_data.get(53..55)?.try_into().ok()?;
+    let cred_id_len = u16::from_be_bytes(cred_id_len_bytes) as usize;
+
+    // Public key starts after credId
+    let public_key_offset = 55 + cred_id_len;
+
+    // The rest of auth_data is the COSE-encoded public key
+    auth_data.get(public_key_offset..).map(|s| s.to_vec())
+}
+
+/// Extract the COSE-encoded public key from an attestation object.
+///
+/// This parses the CBOR attestation object to get authData, then extracts
+/// the public key from the attested credential data.
+///
+/// Returns the raw COSE public key bytes if present and valid.
+#[must_use]
+pub fn extract_public_key_from_attestation(attestation: &[u8]) -> Option<Vec<u8>> {
+    // Parse the CBOR attestation object
+    let value: ciborium::Value = ciborium::from_reader(attestation).ok()?;
+
+    // Extract authData from the map
+    let auth_data = value.as_map().and_then(|m| {
+        m.iter()
+            .find(|(k, _)| k.as_text() == Some("authData"))
+            .and_then(|(_, v)| v.as_bytes())
+    })?;
+
+    extract_public_key_from_auth_data(auth_data)
+}
+
 #[cfg(test)]
 #[allow(clippy::indexing_slicing)]
 mod tests {
