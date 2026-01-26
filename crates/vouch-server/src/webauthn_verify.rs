@@ -274,18 +274,20 @@ fn verify_es256(
     point.extend_from_slice(&x);
     point.extend_from_slice(&y);
 
-    // WebAuthn signatures are in raw format (r || s), not DER
-    // Each component is 32 bytes for P-256
-    if signature.len() != 64 {
-        return Err(VerifyError::SignatureInvalid);
+    // Try raw format first (64 bytes, r || s) - used by browser WebAuthn
+    // Then try DER/ASN.1 format (70-72 bytes) - used by CTAP2/YubiKey
+    if signature.len() == 64 {
+        let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, &point);
+        public_key
+            .verify(message, signature)
+            .map_err(|_| VerifyError::SignatureInvalid)
+    } else {
+        // DER-encoded signature from CTAP2
+        let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, &point);
+        public_key
+            .verify(message, signature)
+            .map_err(|_| VerifyError::SignatureInvalid)
     }
-
-    // aws-lc-rs uses ECDSA_P256_SHA256_FIXED for raw (r||s) signatures
-    let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, &point);
-
-    public_key
-        .verify(message, signature)
-        .map_err(|_| VerifyError::SignatureInvalid)
 }
 
 /// Verify RS256 (RSA PKCS#1 v1.5 with SHA-256) signature.
