@@ -391,6 +391,11 @@ pub async fn login_complete(
     };
 
     // Get the authenticator by credential_id
+    tracing::info!(
+        "login_complete: credential_id_hex={} (len={})",
+        hex::encode(&req.credential_id),
+        req.credential_id.len()
+    );
     let authenticator = db::get_authenticator_by_credential_id(&state.db, &req.credential_id)
         .await
         .map_err(|e| {
@@ -408,6 +413,22 @@ pub async fn login_complete(
                 "Credential not registered with this server",
             )
         })?;
+
+    // Log the authenticator details for debugging
+    tracing::info!(
+        "login_complete: found authenticator id={}, stored_cred_id_hex={} (len={})",
+        authenticator.id,
+        hex::encode(&authenticator.credential_id),
+        authenticator.credential_id.len()
+    );
+    // Sanity check: credential_id should match (lookup was by credential_id)
+    if authenticator.credential_id != req.credential_id {
+        tracing::error!(
+            "CRITICAL: credential_id mismatch after lookup! req={} vs stored={}",
+            hex::encode(&req.credential_id),
+            hex::encode(&authenticator.credential_id)
+        );
+    }
 
     // Verify authenticator belongs to this user (from user_handle)
     if authenticator.user_id != user_id.to_string() {

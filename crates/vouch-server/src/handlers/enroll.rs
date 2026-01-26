@@ -1098,6 +1098,22 @@ pub async fn browser_register_complete(
     // This ensures compatibility with our server-side WebAuthn verification
     let cose_key = passkey.get_public_key();
 
+    // Compare credential_id from request vs webauthn-rs passkey
+    let passkey_cred_id = passkey.cred_id();
+    tracing::info!(
+        "browser_register_complete: req_credential_id_hex={} (len={})",
+        hex::encode(&credential_id_bytes),
+        credential_id_bytes.len()
+    );
+    tracing::info!(
+        "browser_register_complete: passkey_cred_id_hex={} (len={})",
+        hex::encode(passkey_cred_id.as_ref()),
+        passkey_cred_id.len()
+    );
+    if credential_id_bytes != passkey_cred_id.as_ref() {
+        tracing::warn!("MISMATCH: credential_id from request != passkey.cred_id()!");
+    }
+
     // Debug logging to understand the key structure
     tracing::info!(
         "browser_register_complete: cose_key type={:?}",
@@ -1135,6 +1151,21 @@ pub async fn browser_register_complete(
         "browser_register_complete: stored_cbor_hex={}",
         hex::encode(&public_key_cbor)
     );
+    tracing::info!(
+        "browser_register_complete: credential_id_hex={} (len={})",
+        hex::encode(&credential_id_bytes),
+        credential_id_bytes.len()
+    );
+
+    // IMPORTANT: Use the credential_id from the passkey (parsed by webauthn-rs from the attestation)
+    // rather than the one from the request, to ensure consistency with what the YubiKey has stored.
+    // The YubiKey will return the credential_id from its storage during getAssertion.
+    let cred_id_to_store = passkey.cred_id().to_vec();
+    if cred_id_to_store != credential_id_bytes {
+        tracing::warn!(
+            "Using passkey cred_id (from attestation) instead of request credential_id for storage"
+        );
+    }
 
     // Store the authenticator with verified credential
     // user_handle is the user_id as bytes (for discoverable credentials)
@@ -1143,7 +1174,7 @@ pub async fn browser_register_complete(
         &state.db,
         &reg_state.user_id.to_string(),
         &validated.device_name,
-        &credential_id_bytes,
+        &cred_id_to_store,
         &public_key_cbor,
         validated.aaguid.as_deref(),
         Some(&user_handle),

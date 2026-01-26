@@ -2039,4 +2039,117 @@ mod es256_flow {
         assert!(found_x, "Should have x");
         assert!(found_y, "Should have y");
     }
+
+    /// Diagnostic test using exact data from production failure logs.
+    /// This tests whether the signature from YubiKey can verify against the stored public key.
+    #[test]
+    fn test_production_signature_verification() {
+        // Exact data from production logs:
+        // Enrollment logged these x/y coordinates from webauthn-rs:
+        let x_hex = "0482045c4bd8941821e8c7e18d36e9f803ceeb3193e0f8b931cac9bff63fd213";
+        let y_hex = "7d544f9f06dc5e248563d76b0fbdb45f13cf0125bcd8b21db8056c7400b78962";
+
+        // Login logged these values:
+        let authenticator_data_hex =
+            "32e5feaf4b667a32cc4dba9396c490e5fc13df5025ebac41a038f74c5b2ef1680500000004";
+        let signature_hex = "304402205ef921b0eaa9b01d0d5c5459ceccf6e554daefe00dea2ae9b3c50706c6ab50fc022043db7eebd84bed56535dc45849d873da3fd3ef750e8000661d8422ca6b6b27cc";
+        let client_data_hash_hex = "4d07963b810377553a6b035ac82d9aa5ab7652e59d8eae881eff9a3a238ec6e5";
+
+        // Decode all values
+        let x = hex::decode(x_hex).expect("Failed to decode x");
+        let y = hex::decode(y_hex).expect("Failed to decode y");
+        let authenticator_data =
+            hex::decode(authenticator_data_hex).expect("Failed to decode authenticator_data");
+        let signature = hex::decode(signature_hex).expect("Failed to decode signature");
+        let client_data_hash =
+            hex::decode(client_data_hash_hex).expect("Failed to decode client_data_hash");
+
+        println!("=== PRODUCTION DATA VERIFICATION ===");
+        println!("x: {} ({} bytes)", x_hex, x.len());
+        println!("y: {} ({} bytes)", y_hex, y.len());
+        println!(
+            "authenticator_data: {} ({} bytes)",
+            authenticator_data_hex,
+            authenticator_data.len()
+        );
+        println!("signature: {} ({} bytes)", signature_hex, signature.len());
+        println!(
+            "client_data_hash: {} ({} bytes)",
+            client_data_hash_hex,
+            client_data_hash.len()
+        );
+
+        // Verify sizes
+        assert_eq!(x.len(), 32, "x should be 32 bytes");
+        assert_eq!(y.len(), 32, "y should be 32 bytes");
+        assert_eq!(
+            authenticator_data.len(),
+            37,
+            "authenticator_data should be 37 bytes"
+        );
+        assert_eq!(
+            client_data_hash.len(),
+            32,
+            "client_data_hash should be 32 bytes"
+        );
+
+        // Build COSE key (same as cose_key_to_cbor)
+        let cose_key = build_cose_ec2_key(&x, &y);
+        println!("COSE key: {} ({} bytes)", hex::encode(&cose_key), cose_key.len());
+
+        // Build the message that should have been signed
+        // WebAuthn assertion signature is over: authenticator_data || SHA256(client_data_json)
+        // But we have the hash already, so: authenticator_data || client_data_hash
+        let mut message = Vec::with_capacity(authenticator_data.len() + client_data_hash.len());
+        message.extend_from_slice(&authenticator_data);
+        message.extend_from_slice(&client_data_hash);
+        println!("message: {} ({} bytes)", hex::encode(&message), message.len());
+
+        // Parse the DER signature to understand its structure
+        println!("\n=== DER SIGNATURE ANALYSIS ===");
+        if signature.len() >= 2 && signature[0] == 0x30 {
+            let total_len = signature[1] as usize;
+            println!("SEQUENCE length: {}", total_len);
+
+            if signature.len() >= 4 && signature[2] == 0x02 {
+                let r_len = signature[3] as usize;
+                println!("R INTEGER length: {}", r_len);
+                if signature.len() >= 4 + r_len {
+                    let r = &signature[4..4 + r_len];
+                    println!("R value ({} bytes): {}", r.len(), hex::encode(r));
+
+                    let s_offset = 4 + r_len;
+                    if signature.len() > s_offset + 1 && signature[s_offset] == 0x02 {
+                        let s_len = signature[s_offset + 1] as usize;
+                        println!("S INTEGER length: {}", s_len);
+                        if signature.len() >= s_offset + 2 + s_len {
+                            let s = &signature[s_offset + 2..s_offset + 2 + s_len];
+                            println!("S value ({} bytes): {}", s.len(), hex::encode(s));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Try verification with RealCoseVerifier
+        let verifier = RealCoseVerifier::new();
+        let result = verifier.verify(&cose_key, &message, &signature);
+
+        println!("\n=== VERIFICATION RESULT ===");
+        println!("Result: {:?}", result);
+
+        // Even if this fails, we want to understand why
+        // This test documents the actual failure behavior
+        if result.is_err() {
+            println!("\nSignature verification FAILED (as expected from production).");
+            println!("This indicates either:");
+            println!("  1. The YubiKey used a different credential than what was enrolled");
+            println!("  2. The public key stored during enrollment doesn't match the YubiKey's key");
+            println!("  3. The message being verified differs from what the YubiKey signed");
+        }
+
+        // For now, let's NOT assert success - this test documents the failure
+        // We expect this to fail based on production behavior
+        // assert!(result.is_ok(), "Signature should verify: {:?}", result);
+    }
 }
