@@ -170,6 +170,123 @@ impl TestHarness {
         self.clock.advance_hours(hours)?;
         Ok(())
     }
+
+    /// Make an authenticated DELETE request.
+    pub async fn delete_authenticated(
+        &self,
+        path: &str,
+        token: &str,
+    ) -> Result<vouch_cli::HttpResponse> {
+        let url = self.url(path);
+        let auth = format!("Bearer {}", token);
+        self.http_client
+            .request("DELETE", &url, None, None, Some(&auth))
+            .await
+    }
+
+    /// Make an authenticated PATCH request with JSON body.
+    pub async fn patch_json_authenticated<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+        token: &str,
+    ) -> Result<vouch_cli::HttpResponse> {
+        let url = self.url(path);
+        let json = serde_json::to_vec(body)?;
+        let auth = format!("Bearer {}", token);
+        self.http_client
+            .request(
+                "PATCH",
+                &url,
+                Some(&json),
+                Some("application/json"),
+                Some(&auth),
+            )
+            .await
+    }
+
+    /// Make a POST request with form-urlencoded body.
+    pub async fn post_form(&self, path: &str, body: &str) -> Result<vouch_cli::HttpResponse> {
+        let url = self.url(path);
+        self.http_client
+            .request(
+                "POST",
+                &url,
+                Some(body.as_bytes()),
+                Some("application/x-www-form-urlencoded"),
+                None,
+            )
+            .await
+    }
+
+    /// Make an authenticated POST request with form-urlencoded body.
+    pub async fn post_form_authenticated(
+        &self,
+        path: &str,
+        body: &str,
+        token: &str,
+    ) -> Result<vouch_cli::HttpResponse> {
+        let url = self.url(path);
+        let auth = format!("Bearer {}", token);
+        self.http_client
+            .request(
+                "POST",
+                &url,
+                Some(body.as_bytes()),
+                Some("application/x-www-form-urlencoded"),
+                Some(&auth),
+            )
+            .await
+    }
+
+    /// Create a SCIM bearer token for testing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if token creation fails.
+    pub async fn create_scim_token(&self, description: &str) -> Result<String> {
+        let token = test_utils::create_test_scim_token(&self.state.db, description).await;
+        Ok(token)
+    }
+
+    /// Authorize a device code for a user.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if authorization fails.
+    pub async fn authorize_device_code(
+        &self,
+        user_code: &str,
+        user_id: &str,
+        email: &str,
+        auth_id: &str,
+    ) -> Result<()> {
+        // Look up device auth request by user code
+        let request = vouch_server::db::get_device_auth_by_user_code(&self.state.db, user_code)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Device auth request not found"))?;
+
+        // Authorize it
+        vouch_server::db::authorize_device_auth(
+            &self.state.db,
+            &request.id,
+            user_id,
+            email,
+            auth_id,
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// Create an expired session token for testing token expiration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if token creation fails.
+    pub fn create_expired_token(&self, user_id: &str, email: &str, auth_id: &str) -> String {
+        test_utils::create_expired_token(&self.state, user_id, email, auth_id)
+    }
 }
 
 impl std::fmt::Debug for TestHarness {
