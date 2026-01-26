@@ -21,12 +21,12 @@ pub async fn run(server: &str) -> Result<()> {
         }
         Err(AgentError::NotAuthenticated) => {
             println!("Not authenticated.");
-            println!("\nRun 'vouch login --email <email>' to authenticate.");
+            println!("\nRun 'vouch login' to authenticate.");
             return Ok(());
         }
         Err(AgentError::SessionExpired) => {
             println!("Session expired.");
-            println!("\nRun 'vouch login --email <email>' to re-authenticate.");
+            println!("\nRun 'vouch login' to re-authenticate.");
             return Ok(());
         }
         Err(e) => {
@@ -39,7 +39,7 @@ pub async fn run(server: &str) -> Result<()> {
 
     if config.token().is_none() {
         println!("Not authenticated.");
-        println!("\nRun 'vouch login --email <email>' to authenticate.");
+        println!("\nRun 'vouch login' to authenticate.");
         return Ok(());
     }
 
@@ -66,13 +66,13 @@ pub async fn run(server: &str) -> Result<()> {
                 );
             } else {
                 println!("Session expired.");
-                println!("\nRun 'vouch login --email <email>' to re-authenticate.");
+                println!("\nRun 'vouch login' to re-authenticate.");
             }
         }
         Err(e) => {
             // Token might be invalid/expired
             println!("Session invalid: {e}");
-            println!("\nRun 'vouch login --email <email>' to re-authenticate.");
+            println!("\nRun 'vouch login' to re-authenticate.");
         }
     }
 

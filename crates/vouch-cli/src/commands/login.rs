@@ -37,7 +37,6 @@ pub async fn run(server: &str) -> Result<()> {
     let result = key.authenticate(&start_resp.rp_id, &start_resp.challenge, &pin)?;
 
     // Step 5: Complete authentication with server
-    print!("Completing login... ");
     let complete_resp: LoginCompleteResponse = client
         .post(
             "/v1/auth/login/complete",
@@ -53,7 +52,6 @@ pub async fn run(server: &str) -> Result<()> {
         )
         .await
         .context("failed to complete login")?;
-    println!("ok\n");
 
     // Step 6: Store session in agent (if running) and config
     // Use email from response (server identifies user from user_handle)

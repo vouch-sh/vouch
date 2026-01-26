@@ -48,6 +48,13 @@
             const challenge = base64urlToBuffer(options.challenge);
             const userId = base64urlToBuffer(options.user_id);
 
+            // Build excludeCredentials to prevent duplicate registrations
+            const excludeCredentials = (options.exclude_credential_ids || []).map(id => ({
+                type: 'public-key',
+                id: base64urlToBuffer(id),
+                transports: ['usb', 'nfc']
+            }));
+
             // Create credential
             const credential = await navigator.credentials.create({
                 publicKey: {
@@ -67,6 +74,7 @@
                         userVerification: 'required',
                         residentKey: 'required'
                     },
+                    excludeCredentials: excludeCredentials,
                     timeout: 60000,
                     attestation: 'direct'
                 }
