@@ -49,6 +49,13 @@ fn cose_key_to_cbor(
                 ECDSACurve::SECP384R1 => 2,
                 ECDSACurve::SECP521R1 => 3,
             };
+            // Debug: log what webauthn-rs is giving us
+            tracing::debug!(
+                "cose_key_to_cbor: EC2 key - alg={}, curve={}, x_len={}, y_len={}",
+                alg, curve, ec2.x.len(), ec2.y.len()
+            );
+            tracing::debug!("cose_key_to_cbor: x_hex={}", hex::encode(&ec2.x));
+            tracing::debug!("cose_key_to_cbor: y_hex={}", hex::encode(&ec2.y));
             vec![
                 (Value::Integer(1.into()), Value::Integer(2.into())), // kty = EC2
                 (Value::Integer(3.into()), Value::Integer(alg.into())), // alg
@@ -1096,7 +1103,28 @@ pub async fn browser_register_complete(
     // Extract COSE public key and convert to raw CBOR bytes for storage
     // This ensures compatibility with our server-side WebAuthn verification
     let cose_key = passkey.get_public_key();
+
+    // Debug: verify credential_id matches what webauthn-rs parsed
+    let passkey_cred_id: &[u8] = passkey.cred_id().as_ref();
+    tracing::debug!(
+        "browser_register_complete: credential_id_from_request={}",
+        hex::encode(&credential_id_bytes)
+    );
+    tracing::debug!(
+        "browser_register_complete: credential_id_from_passkey={}",
+        hex::encode(passkey_cred_id)
+    );
+    if passkey_cred_id != credential_id_bytes {
+        tracing::error!(
+            "browser_register_complete: CREDENTIAL ID MISMATCH! request != passkey"
+        );
+    }
+
     let public_key_cbor = cose_key_to_cbor(cose_key)?;
+    tracing::debug!(
+        "browser_register_complete: public_key_cbor_hex={}",
+        hex::encode(&public_key_cbor)
+    );
 
     // Store the authenticator with verified credential
     // user_handle is the user_id as bytes (for discoverable credentials)

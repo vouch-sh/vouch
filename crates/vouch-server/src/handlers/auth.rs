@@ -345,6 +345,11 @@ pub async fn login_complete(
     Json(req): Json<LoginCompleteRequest>,
 ) -> Result<Json<LoginCompleteResponse>, (StatusCode, Json<ApiError>)> {
     tracing::info!("Login complete (discoverable credential flow)");
+    tracing::debug!(
+        "login_complete: credential_id_hex={}, user_handle_hex={}",
+        hex::encode(&req.credential_id),
+        hex::encode(&req.user_handle)
+    );
 
     // Extract client info from headers
     let client_info = ClientInfo::from_headers(&headers);
@@ -408,6 +413,11 @@ pub async fn login_complete(
                 "Credential not registered with this server",
             )
         })?;
+    tracing::debug!(
+        "login_complete: found authenticator {}, stored_public_key_hex={}",
+        authenticator.id,
+        hex::encode(&authenticator.public_key)
+    );
 
     // Verify authenticator belongs to this user (from user_handle)
     if authenticator.user_id != user_id.to_string() {
