@@ -550,6 +550,8 @@ pub async fn device_verify_submit(
         urlencoding::encode(&nonce)
     );
 
+    tracing::info!("Redirecting to OIDC authorization URL: {}", auth_url);
+
     Redirect::temporary(&auth_url).into_response()
 }
 
@@ -1271,6 +1273,8 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
         urlencoding::encode(&oidc_state),
         urlencoding::encode(&nonce)
     );
+
+    tracing::info!("Direct enrollment: redirecting to OIDC authorization URL: {}", auth_url);
 
     Redirect::to(&auth_url).into_response()
 }
