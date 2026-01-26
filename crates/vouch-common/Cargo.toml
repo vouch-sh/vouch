@@ -17,3 +17,4 @@ anyhow = { workspace = true }
 dirs = { workspace = true }
 jiff = { workspace = true }
 gethostname = { workspace = true }
+ciborium = { workspace = true }

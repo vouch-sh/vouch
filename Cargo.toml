@@ -84,7 +84,7 @@ tracing-subscriber = { version = "=0.3.22", default-features = false, features =
 jiff = { version = "=0.2.18", default-features = false, features = ["std", "serde"] }
 
 # IDs
-uuid = { version = "=1.19.0", default-features = false, features = ["v4", "v7", "serde", "std"] }
+uuid = { version = "=1.19.0", default-features = false, features = ["v7", "serde", "std"] }
 
 # Password input (CLI)
 rpassword = { version = "=7.4.0", default-features = false }

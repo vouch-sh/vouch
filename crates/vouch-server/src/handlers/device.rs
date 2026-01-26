@@ -14,13 +14,10 @@ use vouch_common::{
     OAuthError,
 };
 
+use super::json_error;
+
 /// Characters used for user code generation (no ambiguous characters).
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
-
-/// JSON error response helper.
-fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
-    (status, Json(ApiError::new(code, message)))
-}
 
 /// OAuth error response helper.
 fn oauth_error(status: StatusCode, error: OAuthError) -> (StatusCode, Json<OAuthError>) {

@@ -5,6 +5,7 @@
 
 use crate::AppState;
 use crate::db::{self, OAuthClient, OAuthClientType, OAuthEventType};
+use crate::impl_template_response;
 use askama::Template;
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::rand as aws_rand;
@@ -22,6 +23,7 @@ use std::sync::Arc;
 use vouch_common::ApiError;
 
 use super::auth::SessionClaims;
+use super::{extract_session, json_error};
 
 // ============================================================================
 // Constants
@@ -40,18 +42,6 @@ const SECRET_LENGTH: usize = 32;
 pub struct ApplicationsListTemplate {
     pub user_email: String,
     pub applications: Vec<ApplicationInfo>,
-}
-
-impl IntoResponse for ApplicationsListTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
 }
 
 /// Application info for display.
@@ -93,18 +83,6 @@ pub struct ApplicationCreateTemplate {
     pub user_email: String,
 }
 
-impl IntoResponse for ApplicationCreateTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
-
 /// Application created success page (shows credentials once).
 #[derive(Template)]
 #[template(path = "applications/created.html")]
@@ -118,18 +96,6 @@ pub struct ApplicationCreatedTemplate {
     pub requires_secret: bool,
 }
 
-impl IntoResponse for ApplicationCreatedTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
-
 /// Application detail page template.
 #[derive(Template)]
 #[template(path = "applications/detail.html")]
@@ -139,18 +105,6 @@ pub struct ApplicationDetailTemplate {
     pub app: ApplicationInfo,
     pub secrets_count: usize,
     pub usage_stats: Vec<UsageStat>,
-}
-
-impl IntoResponse for ApplicationDetailTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
 }
 
 /// Usage stat for display.
@@ -170,18 +124,6 @@ pub struct SecretRotatedTemplate {
     pub client_secret: String,
 }
 
-impl IntoResponse for SecretRotatedTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
-
 /// Error page template.
 #[derive(Template)]
 #[template(path = "applications/error.html")]
@@ -191,23 +133,22 @@ pub struct ApplicationErrorTemplate {
     pub back_url: String,
 }
 
-impl IntoResponse for ApplicationErrorTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
-
 /// Unauthorized template.
 #[derive(Template)]
 #[template(path = "applications/unauthorized.html")]
 pub struct ApplicationUnauthorizedTemplate;
 
+impl_template_response!(
+    ApplicationsListTemplate,
+    ApplicationCreateTemplate,
+    ApplicationCreatedTemplate,
+    ApplicationDetailTemplate,
+    SecretRotatedTemplate,
+    ApplicationErrorTemplate,
+);
+
+// Note: ApplicationUnauthorizedTemplate needs a custom implementation
+// because it returns a different status code
 impl IntoResponse for ApplicationUnauthorizedTemplate {
     fn into_response(self) -> Response {
         match self.render() {
@@ -320,11 +261,6 @@ pub struct RotateSecretResponse {
 // Helper Functions
 // ============================================================================
 
-/// JSON error response helper.
-fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
-    (status, Json(ApiError::new(code, message)))
-}
-
 /// Hash a secret for storage.
 fn hash_secret(secret: &str) -> String {
     hex::encode(digest::digest(&SHA256, secret.as_bytes()))
@@ -350,79 +286,6 @@ fn parse_application_type(s: &str) -> Option<OAuthClientType> {
         "service" => Some(OAuthClientType::Service),
         _ => None,
     }
-}
-
-/// Extract and validate session from Authorization header.
-async fn extract_session(
-    state: &AppState,
-    headers: &HeaderMap,
-) -> Result<(SessionClaims, String), (StatusCode, Json<ApiError>)> {
-    // Get Authorization header
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "));
-
-    let token = auth_header.ok_or_else(|| {
-        json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Missing or invalid Authorization header",
-        )
-    })?;
-
-    // Validate JWT
-    let claims = decode::<SessionClaims>(
-        token,
-        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
-        &Validation::default(),
-    )
-    .map_err(|_| {
-        json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Invalid or expired token",
-        )
-    })?
-    .claims;
-
-    // Verify session exists in database
-    let token_hash = {
-        let hash = digest::digest(&SHA256, token.as_bytes());
-        URL_SAFE_NO_PAD.encode(hash.as_ref())
-    };
-
-    if db::get_session_by_token_hash(&state.db, &token_hash)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
-        .is_none()
-    {
-        return Err(json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Session not found",
-        ));
-    }
-
-    // Get user email
-    let user = db::get_user_by_id(&state.db, &claims.sub)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
-
-    Ok((claims, user.email))
 }
 
 /// Extract session from cookie for web UI.
@@ -894,7 +757,8 @@ pub async fn list_applications_api(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<Json<ListApplicationsResponse>, (StatusCode, Json<ApiError>)> {
-    let (claims, _) = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, &headers).await?;
+    let claims = session.claims;
 
     let applications = db::get_oauth_clients_for_user(&state.db, &claims.sub)
         .await
@@ -919,7 +783,8 @@ pub async fn create_application_api(
     headers: HeaderMap,
     Json(req): Json<CreateApplicationRequest>,
 ) -> Result<Json<CreateApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let (claims, _) = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, &headers).await?;
+    let claims = session.claims;
 
     // Validate inputs
     let name = req.name.trim();
@@ -1010,7 +875,8 @@ pub async fn get_application_api(
     headers: HeaderMap,
     Path(app_id): Path<String>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let (claims, _) = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, &headers).await?;
+    let claims = session.claims;
 
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
         .await
@@ -1043,7 +909,8 @@ pub async fn update_application_api(
     Path(app_id): Path<String>,
     Json(req): Json<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let (claims, _) = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, &headers).await?;
+    let claims = session.claims;
 
     // Get existing application
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
@@ -1108,7 +975,8 @@ pub async fn delete_application_api(
     headers: HeaderMap,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let (claims, _) = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, &headers).await?;
+    let claims = session.claims;
 
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
@@ -1152,7 +1020,8 @@ pub async fn rotate_secret_api(
     headers: HeaderMap,
     Path(app_id): Path<String>,
 ) -> Result<Json<RotateSecretResponse>, (StatusCode, Json<ApiError>)> {
-    let (claims, _) = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, &headers).await?;
+    let claims = session.claims;
 
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
@@ -1239,7 +1108,8 @@ pub async fn revoke_tokens_api(
     headers: HeaderMap,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let (claims, _) = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, &headers).await?;
+    let claims = session.claims;
 
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.db, &app_id)

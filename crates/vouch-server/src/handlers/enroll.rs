@@ -3,13 +3,13 @@
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::extractors::ClientInfo;
+use crate::impl_template_response;
 use askama::Template;
-use aws_lc_rs::rand as aws_rand;
 use axum::{
     Form, Json,
     extract::{Query, State},
     http::{HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{IntoResponse, Redirect, Response},
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -19,7 +19,12 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
-use vouch_common::{ApiError, BrowserRegisterCompleteRequest, BrowserRegisterStartResponse};
+use vouch_common::{
+    ApiError, BrowserRegisterCompleteRequest, BrowserRegisterStartResponse,
+    extract_aaguid_from_attestation, validate_hardware_attestation,
+};
+
+use super::{generate_random_bytes, json_error};
 
 // ============================================================================
 // Templates
@@ -32,18 +37,6 @@ pub struct DeviceVerifyTemplate {
     pub error: Option<String>,
 }
 
-impl IntoResponse for DeviceVerifyTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
-
 /// WebAuthn registration page template.
 #[derive(Template)]
 #[template(path = "enroll_webauthn.html")]
@@ -53,34 +46,10 @@ pub struct EnrollWebauthnTemplate {
     pub rp_id: String,
 }
 
-impl IntoResponse for EnrollWebauthnTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
-
 /// Success page template.
 #[derive(Template)]
 #[template(path = "success.html")]
 pub struct SuccessTemplate;
-
-impl IntoResponse for SuccessTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
 
 /// Error page template.
 #[derive(Template)]
@@ -91,17 +60,12 @@ pub struct ErrorTemplate {
     pub back_url: Option<String>,
 }
 
-impl IntoResponse for ErrorTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
+impl_template_response!(
+    DeviceVerifyTemplate,
+    EnrollWebauthnTemplate,
+    SuccessTemplate,
+    ErrorTemplate,
+);
 
 // ============================================================================
 // Request/Response Types
@@ -192,26 +156,6 @@ impl BrowserRegistrationState {
         )?;
         Ok(data.claims)
     }
-}
-
-// ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Generate random bytes.
-///
-/// # Panics
-/// Panics if the system RNG fails.
-#[allow(clippy::expect_used)]
-fn generate_random_bytes(len: usize) -> Vec<u8> {
-    let mut bytes = vec![0u8; len];
-    aws_rand::fill(&mut bytes).expect("RNG failure");
-    bytes
-}
-
-/// JSON error response helper.
-fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
-    (status, Json(ApiError::new(code, message)))
 }
 
 // ============================================================================
@@ -894,7 +838,14 @@ pub async fn browser_register_complete(
             )
         })?;
 
-    // Extract AAGUID from the attestation object
+    // Validate attestation format - reject software passkeys and platform authenticators
+    let validation = validate_hardware_attestation(&attestation_object);
+    if let (Some(code), Some(message)) = (validation.error_code(), validation.error_message()) {
+        tracing::warn!("Rejected registration: {}", code);
+        return Err(json_error(StatusCode::BAD_REQUEST, code, message));
+    }
+
+    // Extract AAGUID from the attestation object (for logging, not blocking)
     // We parse it ourselves since webauthn-rs doesn't expose the AAGUID directly
     let aaguid = extract_aaguid_from_attestation(&attestation_object);
 
@@ -977,41 +928,6 @@ pub async fn browser_register_complete(
     );
 
     Ok(SuccessTemplate)
-}
-
-/// Extract AAGUID from CBOR-encoded attestation object.
-///
-/// The attestation object structure (CBOR map):
-/// - `fmt`: attestation statement format
-/// - `attStmt`: attestation statement
-/// - `authData`: authenticator data containing AAGUID and credential public key
-///
-/// The authData structure:
-/// - rpIdHash: 32 bytes (SHA-256 of RP ID)
-/// - flags: 1 byte
-/// - signCount: 4 bytes (big-endian)
-/// - attestedCredentialData (if AT flag set):
-///   - aaguid: 16 bytes
-///   - credIdLen: 2 bytes (big-endian)
-///   - credId: credIdLen bytes
-///   - credentialPublicKey: COSE-encoded public key
-fn extract_aaguid_from_attestation(attestation: &[u8]) -> Option<String> {
-    if attestation.len() < 37 {
-        return None;
-    }
-
-    // Parse the CBOR attestation object
-    let value: ciborium::Value = ciborium::from_reader(attestation).ok()?;
-
-    // Extract authData from the map
-    let auth_data = value.as_map().and_then(|m| {
-        m.iter()
-            .find(|(k, _)| k.as_text() == Some("authData"))
-            .and_then(|(_, v)| v.as_bytes())
-    })?;
-
-    // Extract AAGUID from authenticator data
-    vouch_common::extract_aaguid_from_auth_data(auth_data)
 }
 
 // ============================================================================
@@ -1121,6 +1037,7 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
 }
 
 /// Check if a device auth request is for direct enrollment.
+#[allow(dead_code)]
 pub fn is_direct_enrollment(device_auth: &db::DeviceAuthRequest) -> bool {
     device_auth.user_code == DIRECT_ENROLL_MARKER
 }

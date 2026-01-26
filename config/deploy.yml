@@ -39,6 +39,10 @@ env:
   secret:
     - VOUCH_JWT_SECRET
     - VOUCH_ADMIN_BOOTSTRAP_TOKEN
+    - OIDC_ISSUER_URL
+    - OIDC_CLIENT_ID
+    - OIDC_CLIENT_SECRET
+    - VOUCH_ADMIN_EMAILS
 
 volumes:
   - "/opt/vouch/data:/data"

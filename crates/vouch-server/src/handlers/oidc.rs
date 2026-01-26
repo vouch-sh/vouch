@@ -20,6 +20,7 @@
 use crate::AppState;
 use crate::db;
 use crate::dpop::{self, DpopError, ValidatedDpopProof};
+use crate::impl_template_response;
 use askama::Template;
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::rand as aws_rand;
@@ -27,7 +28,7 @@ use axum::{
     Json,
     extract::{Query, State},
     http::{HeaderMap, StatusCode, header},
-    response::{Html, IntoResponse, Redirect, Response},
+    response::{IntoResponse, Redirect, Response},
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -37,6 +38,8 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::ApiError;
+
+use super::hash_token;
 
 // ============================================================================
 // Templates
@@ -49,17 +52,7 @@ pub struct AuthorizeTemplate {
     pub client_id: String,
 }
 
-impl IntoResponse for AuthorizeTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
+impl_template_response!(AuthorizeTemplate);
 
 // ============================================================================
 // OIDC Discovery Document
@@ -1421,12 +1414,6 @@ async fn validate_session_token(
         };
 
     Ok(Some((user, session, authenticator)))
-}
-
-/// Hash a token for storage comparison.
-fn hash_token(token: &str) -> String {
-    let hash = digest::digest(&SHA256, token.as_bytes());
-    URL_SAFE_NO_PAD.encode(hash.as_ref())
 }
 
 /// RFC 9449: Validate DPoP proof if present in the request.

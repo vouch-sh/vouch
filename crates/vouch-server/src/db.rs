@@ -20,6 +20,7 @@ pub struct User {
 
 /// Organization record for domain-based multi-tenancy.
 #[derive(Debug, sqlx::FromRow)]
+#[allow(dead_code)]
 pub struct Organization {
     pub id: String,
     pub domain: String,
@@ -661,7 +662,9 @@ pub struct UserWithAuthCount {
     pub name: Option<String>,
     pub created_at: String,
     pub authenticator_count: i64,
+    #[allow(dead_code)]
     pub org_id: Option<String>,
+    #[allow(dead_code)]
     pub is_org_admin: bool,
 }
 
@@ -717,6 +720,7 @@ pub async fn get_org_by_domain(pool: &SqlitePool, domain: &str) -> Result<Option
 }
 
 /// Get an organization by ID.
+#[allow(dead_code)]
 pub async fn get_org_by_id(pool: &SqlitePool, org_id: &str) -> Result<Option<Organization>> {
     let org = sqlx::query_as::<_, Organization>(
         "SELECT id, domain, name, created_at, created_by_user_id FROM organizations WHERE id = ?",
@@ -776,9 +780,10 @@ pub async fn get_or_create_org_by_domain(
 }
 
 /// Update a user's organization membership.
+#[allow(dead_code)]
 pub async fn set_user_org(
     pool: &SqlitePool,
-    user_id: &str,
+    _user_id: &str,
     org_id: Option<&str>,
     is_org_admin: bool,
 ) -> Result<()> {
@@ -792,6 +797,7 @@ pub async fn set_user_org(
 }
 
 /// Count users in an organization.
+#[allow(dead_code)]
 pub async fn count_users_in_org(pool: &SqlitePool, org_id: &str) -> Result<i64> {
     let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE org_id = ?")
         .bind(org_id)
@@ -802,6 +808,7 @@ pub async fn count_users_in_org(pool: &SqlitePool, org_id: &str) -> Result<i64> 
 }
 
 /// List all organizations.
+#[allow(dead_code)]
 pub async fn list_organizations(pool: &SqlitePool) -> Result<Vec<Organization>> {
     let orgs = sqlx::query_as::<_, Organization>(
         "SELECT id, domain, name, created_at, created_by_user_id FROM organizations ORDER BY domain",

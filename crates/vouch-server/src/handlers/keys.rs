@@ -2,95 +2,23 @@
 
 use crate::AppState;
 use crate::db;
-use aws_lc_rs::digest::{self, SHA256};
 use axum::{
     Json,
     extract::{Path, State},
-    http::{StatusCode, header},
+    http::StatusCode,
 };
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jsonwebtoken::{DecodingKey, Validation, decode};
 use std::sync::Arc;
 use vouch_common::{ApiError, DeleteKeyResponse, KeyInfo, ListKeysResponse, lookup_device_model};
 
-use super::auth::SessionClaims;
-
-/// JSON error response helper.
-fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
-    (status, Json(ApiError::new(code, message)))
-}
-
-/// Hash a token for storage/lookup.
-fn hash_token(token: &str) -> String {
-    let hash = digest::digest(&SHA256, token.as_bytes());
-    URL_SAFE_NO_PAD.encode(hash.as_ref())
-}
-
-/// Extract and validate session from Authorization header.
-/// Returns the session claims and the token hash.
-async fn extract_session(
-    state: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> Result<(SessionClaims, String), (StatusCode, Json<ApiError>)> {
-    // Get Authorization header
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "));
-
-    let token = auth_header.ok_or_else(|| {
-        json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Missing or invalid Authorization header",
-        )
-    })?;
-
-    // Validate JWT
-    let claims = decode::<SessionClaims>(
-        token,
-        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
-        &Validation::default(),
-    )
-    .map_err(|_| {
-        json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Invalid or expired token",
-        )
-    })?
-    .claims;
-
-    // Verify session exists in database
-    let token_hash = hash_token(token);
-    let session = db::get_session_by_token_hash(&state.db, &token_hash)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?;
-
-    if session.is_none() {
-        return Err(json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Session not found",
-        ));
-    }
-
-    Ok((claims, token_hash))
-}
+use super::{extract_session, json_error};
 
 /// List all registered keys for the authenticated user.
 pub async fn list_keys(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
 ) -> Result<Json<ListKeysResponse>, (StatusCode, Json<ApiError>)> {
-    let (claims, _token_hash) = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, &headers).await?;
+    let claims = session.claims;
 
     // Get all authenticators for this user
     let authenticators = db::get_authenticators_for_user(&state.db, &claims.sub)
@@ -132,7 +60,8 @@ pub async fn delete_key(
     headers: axum::http::HeaderMap,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, (StatusCode, Json<ApiError>)> {
-    let (claims, _token_hash) = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, &headers).await?;
+    let claims = session.claims;
 
     // Get the authenticator to verify ownership
     let authenticator = db::get_authenticator_by_id(&state.db, &key_id)

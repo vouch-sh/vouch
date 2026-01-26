@@ -4,8 +4,6 @@ use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::extractors::ClientInfo;
 use crate::webauthn_verify;
-use aws_lc_rs::digest::{self, SHA256};
-use aws_lc_rs::rand as aws_rand;
 use axum::{
     Json,
     extract::State,
@@ -22,32 +20,10 @@ use uuid::Uuid;
 use vouch_common::{
     ApiError, LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest, LoginStartResponse,
     RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
-    SessionStatus,
+    SessionStatus, extract_aaguid_from_attestation, validate_hardware_attestation,
 };
 
-/// JSON error response helper.
-fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
-    (status, Json(ApiError::new(code, message)))
-}
-
-/// Generate random challenge bytes.
-///
-/// # Panics
-/// Panics if the system RNG fails, which should never happen on a correctly
-/// functioning system. This is acceptable during request handling as an RNG
-/// failure indicates a critical system problem.
-#[allow(clippy::expect_used)]
-fn generate_challenge() -> Vec<u8> {
-    let mut challenge = vec![0u8; 32];
-    aws_rand::fill(&mut challenge).expect("RNG failure");
-    challenge
-}
-
-/// Hash a token for storage.
-fn hash_token(token: &str) -> String {
-    let hash = digest::digest(&SHA256, token.as_bytes());
-    URL_SAFE_NO_PAD.encode(hash.as_ref())
-}
+use super::{generate_challenge, hash_token, json_error};
 
 // ============================================================================
 // Registration State (stored temporarily)
@@ -230,7 +206,14 @@ pub async fn register_complete(
         ));
     }
 
-    // Extract AAGUID from attestation object
+    // Validate attestation format - reject software passkeys and platform authenticators
+    let validation = validate_hardware_attestation(&req.attestation_object);
+    if let (Some(code), Some(message)) = (validation.error_code(), validation.error_message()) {
+        tracing::warn!("Rejected registration: {}", code);
+        return Err(json_error(StatusCode::BAD_REQUEST, code, message));
+    }
+
+    // Extract AAGUID from attestation object (for logging, not blocking)
     let aaguid = extract_aaguid_from_attestation(&req.attestation_object);
 
     // Store the authenticator
@@ -619,29 +602,4 @@ pub async fn status(
         expires_in_seconds: expires_in,
         device_name,
     }))
-}
-
-/// Extract AAGUID from CBOR-encoded attestation object.
-///
-/// The attestation object structure (CBOR map):
-/// - `fmt`: attestation statement format
-/// - `attStmt`: attestation statement
-/// - `authData`: authenticator data containing AAGUID and credential public key
-fn extract_aaguid_from_attestation(attestation: &[u8]) -> Option<String> {
-    if attestation.len() < 37 {
-        return None;
-    }
-
-    // Parse the CBOR attestation object
-    let value: ciborium::Value = ciborium::from_reader(attestation).ok()?;
-
-    // Extract authData from the map
-    let auth_data = value.as_map().and_then(|m| {
-        m.iter()
-            .find(|(k, _)| k.as_text() == Some("authData"))
-            .and_then(|(_, v)| v.as_bytes())
-    })?;
-
-    // Extract AAGUID from authenticator data
-    vouch_common::extract_aaguid_from_auth_data(auth_data)
 }

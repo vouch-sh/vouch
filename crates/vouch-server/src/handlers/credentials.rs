@@ -2,16 +2,9 @@
 
 use crate::AppState;
 use crate::db;
-use aws_lc_rs::digest::{self, SHA256};
-use axum::{
-    Json,
-    extract::State,
-    http::{StatusCode, header},
-};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use axum::{Json, extract::State, http::StatusCode};
 use jiff::{Span, Timestamp};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::{
@@ -19,88 +12,7 @@ use vouch_common::{
     SshCertificateResponse,
 };
 
-use super::auth::SessionClaims;
-
-/// JSON error response helper.
-fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
-    (status, Json(ApiError::new(code, message)))
-}
-
-/// Hash a token for storage/lookup.
-fn hash_token(token: &str) -> String {
-    let hash = digest::digest(&SHA256, token.as_bytes());
-    URL_SAFE_NO_PAD.encode(hash.as_ref())
-}
-
-/// Extract and validate session from Authorization header.
-/// Returns the session claims and the user email.
-async fn extract_session(
-    state: &AppState,
-    headers: &axum::http::HeaderMap,
-) -> Result<(SessionClaims, String), (StatusCode, Json<ApiError>)> {
-    // Get Authorization header
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "));
-
-    let token = auth_header.ok_or_else(|| {
-        json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Missing or invalid Authorization header",
-        )
-    })?;
-
-    // Validate JWT
-    let claims = decode::<SessionClaims>(
-        token,
-        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
-        &Validation::default(),
-    )
-    .map_err(|_| {
-        json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Invalid or expired token",
-        )
-    })?
-    .claims;
-
-    // Verify session exists in database
-    let token_hash = hash_token(token);
-    let session = db::get_session_by_token_hash(&state.db, &token_hash)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?;
-
-    if session.is_none() {
-        return Err(json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Session not found",
-        ));
-    }
-
-    // Get user email
-    let user = db::get_user_by_id(&state.db, &claims.sub)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
-
-    Ok((claims, user.email))
-}
+use super::{extract_session_with_email, json_error};
 
 /// Issue an SSH certificate for the authenticated user.
 ///
@@ -114,7 +26,7 @@ pub async fn issue_ssh_certificate(
     Json(request): Json<SshCertificateRequest>,
 ) -> Result<Json<SshCertificateResponse>, (StatusCode, Json<ApiError>)> {
     // Validate session
-    let (_claims, user_email) = extract_session(&state, &headers).await?;
+    let (_claims, user_email) = extract_session_with_email(&state, &headers).await?;
 
     // Get SSH CA
     let ssh_ca = state.ssh_ca.as_ref().ok_or_else(|| {
@@ -310,7 +222,7 @@ pub async fn get_aws_token(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<AwsTokenResponse>, (StatusCode, Json<ApiError>)> {
     // Validate session
-    let (claims, user_email) = extract_session(&state, &headers).await?;
+    let (claims, user_email) = extract_session_with_email(&state, &headers).await?;
 
     // Get authenticator info for AAGUID
     let authenticator = db::get_authenticator_by_id(&state.db, &claims.authenticator_id)

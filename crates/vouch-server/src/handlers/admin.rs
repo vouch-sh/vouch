@@ -3,6 +3,7 @@
 use crate::AppState;
 use crate::config::config_keys;
 use crate::db;
+use crate::impl_template_response;
 use askama::Template;
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::rand as aws_rand;
@@ -19,6 +20,8 @@ use secrecy::ExposeSecret;
 use serde::Deserialize;
 use std::sync::Arc;
 use vouch_common::{ApiError, AuthEventInfo, ListAuthEventsResponse};
+
+use super::json_error;
 
 // ============================================================================
 // Templates
@@ -38,18 +41,6 @@ pub struct AdminSetupTemplate {
     pub current_org: String,
 }
 
-impl IntoResponse for AdminSetupTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
-
 /// Admin user list template.
 #[derive(Template)]
 #[template(path = "admin/users.html")]
@@ -58,34 +49,10 @@ pub struct AdminUsersTemplate {
     pub users: Vec<db::UserWithAuthCount>,
 }
 
-impl IntoResponse for AdminUsersTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
-
 /// Admin unauthorized template.
 #[derive(Template)]
 #[template(path = "admin/unauthorized.html")]
 pub struct AdminUnauthorizedTemplate;
-
-impl IntoResponse for AdminUnauthorizedTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => (StatusCode::UNAUTHORIZED, Html(html)).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
 
 /// Admin message template (success/error).
 #[derive(Template)]
@@ -98,10 +65,14 @@ pub struct AdminMessageTemplate {
     pub is_error: bool,
 }
 
-impl IntoResponse for AdminMessageTemplate {
+impl_template_response!(AdminSetupTemplate, AdminUsersTemplate, AdminMessageTemplate,);
+
+// Note: AdminUnauthorizedTemplate needs a custom implementation
+// because it returns a different status code
+impl IntoResponse for AdminUnauthorizedTemplate {
     fn into_response(self) -> Response {
         match self.render() {
-            Ok(html) => Html(html).into_response(),
+            Ok(html) => (StatusCode::UNAUTHORIZED, Html(html)).into_response(),
             Err(e) => {
                 tracing::error!("Template render error: {}", e);
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -211,6 +182,7 @@ pub struct AdminAuthResult {
     /// Bootstrap token if used (None for cookie auth).
     pub token: Option<String>,
     /// Admin email if authenticated via cookie.
+    #[allow(dead_code)]
     pub admin_email: Option<String>,
     /// Organization ID if admin is scoped to an org (None for global admin).
     pub org_id: Option<String>,
@@ -257,16 +229,16 @@ async fn is_admin_authorized_async(
         }
 
         // Check if user is an org admin
-        if let Ok(Some(user)) = db::get_user_by_email(&state.db, &email).await {
-            if user.is_org_admin {
-                return AdminAuthResult {
-                    authorized: true,
-                    token: None,
-                    admin_email: Some(email),
-                    org_id: user.org_id,
-                    is_global_admin: false,
-                };
-            }
+        if let Ok(Some(user)) = db::get_user_by_email(&state.db, &email).await
+            && user.is_org_admin
+        {
+            return AdminAuthResult {
+                authorized: true,
+                token: None,
+                admin_email: Some(email),
+                org_id: user.org_id,
+                is_global_admin: false,
+            };
         }
     }
 
@@ -666,19 +638,18 @@ pub async fn delete_user(
     let token = auth.token.as_deref().unwrap_or("").to_string();
 
     // For non-global admins, verify the user belongs to their org
-    if !auth.is_global_admin {
-        if let Ok(Some(target_user)) = db::get_user_by_id(&state.db, &user_id).await {
-            if target_user.org_id != auth.org_id {
-                return AdminMessageTemplate {
-                    page_title: "Error".to_string(),
-                    title: "Unauthorized".to_string(),
-                    message: "You can only delete users from your organization.".to_string(),
-                    back_url: format!("/admin/users?token={token}"),
-                    is_error: true,
-                }
-                .into_response();
-            }
+    if !auth.is_global_admin
+        && let Ok(Some(target_user)) = db::get_user_by_id(&state.db, &user_id).await
+        && target_user.org_id != auth.org_id
+    {
+        return AdminMessageTemplate {
+            page_title: "Error".to_string(),
+            title: "Unauthorized".to_string(),
+            message: "You can only delete users from your organization.".to_string(),
+            back_url: format!("/admin/users?token={token}"),
+            is_error: true,
         }
+        .into_response();
     }
 
     if let Err(e) = db::delete_user(&state.db, &user_id).await {
@@ -701,11 +672,6 @@ pub async fn delete_user(
 // ============================================================================
 // Auth Events API
 // ============================================================================
-
-/// Helper for JSON error responses.
-fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode, Json<ApiError>) {
-    (status, Json(ApiError::new(code, message)))
-}
 
 /// List authentication events.
 /// GET /api/v1/admin/auth-events
