@@ -311,15 +311,7 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
     }
 
     // 7. Build signed data: authenticator_data || SHA-256(client_data_json)
-    tracing::debug!(
-        "verify_assertion: client_data_json={}",
-        String::from_utf8_lossy(client_data_json)
-    );
     let client_data_hash = digest::digest(&SHA256, client_data_json);
-    tracing::debug!(
-        "verify_assertion: client_data_hash={}",
-        hex::encode(client_data_hash.as_ref())
-    );
     let mut signed_data = Vec::with_capacity(authenticator_data.len() + 32);
     signed_data.extend_from_slice(authenticator_data);
     signed_data.extend_from_slice(client_data_hash.as_ref());
@@ -418,18 +410,6 @@ fn verify_es256(
     // Extract y coordinate (label -3)
     let y = get_cose_bytes(map, -3)?;
 
-    tracing::debug!(
-        "verify_es256: x_len={}, y_len={}, sig_len={}, msg_len={}",
-        x.len(),
-        y.len(),
-        signature.len(),
-        message.len()
-    );
-    tracing::debug!("verify_es256: x_hex={}", hex::encode(&x));
-    tracing::debug!("verify_es256: y_hex={}", hex::encode(&y));
-    tracing::debug!("verify_es256: sig_hex={}", hex::encode(signature));
-    tracing::debug!("verify_es256: msg_hex={}", hex::encode(message));
-
     // Build uncompressed SEC1 point: 0x04 || x || y
     let mut point = Vec::with_capacity(1 + x.len() + y.len());
     point.push(0x04);
@@ -439,20 +419,16 @@ fn verify_es256(
     // Try raw format first (64 bytes, r || s) - used by browser WebAuthn
     // Then try DER/ASN.1 format (70-72 bytes) - used by CTAP2/YubiKey
     if signature.len() == 64 {
-        tracing::debug!("verify_es256: using FIXED (raw) format");
         let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, &point);
-        public_key.verify(message, signature).map_err(|e| {
-            tracing::warn!("verify_es256 FIXED failed: {:?}", e);
-            VerifyError::SignatureInvalid
-        })
+        public_key
+            .verify(message, signature)
+            .map_err(|_| VerifyError::SignatureInvalid)
     } else {
-        tracing::debug!("verify_es256: using ASN1 (DER) format");
         // DER-encoded signature from CTAP2
         let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, &point);
-        public_key.verify(message, signature).map_err(|e| {
-            tracing::warn!("verify_es256 ASN1 failed: {:?}", e);
-            VerifyError::SignatureInvalid
-        })
+        public_key
+            .verify(message, signature)
+            .map_err(|_| VerifyError::SignatureInvalid)
     }
 }
 

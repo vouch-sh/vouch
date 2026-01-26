@@ -27,6 +27,96 @@ use vouch_common::{ApiError, BrowserRegisterCompleteRequest, BrowserRegisterStar
 use super::{generate_random_bytes, json_error, validate_registration_attestation};
 
 // ============================================================================
+// COSE Key Serialization
+// ============================================================================
+
+/// Convert a webauthn-rs `COSEKey` to raw CBOR bytes for storage.
+///
+/// This produces the same format expected by our WebAuthn verification code:
+/// a CBOR map with keys: 1 (kty), 3 (alg), -1 (curve/n), -2 (x/e), -3 (y).
+fn cose_key_to_cbor(
+    key: &webauthn_rs::prelude::COSEKey,
+) -> Result<Vec<u8>, (StatusCode, Json<ApiError>)> {
+    use ciborium::Value;
+    use webauthn_rs::prelude::{COSEKeyType, ECDSACurve, EDDSACurve};
+
+    let map: Vec<(Value, Value)> = match &key.key {
+        COSEKeyType::EC_EC2(ec2) => {
+            // COSE EC2 key: {1: 2 (kty), 3: alg, -1: curve, -2: x, -3: y}
+            let alg = key.type_ as i64;
+            let curve = match ec2.curve {
+                ECDSACurve::SECP256R1 => 1,
+                ECDSACurve::SECP384R1 => 2,
+                ECDSACurve::SECP521R1 => 3,
+            };
+            vec![
+                (Value::Integer(1.into()), Value::Integer(2.into())), // kty = EC2
+                (Value::Integer(3.into()), Value::Integer(alg.into())), // alg
+                (
+                    Value::Integer((-1_i64).into()),
+                    Value::Integer(curve.into()),
+                ), // curve
+                (
+                    Value::Integer((-2_i64).into()),
+                    Value::Bytes(ec2.x.to_vec()),
+                ), // x
+                (
+                    Value::Integer((-3_i64).into()),
+                    Value::Bytes(ec2.y.to_vec()),
+                ), // y
+            ]
+        }
+        COSEKeyType::RSA(rsa) => {
+            // COSE RSA key: {1: 3 (kty), 3: alg, -1: n, -2: e}
+            let alg = key.type_ as i64;
+            vec![
+                (Value::Integer(1.into()), Value::Integer(3.into())), // kty = RSA
+                (Value::Integer(3.into()), Value::Integer(alg.into())), // alg
+                (
+                    Value::Integer((-1_i64).into()),
+                    Value::Bytes(rsa.n.to_vec()),
+                ), // n
+                (
+                    Value::Integer((-2_i64).into()),
+                    Value::Bytes(rsa.e.to_vec()),
+                ), // e
+            ]
+        }
+        COSEKeyType::EC_OKP(okp) => {
+            // COSE OKP key: {1: 1 (kty), 3: alg, -1: curve, -2: x}
+            let alg = key.type_ as i64;
+            let curve = match okp.curve {
+                EDDSACurve::ED25519 => 6,
+                EDDSACurve::ED448 => 7,
+            };
+            vec![
+                (Value::Integer(1.into()), Value::Integer(1.into())), // kty = OKP
+                (Value::Integer(3.into()), Value::Integer(alg.into())), // alg
+                (
+                    Value::Integer((-1_i64).into()),
+                    Value::Integer(curve.into()),
+                ), // curve
+                (
+                    Value::Integer((-2_i64).into()),
+                    Value::Bytes(okp.x.to_vec()),
+                ), // x
+            ]
+        }
+    };
+
+    let mut buf = Vec::new();
+    ciborium::into_writer(&Value::Map(map), &mut buf).map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "cbor_error",
+            &e.to_string(),
+        )
+    })?;
+
+    Ok(buf)
+}
+
+// ============================================================================
 // Enrollment Session Cookie Management
 // ============================================================================
 
@@ -995,16 +1085,6 @@ pub async fn browser_register_complete(
             )
         })?;
 
-    // Debug: compare webauthn-rs public key with direct extraction
-    let webauthn_cose_key = passkey.get_public_key();
-    if let webauthn_rs::prelude::COSEKeyType::EC_EC2(ec2) = &webauthn_cose_key.key {
-        tracing::debug!(
-            "webauthn-rs EC2 key: x_hex={}, y_hex={}",
-            hex::encode(&ec2.x),
-            hex::encode(&ec2.y)
-        );
-    }
-
     // Validate attestation and check for duplicates
     let validated = validate_registration_attestation(
         &state.db,
@@ -1014,43 +1094,10 @@ pub async fn browser_register_complete(
     )
     .await?;
 
-    // Extract COSE public key directly from the attestation object
-    // We bypass webauthn-rs's get_public_key() which has a bug that returns incorrect data
-    let public_key_cbor = vouch_common::extract_public_key_from_attestation(&attestation_object)
-        .ok_or_else(|| {
-            json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_attestation",
-                "Failed to extract public key from attestation",
-            )
-        })?;
-
-    // Debug: log extracted values and parse to compare with webauthn-rs
-    tracing::debug!(
-        "browser_register_complete: credential_id_hex={}",
-        hex::encode(&credential_id_bytes)
-    );
-    tracing::debug!(
-        "browser_register_complete: direct_public_key_cbor_hex={}",
-        hex::encode(&public_key_cbor)
-    );
-
-    // Parse the directly extracted CBOR to show x/y for comparison
-    if let Ok(cose_value) = ciborium::from_reader::<ciborium::Value, _>(&public_key_cbor[..]) {
-        if let Some(map) = cose_value.as_map() {
-            // Extract x (-2) and y (-3)
-            for (k, v) in map {
-                if let (ciborium::Value::Integer(key), ciborium::Value::Bytes(bytes)) = (k, v) {
-                    let key_i64: i128 = (*key).into();
-                    if key_i64 == -2 {
-                        tracing::debug!("direct extraction x_hex={}", hex::encode(bytes));
-                    } else if key_i64 == -3 {
-                        tracing::debug!("direct extraction y_hex={}", hex::encode(bytes));
-                    }
-                }
-            }
-        }
-    }
+    // Extract COSE public key and convert to raw CBOR bytes for storage
+    // This ensures compatibility with our server-side WebAuthn verification
+    let cose_key = passkey.get_public_key();
+    let public_key_cbor = cose_key_to_cbor(cose_key)?;
 
     // Store the authenticator with verified credential
     // user_handle is the user_id as bytes (for discoverable credentials)
