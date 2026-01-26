@@ -68,3 +68,5 @@ rust-project.json
 
 # TailwindCSS generated output
 crates/vouch-server/static/css/output.css
+
+.env
