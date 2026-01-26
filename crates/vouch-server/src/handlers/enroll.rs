@@ -552,7 +552,9 @@ pub async fn device_verify_submit(
 
     tracing::info!("Redirecting to OIDC authorization URL: {}", auth_url);
 
-    Redirect::temporary(&auth_url).into_response()
+    // Use 303 See Other (not 307) to ensure browser converts POST to GET
+    // A 307 would preserve the POST method and body, sending user_code to Google
+    Redirect::to(&auth_url).into_response()
 }
 
 /// Handle OIDC callback.
@@ -1274,7 +1276,10 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
         urlencoding::encode(&nonce)
     );
 
-    tracing::info!("Direct enrollment: redirecting to OIDC authorization URL: {}", auth_url);
+    tracing::info!(
+        "Direct enrollment: redirecting to OIDC authorization URL: {}",
+        auth_url
+    );
 
     Redirect::to(&auth_url).into_response()
 }
