@@ -1,0 +1,120 @@
+# Default values for vouch-server
+
+replicaCount: 1
+
+image:
+  repository: ghcr.io/vouch-sh/vouch
+  pullPolicy: IfNotPresent
+  # Overrides the image tag whose default is the chart appVersion
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Annotations to add to the service account
+  annotations: {}
+  # The name of the service account to use
+  # If not set and create is true, a name is generated using the fullname template
+  name: ""
+
+podAnnotations: {}
+
+podSecurityContext:
+  fsGroup: 65532
+
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+    # kubernetes.io/ingress.class: nginx
+    # kubernetes.io/tls-acme: "true"
+  hosts:
+    - host: vouch.local
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: vouch-tls
+  #    hosts:
+  #      - vouch.local
+
+resources: {}
+  # limits:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+persistence:
+  enabled: true
+  # Use an existing PVC
+  existingClaim: ""
+  # Storage class for dynamic provisioning
+  storageClass: ""
+  accessMode: ReadWriteOnce
+  size: 1Gi
+  mountPath: /data
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
+
+# Environment variables for vouch-server
+# These are set directly in the deployment
+env:
+  VOUCH_LISTEN_ADDR: "0.0.0.0:3000"
+  VOUCH_DATABASE_URL: "sqlite:/data/vouch.db?mode=rwc"
+  RUST_LOG: "info,vouch_server=debug"
+  # Set these for your deployment:
+  # VOUCH_RP_ID: "vouch.example.com"
+  # VOUCH_RP_NAME: "Vouch"
+  # VOUCH_VERIFICATION_URL: "https://vouch.example.com"
+
+# Secret environment variables
+# Reference an existing secret containing these keys:
+# - VOUCH_JWT_SECRET
+# - VOUCH_ADMIN_BOOTSTRAP_TOKEN
+# - VOUCH_OIDC_ISSUER
+# - VOUCH_OIDC_CLIENT_ID
+# - VOUCH_OIDC_CLIENT_SECRET
+# - VOUCH_ADMIN_EMAILS
+existingSecret: ""
+
+# Or create a new secret (not recommended for production)
+secrets: {}
+  # VOUCH_JWT_SECRET: ""
+  # VOUCH_ADMIN_BOOTSTRAP_TOKEN: ""
+  # VOUCH_OIDC_ISSUER: ""
+  # VOUCH_OIDC_CLIENT_ID: ""
+  # VOUCH_OIDC_CLIENT_SECRET: ""
+  # VOUCH_ADMIN_EMAILS: ""
+
+# Health check configuration
+healthcheck:
+  path: /health
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3

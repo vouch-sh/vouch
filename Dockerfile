@@ -5,10 +5,11 @@ FROM debian:trixie-slim AS css-builder
 
 WORKDIR /app
 
-# Download standalone tailwindcss CLI
+# Download standalone tailwindcss CLI with checksum verification
 RUN apt-get update && apt-get install -y curl \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/latest/download/tailwindcss-linux-x64 \
+    && curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/download/v4.1.8/tailwindcss-linux-x64 \
+    && echo "8f84ce810bdff225e599781d1e2daa82b4282229021c867a71b419f59f9aa836  tailwindcss-linux-x64" | sha256sum -c - \
     && chmod +x tailwindcss-linux-x64
 
 # Copy files needed for CSS build

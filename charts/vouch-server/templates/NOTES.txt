@@ -1,0 +1,37 @@
+Thank you for installing {{ .Chart.Name }}!
+
+Your release is named: {{ .Release.Name }}
+
+To get the application URL:
+{{- if .Values.ingress.enabled }}
+{{- range $host := .Values.ingress.hosts }}
+  {{- range .paths }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ $host.host }}{{ .path }}
+  {{- end }}
+{{- end }}
+{{- else if contains "NodePort" .Values.service.type }}
+  export NODE_PORT=$(kubectl get --namespace {{ .Release.Namespace }} -o jsonpath="{.spec.ports[0].nodePort}" services {{ include "vouch-server.fullname" . }})
+  export NODE_IP=$(kubectl get nodes --namespace {{ .Release.Namespace }} -o jsonpath="{.items[0].status.addresses[0].address}")
+  echo http://$NODE_IP:$NODE_PORT
+{{- else if contains "LoadBalancer" .Values.service.type }}
+     NOTE: It may take a few minutes for the LoadBalancer IP to be available.
+           You can watch the status with: kubectl get --namespace {{ .Release.Namespace }} svc -w {{ include "vouch-server.fullname" . }}
+  export SERVICE_IP=$(kubectl get svc --namespace {{ .Release.Namespace }} {{ include "vouch-server.fullname" . }} --template "{{"{{ range (index .status.loadBalancer.ingress 0) }}{{.}}{{ end }}"}}")
+  echo http://$SERVICE_IP:{{ .Values.service.port }}
+{{- else if contains "ClusterIP" .Values.service.type }}
+  kubectl --namespace {{ .Release.Namespace }} port-forward service/{{ include "vouch-server.fullname" . }} 3000:{{ .Values.service.port }}
+  Then visit: http://localhost:3000
+{{- end }}
+
+IMPORTANT: Before using Vouch, ensure you have configured:
+  1. VOUCH_RP_ID - Your relying party identifier (e.g., your domain)
+  2. VOUCH_RP_NAME - Human-readable name for your organization
+  3. VOUCH_VERIFICATION_URL - Public URL where Vouch is accessible
+  4. VOUCH_JWT_SECRET - A secure random secret for JWT signing
+
+For OIDC authentication (Google Sign-In), also configure:
+  - VOUCH_OIDC_ISSUER
+  - VOUCH_OIDC_CLIENT_ID
+  - VOUCH_OIDC_CLIENT_SECRET
+
+See https://github.com/vouch-sh/vouch for full documentation.

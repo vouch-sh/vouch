@@ -1,0 +1,18 @@
+apiVersion: v2
+name: vouch-server
+description: Hardware-backed authentication system that issues short-lived credentials after FIDO2 verification
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/vouch-sh/vouch
+sources:
+  - https://github.com/vouch-sh/vouch
+maintainers:
+  - name: vouch-sh
+    url: https://github.com/vouch-sh
+keywords:
+  - authentication
+  - fido2
+  - webauthn
+  - security
+  - yubikey
