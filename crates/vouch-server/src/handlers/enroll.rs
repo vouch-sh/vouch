@@ -140,7 +140,9 @@ pub async fn get_enrollment_session_from_cookie(
                 };
 
             // Check if expired
-            let expires = match Timestamp::strptime("%Y-%m-%d %H:%M:%S", &session.expires_at) {
+            // SQLite stores timestamps without timezone, so we append 'Z' to parse as UTC
+            let expires_with_tz = format!("{}Z", session.expires_at.replace(' ', "T"));
+            let expires: Timestamp = match expires_with_tz.parse() {
                 Ok(ts) => ts,
                 Err(e) => {
                     tracing::debug!("get_enrollment_session: failed to parse expiration: {}", e);
