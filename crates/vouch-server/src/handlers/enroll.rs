@@ -934,8 +934,9 @@ pub async fn browser_register_complete(
 // Direct Enrollment (Browser-only, no CLI)
 // ============================================================================
 
-/// Marker for direct enrollment (no CLI device authorization)
-const DIRECT_ENROLL_MARKER: &str = "direct-enroll";
+/// Prefix for direct enrollment user codes (no CLI device authorization).
+/// The full user_code will be `DIRECT-{random}` to ensure uniqueness.
+const DIRECT_ENROLL_PREFIX: &str = "DIRECT-";
 
 /// Start direct browser enrollment (no CLI required).
 /// GET /enroll/start
@@ -964,10 +965,20 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
         .unwrap_or(now)
         .to_string();
 
+    // Generate unique codes for this direct enrollment attempt
+    // user_code needs to be unique per the database constraint
+    let unique_suffix = URL_SAFE_NO_PAD.encode(&generate_random_bytes(8));
+    let user_code = format!("{}{}", DIRECT_ENROLL_PREFIX, unique_suffix);
+    let device_code_hash = format!(
+        "{}{}",
+        DIRECT_ENROLL_PREFIX,
+        URL_SAFE_NO_PAD.encode(&generate_random_bytes(16))
+    );
+
     let device_auth_id = match db::create_device_auth_request(
         &state.db,
-        DIRECT_ENROLL_MARKER, // marker instead of real device code hash
-        DIRECT_ENROLL_MARKER, // marker instead of real user code
+        &device_code_hash,
+        &user_code,
         &expires_at,
         5,
     )
@@ -1023,14 +1034,15 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
     }
 
     // Build authorization URL
+    // Google's OIDC authorization endpoint is /o/oauth2/v2/auth (not /authorize)
     let redirect_uri = format!("{}/oauth/callback", state.config.verification_base_url);
     let auth_url = format!(
-        "{}/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid%20email%20profile&state={}&nonce={}",
-        oidc_issuer.trim_end_matches('/'),
+        "{}/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email&state={}&nonce={}",
+        oidc_issuer,
         urlencoding::encode(client_id),
         urlencoding::encode(&redirect_uri),
-        oidc_state,
-        nonce
+        urlencoding::encode(&oidc_state),
+        urlencoding::encode(&nonce)
     );
 
     Redirect::to(&auth_url).into_response()
@@ -1039,5 +1051,5 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
 /// Check if a device auth request is for direct enrollment.
 #[allow(dead_code)]
 pub fn is_direct_enrollment(device_auth: &db::DeviceAuthRequest) -> bool {
-    device_auth.user_code == DIRECT_ENROLL_MARKER
+    device_auth.user_code.starts_with(DIRECT_ENROLL_PREFIX)
 }
