@@ -8,6 +8,10 @@ description = "Shared types for vouch CLI and server"
 [lints]
 workspace = true
 
+[features]
+default = []
+test-utils = []
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }

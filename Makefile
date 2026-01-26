@@ -9,7 +9,7 @@ KAMAL ?= kamal
 IMAGE_NAME ?= vouch-sh/vouch
 IMAGE_TAG ?= latest
 
-.PHONY: all build test run clean help docker-build docker-run deploy deploy-setup css-dev css-build
+.PHONY: all build test test-integration run clean help docker-build docker-run deploy deploy-setup css-dev css-build
 
 all: build
 
@@ -50,6 +50,9 @@ check: ## Run cargo check
 
 test: ## Run unit tests
 	$(CARGO) test
+
+test-integration: ## Run integration tests
+	$(CARGO) test --package vouch-tests
 
 ##@ Docker
 

@@ -34,9 +34,14 @@ pub mod server;
 pub mod socket;
 pub mod ssh_agent;
 pub mod state;
+pub mod transport;
 
 // Re-export commonly used types
 pub use client::AgentClient;
 pub use error::{AgentError, Result};
 pub use ssh_agent::{SshAgentServer, SshAgentState, SshCredentials, ssh_agent_socket_path};
 pub use state::SessionInfo;
+pub use transport::AgentTransport;
+
+#[cfg(any(test, feature = "test-utils"))]
+pub use transport::{TestTransport, TestTransportPair};

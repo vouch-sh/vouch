@@ -8,6 +8,13 @@ description = "Vouch identity server"
 [lints]
 workspace = true
 
+[features]
+default = []
+test-utils = ["vouch-common/test-utils", "tower"]
+
+[lib]
+path = "src/lib.rs"
+
 [[bin]]
 name = "vouch-server"
 path = "src/main.rs"
@@ -42,6 +49,4 @@ clap = { workspace = true }
 askama = { version = "0.15", default-features = false, features = ["derive", "config", "alloc"] }
 tower-http = { version = "0.6", default-features = false, features = ["cors", "fs"] }
 ssh-key = { workspace = true }
-
-[dev-dependencies]
-tower = { version = "0.5", default-features = false, features = ["util"] }
+tower = { version = "0.5", default-features = false, features = ["util"], optional = true }

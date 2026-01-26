@@ -931,7 +931,7 @@ impl AuthEventType {
 
     /// Parse from database string.
     #[must_use]
-    #[allow(dead_code)]
+    #[allow(dead_code, clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "login_success" => Some(Self::LoginSuccess),
@@ -1393,6 +1393,7 @@ impl OAuthClientType {
 
     /// Parse from database string.
     #[must_use]
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
             "web" => Some(Self::Web),

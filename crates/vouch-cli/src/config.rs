@@ -81,6 +81,12 @@ impl Config {
         self.token.as_deref()
     }
 
+    /// Save the server URL.
+    pub fn save_server_url(&mut self, url: &str) -> Result<()> {
+        self.server_url = Some(url.to_string());
+        self.save()
+    }
+
     /// Save a new session token.
     pub fn save_token(&mut self, token: &str) -> Result<()> {
         self.token = Some(token.to_string());

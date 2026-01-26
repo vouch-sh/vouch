@@ -12,28 +12,7 @@ use tokio::signal;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing_subscriber::EnvFilter;
 
-mod cleanup;
-mod config;
-mod db;
-mod dpop;
-mod extractors;
-mod handlers;
-mod ssh_ca;
-mod webauthn_verify;
-
-#[cfg(test)]
-mod test_utils;
-
-/// Shared application state.
-pub struct AppState {
-    pub db: SqlitePool,
-    pub config: config::ServerConfig,
-    pub webauthn: webauthn_rs::Webauthn,
-    /// SSH Certificate Authority (optional, None if disabled).
-    pub ssh_ca: Option<ssh_ca::SshCa>,
-    /// RFC 9449 DPoP state (nonce manager, JTI cache).
-    pub dpop: dpop::DpopState,
-}
+use vouch_server::{AppState, cleanup, config, dpop, handlers, ssh_ca};
 
 #[tokio::main]
 async fn main() -> Result<()> {

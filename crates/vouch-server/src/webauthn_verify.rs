@@ -8,10 +8,106 @@
 //! 2. Check user presence and user verified flags
 //! 3. Extract and verify signature counter
 //! 4. Verify signature over authenticator_data || SHA-256(client_data_json)
+//!
+//! # Testability
+//!
+//! The [`CoseVerifier`] trait allows injecting test implementations for integration
+//! testing without requiring real cryptographic keys.
 
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::signature::{self, UnparsedPublicKey};
 use thiserror::Error;
+
+/// Trait for COSE signature verification.
+///
+/// This trait abstracts the cryptographic verification of COSE signatures,
+/// allowing for test implementations that can verify assertions without
+/// real cryptographic operations.
+pub trait CoseVerifier: Send + Sync {
+    /// Verify a signature against a COSE public key.
+    ///
+    /// # Arguments
+    ///
+    /// * `cose_key` - The public key in COSE format
+    /// * `message` - The message that was signed
+    /// * `signature` - The signature to verify
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`VerifyError`] if verification fails.
+    fn verify(&self, cose_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), VerifyError>;
+}
+
+/// Real COSE verifier that performs actual cryptographic verification.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RealCoseVerifier;
+
+impl CoseVerifier for RealCoseVerifier {
+    fn verify(&self, cose_key: &[u8], message: &[u8], signature: &[u8]) -> Result<(), VerifyError> {
+        verify_cose_signature(cose_key, message, signature)
+    }
+}
+
+impl RealCoseVerifier {
+    /// Create a new real COSE verifier.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+/// Test COSE verifier that can be configured to succeed or fail.
+///
+/// This is useful for integration tests that need to test the full
+/// verification flow without requiring real cryptographic keys.
+#[cfg(any(test, feature = "test-utils"))]
+#[derive(Debug, Clone)]
+pub struct TestCoseVerifier {
+    /// Whether verification should succeed.
+    pub should_succeed: bool,
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl TestCoseVerifier {
+    /// Create a test verifier that always succeeds.
+    #[must_use]
+    pub fn always_succeed() -> Self {
+        Self {
+            should_succeed: true,
+        }
+    }
+
+    /// Create a test verifier that always fails.
+    #[must_use]
+    pub fn always_fail() -> Self {
+        Self {
+            should_succeed: false,
+        }
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl Default for TestCoseVerifier {
+    fn default() -> Self {
+        Self::always_succeed()
+    }
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+impl CoseVerifier for TestCoseVerifier {
+    fn verify(
+        &self,
+        _cose_key: &[u8],
+        _message: &[u8],
+        _signature: &[u8],
+    ) -> Result<(), VerifyError> {
+        if self.should_succeed {
+            Ok(())
+        } else {
+            Err(VerifyError::SignatureInvalid)
+        }
+    }
+}
 
 /// Errors during WebAuthn assertion verification.
 #[derive(Debug, Error)]
@@ -71,7 +167,10 @@ struct ClientData {
     cross_origin: Option<bool>,
 }
 
-/// Verify a WebAuthn assertion.
+/// Verify a WebAuthn assertion using the default COSE verifier.
+///
+/// This is a convenience function that uses [`RealCoseVerifier`] for production use.
+/// For testing, use [`verify_assertion_with_verifier`] with a custom verifier.
 ///
 /// # Arguments
 /// * `authenticator_data` - Raw authenticator data bytes
@@ -94,6 +193,49 @@ pub fn verify_assertion(
     expected_origin: &str,
     stored_counter: u32,
     require_user_verification: bool,
+) -> Result<VerificationResult, VerifyError> {
+    verify_assertion_with_verifier(
+        authenticator_data,
+        client_data_json,
+        signature,
+        public_key_cose,
+        expected_rp_id,
+        expected_challenge,
+        expected_origin,
+        stored_counter,
+        require_user_verification,
+        &RealCoseVerifier,
+    )
+}
+
+/// Verify a WebAuthn assertion with a custom COSE verifier.
+///
+/// This function allows injecting a custom verifier for testing purposes.
+/// For production use, prefer [`verify_assertion`] which uses the default verifier.
+///
+/// # Arguments
+/// * `authenticator_data` - Raw authenticator data bytes
+/// * `client_data_json` - Raw client data JSON bytes
+/// * `signature` - The signature to verify
+/// * `public_key_cose` - The public key in COSE format (from registration)
+/// * `expected_rp_id` - The expected relying party ID
+/// * `expected_challenge` - The expected challenge (base64url encoded)
+/// * `expected_origin` - The expected origin URL
+/// * `stored_counter` - The previously stored counter value
+/// * `require_user_verification` - Whether to require UV flag
+/// * `verifier` - The COSE verifier to use for signature verification
+#[allow(clippy::too_many_arguments)]
+pub fn verify_assertion_with_verifier<V: CoseVerifier>(
+    authenticator_data: &[u8],
+    client_data_json: &[u8],
+    signature: &[u8],
+    public_key_cose: &[u8],
+    expected_rp_id: &str,
+    expected_challenge: &str,
+    expected_origin: &str,
+    stored_counter: u32,
+    require_user_verification: bool,
+    verifier: &V,
 ) -> Result<VerificationResult, VerifyError> {
     // 1. Verify authenticator data structure
     // Minimum length: 32 (rpIdHash) + 1 (flags) + 4 (counter) = 37 bytes
@@ -174,8 +316,8 @@ pub fn verify_assertion(
     signed_data.extend_from_slice(authenticator_data);
     signed_data.extend_from_slice(client_data_hash.as_ref());
 
-    // 8. Verify signature using COSE key
-    verify_cose_signature(public_key_cose, &signed_data, signature)?;
+    // 8. Verify signature using the provided verifier
+    verifier.verify(public_key_cose, &signed_data, signature)?;
 
     Ok(VerificationResult {
         counter,

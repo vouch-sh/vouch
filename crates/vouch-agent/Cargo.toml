@@ -8,6 +8,10 @@ description = "Vouch local credential agent daemon"
 [lints]
 workspace = true
 
+[features]
+default = []
+test-utils = ["vouch-common/test-utils"]
+
 [lib]
 path = "src/lib.rs"
 

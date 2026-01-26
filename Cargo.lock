@@ -912,6 +912,7 @@ checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
  "curve25519-dalek",
  "ed25519",
+ "rand_core 0.6.4",
  "serde",
  "sha2",
  "subtle",
@@ -983,6 +984,12 @@ dependencies = [
  "parking",
  "pin-project-lite",
 ]
+
+[[package]]
+name = "fastrand"
+version = "2.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "ff"
@@ -3215,6 +3222,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempfile"
+version = "3.24.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "655da9c7eb6305c55742045d5a8d2037996d61d8de95806335c7c86ce0f82e9c"
+dependencies = [
+ "fastrand",
+ "getrandom 0.3.4",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3644,21 +3664,28 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
+ "axum",
  "base64 0.22.1",
  "ciborium",
  "clap",
  "clap_complete",
  "ctap-hid-fido2",
  "dirs",
+ "ed25519-dalek",
+ "hex",
+ "http",
  "inquire",
  "jiff",
  "open",
+ "rand_core 0.6.4",
  "reqwest",
  "rpassword",
  "serde",
  "serde_json",
+ "serde_urlencoded",
  "ssh-key",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -3715,6 +3742,22 @@ dependencies = [
  "vouch-common",
  "webauthn-rs",
  "webauthn-rs-proto",
+]
+
+[[package]]
+name = "vouch-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "vouch-agent",
+ "vouch-cli",
+ "vouch-common",
+ "vouch-server",
 ]
 
 [[package]]

@@ -51,8 +51,9 @@ pub async fn run(server: &str) -> Result<()> {
     // Step 3: Poll for token
     let token_response = poll_for_token(&client, &device_response).await?;
 
-    // Step 4: Save token
+    // Step 4: Save server URL and token
     let mut config = Config::load()?;
+    config.save_server_url(server)?;
     config.save_token(&token_response.access_token)?;
 
     println!("\nEnrollment successful!");

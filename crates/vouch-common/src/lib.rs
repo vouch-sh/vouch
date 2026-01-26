@@ -3,6 +3,7 @@
 pub mod aaguid;
 pub mod api;
 pub mod attestation;
+pub mod clock;
 pub mod cookie;
 pub mod error;
 
@@ -12,6 +13,9 @@ pub use attestation::{
     AttestationFormat, AttestationValidation, extract_aaguid_from_attestation,
     extract_attestation_format, validate_hardware_attestation,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use clock::TestClock;
+pub use clock::{Clock, SystemClock};
 pub use cookie::{
     SessionCookie, clear_cookie, cookie_path, is_cookie_expired, read_cookie, write_cookie,
 };
