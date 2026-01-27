@@ -46,7 +46,7 @@ reqwest = { workspace = true }
 secrecy = { workspace = true }
 subtle = { workspace = true }
 clap = { workspace = true }
-askama = { version = "0.15", default-features = false, features = ["derive", "config", "alloc"] }
-tower-http = { version = "0.6", default-features = false, features = ["cors", "fs"] }
+askama = { workspace = true }
+tower-http = { workspace = true }
 ssh-key = { workspace = true }
-tower = { version = "0.5", default-features = false, features = ["util"], optional = true }
+tower = { workspace = true, optional = true }

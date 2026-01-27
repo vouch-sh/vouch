@@ -33,5 +33,5 @@ base64 = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.15"
-proptest = "1.6"
+tempfile = { workspace = true }
+proptest = { workspace = true }
