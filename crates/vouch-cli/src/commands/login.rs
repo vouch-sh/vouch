@@ -14,13 +14,19 @@ use crate::fido2::{self, YubiKey};
 /// Run the login command.
 /// Uses discoverable credentials - the YubiKey identifies the user.
 pub async fn run(server: &str) -> Result<()> {
-    println!("Logging in...\n");
+    // Check for existing valid session and warn
+    if let Some(remaining_secs) = check_existing_session(server).await {
+        let remaining = jiff::SignedDuration::from_mins((remaining_secs / 60) as i64);
+        println!("Already logged in (expires in {remaining:#}). Re-authenticating...\n");
+    } else {
+        println!("Logging in...\n");
+    }
 
     // Step 1: Wait for YubiKey to be inserted
     let key = YubiKey::wait_for_device()?;
 
     // Step 2: Start authentication with server (no email needed)
-    print!("Contacting server... ");
+    print!("Contacting server ({server})... ");
     let client = VouchClient::new(server)?;
     let start_resp: LoginStartResponse = client
         .post("/v1/auth/login/start", &LoginStartRequest {})
@@ -66,7 +72,10 @@ pub async fn run(server: &str) -> Result<()> {
     }
 
     println!("Login successful as {}!", complete_resp.email);
-    println!("Session expires: {}", complete_resp.expires_at);
+    println!(
+        "Session expires: {}",
+        format_expiry(&complete_resp.expires_at)
+    );
 
     if agent_stored {
         println!("\nYour identity is now available. Check with: vouch status");
@@ -126,4 +135,46 @@ fn write_session_cookie(server: &str, response: &LoginCompleteResponse) -> Resul
 
     tracing::debug!("Cookie written to ~/.vouch/cookie.txt");
     Ok(())
+}
+
+/// Format an ISO 8601 expiry timestamp as a human-readable relative time.
+///
+/// Example: "in 8h (2026-01-27 12:25 UTC)"
+fn format_expiry(expires_at: &str) -> String {
+    let Ok(ts) = expires_at.parse::<jiff::Timestamp>() else {
+        return expires_at.to_string();
+    };
+
+    let secs = ts.duration_since(jiff::Timestamp::now()).as_secs().max(0);
+    let remaining = jiff::SignedDuration::from_mins(secs / 60);
+    let datetime = ts.strftime("%Y-%m-%d %H:%M UTC");
+
+    format!("in {remaining:#} ({datetime})")
+}
+
+/// Check if there's an existing valid session.
+///
+/// Returns `Some(seconds_remaining)` if a valid session exists, `None` otherwise.
+/// This is best-effort - failures are silently ignored.
+async fn check_existing_session(server: &str) -> Option<u64> {
+    // Try agent first
+    if let Ok(mut agent) = AgentClient::connect().await
+        && let Ok(session) = agent.get_session().await
+    {
+        return Some(session.expires_in_seconds);
+    }
+
+    // Fall back to server check
+    let config = Config::load().ok()?;
+    config.token()?;
+    let client = VouchClient::new(server).ok()?;
+    let status = client
+        .get_authenticated::<vouch_common::SessionStatus>("/v1/auth/status")
+        .await
+        .ok()?;
+    if status.authenticated {
+        status.expires_in_seconds
+    } else {
+        None
+    }
 }

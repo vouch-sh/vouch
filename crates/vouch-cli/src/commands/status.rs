@@ -12,7 +12,7 @@ pub async fn run(server: &str) -> Result<()> {
     // First, try to get session from agent
     match get_session_from_agent().await {
         Ok(session) => {
-            print_agent_session(&session);
+            print_agent_session(server, &session);
             return Ok(());
         }
         Err(AgentError::NotRunning) => {
@@ -51,7 +51,7 @@ pub async fn run(server: &str) -> Result<()> {
     {
         Ok(status) => {
             if status.authenticated {
-                println!("Authenticated");
+                println!("Authenticated ({server})");
                 if let Some(email) = &status.email {
                     println!("  Email: {email}");
                 }
@@ -61,8 +61,9 @@ pub async fn run(server: &str) -> Result<()> {
                 if let Some(expires_in) = status.expires_in_seconds {
                     print_expiry(expires_in);
                 }
+                println!("  Agent: not running");
                 println!(
-                    "\nNote: Start the agent for faster status checks: vouch-agent --foreground"
+                    "\nHint: Start the agent for faster status checks: vouch-agent --foreground"
                 );
             } else {
                 println!("Session expired.");
@@ -86,19 +87,15 @@ async fn get_session_from_agent() -> vouch_agent::Result<SessionInfo> {
 }
 
 /// Print session info from agent.
-fn print_agent_session(session: &SessionInfo) {
-    println!("Authenticated (via agent)");
+fn print_agent_session(server: &str, session: &SessionInfo) {
+    println!("Authenticated ({server})");
     println!("  Email: {}", session.user_email);
     print_expiry(session.expires_in_seconds);
+    println!("  Agent: running");
 }
 
 /// Print expiry time.
 fn print_expiry(expires_in: u64) {
-    let hours = expires_in / 3600;
-    let minutes = (expires_in % 3600) / 60;
-    if hours > 0 {
-        println!("  Expires in: {hours}h {minutes}m");
-    } else {
-        println!("  Expires in: {minutes}m");
-    }
+    let remaining = jiff::SignedDuration::from_mins((expires_in / 60) as i64);
+    println!("  Expires in: {remaining:#}");
 }

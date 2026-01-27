@@ -28,6 +28,78 @@ use ctap_hid_fido2::verifier;
 
 // Type-safe FIDO2 types (Phase 3)
 use vouch_common::encoding::Raw;
+
+// ---------------------------------------------------------------------------
+// Suppress spurious stdout from ctap-hid-fido2
+//
+// The ctap-hid-fido2 crate uses unconditional `println!` for unknown CBOR
+// members (e.g. FIPS certification extensions on YubiKey 5 FIPS). Since there
+// is no config flag to disable this, we temporarily redirect fd 1 to /dev/null.
+// ---------------------------------------------------------------------------
+
+/// Guard that redirects stdout to /dev/null on creation and restores it on drop.
+///
+/// # Safety
+///
+/// Uses `libc::dup`/`dup2` to redirect file descriptor 1. This is safe as long as
+/// no other thread is concurrently modifying stdout's fd. All FIDO2 calls are
+/// single-threaded (synchronous HID communication).
+#[cfg(unix)]
+struct SuppressStdout {
+    saved_fd: std::os::unix::io::RawFd,
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+impl SuppressStdout {
+    fn new() -> Option<Self> {
+        use std::os::unix::io::AsRawFd;
+
+        let stdout_fd = std::io::stdout().as_raw_fd();
+        let saved_fd = unsafe { libc::dup(stdout_fd) };
+        if saved_fd < 0 {
+            return None;
+        }
+        if let Ok(devnull) = std::fs::OpenOptions::new().write(true).open("/dev/null") {
+            unsafe { libc::dup2(devnull.as_raw_fd(), stdout_fd) };
+            Some(Self { saved_fd })
+        } else {
+            unsafe { libc::close(saved_fd) };
+            None
+        }
+    }
+}
+
+#[cfg(unix)]
+#[allow(unsafe_code)]
+impl Drop for SuppressStdout {
+    fn drop(&mut self) {
+        use std::os::unix::io::AsRawFd;
+        let stdout_fd = std::io::stdout().as_raw_fd();
+        unsafe {
+            libc::dup2(self.saved_fd, stdout_fd);
+            libc::close(self.saved_fd);
+        }
+    }
+}
+
+/// Run a closure with stdout suppressed (to hide ctap-hid-fido2 println noise).
+#[cfg(unix)]
+fn with_suppressed_stdout<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    let _guard = SuppressStdout::new();
+    f()
+}
+
+#[cfg(not(unix))]
+fn with_suppressed_stdout<F, R>(f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    f()
+}
 use vouch_common::fido2_types::{
     AttestationObject, AuthData, ClientDataJson, CoseKey, CredentialId, Signature, UserHandle,
 };
@@ -165,7 +237,8 @@ impl YubiKey {
         use std::time::Duration;
 
         for _ in 0..10 {
-            match self.device.enable_info_option(&InfoOption::ClientPin) {
+            match with_suppressed_stdout(|| self.device.enable_info_option(&InfoOption::ClientPin))
+            {
                 Ok(_) => return Ok(()),
                 Err(_) => thread::sleep(Duration::from_millis(200)),
             }
@@ -180,9 +253,7 @@ impl YubiKey {
     /// - `Ok(false)` if no PIN is set (user needs to create one)
     /// - `Err` if PIN is not supported or device communication failed
     pub fn is_pin_set(&self) -> Result<bool> {
-        match self
-            .device
-            .enable_info_option(&InfoOption::ClientPin)
+        match with_suppressed_stdout(|| self.device.enable_info_option(&InfoOption::ClientPin))
             .context("failed to query PIN status")?
         {
             Some(true) => Ok(true),
@@ -262,9 +333,7 @@ impl YubiKey {
             .build();
 
         // Execute make_credential
-        let attestation = self
-            .device
-            .make_credential_with_args(&args)
+        let attestation = with_suppressed_stdout(|| self.device.make_credential_with_args(&args))
             .map_err(|e| translate_fido2_error(e, "FIDO2 registration"))?;
 
         // Verify the attestation locally
@@ -304,18 +373,19 @@ impl YubiKey {
             .build();
 
         // Execute get_assertion
-        let assertions = self.device.get_assertion_with_args(&args).map_err(|e| {
-            // Check if it's a "no credentials" error vs a PIN error
-            let err_str = e.to_string();
-            if err_str.contains("0x2E") || err_str.contains("NO_CREDENTIALS") {
-                anyhow::anyhow!(
-                    "No credentials found for this service.\n\
+        let assertions = with_suppressed_stdout(|| self.device.get_assertion_with_args(&args))
+            .map_err(|e| {
+                // Check if it's a "no credentials" error vs a PIN error
+                let err_str = e.to_string();
+                if err_str.contains("0x2E") || err_str.contains("NO_CREDENTIALS") {
+                    anyhow::anyhow!(
+                        "No credentials found for this service.\n\
                          Have you enrolled with `vouch enroll`?"
-                )
-            } else {
-                translate_fido2_error(e, "FIDO2 authentication")
-            }
-        })?;
+                    )
+                } else {
+                    translate_fido2_error(e, "FIDO2 authentication")
+                }
+            })?;
 
         let assertion = assertions
             .into_iter()
