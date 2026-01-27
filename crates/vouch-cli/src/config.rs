@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
-/// CLI configuration stored in ~/.config/vouch/config.json
+/// CLI configuration stored in ~/.vouch/config.json
 ///
 /// Note: The token is stored as a plain string for serialization purposes.
 /// The config file is protected with 0600 permissions on Unix systems.
@@ -101,7 +101,7 @@ impl Config {
 
     /// Get the path to the config file.
     fn config_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir().context("could not determine config directory")?;
-        Ok(config_dir.join("vouch").join("config.json"))
+        let home = dirs::home_dir().context("could not determine home directory")?;
+        Ok(home.join(".vouch").join("config.json"))
     }
 }

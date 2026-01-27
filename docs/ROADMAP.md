@@ -148,6 +148,9 @@ cargo run --bin vouch -- enroll --server http://localhost:3000
 - [x] CLI registration creates discoverable credentials (`.resident_key()`)
 - [x] Browser enrollment requires discoverable credentials (`residentKey: 'required'`)
 - [x] Database stores user_handle for credential lookup
+- [x] Native PIN setup (detect missing PIN and guide user through setup)
+- [x] 8-character minimum PIN requirement
+- [x] User-friendly CTAP2 error messages for PIN issues
 
 **Key Implementation:**
 ```rust
@@ -171,8 +174,15 @@ let assertion = device.get_assertion_with_discoverable(
 **Verification:**
 ```bash
 vouch login
+# If PIN not set:
+#   Your YubiKey does not have a PIN configured.
+#   Let's set one up now.
+#   New PIN (minimum 8 characters): ********
+#   Confirm PIN: ********
+#   Setting PIN... done!
+#
 # Touch your YubiKey...
-# Enter PIN: ****
+# YubiKey PIN: ********
 # ✓ Login successful as user@company.com!
 
 vouch status

@@ -130,19 +130,24 @@ pub async fn run(args: StatusArgs) -> Result<()> {
 ### Working with FIDO2
 
 ```rust
-use ctap_hid_fido2::{Cfg, FidoKeyHidFactory};
+use crate::fido2::{YubiKey, ensure_pin_configured};
 
-// Get available devices
-let devices = FidoKeyHidFactory::discover_fido_keys()?;
+// Wait for YubiKey to be inserted
+let key = YubiKey::wait_for_device()?;
 
-// Create assertion
-let assertion = device.get_assertion(
-    "vouch.sh",                    // RP ID
-    &challenge,                    // Server challenge
-    &[credential_id],              // Allowed credentials
-    Some(&pin),                    // PIN (required)
-)?;
+// Check if PIN is set and prompt for setup if not (requires 8+ chars)
+let pin = ensure_pin_configured(&key)?;
+
+// Authenticate using discoverable credential
+let result = key.authenticate(&rp_id, &challenge, &pin)?;
 ```
+
+**PIN Handling:**
+- `key.is_pin_set()` — Check if PIN is configured
+- `key.set_new_pin(&pin)` — Set initial PIN (8+ characters required)
+- `key.change_pin(&current, &new)` — Change existing PIN
+- `ensure_pin_configured(&key)` — Detect missing PIN and guide user through setup
+- `translate_fido2_error()` — Convert CTAP2 errors to user-friendly messages
 
 ## Testing
 

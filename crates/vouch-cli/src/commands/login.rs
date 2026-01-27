@@ -28,9 +28,8 @@ pub async fn run(server: &str) -> Result<()> {
         .context("failed to start login")?;
     println!("ok");
 
-    // Step 3: Prompt for PIN
-    println!();
-    let pin = fido2::prompt_pin()?;
+    // Step 3: Ensure PIN is configured and get it
+    let pin = fido2::ensure_pin_configured(&key)?;
 
     // Step 4: Perform FIDO2 authentication using discoverable credential
     println!("\nTouch your YubiKey...");

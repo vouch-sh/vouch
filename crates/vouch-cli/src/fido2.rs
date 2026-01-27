@@ -21,6 +21,7 @@ use ctap_hid_fido2::FidoKeyHid;
 use ctap_hid_fido2::FidoKeyHidFactory;
 use ctap_hid_fido2::LibCfg;
 use ctap_hid_fido2::fidokey::get_assertion::GetAssertionArgsBuilder;
+use ctap_hid_fido2::fidokey::get_info::InfoOption;
 use ctap_hid_fido2::fidokey::make_credential::{Attestation, MakeCredentialArgsBuilder};
 use ctap_hid_fido2::public_key_credential_user_entity::PublicKeyCredentialUserEntity;
 use ctap_hid_fido2::verifier;
@@ -147,9 +148,85 @@ impl YubiKey {
 
             if let Ok(device) = FidoKeyHidFactory::create(&cfg) {
                 println!("detected!");
-                return Ok(Self { device });
+                let key = Self { device };
+                key.wait_until_ready()?;
+                return Ok(key);
             }
         }
+    }
+
+    /// Poll the device until it responds to commands.
+    ///
+    /// After USB insertion, the YubiKey needs time to initialize its CTAP HID
+    /// channel. This method retries a lightweight query until the device is ready
+    /// rather than using a fixed delay.
+    fn wait_until_ready(&self) -> Result<()> {
+        use std::thread;
+        use std::time::Duration;
+
+        for _ in 0..10 {
+            match self.device.enable_info_option(&InfoOption::ClientPin) {
+                Ok(_) => return Ok(()),
+                Err(_) => thread::sleep(Duration::from_millis(200)),
+            }
+        }
+        bail!("YubiKey not ready after insertion - try removing and reinserting it")
+    }
+
+    /// Check if a PIN is configured on this `YubiKey`.
+    ///
+    /// Returns:
+    /// - `Ok(true)` if a PIN is set
+    /// - `Ok(false)` if no PIN is set (user needs to create one)
+    /// - `Err` if PIN is not supported or device communication failed
+    pub fn is_pin_set(&self) -> Result<bool> {
+        match self
+            .device
+            .enable_info_option(&InfoOption::ClientPin)
+            .context("failed to query PIN status")?
+        {
+            Some(true) => Ok(true),
+            Some(false) => Ok(false),
+            None => bail!("This device does not support PIN authentication"),
+        }
+    }
+
+    /// Get the number of PIN retry attempts remaining.
+    ///
+    /// Returns the count of attempts before the PIN is blocked.
+    #[allow(dead_code)]
+    pub fn pin_retries(&self) -> Result<i32> {
+        self.device
+            .get_pin_retries()
+            .context("failed to get PIN retry count")
+    }
+
+    /// Set a new PIN on a `YubiKey` that doesn't have one configured.
+    ///
+    /// # Errors
+    /// Returns an error if a PIN is already set (use `change_pin` instead).
+    pub fn set_new_pin(&self, pin: &str) -> Result<()> {
+        self.device.set_new_pin(pin).map_err(|e| {
+            let err_str = e.to_string();
+            if err_str.contains("0x37") || err_str.contains("PIN_POLICY") {
+                anyhow::anyhow!(
+                    "PIN does not meet requirements.\n\
+                     PIN must be at least 8 characters."
+                )
+            } else if err_str.contains("already set") || err_str.contains("clientPin is true") {
+                anyhow::anyhow!("A PIN is already set on this YubiKey.")
+            } else {
+                anyhow::anyhow!("Failed to set PIN: {e}")
+            }
+        })
+    }
+
+    /// Change the PIN on a `YubiKey`.
+    #[allow(dead_code)]
+    pub fn change_pin(&self, current_pin: &str, new_pin: &str) -> Result<()> {
+        self.device
+            .change_pin(current_pin, new_pin)
+            .context("failed to change PIN")
     }
 
     /// Perform FIDO2 registration (`make_credential`).
@@ -188,7 +265,7 @@ impl YubiKey {
         let attestation = self
             .device
             .make_credential_with_args(&args)
-            .context("FIDO2 registration failed - check your PIN and touch the YubiKey")?;
+            .map_err(|e| translate_fido2_error(e, "FIDO2 registration"))?;
 
         // Verify the attestation locally
         let verify_result = verifier::verify_attestation(rp_id, &client_data_json, &attestation);
@@ -227,10 +304,18 @@ impl YubiKey {
             .build();
 
         // Execute get_assertion
-        let assertions = self
-            .device
-            .get_assertion_with_args(&args)
-            .context("No credentials found for this service. Have you registered?")?;
+        let assertions = self.device.get_assertion_with_args(&args).map_err(|e| {
+            // Check if it's a "no credentials" error vs a PIN error
+            let err_str = e.to_string();
+            if err_str.contains("0x2E") || err_str.contains("NO_CREDENTIALS") {
+                anyhow::anyhow!(
+                    "No credentials found for this service.\n\
+                         Have you enrolled with `vouch enroll`?"
+                )
+            } else {
+                translate_fido2_error(e, "FIDO2 authentication")
+            }
+        })?;
 
         let assertion = assertions
             .into_iter()
@@ -256,6 +341,132 @@ impl YubiKey {
 pub fn prompt_pin() -> Result<String> {
     eprint!("YubiKey PIN: ");
     rpassword::read_password().context("failed to read PIN")
+}
+
+/// Translate FIDO2/CTAP2 errors into user-friendly messages.
+///
+/// The ctap-hid-fido2 library returns error messages containing CTAP2 error codes.
+/// This function provides more helpful guidance for common PIN-related errors.
+fn translate_fido2_error(err: anyhow::Error, operation: &str) -> anyhow::Error {
+    let err_str = err.to_string();
+
+    // Check for specific CTAP2 PIN errors in the error string
+    if err_str.contains("0x31") || err_str.contains("PIN_INVALID") {
+        return anyhow::anyhow!(
+            "Incorrect PIN. Please try again.\n\
+             Hint: Too many wrong attempts will lock your YubiKey."
+        );
+    }
+
+    if err_str.contains("0x32") || err_str.contains("PIN_BLOCKED") {
+        return anyhow::anyhow!(
+            "Your YubiKey PIN is blocked due to too many incorrect attempts.\n\
+             You must reset the FIDO2 application to continue:\n\
+             \n\
+             WARNING: This will delete all FIDO2 credentials on this YubiKey!\n\
+             Run: ykman fido reset"
+        );
+    }
+
+    if err_str.contains("0x33") || err_str.contains("PIN_AUTH_INVALID") {
+        return anyhow::anyhow!("PIN authentication failed. Please try again.");
+    }
+
+    if err_str.contains("0x34") || err_str.contains("PIN_AUTH_BLOCKED") {
+        return anyhow::anyhow!(
+            "PIN authentication is temporarily blocked.\n\
+             Please unplug your YubiKey and plug it back in, then try again."
+        );
+    }
+
+    if err_str.contains("0x35") || err_str.contains("PIN_NOT_SET") {
+        return anyhow::anyhow!(
+            "Your YubiKey does not have a PIN set.\n\
+             Run `vouch login` to set up a PIN."
+        );
+    }
+
+    if err_str.contains("0x36") || err_str.contains("PIN_REQUIRED") {
+        return anyhow::anyhow!("A PIN is required for this operation.");
+    }
+
+    if err_str.contains("0x37") || err_str.contains("PIN_POLICY") {
+        return anyhow::anyhow!(
+            "PIN does not meet policy requirements.\n\
+             PIN must be at least 8 characters."
+        );
+    }
+
+    if err_str.contains("0x38") || err_str.contains("PIN_TOKEN_EXPIRED") {
+        return anyhow::anyhow!("PIN authentication expired. Please try again.");
+    }
+
+    // Generic fallback with the operation context
+    anyhow::anyhow!("{operation} failed: {err}")
+}
+
+/// Prompt for a new PIN with confirmation.
+///
+/// Validates PIN requirements:
+/// - Minimum 8 characters (Vouch security requirement)
+/// - Maximum 63 characters (FIDO2 limit)
+pub fn prompt_new_pin() -> Result<String> {
+    use std::io::{Write, stderr};
+
+    loop {
+        eprint!("New PIN (minimum 8 characters): ");
+        stderr().flush().ok();
+        let pin = rpassword::read_password().context("failed to read PIN")?;
+
+        // Validate PIN length
+        if pin.len() < 8 {
+            eprintln!("PIN must be at least 8 characters.");
+            continue;
+        }
+        if pin.len() > 63 {
+            eprintln!("PIN must be at most 63 characters.");
+            continue;
+        }
+
+        // Confirm PIN
+        eprint!("Confirm PIN: ");
+        stderr().flush().ok();
+        let confirm = rpassword::read_password().context("failed to read PIN confirmation")?;
+
+        if pin != confirm {
+            eprintln!("PINs do not match. Please try again.\n");
+            continue;
+        }
+
+        return Ok(pin);
+    }
+}
+
+/// Check if a PIN is set on the YubiKey, and if not, guide the user through setup.
+///
+/// Returns the PIN (either existing or newly set).
+pub fn ensure_pin_configured(key: &YubiKey) -> Result<String> {
+    if key.is_pin_set()? {
+        // PIN is already set, just prompt for it
+        return prompt_pin();
+    }
+
+    // No PIN set - guide user through setup
+    println!();
+    println!("Your YubiKey does not have a PIN configured.");
+    println!("A PIN is required for FIDO2 authentication to prove you are present.");
+    println!();
+    println!("Let's set one up now.");
+    println!();
+
+    let pin = prompt_new_pin()?;
+
+    print!("Setting PIN... ");
+    key.set_new_pin(&pin)?;
+    println!("done!");
+    println!();
+
+    Ok(pin)
 }
 
 /// Client data structure for `WebAuthn`.

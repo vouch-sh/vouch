@@ -96,6 +96,36 @@ let options = PublicKeyCredentialCreationOptions {
 - `userVerification: required` — Ensures PIN or biometric, not just presence
 - `attestation: direct` — Allows verifying authenticator is YubiKey 5 series
 
+### PIN Requirements
+
+Vouch enforces PIN requirements on all FIDO2 operations:
+
+**Minimum PIN Length:** 8 characters (enforced by CLI)
+
+**Native PIN Setup:** If a YubiKey doesn't have a PIN configured, the CLI (`vouch login`, `vouch register`) will detect this and guide the user through setting one up. No external tools required.
+
+```
+$ vouch login
+Please insert your YubiKey... detected!
+
+Your YubiKey does not have a PIN configured.
+A PIN is required for FIDO2 authentication to prove you are present.
+
+Let's set one up now.
+
+New PIN (minimum 8 characters): ********
+Confirm PIN: ********
+Setting PIN... done!
+
+Touch your YubiKey...
+```
+
+**PIN Error Handling:** The CLI provides user-friendly messages for common PIN errors:
+- Incorrect PIN (with warning about lockout)
+- PIN blocked (too many wrong attempts)
+- PIN temporarily blocked (unplug/replug to reset)
+- PIN policy violations
+
 ### Hardware-Bound Enforcement
 
 Vouch validates that authenticators are hardware-bound:
@@ -197,8 +227,9 @@ Vouch enforces a secure key registration model:
 - Prevents unauthorized key addition to accounts
 
 **Duplicate Key Prevention:**
-- Server returns `excludeCredentials` list to prevent re-registering same key
-- Server-side check before storing: returns HTTP 409 if credential_id already exists
+- Server returns `excludeCredentials` list to prevent re-registering the same credential on the same authenticator
+- Server-side check before storing: returns HTTP 409 if credential_id already exists for this user
+- Multiple keys of the same model (same AAGUID) are allowed — AAGUID identifies the device model, not the individual device
 - Applies to both browser and CLI registration flows
 
 ```
@@ -751,8 +782,11 @@ ykman fido info
 
 ### YubiKey Configuration
 
+Vouch requires a minimum 8-character PIN. If your YubiKey doesn't have a PIN configured,
+`vouch login` or `vouch register` will guide you through setting one up.
+
 ```bash
-# Set strong PIN (8+ characters recommended)
+# Change an existing PIN
 ykman fido access change-pin
 
 # Enable PIN complexity (if supported)

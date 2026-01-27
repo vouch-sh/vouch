@@ -259,14 +259,8 @@ pub async fn register_complete(
         ));
     }
 
-    // Validate attestation and check for duplicates
-    let validated = validate_registration_attestation(
-        &state.db,
-        &reg_state.user_id.to_string(),
-        &reg_state.user_name,
-        &req.attestation_object,
-    )
-    .await?;
+    // Validate attestation (hardware-only, extract device info)
+    let validated = validate_registration_attestation(&req.attestation_object)?;
 
     // Store the authenticator
     // user_handle is the user_id as bytes (for discoverable credentials)

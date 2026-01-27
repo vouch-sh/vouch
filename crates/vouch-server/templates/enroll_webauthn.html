@@ -104,7 +104,24 @@
 
         } catch (err) {
             status.className = 'status-error mb-6';
-            status.textContent = 'Error: ' + err.message;
+
+            // Provide user-friendly error messages for common WebAuthn errors
+            let message = err.message;
+            if (err.name === 'InvalidStateError') {
+                message = 'This security key is already registered. Please use a different key.';
+            } else if (err.name === 'NotAllowedError') {
+                message = 'Registration was cancelled or timed out. Please try again.';
+            } else if (err.name === 'NotSupportedError') {
+                message = 'This security key is not supported. Please use a FIDO2-compatible key.';
+            } else if (err.name === 'SecurityError') {
+                message = 'Security error. Please ensure you are on a secure (HTTPS) connection.';
+            } else if (err.name === 'AbortError') {
+                message = 'Registration was cancelled.';
+            } else if (err.message && err.message.toLowerCase().includes('pin')) {
+                message = 'PIN error. Please ensure your security key has a PIN configured and try again.';
+            }
+
+            status.textContent = 'Error: ' + message;
             btn.disabled = false;
             btn.classList.remove('opacity-60', 'cursor-not-allowed');
         }

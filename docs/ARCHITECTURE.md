@@ -9,7 +9,7 @@ Vouch is a **hardware-backed authentication system** that issues short-lived cre
 ```bash
 $ vouch login
 Touch your YubiKey...
-Enter PIN: ****
+YubiKey PIN: ********
 Authenticated as user@company.com (8 hours)
 
 $ ssh prod.example.com    # Just works
@@ -468,6 +468,8 @@ Uses discoverable credential from YubiKey:
 
 **Key insight**: The YubiKey's discoverable credential (passkey) identifies the user. No email needed for daily login.
 
+**PIN Setup**: If the YubiKey doesn't have a PIN configured, `vouch login` and `vouch register` will detect this and guide the user through setting one up. Vouch requires a minimum 8-character PIN for security.
+
 ### Adding Additional Keys (CLI, Requires Login)
 
 After initial enrollment, users can add backup keys via CLI:
@@ -526,8 +528,8 @@ After initial enrollment, users can add backup keys via CLI:
 **Security controls:**
 - Requires valid session token (must `vouch login` first)
 - Email comes from session claims (OIDC-verified), not user input
-- Server checks for duplicate credential_id before storing
-- `excludeCredentials` list prevents re-registering same physical key
+- `excludeCredentials` prevents re-registering the same credential on the same authenticator
+- Server checks for duplicate credential_id per user before storing
 
 ### Credential Request (Transparent)
 

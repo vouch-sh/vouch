@@ -1086,14 +1086,8 @@ pub async fn browser_register_complete(
             )
         })?;
 
-    // Validate attestation and check for duplicates
-    let validated = validate_registration_attestation(
-        &state.db,
-        &reg_state.user_id.to_string(),
-        &reg_state.user_email,
-        &attestation_object,
-    )
-    .await?;
+    // Validate attestation (hardware-only, extract device info)
+    let validated = validate_registration_attestation(&attestation_object)?;
 
     // Extract COSE public key and convert to raw CBOR bytes for storage
     // This ensures compatibility with our server-side WebAuthn verification
