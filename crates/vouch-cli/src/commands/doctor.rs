@@ -110,7 +110,17 @@ async fn check_agent() -> CheckResult {
         Ok(mut client) => {
             // Try to ping the agent
             match client.ping().await {
-                Ok(_) => CheckResult::pass("Agent is running"),
+                Ok(_) => {
+                    // Try to read PID from pid file for extra diagnostic info
+                    let pid_info = vouch_agent::daemon::pid_file_path()
+                        .ok()
+                        .and_then(|p| std::fs::read_to_string(p).ok())
+                        .and_then(|s| s.trim().parse::<u32>().ok());
+                    match pid_info {
+                        Some(pid) => CheckResult::pass(format!("Agent is running (PID {pid})")),
+                        None => CheckResult::pass("Agent is running"),
+                    }
+                }
                 Err(e) => CheckResult::fail(format!("Agent connection failed: {e}")),
             }
         }
