@@ -81,8 +81,8 @@ pub async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
         add_trusted_ca_to_known_hosts(&ca_path, host_patterns)?;
     }
 
-    // Configure SSH to use the Vouch SSH agent
-    configure_ssh_agent()?;
+    // Configure SSH to use the Vouch identity and certificate
+    configure_ssh_config(hosts)?;
 
     println!();
     println!("SSH CA setup complete!");
@@ -95,11 +95,13 @@ pub async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
         ca_path.display()
     );
     println!();
-    println!("  2. Add to /etc/ssh/sshd_config:");
+    println!("  2. Create /etc/ssh/sshd_config.d/99-vouch-ca.conf with:");
+    println!();
     println!("     TrustedUserCAKeys /etc/ssh/vouch_ca.pub");
     println!();
-    println!("  3. Restart SSH:");
-    println!("     systemctl restart sshd");
+    println!("  3. Validate the configuration and reload sshd:");
+    println!();
+    println!("     sudo sshd -t && sudo systemctl reload sshd");
     println!();
     println!("Users can then authenticate with:");
     println!("  vouch login");
@@ -109,8 +111,13 @@ pub async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Configure SSH agent in ~/.ssh/config.
-fn configure_ssh_agent() -> Result<()> {
+/// Configure SSH config with Vouch identity and certificate.
+///
+/// If `--hosts` is provided, creates a host-specific block with `IdentityAgent`
+/// so it doesn't conflict with other SSH agents (e.g., 1Password).
+/// The `IdentityFile` and `CertificateFile` are always added to a `Host *` block
+/// since those directives are additive and safe to combine.
+fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
     let config_path = ssh_config_path()?;
     let key_path = default_key_path()?;
     let cert_path = PathBuf::from(format!("{}-cert.pub", key_path.display()));
@@ -127,32 +134,60 @@ fn configure_ssh_agent() -> Result<()> {
     };
 
     // Check if Vouch config already exists
-    if existing.contains("# Vouch SSH Agent") || existing.contains(&agent_socket) {
+    if existing.contains("# Vouch SSH Configuration") || existing.contains(&agent_socket) {
         println!("SSH config already configured for Vouch");
         return Ok(());
     }
 
-    // Add Vouch SSH agent configuration
-    let vouch_config = format!(
-        r#"
-# Vouch SSH Agent Configuration
+    // Build the config block
+    let vouch_config = if let Some(host_pattern) = hosts {
+        // Host-specific: set IdentityAgent only for matching hosts to avoid
+        // conflicting with other SSH agents (e.g., 1Password)
+        format!(
+            r#"
+# Vouch SSH Configuration
+# Added by: vouch setup ssh
+Host {host_pattern}
+    IdentityAgent {agent_socket}
+    IdentityFile {key_path}
+    CertificateFile {cert_path}
+"#,
+            key_path = key_path.display(),
+            cert_path = cert_path.display()
+        )
+    } else {
+        // No hosts specified: only add IdentityFile and CertificateFile globally.
+        // These are additive and won't conflict with other agents.
+        // IdentityAgent is omitted to avoid overriding other agents.
+        format!(
+            r#"
+# Vouch SSH Configuration
 # Added by: vouch setup ssh
 Host *
-    IdentityAgent {}
-    IdentityFile {}
-    CertificateFile {}
+    IdentityFile {key_path}
+    CertificateFile {cert_path}
 "#,
-        agent_socket,
-        key_path.display(),
-        cert_path.display()
-    );
+            key_path = key_path.display(),
+            cert_path = cert_path.display()
+        )
+    };
 
     let new_config = format!("{existing}{vouch_config}");
     fs::write(&config_path, new_config)
         .with_context(|| format!("failed to write {}", config_path.display()))?;
 
     println!("Updated SSH config: {}", config_path.display());
-    println!("  Added IdentityAgent directive for Vouch SSH agent");
+    if hosts.is_some() {
+        println!("  Added Vouch IdentityAgent for specified hosts");
+    } else {
+        println!("  Added Vouch IdentityFile and CertificateFile");
+        println!(
+            "  Note: IdentityAgent not set globally to avoid conflicts with other SSH agents."
+        );
+        println!(
+            "  To use the Vouch agent for specific hosts, re-run with: vouch setup ssh --hosts \"pattern\""
+        );
+    }
 
     Ok(())
 }
