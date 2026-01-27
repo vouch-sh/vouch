@@ -1,0 +1,23 @@
+{
+  "metadata": {
+    "description": "YubiKey diagnostic test fixture",
+    "aaguid": "28969c2404874a46be3937bc6337a24f",
+    "created_at": "2026-01-27T02:30:58.314325Z[Etc/Unknown]",
+    "rp_id": "diag.test.local"
+  },
+  "registration": {
+    "challenge_hex": "f9bf07a0a224a73da0de2dd531794c022f6ced76f37cea19f8269debeeffa402",
+    "client_data_json": "{\"challenge\":\"-b8HoKIkpz2g3i3VMXlMAi9s7XbzfOoZ-Cad6-7_pAI\",\"crossOrigin\":false,\"origin\":\"https://diag.test.local\",\"type\":\"webauthn.create\"}",
+    "credential_id_hex": "6a4d629e8ba41933a87fc2f51cc36a3791dddd55c4aaffaf32ae3ef992c8b6422f42c493f790e92c01d7b8727787da8283dc1c31cd46adb431c89cfd9082486a",
+    "public_key_cose_hex": "a50102032620012158201e01393df53e87ebf615d5bf63c6dbcd57ff98de266eb899291ce9a7e025f916225820c3f9097e5858c4f54e8d7dad8d88ec7d89b5f3f820d62d4dbc992984d8e75e52",
+    "auth_data_hex": "bfa28166230fe3cd9c89e1b7e972bdee1b1a31d638dd91e8305b1b7203c72c82450000000128969c2404874a46be3937bc6337a24f00406a4d629e8ba41933a87fc2f51cc36a3791dddd55c4aaffaf32ae3ef992c8b6422f42c493f790e92c01d7b8727787da8283dc1c31cd46adb431c89cfd9082486aa50102032620012158201e01393df53e87ebf615d5bf63c6dbcd57ff98de266eb899291ce9a7e025f916225820c3f9097e5858c4f54e8d7dad8d88ec7d89b5f3f820d62d4dbc992984d8e75e52",
+    "x_hex": "1e01393df53e87ebf615d5bf63c6dbcd57ff98de266eb899291ce9a7e025f916",
+    "y_hex": "c3f9097e5858c4f54e8d7dad8d88ec7d89b5f3f820d62d4dbc992984d8e75e52"
+  },
+  "authentication": {
+    "challenge_hex": "e05aaadc3a5e8a575f3224b0c8f11ed522a46450991f9bf46c3cd3e09e4d0c1f",
+    "client_data_json": "{\"challenge\":\"4Fqq3DpeildfMiSwyPEe1SKkZFCZH5v0bDzT4J5NDB8\",\"crossOrigin\":false,\"origin\":\"https://diag.test.local\",\"type\":\"webauthn.get\"}",
+    "auth_data_hex": "bfa28166230fe3cd9c89e1b7e972bdee1b1a31d638dd91e8305b1b7203c72c820500000002",
+    "signature_hex": "304602210089fb973f3841390a0256314bb70e81704886bd005bab69365254da28d8cc485502210085aa17b46aa1d4db28042c1c2ecca849f40b101375327aa51afe1b04251f46e1"
+  }
+}

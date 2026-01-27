@@ -2,6 +2,7 @@
 
 pub mod completions;
 pub mod credential;
+pub mod diag;
 pub mod doctor;
 pub mod enroll;
 pub mod keys;

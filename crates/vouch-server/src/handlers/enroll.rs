@@ -1066,6 +1066,7 @@ pub async fn browser_register_complete(
         type_: "public-key".to_string(),
     };
 
+    // Log raw attestation object for debugging
     // Use webauthn-rs to verify the attestation
     // This performs cryptographic verification of:
     // - Challenge matches
@@ -1098,74 +1099,11 @@ pub async fn browser_register_complete(
     // This ensures compatibility with our server-side WebAuthn verification
     let cose_key = passkey.get_public_key();
 
-    // Compare credential_id from request vs webauthn-rs passkey
-    let passkey_cred_id = passkey.cred_id();
-    tracing::info!(
-        "browser_register_complete: req_credential_id_hex={} (len={})",
-        hex::encode(&credential_id_bytes),
-        credential_id_bytes.len()
-    );
-    tracing::info!(
-        "browser_register_complete: passkey_cred_id_hex={} (len={})",
-        hex::encode(passkey_cred_id.as_ref()),
-        passkey_cred_id.len()
-    );
-    if credential_id_bytes != passkey_cred_id.as_ref() {
-        tracing::warn!("MISMATCH: credential_id from request != passkey.cred_id()!");
-    }
-
-    // Debug logging to understand the key structure
-    tracing::info!(
-        "browser_register_complete: cose_key type={:?}",
-        cose_key.type_
-    );
-    match &cose_key.key {
-        webauthn_rs::prelude::COSEKeyType::EC_EC2(ec2) => {
-            tracing::info!(
-                "browser_register_complete: EC2 key curve={:?}, x_len={}, y_len={}, x_hex={}, y_hex={}",
-                ec2.curve,
-                ec2.x.len(),
-                ec2.y.len(),
-                hex::encode(&ec2.x),
-                hex::encode(&ec2.y)
-            );
-        }
-        webauthn_rs::prelude::COSEKeyType::EC_OKP(okp) => {
-            tracing::info!(
-                "browser_register_complete: OKP key curve={:?}, x_len={}",
-                okp.curve,
-                okp.x.len()
-            );
-        }
-        webauthn_rs::prelude::COSEKeyType::RSA(rsa) => {
-            tracing::info!(
-                "browser_register_complete: RSA key n_len={}, e_len={}",
-                rsa.n.len(),
-                rsa.e.len()
-            );
-        }
-    }
-
     let public_key_cbor = cose_key_to_cbor(cose_key)?;
-    tracing::info!(
-        "browser_register_complete: stored_cbor_hex={}",
-        hex::encode(&public_key_cbor)
-    );
-    tracing::info!(
-        "browser_register_complete: credential_id_hex={} (len={})",
-        hex::encode(&credential_id_bytes),
-        credential_id_bytes.len()
-    );
 
-    // IMPORTANT: Use the credential_id from the passkey (parsed by webauthn-rs from the attestation)
+    // Use the credential_id from the passkey (parsed by webauthn-rs from the attestation)
     // rather than the one from the request, to ensure consistency with what the YubiKey has stored.
-    // The YubiKey will return the credential_id from its storage during getAssertion.
     let cred_id_to_store = passkey.cred_id().to_vec();
-    if cred_id_to_store != credential_id_bytes {
-        tracing::warn!(
-            "Using passkey cred_id (from attestation) instead of request credential_id for storage"
-        );
-    }
 
     // Store the authenticator with verified credential
     // user_handle is the user_id as bytes (for discoverable credentials)

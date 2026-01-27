@@ -19,8 +19,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 use vouch_common::{
     ApiError, LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest, LoginStartResponse,
-    RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
-    SessionStatus,
+    Raw, RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest,
+    RegisterStartResponse, SessionStatus, fido2_types::Challenge,
 };
 
 use super::{generate_challenge, hash_token, json_error, validate_registration_attestation};
@@ -35,7 +35,7 @@ struct RegistrationState {
     user_id: Uuid,
     user_name: String,
     device_name: String,
-    challenge: Vec<u8>,
+    challenge: Challenge<Raw>,
     rp_id: String,
 }
 
@@ -69,7 +69,7 @@ impl RegistrationState {
 /// Simplified for discoverable credentials - no user lookup needed upfront.
 #[derive(Debug, Serialize, Deserialize)]
 struct AuthenticationState {
-    challenge: Vec<u8>,
+    challenge: Challenge<Raw>,
     rp_id: String,
 }
 
@@ -168,15 +168,16 @@ pub async fn register_start(
             )
         })?;
 
-    let exclude_credential_ids: Vec<Vec<u8>> = existing_auths
+    let exclude_credential_ids: Vec<vouch_common::CredentialId<vouch_common::Raw>> = existing_auths
         .iter()
-        .map(|a| a.credential_id.clone())
+        .map(|a| a.credential_id.clone().into())
         .collect();
 
     // Generate challenge
     let challenge = generate_challenge();
 
     // Create state token
+    let challenge: Challenge<Raw> = challenge.into();
     let reg_state = RegistrationState {
         user_id,
         user_name: user.email.clone(),
@@ -314,6 +315,7 @@ pub async fn login_start(
     let challenge = generate_challenge();
 
     // Create state token (simplified - no user info needed upfront)
+    let challenge: Challenge<Raw> = challenge.into();
     let auth_state = AuthenticationState {
         challenge: challenge.clone(),
         rp_id: state.config.rp_id.clone(),
@@ -422,10 +424,10 @@ pub async fn login_complete(
         authenticator.credential_id.len()
     );
     // Sanity check: credential_id should match (lookup was by credential_id)
-    if authenticator.credential_id != req.credential_id {
+    if authenticator.credential_id.as_slice() != req.credential_id.as_bytes() {
         tracing::error!(
             "CRITICAL: credential_id mismatch after lookup! req={} vs stored={}",
-            hex::encode(&req.credential_id),
+            hex::encode(req.credential_id.as_bytes()),
             hex::encode(&authenticator.credential_id)
         );
     }

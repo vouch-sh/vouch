@@ -4,8 +4,20 @@ pub mod aaguid;
 pub mod api;
 pub mod attestation;
 pub mod clock;
+pub mod contracts;
 pub mod cookie;
+pub mod encoding;
 pub mod error;
+pub mod fido2_types;
+pub mod fixtures;
+
+#[cfg(test)]
+mod api_tests;
+#[cfg(test)]
+mod encoding_tests;
+
+pub use encoding::{Base64Url, ConvertEncoding, Encoded, Encoding, Raw};
+pub use fido2_types::*;
 
 pub use aaguid::{
     extract_aaguid_from_auth_data, extract_public_key_from_attestation,

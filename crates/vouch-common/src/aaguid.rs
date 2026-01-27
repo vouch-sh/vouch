@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::LazyLock;
+use uuid::Uuid;
 
 /// Known AAGUIDs mapped to device model names.
 /// Source: Yubico official documentation (January 2026)
@@ -227,11 +228,27 @@ static AAGUID_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new
 ///
 /// Returns the human-readable device model name if known, or `None` if the
 /// AAGUID is not in the lookup table.
+///
+/// Accepts AAGUIDs in both hyphenated (`28969c24-0487-4a46-be39-37bc6337a24f`)
+/// and non-hyphenated (`28969c2404874a46be3937bc6337a24f`) formats.
 #[must_use]
 pub fn lookup_device_model(aaguid: &str) -> Option<&'static str> {
     // Normalize to lowercase for comparison
     let normalized = aaguid.to_lowercase();
-    AAGUID_MAP.get(normalized.as_str()).copied()
+
+    // Try direct lookup first
+    if let Some(model) = AAGUID_MAP.get(normalized.as_str()) {
+        return Some(*model);
+    }
+
+    // If no hyphens, try parsing as UUID and formatting with hyphens
+    if let Ok(uuid) = Uuid::try_parse(&normalized) {
+        return AAGUID_MAP
+            .get(uuid.as_hyphenated().to_string().as_str())
+            .copied();
+    }
+
+    None
 }
 
 /// Extract AAGUID from authenticator data.
@@ -266,25 +283,7 @@ pub fn extract_aaguid_from_auth_data(auth_data: &[u8]) -> Option<String> {
     let aaguid_bytes: [u8; 16] = aaguid_slice.try_into().ok()?;
 
     // Format as UUID string
-    Some(format!(
-        "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        aaguid_bytes[0],
-        aaguid_bytes[1],
-        aaguid_bytes[2],
-        aaguid_bytes[3],
-        aaguid_bytes[4],
-        aaguid_bytes[5],
-        aaguid_bytes[6],
-        aaguid_bytes[7],
-        aaguid_bytes[8],
-        aaguid_bytes[9],
-        aaguid_bytes[10],
-        aaguid_bytes[11],
-        aaguid_bytes[12],
-        aaguid_bytes[13],
-        aaguid_bytes[14],
-        aaguid_bytes[15],
-    ))
+    Some(Uuid::from_bytes(aaguid_bytes).to_string())
 }
 
 /// Extract the COSE-encoded public key from authenticator data.
@@ -347,9 +346,13 @@ pub fn extract_public_key_from_attestation(attestation: &[u8]) -> Option<Vec<u8>
 }
 
 #[cfg(test)]
-#[allow(clippy::indexing_slicing)]
+#[allow(clippy::indexing_slicing, clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // Device Model Lookup Tests
+    // =========================================================================
 
     #[test]
     fn test_lookup_yubikey_5_nfc() {
@@ -382,6 +385,30 @@ mod tests {
             Some("YubiKey 5 NFC")
         );
     }
+
+    #[test]
+    fn test_lookup_non_hyphenated_uuid_format() {
+        // UUID without hyphens should still work
+        assert_eq!(
+            lookup_device_model("2fc0579f811347eab116bb5a8db9202a"),
+            Some("YubiKey 5 NFC")
+        );
+    }
+
+    #[test]
+    fn test_lookup_invalid_uuid_format() {
+        // Invalid UUID format returns None
+        assert_eq!(lookup_device_model("not-a-valid-uuid"), None);
+        assert_eq!(lookup_device_model(""), None);
+        assert_eq!(
+            lookup_device_model("zzzzzzzz-zzzz-zzzz-zzzz-zzzzzzzzzzzz"),
+            None
+        );
+    }
+
+    // =========================================================================
+    // AAGUID Extraction Tests
+    // =========================================================================
 
     #[test]
     fn test_extract_aaguid_valid() {
@@ -417,5 +444,314 @@ mod tests {
 
         let result = extract_aaguid_from_auth_data(&auth_data);
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_aaguid_exactly_minimum() {
+        // Exactly 53 bytes - minimum for AAGUID extraction
+        let mut auth_data = vec![0u8; 53];
+        auth_data[32] = 0x41; // AT + UP flags
+        // Set AAGUID at offset 37
+        auth_data[37..53].copy_from_slice(&[0x01; 16]);
+
+        let result = extract_aaguid_from_auth_data(&auth_data);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_extract_aaguid_one_byte_short() {
+        // 52 bytes - just under minimum
+        let mut auth_data = vec![0u8; 52];
+        auth_data[32] = 0x41; // AT + UP flags
+
+        let result = extract_aaguid_from_auth_data(&auth_data);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_aaguid_with_extra_data() {
+        // More than minimum, should still work
+        let mut auth_data = vec![0u8; 200];
+        auth_data[32] = 0x41; // AT + UP flags
+        let aaguid_bytes = [
+            0x2f, 0xc0, 0x57, 0x9f, 0x81, 0x13, 0x47, 0xea, 0xb1, 0x16, 0xbb, 0x5a, 0x8d, 0xb9,
+            0x20, 0x2a,
+        ];
+        auth_data[37..53].copy_from_slice(&aaguid_bytes);
+
+        let result = extract_aaguid_from_auth_data(&auth_data);
+        assert_eq!(
+            result,
+            Some("2fc0579f-8113-47ea-b116-bb5a8db9202a".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_aaguid_zero_aaguid() {
+        // Zero AAGUID (valid but means "unknown authenticator")
+        let mut auth_data = vec![0u8; 53];
+        auth_data[32] = 0x41; // AT + UP flags
+        // AAGUID is all zeros (default)
+
+        let result = extract_aaguid_from_auth_data(&auth_data);
+        assert_eq!(
+            result,
+            Some("00000000-0000-0000-0000-000000000000".to_string())
+        );
+    }
+
+    // =========================================================================
+    // Public Key Extraction Tests
+    // =========================================================================
+
+    #[test]
+    fn test_extract_public_key_from_auth_data_valid() {
+        // Create auth data with AT flag and a credential
+        // Structure: rpIdHash(32) + flags(1) + signCount(4) + aaguid(16) + credIdLen(2) + credId + publicKey
+        let mut auth_data = vec![0u8; 55 + 16 + 77]; // 55 base + 16 byte cred ID + 77 byte public key
+
+        auth_data[32] = 0x41; // AT + UP flags
+        // credIdLen at offset 53-54 (big-endian)
+        auth_data[53] = 0x00;
+        auth_data[54] = 0x10; // 16 bytes for credential ID
+        // Credential ID at offset 55-70
+        auth_data[55..71].fill(0xAA);
+        // Public key starts at offset 71 (55 + 16)
+        auth_data[71..].fill(0xBB);
+
+        let result = extract_public_key_from_auth_data(&auth_data);
+        assert!(result.is_some());
+        let pk = result.unwrap();
+        assert_eq!(pk.len(), 77);
+        assert!(pk.iter().all(|&b| b == 0xBB));
+    }
+
+    #[test]
+    fn test_extract_public_key_from_auth_data_no_at_flag() {
+        let mut auth_data = vec![0u8; 100];
+        auth_data[32] = 0x01; // UP flag only, no AT flag
+
+        let result = extract_public_key_from_auth_data(&auth_data);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_public_key_from_auth_data_too_short() {
+        // Less than 55 bytes (minimum for public key extraction)
+        let mut auth_data = vec![0u8; 54];
+        auth_data[32] = 0x41; // AT + UP flags
+
+        let result = extract_public_key_from_auth_data(&auth_data);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_public_key_cred_id_len_exceeds_data() {
+        // credIdLen claims more bytes than available
+        let mut auth_data = vec![0u8; 60]; // Only 60 bytes total
+        auth_data[32] = 0x41; // AT + UP flags
+        auth_data[53] = 0x00;
+        auth_data[54] = 0xFF; // credIdLen = 255, but not enough data
+
+        let result = extract_public_key_from_auth_data(&auth_data);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_public_key_huge_cred_id_len() {
+        // credIdLen at maximum u16 value
+        let mut auth_data = vec![0u8; 100];
+        auth_data[32] = 0x41; // AT + UP flags
+        auth_data[53] = 0xFF;
+        auth_data[54] = 0xFF; // credIdLen = 65535
+
+        let result = extract_public_key_from_auth_data(&auth_data);
+        // Should return None because 55 + 65535 > auth_data.len()
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_public_key_zero_cred_id_len() {
+        // Zero-length credential ID
+        let mut auth_data = vec![0u8; 100];
+        auth_data[32] = 0x41; // AT + UP flags
+        auth_data[53] = 0x00;
+        auth_data[54] = 0x00; // credIdLen = 0
+        // Public key starts immediately at offset 55
+        auth_data[55..].fill(0xCC);
+
+        let result = extract_public_key_from_auth_data(&auth_data);
+        assert!(result.is_some());
+        let pk = result.unwrap();
+        assert_eq!(pk.len(), 45); // 100 - 55 = 45
+    }
+
+    #[test]
+    fn test_extract_public_key_empty_result() {
+        // No bytes left after credential ID
+        let mut auth_data = vec![0u8; 71]; // Exactly 55 + 16 bytes for cred ID
+        auth_data[32] = 0x41; // AT + UP flags
+        auth_data[53] = 0x00;
+        auth_data[54] = 0x10; // credIdLen = 16
+
+        let result = extract_public_key_from_auth_data(&auth_data);
+        // Returns Some with empty vec
+        assert_eq!(result, Some(vec![]));
+    }
+
+    // =========================================================================
+    // Public Key From Attestation Tests
+    // =========================================================================
+
+    #[test]
+    fn test_extract_public_key_from_attestation_valid() {
+        // Create a minimal valid attestation object with authData
+        let mut auth_data = vec![0u8; 55 + 16 + 77]; // 148 bytes
+        auth_data[32] = 0x41; // AT + UP flags
+        auth_data[53] = 0x00;
+        auth_data[54] = 0x10; // credIdLen = 16
+        auth_data[55..71].fill(0xAA); // credential ID
+        auth_data[71..].fill(0xBB); // public key
+
+        let attestation = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("fmt".to_string()),
+                ciborium::Value::Text("packed".to_string()),
+            ),
+            (
+                ciborium::Value::Text("authData".to_string()),
+                ciborium::Value::Bytes(auth_data.clone()),
+            ),
+            (
+                ciborium::Value::Text("attStmt".to_string()),
+                ciborium::Value::Map(vec![]),
+            ),
+        ]);
+
+        let mut buf = Vec::new();
+        ciborium::into_writer(&attestation, &mut buf).unwrap();
+
+        let result = extract_public_key_from_attestation(&buf);
+        assert!(result.is_some());
+        let pk = result.unwrap();
+        assert_eq!(pk.len(), 77);
+    }
+
+    #[test]
+    fn test_extract_public_key_from_attestation_missing_auth_data() {
+        // Attestation object without authData field
+        let attestation = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("fmt".to_string()),
+                ciborium::Value::Text("packed".to_string()),
+            ),
+            (
+                ciborium::Value::Text("attStmt".to_string()),
+                ciborium::Value::Map(vec![]),
+            ),
+        ]);
+
+        let mut buf = Vec::new();
+        ciborium::into_writer(&attestation, &mut buf).unwrap();
+
+        let result = extract_public_key_from_attestation(&buf);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_public_key_from_attestation_invalid_cbor() {
+        // Invalid CBOR data
+        let invalid_cbor = vec![0xFF, 0xFF, 0xFF];
+
+        let result = extract_public_key_from_attestation(&invalid_cbor);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_public_key_from_attestation_not_a_map() {
+        // CBOR value that's not a map
+        let mut buf = Vec::new();
+        ciborium::into_writer(&ciborium::Value::Integer(42.into()), &mut buf).unwrap();
+
+        let result = extract_public_key_from_attestation(&buf);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_public_key_from_attestation_auth_data_not_bytes() {
+        // authData field is not bytes
+        let attestation = ciborium::Value::Map(vec![
+            (
+                ciborium::Value::Text("fmt".to_string()),
+                ciborium::Value::Text("packed".to_string()),
+            ),
+            (
+                ciborium::Value::Text("authData".to_string()),
+                ciborium::Value::Text("not bytes".to_string()), // Should be Bytes
+            ),
+            (
+                ciborium::Value::Text("attStmt".to_string()),
+                ciborium::Value::Map(vec![]),
+            ),
+        ]);
+
+        let mut buf = Vec::new();
+        ciborium::into_writer(&attestation, &mut buf).unwrap();
+
+        let result = extract_public_key_from_attestation(&buf);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_extract_public_key_from_attestation_empty() {
+        let result = extract_public_key_from_attestation(&[]);
+        assert_eq!(result, None);
+    }
+
+    // =========================================================================
+    // Edge Cases and Boundary Conditions
+    // =========================================================================
+
+    #[test]
+    fn test_extract_aaguid_flags_byte_boundary() {
+        // Test various flag combinations
+        let test_flags = [
+            (0x40, true),  // AT only (valid)
+            (0x41, true),  // AT + UP (valid)
+            (0x45, true),  // AT + UV + UP (valid)
+            (0xC1, true),  // AT + ED + UP (valid)
+            (0x00, false), // No flags
+            (0x01, false), // UP only
+            (0x04, false), // UV only
+            (0x80, false), // ED only
+        ];
+
+        for (flags, should_extract) in test_flags {
+            let mut auth_data = vec![0u8; 53];
+            auth_data[32] = flags;
+            auth_data[37..53].fill(0xAB);
+
+            let result = extract_aaguid_from_auth_data(&auth_data);
+            assert_eq!(
+                result.is_some(),
+                should_extract,
+                "Failed for flags: 0x{:02X}",
+                flags
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_aaguid_all_ff_bytes() {
+        // All 0xFF bytes AAGUID
+        let mut auth_data = vec![0u8; 53];
+        auth_data[32] = 0x41;
+        auth_data[37..53].fill(0xFF);
+
+        let result = extract_aaguid_from_auth_data(&auth_data);
+        assert_eq!(
+            result,
+            Some("ffffffff-ffff-ffff-ffff-ffffffffffff".to_string())
+        );
     }
 }

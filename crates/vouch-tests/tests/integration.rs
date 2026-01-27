@@ -2040,10 +2040,150 @@ mod es256_flow {
         assert!(found_y, "Should have y");
     }
 
-    /// Diagnostic test using exact data from production failure logs.
-    /// This tests whether the signature from YubiKey can verify against the stored public key.
+    /// Diagnostic test using exact data from production failure logs (run 1).
     #[test]
-    fn test_production_signature_verification() {
+    fn test_production_signature_verification_run1() {
+        // Exact data from production logs (first run):
+        let x_hex = "0482045c4bd8941821e8c7e18d36e9f803ceeb3193e0f8b931cac9bff63fd213";
+        let y_hex = "7d544f9f06dc5e248563d76b0fbdb45f13cf0125bcd8b21db8056c7400b78962";
+
+        let authenticator_data_hex =
+            "32e5feaf4b667a32cc4dba9396c490e5fc13df5025ebac41a038f74c5b2ef1680500000004";
+        let signature_hex = "304402205ef921b0eaa9b01d0d5c5459ceccf6e554daefe00dea2ae9b3c50706c6ab50fc022043db7eebd84bed56535dc45849d873da3fd3ef750e8000661d8422ca6b6b27cc";
+        let client_data_hash_hex =
+            "4d07963b810377553a6b035ac82d9aa5ab7652e59d8eae881eff9a3a238ec6e5";
+
+        run_signature_verification_test(
+            x_hex,
+            y_hex,
+            authenticator_data_hex,
+            signature_hex,
+            client_data_hash_hex,
+            "run1",
+        );
+    }
+
+    /// Diagnostic test using exact data from production failure logs (run 2 - fresh enrollment).
+    #[test]
+    fn test_production_signature_verification_run2() {
+        // Exact data from production logs (second run with fresh enrollment):
+        let x_hex = "cd6025d79845ccb0a2f125044461e6f3ad2ec01239c87ee5d96cc5fb0e3a916b";
+        let y_hex = "e09f643a60fb9b9d3a93263a377333634efd89f8b12912063d616a9f3dcbc73b";
+
+        let authenticator_data_hex =
+            "32e5feaf4b667a32cc4dba9396c490e5fc13df5025ebac41a038f74c5b2ef1680500000002";
+        let signature_hex = "3045022019410652447749152675b35fac57219211e57d139d145a1b6c1f1af222d9e44a022100bd7b489c2ab62dbd08470d55209b84d7c6df22702f95d45201cd4e54f1065563";
+        let client_data_hash_hex =
+            "82a7c974f92f99f9366cc336ae57f38a226c920d98bfa5f3d85236618be21662";
+
+        run_signature_verification_test(
+            x_hex,
+            y_hex,
+            authenticator_data_hex,
+            signature_hex,
+            client_data_hash_hex,
+            "run2",
+        );
+    }
+
+    fn run_signature_verification_test(
+        x_hex: &str,
+        y_hex: &str,
+        authenticator_data_hex: &str,
+        signature_hex: &str,
+        client_data_hash_hex: &str,
+        label: &str,
+    ) {
+        use aws_lc_rs::signature::{ECDSA_P256_SHA256_ASN1, UnparsedPublicKey};
+
+        let x = hex::decode(x_hex).expect("Failed to decode x");
+        let y = hex::decode(y_hex).expect("Failed to decode y");
+        let authenticator_data =
+            hex::decode(authenticator_data_hex).expect("Failed to decode authenticator_data");
+        let signature = hex::decode(signature_hex).expect("Failed to decode signature");
+        let client_data_hash =
+            hex::decode(client_data_hash_hex).expect("Failed to decode client_data_hash");
+
+        println!("=== PRODUCTION DATA VERIFICATION ({}) ===", label);
+        println!("x: {} ({} bytes)", x_hex, x.len());
+        println!("y: {} ({} bytes)", y_hex, y.len());
+
+        // Check if (x, y) is a valid point on the P-256 curve
+        // P-256 curve equation: y^2 = x^3 - 3x + b (mod p)
+        // where p = 2^256 - 2^224 + 2^192 + 2^96 - 1
+        // and b = 0x5ac635d8aa3a93e7b3ebbd55769886bc651d06b0cc53b0f63bce3c3e27d2604b
+        println!("\n=== CURVE POINT VALIDATION ===");
+        // We can check this by trying to parse the point with aws-lc-rs
+        // If it's not on the curve, parsing will fail
+
+        // Build SEC1 uncompressed point
+        let mut point = Vec::with_capacity(65);
+        point.push(0x04);
+        point.extend_from_slice(&x);
+        point.extend_from_slice(&y);
+        println!("point: {} ({} bytes)", hex::encode(&point), point.len());
+
+        // Try to create an ECDSA public key - this validates the point is on the curve
+        let _key_parse_result =
+            aws_lc_rs::agreement::UnparsedPublicKey::new(&aws_lc_rs::agreement::ECDH_P256, &point);
+        // We can't directly check if it's valid, but verification will fail if point is invalid
+        println!("Point created (will validate during verify)");
+
+        // Build message
+        let mut message = Vec::with_capacity(authenticator_data.len() + client_data_hash.len());
+        message.extend_from_slice(&authenticator_data);
+        message.extend_from_slice(&client_data_hash);
+        println!(
+            "message: {} ({} bytes)",
+            hex::encode(&message),
+            message.len()
+        );
+
+        println!("signature: {} ({} bytes)", signature_hex, signature.len());
+
+        // Try to verify directly with aws-lc-rs
+        let public_key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, &point);
+        let result = public_key.verify(&message, &signature);
+
+        println!("\n=== DIRECT aws-lc-rs VERIFICATION ===");
+        println!("Result: {:?}", result);
+
+        // Also try with RealCoseVerifier for comparison
+        let cose_key = build_cose_ec2_key(&x, &y);
+        let verifier = RealCoseVerifier::new();
+        let cose_result = verifier.verify(&cose_key, &message, &signature);
+        println!("COSE verifier result: {:?}", cose_result);
+
+        // Parse the DER signature to show r and s values
+        println!("\n=== DER SIGNATURE STRUCTURE ===");
+        if signature.len() > 2 && signature[0] == 0x30 {
+            let seq_len = signature[1] as usize;
+            println!("SEQUENCE length: {}", seq_len);
+            if signature.len() > 4 && signature[2] == 0x02 {
+                let r_len = signature[3] as usize;
+                let r_start = 4;
+                let r_end = r_start + r_len;
+                if signature.len() >= r_end {
+                    let r = &signature[r_start..r_end];
+                    println!("r ({} bytes): {}", r_len, hex::encode(r));
+
+                    if signature.len() > r_end + 1 && signature[r_end] == 0x02 {
+                        let s_len = signature[r_end + 1] as usize;
+                        let s_start = r_end + 2;
+                        let s_end = s_start + s_len;
+                        if signature.len() >= s_end {
+                            let s = &signature[s_start..s_end];
+                            println!("s ({} bytes): {}", s_len, hex::encode(s));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Old diagnostic test - keeping for reference.
+    #[test]
+    fn test_production_signature_verification_old() {
         // Exact data from production logs:
         // Enrollment logged these x/y coordinates from webauthn-rs:
         let x_hex = "0482045c4bd8941821e8c7e18d36e9f803ceeb3193e0f8b931cac9bff63fd213";
@@ -2053,7 +2193,8 @@ mod es256_flow {
         let authenticator_data_hex =
             "32e5feaf4b667a32cc4dba9396c490e5fc13df5025ebac41a038f74c5b2ef1680500000004";
         let signature_hex = "304402205ef921b0eaa9b01d0d5c5459ceccf6e554daefe00dea2ae9b3c50706c6ab50fc022043db7eebd84bed56535dc45849d873da3fd3ef750e8000661d8422ca6b6b27cc";
-        let client_data_hash_hex = "4d07963b810377553a6b035ac82d9aa5ab7652e59d8eae881eff9a3a238ec6e5";
+        let client_data_hash_hex =
+            "4d07963b810377553a6b035ac82d9aa5ab7652e59d8eae881eff9a3a238ec6e5";
 
         // Decode all values
         let x = hex::decode(x_hex).expect("Failed to decode x");
@@ -2095,7 +2236,11 @@ mod es256_flow {
 
         // Build COSE key (same as cose_key_to_cbor)
         let cose_key = build_cose_ec2_key(&x, &y);
-        println!("COSE key: {} ({} bytes)", hex::encode(&cose_key), cose_key.len());
+        println!(
+            "COSE key: {} ({} bytes)",
+            hex::encode(&cose_key),
+            cose_key.len()
+        );
 
         // Build the message that should have been signed
         // WebAuthn assertion signature is over: authenticator_data || SHA256(client_data_json)
@@ -2103,7 +2248,11 @@ mod es256_flow {
         let mut message = Vec::with_capacity(authenticator_data.len() + client_data_hash.len());
         message.extend_from_slice(&authenticator_data);
         message.extend_from_slice(&client_data_hash);
-        println!("message: {} ({} bytes)", hex::encode(&message), message.len());
+        println!(
+            "message: {} ({} bytes)",
+            hex::encode(&message),
+            message.len()
+        );
 
         // Parse the DER signature to understand its structure
         println!("\n=== DER SIGNATURE ANALYSIS ===");
@@ -2144,12 +2293,230 @@ mod es256_flow {
             println!("\nSignature verification FAILED (as expected from production).");
             println!("This indicates either:");
             println!("  1. The YubiKey used a different credential than what was enrolled");
-            println!("  2. The public key stored during enrollment doesn't match the YubiKey's key");
+            println!(
+                "  2. The public key stored during enrollment doesn't match the YubiKey's key"
+            );
             println!("  3. The message being verified differs from what the YubiKey signed");
         }
 
         // For now, let's NOT assert success - this test documents the failure
         // We expect this to fail based on production behavior
         // assert!(result.is_ok(), "Signature should verify: {:?}", result);
+    }
+}
+
+mod encoding_verification {
+    use super::*;
+    use vouch_common::LoginCompleteRequest;
+
+    /// Verify MockFidoDevice data survives JSON round-trip
+    #[tokio::test]
+    async fn test_mock_device_data_survives_serialization() {
+        let device = IntegrationMockDevice::new();
+        let challenge = [1u8; 32];
+
+        // Use a proper user_id for registration
+        let user_id = [42u8; 16];
+        let _reg = device
+            .register("test.local", &challenge, &user_id, "test@example.com")
+            .unwrap();
+        let auth = device.authenticate("test.local", &challenge).unwrap();
+
+        // Simulate CLI→Server serialization
+        let req = LoginCompleteRequest {
+            state: "test".to_string(),
+            credential_id: auth.credential_id.clone(),
+            authenticator_data: auth.authenticator_data.clone(),
+            signature: auth.signature.clone(),
+            client_data_json: auth.client_data_json.clone(),
+            user_handle: auth.user_handle.clone(),
+            client_context: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: LoginCompleteRequest = serde_json::from_str(&json).unwrap();
+
+        // Verify exact byte match
+        assert_eq!(
+            auth.credential_id.as_bytes(),
+            decoded.credential_id.as_bytes()
+        );
+        assert_eq!(
+            auth.authenticator_data.as_bytes(),
+            decoded.authenticator_data.as_bytes()
+        );
+        assert_eq!(auth.signature.as_bytes(), decoded.signature.as_bytes());
+        assert_eq!(
+            auth.client_data_json.as_bytes(),
+            decoded.client_data_json.as_bytes()
+        );
+    }
+
+    /// Verify COSE key survives round-trip
+    #[tokio::test]
+    async fn test_cose_key_round_trip() {
+        let device = IntegrationMockDevice::new();
+        let user_id = [1u8; 16];
+        let reg = device
+            .register("test.local", &[0u8; 32], &user_id, "user@example.com")
+            .unwrap();
+
+        // Round-trip through JSON
+        let json = serde_json::to_string(&reg.public_key).unwrap();
+        let decoded: Vec<u8> = serde_json::from_str(&json).unwrap();
+
+        // Parse as COSE to verify structure preserved
+        let original_cose: ciborium::Value = ciborium::from_reader(&reg.public_key[..]).unwrap();
+        let decoded_cose: ciborium::Value = ciborium::from_reader(&decoded[..]).unwrap();
+        assert_eq!(original_cose, decoded_cose);
+    }
+
+    /// Verify credential_id serialization format
+    #[tokio::test]
+    async fn test_credential_id_serialization_format() {
+        let device = IntegrationMockDevice::new();
+        let cred_id = device.credential_id();
+
+        // Verify JSON encoding produces array format [1,2,3,...]
+        let json = serde_json::to_string(&cred_id).unwrap();
+        assert!(json.starts_with('['), "Should be JSON array, got: {}", json);
+        assert!(json.ends_with(']'), "Should be JSON array, got: {}", json);
+    }
+
+    /// Verify all special byte values survive round-trip
+    #[tokio::test]
+    async fn test_special_bytes_in_request() {
+        // Test with bytes that could cause issues
+        let problematic_bytes: Vec<u8> = vec![0x00, 0xFF, 0x7F, 0x80, 0xC0, 0xE0, 0xF0, 0xFE];
+
+        let req = LoginCompleteRequest {
+            state: "test".to_string(),
+            credential_id: problematic_bytes.clone().into(),
+            authenticator_data: problematic_bytes.clone().into(),
+            signature: problematic_bytes.clone().into(),
+            client_data_json: problematic_bytes.clone().into(),
+            user_handle: problematic_bytes.clone().into(),
+            client_context: None,
+        };
+
+        let json = serde_json::to_string(&req).unwrap();
+        let decoded: LoginCompleteRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(
+            problematic_bytes.as_slice(),
+            decoded.credential_id.as_bytes()
+        );
+        assert_eq!(
+            problematic_bytes.as_slice(),
+            decoded.authenticator_data.as_bytes()
+        );
+        assert_eq!(problematic_bytes.as_slice(), decoded.signature.as_bytes());
+        assert_eq!(
+            problematic_bytes.as_slice(),
+            decoded.client_data_json.as_bytes()
+        );
+        assert_eq!(problematic_bytes.as_slice(), decoded.user_handle.as_bytes());
+    }
+
+    /// Test typed API with MockFidoDevice
+    #[tokio::test]
+    async fn test_typed_mock_device_api() {
+        use vouch_cli::{FidoDevice, MockFidoDevice};
+
+        let device = MockFidoDevice::new();
+        let challenge = [42u8; 32];
+        let user_id = [1u8; 16];
+
+        // Verify credential_id() and public_key_cose() work correctly
+        assert!(!device.credential_id().is_empty());
+        assert!(!device.public_key_cose().is_empty());
+
+        // Registration now returns typed result directly
+        let reg_result = device
+            .register(
+                "test.local",
+                "Test",
+                &challenge,
+                &user_id,
+                "user@test.com",
+                "",
+            )
+            .unwrap();
+
+        // Verify typed result fields
+        assert!(!reg_result.credential_id.is_empty());
+        assert!(!reg_result.public_key.is_empty());
+        assert!(!reg_result.attestation_object.is_empty());
+        assert!(!reg_result.client_data_json.is_empty());
+
+        // Authentication now returns typed result directly
+        let auth_result = device.authenticate("test.local", &challenge, "").unwrap();
+
+        // Verify typed result fields
+        assert!(!auth_result.credential_id.is_empty());
+        assert_eq!(auth_result.authenticator_data.len(), 37);
+        assert_eq!(auth_result.signature.len(), 64);
+        assert!(!auth_result.client_data_json.is_empty());
+    }
+
+    /// Test typed verification functions
+    #[tokio::test]
+    async fn test_typed_verification_functions() {
+        use vouch_cli::{FidoDevice, MockFidoDevice};
+        use vouch_server::webauthn_verify::{
+            TestCoseVerifier, verify_assertion_typed_with_verifier,
+        };
+
+        let device = MockFidoDevice::new();
+        let challenge = [99u8; 32];
+        let user_id = [2u8; 16];
+
+        // Register first to get the public key
+        let reg = device
+            .register(
+                "test.local",
+                "Test",
+                &challenge,
+                &user_id,
+                "user@test.com",
+                "",
+            )
+            .unwrap();
+
+        // Authenticate
+        let auth = device.authenticate("test.local", &challenge, "").unwrap();
+
+        // Verify using typed API
+        let verifier = TestCoseVerifier::always_succeed();
+
+        // Results are now typed directly
+        let auth_data = &auth.authenticator_data;
+        let client_data = &auth.client_data_json;
+        let signature = &auth.signature;
+        let public_key = &reg.public_key;
+
+        // Extract challenge from client data for verification
+        let client_data_str = std::str::from_utf8(client_data.as_bytes()).unwrap();
+        let client_data_json: serde_json::Value = serde_json::from_str(client_data_str).unwrap();
+        let expected_challenge = client_data_json["challenge"].as_str().unwrap();
+
+        let result = verify_assertion_typed_with_verifier(
+            auth_data,
+            client_data,
+            signature,
+            public_key,
+            "test.local",
+            expected_challenge,
+            "https://test.local",
+            0,
+            true,
+            &verifier,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Typed verification should succeed: {:?}",
+            result.err()
+        );
     }
 }

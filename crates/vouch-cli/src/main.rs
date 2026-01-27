@@ -67,6 +67,9 @@ enum Commands {
     Completions(commands::completions::CompletionsArgs),
     /// Check your Vouch environment for common issues.
     Doctor,
+    /// Run diagnostic test of YubiKey registration + authentication (bypasses server).
+    #[command(hide = true)]
+    Diag(commands::diag::DiagArgs),
 }
 
 #[derive(Subcommand)]
@@ -191,5 +194,6 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Commands::Doctor => commands::doctor::run(&server).await,
+        Commands::Diag(args) => commands::diag::run(args),
     }
 }

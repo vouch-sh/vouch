@@ -3,6 +3,12 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::encoding::Raw;
+use crate::fido2_types::{
+    AttestationObject, AuthData, Challenge, ClientDataJson, CoseKey, CredentialId, Signature,
+    UserHandle,
+};
+
 // ============================================================================
 // Registration
 // ============================================================================
@@ -23,7 +29,7 @@ pub struct RegisterStartRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterStartResponse {
     /// Random challenge bytes (32 bytes).
-    pub challenge: Vec<u8>,
+    pub challenge: Challenge<Raw>,
     /// Relying Party ID (domain, e.g., "vouch.sh").
     pub rp_id: String,
     /// Relying Party name for display.
@@ -40,7 +46,7 @@ pub struct RegisterStartResponse {
     /// Credential IDs to exclude (already registered for this user).
     /// Used to prevent duplicate registrations of the same key.
     #[serde(default)]
-    pub exclude_credential_ids: Vec<Vec<u8>>,
+    pub exclude_credential_ids: Vec<CredentialId<Raw>>,
 }
 
 /// Request to complete FIDO2 registration with authenticator response.
@@ -49,13 +55,13 @@ pub struct RegisterCompleteRequest {
     /// Registration state token from start response.
     pub state: String,
     /// Credential ID from authenticator.
-    pub credential_id: Vec<u8>,
+    pub credential_id: CredentialId<Raw>,
     /// COSE public key from authenticator.
-    pub public_key: Vec<u8>,
+    pub public_key: CoseKey<Raw>,
     /// Attestation object from authenticator.
-    pub attestation_object: Vec<u8>,
+    pub attestation_object: AttestationObject<Raw>,
     /// Client data JSON (constructed by CLI).
-    pub client_data_json: Vec<u8>,
+    pub client_data_json: ClientDataJson<Raw>,
 }
 
 /// Response after successful registration.
@@ -120,7 +126,7 @@ pub struct LoginStartRequest {}
 #[derive(Debug, Serialize, Deserialize)]
 pub struct LoginStartResponse {
     /// Random challenge bytes (32 bytes).
-    pub challenge: Vec<u8>,
+    pub challenge: Challenge<Raw>,
     /// Relying Party ID (domain).
     pub rp_id: String,
     /// Authentication state token (opaque, returned to complete endpoint).
@@ -133,15 +139,15 @@ pub struct LoginCompleteRequest {
     /// Authentication state token from start response.
     pub state: String,
     /// Credential ID used for this assertion.
-    pub credential_id: Vec<u8>,
+    pub credential_id: CredentialId<Raw>,
     /// Authenticator data from assertion.
-    pub authenticator_data: Vec<u8>,
+    pub authenticator_data: AuthData<Raw>,
     /// Signature from assertion.
-    pub signature: Vec<u8>,
+    pub signature: Signature<Raw>,
     /// Client data JSON (constructed by CLI).
-    pub client_data_json: Vec<u8>,
+    pub client_data_json: ClientDataJson<Raw>,
     /// User handle from discoverable credential (identifies the user).
-    pub user_handle: Vec<u8>,
+    pub user_handle: UserHandle<Raw>,
     /// Client context (device/environment info for anomaly detection).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_context: Option<ClientContext>,

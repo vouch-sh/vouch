@@ -8,6 +8,11 @@
 //! The [`FidoDevice`] trait allows injecting mock implementations for testing.
 //! The [`MockFidoDevice`] (behind `test-utils` feature) provides a software
 //! implementation that generates real Ed25519 signatures.
+//!
+//! # Type Safety
+//!
+//! This module provides both untyped (`Vec<u8>`) result types for compatibility
+//! and typed result types using `vouch_common::fido2_types` for compile-time safety.
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
@@ -20,30 +25,36 @@ use ctap_hid_fido2::fidokey::make_credential::{Attestation, MakeCredentialArgsBu
 use ctap_hid_fido2::public_key_credential_user_entity::PublicKeyCredentialUserEntity;
 use ctap_hid_fido2::verifier;
 
+// Type-safe FIDO2 types (Phase 3)
+use vouch_common::encoding::Raw;
+use vouch_common::fido2_types::{
+    AttestationObject, AuthData, ClientDataJson, CoseKey, CredentialId, Signature, UserHandle,
+};
+
 /// Result of FIDO2 registration (`make_credential`).
 pub struct RegistrationResult {
     /// Credential ID assigned by the authenticator.
-    pub credential_id: Vec<u8>,
-    /// DER-encoded public key.
-    pub public_key: Vec<u8>,
-    /// Raw authenticator data from the attestation.
-    pub attestation_object: Vec<u8>,
+    pub credential_id: CredentialId<Raw>,
+    /// COSE-encoded public key.
+    pub public_key: CoseKey<Raw>,
+    /// Raw attestation object.
+    pub attestation_object: AttestationObject<Raw>,
     /// Client data JSON.
-    pub client_data_json: Vec<u8>,
+    pub client_data_json: ClientDataJson<Raw>,
 }
 
 /// Result of FIDO2 authentication (`get_assertion`).
 pub struct AuthenticationResult {
     /// Credential ID used for this assertion.
-    pub credential_id: Vec<u8>,
+    pub credential_id: CredentialId<Raw>,
     /// Authenticator data.
-    pub authenticator_data: Vec<u8>,
+    pub authenticator_data: AuthData<Raw>,
     /// Signature over client data hash and authenticator data.
-    pub signature: Vec<u8>,
+    pub signature: Signature<Raw>,
     /// Client data JSON.
-    pub client_data_json: Vec<u8>,
+    pub client_data_json: ClientDataJson<Raw>,
     /// User handle (required for discoverable credentials).
-    pub user_handle: Vec<u8>,
+    pub user_handle: UserHandle<Raw>,
 }
 
 /// Wrapper around a FIDO2 device (`YubiKey`).
@@ -157,7 +168,6 @@ impl YubiKey {
         // Build client data JSON (WebAuthn spec)
         let client_data = ClientData::new_create(challenge, rp_id);
         let client_data_json = client_data.to_json()?;
-        let client_data_hash = sha256(&client_data_json);
 
         // Create user entity
         let user =
@@ -165,7 +175,10 @@ impl YubiKey {
 
         // Build make_credential arguments
         // Use .resident_key() to create a discoverable credential (passkey)
-        let args = MakeCredentialArgsBuilder::new(rp_id, &client_data_hash)
+        // IMPORTANT: ctap-hid-fido2 expects raw bytes and hashes them internally.
+        // We pass the full client_data_json so the library computes:
+        // clientDataHash = SHA256(client_data_json)
+        let args = MakeCredentialArgsBuilder::new(rp_id, &client_data_json)
             .user_entity(&user)
             .pin(pin)
             .resident_key()
@@ -178,16 +191,16 @@ impl YubiKey {
             .context("FIDO2 registration failed - check your PIN and touch the YubiKey")?;
 
         // Verify the attestation locally
-        let verify_result = verifier::verify_attestation(rp_id, &client_data_hash, &attestation);
+        let verify_result = verifier::verify_attestation(rp_id, &client_data_json, &attestation);
         if !verify_result.is_success {
             bail!("attestation verification failed");
         }
 
         Ok(RegistrationResult {
-            credential_id: verify_result.credential_id,
-            public_key: verify_result.credential_public_key.der,
-            attestation_object: build_attestation_object(&attestation)?,
-            client_data_json,
+            credential_id: verify_result.credential_id.into(),
+            public_key: verify_result.credential_public_key.der.into(),
+            attestation_object: build_attestation_object(&attestation)?.into(),
+            client_data_json: client_data_json.into(),
         })
     }
 
@@ -204,10 +217,12 @@ impl YubiKey {
         // Build client data JSON (WebAuthn spec)
         let client_data = ClientData::new_get(challenge, rp_id);
         let client_data_json = client_data.to_json()?;
-        let client_data_hash = sha256(&client_data_json);
 
-        // Build get_assertion arguments without credential_id (discoverable flow)
-        let args = GetAssertionArgsBuilder::new(rp_id, &client_data_hash)
+        // IMPORTANT: ctap-hid-fido2 expects raw bytes and hashes them internally.
+        // We pass the full client_data_json so the library computes:
+        // clientDataHash = SHA256(client_data_json)
+        // This matches what WebAuthn/browsers do.
+        let args = GetAssertionArgsBuilder::new(rp_id, &client_data_json)
             .pin(pin)
             .build();
 
@@ -228,11 +243,11 @@ impl YubiKey {
         }
 
         Ok(AuthenticationResult {
-            credential_id: assertion.credential_id,
-            authenticator_data: assertion.auth_data,
-            signature: assertion.signature,
-            client_data_json,
-            user_handle: assertion.user.id,
+            credential_id: assertion.credential_id.into(),
+            authenticator_data: assertion.auth_data.into(),
+            signature: assertion.signature.into(),
+            client_data_json: client_data_json.into(),
+            user_handle: assertion.user.id.into(),
         })
     }
 }
@@ -276,13 +291,6 @@ impl ClientData {
     fn to_json(&self) -> Result<Vec<u8>> {
         serde_json::to_vec(self).context("failed to serialize client data")
     }
-}
-
-/// Compute SHA-256 hash.
-fn sha256(data: &[u8]) -> Vec<u8> {
-    aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, data)
-        .as_ref()
-        .to_vec()
 }
 
 /// Trait for abstracting FIDO2 device operations.
@@ -341,6 +349,14 @@ impl FidoDevice for YubiKey {
 ///
 /// This implementation uses Ed25519 keys to generate real cryptographic
 /// signatures that can be verified by the server's COSE verifier.
+#[cfg(any(test, feature = "test-utils"))]
+#[allow(dead_code)]
+fn sha256(data: &[u8]) -> Vec<u8> {
+    aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, data)
+        .as_ref()
+        .to_vec()
+}
+
 #[cfg(any(test, feature = "test-utils"))]
 #[allow(dead_code)]
 pub struct MockFidoDevice {
@@ -502,10 +518,10 @@ impl FidoDevice for MockFidoDevice {
         let attestation_object = build_none_attestation_object(&auth_data)?;
 
         Ok(RegistrationResult {
-            credential_id: self.credential_id.clone(),
-            public_key: public_key_cose,
-            attestation_object,
-            client_data_json,
+            credential_id: self.credential_id.clone().into(),
+            public_key: public_key_cose.into(),
+            attestation_object: attestation_object.into(),
+            client_data_json: client_data_json.into(),
         })
     }
 
@@ -535,11 +551,11 @@ impl FidoDevice for MockFidoDevice {
         let signature = self.signing_key.sign(&signed_data);
 
         Ok(AuthenticationResult {
-            credential_id: self.credential_id.clone(),
-            authenticator_data: auth_data,
-            signature: signature.to_bytes().to_vec(),
-            client_data_json,
-            user_handle: self.user_id.clone(),
+            credential_id: self.credential_id.clone().into(),
+            authenticator_data: auth_data.into(),
+            signature: signature.to_bytes().to_vec().into(),
+            client_data_json: client_data_json.into(),
+            user_handle: self.user_id.clone().into(),
         })
     }
 }
@@ -612,10 +628,10 @@ mod tests {
         let reg = result.ok();
         assert!(reg.is_some());
         let reg = reg.unwrap_or_else(|| RegistrationResult {
-            credential_id: vec![],
-            public_key: vec![],
-            attestation_object: vec![],
-            client_data_json: vec![],
+            credential_id: vec![].into(),
+            public_key: vec![].into(),
+            attestation_object: vec![].into(),
+            client_data_json: vec![].into(),
         });
         assert!(!reg.credential_id.is_empty());
         assert!(!reg.public_key.is_empty());
@@ -633,11 +649,11 @@ mod tests {
         let auth = result.ok();
         assert!(auth.is_some());
         let auth = auth.unwrap_or_else(|| AuthenticationResult {
-            credential_id: vec![],
-            authenticator_data: vec![],
-            signature: vec![],
-            client_data_json: vec![],
-            user_handle: vec![],
+            credential_id: vec![].into(),
+            authenticator_data: vec![].into(),
+            signature: vec![].into(),
+            client_data_json: vec![].into(),
+            user_handle: vec![].into(),
         });
         assert!(!auth.credential_id.is_empty());
         assert_eq!(auth.authenticator_data.len(), 37); // 32 + 1 + 4
