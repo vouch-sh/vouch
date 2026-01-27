@@ -9,7 +9,7 @@ KAMAL ?= kamal
 IMAGE_NAME ?= vouch-sh/vouch
 IMAGE_TAG ?= latest
 
-.PHONY: all build test test-integration run clean help docker-build docker-run deploy deploy-setup css-dev css-build
+.PHONY: all build test test-integration run run-agent clean help docker-build docker-run deploy deploy-logs css-dev css-build
 
 all: build
 
@@ -27,7 +27,7 @@ css-build: ## Build minified CSS for production
 	cd crates/vouch-server && tailwindcss -i styles/input.css -o static/css/output.css --minify
 
 run: ## Run the vouch CLI locally
-	RUST_LOG=info $(CARGO) run --bin vouch
+	RUST_LOG=debug $(CARGO) run --bin vouch
 
 run-server: ## Run the vouch server locally
 	RUST_LOG=debug \
@@ -36,6 +36,9 @@ run-server: ## Run the vouch server locally
 	VOUCH_JWT_SECRET=dev-secret-at-least-32-characters-long \
 	VOUCH_ADMIN_BOOTSTRAP_TOKEN=admin123 \
 	$(CARGO) run --bin vouch-server
+
+run-agent:
+	RUST_LOG=debug $(CARGO) run --bin vouch-agent -- --verbose --foreground
 
 fmt: ## Format code
 	$(CARGO) fmt --all
@@ -72,17 +75,11 @@ docker-run: ## Run Docker container locally
 
 ##@ Deployment (Kamal)
 
-deploy-setup: ## Initial Kamal setup (run once)
-	$(KAMAL) setup
-
 deploy: ## Deploy to production
 	$(KAMAL) deploy
 
 deploy-logs: ## View production logs
 	$(KAMAL) app logs
-
-deploy-details: ## Show deployment details
-	$(KAMAL) details
 
 ##@ Cleanup
 

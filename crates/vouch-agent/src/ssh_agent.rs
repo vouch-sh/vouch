@@ -333,6 +333,12 @@ impl SshAgentState {
         *guard = Some(Timestamp::now());
     }
 
+    /// Set the server URL for credential refresh/lazy provisioning.
+    pub async fn set_server_url(&self, url: String) {
+        let mut guard = self.server_url.write().await;
+        *guard = Some(url);
+    }
+
     /// Get the server URL for refresh.
     pub async fn get_server_url(&self) -> Option<String> {
         let guard = self.server_url.read().await;
@@ -467,7 +473,9 @@ async fn handle_ssh_connection(
 
         // Handle message
         let response = match msg_type {
-            SSH_AGENTC_REQUEST_IDENTITIES => handle_request_identities(&state).await,
+            SSH_AGENTC_REQUEST_IDENTITIES => {
+                handle_request_identities(&state, agent_state.as_ref()).await
+            }
             SSH_AGENTC_SIGN_REQUEST => {
                 handle_sign_request(&buf, &state, agent_state.as_ref()).await
             }
@@ -486,25 +494,47 @@ async fn handle_ssh_connection(
     }
 }
 
-/// Handle SSH_AGENTC_REQUEST_IDENTITIES.
-async fn handle_request_identities(state: &Arc<SshAgentState>) -> Result<Vec<u8>> {
-    let creds = state.get_credentials().await;
+/// Default SSH key path for lazy disk loading.
+const DEFAULT_KEY_NAME: &str = "id_ed25519_vouch";
 
+/// Handle SSH_AGENTC_REQUEST_IDENTITIES with lazy loading.
+async fn handle_request_identities(
+    state: &Arc<SshAgentState>,
+    agent_state: Option<&Arc<crate::state::AgentState>>,
+) -> Result<Vec<u8>> {
+    // First check in-memory credentials
+    let creds = state.get_valid_credentials().await;
+
+    if let Some(c) = creds {
+        return build_identities_response(Some(&c));
+    }
+
+    // No valid credentials in memory — try lazy loading from disk
+    if let Some(loaded) = try_load_from_disk(state, agent_state).await {
+        return build_identities_response(Some(&loaded));
+    }
+
+    // No valid cert on disk either — try background provisioning
+    spawn_lazy_provision(state, agent_state);
+
+    // Return 0 identities immediately (don't block the SSH connection)
+    build_identities_response(None)
+}
+
+/// Build an SSH_AGENT_IDENTITIES_ANSWER response.
+fn build_identities_response(creds: Option<&SshCredentials>) -> Result<Vec<u8>> {
     let mut response = Vec::new();
     response.push(SSH_AGENT_IDENTITIES_ANSWER);
 
     match creds {
         Some(c) => {
-            // Number of keys (1)
             response.extend_from_slice(&1u32.to_be_bytes());
 
-            // Key blob length + data
             let blob_len = u32::try_from(c.certificate_blob.len())
                 .map_err(|_| AgentError::Protocol("certificate too large".to_string()))?;
             response.extend_from_slice(&blob_len.to_be_bytes());
             response.extend_from_slice(&c.certificate_blob);
 
-            // Comment length + data
             let comment_bytes = c.comment.as_bytes();
             let comment_len = u32::try_from(comment_bytes.len())
                 .map_err(|_| AgentError::Protocol("comment too large".to_string()))?;
@@ -514,13 +544,195 @@ async fn handle_request_identities(state: &Arc<SshAgentState>) -> Result<Vec<u8>
             debug!("Returning 1 identity");
         }
         None => {
-            // No keys
             response.extend_from_slice(&0u32.to_be_bytes());
             debug!("Returning 0 identities");
         }
     }
 
     Ok(response)
+}
+
+/// Try to load SSH credentials from disk (lazy loading after agent restart).
+///
+/// Only loads if the agent has a valid session (prevents stale certs after logout).
+async fn try_load_from_disk(
+    state: &Arc<SshAgentState>,
+    agent_state: Option<&Arc<crate::state::AgentState>>,
+) -> Option<SshCredentials> {
+    // Require a valid agent session to prevent serving stale certs
+    let agent = agent_state?;
+    let session = agent.get_session().await?;
+
+    // Check for default key and cert files on disk
+    let home = dirs::home_dir()?;
+    let ssh_dir = home.join(".ssh");
+    let key_path = ssh_dir.join(DEFAULT_KEY_NAME);
+    let cert_path = ssh_dir.join(format!("{DEFAULT_KEY_NAME}-cert.pub"));
+
+    if !key_path.exists() || !cert_path.exists() {
+        debug!("No SSH key/cert files found on disk for lazy loading");
+        return None;
+    }
+
+    // Load credentials from disk
+    let creds = match SshCredentials::load(&key_path, &cert_path) {
+        Ok(c) => c,
+        Err(e) => {
+            debug!("Failed to load SSH credentials from disk: {e}");
+            return None;
+        }
+    };
+
+    // Check if the certificate is still valid
+    if creds.is_expired() {
+        debug!("Disk certificate is expired, not loading");
+        return None;
+    }
+
+    info!("Lazy-loaded SSH credentials from disk");
+
+    // Store in agent state with session linkage
+    let server_url = state.get_server_url().await;
+    state
+        .store_credentials(creds.clone(), Some(session.expires_at), server_url)
+        .await;
+
+    Some(creds)
+}
+
+/// Spawn a non-blocking background task to provision SSH certificate from server.
+///
+/// This does NOT block the current SSH connection. The next identity request
+/// will pick up the newly provisioned cert.
+fn spawn_lazy_provision(
+    state: &Arc<SshAgentState>,
+    agent_state: Option<&Arc<crate::state::AgentState>>,
+) {
+    let Some(agent) = agent_state else {
+        return;
+    };
+
+    // Check for existing keypair (agent does NOT generate keypairs)
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return,
+    };
+    let key_path = home.join(".ssh").join(DEFAULT_KEY_NAME);
+    let pub_path = key_path.with_extension("pub");
+
+    if !key_path.exists() || !pub_path.exists() {
+        debug!("No SSH keypair on disk, cannot lazy-provision");
+        return;
+    }
+
+    let state_clone = Arc::clone(state);
+    let agent_clone = Arc::clone(agent);
+
+    tokio::spawn(async move {
+        // Rate-limit provisioning attempts
+        if !state_clone.can_attempt_refresh().await {
+            debug!("Lazy provisioning rate-limited");
+            return;
+        }
+        state_clone.record_refresh_attempt().await;
+
+        // Need a valid session and server URL
+        let Some(session) = agent_clone.get_session().await else {
+            debug!("No valid session for lazy provisioning");
+            return;
+        };
+        let Some(server_url) = state_clone.get_server_url().await else {
+            debug!("No server URL for lazy provisioning");
+            return;
+        };
+
+        // Read the public key from disk
+        let pub_key_str = match std::fs::read_to_string(&pub_path) {
+            Ok(s) => s.trim().to_string(),
+            Err(e) => {
+                debug!("Failed to read public key for lazy provisioning: {e}");
+                return;
+            }
+        };
+
+        info!("Lazy-provisioning SSH certificate from {server_url}");
+
+        // Make the HTTP request with a short timeout
+        let client = match reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                debug!("Failed to create HTTP client for lazy provisioning: {e}");
+                return;
+            }
+        };
+
+        let token = match agent_clone.get_token().await {
+            Some(t) => t,
+            None => {
+                debug!("No token available for lazy provisioning");
+                return;
+            }
+        };
+
+        let request = vouch_common::SshCertificateRequest {
+            public_key: pub_key_str,
+        };
+
+        let response = match client
+            .post(format!("{server_url}/v1/credentials/ssh"))
+            .bearer_auth(token)
+            .json(&request)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                debug!("Lazy provisioning request failed: {e}");
+                return;
+            }
+        };
+
+        if !response.status().is_success() {
+            debug!("Lazy provisioning returned status {}", response.status());
+            return;
+        }
+
+        let cert_response: vouch_common::SshCertificateResponse = match response.json().await {
+            Ok(r) => r,
+            Err(e) => {
+                debug!("Failed to parse lazy provisioning response: {e}");
+                return;
+            }
+        };
+
+        // Write certificate to disk
+        let cert_path = home
+            .join(".ssh")
+            .join(format!("{DEFAULT_KEY_NAME}-cert.pub"));
+        if let Err(e) = std::fs::write(&cert_path, format!("{}\n", cert_response.certificate)) {
+            debug!("Failed to write lazy-provisioned certificate: {e}");
+            return;
+        }
+
+        // Load credentials into agent state
+        match SshCredentials::load(&key_path, &cert_path) {
+            Ok(creds) => {
+                state_clone
+                    .store_credentials(creds, Some(session.expires_at), Some(server_url))
+                    .await;
+                info!(
+                    "Lazy-provisioned SSH certificate (serial: {}, valid for: {}s)",
+                    cert_response.serial, cert_response.valid_for_seconds
+                );
+            }
+            Err(e) => {
+                debug!("Failed to load lazy-provisioned credentials: {e}");
+            }
+        }
+    });
 }
 
 /// Handle SSH_AGENTC_SIGN_REQUEST.

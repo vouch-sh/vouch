@@ -111,6 +111,9 @@ pub struct StoreSessionParams {
     pub user_email: String,
     /// ISO 8601 expiration timestamp.
     pub expires_at: String,
+    /// Server URL for credential refresh (optional).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
 }
 
 /// Parameters for `store_ssh_credentials` method.
@@ -149,6 +152,7 @@ mod tests {
             token: "test_token".to_string(),
             user_email: "test@example.com".to_string(),
             expires_at: "2099-12-31T23:59:59Z".to_string(),
+            server_url: None,
         };
         let req = Request::with_params(2, "store_session", &params);
 

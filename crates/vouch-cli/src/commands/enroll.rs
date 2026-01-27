@@ -2,11 +2,14 @@
 
 use anyhow::{Context, Result};
 use std::io::{Write, stdout};
+use vouch_agent::{AgentClient, AgentError};
 use vouch_common::{
     DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse, OAuthError,
+    SessionCookie, write_cookie,
 };
 
 use crate::client::VouchClient;
+use crate::commands::credential;
 use crate::config::Config;
 
 /// Run the enroll command.
@@ -56,13 +59,84 @@ pub async fn run(server: &str) -> Result<()> {
     config.save_server_url(server)?;
     config.save_token(&token_response.access_token)?;
 
+    // Step 5: Compute expiration timestamp from expires_in
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::SignedDuration::from_secs(
+            i64::try_from(token_response.expires_in).unwrap_or(28800) - 30,
+        ))
+        .unwrap_or_else(|_| jiff::Timestamp::now());
+    let expires_at_str = expires_at.to_string();
+
+    // Step 6: Store session in agent (if running)
+    let agent_stored = store_session_in_agent(
+        &token_response.access_token,
+        &token_response.email,
+        &expires_at_str,
+        server,
+    )
+    .await;
+
+    // Step 7: Write cookie file for CLI tools
+    if let Err(e) = write_session_cookie(server, &token_response.access_token, expires_at) {
+        tracing::debug!("Failed to write cookie file: {e}");
+    }
+
     println!("\nEnrollment successful!");
     println!("Enrolled as: {}", token_response.email);
+
+    // Step 8: Auto-provision SSH certificate
+    credential::ssh::auto_provision(server, &expires_at_str).await;
+
+    if agent_stored {
+        println!("\nYour identity is now available. Check with: vouch status");
+    }
+
     println!();
     println!("To add additional keys:");
     println!("  1. vouch login");
     println!("  2. vouch register --name \"Backup Key\"");
 
+    Ok(())
+}
+
+/// Store session in the agent (if running).
+async fn store_session_in_agent(token: &str, email: &str, expires_at: &str, server: &str) -> bool {
+    match AgentClient::connect().await {
+        Ok(mut agent) => {
+            match agent
+                .store_session(token, email, expires_at, Some(server))
+                .await
+            {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::debug!("Failed to store session in agent: {e}");
+                    false
+                }
+            }
+        }
+        Err(AgentError::NotRunning) => {
+            tracing::debug!("Agent not running, session stored in config only");
+            false
+        }
+        Err(e) => {
+            tracing::debug!("Failed to connect to agent: {e}");
+            false
+        }
+    }
+}
+
+/// Write the session cookie file for CLI tools.
+fn write_session_cookie(server: &str, token: &str, expires_at: jiff::Timestamp) -> Result<()> {
+    let url = url::Url::parse(server).context("failed to parse server URL")?;
+    let domain = url
+        .host_str()
+        .context("server URL has no host")?
+        .to_string();
+
+    let cookie = SessionCookie::new(&domain, token, expires_at.as_second());
+    write_cookie(&cookie)?;
+
+    tracing::debug!("Cookie written to ~/.vouch/cookie.txt");
     Ok(())
 }
 

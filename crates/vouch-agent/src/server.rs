@@ -136,7 +136,7 @@ async fn handle_request(
     match request.method.as_str() {
         "ping" => handle_ping(request),
         "get_session" => handle_get_session(request, state).await,
-        "store_session" => handle_store_session(request, state).await,
+        "store_session" => handle_store_session(request, state, ssh_state).await,
         "clear_session" => handle_clear_session(request, state, ssh_state).await,
         "get_token" => handle_get_token(request, state).await,
         "store_ssh_credentials" => handle_store_ssh_credentials(request, ssh_state).await,
@@ -167,7 +167,11 @@ async fn handle_get_session(request: &Request, state: &Arc<AgentState>) -> Respo
 }
 
 /// Handle `store_session` request.
-async fn handle_store_session(request: &Request, state: &Arc<AgentState>) -> Response {
+async fn handle_store_session(
+    request: &Request,
+    state: &Arc<AgentState>,
+    ssh_state: &Arc<SshAgentState>,
+) -> Response {
     let params: StoreSessionParams = match &request.params {
         Some(p) => match serde_json::from_value(p.clone()) {
             Ok(params) => params,
@@ -201,6 +205,40 @@ async fn handle_store_session(request: &Request, state: &Arc<AgentState>) -> Res
     );
 
     state.store_session(session).await;
+
+    // Store server URL in SSH agent state for lazy provisioning/refresh
+    if let Some(url) = params.server_url {
+        // Validate: must be a valid URL; reject insecure HTTP for non-localhost
+        if let Ok(parsed) = url::Url::parse(&url) {
+            if parsed.scheme() == "https" || parsed.scheme() == "http" {
+                match vouch_common::check_url_security(&url) {
+                    vouch_common::UrlSecurity::Secure => {
+                        ssh_state.set_server_url(url).await;
+                    }
+                    vouch_common::UrlSecurity::InsecureHttp { url: insecure_url } => {
+                        if std::env::var("VOUCH_ALLOW_INSECURE").is_ok() {
+                            warn!(
+                                "Using insecure HTTP server URL: {insecure_url}. VOUCH_ALLOW_INSECURE is set."
+                            );
+                            ssh_state.set_server_url(url).await;
+                        } else {
+                            warn!(
+                                "Rejecting insecure HTTP server URL: {insecure_url}. Set VOUCH_ALLOW_INSECURE=1 to override."
+                            );
+                        }
+                    }
+                }
+            } else {
+                debug!(
+                    "Ignoring server_url with unsupported scheme: {}",
+                    parsed.scheme()
+                );
+            }
+        } else {
+            debug!("Ignoring invalid server_url");
+        }
+    }
+
     info!("Session stored");
 
     Response::success(request.id, true)

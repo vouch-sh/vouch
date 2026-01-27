@@ -128,11 +128,13 @@ impl AgentClient {
         token: &str,
         user_email: &str,
         expires_at: &str,
+        server_url: Option<&str>,
     ) -> Result<()> {
         let params = StoreSessionParams {
             token: token.to_string(),
             user_email: user_email.to_string(),
             expires_at: expires_at.to_string(),
+            server_url: server_url.map(String::from),
         };
 
         let response = self

@@ -8,6 +8,7 @@ use vouch_common::{
 };
 
 use crate::client::VouchClient;
+use crate::commands::credential;
 use crate::config::Config;
 use crate::fido2::{self, YubiKey};
 
@@ -60,7 +61,7 @@ pub async fn run(server: &str) -> Result<()> {
 
     // Step 6: Store session in agent (if running) and config
     // Use email from response (server identifies user from user_handle)
-    let agent_stored = store_session_in_agent(&complete_resp.email, &complete_resp).await;
+    let agent_stored = store_session_in_agent(&complete_resp.email, &complete_resp, server).await;
 
     // Also save to config as fallback
     let mut config = Config::load()?;
@@ -77,6 +78,9 @@ pub async fn run(server: &str) -> Result<()> {
         format_expiry(&complete_resp.expires_at)
     );
 
+    // Step 8: Auto-provision SSH certificate
+    credential::ssh::auto_provision(server, &complete_resp.expires_at).await;
+
     if agent_stored {
         println!("\nYour identity is now available. Check with: vouch status");
     } else {
@@ -88,11 +92,15 @@ pub async fn run(server: &str) -> Result<()> {
 }
 
 /// Store session in the agent (if running).
-async fn store_session_in_agent(email: &str, response: &LoginCompleteResponse) -> bool {
+async fn store_session_in_agent(
+    email: &str,
+    response: &LoginCompleteResponse,
+    server: &str,
+) -> bool {
     match AgentClient::connect().await {
         Ok(mut agent) => {
             match agent
-                .store_session(&response.token, email, &response.expires_at)
+                .store_session(&response.token, email, &response.expires_at, Some(server))
                 .await
             {
                 Ok(()) => true,

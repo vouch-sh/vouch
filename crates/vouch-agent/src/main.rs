@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use vouch_agent::daemon;
+use vouch_agent::recovery;
 use vouch_agent::server::AgentServer;
 use vouch_agent::socket::remove_socket;
 use vouch_agent::ssh_agent::{SshAgentServer, SshAgentState, ssh_agent_socket_path};
@@ -142,6 +143,11 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
 
     // Create SSH agent state
     let ssh_state = SshAgentState::new();
+
+    // Try to recover session from disk (best-effort)
+    if recovery::try_recover_session(&state, &ssh_state).await {
+        info!("Session recovered from disk");
+    }
 
     // Create servers
     let server = AgentServer::new(Arc::clone(&state), Arc::clone(&ssh_state));

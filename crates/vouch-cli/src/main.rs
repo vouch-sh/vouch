@@ -21,6 +21,10 @@ struct Cli {
     #[arg(long, env = "VOUCH_SERVER", global = true)]
     server: Option<String>,
 
+    /// Allow insecure HTTP connections to non-localhost servers.
+    #[arg(long, env = "VOUCH_ALLOW_INSECURE", global = true, hide = true)]
+    allow_insecure: bool,
+
     /// Enable verbose output.
     #[arg(short, long, global = true)]
     verbose: bool,
@@ -70,6 +74,16 @@ enum Commands {
     /// Run diagnostic test of YubiKey registration + authentication (bypasses server).
     #[command(hide = true)]
     Diag(commands::diag::DiagArgs),
+}
+
+impl Commands {
+    /// Whether this command contacts the server (and thus needs URL security checks).
+    fn uses_server(&self) -> bool {
+        !matches!(
+            self,
+            Commands::Completions(_) | Commands::Diag(_) | Commands::Logout
+        )
+    }
 }
 
 #[derive(Subcommand)]
@@ -153,6 +167,27 @@ async fn main() -> Result<()> {
         .server
         .or_else(|| config.server_url().map(String::from))
         .unwrap_or_else(|| "http://localhost:3000".to_string());
+
+    // Enforce HTTPS for non-localhost servers
+    if cli.command.uses_server() {
+        match vouch_common::check_url_security(&server) {
+            vouch_common::UrlSecurity::Secure => {}
+            vouch_common::UrlSecurity::InsecureHttp { url } => {
+                if cli.allow_insecure {
+                    eprintln!(
+                        "WARNING: Using insecure HTTP connection to {url}.\n\
+                         Credentials will be transmitted in plaintext.\n"
+                    );
+                } else {
+                    anyhow::bail!(
+                        "Server URL uses plain HTTP ({url}).\n\
+                         Credentials would be sent in plaintext.\n\n\
+                         Use an https:// URL, or set --allow-insecure / VOUCH_ALLOW_INSECURE=1 for development."
+                    );
+                }
+            }
+        }
+    }
 
     match cli.command {
         Commands::Enroll => commands::enroll::run(&server).await,

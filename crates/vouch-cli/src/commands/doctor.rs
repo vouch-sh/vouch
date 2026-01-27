@@ -75,6 +75,14 @@ pub async fn run(server: &str) -> Result<()> {
         all_passed = false;
     }
 
+    // Check 6: Server URL security
+    print!("Server URL security ... ");
+    let security_result = check_server_url_security(server);
+    print_result(&security_result);
+    if !security_result.passed {
+        all_passed = false;
+    }
+
     // Summary
     println!();
     if all_passed {
@@ -225,5 +233,16 @@ fn check_ssh_config() -> CheckResult {
         CheckResult::pass("SSH configured for Vouch")
     } else {
         CheckResult::fail(issues.join("; "))
+    }
+}
+
+/// Check if the server URL uses secure transport.
+fn check_server_url_security(server: &str) -> CheckResult {
+    if vouch_common::check_url_security(server).is_insecure() {
+        CheckResult::fail(format!(
+            "Server uses plain HTTP ({server}). Use HTTPS or set VOUCH_ALLOW_INSECURE=1."
+        ))
+    } else {
+        CheckResult::pass("Server URL is secure (HTTPS or localhost)")
     }
 }

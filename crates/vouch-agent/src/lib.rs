@@ -30,6 +30,7 @@ pub mod client;
 pub mod daemon;
 pub mod error;
 pub mod protocol;
+pub mod recovery;
 pub mod server;
 pub mod socket;
 pub mod ssh_agent;

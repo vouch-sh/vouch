@@ -4,12 +4,14 @@ pub mod aaguid;
 pub mod api;
 pub mod attestation;
 pub mod clock;
+pub mod config;
 pub mod contracts;
 pub mod cookie;
 pub mod encoding;
 pub mod error;
 pub mod fido2_types;
 pub mod fixtures;
+pub mod url;
 
 #[cfg(test)]
 mod api_tests;
@@ -31,7 +33,9 @@ pub use attestation::{
 #[cfg(any(test, feature = "test-utils"))]
 pub use clock::TestClock;
 pub use clock::{Clock, SystemClock};
+pub use config::{VouchConfig, config_path, read_config};
 pub use cookie::{
     SessionCookie, clear_cookie, cookie_path, is_cookie_expired, read_cookie, write_cookie,
 };
 pub use error::*;
+pub use url::{UrlSecurity, check_url_security};
