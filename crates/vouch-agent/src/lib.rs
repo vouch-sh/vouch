@@ -26,20 +26,25 @@
 //! }
 //! ```
 
+#[cfg(unix)]
 pub mod client;
 pub mod daemon;
 pub mod error;
 pub mod protocol;
 pub mod recovery;
+#[cfg(unix)]
 pub mod server;
 pub mod socket;
+#[cfg(unix)]
 pub mod ssh_agent;
 pub mod state;
 pub mod transport;
 
 // Re-export commonly used types
+#[cfg(unix)]
 pub use client::AgentClient;
 pub use error::{AgentError, Result};
+#[cfg(unix)]
 pub use ssh_agent::{SshAgentServer, SshAgentState, SshCredentials, ssh_agent_socket_path};
 pub use state::SessionInfo;
 pub use transport::AgentTransport;

@@ -1,0 +1,12 @@
+[Unit]
+Description=Vouch credential agent
+Documentation=https://github.com/vouch-sh/vouch
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/vouch-agent --foreground
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

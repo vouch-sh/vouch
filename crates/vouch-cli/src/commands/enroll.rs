@@ -2,6 +2,7 @@
 
 use anyhow::{Context, Result};
 use std::io::{Write, stdout};
+#[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError};
 use vouch_common::{
     DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse, OAuthError,
@@ -68,6 +69,7 @@ pub async fn run(server: &str) -> Result<()> {
     let expires_at_str = expires_at.to_string();
 
     // Step 6: Store session in agent (if running)
+    #[cfg(unix)]
     let agent_stored = store_session_in_agent(
         &token_response.access_token,
         &token_response.email,
@@ -75,6 +77,8 @@ pub async fn run(server: &str) -> Result<()> {
         server,
     )
     .await;
+    #[cfg(not(unix))]
+    let agent_stored = false;
 
     // Step 7: Write cookie file for CLI tools
     if let Err(e) = write_session_cookie(server, &token_response.access_token, expires_at) {
@@ -100,6 +104,7 @@ pub async fn run(server: &str) -> Result<()> {
 }
 
 /// Store session in the agent (if running).
+#[cfg(unix)]
 async fn store_session_in_agent(token: &str, email: &str, expires_at: &str, server: &str) -> bool {
     match AgentClient::connect().await {
         Ok(mut agent) => {

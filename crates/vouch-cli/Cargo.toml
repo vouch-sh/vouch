@@ -22,7 +22,6 @@ path = "src/main.rs"
 
 [dependencies]
 vouch-common = { workspace = true }
-vouch-agent = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 clap_complete = { workspace = true }
@@ -47,6 +46,9 @@ ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 rand_core = { workspace = true, optional = true }
 serde_urlencoded = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+vouch-agent = { workspace = true }
 libc = { workspace = true }
 
 # Optional dependencies for test-utils feature

@@ -91,7 +91,6 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-      artifact-metadata: write
     outputs:
       digest: ${{ steps.inspect.outputs.digest }}
 
@@ -144,6 +143,266 @@ jobs:
           subject-digest: ${{ steps.inspect.outputs.digest }}
           push-to-registry: true
 
+  build-binaries:
+    name: Build Binaries (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bins: "vouch vouch-agent"
+            server: true
+            archive-ext: tar.gz
+            install: sudo apt-get update && sudo apt-get install -y libudev-dev
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            bins: "vouch vouch-agent"
+            server: true
+            archive-ext: tar.gz
+            install: sudo apt-get update && sudo apt-get install -y libudev-dev
+          - name: macos-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            bins: "vouch vouch-agent"
+            server: false
+            archive-ext: tar.gz
+            install: ""
+          - name: windows-amd64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            bins: "vouch"
+            server: false
+            archive-ext: zip
+            install: ""
+          - name: windows-arm64
+            runner: windows-latest
+            target: aarch64-pc-windows-msvc
+            bins: "vouch"
+            server: false
+            archive-ext: zip
+            install: ""
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install system dependencies
+        if: matrix.install != ''
+        run: ${{ matrix.install }}
+
+      - name: Setup Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@8b402f58fbc84540c8b491a91e594a4576fec3d7 # v5.0.2
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-release-${{ matrix.target }}-
+            ${{ runner.os }}-cargo-release-
+            ${{ runner.os }}-cargo-
+
+      - name: Install cargo-cyclonedx
+        shell: bash
+        run: cargo install cargo-cyclonedx
+
+      - name: Build CLI and Agent
+        if: matrix.bins == 'vouch vouch-agent'
+        run: cargo build --release --target ${{ matrix.target }} -p vouch-cli -p vouch-agent
+
+      - name: Build CLI only
+        if: matrix.bins == 'vouch'
+        run: cargo build --release --target ${{ matrix.target }} -p vouch-cli
+
+      - name: Build Server
+        if: matrix.server
+        run: cargo build --release --target ${{ matrix.target }} -p vouch-server
+
+      - name: Generate SBOM
+        shell: bash
+        run: cargo cyclonedx --target ${{ matrix.target }} --format json
+
+      - name: Get version
+        id: version
+        shell: bash
+        run: |
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Create archive (tar.gz)
+        if: matrix.archive-ext == 'tar.gz'
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          STAGING="vouch-v${VERSION}-${TARGET}"
+
+          mkdir -p "${STAGING}"
+          for bin in ${{ matrix.bins }}; do
+            cp "target/${TARGET}/release/${bin}" "${STAGING}/"
+          done
+
+          tar czf "${STAGING}.tar.gz" "${STAGING}"
+          sha256sum "${STAGING}.tar.gz" > "${STAGING}.tar.gz.sha256"
+
+          # Server archive (separate)
+          if [ "${{ matrix.server }}" = "true" ]; then
+            SERVER_STAGING="vouch-server-v${VERSION}-${TARGET}"
+            mkdir -p "${SERVER_STAGING}"
+            cp "target/${TARGET}/release/vouch-server" "${SERVER_STAGING}/"
+            tar czf "${SERVER_STAGING}.tar.gz" "${SERVER_STAGING}"
+            sha256sum "${SERVER_STAGING}.tar.gz" > "${SERVER_STAGING}.tar.gz.sha256"
+          fi
+
+      - name: Create archive (zip)
+        if: matrix.archive-ext == 'zip'
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          STAGING="vouch-v${VERSION}-${TARGET}"
+
+          mkdir -p "${STAGING}"
+          for bin in ${{ matrix.bins }}; do
+            cp "target/${TARGET}/release/${bin}.exe" "${STAGING}/"
+          done
+
+          7z a "${STAGING}.zip" "${STAGING}"
+          sha256sum "${STAGING}.zip" > "${STAGING}.zip.sha256"
+
+      - name: Collect SBOM artifacts
+        shell: bash
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          # Find and copy CycloneDX SBOMs with target-specific names
+          for sbom in $(find . -name "*_cdx.json" -not -path "./target/*" 2>/dev/null || find . -name "*.cdx.json" -not -path "./target/*" 2>/dev/null); do
+            base=$(basename "${sbom}")
+            cp "${sbom}" "vouch-v${VERSION}-${TARGET}-${base}"
+          done
+
+      - name: Upload binary artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: binaries-${{ matrix.name }}
+          path: |
+            vouch-v*.tar.gz
+            vouch-v*.zip
+            vouch-v*.sha256
+            vouch-server-v*.tar.gz
+            vouch-server-v*.sha256
+            vouch-v*cdx.json
+          if-no-files-found: error
+          retention-days: 5
+
+      - name: Attest build provenance (CLI archive)
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: vouch-v${{ steps.version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive-ext }}
+
+      - name: Attest build provenance (server archive)
+        if: matrix.server
+        uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-path: vouch-server-v${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz
+
+      - name: Attest SBOM
+        uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3.0.0
+        with:
+          subject-path: vouch-v${{ steps.version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive-ext }}
+          sbom-path: vouch-v${{ steps.version.outputs.version }}-${{ matrix.target }}-*cdx.json
+
+  linux-packages:
+    name: Linux Packages (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    needs: build-binaries
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            artifact: binaries-linux-amd64
+            target: x86_64-unknown-linux-gnu
+            nfpm_arch: amd64
+          - arch: arm64
+            artifact: binaries-linux-arm64
+            target: aarch64-unknown-linux-gnu
+            nfpm_arch: arm64
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Download binary artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts
+
+      - name: Get version
+        id: version
+        run: |
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract binaries
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          cd artifacts
+          tar xzf "vouch-v${VERSION}-${TARGET}.tar.gz"
+          cp "vouch-v${VERSION}-${TARGET}/vouch" .
+          cp "vouch-v${VERSION}-${TARGET}/vouch-agent" .
+
+      - name: Install nfpm
+        run: |
+          echo 'deb [trusted=yes] https://repo.goreleaser.com/apt/ /' | sudo tee /etc/apt/sources.list.d/goreleaser.list
+          sudo apt-get update
+          sudo apt-get install -y nfpm
+
+      - name: Build DEB package
+        working-directory: artifacts
+        run: |
+          VERSION="${{ steps.version.outputs.version }}" \
+          ARCH="${{ matrix.nfpm_arch }}" \
+          nfpm package --config ../packaging/nfpm.yaml --packager deb
+
+      - name: Build RPM package
+        working-directory: artifacts
+        run: |
+          VERSION="${{ steps.version.outputs.version }}" \
+          ARCH="${{ matrix.nfpm_arch }}" \
+          nfpm package --config ../packaging/nfpm.yaml --packager rpm
+
+      - name: Upload package artifacts
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          name: packages-${{ matrix.arch }}
+          path: |
+            artifacts/*.deb
+            artifacts/*.rpm
+          if-no-files-found: error
+          retention-days: 5
+
   helm:
     name: Package Helm Chart
     runs-on: ubuntu-latest
@@ -153,7 +412,6 @@ jobs:
       packages: write
       id-token: write
       attestations: write
-      artifact-metadata: write
 
     steps:
       - name: Checkout
@@ -204,10 +462,223 @@ jobs:
         run: |
           helm push .helm-packages/*.tgz oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts
 
+  release-artifacts:
+    name: Publish Release Artifacts
+    runs-on: ubuntu-latest
+    needs: [build-binaries, linux-packages, merge, helm]
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all binary artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: artifacts
+          pattern: binaries-*
+          merge-multiple: true
+
+      - name: Download all package artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          path: artifacts
+          pattern: packages-*
+          merge-multiple: true
+
+      - name: Generate consolidated SHA256SUMS
+        run: |
+          cd artifacts
+          sha256sum *.tar.gz *.zip *.deb *.rpm 2>/dev/null > SHA256SUMS.txt || true
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+        with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.zip
+            artifacts/*.deb
+            artifacts/*.rpm
+            artifacts/*cdx.json
+            artifacts/SHA256SUMS.txt
+
+  homebrew:
+    name: Update Homebrew Tap
+    runs-on: ubuntu-latest
+    needs: release-artifacts
+    permissions:
+      contents: read
+
+    steps:
+      - name: Get version
+        id: version
+        run: |
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download SHA256SUMS from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ steps.version.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "SHA256SUMS.txt"
+
+      - name: Extract macOS ARM64 SHA256
+        id: sha
+        run: |
+          SHA=$(grep "vouch-v${{ steps.version.outputs.version }}-aarch64-apple-darwin.tar.gz" SHA256SUMS.txt | awk '{print $1}')
+          echo "macos_arm64=${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout Homebrew tap
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: vouch-sh/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Update formula
+        run: |
+          cat > homebrew-tap/Formula/vouch.rb << 'FORMULA'
+          class Vouch < Formula
+            desc "Hardware-backed identity for developers"
+            homepage "https://github.com/vouch-sh/vouch"
+            version "${{ steps.version.outputs.version }}"
+            license "Apache-2.0"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/vouch-sh/vouch/releases/download/v${{ steps.version.outputs.version }}/vouch-v${{ steps.version.outputs.version }}-aarch64-apple-darwin.tar.gz"
+                sha256 "${{ steps.sha.outputs.macos_arm64 }}"
+              end
+            end
+
+            def install
+              bin.install "vouch"
+              bin.install "vouch-agent"
+              generate_completions_from_executable(bin/"vouch", "completions")
+            end
+
+            service do
+              run [opt_bin/"vouch-agent", "--foreground"]
+              keep_alive true
+              log_path var/"log/vouch-agent.log"
+              error_log_path var/"log/vouch-agent.log"
+            end
+
+            test do
+              assert_match "vouch", shell_output("#{bin}/vouch --version")
+            end
+          end
+          FORMULA
+
+      - name: Commit and push formula
+        working-directory: homebrew-tap
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/vouch.rb
+          git commit -m "vouch ${{ steps.version.outputs.version }}"
+          git push
+
+  publish-packages:
+    name: Publish Package Repositories
+    runs-on: ubuntu-latest
+    needs: release-artifacts
+    permissions:
+      contents: read
+
+    steps:
+      - name: Get version
+        id: version
+        run: |
+          VERSION="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Download .deb and .rpm from GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ steps.version.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "*.deb" \
+            --pattern "*.rpm" \
+            --dir packages
+
+      - name: Checkout packages repo
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: vouch-sh/packages
+          token: ${{ secrets.PACKAGES_REPO_TOKEN }}
+          path: packages-repo
+
+      - name: Import GPG key
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+
+      - name: Install packaging tools
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev createrepo-c
+
+      - name: Update APT repository
+        run: |
+          cd packages-repo
+
+          # Copy .deb files to pool
+          cp ../packages/*.deb apt/pool/main/
+
+          # Generate Packages indices for each architecture
+          cd apt
+          for arch in amd64 arm64; do
+            dpkg-scanpackages --arch "${arch}" pool/main > "dists/stable/main/binary-${arch}/Packages"
+            gzip -9c "dists/stable/main/binary-${arch}/Packages" > "dists/stable/main/binary-${arch}/Packages.gz"
+          done
+
+          # Generate Release file
+          cd dists/stable
+          apt-ftparchive release -c ../../../apt-ftparchive.conf . > Release
+
+          # Sign Release file
+          gpg --batch --yes --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" \
+            --clearsign -o InRelease Release
+          gpg --batch --yes --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" \
+            --detach-sign --armor -o Release.gpg Release
+
+      - name: Update RPM repository
+        run: |
+          cd packages-repo
+
+          # Copy .rpm files to architecture directories
+          for rpm in ../packages/*.rpm; do
+            arch=$(rpm -qp --queryformat '%{ARCH}' "${rpm}" 2>/dev/null || echo "")
+            case "${arch}" in
+              x86_64)  cp "${rpm}" rpm/x86_64/ ;;
+              aarch64) cp "${rpm}" rpm/aarch64/ ;;
+            esac
+          done
+
+          # Generate RPM metadata and sign
+          for arch in x86_64 aarch64; do
+            createrepo_c --update "rpm/${arch}/"
+            gpg --batch --yes --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" \
+              --detach-sign --armor -o "rpm/${arch}/repodata/repomd.xml.asc" "rpm/${arch}/repodata/repomd.xml"
+          done
+
+      - name: Commit and push
+        working-directory: packages-repo
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "vouch ${{ steps.version.outputs.version }}"
+          git push
+
   release-notes:
     name: Generate Release Notes
     runs-on: ubuntu-latest
-    needs: [merge, helm]
+    needs: [merge, helm, release-artifacts, homebrew, publish-packages]
     permissions:
       contents: write
 
@@ -217,19 +688,115 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Get version
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Generate release notes
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ steps.version.outputs.tag }}
           generate_release_notes: true
           body: |
             ## Installation
+
+            ### Homebrew (macOS)
+
+            ```bash
+            brew install vouch-sh/tap/vouch
+            ```
+
+            To start the agent automatically:
+
+            ```bash
+            brew services start vouch
+            ```
+
+            ### APT Repository (Debian/Ubuntu)
+
+            ```bash
+            curl -fsSL https://packages.vouch.sh/gpg/vouch.asc \
+              | gpg --dearmor \
+              | sudo tee /usr/share/keyrings/vouch-archive-keyring.gpg > /dev/null
+
+            echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/vouch-archive-keyring.gpg] https://packages.vouch.sh/apt stable main" \
+              | sudo tee /etc/apt/sources.list.d/vouch.list > /dev/null
+
+            sudo apt-get update && sudo apt-get install -y vouch
+            ```
+
+            ### YUM/DNF Repository (Fedora/RHEL)
+
+            ```bash
+            sudo tee /etc/yum.repos.d/vouch.repo << 'EOF'
+            [vouch]
+            name=Vouch
+            baseurl=https://packages.vouch.sh/rpm/$basearch/
+            gpgcheck=1
+            gpgkey=https://packages.vouch.sh/gpg/vouch.asc
+            enabled=1
+            EOF
+
+            sudo dnf install -y vouch
+            ```
+
+            ### DEB Package (Debian/Ubuntu)
+
+            ```bash
+            # amd64
+            gh release download ${{ steps.version.outputs.tag }} --repo ${{ github.repository }} --pattern "vouch_${{ steps.version.outputs.version }}_amd64.deb"
+            sudo dpkg -i vouch_${{ steps.version.outputs.version }}_amd64.deb
+
+            # arm64
+            gh release download ${{ steps.version.outputs.tag }} --repo ${{ github.repository }} --pattern "vouch_${{ steps.version.outputs.version }}_arm64.deb"
+            sudo dpkg -i vouch_${{ steps.version.outputs.version }}_arm64.deb
+            ```
+
+            ### RPM Package (Fedora/RHEL)
+
+            ```bash
+            # x86_64
+            gh release download ${{ steps.version.outputs.tag }} --repo ${{ github.repository }} --pattern "vouch-${{ steps.version.outputs.version }}-1.x86_64.rpm"
+            sudo rpm -i vouch-${{ steps.version.outputs.version }}-1.x86_64.rpm
+
+            # aarch64
+            gh release download ${{ steps.version.outputs.tag }} --repo ${{ github.repository }} --pattern "vouch-${{ steps.version.outputs.version }}-1.aarch64.rpm"
+            sudo rpm -i vouch-${{ steps.version.outputs.version }}-1.aarch64.rpm
+            ```
+
+            ### Binary Downloads
+
+            Download the appropriate binary for your platform from the release assets below.
+
+            | Platform | Architecture | Archive |
+            |----------|-------------|---------|
+            | Linux | x86_64 | `vouch-${{ steps.version.outputs.tag }}-x86_64-unknown-linux-gnu.tar.gz` |
+            | Linux | aarch64 | `vouch-${{ steps.version.outputs.tag }}-aarch64-unknown-linux-gnu.tar.gz` |
+            | macOS | Apple Silicon | `vouch-${{ steps.version.outputs.tag }}-aarch64-apple-darwin.tar.gz` |
+            | Windows | x86_64 | `vouch-${{ steps.version.outputs.tag }}-x86_64-pc-windows-msvc.zip` |
+            | Windows | ARM64 | `vouch-${{ steps.version.outputs.tag }}-aarch64-pc-windows-msvc.zip` |
+
+            #### Verify integrity
+
+            ```bash
+            sha256sum -c SHA256SUMS.txt
+            ```
+
+            #### Verify provenance
+
+            ```bash
+            gh attestation verify vouch-${{ steps.version.outputs.tag }}-aarch64-apple-darwin.tar.gz --owner vouch-sh
+            ```
 
             ### Using Helm (OCI)
 
             ```bash
             helm install vouch-server oci://${{ env.REGISTRY }}/${{ github.repository_owner }}/charts/vouch-server \
-              --version ${{ github.event.inputs.tag || github.ref_name }} \
+              --version ${{ steps.version.outputs.version }} \
               --namespace vouch-server \
               --create-namespace
             ```
@@ -238,7 +805,7 @@ jobs:
 
             ```bash
             helm install vouch-server \
-              https://github.com/${{ github.repository }}/releases/download/${{ github.event.inputs.tag || github.ref_name }}/vouch-server-*.tgz \
+              https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/vouch-server-${{ steps.version.outputs.version }}.tgz \
               --namespace vouch-server \
               --create-namespace
             ```
@@ -246,12 +813,16 @@ jobs:
             ### Container Image
 
             ```bash
-            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.inputs.tag || github.ref_name }}
+            docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }}
             ```
 
             ### Verify Attestations
 
             ```bash
-            gh attestation verify oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.event.inputs.tag || github.ref_name }} \
+            # Container image
+            gh attestation verify oci://${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.tag }} \
               --owner ${{ github.repository_owner }}
+
+            # Binary archives
+            gh attestation verify vouch-${{ steps.version.outputs.tag }}-aarch64-apple-darwin.tar.gz --owner vouch-sh
             ```

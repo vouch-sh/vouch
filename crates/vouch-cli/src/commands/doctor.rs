@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use ctap_hid_fido2::{Cfg, FidoKeyHidFactory};
+#[cfg(unix)]
 use vouch_agent::AgentClient;
 
 use crate::client::VouchClient;
@@ -43,12 +44,15 @@ pub async fn run(server: &str) -> Result<()> {
         all_passed = false;
     }
 
-    // Check 2: Agent running
-    print!("Agent running ... ");
-    let agent_result = check_agent().await;
-    print_result(&agent_result);
-    if !agent_result.passed {
-        all_passed = false;
+    // Check 2: Agent running (Unix only — agent requires Unix sockets)
+    #[cfg(unix)]
+    {
+        print!("Agent running ... ");
+        let agent_result = check_agent().await;
+        print_result(&agent_result);
+        if !agent_result.passed {
+            all_passed = false;
+        }
     }
 
     // Check 3: Server reachable
@@ -113,6 +117,7 @@ fn check_yubikey() -> CheckResult {
 }
 
 /// Check if the agent is running.
+#[cfg(unix)]
 async fn check_agent() -> CheckResult {
     match AgentClient::connect().await {
         Ok(mut client) => {
@@ -163,9 +168,10 @@ async fn check_server(server: &str) -> CheckResult {
 
 /// Check if there's a valid session.
 async fn check_session() -> CheckResult {
-    // Try agent first
-    match AgentClient::connect().await {
-        Ok(mut client) => match client.get_session().await {
+    // Try agent first (Unix only — agent requires Unix sockets)
+    #[cfg(unix)]
+    if let Ok(mut client) = AgentClient::connect().await {
+        return match client.get_session().await {
             Ok(session) => {
                 if session.expires_in_seconds > 0 {
                     let hours = session.expires_in_seconds / 3600;
@@ -179,20 +185,19 @@ async fn check_session() -> CheckResult {
                 }
             }
             Err(_) => CheckResult::fail("No active session. Run: vouch login"),
-        },
-        Err(_) => {
-            // Fall back to config
-            let config = match Config::load() {
-                Ok(c) => c,
-                Err(_) => return CheckResult::fail("No config found. Run: vouch login"),
-            };
+        };
+    }
 
-            if config.token().is_some() {
-                CheckResult::pass("Session token found (agent not running for full validation)")
-            } else {
-                CheckResult::fail("No session token. Run: vouch login")
-            }
-        }
+    // Fall back to config
+    let config = match Config::load() {
+        Ok(c) => c,
+        Err(_) => return CheckResult::fail("No config found. Run: vouch login"),
+    };
+
+    if config.token().is_some() {
+        CheckResult::pass("Session token found (agent not running for full validation)")
+    } else {
+        CheckResult::fail("No session token. Run: vouch login")
     }
 }
 

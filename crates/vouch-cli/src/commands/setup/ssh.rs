@@ -121,9 +121,12 @@ fn configure_ssh_config(hosts: Option<&str>) -> Result<()> {
     let config_path = ssh_config_path()?;
     let key_path = default_key_path()?;
     let cert_path = PathBuf::from(format!("{}-cert.pub", key_path.display()));
+    #[cfg(unix)]
     let agent_socket = vouch_agent::ssh_agent_socket_path()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "~/.vouch/ssh-agent.sock".to_string());
+    #[cfg(not(unix))]
+    let agent_socket = "~/.vouch/ssh-agent.sock".to_string();
 
     // Read existing config
     let existing = if config_path.exists() {

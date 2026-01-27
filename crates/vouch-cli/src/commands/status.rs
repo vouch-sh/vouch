@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use ssh_key::certificate::Certificate;
+#[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError, SessionInfo};
 use vouch_common::SessionStatus;
 
@@ -11,7 +12,8 @@ use crate::config::Config;
 
 /// Run the status command.
 pub async fn run(server: &str) -> Result<()> {
-    // First, try to get session from agent
+    // First, try to get session from agent (Unix only)
+    #[cfg(unix)]
     match get_session_from_agent().await {
         Ok(session) => {
             print_agent_session(server, &session);
@@ -85,12 +87,14 @@ pub async fn run(server: &str) -> Result<()> {
 }
 
 /// Get session from the agent.
+#[cfg(unix)]
 async fn get_session_from_agent() -> vouch_agent::Result<SessionInfo> {
     let mut agent = AgentClient::connect().await?;
     agent.get_session().await
 }
 
 /// Print session info from agent.
+#[cfg(unix)]
 fn print_agent_session(server: &str, session: &SessionInfo) {
     println!("Authenticated ({server})");
     println!("  Email: {}", session.user_email);
@@ -168,7 +172,8 @@ fn print_ssh_certificate_status() {
     }
     println!("       Serial: {}", cert.serial());
 
-    // Show SSH agent socket if configured
+    // Show SSH agent socket if configured (Unix only)
+    #[cfg(unix)]
     if let Ok(socket_path) = vouch_agent::ssh_agent_socket_path()
         && socket_path.exists()
     {

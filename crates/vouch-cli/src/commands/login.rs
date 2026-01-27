@@ -1,6 +1,7 @@
 //! Login command - authenticate with your `YubiKey`.
 
 use anyhow::{Context, Result};
+#[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError};
 use vouch_common::{
     ClientContext, LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest,
@@ -61,7 +62,10 @@ pub async fn run(server: &str) -> Result<()> {
 
     // Step 6: Store session in agent (if running) and config
     // Use email from response (server identifies user from user_handle)
+    #[cfg(unix)]
     let agent_stored = store_session_in_agent(&complete_resp.email, &complete_resp, server).await;
+    #[cfg(not(unix))]
+    let agent_stored = false;
 
     // Also save to config as fallback
     let mut config = Config::load()?;
@@ -92,6 +96,7 @@ pub async fn run(server: &str) -> Result<()> {
 }
 
 /// Store session in the agent (if running).
+#[cfg(unix)]
 async fn store_session_in_agent(
     email: &str,
     response: &LoginCompleteResponse,
@@ -165,7 +170,8 @@ fn format_expiry(expires_at: &str) -> String {
 /// Returns `Some(seconds_remaining)` if a valid session exists, `None` otherwise.
 /// This is best-effort - failures are silently ignored.
 async fn check_existing_session(server: &str) -> Option<u64> {
-    // Try agent first
+    // Try agent first (Unix only)
+    #[cfg(unix)]
     if let Ok(mut agent) = AgentClient::connect().await
         && let Ok(session) = agent.get_session().await
     {

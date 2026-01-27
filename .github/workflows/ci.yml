@@ -15,10 +15,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-      - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # master
-        with:
-          toolchain: stable
-          components: rustfmt
+      - name: Setup Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add rustfmt
       - run: cargo fmt --all --check
 
   clippy:
@@ -28,25 +29,137 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
-      - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # master
+      - name: Setup Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup component add clippy
+      - name: Cache Cargo registry and build
+        uses: actions/cache@8b402f58fbc84540c8b491a91e594a4576fec3d7 # v5.0.2
         with:
-          toolchain: stable
-          components: clippy
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-clippy-
+            ${{ runner.os }}-cargo-
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
-    name: Unit Tests
-    runs-on: ubuntu-latest
+    name: Unit Tests (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            runner: ubuntu-latest
+            install-deps: sudo apt-get update && sudo apt-get install -y libudev-dev
+            cargo-args: ""
+          - name: macos
+            runner: macos-latest
+            install-deps: ""
+            cargo-args: ""
+          - name: windows
+            runner: windows-latest
+            install-deps: ""
+            cargo-args: "--workspace --exclude vouch-server --exclude vouch-tests"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
-      - uses: dtolnay/rust-toolchain@f7ccc83f9ed1e5b9c81d8a67d7ad1a747e22a561 # master
+        if: matrix.install-deps != ''
+        run: ${{ matrix.install-deps }}
+      - name: Setup Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+      - name: Cache Cargo registry and build
+        uses: actions/cache@8b402f58fbc84540c8b491a91e594a4576fec3d7 # v5.0.2
         with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-      - run: cargo test
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-test-
+            ${{ runner.os }}-cargo-
+      - name: Run tests
+        run: cargo test ${{ matrix.cargo-args }}
+
+  build:
+    name: Build (${{ matrix.name }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            packages: "-p vouch-cli -p vouch-agent -p vouch-server"
+            install: sudo apt-get update && sudo apt-get install -y libudev-dev
+          - name: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            packages: "-p vouch-cli -p vouch-agent -p vouch-server"
+            install: sudo apt-get update && sudo apt-get install -y libudev-dev
+          - name: macos-arm64
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            packages: "-p vouch-cli -p vouch-agent"
+            install: ""
+          - name: windows-amd64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            packages: "-p vouch-cli"
+            install: ""
+          - name: windows-arm64
+            runner: windows-latest
+            target: aarch64-pc-windows-msvc
+            packages: "-p vouch-cli"
+            install: ""
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - name: Install system dependencies
+        if: matrix.install != ''
+        run: ${{ matrix.install }}
+      - name: Setup Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add ${{ matrix.target }}
+      - name: Cache Cargo registry and build
+        uses: actions/cache@8b402f58fbc84540c8b491a91e594a4576fec3d7 # v5.0.2
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ matrix.target }}-
+            ${{ runner.os }}-cargo-
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
+
+  dependency-review:
+    name: Dependency Review
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/dependency-review-action@3c4e3dcb1aa7874d2c16be7d79418e9b7efd6261 # v4.8.2
+        with:
+          vulnerability-check: true
+          license-check: true
 
   scan:
     name: Security Scan

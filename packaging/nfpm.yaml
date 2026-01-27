@@ -1,0 +1,33 @@
+name: vouch
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+maintainer: "Vouch <hello@vouch.sh>"
+description: "Hardware-backed identity for developers"
+vendor: "Vouch"
+homepage: "https://github.com/vouch-sh/vouch"
+license: "Apache-2.0"
+
+depends:
+  - libudev1
+
+overrides:
+  rpm:
+    depends:
+      - systemd-libs
+
+contents:
+  - src: ./vouch
+    dst: /usr/bin/vouch
+    file_info:
+      mode: 0755
+  - src: ./vouch-agent
+    dst: /usr/bin/vouch-agent
+    file_info:
+      mode: 0755
+  - src: ../packaging/vouch-agent.service
+    dst: /usr/lib/systemd/user/vouch-agent.service
+    type: config
+
+scripts:
+  postinstall: ../packaging/postinstall.sh

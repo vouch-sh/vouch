@@ -1,6 +1,7 @@
 //! Logout command - end current session.
 
 use anyhow::Result;
+#[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError};
 use vouch_common::clear_cookie;
 
@@ -14,7 +15,10 @@ pub async fn run() -> Result<()> {
     let had_token = config.token().is_some();
 
     // Clear session from agent (if running)
+    #[cfg(unix)]
     let agent_cleared = clear_session_in_agent().await;
+    #[cfg(not(unix))]
+    let agent_cleared = false;
 
     // Clear token from config
     if had_token {
@@ -40,6 +44,7 @@ pub async fn run() -> Result<()> {
 }
 
 /// Clear session in the agent (if running).
+#[cfg(unix)]
 async fn clear_session_in_agent() -> bool {
     match AgentClient::connect().await {
         Ok(mut agent) => match agent.clear_session().await {

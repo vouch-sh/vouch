@@ -156,7 +156,8 @@ pub(crate) async fn provision_ssh_certificate(
 pub(crate) async fn auto_provision(server: &str, expires_at: &str) -> bool {
     match provision_ssh_certificate(server, None).await {
         Ok(result) => {
-            // Store in agent with session linkage
+            // Store in agent with session linkage (Unix only)
+            #[cfg(unix)]
             if let Ok(mut agent) = vouch_agent::AgentClient::connect().await {
                 let _ = agent
                     .store_ssh_credentials_with_session(
@@ -223,33 +224,45 @@ pub async fn run(server: &str, key_path: Option<&str>) -> Result<()> {
     println!("  Principals: {}", result.response.principals.join(", "));
     println!("  Valid for: {}h {}m", valid_hours, valid_minutes);
 
-    // Try to store credentials in the agent for SSH agent protocol
-    if let Ok(mut agent_client) = vouch_agent::AgentClient::connect().await {
-        let key_path_str = result.key_path.to_string_lossy().to_string();
-        let cert_path_str = result.cert_path.to_string_lossy().to_string();
-        if agent_client
-            .store_ssh_credentials(&key_path_str, &cert_path_str)
-            .await
-            .is_ok()
-        {
+    // Try to store credentials in the agent for SSH agent protocol (Unix only)
+    #[cfg(unix)]
+    {
+        if let Ok(mut agent_client) = vouch_agent::AgentClient::connect().await {
+            let key_path_str = result.key_path.to_string_lossy().to_string();
+            let cert_path_str = result.cert_path.to_string_lossy().to_string();
+            if agent_client
+                .store_ssh_credentials(&key_path_str, &cert_path_str)
+                .await
+                .is_ok()
+            {
+                println!();
+                println!("SSH credentials loaded into agent.");
+                println!(
+                    "  SSH agent socket: {}",
+                    vouch_agent::ssh_agent_socket_path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "~/.vouch/ssh-agent.sock".to_string())
+                );
+                println!();
+                println!("To use the agent, set SSH_AUTH_SOCK:");
+                println!(
+                    "  export SSH_AUTH_SOCK={}",
+                    vouch_agent::ssh_agent_socket_path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|_| "~/.vouch/ssh-agent.sock".to_string())
+                );
+            }
+        } else {
             println!();
-            println!("SSH credentials loaded into agent.");
-            println!(
-                "  SSH agent socket: {}",
-                vouch_agent::ssh_agent_socket_path()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| "~/.vouch/ssh-agent.sock".to_string())
-            );
+            println!("To use this certificate, add to your ~/.ssh/config:");
             println!();
-            println!("To use the agent, set SSH_AUTH_SOCK:");
-            println!(
-                "  export SSH_AUTH_SOCK={}",
-                vouch_agent::ssh_agent_socket_path()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|_| "~/.vouch/ssh-agent.sock".to_string())
-            );
+            println!("  Host *");
+            println!("      IdentityFile {}", result.key_path.display());
+            println!("      CertificateFile {}", result.cert_path.display());
         }
-    } else {
+    }
+    #[cfg(not(unix))]
+    {
         println!();
         println!("To use this certificate, add to your ~/.ssh/config:");
         println!();
