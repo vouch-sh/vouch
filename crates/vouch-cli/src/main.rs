@@ -125,6 +125,15 @@ enum CredentialCommands {
         #[arg(long)]
         key: Option<String>,
     },
+    /// Git credential helper for GitHub.
+    ///
+    /// This is used by git as a credential helper. Users should not call this directly.
+    /// Instead, use `vouch setup github` to configure git.
+    #[command(hide = true)]
+    Github {
+        /// Git credential operation (get, store, erase).
+        operation: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -147,6 +156,15 @@ enum SetupCommands {
         /// If specified, adds entry to ~/.ssh/known_hosts.
         #[arg(long)]
         hosts: Option<String>,
+    },
+    /// Configure Git to use Vouch for GitHub credentials.
+    Github {
+        /// GitHub host to configure (default: github.com).
+        #[arg(long, default_value = "github.com")]
+        host: String,
+        /// Automatically configure git (otherwise just show instructions).
+        #[arg(long)]
+        configure: bool,
     },
 }
 
@@ -213,6 +231,9 @@ async fn main() -> Result<()> {
             CredentialCommands::Ssh { key } => {
                 commands::credential::ssh::run(&server, key.as_deref()).await
             }
+            CredentialCommands::Github { operation } => {
+                commands::credential::github::run(&operation).await
+            }
         },
         Commands::Setup { command } => match command {
             SetupCommands::Aws {
@@ -222,6 +243,9 @@ async fn main() -> Result<()> {
             } => commands::setup::aws::run(&profile, &role, add_profile).await,
             SetupCommands::Ssh { hosts } => {
                 commands::setup::ssh::run(&server, hosts.as_deref()).await
+            }
+            SetupCommands::Github { host, configure } => {
+                commands::setup::github::run(&host, configure).await
             }
         },
         Commands::Completions(args) => {

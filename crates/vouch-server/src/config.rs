@@ -172,6 +172,22 @@ pub struct Args {
     /// Use "*" to allow all origins (not recommended for production).
     #[arg(long, env = "VOUCH_CORS_ORIGINS")]
     pub cors_origins: Option<String>,
+
+    /// GitHub App ID (assigned when creating the app on github.com).
+    #[arg(long, env = "VOUCH_GITHUB_APP_ID")]
+    pub github_app_id: Option<u64>,
+
+    /// GitHub App name (the slug from github.com/apps/{name}).
+    #[arg(long, env = "VOUCH_GITHUB_APP_NAME")]
+    pub github_app_name: Option<String>,
+
+    /// GitHub App private key (PEM format, RSA). Can use literal \n for newlines.
+    #[arg(long, env = "VOUCH_GITHUB_APP_KEY")]
+    pub github_app_key: Option<String>,
+
+    /// GitHub webhook secret for verifying webhook signatures.
+    #[arg(long, env = "VOUCH_GITHUB_WEBHOOK_SECRET")]
+    pub github_webhook_secret: Option<String>,
 }
 
 // ============================================================================
@@ -240,6 +256,14 @@ pub struct ServerConfig {
     /// CORS allowed origins (comma-separated). Empty means same-origin only.
     /// Use "*" to allow all origins (not recommended for production).
     pub cors_origins: Option<Vec<String>>,
+    /// GitHub App ID (assigned when creating the app on github.com).
+    pub github_app_id: Option<u64>,
+    /// GitHub App name (the slug from github.com/apps/{name}).
+    pub github_app_name: Option<String>,
+    /// GitHub App private key (PEM format, RSA).
+    pub github_app_key: Option<SecretString>,
+    /// GitHub webhook secret for verifying webhook signatures.
+    pub github_webhook_secret: Option<SecretString>,
 }
 
 impl ServerConfig {
@@ -309,6 +333,10 @@ impl ServerConfig {
             auth_events_retention_days: args.auth_events_retention_days,
             oauth_events_retention_days: args.oauth_events_retention_days,
             cors_origins,
+            github_app_id: args.github_app_id,
+            github_app_name: args.github_app_name,
+            github_app_key: args.github_app_key.map(SecretString::from),
+            github_webhook_secret: args.github_webhook_secret.map(SecretString::from),
         })
     }
 
@@ -361,5 +389,25 @@ impl ServerConfig {
     #[must_use]
     pub fn oidc_client_secret_exposed(&self) -> Option<&str> {
         self.oidc_client_secret.as_ref().map(|s| s.expose_secret())
+    }
+
+    /// Check if GitHub App is configured (all required fields present).
+    #[must_use]
+    pub fn github_app_configured(&self) -> bool {
+        self.github_app_id.is_some() && self.github_app_key.is_some()
+    }
+
+    /// Get the GitHub App private key (exposed) if configured.
+    #[must_use]
+    pub fn github_app_key_exposed(&self) -> Option<&str> {
+        self.github_app_key.as_ref().map(|s| s.expose_secret())
+    }
+
+    /// Get the GitHub webhook secret (exposed) if configured.
+    #[must_use]
+    pub fn github_webhook_secret_exposed(&self) -> Option<&str> {
+        self.github_webhook_secret
+            .as_ref()
+            .map(|s| s.expose_secret())
     }
 }

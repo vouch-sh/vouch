@@ -14,6 +14,7 @@ Authenticated as user@company.com (8 hours)
 
 $ ssh prod.example.com    # Just works
 $ aws s3 ls               # Just works
+$ git push origin main    # Just works
 ```
 
 ## Design Principles
@@ -50,8 +51,8 @@ $ aws s3 ls               # Just works
  |  |  * vouch status                                                    |  |
  |  |  * vouch logout                                                    |  |
  |  |  * vouch keys        (interactive menu, or list|remove|rename)     |  |
- |  |  * vouch credential ssh|aws                                        |  |
- |  |  * vouch setup ssh|aws                                             |  |
+ |  |  * vouch credential ssh|aws|github                                  |  |
+ |  |  * vouch setup ssh|aws|github                                      |  |
  |  |  * vouch doctor     (diagnostic checks)                            |  |
  |  |  * vouch completions (shell completions)                           |  |
  |  +---------------------------------------------------------------------+  |
@@ -63,7 +64,7 @@ $ aws s3 ls               # Just works
  |  |    (background)      |     |                                        |  |
  |  |                      |     |  ssh --> IdentityAgent --> vouch agent |  |
  |  |  * Session cache     |     |  aws --> credential_process --> vouch  |  |
- |  |  * SSH certs         |     |                                        |  |
+ |  |  * SSH certs         |     |  git --> credential helper --> vouch   |  |
  |  |  * SSH agent protocol|     |                                        |  |
  |  +----------------------+     +----------------------------------------+  |
  |            |                                                              |
@@ -74,13 +75,13 @@ $ aws s3 ls               # Just works
  +---------------------------------------------------------------------------+
  |                            Vouch Server                                   |
  |                                                                           |
- |  +------------------+  +------------------+  +--------------------------+ |
- |  |   Auth Portal    |  |   SSH CA         |  |   OIDC Provider          | |
- |  |                  |  |   (built-in)     |  |                          | |
- |  |  * WebAuthn      |  |                  |  |  * /.well-known/oidc     | |
- |  |  * Google OIDC   |  |  * Ed25519 CA    |  |  * /oauth/token          | |
- |  |  * Sessions      |  |  * User certs    |  |  * For AWS federation    | |
- |  +------------------+  +------------------+  +--------------------------+ |
+ |  +----------------+  +----------------+  +----------------+  +---------+ |
+ |  |  Auth Portal   |  |   SSH CA       |  | OIDC Provider  |  | GitHub  | |
+ |  |                |  |   (built-in)   |  |                |  |  App    | |
+ |  |  * WebAuthn    |  |                |  | * /.well-known |  |         | |
+ |  |  * Google OIDC |  |  * Ed25519 CA  |  | * /oauth/token |  | * Inst. | |
+ |  |  * Sessions    |  |  * User certs  |  | * AWS federat. |  |  tokens | |
+ |  +----------------+  +----------------+  +----------------+  +---------+ |
  |                                                                           |
  |  Policy: Hardware-bound authenticators only (YubiKey 5 series)           |
  +---------------------------------------------------------------------------+
@@ -253,6 +254,21 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - No vendor lock-in - apps can switch IdPs later
 - JWT tokens can be verified offline with public keys
 - Existing libraries handle all the complexity
+
+#### GitHub App Integration
+
+Vouch integrates with GitHub via a shared GitHub App to provide short-lived Git credentials:
+
+- **Installation tokens** — 15-minute TTL, scoped to specific repositories
+- **Minimal permissions** — `contents:write`, `metadata:read` only
+- **Multi-org support** — Organizations can connect multiple GitHub accounts
+- **Automatic selection** — Vouch determines the correct installation from the repo URL
+
+**Flow:**
+1. Org admin connects GitHub at `/github/connect`
+2. User runs `vouch setup github --configure` to set up git credential helper
+3. Git operations automatically request tokens via `vouch credential github`
+4. Tokens are scoped to the specific GitHub organization being accessed
 
 #### External Identity Provider Integration
 

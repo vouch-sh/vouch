@@ -72,6 +72,10 @@ pub fn test_config() -> ServerConfig {
         auth_events_retention_days: 90,
         oauth_events_retention_days: 30,
         cors_origins: None,
+        github_app_id: None,
+        github_app_name: None,
+        github_app_key: None,
+        github_webhook_secret: None,
     }
 }
 
@@ -98,6 +102,7 @@ pub async fn test_app_state() -> Arc<AppState> {
         ssh_ca: None,
         dpop: DpopState::new(),
         oidc_key,
+        github_app: None,
     })
 }
 

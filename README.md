@@ -11,8 +11,9 @@ Enter PIN: ****
 ✓ Authenticated as you@company.com
 ✓ Session valid for 8 hours
 
-$ ssh prod.example.com    # Just works
-$ aws s3 ls               # Just works
+$ ssh prod.example.com                        # Just works
+$ aws s3 ls                                   # Just works
+$ git push origin main                        # Just works
 ```
 
 ## The Problem
@@ -119,6 +120,7 @@ vouch enroll
 # Configure integrations
 vouch setup ssh                                    # Configures SSH to use vouch certificates
 vouch setup aws --role arn:aws:iam::ID:role/name   # Configures AWS credential_process
+vouch setup github --configure                     # Configures git credential helper for GitHub
 ```
 
 ### Daily Use
@@ -129,6 +131,7 @@ vouch login
 # Everything just works for 8 hours
 ssh prod-server
 aws s3 ls
+git clone https://github.com/your-org/private-repo.git
 
 # Check session status
 vouch status
@@ -140,6 +143,7 @@ vouch status
 - **macOS** 12+ or **Linux** (glibc 2.31+) — Windows support is planned
 - For AWS: IAM role with OIDC federation configured
 - For SSH: CA public key distributed to target hosts
+- For GitHub: Organization admin connects the Vouch GitHub App
 
 ## Architecture
 

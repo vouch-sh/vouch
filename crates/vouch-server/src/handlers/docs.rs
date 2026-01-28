@@ -31,6 +31,20 @@ pub struct DocsAwsTemplate {
 
 impl_template_response!(DocsAwsTemplate);
 
+/// GitHub setup documentation page template.
+#[derive(Template)]
+#[template(path = "docs/github.html")]
+pub struct DocsGithubTemplate {
+    /// Organization name for branding.
+    pub org_name: String,
+    /// Whether the GitHub App is configured on this server.
+    pub github_configured: bool,
+    /// Server URL for the connect link.
+    pub server_url: String,
+}
+
+impl_template_response!(DocsGithubTemplate);
+
 /// Documentation index page.
 /// GET /docs
 #[allow(clippy::unused_async)]
@@ -48,5 +62,16 @@ pub async fn aws_setup_page(State(state): State<Arc<AppState>>) -> impl IntoResp
         provider_url: state.config.verification_base_url.clone(),
         rp_id: state.config.rp_id.clone(),
         org_name: state.config.get_org_display_name().to_string(),
+    }
+}
+
+/// GitHub setup documentation page.
+/// GET /docs/github
+#[allow(clippy::unused_async)]
+pub async fn github_setup_page(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    DocsGithubTemplate {
+        org_name: state.config.get_org_display_name().to_string(),
+        github_configured: state.github_app.is_some(),
+        server_url: state.config.verification_base_url.clone(),
     }
 }

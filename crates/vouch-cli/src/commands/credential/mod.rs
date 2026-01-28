@@ -2,4 +2,5 @@
 //! Credential issuance commands.
 
 pub mod aws;
+pub mod github;
 pub mod ssh;

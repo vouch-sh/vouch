@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+
+{% block title %}Vouch - GitHub Connected{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center flex-1 p-5">
+    <div class="card max-w-md w-full text-center">
+        <svg class="w-12 h-12 text-vouch-success mx-auto mb-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
+        <h1 class="text-2xl font-bold text-gray-200 mb-2">GitHub Connected</h1>
+        <p class="text-gray-400 mb-6">
+            Successfully connected to <span class="text-gray-300 font-medium">{{ github_account }}</span>.
+        </p>
+
+        <div class="bg-vouch-surface rounded-lg p-4 text-left mb-6">
+            <h3 class="text-sm font-medium text-gray-300 mb-3">Next steps for your team:</h3>
+            <div class="space-y-3">
+                <div>
+                    <p class="text-xs text-gray-500 mb-1">1. Configure Git to use Vouch:</p>
+                    <code class="block bg-vouch-bg text-vouch-accent text-sm px-3 py-2 rounded">vouch setup github --configure</code>
+                </div>
+                <div>
+                    <p class="text-xs text-gray-500 mb-1">2. Test with any repository:</p>
+                    <code class="block bg-vouch-bg text-vouch-accent text-sm px-3 py-2 rounded">git clone https://github.com/{{ github_account }}/...</code>
+                </div>
+            </div>
+        </div>
+
+        <p class="text-sm text-gray-500">
+            You can close this window.
+        </p>
+    </div>
+</div>
+{% endblock %}

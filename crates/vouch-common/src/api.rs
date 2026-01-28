@@ -493,3 +493,58 @@ pub struct AwsTokenResponse {
     /// Token validity period in seconds.
     pub expires_in: u64,
 }
+
+// ============================================================================
+// GitHub Credentials
+// ============================================================================
+
+/// Request to obtain a GitHub installation access token.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct GitHubTokenRequest {
+    /// GitHub organization/user to get token for. Required if multiple GitHub
+    /// accounts are connected. Can be inferred from `repositories` if provided.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
+    /// Optional: scope token to specific repositories (format: "owner/repo").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repositories: Option<Vec<String>>,
+}
+
+/// Response containing a GitHub installation access token.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GitHubTokenResponse {
+    /// Installation access token (use as password with username "x-access-token").
+    pub token: String,
+    /// ISO 8601 expiration timestamp.
+    pub expires_at: String,
+    /// Seconds until expiration.
+    pub expires_in: u64,
+    /// Granted permissions (scope -> level).
+    pub permissions: std::collections::HashMap<String, String>,
+    /// Repositories the token can access (if scoped).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repositories: Option<Vec<String>>,
+}
+
+/// Response indicating GitHub integration status.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GitHubStatusResponse {
+    /// Whether GitHub App is configured on the server.
+    pub configured: bool,
+    /// Whether the user's organization has connected GitHub.
+    pub connected: bool,
+    /// Connected GitHub accounts (may be multiple).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub github_accounts: Vec<GitHubAccountStatus>,
+}
+
+/// Status of a connected GitHub account.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GitHubAccountStatus {
+    /// GitHub account login (organization or user name).
+    pub login: String,
+    /// Account type ("Organization" or "User").
+    pub account_type: String,
+    /// Whether the installation is suspended.
+    pub suspended: bool,
+}

@@ -2,4 +2,5 @@
 //! Setup and configuration commands.
 
 pub mod aws;
+pub mod github;
 pub mod ssh;

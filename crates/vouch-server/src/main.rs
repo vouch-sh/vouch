@@ -13,7 +13,7 @@ use tokio::signal;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing_subscriber::EnvFilter;
 
-use vouch_server::{AppState, cleanup, config, dpop, handlers, oidc_key, ssh_ca};
+use vouch_server::{AppState, cleanup, config, dpop, github_app, handlers, oidc_key, ssh_ca};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -74,6 +74,22 @@ async fn main() -> Result<()> {
     let oidc_key = oidc_key::OidcSigningKey::load_or_generate(config.oidc_signing_key.as_deref())?;
     tracing::info!("OIDC signing key initialized: {}", oidc_key.key_id());
 
+    // Initialize GitHub App if configured
+    let github_app = match github_app::GitHubApp::load(&config) {
+        Ok(Some(app)) => {
+            tracing::info!("GitHub App initialized: app_id={}", app.app_id().0);
+            Some(app)
+        }
+        Ok(None) => {
+            tracing::info!("GitHub App not configured");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("Failed to initialize GitHub App: {e}");
+            None
+        }
+    };
+
     // Create DPoP state
     let dpop_state = Arc::new(dpop::DpopState::new());
 
@@ -85,6 +101,7 @@ async fn main() -> Result<()> {
         ssh_ca,
         dpop: dpop::DpopState::new(),
         oidc_key,
+        github_app,
     });
 
     // Start background cleanup task if enabled
@@ -118,6 +135,7 @@ async fn main() -> Result<()> {
         // Documentation pages
         .route("/docs", get(handlers::docs::docs_index_page))
         .route("/docs/aws", get(handlers::docs::aws_setup_page))
+        .route("/docs/github", get(handlers::docs::github_setup_page))
         // OIDC Provider endpoints
         .route(
             "/.well-known/openid-configuration",
@@ -195,6 +213,29 @@ async fn main() -> Result<()> {
         .route(
             "/v1/credentials/aws/token",
             get(handlers::credentials::get_aws_token),
+        )
+        // GitHub credential endpoints
+        .route(
+            "/v1/credentials/github/status",
+            get(handlers::credentials::get_github_status),
+        )
+        .route(
+            "/v1/credentials/github/token",
+            post(handlers::credentials::get_github_token),
+        )
+        // GitHub App installation
+        .route(
+            "/api/webhooks/github",
+            post(handlers::github::github_webhook),
+        )
+        .route(
+            "/github/connect",
+            get(handlers::github::github_connect_page),
+        )
+        .route("/github/callback", get(handlers::github::github_callback))
+        .route(
+            "/github/success",
+            get(handlers::github::github_success_page),
         )
         // Org admin API (JSON, JWT Bearer auth)
         .route(

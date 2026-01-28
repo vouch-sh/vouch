@@ -3763,6 +3763,7 @@ dependencies = [
  "serde_json",
  "sqlx",
  "ssh-key",
+ "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tower",
@@ -3775,6 +3776,7 @@ dependencies = [
  "vouch-common",
  "webauthn-rs",
  "webauthn-rs-proto",
+ "zeroize",
 ]
 
 [[package]]

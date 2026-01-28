@@ -1,0 +1,223 @@
+{% extends "base.html" %}
+
+{% block title %}GitHub Integration - {{ org_name }}{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center flex-1 p-5">
+    <div class="card max-w-4xl w-full">
+        <a href="/docs" class="inline-flex items-center gap-1.5 text-vouch-accent text-sm mb-6 hover:text-vouch-accent-hover">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+            Back to docs
+        </a>
+        <h1 class="text-3xl font-bold text-gray-200 mb-2">GitHub Integration</h1>
+        <p class="text-gray-400 mb-8">Access private GitHub repositories using {{ org_name }} authentication</p>
+
+        {% if !github_configured %}
+        <!-- Not configured warning -->
+        <div class="mb-8 p-4 bg-yellow-900/20 rounded-lg border border-yellow-600/30">
+            <div class="flex items-start gap-3">
+                <svg class="w-5 h-5 text-yellow-500 mt-0.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v3.75m-9.303 3.376c-.866 1.5.217 3.374 1.948 3.374h14.71c1.73 0 2.813-1.874 1.948-3.374L13.949 3.378c-.866-1.5-3.032-1.5-3.898 0L2.697 16.126ZM12 15.75h.007v.008H12v-.008Z" />
+                </svg>
+                <div>
+                    <p class="text-yellow-200 font-medium">GitHub App Not Configured</p>
+                    <p class="text-yellow-300/80 text-sm mt-1">
+                        The server administrator needs to configure the GitHub App before this feature can be used.
+                    </p>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Overview -->
+        <div class="mb-8 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-2">How it works</h2>
+            <p class="text-gray-400 text-sm">
+                {{ org_name }} uses a GitHub App to issue short-lived access tokens for your organization's repositories.
+                When you run <code class="text-vouch-accent">git clone</code> or <code class="text-vouch-accent">git push</code>,
+                the Vouch CLI automatically obtains a token scoped to your organization's repositories.
+                Tokens are valid for 15 minutes and require authentication with your YubiKey.
+            </p>
+            <p class="text-gray-400 text-sm mt-2">
+                <strong class="text-gray-300">Multiple GitHub organizations:</strong> Your organization can connect multiple GitHub accounts
+                (e.g., <code class="text-vouch-accent">acme-corp</code> and <code class="text-vouch-accent">acme-oss</code>).
+                Vouch automatically selects the right one based on the repository you're accessing.
+            </p>
+        </div>
+
+        <!-- Prerequisites -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Prerequisites</h2>
+            <ul class="space-y-2 text-gray-400 text-sm ml-4">
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-accent mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    <span>Vouch CLI installed and enrolled (<code class="text-vouch-accent">vouch enroll</code>)</span>
+                </li>
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-accent mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    <span>Google Workspace account (personal Gmail is not supported)</span>
+                </li>
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-accent mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    <span>Organization admin has connected GitHub (see Admin Setup below)</span>
+                </li>
+            </ul>
+        </div>
+
+        <!-- Step 1: Configure Git -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">1</span>
+                <span class="text-lg font-semibold text-gray-200">Configure Git Credential Helper</span>
+            </div>
+            <div class="ml-11">
+                <p class="text-gray-400 text-sm mb-3">
+                    Run the setup command to configure git to use Vouch for GitHub authentication.
+                </p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># Check status and see configuration
+vouch setup github
+
+# Automatically configure git
+vouch setup github --configure</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+                <p class="text-gray-500 text-sm mt-3">
+                    This adds the following to your <code class="text-vouch-accent">~/.gitconfig</code>:
+                </p>
+                <div class="code-block relative text-sm mt-2">
+                    <pre class="whitespace-pre-wrap">[credential "https://github.com"]
+    helper = "/path/to/vouch" credential github</pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 2: Log In -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">2</span>
+                <span class="text-lg font-semibold text-gray-200">Authenticate with Your YubiKey</span>
+            </div>
+            <div class="ml-11">
+                <p class="text-gray-400 text-sm mb-3">
+                    Log in with your YubiKey to start a session.
+                </p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">vouch login</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 3: Use Git -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">3</span>
+                <span class="text-lg font-semibold text-gray-200">Use Git Normally</span>
+            </div>
+            <div class="ml-11">
+                <p class="text-gray-400 text-sm mb-3">
+                    Git operations to GitHub will automatically use Vouch for authentication.
+                </p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># Clone a private repository
+git clone https://github.com/your-org/your-repo.git
+
+# Push changes
+git push origin main
+
+# Pull updates
+git pull</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Admin Setup Section -->
+        <div class="mb-8 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-3">Admin Setup: Connect GitHub</h2>
+            <p class="text-gray-400 text-sm mb-4">
+                Organization administrators need to connect GitHub before team members can use this feature.
+                You can connect multiple GitHub organizations if needed.
+            </p>
+            {% if github_configured %}
+            <a href="/github/connect" class="inline-flex items-center gap-2 px-4 py-2 bg-vouch-accent text-white rounded-lg hover:bg-vouch-accent-hover transition-colors">
+                <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24">
+                    <path fill-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" clip-rule="evenodd" />
+                </svg>
+                Connect GitHub
+            </a>
+            {% else %}
+            <p class="text-gray-500 text-sm italic">
+                GitHub App is not configured on this server. Contact your server administrator.
+            </p>
+            {% endif %}
+        </div>
+
+        <!-- Troubleshooting -->
+        <div class="mt-10 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-3">Troubleshooting</h2>
+            <dl class="space-y-3 text-sm">
+                <div>
+                    <dt class="text-gray-300 font-medium">Authentication failed</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Make sure you're logged in with <code class="text-vouch-accent">vouch login</code>. Sessions expire after 8 hours.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">"Organization has not connected GitHub"</dt>
+                    <dd class="text-gray-400 mt-1">
+                        An organization admin needs to visit <code class="text-vouch-accent">{{ server_url }}/github/connect</code> to install the GitHub App.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">"GitHub requires organizational membership"</dt>
+                    <dd class="text-gray-400 mt-1">
+                        GitHub integration only works with Google Workspace accounts. Personal Gmail accounts are not supported.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">Repository not accessible</dt>
+                    <dd class="text-gray-400 mt-1">
+                        The GitHub App may only have access to selected repositories. Contact your admin to grant access to additional repos.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">"Multiple GitHub accounts connected. Specify 'owner'"</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Your organization has multiple GitHub accounts connected. This usually resolves automatically based on the repository URL.
+                        If you see this error, ensure you're using the full repository URL (e.g., <code class="text-vouch-accent">https://github.com/acme-corp/repo.git</code>).
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">Wrong credential helper being used</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Check for conflicting credential helpers with <code class="text-vouch-accent">git config --list | grep credential</code>.
+                        You may need to remove other helpers for github.com.
+                    </dd>
+                </div>
+            </dl>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function copyCode(button) {
+        const codeBlock = button.parentElement.querySelector('pre');
+        const text = codeBlock.textContent;
+        navigator.clipboard.writeText(text).then(() => {
+            const original = button.textContent;
+            button.textContent = 'Copied!';
+            setTimeout(() => button.textContent = original, 2000);
+        });
+    }
+</script>
+{% endblock %}

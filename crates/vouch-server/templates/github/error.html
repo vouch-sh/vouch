@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+
+{% block title %}Vouch - Error{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center flex-1 p-5">
+    <div class="card max-w-md w-full text-center">
+        <svg class="w-12 h-12 text-vouch-error mx-auto mb-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m9.75 9.75 4.5 4.5m0-4.5-4.5 4.5M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z"/></svg>
+        <h1 class="text-2xl font-bold text-vouch-error mb-2">{{ title }}</h1>
+        <p class="text-gray-400 mb-6">{{ message }}</p>
+
+        <a href="/github/connect" class="btn-primary inline-block">
+            Try Again
+        </a>
+    </div>
+</div>
+{% endblock %}

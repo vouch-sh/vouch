@@ -9,6 +9,7 @@ pub mod config;
 pub mod db;
 pub mod dpop;
 pub mod extractors;
+pub mod github_app;
 pub mod handlers;
 pub mod oidc_key;
 pub mod ssh_ca;
@@ -41,4 +42,6 @@ pub struct AppState {
     pub dpop: dpop::DpopState,
     /// OIDC signing key for ES256 JWT signing.
     pub oidc_key: oidc_key::OidcSigningKey,
+    /// GitHub App for credential issuance (optional, None if not configured).
+    pub github_app: Option<github_app::GitHubApp>,
 }

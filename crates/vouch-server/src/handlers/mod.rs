@@ -11,6 +11,7 @@ pub mod device;
 pub mod docs;
 pub mod enroll;
 pub mod enroll_keys;
+pub mod github;
 pub mod home;
 pub mod install;
 pub mod keys;
