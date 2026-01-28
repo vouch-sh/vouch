@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Background cleanup tasks for expired data.
 //!
 //! This module handles periodic cleanup of:

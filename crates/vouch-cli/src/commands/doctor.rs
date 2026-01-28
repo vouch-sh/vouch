@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Doctor command - diagnostic checks for the Vouch environment.
 
 use anyhow::Result;

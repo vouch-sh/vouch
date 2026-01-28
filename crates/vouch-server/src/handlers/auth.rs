@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Authentication handlers for registration and login.
 
 use crate::AppState;

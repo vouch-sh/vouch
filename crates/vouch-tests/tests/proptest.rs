@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Property-based tests for encoding types and conversions.
 //!
 //! These tests verify that binary data round-trips correctly through

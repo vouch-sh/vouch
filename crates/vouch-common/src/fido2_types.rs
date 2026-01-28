@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Semantic type markers for FIDO2 data.
 //!
 //! This module provides type aliases that give semantic meaning to binary data.

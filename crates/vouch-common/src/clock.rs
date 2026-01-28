@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Clock abstraction for time-based operations.
 //!
 //! This module provides a trait for abstracting time access, enabling testable

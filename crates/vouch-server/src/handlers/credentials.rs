@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Credential issuance handlers (SSH certificates, AWS tokens, etc.).
 
 use crate::AppState;

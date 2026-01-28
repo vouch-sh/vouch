@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Server-side WebAuthn assertion verification.
 //!
 //! This module provides COSE signature verification for WebAuthn assertions,

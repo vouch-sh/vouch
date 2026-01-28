@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! RFC 9449 DPoP (Demonstrating Proof of Possession) implementation.
 //!
 //! DPoP provides sender-constrained tokens by binding tokens to a client's

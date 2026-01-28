@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Agent server with Unix socket listener.
 
 use crate::error::{AgentError, Result};

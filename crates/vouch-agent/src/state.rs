@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Agent state and session management.
 
 use jiff::Timestamp;

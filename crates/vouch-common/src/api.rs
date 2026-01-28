@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! API request and response types for CLI-Server communication.
 
 use serde::{Deserialize, Serialize};

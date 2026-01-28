@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! AWS setup command.
 //!
 //! Configures AWS CLI/SDK to use Vouch for credential federation.

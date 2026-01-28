@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Enrollment handlers for browser-based device authorization flow.
 
 use crate::AppState;

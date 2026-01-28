@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! SSH Certificate Authority for signing user SSH certificates.
 //!
 //! This module provides functionality to:

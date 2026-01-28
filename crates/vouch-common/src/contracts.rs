@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Runtime validation contracts for FIDO2 data structures.
 //!
 //! This module provides validation functions that verify semantic correctness

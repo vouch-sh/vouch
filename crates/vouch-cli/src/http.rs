@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! HTTP client abstraction for server communication.
 //!
 //! This module provides a trait-based abstraction over HTTP operations,

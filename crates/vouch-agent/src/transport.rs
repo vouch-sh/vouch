@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Transport abstraction for agent IPC communication.
 //!
 //! This module provides a trait-based abstraction over the IPC transport layer,

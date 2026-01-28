@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Key management commands - list, rename, and remove registered security keys.
 
 use anyhow::{Result, bail};

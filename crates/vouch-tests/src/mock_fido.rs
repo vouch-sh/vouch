@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Mock FIDO2 device for integration testing.
 //!
 //! This module provides additional helper methods for integration testing

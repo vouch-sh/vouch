@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! FIDO2 device communication using ctap-hid-fido2.
 //!
 //! This module provides a trait-based abstraction over FIDO2 devices, enabling

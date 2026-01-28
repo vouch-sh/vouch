@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Shared types for vouch CLI and server.
 
 pub mod aaguid;

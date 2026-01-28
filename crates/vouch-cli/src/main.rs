@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Vouch CLI - Hardware-backed identity for developers.
 
 use anyhow::Result;

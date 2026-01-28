@@ -10,11 +10,11 @@ Be respectful and constructive. We're building security software — thoughtful 
 
 | Component | License | Contributions Welcome |
 |-----------|---------|----------------------|
-| vouch-cli | Apache 2.0 | ✅ Yes |
-| vouch-agent | Apache 2.0 | ✅ Yes |
-| vouch-common | Apache 2.0 | ✅ Yes |
-| Documentation | CC BY 4.0 | ✅ Yes |
-| vouch-server | Proprietary | ❌ No (internal) |
+| vouch-cli | Apache-2.0 OR MIT | ✅ Yes |
+| vouch-agent | Apache-2.0 OR MIT | ✅ Yes |
+| vouch-common | Apache-2.0 OR MIT | ✅ Yes |
+| vouch-server | BUSL-1.1 | ✅ Yes (CLA required) |
+| Documentation | CC-BY-4.0 | ✅ Yes |
 
 ## Development Setup
 
@@ -406,7 +406,7 @@ Documentation lives in `/docs`. When updating:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the Apache 2.0 License.
+By contributing to open source components (vouch-cli, vouch-agent, vouch-common), you agree that your contributions will be dual-licensed under Apache-2.0 OR MIT, at the choice of the user. By contributing to vouch-server, you agree that your contributions will be licensed under the Business Source License 1.1.
 
 ---
 

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Device Authorization Grant handlers (RFC 8628).
 
 use crate::AppState;

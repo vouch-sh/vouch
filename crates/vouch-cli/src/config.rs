@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Configuration and token storage for vouch CLI.
 
 use anyhow::{Context, Result};

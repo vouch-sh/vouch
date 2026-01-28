@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Netscape cookie format support for CLI session storage.
 //!
 //! This module provides functions to read and write cookies in the Netscape cookie

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Integration tests for Vouch.
 //!
 //! These tests run through actual production code paths by using

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Key management handlers during enrollment (using cookie-based authentication).
 //!
 //! These endpoints allow users to manage their security keys during the enrollment flow,

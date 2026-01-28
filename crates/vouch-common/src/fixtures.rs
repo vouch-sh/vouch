@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! FIDO2 test fixture data structures.
 //!
 //! This module defines structures for storing and loading real YubiKey

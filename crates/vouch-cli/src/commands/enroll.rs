@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Enroll command - RFC 8628 Device Authorization Grant.
 
 use anyhow::{Context, Result};

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Landing page handler for user discovery.
 
 use crate::AppState;

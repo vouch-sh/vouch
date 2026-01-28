@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Registration command - register an additional `YubiKey` with the server.
 //!
 //! This command requires the user to be already authenticated (via `vouch login`).

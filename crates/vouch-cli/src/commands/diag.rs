@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Diagnostic command for testing YubiKey registration and authentication flow.
 //!
 //! This bypasses the server and webauthn-rs entirely to test if the YubiKey

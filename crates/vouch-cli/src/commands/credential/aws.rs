@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! AWS credential command.
 //!
 //! Obtains temporary AWS credentials using Vouch session and STS.

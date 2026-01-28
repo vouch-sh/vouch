@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Error types for vouch.
 
 use serde::{Deserialize, Serialize};

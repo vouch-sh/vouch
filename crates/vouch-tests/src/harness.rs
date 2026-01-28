@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Test harness for integration testing.
 //!
 //! This module provides a unified test harness that combines all the test

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Golden file tests using real FIDO2 fixture data.
 //!
 //! These tests verify that our verification code works correctly with real

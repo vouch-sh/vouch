@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Key management handlers for listing, renaming, and removing registered security keys.
 
 use crate::AppState;

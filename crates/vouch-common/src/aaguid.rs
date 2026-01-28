@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! AAGUID (Authenticator Attestation GUID) lookup for device model identification.
 //!
 //! The AAGUID is a 16-byte identifier embedded in FIDO2 authenticator data that

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! SSH Agent Protocol implementation.
 //!
 //! This module implements the SSH agent protocol (draft-miller-ssh-agent)

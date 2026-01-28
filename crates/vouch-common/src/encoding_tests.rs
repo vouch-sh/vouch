@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Safety tests for binary encoding round-trips.
 //!
 //! These tests verify that Vec<u8> serialization works correctly

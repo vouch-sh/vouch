@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Type-safe encoding wrappers for FIDO2 data.
 //!
 //! This module provides compile-time tracking of data encoding formats.

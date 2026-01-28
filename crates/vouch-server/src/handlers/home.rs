@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Home page handler with smart routing based on configuration.
 //!
 //! This module provides the main landing page for Vouch that adapts based on

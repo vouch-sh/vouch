@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! SSH certificate credential command.
 //!
 //! Generates a local SSH keypair (if not exists), requests a certificate

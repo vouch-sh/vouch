@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Agent client for CLI communication.
 
 use crate::error::{AgentError, Result};

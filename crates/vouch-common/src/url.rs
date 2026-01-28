@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! URL security validation for server connections.
 
 use url::Url;

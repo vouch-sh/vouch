@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Integration test utilities for Vouch.
 //!
 //! This crate provides test harnesses and utilities for integration testing

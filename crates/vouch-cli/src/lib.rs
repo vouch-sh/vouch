@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Vouch CLI library.
 //!
 //! This crate provides the Vouch CLI for hardware-backed identity,

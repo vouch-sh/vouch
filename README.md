@@ -98,7 +98,7 @@ Every action carries attestation of who delegated what to whom.
 | Short-lived credentials | ✅ 8hr certs | ❌ Stored secrets | ✅ Certs | ❌ Long-lived |
 | Self-serve setup | ✅ <5 min | ✅ | ❌ Complex | ❌ Enterprise |
 | Agent delegation | ✅ Built-in | ❌ | ❌ | ❌ |
-| Open source CLI | ✅ Apache 2.0 | ❌ | ⚠️ BSL | ❌ |
+| Open source CLI | ✅ Apache-2.0 OR MIT | ❌ | ⚠️ BSL | ❌ |
 | Air-gap support | ✅ | ❌ | ✅ | ❌ |
 
 ## Quick Start
@@ -155,11 +155,11 @@ Vouch consists of:
 
 | Component | Description | Source |
 |-----------|-------------|--------|
-| `vouch` CLI | User-facing commands, credential helpers | Open source (Apache 2.0) |
-| `vouch-agent` | Background daemon, session management | Open source (Apache 2.0) |
-| Vouch Server | OIDC provider, certificate authority | Proprietary (SaaS or on-prem) |
+| `vouch` CLI | User-facing commands, credential helpers | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
+| `vouch-agent` | Background daemon, session management | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
+| Vouch Server | OIDC provider, certificate authority | [BSL 1.1](crates/vouch-server/LICENSE) (converts to Apache-2.0) |
 
-The CLI is fully open source for security auditing. The server is available as:
+The CLI is fully open source for security auditing. The server source is available under the Business Source License 1.1, which converts to Apache-2.0 after two years. The server is available as:
 - **Vouch Cloud** — Managed SaaS
 - **Vouch Enterprise** — Self-hosted, including air-gapped deployments
 
@@ -198,12 +198,13 @@ See [SECURITY.md](docs/SECURITY.md) for our threat model and responsible disclos
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-The CLI is open source under Apache 2.0. We believe security tools should be auditable.
+The CLI is open source under Apache-2.0 OR MIT. We believe security tools should be auditable.
 
 ## License
 
-- CLI and client libraries: [Apache 2.0](LICENSE)
-- Server: Proprietary (contact sales@vouch.sh)
+- CLI, agent, and shared libraries: [Apache-2.0](LICENSE-APACHE) OR [MIT](LICENSE-MIT)
+- Server: [BSL 1.1](crates/vouch-server/LICENSE) (converts to Apache-2.0 after 2 years)
+- Documentation: [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)
 
 ---
 

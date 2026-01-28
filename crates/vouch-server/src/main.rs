@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Vouch identity server.
 
 use anyhow::Result;

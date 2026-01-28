@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Vouch identity server library.
 //!
 //! This crate provides the Vouch identity server with OIDC provider,

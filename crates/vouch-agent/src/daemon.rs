@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Daemon lifecycle management.
 //!
 //! This module handles:

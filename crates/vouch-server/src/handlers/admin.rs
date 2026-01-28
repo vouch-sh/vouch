@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Admin handlers for server setup and user management.
 
 use crate::AppState;

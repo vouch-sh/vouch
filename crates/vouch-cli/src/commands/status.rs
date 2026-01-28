@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Status command - show current session status.
 
 use anyhow::Result;

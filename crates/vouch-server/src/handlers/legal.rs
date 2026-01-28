@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! Legal pages handler (privacy policy and terms of service).
 
 use crate::AppState;

@@ -545,7 +545,7 @@ jobs:
             desc "Hardware-backed identity for developers"
             homepage "https://github.com/vouch-sh/vouch"
             version "${{ steps.version.outputs.version }}"
-            license "Apache-2.0"
+            license "Apache-2.0 OR MIT"
 
             on_macos do
               on_arm do

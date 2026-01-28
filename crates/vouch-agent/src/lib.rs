@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Vouch local credential agent.
 //!
 //! This crate provides the vouch-agent daemon that manages session state

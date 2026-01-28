@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Read-only configuration reader for `~/.vouch/config.json`.
 //!
 //! This module provides read-only access to the Vouch config file.

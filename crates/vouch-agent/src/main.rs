@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Vouch agent daemon binary.
 
 use clap::Parser;

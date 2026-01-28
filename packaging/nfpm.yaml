@@ -6,7 +6,7 @@ maintainer: "Vouch <hello@vouch.sh>"
 description: "Hardware-backed identity for developers"
 vendor: "Vouch"
 homepage: "https://github.com/vouch-sh/vouch"
-license: "Apache-2.0"
+license: "Apache-2.0 OR MIT"
 
 depends:
   - libudev1

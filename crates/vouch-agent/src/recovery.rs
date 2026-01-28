@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Session recovery from persisted credentials on disk.
 //!
 //! On startup, the agent attempts to restore a valid session by reading

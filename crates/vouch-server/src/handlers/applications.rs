@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: BUSL-1.1
 //! OAuth Application Registration handlers.
 //!
 //! This module implements the self-service portal for developers to register

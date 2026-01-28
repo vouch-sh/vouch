@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Attestation format extraction and validation for WebAuthn credentials.
 //!
 //! This module provides utilities to extract and classify attestation formats
