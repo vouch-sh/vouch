@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+
+{% block title %}Documentation - {{ org_name }}{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center flex-1 p-5">
+    <div class="card max-w-2xl w-full">
+        <a href="/" class="inline-flex items-center gap-1.5 text-vouch-accent text-sm mb-6 hover:text-vouch-accent-hover">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+            Back to home
+        </a>
+        <h1 class="text-3xl font-bold text-gray-200 mb-2">Documentation</h1>
+        <p class="text-gray-400 mb-8">Guides for integrating {{ org_name }} with your infrastructure</p>
+
+        <div class="space-y-4">
+            <!-- AWS Integration -->
+            <a href="/docs/aws" class="block p-4 bg-vouch-raised rounded-lg border border-vouch-border hover:border-vouch-accent transition-colors">
+                <div class="flex items-start gap-4">
+                    <div class="p-2 bg-vouch-bg rounded-lg">
+                        <svg class="w-6 h-6 text-vouch-accent" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 0 0 4.5 4.5H18a3.75 3.75 0 0 0 1.332-7.257 3 3 0 0 0-3.758-3.848 5.25 5.25 0 0 0-10.233 2.33A4.502 4.502 0 0 0 2.25 15Z" />
+                        </svg>
+                    </div>
+                    <div>
+                        <h2 class="text-lg font-semibold text-gray-200">AWS Integration</h2>
+                        <p class="text-gray-400 text-sm mt-1">
+                            Configure AWS IAM to trust {{ org_name }} as an OIDC identity provider for secure credential access.
+                        </p>
+                    </div>
+                    <svg class="w-5 h-5 text-gray-500 ml-auto mt-1" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+                    </svg>
+                </div>
+            </a>
+
+            <!-- SSH Certificates (placeholder for future) -->
+            <div class="block p-4 bg-vouch-raised rounded-lg border border-vouch-border opacity-50">
+                <div class="flex items-start gap-4">
+                    <div class="p-2 bg-vouch-bg rounded-lg">
+                        <svg class="w-6 h-6 text-gray-500" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0 0 21 18V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v12a2.25 2.25 0 0 0 2.25 2.25Z" />
+                        </svg>
+                    </div>
+                    <div>
+                        <h2 class="text-lg font-semibold text-gray-400">SSH Certificates</h2>
+                        <p class="text-gray-500 text-sm mt-1">
+                            Configure SSH servers to trust {{ org_name }} certificates for passwordless authentication.
+                        </p>
+                        <span class="inline-block mt-2 px-2 py-0.5 bg-vouch-bg text-gray-500 text-xs rounded">Coming soon</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

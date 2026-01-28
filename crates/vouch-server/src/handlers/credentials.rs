@@ -5,7 +5,6 @@ use crate::AppState;
 use crate::db;
 use axum::{Json, extract::State, http::StatusCode};
 use jiff::{Span, Timestamp};
-use jsonwebtoken::{EncodingKey, Header, encode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::{
@@ -259,13 +258,10 @@ pub async fn get_aws_token(
         hardware_aaguid: authenticator.and_then(|a| a.aaguid),
     };
 
-    // Sign the token
-    let id_token = encode(
-        &Header::default(),
-        &id_claims,
-        &EncodingKey::from_secret(state.config.jwt_secret_bytes()),
-    )
-    .map_err(|e| {
+    // Sign the token with ES256 using the OIDC signing key
+    // AWS OIDC requires asymmetric signing (ES256) so it can verify
+    // the token using the public key from the JWKS endpoint
+    let id_token = state.oidc_key.sign_jwt(&id_claims).map_err(|e| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "token_error",

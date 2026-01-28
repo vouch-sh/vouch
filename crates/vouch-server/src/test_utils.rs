@@ -26,6 +26,7 @@ use crate::AppState;
 use crate::config::ServerConfig;
 use crate::dpop::DpopState;
 use crate::handlers;
+use crate::oidc_key::OidcSigningKey;
 
 /// Create an in-memory SQLite database with migrations for testing.
 pub async fn test_db() -> SqlitePool {
@@ -62,6 +63,8 @@ pub fn test_config() -> ServerConfig {
         cli_download_linux: None,
         cli_download_windows: None,
         ssh_ca_key_path: None,
+        ssh_ca_key: None,
+        oidc_signing_key: None,
         dpop_enabled: true,
         dpop_nonce_required: false,
         dpop_max_age_seconds: 300,
@@ -85,12 +88,16 @@ pub async fn test_app_state() -> Arc<AppState> {
         .build()
         .expect("Failed to build Webauthn");
 
+    // Generate OIDC signing key for tests
+    let oidc_key = OidcSigningKey::generate().expect("Failed to generate test OIDC key");
+
     Arc::new(AppState {
         db: pool,
         config,
         webauthn,
         ssh_ca: None,
         dpop: DpopState::new(),
+        oidc_key,
     })
 }
 

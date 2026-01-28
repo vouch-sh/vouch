@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: BUSL-1.1
+//! Documentation pages handler.
+
+use crate::AppState;
+use crate::impl_template_response;
+use askama::Template;
+use axum::{extract::State, response::IntoResponse};
+use std::sync::Arc;
+
+/// Documentation index page template.
+#[derive(Template)]
+#[template(path = "docs/index.html")]
+pub struct DocsIndexTemplate {
+    /// Organization name for branding.
+    pub org_name: String,
+}
+
+impl_template_response!(DocsIndexTemplate);
+
+/// AWS setup documentation page template.
+#[derive(Template)]
+#[template(path = "docs/aws.html")]
+pub struct DocsAwsTemplate {
+    /// The OIDC provider URL (verification_base_url).
+    pub provider_url: String,
+    /// The RP ID (domain) for the OIDC provider.
+    pub rp_id: String,
+    /// Organization name for branding.
+    pub org_name: String,
+}
+
+impl_template_response!(DocsAwsTemplate);
+
+/// Documentation index page.
+/// GET /docs
+#[allow(clippy::unused_async)]
+pub async fn docs_index_page(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    DocsIndexTemplate {
+        org_name: state.config.get_org_display_name().to_string(),
+    }
+}
+
+/// AWS setup documentation page.
+/// GET /docs/aws
+#[allow(clippy::unused_async)]
+pub async fn aws_setup_page(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    DocsAwsTemplate {
+        provider_url: state.config.verification_base_url.clone(),
+        rp_id: state.config.rp_id.clone(),
+        org_name: state.config.get_org_display_name().to_string(),
+    }
+}

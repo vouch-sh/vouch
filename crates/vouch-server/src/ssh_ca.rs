@@ -23,6 +23,28 @@ pub struct SshCa {
 }
 
 impl SshCa {
+    /// Load the SSH CA from PEM content directly.
+    ///
+    /// This is used when the key content is provided via environment variable
+    /// rather than a file path.
+    pub fn from_pem(pem_content: &str, rp_id: &str) -> Result<Self> {
+        let private_key = PrivateKey::from_openssh(pem_content.trim())
+            .map_err(|e| anyhow::anyhow!("Failed to parse SSH CA key from PEM: {e}"))?;
+
+        tracing::info!(
+            "SSH CA loaded from PEM: {}",
+            private_key
+                .public_key()
+                .to_openssh()
+                .unwrap_or_else(|_| String::from("<unable to display>"))
+        );
+
+        Ok(Self {
+            private_key,
+            rp_id: rp_id.to_string(),
+        })
+    }
+
     /// Load or create the SSH CA keypair.
     ///
     /// If the key file exists, it loads the private key.
@@ -38,6 +60,34 @@ impl SshCa {
             private_key,
             rp_id: rp_id.to_string(),
         })
+    }
+
+    /// Load from PEM content if provided, otherwise load from file path.
+    ///
+    /// Priority: PEM content > file path > generate new key
+    pub fn load(
+        pem_content: Option<&str>,
+        key_path: Option<&str>,
+        rp_id: &str,
+    ) -> Result<Option<Self>> {
+        // First, check if PEM content is provided
+        if let Some(pem) = pem_content
+            && !pem.trim().is_empty()
+        {
+            return Ok(Some(Self::from_pem(pem, rp_id)?));
+        }
+
+        // Second, check if key path is provided
+        if let Some(path) = key_path {
+            if path.is_empty() {
+                tracing::info!("SSH CA disabled (empty key path)");
+                return Ok(None);
+            }
+            return Ok(Some(Self::load_or_create(Path::new(path), rp_id)?));
+        }
+
+        // No configuration provided
+        Ok(None)
     }
 
     /// Load an existing private key from file.

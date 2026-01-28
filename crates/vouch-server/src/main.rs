@@ -13,7 +13,7 @@ use tokio::signal;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing_subscriber::EnvFilter;
 
-use vouch_server::{AppState, cleanup, config, dpop, handlers, ssh_ca};
+use vouch_server::{AppState, cleanup, config, dpop, handlers, oidc_key, ssh_ca};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -46,30 +46,33 @@ async fn main() -> Result<()> {
     let webauthn = webauthn_builder.build()?;
 
     // Initialize SSH CA if configured
-    let ssh_ca = if let Some(ref key_path) = config.ssh_ca_key_path {
-        if key_path.is_empty() {
-            tracing::info!("SSH CA disabled (empty key path)");
-            None
-        } else {
-            let path = std::path::Path::new(key_path);
-            match ssh_ca::SshCa::load_or_create(path, &config.rp_id) {
-                Ok(ca) => {
-                    if let Ok(pub_key) = ca.public_key() {
-                        tracing::info!("SSH CA initialized: {}", pub_key);
-                    } else {
-                        tracing::info!("SSH CA initialized");
-                    }
-                    Some(ca)
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to initialize SSH CA: {e}");
-                    None
-                }
+    // Priority: PEM content (VOUCH_SSH_CA_KEY) > file path (VOUCH_SSH_CA_KEY_PATH)
+    let ssh_ca = match ssh_ca::SshCa::load(
+        config.ssh_ca_key.as_deref(),
+        config.ssh_ca_key_path.as_deref(),
+        &config.rp_id,
+    ) {
+        Ok(Some(ca)) => {
+            if let Ok(pub_key) = ca.public_key() {
+                tracing::info!("SSH CA initialized: {}", pub_key);
+            } else {
+                tracing::info!("SSH CA initialized");
             }
+            Some(ca)
         }
-    } else {
-        None
+        Ok(None) => {
+            tracing::info!("SSH CA disabled");
+            None
+        }
+        Err(e) => {
+            tracing::warn!("Failed to initialize SSH CA: {e}");
+            None
+        }
     };
+
+    // Initialize OIDC signing key (ES256 for AWS and OIDC ID tokens)
+    let oidc_key = oidc_key::OidcSigningKey::load_or_generate(config.oidc_signing_key.as_deref())?;
+    tracing::info!("OIDC signing key initialized: {}", oidc_key.key_id());
 
     // Create DPoP state
     let dpop_state = Arc::new(dpop::DpopState::new());
@@ -81,6 +84,7 @@ async fn main() -> Result<()> {
         webauthn,
         ssh_ca,
         dpop: dpop::DpopState::new(),
+        oidc_key,
     });
 
     // Start background cleanup task if enabled
@@ -111,6 +115,9 @@ async fn main() -> Result<()> {
         .route("/about", get(handlers::about::about_page))
         .route("/privacy", get(handlers::legal::privacy_page))
         .route("/terms", get(handlers::legal::terms_page))
+        // Documentation pages
+        .route("/docs", get(handlers::docs::docs_index_page))
+        .route("/docs/aws", get(handlers::docs::aws_setup_page))
         // OIDC Provider endpoints
         .route(
             "/.well-known/openid-configuration",

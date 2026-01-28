@@ -8,6 +8,7 @@ pub mod auth;
 pub mod common;
 pub mod credentials;
 pub mod device;
+pub mod docs;
 pub mod enroll;
 pub mod enroll_keys;
 pub mod home;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Server configuration.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::SqlitePool;
@@ -133,6 +133,17 @@ pub struct Args {
     #[arg(long, env = "VOUCH_SSH_CA_KEY_PATH", default_value = "./ssh_ca_key")]
     pub ssh_ca_key_path: String,
 
+    /// SSH CA private key content (PEM format, Ed25519).
+    /// If set, takes precedence over VOUCH_SSH_CA_KEY_PATH.
+    #[arg(long, env = "VOUCH_SSH_CA_KEY")]
+    pub ssh_ca_key: Option<String>,
+
+    /// OIDC signing key content (PEM format, P-256 EC).
+    /// Used for signing OIDC ID tokens with ES256 algorithm.
+    /// If not set, an ephemeral key will be generated.
+    #[arg(long, env = "VOUCH_OIDC_SIGNING_KEY")]
+    pub oidc_signing_key: Option<String>,
+
     /// Enable RFC 9449 DPoP support.
     #[arg(long, env = "VOUCH_DPOP_ENABLED")]
     pub dpop_enabled: Option<String>,
@@ -207,6 +218,12 @@ pub struct ServerConfig {
     /// Path to SSH CA private key file (default: `./ssh_ca_key`).
     /// Set to empty string to disable SSH CA.
     pub ssh_ca_key_path: Option<String>,
+    /// SSH CA private key content (PEM format, Ed25519).
+    /// If set, takes precedence over `ssh_ca_key_path`.
+    pub ssh_ca_key: Option<String>,
+    /// OIDC signing key content (PEM format, P-256 EC).
+    /// Used for signing OIDC ID tokens with ES256 algorithm.
+    pub oidc_signing_key: Option<String>,
     /// Enable RFC 9449 DPoP support (default: true).
     pub dpop_enabled: bool,
     /// Require DPoP nonce in proofs (default: false).
@@ -283,143 +300,14 @@ impl ServerConfig {
             cli_download_linux: args.cli_download_linux,
             cli_download_windows: args.cli_download_windows,
             ssh_ca_key_path,
+            ssh_ca_key: args.ssh_ca_key,
+            oidc_signing_key: args.oidc_signing_key,
             dpop_enabled,
             dpop_nonce_required,
             dpop_max_age_seconds: args.dpop_max_age,
             cleanup_interval_minutes: args.cleanup_interval,
             auth_events_retention_days: args.auth_events_retention_days,
             oauth_events_retention_days: args.oauth_events_retention_days,
-            cors_origins,
-        })
-    }
-
-    /// Load configuration from environment variables (legacy method).
-    /// Prefer using `Args::parse()` and `from_args()` instead.
-    pub fn from_env() -> Result<Self> {
-        let database_url = std::env::var("VOUCH_DATABASE_URL")
-            .unwrap_or_else(|_| "sqlite:vouch.db?mode=rwc".to_string());
-
-        let listen_addr =
-            std::env::var("VOUCH_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:3000".to_string());
-
-        let rp_id =
-            std::env::var("VOUCH_RP_ID").context("VOUCH_RP_ID environment variable is required")?;
-
-        let rp_name = std::env::var("VOUCH_RP_NAME").unwrap_or_else(|_| "Vouch".to_string());
-
-        let jwt_secret_raw = std::env::var("VOUCH_JWT_SECRET")
-            .context("VOUCH_JWT_SECRET environment variable is required")?;
-
-        if jwt_secret_raw.len() < 32 {
-            anyhow::bail!("VOUCH_JWT_SECRET must be at least 32 characters");
-        }
-        let jwt_secret = SecretString::from(jwt_secret_raw);
-
-        let session_hours = std::env::var("VOUCH_SESSION_HOURS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8);
-
-        // OIDC configuration (optional - only needed for enrollment)
-        let oidc_issuer_url = std::env::var("VOUCH_OIDC_ISSUER").ok();
-        let oidc_client_id = std::env::var("VOUCH_OIDC_CLIENT_ID").ok();
-        let oidc_client_secret = std::env::var("VOUCH_OIDC_CLIENT_SECRET")
-            .ok()
-            .map(SecretString::from);
-
-        // Default verification URL to https://{rp_id}
-        let verification_base_url =
-            std::env::var("VOUCH_VERIFICATION_URL").unwrap_or_else(|_| format!("https://{rp_id}"));
-
-        let device_code_expires_seconds = std::env::var("VOUCH_DEVICE_CODE_EXPIRES")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(600);
-
-        let device_poll_interval_seconds = std::env::var("VOUCH_DEVICE_POLL_INTERVAL")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(5);
-
-        // Allowed domains (optional)
-        let allowed_domains = std::env::var("VOUCH_ALLOWED_DOMAINS")
-            .ok()
-            .map(|s| parse_comma_list(&s));
-
-        // Branding
-        let org_name = std::env::var("VOUCH_ORG_NAME").ok();
-        let cli_download_macos = std::env::var("VOUCH_CLI_DOWNLOAD_MACOS").ok();
-        let cli_download_linux = std::env::var("VOUCH_CLI_DOWNLOAD_LINUX").ok();
-        let cli_download_windows = std::env::var("VOUCH_CLI_DOWNLOAD_WINDOWS").ok();
-
-        // SSH CA configuration (default: enabled with ./ssh_ca_key)
-        let ssh_ca_key_path = std::env::var("VOUCH_SSH_CA_KEY_PATH").ok().or_else(|| {
-            // Default to ssh_ca_key in current directory
-            Some("./ssh_ca_key".to_string())
-        });
-
-        // RFC 9449 DPoP configuration
-        let dpop_enabled = std::env::var("VOUCH_DPOP_ENABLED")
-            .ok()
-            .map(|s| parse_bool_default_true(&s))
-            .unwrap_or(true);
-
-        let dpop_nonce_required = std::env::var("VOUCH_DPOP_NONCE_REQUIRED")
-            .ok()
-            .map(|s| parse_bool_default_false(&s))
-            .unwrap_or(false);
-
-        let dpop_max_age_seconds = std::env::var("VOUCH_DPOP_MAX_AGE")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(300);
-
-        // Cleanup task configuration
-        let cleanup_interval_minutes = std::env::var("VOUCH_CLEANUP_INTERVAL")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(15);
-
-        let auth_events_retention_days = std::env::var("VOUCH_AUTH_EVENTS_RETENTION_DAYS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(90);
-
-        let oauth_events_retention_days = std::env::var("VOUCH_OAUTH_EVENTS_RETENTION_DAYS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(30);
-
-        // CORS configuration
-        let cors_origins = std::env::var("VOUCH_CORS_ORIGINS")
-            .ok()
-            .map(|s| parse_comma_list_preserve_case(&s));
-
-        Ok(Self {
-            listen_addr,
-            database_url,
-            rp_id,
-            rp_name,
-            jwt_secret,
-            session_hours,
-            oidc_issuer_url,
-            oidc_client_id,
-            oidc_client_secret,
-            verification_base_url,
-            device_code_expires_seconds,
-            device_poll_interval_seconds,
-            allowed_domains,
-            org_name,
-            cli_download_macos,
-            cli_download_linux,
-            cli_download_windows,
-            ssh_ca_key_path,
-            dpop_enabled,
-            dpop_nonce_required,
-            dpop_max_age_seconds,
-            cleanup_interval_minutes,
-            auth_events_retention_days,
-            oauth_events_retention_days,
             cors_origins,
         })
     }

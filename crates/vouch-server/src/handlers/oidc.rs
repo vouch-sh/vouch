@@ -113,7 +113,7 @@ pub async fn discovery(State(state): State<Arc<AppState>>) -> Json<OidcDiscovery
             "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
         ],
         subject_types_supported: vec!["public".to_string()],
-        id_token_signing_alg_values_supported: vec!["HS256".to_string()],
+        id_token_signing_alg_values_supported: vec!["ES256".to_string()],
         token_endpoint_auth_methods_supported: vec![
             "client_secret_basic".to_string(),
             "client_secret_post".to_string(),
@@ -150,38 +150,20 @@ pub async fn discovery(State(state): State<Arc<AppState>>) -> Json<OidcDiscovery
 /// JSON Web Key Set response.
 #[derive(Debug, Serialize)]
 pub struct JwksResponse {
-    keys: Vec<Jwk>,
-}
-
-/// JSON Web Key (symmetric key for HS256).
-#[derive(Debug, Serialize)]
-pub struct Jwk {
-    kty: String,
-    alg: String,
-    kid: String,
-    #[serde(rename = "use")]
-    key_use: String,
-    // For symmetric keys, we don't expose the actual key
-    // Clients verify tokens by calling the userinfo endpoint
+    keys: Vec<crate::oidc_key::EcJwk>,
 }
 
 /// GET /oauth/jwks
 ///
 /// Returns the public keys used to sign tokens.
-/// Note: Currently using HS256 (symmetric), so this is informational only.
-/// Clients should verify tokens via the userinfo endpoint or trust the issuer.
-pub async fn jwks(State(_state): State<Arc<AppState>>) -> Json<JwksResponse> {
-    // For HS256, we return an empty key set since the symmetric key
-    // should not be shared. Clients should use token introspection
-    // or the userinfo endpoint to validate tokens.
-    Json(JwksResponse {
-        keys: vec![Jwk {
-            kty: "oct".to_string(),
-            alg: "HS256".to_string(),
-            kid: "vouch-signing-key-1".to_string(),
-            key_use: "sig".to_string(),
-        }],
-    })
+/// Returns EC public key in JWK format for ES256 verification.
+pub async fn jwks(State(state): State<Arc<AppState>>) -> Result<Json<JwksResponse>, StatusCode> {
+    let jwk = state.oidc_key.public_key_jwk().map_err(|e| {
+        tracing::error!("Failed to get OIDC public key JWK: {}", e);
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(JwksResponse { keys: vec![jwk] }))
 }
 
 // ============================================================================
@@ -1694,6 +1676,71 @@ mod tests {
             assert!(key.get("kty").is_some(), "Key must have 'kty' field");
             assert!(key.get("alg").is_some(), "Key must have 'alg' field");
         }
+    }
+
+    #[tokio::test]
+    async fn test_jwks_returns_ec_key_for_es256() {
+        // AWS OIDC requires EC public key for ES256 verification
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/oauth/jwks", &[]).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let jwks: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        let keys = jwks["keys"].as_array().expect("keys is an array");
+        assert!(!keys.is_empty(), "JWKS should have at least one key");
+
+        let key = &keys[0];
+
+        // Verify it's an EC key for ES256
+        assert_eq!(key["kty"], "EC", "Key type should be EC");
+        assert_eq!(key["crv"], "P-256", "Curve should be P-256");
+        assert_eq!(key["alg"], "ES256", "Algorithm should be ES256");
+        assert_eq!(key["use"], "sig", "Usage should be sig");
+
+        // Verify EC public key coordinates are present
+        assert!(key.get("x").is_some(), "EC key must have x coordinate");
+        assert!(key.get("y").is_some(), "EC key must have y coordinate");
+
+        // Verify x and y are valid base64url strings (not empty)
+        let x = key["x"].as_str().expect("x should be a string");
+        let y = key["y"].as_str().expect("y should be a string");
+        assert!(!x.is_empty(), "x coordinate should not be empty");
+        assert!(!y.is_empty(), "y coordinate should not be empty");
+
+        // Verify kid is present
+        assert!(key.get("kid").is_some(), "EC key must have kid");
+        let kid = key["kid"].as_str().expect("kid should be a string");
+        assert!(
+            kid.starts_with("vouch-oidc-"),
+            "kid should start with vouch-oidc-"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_discovery_advertises_es256() {
+        // Verify discovery document advertises ES256 for ID token signing
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+        let algs = discovery["id_token_signing_alg_values_supported"]
+            .as_array()
+            .expect("Should be an array");
+
+        assert!(
+            algs.iter().any(|a| a == "ES256"),
+            "Discovery should advertise ES256 signing"
+        );
+
+        // Should NOT advertise HS256 (symmetric) for AWS compatibility
+        assert!(
+            !algs.iter().any(|a| a == "HS256"),
+            "Discovery should not advertise HS256 for AWS compatibility"
+        );
     }
 
     // ========================================================================

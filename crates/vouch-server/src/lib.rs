@@ -10,6 +10,7 @@ pub mod db;
 pub mod dpop;
 pub mod extractors;
 pub mod handlers;
+pub mod oidc_key;
 pub mod ssh_ca;
 pub mod webauthn_verify;
 
@@ -38,4 +39,6 @@ pub struct AppState {
     pub ssh_ca: Option<ssh_ca::SshCa>,
     /// RFC 9449 DPoP state (nonce manager, JTI cache).
     pub dpop: dpop::DpopState,
+    /// OIDC signing key for ES256 JWT signing.
+    pub oidc_key: oidc_key::OidcSigningKey,
 }
