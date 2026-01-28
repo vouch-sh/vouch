@@ -3,10 +3,14 @@
 //!
 //! The home page shows the landing/enrollment page with
 //! "Sign in with Google", CLI instructions, and download links.
+//! If the user is already authenticated, it shows a "Manage Security Keys"
+//! button instead.
 
+use crate::handlers::common::extract_session_from_cookie;
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::{extract::State, response::IntoResponse};
+use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
 /// Home page template.
@@ -19,14 +23,23 @@ pub struct HomeTemplate {
     pub download_macos: Option<String>,
     pub download_linux: Option<String>,
     pub download_windows: Option<String>,
+    /// Whether the user is authenticated.
+    pub authenticated: bool,
+    /// The user's email if authenticated.
+    pub user_email: Option<String>,
 }
 
 impl_template_response!(HomeTemplate);
 
 /// Home page showing enrollment instructions.
 /// GET /
-#[allow(clippy::unused_async)]
-pub async fn home_page(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+pub async fn home_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    // Check if user is authenticated
+    let session = extract_session_from_cookie(&state, &jar).await.ok();
+
     let has_downloads = state.config.cli_download_macos.is_some()
         || state.config.cli_download_linux.is_some()
         || state.config.cli_download_windows.is_some();
@@ -38,5 +51,7 @@ pub async fn home_page(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         download_macos: state.config.cli_download_macos.clone(),
         download_linux: state.config.cli_download_linux.clone(),
         download_windows: state.config.cli_download_windows.clone(),
+        authenticated: session.is_some(),
+        user_email: session.map(|s| s.claims.email),
     }
 }
