@@ -338,6 +338,7 @@ pub struct OidcCallbackParams {
 #[derive(Debug, Deserialize)]
 struct OidcTokenResponse {
     id_token: String,
+    #[allow(dead_code)]
     access_token: String,
 }
 
@@ -393,43 +394,6 @@ impl BrowserRegistrationState {
             &validation,
         )?;
         Ok(data.claims)
-    }
-}
-
-// ============================================================================
-// OIDC Token Revocation
-// ============================================================================
-
-/// Best-effort revocation of an upstream OIDC access token (RFC 7009).
-///
-/// Uses the same Google endpoint derivation pattern as `oidc_callback`
-/// (replacing `accounts.google.com` with `oauth2.googleapis.com`).
-async fn revoke_oidc_access_token(oidc_issuer: &str, access_token: &str) {
-    let revocation_url = format!(
-        "{}/revoke",
-        oidc_issuer.replace("accounts.google.com", "oauth2.googleapis.com")
-    );
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
-
-    match client
-        .post(&revocation_url)
-        .form(&[("token", access_token)])
-        .send()
-        .await
-    {
-        Ok(resp) if resp.status().is_success() => {
-            tracing::info!("Revoked upstream OIDC access token");
-        }
-        Ok(resp) => {
-            tracing::warn!("OIDC token revocation returned status: {}", resp.status());
-        }
-        Err(e) => {
-            tracing::warn!("Failed to revoke OIDC access token: {}", e);
-        }
     }
 }
 
@@ -791,14 +755,6 @@ pub async fn oidc_callback(
         }
         .into_response();
     }
-
-    // Revoke the upstream OIDC access token immediately — we only need the id_token claims.
-    // This minimizes the window where the token is valid and avoids storing it.
-    let oidc_issuer_for_revoke = oidc_issuer.to_string();
-    let access_token_for_revoke = tokens.access_token.clone();
-    tokio::spawn(async move {
-        revoke_oidc_access_token(&oidc_issuer_for_revoke, &access_token_for_revoke).await;
-    });
 
     // Check domain restriction
     if let Some(domains) = &state.config.allowed_domains {
