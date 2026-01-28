@@ -32,6 +32,7 @@ pub mod client;
 pub mod daemon;
 pub mod error;
 pub mod protocol;
+#[cfg(unix)]
 pub mod recovery;
 #[cfg(unix)]
 pub mod server;
