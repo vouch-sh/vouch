@@ -3,39 +3,42 @@
 {% block title %}Privacy Policy - {{ org_name }}{% endblock %}
 
 {% block content %}
-<div class="flex items-center justify-center min-h-screen p-5">
+<div class="flex items-center justify-center flex-1 p-5">
     <div class="card max-w-3xl w-full">
         <div class="mb-6">
-            <a href="/" class="text-vouch-500 hover:text-vouch-600 text-sm">&larr; Back to Home</a>
+            <a href="/" class="inline-flex items-center gap-1.5 text-vouch-accent hover:text-vouch-accent-hover text-sm">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+                Back to Home
+            </a>
         </div>
 
-        <h1 class="text-3xl font-bold text-gray-900 mb-2">Privacy Policy</h1>
+        <h1 class="text-3xl font-bold text-gray-200 mb-2">Privacy Policy</h1>
         <p class="text-gray-500 text-sm mb-8">Last updated: January 2025</p>
 
         <div class="prose prose-gray max-w-none">
             <section class="mb-8">
-                <h2 class="text-xl font-semibold text-gray-900 mb-3">Introduction</h2>
-                <p class="text-gray-600 mb-4">
+                <h2 class="text-xl font-semibold text-gray-200 mb-3">Introduction</h2>
+                <p class="text-gray-400 mb-4">
                     {{ org_name }} ("we", "our", or "us") operates the Vouch authentication service.
                     This Privacy Policy explains how we collect, use, and protect your information when you use our service.
                 </p>
             </section>
 
             <section class="mb-8">
-                <h2 class="text-xl font-semibold text-gray-900 mb-3">Information We Collect</h2>
-                <p class="text-gray-600 mb-4">We collect the following types of information:</p>
-                <ul class="list-disc list-inside text-gray-600 space-y-2 ml-4">
-                    <li><strong>Account Information:</strong> Email address and identity information provided through your organization's identity provider.</li>
-                    <li><strong>Authentication Data:</strong> FIDO2/WebAuthn credential identifiers (public keys) associated with your security keys. We never store private keys.</li>
-                    <li><strong>Usage Logs:</strong> Authentication events, including timestamps, IP addresses, and credential usage for security auditing.</li>
-                    <li><strong>Device Information:</strong> Security key metadata (e.g., authenticator type) for compatibility and security purposes.</li>
+                <h2 class="text-xl font-semibold text-gray-200 mb-3">Information We Collect</h2>
+                <p class="text-gray-400 mb-4">We collect the following types of information:</p>
+                <ul class="list-disc list-inside text-gray-400 space-y-2 ml-4">
+                    <li><strong class="text-gray-300">Account Information:</strong> Email address and identity information provided through your organization's identity provider.</li>
+                    <li><strong class="text-gray-300">Authentication Data:</strong> FIDO2/WebAuthn credential identifiers (public keys) associated with your security keys. We never store private keys.</li>
+                    <li><strong class="text-gray-300">Usage Logs:</strong> Authentication events, including timestamps, IP addresses, and credential usage for security auditing.</li>
+                    <li><strong class="text-gray-300">Device Information:</strong> Security key metadata (e.g., authenticator type) for compatibility and security purposes.</li>
                 </ul>
             </section>
 
             <section class="mb-8">
-                <h2 class="text-xl font-semibold text-gray-900 mb-3">How We Use Your Information</h2>
-                <p class="text-gray-600 mb-4">We use your information to:</p>
-                <ul class="list-disc list-inside text-gray-600 space-y-2 ml-4">
+                <h2 class="text-xl font-semibold text-gray-200 mb-3">How We Use Your Information</h2>
+                <p class="text-gray-400 mb-4">We use your information to:</p>
+                <ul class="list-disc list-inside text-gray-400 space-y-2 ml-4">
                     <li>Authenticate your identity and issue short-lived credentials</li>
                     <li>Maintain security and detect unauthorized access attempts</li>
                     <li>Comply with legal obligations and organizational security policies</li>
@@ -44,8 +47,8 @@
             </section>
 
             <section class="mb-8">
-                <h2 class="text-xl font-semibold text-gray-900 mb-3">Data Retention</h2>
-                <p class="text-gray-600 mb-4">
+                <h2 class="text-xl font-semibold text-gray-200 mb-3">Data Retention</h2>
+                <p class="text-gray-400 mb-4">
                     Authentication logs are retained according to your organization's security policies.
                     Credential data is retained until you or your administrator removes it.
                     Session tokens are short-lived (typically 8 hours) and automatically expire.
@@ -53,11 +56,11 @@
             </section>
 
             <section class="mb-8">
-                <h2 class="text-xl font-semibold text-gray-900 mb-3">Data Security</h2>
-                <p class="text-gray-600 mb-4">
+                <h2 class="text-xl font-semibold text-gray-200 mb-3">Data Security</h2>
+                <p class="text-gray-400 mb-4">
                     We implement industry-standard security measures to protect your data:
                 </p>
-                <ul class="list-disc list-inside text-gray-600 space-y-2 ml-4">
+                <ul class="list-disc list-inside text-gray-400 space-y-2 ml-4">
                     <li>All communications are encrypted using TLS</li>
                     <li>FIDO2/WebAuthn ensures phishing-resistant authentication</li>
                     <li>Private keys never leave your security device</li>
@@ -66,33 +69,33 @@
             </section>
 
             <section class="mb-8">
-                <h2 class="text-xl font-semibold text-gray-900 mb-3">Your Rights</h2>
-                <p class="text-gray-600 mb-4">
+                <h2 class="text-xl font-semibold text-gray-200 mb-3">Your Rights</h2>
+                <p class="text-gray-400 mb-4">
                     Depending on your jurisdiction, you may have rights regarding your personal data, including:
                 </p>
-                <ul class="list-disc list-inside text-gray-600 space-y-2 ml-4">
+                <ul class="list-disc list-inside text-gray-400 space-y-2 ml-4">
                     <li>Access to your personal data</li>
                     <li>Correction of inaccurate data</li>
                     <li>Deletion of your data (subject to retention requirements)</li>
                     <li>Data portability</li>
                 </ul>
-                <p class="text-gray-600 mt-4">
+                <p class="text-gray-400 mt-4">
                     Contact your organization's administrator to exercise these rights.
                 </p>
             </section>
 
             <section class="mb-8">
-                <h2 class="text-xl font-semibold text-gray-900 mb-3">Contact Us</h2>
-                <p class="text-gray-600">
+                <h2 class="text-xl font-semibold text-gray-200 mb-3">Contact Us</h2>
+                <p class="text-gray-400">
                     If you have questions about this Privacy Policy, please contact your organization's IT administrator
                     or security team.
                 </p>
             </section>
         </div>
 
-        <div class="mt-8 pt-6 border-t border-gray-200">
+        <div class="mt-8 pt-6 border-t border-vouch-border">
             <p class="text-gray-500 text-sm text-center">
-                <a href="/terms" class="text-vouch-500 hover:text-vouch-600">Terms of Service</a>
+                <a href="/terms" class="text-vouch-accent hover:text-vouch-accent-hover">Terms of Service</a>
             </p>
         </div>
     </div>

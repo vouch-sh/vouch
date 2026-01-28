@@ -6,16 +6,17 @@
     <link rel="stylesheet" href="/static/css/output.css">
     <title>{% block title %}Vouch Admin{% endblock %}</title>
 </head>
-<body class="min-h-screen bg-gray-100">
+<body class="min-h-screen bg-vouch-bg text-gray-300">
     <div class="max-w-4xl mx-auto p-5">
         {% block nav %}
         <nav class="flex gap-4 mb-6">
-            <a href="/admin/setup?token={{ token }}" class="text-vouch-500 font-medium hover:underline">Setup</a>
-            <a href="/admin/users?token={{ token }}" class="text-vouch-500 font-medium hover:underline">Users</a>
+            <a href="/admin/setup?token={{ token }}" class="text-vouch-accent font-medium hover:text-vouch-accent-hover">Setup</a>
+            <a href="/admin/users?token={{ token }}" class="text-vouch-accent font-medium hover:text-vouch-accent-hover">Users</a>
         </nav>
         {% endblock %}
         {% block content %}{% endblock %}
     </div>
+    <footer class="py-6 text-center text-xs text-gray-500">Copyright 2026 Smoke Turner, LLC</footer>
     {% block scripts %}{% endblock %}
 </body>
 </html>

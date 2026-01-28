@@ -6,33 +6,33 @@
 
 {% block content %}
 <div class="card text-center max-w-md mx-auto">
-    <h1 class="text-2xl font-bold text-gray-800 mb-6">{{ org_name }} Admin</h1>
+    <h1 class="text-2xl font-bold text-gray-200 mb-6">{{ org_name }} Admin</h1>
 
     {% if let Some(err) = error %}
-    <div class="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded mb-6">
+    <div class="bg-vouch-error-bg border border-vouch-error text-gray-300 px-4 py-3 rounded mb-6">
         {{ err }}
     </div>
     {% endif %}
 
     {% if oidc_configured %}
-    <p class="text-gray-600 mb-6">Sign in with your organization identity provider.</p>
+    <p class="text-gray-400 mb-6">Sign in with your organization identity provider.</p>
 
     <form method="POST" action="/admin/login">
         <button type="submit"
-            class="w-full bg-blue-600 hover:bg-blue-700 text-white font-medium py-3 px-4 rounded transition">
+            class="w-full bg-vouch-accent hover:bg-vouch-accent-hover text-white font-medium py-3 px-4 rounded-md transition-colors">
             Sign in with SSO
         </button>
     </form>
 
-    <p class="text-sm text-gray-400 mt-6">
+    <p class="text-sm text-gray-500 mt-6">
         Only authorized administrators can access this portal.
     </p>
     {% else %}
-    <p class="text-gray-600 mb-4">OIDC is not configured. Use a bootstrap token to access admin.</p>
+    <p class="text-gray-400 mb-4">OIDC is not configured. Use a bootstrap token to access admin.</p>
 
-    <p class="text-sm text-gray-400">
-        Set <code class="bg-gray-100 px-2 py-1 rounded">VOUCH_ADMIN_BOOTSTRAP_TOKEN</code> and visit<br>
-        <code class="bg-gray-100 px-2 py-1 rounded">/admin/setup?token=YOUR_TOKEN</code>
+    <p class="text-sm text-gray-500">
+        Set <code class="bg-vouch-raised px-2 py-1 rounded text-gray-300">VOUCH_ADMIN_BOOTSTRAP_TOKEN</code> and visit<br>
+        <code class="bg-vouch-raised px-2 py-1 rounded text-gray-300">/admin/setup?token=YOUR_TOKEN</code>
     </p>
     {% endif %}
 </div>

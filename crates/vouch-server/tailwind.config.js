@@ -4,22 +4,23 @@ export default {
     './templates/**/*.html',
     './src/**/*.rs',
   ],
-  darkMode: 'class',
   theme: {
     extend: {
       colors: {
-        // Vouch brand colors
         vouch: {
-          50: '#f5f3ff',
-          100: '#ede9fe',
-          200: '#ddd6fe',
-          300: '#c4b5fd',
-          400: '#a78bfa',
-          500: '#667eea',
-          600: '#5a67d8',
-          700: '#4c51bf',
-          800: '#434190',
-          900: '#3c366b',
+          bg: '#0f1b2d',
+          surface: '#1a2332',
+          raised: '#243040',
+          border: '#354150',
+          subtle: '#2a3544',
+          accent: '#539fe5',
+          'accent-hover': '#89bceb',
+          success: '#2ea043',
+          'success-bg': '#0d2818',
+          error: '#d73a49',
+          'error-bg': '#2d1214',
+          warning: '#d29922',
+          'warning-bg': '#2d2208',
         },
       },
       fontFamily: {

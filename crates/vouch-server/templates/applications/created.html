@@ -2,31 +2,29 @@
 
 {% block title %}Application Created - Vouch{% endblock %}
 
-{% block body_class %}min-h-screen bg-gray-100{% endblock %}
-
 {% block content %}
 <div class="max-w-2xl mx-auto p-6">
-    <div class="bg-white rounded-lg shadow p-6">
+    <div class="bg-vouch-surface border border-vouch-border rounded-lg p-6">
         <div class="text-center mb-6">
-            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-green-100">
-                <svg class="h-6 w-6 text-green-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div class="mx-auto flex items-center justify-center h-12 w-12 rounded-full bg-vouch-success-bg">
+                <svg class="h-6 w-6 text-vouch-success" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
                 </svg>
             </div>
-            <h1 class="mt-3 text-xl font-bold text-gray-900">Application Created</h1>
-            <p class="text-gray-600">{{ name }}</p>
+            <h1 class="mt-3 text-xl font-bold text-gray-200">Application Created</h1>
+            <p class="text-gray-400">{{ name }}</p>
         </div>
 
-        <div class="bg-yellow-50 border border-yellow-200 rounded-lg p-4 mb-6">
+        <div class="bg-vouch-warning-bg border border-vouch-warning rounded-lg p-4 mb-6">
             <div class="flex">
                 <div class="flex-shrink-0">
-                    <svg class="h-5 w-5 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+                    <svg class="h-5 w-5 text-vouch-warning" fill="currentColor" viewBox="0 0 20 20">
                         <path fill-rule="evenodd" d="M8.257 3.099c.765-1.36 2.722-1.36 3.486 0l5.58 9.92c.75 1.334-.213 2.98-1.742 2.98H4.42c-1.53 0-2.493-1.646-1.743-2.98l5.58-9.92zM11 13a1 1 0 11-2 0 1 1 0 012 0zm-1-8a1 1 0 00-1 1v3a1 1 0 002 0V6a1 1 0 00-1-1z" clip-rule="evenodd"/>
                     </svg>
                 </div>
                 <div class="ml-3">
-                    <h3 class="text-sm font-medium text-yellow-800">Save Your Credentials</h3>
-                    <p class="mt-1 text-sm text-yellow-700">
+                    <h3 class="text-sm font-medium text-gray-300">Save Your Credentials</h3>
+                    <p class="mt-1 text-sm text-gray-400">
                         {% if requires_secret %}
                         The client secret will only be shown once. Store it securely.
                         {% else %}
@@ -39,11 +37,11 @@
 
         <div class="space-y-4">
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Client ID</label>
+                <label class="block text-sm font-medium text-gray-300 mb-1">Client ID</label>
                 <div class="flex">
-                    <code class="flex-1 bg-gray-100 p-3 rounded-l-md font-mono text-sm break-all">{{ client_id }}</code>
-                    <button onclick="copyToClipboard('{{ client_id }}')" class="px-3 bg-gray-200 hover:bg-gray-300 rounded-r-md" title="Copy">
-                        <svg class="h-5 w-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <code class="flex-1 bg-vouch-raised border border-vouch-border p-3 rounded-l-md font-mono text-sm text-gray-300 break-all">{{ client_id }}</code>
+                    <button onclick="copyToClipboard('{{ client_id }}')" class="px-3 bg-vouch-raised border border-l-0 border-vouch-border hover:bg-vouch-border rounded-r-md transition-colors" title="Copy">
+                        <svg class="h-5 w-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
                         </svg>
                     </button>
@@ -54,11 +52,11 @@
             {% match client_secret %}
             {% when Some with (secret) %}
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Client Secret</label>
+                <label class="block text-sm font-medium text-gray-300 mb-1">Client Secret</label>
                 <div class="flex">
-                    <code class="flex-1 bg-gray-100 p-3 rounded-l-md font-mono text-sm break-all">{{ secret }}</code>
-                    <button onclick="copyToClipboard('{{ secret }}')" class="px-3 bg-gray-200 hover:bg-gray-300 rounded-r-md" title="Copy">
-                        <svg class="h-5 w-5 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <code class="flex-1 bg-vouch-raised border border-vouch-border p-3 rounded-l-md font-mono text-sm text-gray-300 break-all">{{ secret }}</code>
+                    <button onclick="copyToClipboard('{{ secret }}')" class="px-3 bg-vouch-raised border border-l-0 border-vouch-border hover:bg-vouch-border rounded-r-md transition-colors" title="Copy">
+                        <svg class="h-5 w-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
                         </svg>
                     </button>
@@ -69,13 +67,13 @@
             {% endif %}
 
             <div>
-                <label class="block text-sm font-medium text-gray-700 mb-1">Application Type</label>
-                <p class="text-sm text-gray-900">{{ application_type }}</p>
+                <label class="block text-sm font-medium text-gray-300 mb-1">Application Type</label>
+                <p class="text-sm text-gray-200">{{ application_type }}</p>
             </div>
         </div>
 
         <div class="mt-8 flex justify-center">
-            <a href="/applications" class="px-6 py-2 bg-vouch-600 hover:bg-vouch-700 text-white rounded-md text-sm font-medium">
+            <a href="/applications" class="px-6 py-2 bg-vouch-accent hover:bg-vouch-accent-hover text-white rounded-md text-sm font-medium transition-colors">
                 View All Applications
             </a>
         </div>

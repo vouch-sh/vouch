@@ -3,56 +3,80 @@
 {% block title %}Developer Setup - Vouch{% endblock %}
 
 {% block content %}
-<div class="flex items-center justify-center min-h-screen p-5">
+<div class="flex items-center justify-center flex-1 p-5">
     <div class="card max-w-xl w-full">
-        <a href="/" class="inline-flex items-center gap-1.5 text-vouch-500 text-sm mb-6 hover:underline">&larr; Back to home</a>
-        <h1 class="text-3xl font-bold text-gray-900 mb-2">Get Started with Vouch</h1>
-        <p class="text-gray-600 mb-8">Install the CLI and enroll your YubiKey</p>
+        <a href="/" class="inline-flex items-center gap-1.5 text-vouch-accent text-sm mb-6 hover:text-vouch-accent-hover">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+            Back to home
+        </a>
+        <h1 class="text-3xl font-bold text-gray-200 mb-2">Get Started with Vouch</h1>
+        <p class="text-gray-400 mb-8">Install the CLI and enroll your YubiKey</p>
 
         <!-- Step 1: Install the CLI -->
         <div class="mb-8">
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">1</span>
-                <span class="text-lg font-semibold text-gray-900">Install the CLI</span>
+                <span class="text-lg font-semibold text-gray-200">Install the CLI</span>
             </div>
             <div class="ml-11">
                 <div class="flex gap-2 mb-2">
                     <button class="tab tab-active" onclick="showTab('macos')">macOS</button>
-                    <button class="tab" onclick="showTab('linux')">Linux</button>
+                    <button class="tab" onclick="showTab('apt')">Debian / Ubuntu</button>
+                    <button class="tab" onclick="showTab('rpm')">Fedora / RHEL</button>
                 </div>
 
                 <div id="macos-tab" class="tab-content">
                     <div class="code-block relative">
                         <span class="text-gray-500 mr-2">$</span>brew install vouch-sh/tap/vouch
-                        <button onclick="copyCommand('brew install vouch-sh/tap/vouch')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-gray-700 text-gray-400 rounded text-xs hover:bg-gray-600 hover:text-white transition-colors">Copy</button>
+                        <button onclick="copyCommand('brew install vouch-sh/tap/vouch')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
                     </div>
                 </div>
 
-                <div id="linux-tab" class="tab-content hidden">
-                    <div class="code-block relative">
-                        <span class="text-gray-500 mr-2">$</span>curl -fsSL https://vouch.sh/install.sh | sh
-                        <button onclick="copyCommand('curl -fsSL https://vouch.sh/install.sh | sh')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-gray-700 text-gray-400 rounded text-xs hover:bg-gray-600 hover:text-white transition-colors">Copy</button>
+                <div id="apt-tab" class="tab-content hidden">
+                    <div class="code-block text-sm space-y-1">
+                        <div class="text-gray-500"># Import GPG key</div>
+                        <div>curl -fsSL https://packages.vouch.sh/gpg/vouch.asc \</div>
+                        <div class="pl-4">| gpg --dearmor \</div>
+                        <div class="pl-4">| sudo tee /usr/share/keyrings/vouch-archive-keyring.gpg &gt; /dev/null</div>
+                        <div class="mt-2 text-gray-500"># Add repository</div>
+                        <div>echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/vouch-archive-keyring.gpg] https://packages.vouch.sh/apt stable main" \</div>
+                        <div class="pl-4">| sudo tee /etc/apt/sources.list.d/vouch.list &gt; /dev/null</div>
+                        <div class="mt-2 text-gray-500"># Install</div>
+                        <div>sudo apt-get update &amp;&amp; sudo apt-get install -y vouch</div>
+                    </div>
+                </div>
+
+                <div id="rpm-tab" class="tab-content hidden">
+                    <div class="code-block text-sm space-y-1">
+                        <div class="text-gray-500"># Add repository</div>
+                        <div>sudo tee /etc/yum.repos.d/vouch.repo &lt;&lt; 'EOF'</div>
+                        <div>[vouch]</div>
+                        <div>name=Vouch</div>
+                        <div>baseurl=https://packages.vouch.sh/rpm/$basearch/</div>
+                        <div>gpgcheck=1</div>
+                        <div>gpgkey=https://packages.vouch.sh/gpg/vouch.asc</div>
+                        <div>enabled=1</div>
+                        <div>EOF</div>
+                        <div class="mt-2 text-gray-500"># Install</div>
+                        <div>sudo dnf install -y vouch</div>
                     </div>
                 </div>
 
                 {% if has_downloads %}
-                <p class="mt-4 text-sm text-gray-600">Or download directly:</p>
+                <p class="mt-4 text-sm text-gray-400">Or download directly:</p>
                 <div class="flex flex-wrap gap-3 mt-4">
                     {% if let Some(url) = download_macos %}
                     <a href="{{ url }}" class="download-btn">
-                        <span>&#x1F34E;</span>
                         <span>macOS</span>
                     </a>
                     {% endif %}
                     {% if let Some(url) = download_linux %}
                     <a href="{{ url }}" class="download-btn">
-                        <span>&#x1F427;</span>
                         <span>Linux</span>
                     </a>
                     {% endif %}
                     {% if let Some(url) = download_windows %}
                     <a href="{{ url }}" class="download-btn">
-                        <span>&#x1FA9F;</span>
                         <span>Windows</span>
                     </a>
                     {% endif %}
@@ -65,14 +89,14 @@
         <div class="mb-8">
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">2</span>
-                <span class="text-lg font-semibold text-gray-900">Enroll your YubiKey</span>
+                <span class="text-lg font-semibold text-gray-200">Enroll your YubiKey</span>
             </div>
             <div class="ml-11">
                 <div class="code-block relative">
                     <span class="text-gray-500 mr-2">$</span>vouch enroll --server &lt;your-company-url&gt;
-                    <button onclick="copyCommand('vouch enroll --server ')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-gray-700 text-gray-400 rounded text-xs hover:bg-gray-600 hover:text-white transition-colors">Copy</button>
+                    <button onclick="copyCommand('vouch enroll --server ')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
                 </div>
-                <p class="mt-2 text-sm text-gray-600">Your admin will give you the URL. This opens a browser to verify your identity and register your YubiKey.</p>
+                <p class="mt-2 text-sm text-gray-400">Your admin will give you the URL. This opens a browser to verify your identity and register your YubiKey.</p>
             </div>
         </div>
 
@@ -80,7 +104,7 @@
         <div>
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">3</span>
-                <span class="text-lg font-semibold text-gray-900">Daily login</span>
+                <span class="text-lg font-semibold text-gray-200">Daily login</span>
             </div>
             <div class="ml-11">
                 <div class="code-block">
@@ -88,9 +112,9 @@
                     <div><span class="text-gray-500">$</span> vouch login</div>
                     <div>Enter PIN: ****</div>
                     <div>Touch your YubiKey...</div>
-                    <div class="text-blue-400">&#x2713; Authenticated for 8 hours</div>
+                    <div class="text-vouch-accent">&#x2713; Authenticated for 8 hours</div>
                 </div>
-                <p class="mt-2 text-sm text-gray-600">After login, your identity is available to SSH, AWS, Git, and other tools automatically.</p>
+                <p class="mt-2 text-sm text-gray-400">After login, your identity is available to SSH, AWS, Git, and other tools automatically.</p>
             </div>
         </div>
     </div>

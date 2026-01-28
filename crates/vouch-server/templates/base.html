@@ -7,8 +7,11 @@
     <title>{% block title %}Vouch{% endblock %}</title>
     {% block head %}{% endblock %}
 </head>
-<body class="{% block body_class %}min-h-screen bg-gradient-to-br from-vouch-500 to-purple-600{% endblock %}">
-    {% block content %}{% endblock %}
+<body class="{% block body_class %}min-h-screen flex flex-col bg-vouch-bg text-gray-300{% endblock %}">
+    <main class="flex-1 flex flex-col">
+        {% block content %}{% endblock %}
+    </main>
+    <footer class="py-6 text-center text-xs text-gray-500">Copyright 2026 Smoke Turner, LLC</footer>
     {% block scripts %}{% endblock %}
 </body>
 </html>

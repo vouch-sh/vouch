@@ -299,6 +299,8 @@ async fn main() -> Result<()> {
             "/static",
             ServeDir::new(if std::path::Path::new("/static").exists() {
                 "/static"
+            } else if std::path::Path::new("crates/vouch-server/static").exists() {
+                "crates/vouch-server/static"
             } else {
                 "static"
             }),

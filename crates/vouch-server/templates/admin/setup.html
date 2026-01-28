@@ -4,12 +4,12 @@
 
 {% block content %}
 <div class="card mb-6">
-    <h1 class="text-2xl font-bold text-gray-900 mb-2">Vouch Admin Setup</h1>
-    <p class="text-gray-600">Configure your Vouch server for external identity provider authentication.</p>
+    <h1 class="text-2xl font-bold text-gray-200 mb-2">Vouch Admin Setup</h1>
+    <p class="text-gray-400">Configure your Vouch server for external identity provider authentication.</p>
 </div>
 
 <div class="card mb-6">
-    <h2 class="text-lg font-semibold text-gray-900 mb-4">
+    <h2 class="text-lg font-semibold text-gray-200 mb-4">
         Identity Provider Configuration
         {% if oidc_configured %}
         <span class="badge badge-success ml-2">Configured</span>
@@ -21,10 +21,10 @@
     <div class="mb-6">
         <div class="flex items-center gap-3 mb-3">
             <span class="step-number">1</span>
-            <span class="font-semibold text-gray-900">Create OAuth App in Your IdP</span>
+            <span class="font-semibold text-gray-200">Create OAuth App in Your IdP</span>
         </div>
-        <p class="text-sm text-gray-600 ml-11 mb-2">Create an OAuth 2.0 / OIDC application in your identity provider and configure this redirect URI:</p>
-        <div class="ml-11 mt-2 bg-gray-50 border border-gray-200 rounded-lg px-4 py-3 font-mono text-sm break-all">
+        <p class="text-sm text-gray-400 ml-11 mb-2">Create an OAuth 2.0 / OIDC application in your identity provider and configure this redirect URI:</p>
+        <div class="ml-11 mt-2 bg-vouch-raised border border-vouch-border rounded-lg px-4 py-3 font-mono text-sm text-gray-300 break-all">
             {{ redirect_uri }}
         </div>
     </div>
@@ -32,11 +32,11 @@
     <div>
         <div class="flex items-center gap-3 mb-3">
             <span class="step-number">2</span>
-            <span class="font-semibold text-gray-900">Enter Configuration</span>
+            <span class="font-semibold text-gray-200">Enter Configuration</span>
         </div>
         <form method="POST" action="/admin/setup/oidc?token={{ token }}" class="ml-11 space-y-4">
             <div>
-                <label for="idp_provider" class="block text-sm font-medium text-gray-700 mb-1.5">Identity Provider</label>
+                <label for="idp_provider" class="block text-sm font-medium text-gray-300 mb-1.5">Identity Provider</label>
                 <select id="idp_provider" name="idp_provider" class="input-field" onchange="toggleCustomIssuer()">
                     <option value="google" {% if current_idp == "google" %}selected{% endif %}>Google Workspace</option>
                     <option value="microsoft" {% if current_idp == "microsoft" %}selected{% endif %}>Microsoft Entra ID</option>
@@ -45,24 +45,24 @@
                 </select>
             </div>
             <div id="custom_issuer_container" style="display: {% if current_idp == "custom" %}block{% elif current_idp == "okta" %}block{% else %}none{% endif %}">
-                <label for="custom_issuer" class="block text-sm font-medium text-gray-700 mb-1.5">OIDC Issuer URL</label>
+                <label for="custom_issuer" class="block text-sm font-medium text-gray-300 mb-1.5">OIDC Issuer URL</label>
                 <input type="url" id="custom_issuer" name="custom_issuer" placeholder="https://your-idp.example.com" value="{{ current_issuer }}" class="input-field">
                 <p class="text-xs text-gray-500 mt-1">The issuer URL from your OIDC provider's discovery document.</p>
             </div>
             <div>
-                <label for="client_id" class="block text-sm font-medium text-gray-700 mb-1.5">Client ID</label>
+                <label for="client_id" class="block text-sm font-medium text-gray-300 mb-1.5">Client ID</label>
                 <input type="text" id="client_id" name="client_id" placeholder="Your OAuth client ID" value="{{ current_client_id }}" required class="input-field font-mono">
             </div>
             <div>
-                <label for="client_secret" class="block text-sm font-medium text-gray-700 mb-1.5">Client Secret</label>
+                <label for="client_secret" class="block text-sm font-medium text-gray-300 mb-1.5">Client Secret</label>
                 <input type="password" id="client_secret" name="client_secret" placeholder="Your OAuth client secret" required class="input-field font-mono">
             </div>
             <div>
-                <label for="org_name" class="block text-sm font-medium text-gray-700 mb-1.5">Organization Name (optional)</label>
+                <label for="org_name" class="block text-sm font-medium text-gray-300 mb-1.5">Organization Name (optional)</label>
                 <input type="text" id="org_name" name="org_name" placeholder="Acme Corp" value="{{ current_org }}" class="input-field">
             </div>
             <div>
-                <label for="allowed_domains" class="block text-sm font-medium text-gray-700 mb-1.5">Allowed Email Domains (optional, comma-separated)</label>
+                <label for="allowed_domains" class="block text-sm font-medium text-gray-300 mb-1.5">Allowed Email Domains (optional, comma-separated)</label>
                 <input type="text" id="allowed_domains" name="allowed_domains" placeholder="company.com, subsidiary.com" value="{{ current_domains }}" class="input-field">
             </div>
             <button type="submit" class="btn-primary">Save Configuration</button>
@@ -71,8 +71,8 @@
 </div>
 
 <div class="card mb-6">
-    <h2 class="text-lg font-semibold text-gray-900 mb-4">Test Configuration</h2>
-    <p class="text-gray-600 text-sm mb-4">Verify your OIDC settings work correctly before enabling.</p>
+    <h2 class="text-lg font-semibold text-gray-200 mb-4">Test Configuration</h2>
+    <p class="text-gray-400 text-sm mb-4">Verify your OIDC settings work correctly before enabling.</p>
     <form method="POST" action="/admin/setup/test?token={{ token }}">
         <input type="hidden" name="client_id" value="{{ current_client_id }}">
         <input type="hidden" name="client_secret" value="">
@@ -81,11 +81,11 @@
 </div>
 
 <div class="card">
-    <h2 class="text-lg font-semibold text-gray-900 mb-4">Provider Setup Guides</h2>
-    <ul class="text-sm text-gray-600 space-y-2">
-        <li><a href="https://console.cloud.google.com/apis/credentials" target="_blank" class="text-vouch-500 hover:underline">Google Cloud Console</a> - Create an OAuth 2.0 Client ID (Web application)</li>
-        <li><a href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" class="text-vouch-500 hover:underline">Microsoft Azure Portal</a> - Register an application in Entra ID</li>
-        <li><a href="https://developer.okta.com/docs/guides/sign-into-web-app/aspnet/main/" target="_blank" class="text-vouch-500 hover:underline">Okta Developer Docs</a> - Create an OIDC Web Application</li>
+    <h2 class="text-lg font-semibold text-gray-200 mb-4">Provider Setup Guides</h2>
+    <ul class="text-sm text-gray-400 space-y-2">
+        <li><a href="https://console.cloud.google.com/apis/credentials" target="_blank" class="text-vouch-accent hover:text-vouch-accent-hover">Google Cloud Console</a> - Create an OAuth 2.0 Client ID (Web application)</li>
+        <li><a href="https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade" target="_blank" class="text-vouch-accent hover:text-vouch-accent-hover">Microsoft Azure Portal</a> - Register an application in Entra ID</li>
+        <li><a href="https://developer.okta.com/docs/guides/sign-into-web-app/aspnet/main/" target="_blank" class="text-vouch-accent hover:text-vouch-accent-hover">Okta Developer Docs</a> - Create an OIDC Web Application</li>
     </ul>
 </div>
 

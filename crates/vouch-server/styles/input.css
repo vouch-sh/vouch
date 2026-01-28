@@ -1,22 +1,22 @@
 @import "tailwindcss";
 @config "../tailwind.config.js";
 
-/* Custom Vouch styles */
+/* Custom Vouch styles — dark-mode-only, flat design */
 @layer components {
   .code-block {
-    @apply bg-gray-900 text-green-400 p-4 rounded-lg font-mono text-sm overflow-x-auto;
+    @apply bg-[#0a1220] text-gray-300 p-4 rounded-md font-mono text-sm overflow-x-auto border border-vouch-subtle;
   }
 
   .btn-primary {
-    @apply inline-block px-6 py-3 bg-gradient-to-r from-vouch-500 to-purple-600 text-white font-semibold rounded-lg shadow-lg hover:shadow-xl transform hover:-translate-y-0.5 transition-all duration-200;
+    @apply inline-block px-6 py-3 bg-vouch-accent text-white font-medium rounded-md hover:bg-vouch-accent-hover transition-colors;
   }
 
   .btn-secondary {
-    @apply inline-block px-6 py-3 bg-gray-600 text-white font-semibold rounded-lg hover:bg-gray-700 transition-colors duration-200;
+    @apply inline-block px-6 py-3 border border-vouch-border text-gray-300 rounded-md hover:bg-vouch-raised transition-colors;
   }
 
   .btn-danger {
-    @apply inline-block px-4 py-2 bg-red-600 text-white font-medium rounded-lg hover:bg-red-700 transition-colors duration-200;
+    @apply inline-block px-4 py-2 bg-vouch-error text-white rounded-md hover:opacity-90 transition-colors;
   }
 
   .btn-small {
@@ -24,89 +24,74 @@
   }
 
   .card {
-    @apply bg-white rounded-2xl p-8 shadow-xl;
-  }
-
-  .card-dark {
-    @apply bg-gray-800 rounded-2xl p-8 shadow-xl;
+    @apply bg-vouch-surface border border-vouch-border rounded-lg p-8;
   }
 
   .input-field {
-    @apply w-full px-4 py-3 border-2 border-gray-200 rounded-lg text-base focus:outline-none focus:border-vouch-500 transition-colors duration-200;
+    @apply w-full px-4 py-3 bg-vouch-raised border border-vouch-border text-gray-200 rounded-md focus:border-vouch-accent focus:outline-none transition-colors;
   }
 
   .input-code {
-    @apply w-full px-4 py-4 text-2xl text-center font-mono uppercase tracking-widest border-2 border-gray-200 rounded-lg focus:outline-none focus:border-vouch-500 transition-colors duration-200;
+    @apply w-full px-4 py-4 text-2xl text-center font-mono uppercase tracking-widest bg-vouch-raised border border-vouch-border text-gray-200 rounded-md focus:border-vouch-accent focus:outline-none transition-colors;
   }
 
   .status-waiting {
-    @apply p-5 rounded-lg bg-blue-50 text-blue-700;
+    @apply bg-vouch-surface border border-vouch-border text-gray-300 p-5 rounded-lg;
   }
 
   .status-success {
-    @apply p-5 rounded-lg bg-green-50 text-green-700;
+    @apply bg-vouch-success-bg border border-vouch-success text-vouch-success p-5 rounded-lg;
   }
 
   .status-error {
-    @apply p-5 rounded-lg bg-red-50 text-red-700;
+    @apply bg-vouch-error-bg border border-vouch-error text-vouch-error p-5 rounded-lg;
   }
 
   .alert-success {
-    @apply p-4 rounded-lg bg-green-100 text-green-800;
+    @apply bg-vouch-success-bg border-l-4 border-vouch-success text-gray-300 p-4 rounded-r-lg;
   }
 
   .alert-error {
-    @apply p-4 rounded-lg bg-red-100 text-red-800;
+    @apply bg-vouch-error-bg border-l-4 border-vouch-error text-gray-300 p-4 rounded-r-lg;
   }
 
   .alert-warning {
-    @apply p-4 rounded-lg bg-yellow-100 text-yellow-800;
+    @apply bg-vouch-warning-bg border-l-4 border-vouch-warning text-gray-300 p-4 rounded-r-lg;
   }
 
   .step-number {
-    @apply inline-flex items-center justify-center w-8 h-8 bg-gradient-to-r from-vouch-500 to-purple-600 text-white rounded-full font-semibold text-sm;
+    @apply inline-flex items-center justify-center w-8 h-8 border border-vouch-accent text-vouch-accent rounded-full font-semibold text-sm;
   }
 
   .feature-icon {
-    @apply text-2xl mb-2;
+    @apply text-vouch-accent mb-2;
   }
 
   .download-btn {
-    @apply inline-flex items-center gap-2 px-5 py-3 bg-gray-100 border-2 border-gray-200 rounded-lg font-medium text-gray-700 hover:border-vouch-500 hover:bg-vouch-50 transition-all duration-200;
+    @apply inline-flex items-center gap-2 px-5 py-3 border border-vouch-border rounded-md text-gray-300 hover:border-vouch-accent hover:text-vouch-accent transition-colors;
   }
 
   .persona-card {
-    @apply block border-2 border-gray-200 rounded-xl p-8 text-center transition-all duration-200 cursor-pointer no-underline text-inherit hover:border-vouch-500 hover:bg-vouch-50 hover:-translate-y-0.5 hover:shadow-lg;
+    @apply block border border-vouch-border rounded-lg p-8 text-center transition-colors cursor-pointer no-underline text-inherit hover:border-vouch-accent hover:bg-vouch-raised;
   }
 
   .tab {
-    @apply px-4 py-2 border-none bg-gray-100 rounded-t-lg cursor-pointer text-sm text-gray-600;
+    @apply px-4 py-2 border-b-2 border-transparent text-gray-400 cursor-pointer text-sm;
   }
 
   .tab-active {
-    @apply bg-gray-900 text-green-400;
+    @apply border-vouch-accent text-vouch-accent;
   }
 
   .badge {
-    @apply inline-block px-2 py-0.5 rounded-full text-xs font-medium;
+    @apply inline-block px-2 py-0.5 rounded text-xs font-medium;
   }
 
   .badge-success {
-    @apply bg-green-100 text-green-800;
+    @apply bg-vouch-success-bg text-vouch-success;
   }
 
   .badge-warning {
-    @apply bg-yellow-100 text-yellow-800;
-  }
-}
-
-/* Dark mode styles */
-@layer utilities {
-  .dark .card {
-    @apply bg-gray-800 text-white;
-  }
-
-  .dark .input-field {
-    @apply bg-gray-700 border-gray-600 text-white;
+    @apply bg-vouch-warning-bg text-vouch-warning;
   }
 }

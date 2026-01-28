@@ -3,76 +3,79 @@
 {% block title %}Admin Setup - Vouch{% endblock %}
 
 {% block content %}
-<div class="flex items-center justify-center min-h-screen p-5">
+<div class="flex items-center justify-center flex-1 p-5">
     <div class="card max-w-2xl w-full">
-        <a href="/" class="inline-flex items-center gap-1.5 text-vouch-500 text-sm mb-6 hover:underline">&larr; Back to home</a>
-        <h1 class="text-3xl font-bold text-gray-900 mb-2">Set Up Vouch for Your Team</h1>
-        <p class="text-gray-600 mb-8">Get hardware-backed authentication running in minutes</p>
+        <a href="/" class="inline-flex items-center gap-1.5 text-vouch-accent text-sm mb-6 hover:text-vouch-accent-hover">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+            Back to home
+        </a>
+        <h1 class="text-3xl font-bold text-gray-200 mb-2">Set Up Vouch for Your Team</h1>
+        <p class="text-gray-400 mb-8">Get hardware-backed authentication running in minutes</p>
 
         <!-- Step 1: Choose Your Path -->
-        <div class="mb-8 pb-8 border-b border-gray-200">
+        <div class="mb-8 pb-8 border-b border-vouch-border">
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">1</span>
-                <span class="text-lg font-semibold text-gray-900">Choose Your Path</span>
+                <span class="text-lg font-semibold text-gray-200">Choose Your Path</span>
             </div>
             <div class="ml-11">
                 <div class="grid md:grid-cols-2 gap-4 mb-4">
-                    <div class="path-option border-2 border-gray-200 rounded-lg p-5 cursor-pointer hover:border-vouch-500 hover:bg-vouch-50 transition-all" onclick="selectPath('cloud')">
-                        <h3 class="font-semibold text-gray-900 mb-2">
-                            &#x2601;&#xFE0F; Vouch Cloud
-                            <span class="inline-block bg-green-400 text-green-900 text-xs px-2 py-0.5 rounded ml-2 font-medium">Recommended</span>
+                    <div class="path-option border border-vouch-border rounded-lg p-5 cursor-pointer hover:border-vouch-accent hover:bg-vouch-raised transition-colors" onclick="selectPath('cloud')">
+                        <h3 class="font-semibold text-gray-200 mb-2">
+                            Vouch Cloud
+                            <span class="inline-block bg-vouch-success-bg text-vouch-success text-xs px-2 py-0.5 rounded ml-2 font-medium">Recommended</span>
                         </h3>
-                        <p class="text-sm text-gray-600">We handle the server. You verify your domain. 5 minutes to first user.</p>
+                        <p class="text-sm text-gray-400">We handle the server. You verify your domain. 5 minutes to first user.</p>
                     </div>
-                    <div class="path-option border-2 border-gray-200 rounded-lg p-5 cursor-pointer hover:border-vouch-500 hover:bg-vouch-50 transition-all" onclick="selectPath('selfhost')">
-                        <h3 class="font-semibold text-gray-900 mb-2">&#x1F3E2; Self-Hosted</h3>
-                        <p class="text-sm text-gray-600">Deploy on your own infrastructure. Docker or Kubernetes. 15-30 minutes setup.</p>
+                    <div class="path-option border border-vouch-border rounded-lg p-5 cursor-pointer hover:border-vouch-accent hover:bg-vouch-raised transition-colors" onclick="selectPath('selfhost')">
+                        <h3 class="font-semibold text-gray-200 mb-2">Self-Hosted</h3>
+                        <p class="text-sm text-gray-400">Deploy on your own infrastructure. Docker or Kubernetes. 15-30 minutes setup.</p>
                     </div>
                 </div>
 
-                <div id="cloud-section" class="hidden bg-gray-50 rounded-lg p-5 text-sm">
-                    <p class="font-semibold mb-4">Vouch Cloud is coming soon. Join the waitlist:</p>
+                <div id="cloud-section" class="hidden bg-vouch-raised rounded-lg p-5 text-sm">
+                    <p class="font-semibold text-gray-300 mb-4">Vouch Cloud is coming soon. Join the waitlist:</p>
                     <form class="mt-4">
                         <input type="email" placeholder="you@company.com" id="waitlist-email" class="input-field mb-4">
                         <button type="button" class="btn-primary" onclick="joinWaitlist()">Join Waitlist</button>
                     </form>
                 </div>
 
-                <div id="selfhost-section" class="hidden bg-gray-50 rounded-lg p-5 text-sm">
-                    <p class="font-semibold mb-3">Self-hosted deployment:</p>
-                    <ol class="list-decimal list-inside space-y-2 text-gray-600">
-                        <li>Clone the repository: <code class="bg-gray-200 px-1.5 py-0.5 rounded font-mono text-xs">git clone https://github.com/vouch-sh/vouch</code></li>
-                        <li>Copy <code class="bg-gray-200 px-1.5 py-0.5 rounded font-mono text-xs">.env.example</code> to <code class="bg-gray-200 px-1.5 py-0.5 rounded font-mono text-xs">.env</code> and configure</li>
-                        <li>Run with Docker: <code class="bg-gray-200 px-1.5 py-0.5 rounded font-mono text-xs">docker compose up -d</code></li>
+                <div id="selfhost-section" class="hidden bg-vouch-raised rounded-lg p-5 text-sm">
+                    <p class="font-semibold text-gray-300 mb-3">Self-hosted deployment:</p>
+                    <ol class="list-decimal list-inside space-y-2 text-gray-400">
+                        <li>Clone the repository: <code class="bg-vouch-bg px-1.5 py-0.5 rounded font-mono text-xs text-gray-300">git clone https://github.com/vouch-sh/vouch</code></li>
+                        <li>Copy <code class="bg-vouch-bg px-1.5 py-0.5 rounded font-mono text-xs text-gray-300">.env.example</code> to <code class="bg-vouch-bg px-1.5 py-0.5 rounded font-mono text-xs text-gray-300">.env</code> and configure</li>
+                        <li>Run with Docker: <code class="bg-vouch-bg px-1.5 py-0.5 rounded font-mono text-xs text-gray-300">docker compose up -d</code></li>
                         <li>Configure your reverse proxy (nginx, Caddy, etc.)</li>
                     </ol>
-                    <p class="mt-4 text-gray-600">Then continue to Step 2 below to connect Google Workspace.</p>
+                    <p class="mt-4 text-gray-400">Then continue to Step 2 below to connect Google Workspace.</p>
                 </div>
             </div>
         </div>
 
         <!-- Step 2: Connect Google Workspace -->
-        <div class="mb-8 pb-8 border-b border-gray-200">
+        <div class="mb-8 pb-8 border-b border-vouch-border">
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">2</span>
-                <span class="text-lg font-semibold text-gray-900">Connect Google Workspace</span>
+                <span class="text-lg font-semibold text-gray-200">Connect Google Workspace</span>
             </div>
             <div class="ml-11">
-                <div class="bg-gray-50 rounded-lg p-5 text-sm mb-5">
-                    <p class="font-semibold mb-3">Create OAuth credentials in Google Cloud Console:</p>
-                    <ol class="list-decimal list-inside space-y-2 text-gray-600">
-                        <li>Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank" class="text-vouch-500 hover:underline">console.cloud.google.com/apis/credentials</a></li>
+                <div class="bg-vouch-raised rounded-lg p-5 text-sm mb-5">
+                    <p class="font-semibold text-gray-300 mb-3">Create OAuth credentials in Google Cloud Console:</p>
+                    <ol class="list-decimal list-inside space-y-2 text-gray-400">
+                        <li>Go to <a href="https://console.cloud.google.com/apis/credentials" target="_blank" class="text-vouch-accent hover:text-vouch-accent-hover">console.cloud.google.com/apis/credentials</a></li>
                         <li>Create a new project (or select existing) and name it "Vouch"</li>
                         <li>Configure OAuth consent screen:
                             <ul class="list-disc list-inside ml-4 mt-1 mb-1">
-                                <li>User Type: <strong>Internal</strong> (your org only)</li>
-                                <li>Scopes: <code class="bg-gray-200 px-1 rounded font-mono text-xs">openid</code>, <code class="bg-gray-200 px-1 rounded font-mono text-xs">email</code>, <code class="bg-gray-200 px-1 rounded font-mono text-xs">profile</code></li>
+                                <li>User Type: <strong class="text-gray-300">Internal</strong> (your org only)</li>
+                                <li>Scopes: <code class="bg-vouch-bg px-1 rounded font-mono text-xs text-gray-300">openid</code>, <code class="bg-vouch-bg px-1 rounded font-mono text-xs text-gray-300">email</code>, <code class="bg-vouch-bg px-1 rounded font-mono text-xs text-gray-300">profile</code></li>
                             </ul>
                         </li>
                         <li>Create OAuth 2.0 Client ID:
                             <ul class="list-disc list-inside ml-4 mt-1 mb-1">
-                                <li>Type: <strong>Web application</strong></li>
-                                <li>Redirect URI: <code class="bg-gray-200 px-1 rounded font-mono text-xs">{{ server_url }}/oauth/callback</code></li>
+                                <li>Type: <strong class="text-gray-300">Web application</strong></li>
+                                <li>Redirect URI: <code class="bg-vouch-bg px-1 rounded font-mono text-xs text-gray-300">{{ server_url }}/oauth/callback</code></li>
                             </ul>
                         </li>
                         <li>Copy Client ID and Client Secret</li>
@@ -81,19 +84,19 @@
 
                 <form action="/admin/setup/oidc" method="POST" class="space-y-4">
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1.5">OIDC Issuer URL</label>
+                        <label class="block text-sm font-medium text-gray-300 mb-1.5">OIDC Issuer URL</label>
                         <input type="url" name="issuer" value="https://accounts.google.com" required class="input-field">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1.5">Client ID</label>
+                        <label class="block text-sm font-medium text-gray-300 mb-1.5">Client ID</label>
                         <input type="text" name="client_id" placeholder="xxxx.apps.googleusercontent.com" required class="input-field font-mono">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1.5">Client Secret</label>
+                        <label class="block text-sm font-medium text-gray-300 mb-1.5">Client Secret</label>
                         <input type="password" name="client_secret" placeholder="GOCSPX-xxxx" required class="input-field font-mono">
                     </div>
                     <div>
-                        <label class="block text-sm font-medium text-gray-700 mb-1.5">Allowed Domain (optional)</label>
+                        <label class="block text-sm font-medium text-gray-300 mb-1.5">Allowed Domain (optional)</label>
                         <input type="text" name="allowed_domain" placeholder="yourcompany.com" class="input-field">
                         <p class="mt-1.5 text-xs text-gray-500">Restrict enrollment to this email domain</p>
                     </div>
@@ -106,16 +109,16 @@
         <div>
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">3</span>
-                <span class="text-lg font-semibold text-gray-900">Invite Your Team</span>
+                <span class="text-lg font-semibold text-gray-200">Invite Your Team</span>
             </div>
             <div class="ml-11">
-                <div class="bg-green-50 border-2 border-green-400 rounded-lg p-5">
-                    <h3 class="font-semibold text-green-800 mb-3">Share this with your team:</h3>
+                <div class="bg-vouch-success-bg border border-vouch-success rounded-lg p-5">
+                    <h3 class="font-semibold text-gray-300 mb-3">Share this with your team:</h3>
                     <div class="code-block relative">
                         <span class="text-gray-500 mr-2">$</span>vouch enroll --server {{ server_url }}
-                        <button onclick="copyCommand('vouch enroll --server {{ server_url }}')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-gray-700 text-gray-400 rounded text-xs hover:bg-gray-600 hover:text-white transition-colors">Copy</button>
+                        <button onclick="copyCommand('vouch enroll --server {{ server_url }}')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
                     </div>
-                    <p class="mt-3 text-sm text-gray-600">Or send them directly to: <strong>{{ server_url }}</strong></p>
+                    <p class="mt-3 text-sm text-gray-400">Or send them directly to: <strong class="text-gray-300">{{ server_url }}</strong></p>
                 </div>
             </div>
         </div>
@@ -127,11 +130,11 @@
 <script>
     function selectPath(path) {
         document.querySelectorAll('.path-option').forEach(el => {
-            el.classList.remove('border-vouch-500', 'bg-vouch-50');
-            el.classList.add('border-gray-200');
+            el.classList.remove('border-vouch-accent', 'bg-vouch-raised');
+            el.classList.add('border-vouch-border');
         });
-        event.currentTarget.classList.remove('border-gray-200');
-        event.currentTarget.classList.add('border-vouch-500', 'bg-vouch-50');
+        event.currentTarget.classList.remove('border-vouch-border');
+        event.currentTarget.classList.add('border-vouch-accent', 'bg-vouch-raised');
 
         document.getElementById('cloud-section').classList.toggle('hidden', path !== 'cloud');
         document.getElementById('selfhost-section').classList.toggle('hidden', path !== 'selfhost');
