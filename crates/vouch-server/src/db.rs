@@ -2302,7 +2302,6 @@ pub async fn touch_enrollment_session(pool: &SqlitePool, id: &str) -> Result<()>
 }
 
 /// Delete an enrollment session.
-#[allow(dead_code)]
 pub async fn delete_enrollment_session(pool: &SqlitePool, id: &str) -> Result<bool> {
     let result = sqlx::query("DELETE FROM enrollment_sessions WHERE id = ?")
         .bind(id)

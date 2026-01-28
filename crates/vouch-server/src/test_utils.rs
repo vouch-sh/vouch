@@ -133,6 +133,7 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         .route("/device", get(handlers::enroll::device_verify_page))
         .route("/device", post(handlers::enroll::device_verify_submit))
         .route("/oauth/callback", get(handlers::enroll::oidc_callback))
+        .route("/enroll/logout", post(handlers::enroll::enroll_logout))
         .route(
             "/enroll/webauthn/start",
             post(handlers::enroll::browser_register_start),

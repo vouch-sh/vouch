@@ -159,6 +159,7 @@ async fn main() -> Result<()> {
         )
         // Key management during enrollment (uses cookie for auth)
         .route("/enroll/keys", get(handlers::enroll::enroll_keys_page))
+        .route("/enroll/logout", post(handlers::enroll::enroll_logout))
         .route("/enroll/keys/api", get(handlers::enroll_keys::list_keys))
         .route(
             "/enroll/keys/{id}",

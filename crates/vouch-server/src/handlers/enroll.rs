@@ -172,6 +172,15 @@ async fn create_enrollment_session_cookie(
     ))
 }
 
+/// Clear the enrollment session cookie.
+/// Returns the Set-Cookie header value that expires the cookie.
+fn clear_enrollment_cookie() -> String {
+    format!(
+        "{}=; Path=/enroll; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
+        ENROLL_COOKIE_NAME
+    )
+}
+
 /// Get enrollment session from cookie.
 /// Returns the session if valid, None otherwise.
 pub async fn get_enrollment_session_from_cookie(
@@ -329,7 +338,6 @@ pub struct OidcCallbackParams {
 #[derive(Debug, Deserialize)]
 struct OidcTokenResponse {
     id_token: String,
-    #[allow(dead_code)]
     access_token: String,
 }
 
@@ -385,6 +393,43 @@ impl BrowserRegistrationState {
             &validation,
         )?;
         Ok(data.claims)
+    }
+}
+
+// ============================================================================
+// OIDC Token Revocation
+// ============================================================================
+
+/// Best-effort revocation of an upstream OIDC access token (RFC 7009).
+///
+/// Uses the same Google endpoint derivation pattern as `oidc_callback`
+/// (replacing `accounts.google.com` with `oauth2.googleapis.com`).
+async fn revoke_oidc_access_token(oidc_issuer: &str, access_token: &str) {
+    let revocation_url = format!(
+        "{}/revoke",
+        oidc_issuer.replace("accounts.google.com", "oauth2.googleapis.com")
+    );
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_default();
+
+    match client
+        .post(&revocation_url)
+        .form(&[("token", access_token)])
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::info!("Revoked upstream OIDC access token");
+        }
+        Ok(resp) => {
+            tracing::warn!("OIDC token revocation returned status: {}", resp.status());
+        }
+        Err(e) => {
+            tracing::warn!("Failed to revoke OIDC access token: {}", e);
+        }
     }
 }
 
@@ -540,7 +585,7 @@ pub async fn device_verify_submit(
     // Build redirect URL
     let redirect_uri = format!("{}/oauth/callback", state.config.verification_base_url);
     let auth_url = format!(
-        "{}/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email&state={}&nonce={}",
+        "{}/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email&state={}&nonce={}&prompt=login",
         oidc_issuer,
         urlencoding::encode(client_id),
         urlencoding::encode(&redirect_uri),
@@ -747,6 +792,14 @@ pub async fn oidc_callback(
         .into_response();
     }
 
+    // Revoke the upstream OIDC access token immediately — we only need the id_token claims.
+    // This minimizes the window where the token is valid and avoids storing it.
+    let oidc_issuer_for_revoke = oidc_issuer.to_string();
+    let access_token_for_revoke = tokens.access_token.clone();
+    tokio::spawn(async move {
+        revoke_oidc_access_token(&oidc_issuer_for_revoke, &access_token_for_revoke).await;
+    });
+
     // Check domain restriction
     if let Some(domains) = &state.config.allowed_domains {
         let email_domain = claims.email.split('@').nth(1).unwrap_or("");
@@ -872,6 +925,29 @@ pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, headers: Heade
         rp_id: state.config.rp_id.clone(),
     }
     .into_response()
+}
+
+/// Handle enrollment sign-out.
+/// POST /enroll/logout
+pub async fn enroll_logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+    // Get enrollment session from cookie and delete it
+    if let Some(session) = get_enrollment_session_from_cookie(&state, &headers).await {
+        if let Err(e) = db::delete_enrollment_session(&state.db, &session.id).await {
+            tracing::warn!(
+                "Failed to delete enrollment session during logout: {}",
+                e
+            );
+        }
+        tracing::info!("Enrollment logout: {}", session.user_email);
+    }
+
+    // Clear cookie and redirect to landing page
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, "/")
+        .header(header::SET_COOKIE, clear_enrollment_cookie())
+        .body(Body::empty())
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// Start browser-based `WebAuthn` registration.
@@ -1273,7 +1349,7 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
     // Google's OIDC authorization endpoint is /o/oauth2/v2/auth (not /authorize)
     let redirect_uri = format!("{}/oauth/callback", state.config.verification_base_url);
     let auth_url = format!(
-        "{}/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email&state={}&nonce={}",
+        "{}/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email&state={}&nonce={}&prompt=login",
         oidc_issuer,
         urlencoding::encode(client_id),
         urlencoding::encode(&redirect_uri),
