@@ -659,7 +659,7 @@ impl MockFidoDevice {
     #[must_use]
     pub fn new() -> Self {
         use ed25519_dalek::SigningKey;
-        use rand_core::OsRng;
+        use ssh_key::rand_core::OsRng;
 
         let signing_key = SigningKey::generate(&mut OsRng);
         let mut credential_id = vec![0u8; 32];

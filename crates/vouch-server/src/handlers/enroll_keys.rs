@@ -9,8 +9,9 @@ use crate::db;
 use axum::{
     Json,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
 };
+use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 use vouch_common::{
     ApiError, DeleteKeyResponse, KeyInfo, ListKeysResponse, RenameKeyRequest, RenameKeyResponse,
@@ -31,10 +32,10 @@ struct EnrollmentAuth {
 /// Validate enrollment session from cookie and extract user info.
 async fn validate_enrollment_cookie(
     state: &AppState,
-    headers: &HeaderMap,
+    jar: &CookieJar,
 ) -> Result<EnrollmentAuth, (StatusCode, Json<ApiError>)> {
     // Get enrollment session from cookie
-    let session = get_enrollment_session_from_cookie(state, headers)
+    let session = get_enrollment_session_from_cookie(state, jar)
         .await
         .ok_or_else(|| {
             json_error(
@@ -55,9 +56,9 @@ async fn validate_enrollment_cookie(
 /// Authentication is via cookie.
 pub async fn list_keys(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    jar: CookieJar,
 ) -> Result<Json<ListKeysResponse>, (StatusCode, Json<ApiError>)> {
-    let auth = validate_enrollment_cookie(&state, &headers).await?;
+    let auth = validate_enrollment_cookie(&state, &jar).await?;
 
     // Get all authenticators for this user
     let authenticators = db::get_authenticators_for_user(&state.db, &auth.user_id)
@@ -98,11 +99,11 @@ pub async fn list_keys(
 /// Authentication is via cookie.
 pub async fn rename_key(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    jar: CookieJar,
     Path(key_id): Path<String>,
     Json(req): Json<RenameKeyRequest>,
 ) -> Result<Json<RenameKeyResponse>, (StatusCode, Json<ApiError>)> {
-    let auth = validate_enrollment_cookie(&state, &headers).await?;
+    let auth = validate_enrollment_cookie(&state, &jar).await?;
 
     // Validate name
     let name = req.name.trim();
@@ -170,10 +171,10 @@ pub async fn rename_key(
 /// Authentication is via cookie.
 pub async fn delete_key(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    jar: CookieJar,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, (StatusCode, Json<ApiError>)> {
-    let auth = validate_enrollment_cookie(&state, &headers).await?;
+    let auth = validate_enrollment_cookie(&state, &jar).await?;
 
     // Get the authenticator to verify ownership
     let authenticator = db::get_authenticator_by_id(&state.db, &key_id)

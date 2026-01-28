@@ -10,8 +10,10 @@ use axum::{
     extract::State,
     http::{HeaderMap, StatusCode, header},
 };
+use axum_extra::TypedHeader;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use headers::authorization::{Authorization, Bearer};
 use jiff::{Span, Timestamp};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use secrecy::ExposeSecret;
@@ -126,11 +128,11 @@ pub struct SessionClaims {
 /// additional keys via this endpoint after logging in with an existing key.
 pub async fn register_start(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     Json(req): Json<RegisterStartRequest>,
 ) -> Result<Json<RegisterStartResponse>, (StatusCode, Json<ApiError>)> {
     // Require authentication
-    let session = super::extract_session(&state, &headers).await?;
+    let session = super::extract_session(&state, auth_header).await?;
     let user_id = Uuid::parse_str(&session.claims.sub).map_err(|e| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,

@@ -5,6 +5,8 @@ use crate::AppState;
 use crate::db::{self, GitHubCredentialEventParams};
 use crate::github_app::{GitHubInstallationId, minimal_git_permissions};
 use axum::{Json, extract::State, http::StatusCode};
+use axum_extra::TypedHeader;
+use headers::authorization::{Authorization, Bearer};
 use jiff::{Span, Timestamp};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -25,11 +27,11 @@ use super::{extract_session_with_email, json_error};
 /// as a user certificate with principals extracted from the user's email.
 pub async fn issue_ssh_certificate(
     State(state): State<Arc<AppState>>,
-    headers: axum::http::HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     Json(request): Json<SshCertificateRequest>,
 ) -> Result<Json<SshCertificateResponse>, (StatusCode, Json<ApiError>)> {
     // Validate session
-    let (_claims, user_email) = extract_session_with_email(&state, &headers).await?;
+    let (_claims, user_email) = extract_session_with_email(&state, auth_header).await?;
 
     // Get SSH CA
     let ssh_ca = state.ssh_ca.as_ref().ok_or_else(|| {
@@ -222,10 +224,10 @@ struct AwsIdTokenClaims {
 /// The AWS IAM role must be configured to trust the Vouch OIDC provider.
 pub async fn get_aws_token(
     State(state): State<Arc<AppState>>,
-    headers: axum::http::HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
 ) -> Result<Json<AwsTokenResponse>, (StatusCode, Json<ApiError>)> {
     // Validate session
-    let (claims, user_email) = extract_session_with_email(&state, &headers).await?;
+    let (claims, user_email) = extract_session_with_email(&state, auth_header).await?;
 
     // Get authenticator info for AAGUID
     let authenticator = db::get_authenticator_by_id(&state.db, &claims.authenticator_id)
@@ -291,10 +293,10 @@ pub async fn get_aws_token(
 /// Returns whether GitHub is configured and connected for the user's organization.
 pub async fn get_github_status(
     State(state): State<Arc<AppState>>,
-    headers: axum::http::HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
 ) -> Result<Json<GitHubStatusResponse>, (StatusCode, Json<ApiError>)> {
     // Validate session
-    let session = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, auth_header).await?;
 
     // Get user
     let user = db::get_user_by_id(&state.db, &session.claims.sub)
@@ -345,11 +347,12 @@ pub async fn get_github_status(
 /// GitHub installation with minimal permissions (contents:write, metadata:read).
 pub async fn get_github_token(
     State(state): State<Arc<AppState>>,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     headers: axum::http::HeaderMap,
     Json(request): Json<GitHubTokenRequest>,
 ) -> Result<Json<GitHubTokenResponse>, (StatusCode, Json<ApiError>)> {
     // Validate session
-    let session = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, auth_header).await?;
 
     // Get user
     let user = db::get_user_by_id(&state.db, &session.claims.sub)

@@ -11,10 +11,12 @@ use aws_lc_rs::rand as aws_rand;
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
 };
+use axum_extra::TypedHeader;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use headers::authorization::{Authorization, Bearer};
 use serde::Deserialize;
 use std::sync::Arc;
 use vouch_common::{ApiError, AuthEventInfo, ListAuthEventsResponse};
@@ -31,9 +33,9 @@ use super::json_error;
 /// Returns the user and their org_id if they are an org admin.
 async fn extract_org_admin(
     state: &AppState,
-    headers: &HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
 ) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
-    let session = extract_session(state, headers).await?;
+    let session = extract_session(state, auth_header).await?;
 
     let user = db::get_user_by_id(&state.db, &session.claims.sub)
         .await
@@ -88,10 +90,10 @@ pub struct AuthEventsQuery {
 /// GET /api/v1/org/auth-events
 pub async fn list_auth_events(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     Query(query): Query<AuthEventsQuery>,
 ) -> Result<Json<ListAuthEventsResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, _org_id) = extract_org_admin(&state, &headers).await?;
+    let (_user, _org_id) = extract_org_admin(&state, auth_header).await?;
 
     // Build query params
     let db_query = db::AuthEventQuery {
@@ -189,10 +191,10 @@ pub struct ListScimTokensResponse {
 /// POST /api/v1/org/scim-tokens
 pub async fn create_scim_token(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     Json(req): Json<CreateScimTokenRequest>,
 ) -> Result<Json<CreateScimTokenResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_org_admin(&state, &headers).await?;
+    let (_user, org_id) = extract_org_admin(&state, auth_header).await?;
 
     // Generate a secure random token
     let mut token_bytes = [0u8; 32];
@@ -248,9 +250,9 @@ pub async fn create_scim_token(
 /// GET /api/v1/org/scim-tokens
 pub async fn list_scim_tokens(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
 ) -> Result<Json<ListScimTokensResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_org_admin(&state, &headers).await?;
+    let (_user, org_id) = extract_org_admin(&state, auth_header).await?;
 
     let tokens = db::list_scim_tokens(&state.db, Some(&org_id))
         .await
@@ -280,10 +282,10 @@ pub async fn list_scim_tokens(
 /// DELETE /api/v1/org/scim-tokens/:id
 pub async fn delete_scim_token(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     Path(token_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let (_user, _org_id) = extract_org_admin(&state, &headers).await?;
+    let (_user, _org_id) = extract_org_admin(&state, auth_header).await?;
 
     db::delete_scim_token(&state.db, &token_id)
         .await

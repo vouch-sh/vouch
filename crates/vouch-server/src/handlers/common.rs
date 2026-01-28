@@ -6,10 +6,14 @@ use crate::db;
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::rand as aws_rand;
 use axum::Json;
-use axum::http::{StatusCode, header};
+use axum::http::StatusCode;
+use axum_extra::TypedHeader;
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use headers::authorization::{Authorization, Bearer};
 use jsonwebtoken::{DecodingKey, Validation};
+use time::Duration;
 use vouch_common::{ApiError, extract_aaguid_from_attestation, validate_hardware_attestation};
 
 use super::auth::SessionClaims;
@@ -91,21 +95,18 @@ pub struct ValidatedSession {
 /// - No session exists in the database for this token
 pub async fn extract_session(
     state: &AppState,
-    headers: &axum::http::HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
 ) -> Result<ValidatedSession, (StatusCode, Json<ApiError>)> {
-    // Get Authorization header
-    let auth_header = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "));
-
-    let token = auth_header.ok_or_else(|| {
+    // Get token from Authorization header
+    let TypedHeader(Authorization(bearer)) = auth_header.ok_or_else(|| {
         json_error(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "Missing or invalid Authorization header",
         )
     })?;
+
+    let token = bearer.token();
 
     // Validate JWT
     let claims = jsonwebtoken::decode::<SessionClaims>(
@@ -145,6 +146,97 @@ pub async fn extract_session(
     Ok(ValidatedSession { claims, token_hash })
 }
 
+// ============================================================================
+// Cookie-based Session Extraction (for browser UI)
+// ============================================================================
+
+/// Extract and validate session from cookie (for browser UI).
+///
+/// This is similar to `extract_session` but reads from cookies instead of
+/// the Authorization header. Used for browser-based pages like `/github/connect`.
+///
+/// # Errors
+///
+/// Returns an error response if no valid session cookie is present.
+pub async fn extract_session_from_cookie(
+    state: &AppState,
+    jar: &CookieJar,
+) -> Result<ValidatedSession, (StatusCode, Json<ApiError>)> {
+    // Get session token from cookie
+    let token = jar.get("vouch_session").map(|c| c.value()).ok_or_else(|| {
+        json_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "No session cookie",
+        )
+    })?;
+
+    // Validate JWT
+    let claims = jsonwebtoken::decode::<SessionClaims>(
+        token,
+        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &Validation::default(),
+    )
+    .map_err(|_| {
+        json_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Invalid or expired session",
+        )
+    })?
+    .claims;
+
+    // Verify session exists in database
+    let token_hash = hash_token(token);
+    let session = db::get_session_by_token_hash(&state.db, &token_hash)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?;
+
+    if session.is_none() {
+        return Err(json_error(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "Session not found",
+        ));
+    }
+
+    Ok(ValidatedSession { claims, token_hash })
+}
+
+/// Create a session cookie.
+///
+/// Returns a Cookie configured with proper security attributes.
+#[must_use]
+pub fn create_session_cookie(token: &str, max_age_seconds: i64) -> Cookie<'static> {
+    Cookie::build(("vouch_session", token.to_owned()))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .max_age(Duration::seconds(max_age_seconds))
+        .build()
+}
+
+/// Create a cookie that clears the session.
+///
+/// Returns a Cookie that expires the session cookie.
+#[must_use]
+pub fn clear_session_cookie() -> Cookie<'static> {
+    Cookie::build(("vouch_session", ""))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .max_age(Duration::ZERO)
+        .build()
+}
+
 /// Extract session and also fetch the user email.
 ///
 /// This is a convenience function for handlers that need the user's email
@@ -156,9 +248,9 @@ pub async fn extract_session(
 /// is not found in the database.
 pub async fn extract_session_with_email(
     state: &AppState,
-    headers: &axum::http::HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
 ) -> Result<(SessionClaims, String), (StatusCode, Json<ApiError>)> {
-    let session = extract_session(state, headers).await?;
+    let session = extract_session(state, auth_header).await?;
 
     // Get user email
     let user = db::get_user_by_id(&state.db, &session.claims.sub)

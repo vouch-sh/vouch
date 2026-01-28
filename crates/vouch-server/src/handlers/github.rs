@@ -18,6 +18,7 @@ use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
+use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
@@ -277,10 +278,7 @@ pub async fn github_webhook(
 }
 
 /// GET /github/connect - Show GitHub connection page.
-pub async fn github_connect_page(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn github_connect_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
     // Verify GitHub App is configured
     if state.github_app.is_none() {
         return GitHubErrorTemplate {
@@ -290,11 +288,12 @@ pub async fn github_connect_page(
         .into_response();
     }
 
-    // Extract session
-    let session = match crate::handlers::common::extract_session(&state, &headers).await {
+    // Extract session from cookie (browser UI)
+    let session = match crate::handlers::common::extract_session_from_cookie(&state, &jar).await {
         Ok(s) => s,
         Err(_) => {
-            return Redirect::to("/login?next=/github/connect").into_response();
+            // No valid session - redirect to enrollment
+            return Redirect::to("/enroll/start").into_response();
         }
     };
 

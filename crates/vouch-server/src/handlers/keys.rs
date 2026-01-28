@@ -8,6 +8,8 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
 };
+use axum_extra::TypedHeader;
+use headers::authorization::{Authorization, Bearer};
 use std::sync::Arc;
 use vouch_common::{
     ApiError, DeleteKeyResponse, KeyInfo, ListKeysResponse, RenameKeyRequest, RenameKeyResponse,
@@ -19,9 +21,9 @@ use super::{extract_session, json_error};
 /// List all registered keys for the authenticated user.
 pub async fn list_keys(
     State(state): State<Arc<AppState>>,
-    headers: axum::http::HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
 ) -> Result<Json<ListKeysResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, auth_header).await?;
     let claims = session.claims;
 
     // Get all authenticators for this user
@@ -61,11 +63,11 @@ pub async fn list_keys(
 /// Rename a registered key.
 pub async fn rename_key(
     State(state): State<Arc<AppState>>,
-    headers: axum::http::HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     Path(key_id): Path<String>,
     Json(req): Json<RenameKeyRequest>,
 ) -> Result<Json<RenameKeyResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, auth_header).await?;
     let claims = session.claims;
 
     // Validate name
@@ -132,10 +134,10 @@ pub async fn rename_key(
 /// Delete a registered key.
 pub async fn delete_key(
     State(state): State<Arc<AppState>>,
-    headers: axum::http::HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, auth_header).await?;
     let claims = session.claims;
 
     // Get the authenticator to verify ownership

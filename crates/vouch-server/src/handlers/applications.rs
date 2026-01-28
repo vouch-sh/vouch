@@ -13,18 +13,20 @@ use aws_lc_rs::rand as aws_rand;
 use axum::{
     Form, Json,
     extract::{Path, State},
-    http::{HeaderMap, StatusCode, header},
+    http::StatusCode,
     response::{Html, IntoResponse, Redirect, Response},
 };
+use axum_extra::TypedHeader;
+use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jsonwebtoken::{DecodingKey, Validation, decode};
+use headers::authorization::{Authorization, Bearer};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::ApiError;
 
 use super::auth::SessionClaims;
-use super::{extract_session, json_error};
+use super::{extract_session, extract_session_from_cookie, json_error};
 
 // ============================================================================
 // Constants
@@ -289,45 +291,20 @@ fn parse_application_type(s: &str) -> Option<OAuthClientType> {
     }
 }
 
-/// Extract session from cookie for web UI.
-async fn extract_session_from_cookie(
+/// Extract session from cookie for web UI (with user email).
+async fn extract_session_with_email_from_cookie(
     state: &AppState,
-    headers: &HeaderMap,
+    jar: &CookieJar,
 ) -> Option<(SessionClaims, String)> {
-    // Get session token from cookie
-    let token = headers
-        .get(header::COOKIE)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|cookies| {
-            cookies
-                .split(';')
-                .find_map(|c| c.trim().strip_prefix("vouch_session="))
-        })?;
+    // Use shared cookie extraction
+    let session = extract_session_from_cookie(state, jar).await.ok()?;
 
-    // Validate JWT
-    let claims = decode::<SessionClaims>(
-        token,
-        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
-        &Validation::default(),
-    )
-    .ok()?
-    .claims;
-
-    // Verify session exists in database
-    let token_hash = {
-        let hash = digest::digest(&SHA256, token.as_bytes());
-        URL_SAFE_NO_PAD.encode(hash.as_ref())
-    };
-
-    // Verify session exists
-    db::get_session_by_token_hash(&state.db, &token_hash)
+    // Get user email
+    let user = db::get_user_by_id(&state.db, &session.claims.sub)
         .await
         .ok()??;
 
-    // Get user email
-    let user = db::get_user_by_id(&state.db, &claims.sub).await.ok()??;
-
-    Some((claims, user.email))
+    Some((session.claims, user.email))
 }
 
 /// Parse redirect URIs from form input (newline or comma separated).
@@ -348,9 +325,10 @@ fn parse_redirect_uris(input: &str) -> Vec<String> {
 /// GET /applications
 pub async fn list_applications_page(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    jar: CookieJar,
 ) -> Response {
-    let Some((claims, user_email)) = extract_session_from_cookie(&state, &headers).await else {
+    let Some((claims, user_email)) = extract_session_with_email_from_cookie(&state, &jar).await
+    else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
@@ -378,9 +356,9 @@ pub async fn list_applications_page(
 /// GET /applications/new
 pub async fn create_application_page(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    jar: CookieJar,
 ) -> Response {
-    let Some((_, user_email)) = extract_session_from_cookie(&state, &headers).await else {
+    let Some((_, user_email)) = extract_session_with_email_from_cookie(&state, &jar).await else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
@@ -391,10 +369,11 @@ pub async fn create_application_page(
 /// POST /applications/new
 pub async fn create_application_form(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    jar: CookieJar,
     Form(form): Form<CreateApplicationForm>,
 ) -> Response {
-    let Some((claims, user_email)) = extract_session_from_cookie(&state, &headers).await else {
+    let Some((claims, user_email)) = extract_session_with_email_from_cookie(&state, &jar).await
+    else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
@@ -500,10 +479,11 @@ pub async fn create_application_form(
 /// GET /applications/:id
 pub async fn detail_application_page(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Response {
-    let Some((claims, user_email)) = extract_session_from_cookie(&state, &headers).await else {
+    let Some((claims, user_email)) = extract_session_with_email_from_cookie(&state, &jar).await
+    else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
@@ -568,11 +548,11 @@ pub async fn detail_application_page(
 /// POST /applications/:id
 pub async fn update_application_form(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    jar: CookieJar,
     Path(app_id): Path<String>,
     Form(form): Form<UpdateApplicationForm>,
 ) -> Response {
-    let Some((claims, _)) = extract_session_from_cookie(&state, &headers).await else {
+    let Some((claims, _)) = extract_session_with_email_from_cookie(&state, &jar).await else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
@@ -630,10 +610,10 @@ pub async fn update_application_form(
 /// POST /applications/:id/delete
 pub async fn delete_application_form(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Response {
-    let Some((claims, _)) = extract_session_from_cookie(&state, &headers).await else {
+    let Some((claims, _)) = extract_session_with_email_from_cookie(&state, &jar).await else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
@@ -670,10 +650,11 @@ pub async fn delete_application_form(
 /// POST /applications/:id/rotate
 pub async fn rotate_secret_form(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Response {
-    let Some((claims, user_email)) = extract_session_from_cookie(&state, &headers).await else {
+    let Some((claims, user_email)) = extract_session_with_email_from_cookie(&state, &jar).await
+    else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
@@ -756,9 +737,9 @@ pub async fn rotate_secret_form(
 /// GET /api/v1/applications
 pub async fn list_applications_api(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
 ) -> Result<Json<ListApplicationsResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, auth_header).await?;
     let claims = session.claims;
 
     let applications = db::get_oauth_clients_for_user(&state.db, &claims.sub)
@@ -781,10 +762,10 @@ pub async fn list_applications_api(
 /// POST /api/v1/applications
 pub async fn create_application_api(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     Json(req): Json<CreateApplicationRequest>,
 ) -> Result<Json<CreateApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, auth_header).await?;
     let claims = session.claims;
 
     // Validate inputs
@@ -873,10 +854,10 @@ pub async fn create_application_api(
 /// GET /api/v1/applications/:id
 pub async fn get_application_api(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     Path(app_id): Path<String>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, auth_header).await?;
     let claims = session.claims;
 
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
@@ -906,11 +887,11 @@ pub async fn get_application_api(
 /// PATCH /api/v1/applications/:id
 pub async fn update_application_api(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     Path(app_id): Path<String>,
     Json(req): Json<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, auth_header).await?;
     let claims = session.claims;
 
     // Get existing application
@@ -973,10 +954,10 @@ pub async fn update_application_api(
 /// DELETE /api/v1/applications/:id
 pub async fn delete_application_api(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, auth_header).await?;
     let claims = session.claims;
 
     // Verify ownership
@@ -1018,10 +999,10 @@ pub async fn delete_application_api(
 /// POST /api/v1/applications/:id/rotate
 pub async fn rotate_secret_api(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     Path(app_id): Path<String>,
 ) -> Result<Json<RotateSecretResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, auth_header).await?;
     let claims = session.claims;
 
     // Verify ownership
@@ -1106,10 +1087,10 @@ pub async fn rotate_secret_api(
 /// POST /api/v1/applications/:id/revoke
 pub async fn revoke_tokens_api(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, &headers).await?;
+    let session = extract_session(&state, auth_header).await?;
     let claims = session.claims;
 
     // Verify ownership

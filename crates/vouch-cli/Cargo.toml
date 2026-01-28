@@ -11,7 +11,7 @@ workspace = true
 
 [features]
 default = []
-test-utils = ["vouch-common/test-utils", "ed25519-dalek/rand_core", "rand_core", "axum", "tower", "http"]
+test-utils = ["vouch-common/test-utils", "ed25519-dalek/rand_core", "axum", "tower", "http"]
 
 [lib]
 path = "src/lib.rs"
@@ -24,18 +24,18 @@ path = "src/main.rs"
 vouch-common = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
-clap_complete = { workspace = true }
+clap_complete = { version = "=4.5.65", default-features = false }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
-ctap-hid-fido2 = { workspace = true }
-rpassword = { workspace = true }
-inquire = { workspace = true }
+ctap-hid-fido2 = { version = "=3.5.8", default-features = false }
+rpassword = { version = "=7.4.0", default-features = false }
+inquire = { version = "=0.9.2", default-features = false, features = ["crossterm"] }
 dirs = { workspace = true }
-open = { workspace = true }
+open = { version = "=5.3.3", default-features = false }
 base64 = { workspace = true }
 aws-lc-rs = { workspace = true }
 jiff = { workspace = true }
@@ -44,8 +44,7 @@ ssh-key = { workspace = true }
 ciborium = { workspace = true }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
-rand_core = { workspace = true, optional = true }
-serde_urlencoded = { workspace = true }
+serde_urlencoded = { version = "=0.7.1", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 vouch-agent = { workspace = true }

@@ -15,6 +15,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
@@ -22,10 +23,15 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode}
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use time::Duration;
 use uuid::Uuid;
 use vouch_common::{ApiError, BrowserRegisterCompleteRequest, BrowserRegisterStartResponse};
 
-use super::{generate_random_bytes, json_error, validate_registration_attestation};
+use super::auth::SessionClaims;
+use super::{
+    create_session_cookie, generate_random_bytes, hash_token, json_error,
+    validate_registration_attestation,
+};
 
 // ============================================================================
 // COSE Key Serialization
@@ -121,20 +127,17 @@ fn cose_key_to_cbor(
 // Enrollment Session Cookie Management
 // ============================================================================
 
-/// Enrollment session cookie name.
-const ENROLL_COOKIE_NAME: &str = "vouch_enroll";
-
 /// Enrollment session duration (30 minutes).
 const ENROLL_SESSION_MINUTES: i64 = 30;
 
 /// Create an enrollment session cookie.
-/// Returns the Set-Cookie header value, or None on failure.
+/// Returns the cookie, or None on failure.
 async fn create_enrollment_session_cookie(
     state: &AppState,
     user_id: &str,
     user_email: &str,
     device_auth_id: Option<&str>,
-) -> Option<String> {
+) -> Option<Cookie<'static>> {
     // Generate random token
     let mut token_bytes = [0u8; 32];
     aws_rand::fill(&mut token_bytes).ok()?;
@@ -164,104 +167,78 @@ async fn create_enrollment_session_cookie(
     // Build cookie with security attributes
     // Use SameSite=Lax (not Strict) because the redirect from Google OAuth
     // would otherwise prevent the cookie from being sent on the subsequent navigation
-    Some(format!(
-        "{}={}; Path=/enroll; HttpOnly; Secure; SameSite=Lax; Max-Age={}",
-        ENROLL_COOKIE_NAME,
-        token,
-        ENROLL_SESSION_MINUTES * 60
-    ))
-}
-
-/// Clear the enrollment session cookie.
-/// Returns the Set-Cookie header value that expires the cookie.
-fn clear_enrollment_cookie() -> String {
-    format!(
-        "{}=; Path=/enroll; HttpOnly; Secure; SameSite=Lax; Max-Age=0",
-        ENROLL_COOKIE_NAME
+    Some(
+        Cookie::build(("vouch_enroll", token))
+            .path("/enroll")
+            .http_only(true)
+            .secure(true)
+            .same_site(SameSite::Lax)
+            .max_age(Duration::seconds(ENROLL_SESSION_MINUTES * 60))
+            .build(),
     )
 }
 
-/// Get enrollment session from cookie.
+/// Create a cookie that clears the enrollment session.
+/// Returns a Cookie that expires the enrollment cookie.
+fn clear_enrollment_cookie() -> Cookie<'static> {
+    Cookie::build(("vouch_enroll", ""))
+        .path("/enroll")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Lax)
+        .max_age(Duration::ZERO)
+        .build()
+}
+
+/// Get enrollment session from cookie jar.
 /// Returns the session if valid, None otherwise.
 pub async fn get_enrollment_session_from_cookie(
     state: &AppState,
-    headers: &HeaderMap,
+    jar: &CookieJar,
 ) -> Option<EnrollmentSession> {
-    // Get Cookie header
-    let cookie_header = match headers.get(header::COOKIE) {
-        Some(h) => match h.to_str() {
-            Ok(s) => s,
-            Err(_) => {
-                tracing::debug!("get_enrollment_session: cookie header not valid UTF-8");
-                return None;
-            }
-        },
-        None => {
-            tracing::debug!("get_enrollment_session: no Cookie header present");
+    let cookie = jar.get("vouch_enroll")?;
+    let value = cookie.value();
+
+    tracing::debug!("get_enrollment_session: found vouch_enroll cookie");
+
+    // Hash the token to look up session
+    let token_hash = hex::encode(digest::digest(&SHA256, value.as_bytes()));
+
+    // Look up session
+    let session = match db::get_enrollment_session_by_token_hash(&state.db, &token_hash).await {
+        Ok(Some(s)) => {
+            tracing::debug!("get_enrollment_session: found session in database");
+            s
+        }
+        Ok(None) => {
+            tracing::debug!("get_enrollment_session: session not found in database");
+            return None;
+        }
+        Err(e) => {
+            tracing::debug!("get_enrollment_session: database error: {}", e);
             return None;
         }
     };
 
-    tracing::debug!(
-        "get_enrollment_session: looking for {} cookie",
-        ENROLL_COOKIE_NAME
-    );
-
-    // Parse cookies to find vouch_enroll
-    for cookie in cookie_header.split(';') {
-        let cookie = cookie.trim();
-        if let Some(value) = cookie.strip_prefix(&format!("{}=", ENROLL_COOKIE_NAME)) {
-            tracing::debug!(
-                "get_enrollment_session: found {} cookie",
-                ENROLL_COOKIE_NAME
-            );
-
-            // Hash the token to look up session
-            let token_hash = hex::encode(digest::digest(&SHA256, value.as_bytes()));
-
-            // Look up session
-            let session =
-                match db::get_enrollment_session_by_token_hash(&state.db, &token_hash).await {
-                    Ok(Some(s)) => {
-                        tracing::debug!("get_enrollment_session: found session in database");
-                        s
-                    }
-                    Ok(None) => {
-                        tracing::debug!("get_enrollment_session: session not found in database");
-                        continue;
-                    }
-                    Err(e) => {
-                        tracing::debug!("get_enrollment_session: database error: {}", e);
-                        continue;
-                    }
-                };
-
-            // Check if expired
-            // SQLite stores timestamps without timezone, so we append 'Z' to parse as UTC
-            let expires_with_tz = format!("{}Z", session.expires_at.replace(' ', "T"));
-            let expires: Timestamp = match expires_with_tz.parse() {
-                Ok(ts) => ts,
-                Err(e) => {
-                    tracing::debug!("get_enrollment_session: failed to parse expiration: {}", e);
-                    continue;
-                }
-            };
-
-            if expires > Timestamp::now() {
-                // Update last used timestamp
-                let _ = db::touch_enrollment_session(&state.db, &session.id).await;
-                return Some(session);
-            } else {
-                tracing::debug!("get_enrollment_session: session expired");
-            }
+    // Check if expired
+    // SQLite stores timestamps without timezone, so we append 'Z' to parse as UTC
+    let expires_with_tz = format!("{}Z", session.expires_at.replace(' ', "T"));
+    let expires: Timestamp = match expires_with_tz.parse() {
+        Ok(ts) => ts,
+        Err(e) => {
+            tracing::debug!("get_enrollment_session: failed to parse expiration: {}", e);
+            return None;
         }
-    }
+    };
 
-    tracing::debug!(
-        "get_enrollment_session: {} cookie not found in header",
-        ENROLL_COOKIE_NAME
-    );
-    None
+    if expires > Timestamp::now() {
+        // Update last used timestamp
+        let _ = db::touch_enrollment_session(&state.db, &session.id).await;
+        Some(session)
+    } else {
+        tracing::debug!("get_enrollment_session: session expired");
+        None
+    }
 }
 
 // ============================================================================
@@ -850,7 +827,7 @@ pub async fn oidc_callback(
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(header::LOCATION, "/enroll/keys")
-        .header(header::SET_COOKIE, &cookie)
+        .header(header::SET_COOKIE, cookie.to_string())
         .body(Body::empty())
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
@@ -858,11 +835,11 @@ pub async fn oidc_callback(
 /// Serve the key management page.
 /// GET /enroll/keys
 /// Authentication is via cookie (set by oidc_callback).
-pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
     tracing::debug!("enroll_keys_page: checking for enrollment session cookie");
 
     // Get enrollment session from cookie
-    let session = match get_enrollment_session_from_cookie(&state, &headers).await {
+    let session = match get_enrollment_session_from_cookie(&state, &jar).await {
         Some(s) => {
             tracing::debug!("enroll_keys_page: found valid session for {}", s.user_email);
             s
@@ -885,9 +862,9 @@ pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, headers: Heade
 
 /// Handle enrollment sign-out.
 /// POST /enroll/logout
-pub async fn enroll_logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+pub async fn enroll_logout(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
     // Get enrollment session from cookie and delete it
-    if let Some(session) = get_enrollment_session_from_cookie(&state, &headers).await {
+    if let Some(session) = get_enrollment_session_from_cookie(&state, &jar).await {
         if let Err(e) = db::delete_enrollment_session(&state.db, &session.id).await {
             tracing::warn!("Failed to delete enrollment session during logout: {}", e);
         }
@@ -898,7 +875,7 @@ pub async fn enroll_logout(State(state): State<Arc<AppState>>, headers: HeaderMa
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(header::LOCATION, "/")
-        .header(header::SET_COOKIE, clear_enrollment_cookie())
+        .header(header::SET_COOKIE, clear_enrollment_cookie().to_string())
         .body(Body::empty())
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
@@ -909,10 +886,10 @@ pub async fn enroll_logout(State(state): State<Arc<AppState>>, headers: HeaderMa
 #[allow(clippy::unused_async)]
 pub async fn browser_register_start(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    jar: CookieJar,
 ) -> Result<Json<BrowserRegisterStartResponse>, (StatusCode, Json<ApiError>)> {
     // Get enrollment session from cookie
-    let enroll_session = get_enrollment_session_from_cookie(&state, &headers)
+    let enroll_session = get_enrollment_session_from_cookie(&state, &jar)
         .await
         .ok_or_else(|| {
             json_error(
@@ -1192,7 +1169,80 @@ pub async fn browser_register_complete(
         validated.aaguid.as_deref().unwrap_or("unknown")
     );
 
-    Ok(SuccessTemplate)
+    // Create a session for the browser so the user stays logged in
+    let now = Timestamp::now();
+    let session_hours = i64::try_from(state.config.session_hours).map_err(|_| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "time_error",
+            "Invalid session hours",
+        )
+    })?;
+    let duration = Span::new().hours(session_hours);
+    let expires = now.checked_add(duration).map_err(|_| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "time_error",
+            "Time overflow",
+        )
+    })?;
+
+    let claims = SessionClaims {
+        sub: reg_state.user_id.to_string(),
+        email: reg_state.user_email.clone(),
+        authenticator_id: authenticator_id.clone(),
+        iat: now.as_second(),
+        exp: expires.as_second(),
+    };
+
+    let token = encode(
+        &Header::default(),
+        &claims,
+        &EncodingKey::from_secret(state.config.jwt_secret_bytes()),
+    )
+    .map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "token_error",
+            &e.to_string(),
+        )
+    })?;
+
+    // Store session in database
+    let token_hash = hash_token(&token);
+    db::create_session(
+        &state.db,
+        &reg_state.user_id.to_string(),
+        &token_hash,
+        &authenticator_id,
+        &expires.to_string(),
+    )
+    .await
+    .map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            &e.to_string(),
+        )
+    })?;
+
+    // Return success template with session cookie
+    let cookie = create_session_cookie(&token, session_hours * 3600);
+    let html = SuccessTemplate.render().map_err(|e| {
+        tracing::error!("Template render error: {}", e);
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "render_error",
+            "Failed to render template",
+        )
+    })?;
+
+    Ok(Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::SET_COOKIE, cookie.to_string())
+        .body(Body::from(html))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()))
 }
 
 // ============================================================================

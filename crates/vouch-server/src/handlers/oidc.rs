@@ -31,6 +31,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
+use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
@@ -229,7 +230,7 @@ impl AuthorizationCode {
 pub async fn authorize(
     State(state): State<Arc<AppState>>,
     Query(params): Query<AuthorizeRequest>,
-    headers: axum::http::HeaderMap,
+    jar: CookieJar,
 ) -> Response {
     // Validate response_type
     if params.response_type != "code" {
@@ -241,14 +242,7 @@ pub async fn authorize(
     }
 
     // Try to get existing session from cookie
-    let session_token = headers
-        .get(header::COOKIE)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|cookies| {
-            cookies
-                .split(';')
-                .find_map(|c| c.trim().strip_prefix("vouch_session="))
-        });
+    let session_token = jar.get("vouch_session").map(|c| c.value());
 
     // Check if we have a valid session
     if let Some(token) = session_token
@@ -1159,23 +1153,24 @@ pub struct UserInfoResponse {
 /// Returns information about the authenticated user.
 pub async fn userinfo(
     State(state): State<Arc<AppState>>,
-    headers: axum::http::HeaderMap,
+    headers: HeaderMap,
 ) -> Result<Json<UserInfoResponse>, (StatusCode, Json<ApiError>)> {
-    // Get Authorization header
-    let auth_header = headers
+    // Get token from Authorization header
+    // Note: We use manual parsing here to return 401 for both missing and invalid headers
+    // (OIDC spec requires 401 for invalid bearer tokens, but TypedHeader returns 400 for malformed)
+    let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "));
-
-    let token = auth_header.ok_or_else(|| {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new(
-                "invalid_token",
-                "Missing or invalid bearer token",
-            )),
-        )
-    })?;
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .ok_or_else(|| {
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(ApiError::new(
+                    "invalid_token",
+                    "Missing or invalid bearer token",
+                )),
+            )
+        })?;
 
     // Validate the session token
     let (user, _session, authenticator) = validate_session_token(&state, token)
