@@ -1,6 +1,8 @@
 # Agent Delegation
 
-Vouch's delegation system allows humans to grant scoped, time-limited credentials to AI coding assistants and automation tools. Every delegated action carries attestation of who delegated what to whom — and that attestation traces back to a YubiKey touch.
+> **Status: Planned** — This document describes the planned agent delegation feature for Vouch (v0.7). The commands and APIs described here are not yet implemented. See [ROADMAP.md](ROADMAP.md) for development status.
+
+Vouch's delegation system will allow humans to grant scoped, time-limited credentials to AI coding assistants and automation tools. Every delegated action will carry attestation of who delegated what to whom — and that attestation traces back to a YubiKey touch.
 
 ## The Problem
 

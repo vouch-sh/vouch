@@ -47,7 +47,7 @@ Vouch is designed around three core principles:
 
 #### Nation-State
 - **Capabilities**: Zero-days, supply chain compromise, physical access
-- **Vouch defense**: Air-gapped deployment, HSM integration, reproducible builds
+- **Vouch defense**: Air-gapped deployment (planned), reproducible builds
 
 ## Security Controls
 
@@ -255,7 +255,6 @@ The email is never self-asserted. It always traces back to the original OIDC ver
 
 All communication uses TLS 1.3 with:
 - AEAD ciphers only (AES-GCM, ChaCha20-Poly1305)
-- Certificate pinning for CLI → server communication
 - rustls (no OpenSSL)
 
 ### Credential Layer
@@ -310,9 +309,9 @@ Every credential issuance generates an audit log entry:
 ```
 
 Audit logs are:
-- Immutable (append-only storage)
+- Immutable (append-only database storage)
 - Retained for compliance period (configurable, default 2 years)
-- Exportable to SIEM (Splunk, Datadog, etc.)
+- SIEM export planned (Splunk, Datadog, etc.) — see [ROADMAP.md](ROADMAP.md)
 
 ## Session Storage Security
 

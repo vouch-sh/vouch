@@ -1,5 +1,7 @@
 # Air-Gapped Deployment Guide
 
+> **Status: Planned** — This document describes the planned air-gapped deployment architecture for Vouch Enterprise. The features described here are under development (see [ROADMAP.md](ROADMAP.md), v0.8). The core components (SSH CA, FIDO2 authentication) exist today, but the packaging, automation scripts, and air-gap-specific commands are not yet implemented.
+
 This guide covers deploying Vouch in environments with no internet connectivity, such as defense contractors, government agencies, financial services, and critical infrastructure.
 
 ## Overview
@@ -10,7 +12,7 @@ In an air-gapped environment:
 - Internal identity provider (no Google Workspace)
 - Time sync from isolated NTP or GPS
 
-Vouch fully supports these constraints with its built-in SSH CA.
+Vouch's built-in SSH CA and local-first architecture make it well-suited for these constraints.
 
 ## Architecture
 
@@ -22,7 +24,7 @@ Vouch fully supports these constraints with its built-in SSH CA.
 |  |                      On-Premises Vouch Stack                         |  |
 |  |                                                                      |  |
 |  |  +--------------+  +----------------+  +----------------------------+ |  |
-|  |  |   Vouch      |  |   Built-in     |  |       PostgreSQL           | |  |
+|  |  |   Vouch      |  |   Built-in     |  |       SQLite               | |  |
 |  |  |   Server     |  |   SSH CA       |  |                            | |  |
 |  |  |              |  |                |  |  * Users & credentials     | |  |
 |  |  |  * WebAuthn  |  |  * Ed25519 CA  |  |  * Sessions                | |  |
@@ -79,7 +81,6 @@ Vouch fully supports these constraints with its built-in SSH CA.
 
 ### Software (Pre-downloaded)
 - Vouch Server container images
-- PostgreSQL container image
 - vouch CLI binaries (all platforms)
 - CA initialization scripts
 
@@ -105,8 +106,7 @@ Bundle contents:
 ```
 vouch-enterprise-1.0.0-airgap/
 ├── images/
-│   ├── vouch-server-1.0.0.tar       # Docker image (includes built-in CA)
-│   └── postgres-15.tar              # Docker image
+│   └── vouch-server-1.0.0.tar       # Docker image (includes built-in CA + SQLite)
 ├── cli/
 │   ├── vouch-1.0.0-darwin-arm64.tar.gz
 │   ├── vouch-1.0.0-darwin-amd64.tar.gz
@@ -146,10 +146,9 @@ echo "Bundle verified"
 ```bash
 # Load images into local Docker registry
 docker load < images/vouch-server-1.0.0.tar
-docker load < images/postgres-15.tar
 
 # Verify images loaded
-docker images | grep -E "vouch-server|postgres"
+docker images | grep vouch-server
 ```
 
 ### Step 4: Initialize SSH Certificate Authority
@@ -198,7 +197,7 @@ private_key_path = "/secrets/ssh-ca-key"
 public_key_path = "/etc/vouch/ssh-ca.pub"
 
 [database]
-url = "postgres://vouch:password@db.internal:5432/vouch"
+path = "/data/vouch.db"  # SQLite database
 
 [identity]
 # Internal identity provider (no Google Workspace)
@@ -265,20 +264,26 @@ export VOUCH_CA_CERT=/etc/vouch/root-ca.crt
 
 ### Step 9: Enroll Users
 
-In air-gapped mode, enrollment is done locally (no browser required):
+> **Note:** Air-gap-specific enrollment commands (`vouch enroll --airgap`, `vouch admin user create`) are planned but not yet implemented. Currently, enrollment requires browser access to the Vouch server's web UI.
+
+In air-gapped mode, enrollment will be done locally:
 
 ```bash
-# Admin creates user account
+# Admin creates user account (planned)
 vouch admin user create --email user@internal --name "User Name"
 
-# User enrolls their YubiKey (CLI-only in air-gap mode)
+# User enrolls their YubiKey (planned CLI-only air-gap mode)
 vouch enroll --airgap
 # Touch your YubiKey...
 # Enter PIN: ****
 # Enrolled as user@internal
 ```
 
+For current deployments, users enroll via the Vouch server's web interface at `https://auth.internal`.
+
 ## YubiKey Provisioning
+
+> **Note:** The provisioning commands below (`--export-pubkey`, `admin credential import`, `--airgap`) are planned but not yet implemented.
 
 ### Option A: Pre-Provisioned Keys (Recommended)
 
@@ -286,7 +291,7 @@ Keys provisioned in connected environment, public keys transferred:
 
 1. **Connected environment:**
 ```bash
-# Generate resident credential on YubiKey
+# Generate resident credential on YubiKey (planned)
 vouch enroll --export-pubkey > user-pubkey.json
 ```
 
@@ -294,14 +299,14 @@ vouch enroll --export-pubkey > user-pubkey.json
 
 3. **Air-gapped environment:**
 ```bash
-# Admin imports public key
+# Admin imports public key (planned)
 vouch admin credential import --user user@internal < user-pubkey.json
 ```
 
 ### Option B: Fully Air-Gapped Provisioning
 
 ```bash
-# User inserts YubiKey
+# User inserts YubiKey (planned)
 # Registration happens entirely on internal network
 vouch enroll --airgap
 
@@ -448,7 +453,7 @@ Transfer encrypted exports via approved media to connected compliance systems.
 
 | Component | Frequency | Method | Retention |
 |-----------|-----------|--------|-----------|
-| PostgreSQL | Daily | pg_dump, encrypted | 90 days |
+| SQLite database | Daily | File copy, encrypted | 90 days |
 | SSH CA keys | On change | HSM backup or split custody | Permanent |
 | Configuration | On change | Git (internal) | Permanent |
 | Audit logs | Continuous | Append-only storage | Per policy |

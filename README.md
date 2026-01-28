@@ -2,7 +2,7 @@
 
 **Prove you're here.**
 
-Hardware-backed authentication that issues short-lived credentials only after a human touches a YubiKey. One touch, one PIN, one 8-hour session — then SSH, AWS, and GitHub just work.
+Hardware-backed authentication that issues short-lived credentials only after a human touches a YubiKey. One touch, one PIN, one 8-hour session — then SSH and AWS just work.
 
 ```bash
 $ vouch login
@@ -13,7 +13,6 @@ Enter PIN: ****
 
 $ ssh prod.example.com    # Just works
 $ aws s3 ls               # Just works
-$ git push origin main    # Just works
 ```
 
 ## The Problem
@@ -46,20 +45,20 @@ Vouch requires **physical presence** for every credential issuance:
 │                                                                  │
 │  ┌──────────┐     ┌──────────┐     ┌──────────────────────────┐ │
 │  │ YubiKey  │────▶│  vouch   │────▶│ Short-lived credentials  │ │
-│  │ (touch)  │     │  login   │     │ stored in system keychain│ │
+│  │ (touch)  │     │  login   │     │ managed by vouch agent   │ │
 │  └──────────┘     └──────────┘     └──────────────────────────┘ │
 │                         │                      │                 │
 │                         ▼                      ▼                 │
 │                   ┌──────────┐          ┌──────────────┐        │
 │                   │  vouch   │          │ Native tools │        │
-│                   │  server  │          │ (ssh, aws,   │        │
-│                   │  (OIDC)  │          │  git, etc.)  │        │
+│                   │  server  │          │ (ssh, aws)   │        │
+│                   │  (OIDC)  │          │              │        │
 │                   └──────────┘          └──────────────┘        │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
 1. **`vouch login`** — Touch YubiKey, enter PIN, get 8-hour session
-2. **Vouch issues credentials** — SSH certificates, AWS STS tokens, GitHub App tokens
+2. **Vouch issues credentials** — SSH certificates, AWS STS tokens
 3. **Tools just work** — Standard credential helpers, no wrappers needed
 
 ## Key Features
@@ -70,7 +69,6 @@ Unlike optional MFA that can be bypassed, Vouch only issues credentials after FI
 ### Short-Lived Everything
 - SSH certificates: 8 hours
 - AWS credentials: 1 hour (auto-refresh within session)
-- GitHub tokens: Per-operation
 
 No more rotating keys. No more revoking access. Credentials simply expire.
 
@@ -78,8 +76,6 @@ No more rotating keys. No more revoking access. Credentials simply expire.
 Vouch configures standard credential providers:
 - SSH: `IdentityAgent` pointing to vouch's signing agent
 - AWS: `credential_process` in `~/.aws/config`
-- Git: `credential.helper` in `~/.gitconfig`
-- Kubernetes: `exec` plugin in kubeconfig
 
 After `vouch login`, existing workflows are unchanged.
 
@@ -97,7 +93,7 @@ Every action carries attestation of who delegated what to whom.
 | Hardware presence required | ✅ Mandatory | ❌ Optional | ❌ Optional | ❌ Optional |
 | Short-lived credentials | ✅ 8hr certs | ❌ Stored secrets | ✅ Certs | ❌ Long-lived |
 | Self-serve setup | ✅ <5 min | ✅ | ❌ Complex | ❌ Enterprise |
-| Agent delegation | ✅ Built-in | ❌ | ❌ | ❌ |
+| Agent delegation | 🔜 Planned | ❌ | ❌ | ❌ |
 | Open source CLI | ✅ Apache-2.0 OR MIT | ❌ | ⚠️ BSL | ❌ |
 | Air-gap support | ✅ | ❌ | ✅ | ❌ |
 
@@ -117,13 +113,12 @@ cargo install --git https://github.com/vouch-sh/vouch vouch-cli
 
 ### Setup
 ```bash
-# Register your YubiKey (one-time)
-vouch register
+# Enroll with your YubiKey (one-time, opens browser)
+vouch enroll
 
 # Configure integrations
-vouch setup ssh      # Configures SSH to use vouch certificates
-vouch setup aws      # Configures AWS credential_process
-vouch setup github   # Configures git credential helper
+vouch setup ssh                                    # Configures SSH to use vouch certificates
+vouch setup aws --role arn:aws:iam::ID:role/name   # Configures AWS credential_process
 ```
 
 ### Daily Use
@@ -134,8 +129,6 @@ vouch login
 # Everything just works for 8 hours
 ssh prod-server
 aws s3 ls
-git push origin main
-kubectl get pods
 
 # Check session status
 vouch status
@@ -144,9 +137,8 @@ vouch status
 ## Requirements
 
 - **YubiKey 5 series** (firmware 5.2+) with FIDO2/WebAuthn support
-- **macOS** 12+, **Linux** (glibc 2.31+), or **Windows** 10+
+- **macOS** 12+ or **Linux** (glibc 2.31+) — Windows support is planned
 - For AWS: IAM role with OIDC federation configured
-- For GitHub: GitHub App installed in your organization
 - For SSH: CA public key distributed to target hosts
 
 ## Architecture

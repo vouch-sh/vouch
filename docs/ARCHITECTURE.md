@@ -14,7 +14,6 @@ Authenticated as user@company.com (8 hours)
 
 $ ssh prod.example.com    # Just works
 $ aws s3 ls               # Just works
-$ git push origin main    # Just works
 ```
 
 ## Design Principles
@@ -64,7 +63,7 @@ $ git push origin main    # Just works
  |  |    (background)      |     |                                        |  |
  |  |                      |     |  ssh --> IdentityAgent --> vouch agent |  |
  |  |  * Session cache     |     |  aws --> credential_process --> vouch  |  |
- |  |  * SSH certs         |     |  git --> credential.helper --> vouch   |  |
+ |  |  * SSH certs         |     |                                        |  |
  |  |  * SSH agent protocol|     |                                        |  |
  |  +----------------------+     +----------------------------------------+  |
  |            |                                                              |
@@ -100,7 +99,7 @@ The user-facing command-line tool. Written in Rust using:
 - Single statically-linked binary (MUSL target for Linux)
 - No runtime dependencies
 - Startup time <1ms
-- Open source (Apache 2.0) for security auditing
+- Open source (Apache-2.0 OR MIT) for security auditing
 
 ### vouch-agent
 
@@ -113,7 +112,6 @@ Background daemon managing session state and credential access.
 |  +-------------+  +-------------+  +-------------------+   |
 |  |   Session   |  |    Cert     |  |    SSH Agent      |   |
 |  |   Manager   |  |    Cache    |  |    Protocol       |   |
-|  |   ✅ Done   |  |   (future)  |  |    (future)       |   |
 |  |             |  |             |  |                   |   |
 |  | * 8hr TTL   |  | * SSH certs |  | * Identities      |   |
 |  | * SecretStr |  | * Auto-     |  | * Sign requests   |   |
@@ -121,7 +119,7 @@ Background daemon managing session state and credential access.
 |  +-------------+  +-------------+  +-------------------+   |
 |                                                            |
 |  IPC: Unix socket at ~/.vouch/agent.sock                  |
-|  SSH Agent: Unix socket at ~/.vouch/ssh-agent.sock (future)|
+|  SSH Agent: Unix socket at ~/.vouch/ssh-agent.sock         |
 |  Protocol: JSON-RPC 2.0 with 4-byte length-prefixed frames |
 +-----------------------------------------------------------+
 ```
@@ -166,9 +164,10 @@ pub struct SessionInfo {
 | -32601 | `METHOD_NOT_FOUND` | Unknown method |
 | -32602 | `INVALID_PARAMS` | Bad parameters |
 
-**Future IPC Operations (Phase 5):**
-- `GetSshCert` — Request SSH certificate
-- `SignSshChallenge(data)` — SSH agent protocol
+**SSH Agent IPC Operations (via `~/.vouch/ssh-agent.sock`):**
+- `REQUEST_IDENTITIES` — Returns cached SSH certificate
+- `SIGN_REQUEST` — Signs data with user's private key
+- Certificate refresh triggered automatically when expiring (30-minute threshold)
 
 ### Vouch Server
 
@@ -284,8 +283,8 @@ Admin Portal → Settings → Identity Providers → Add Provider
 | Provider | Status | Notes |
 |----------|--------|-------|
 | Google Workspace | ✅ Supported | First-class support, recommended |
-| Microsoft Entra ID | 🔜 Planned | Next priority |
-| Generic OIDC | 🔜 Planned | Any OIDC-compliant IdP |
+| Microsoft Entra ID | ✅ Supported | Azure AD / Entra ID integration |
+| Generic OIDC | ✅ Supported | Any OIDC-compliant IdP |
 
 **Claims Mapping:**
 
@@ -610,14 +609,16 @@ How it works:
 5. Credentials expire in 1 hour, auto-refresh within session
 ```
 
-### GitHub Integration
+### GitHub Integration (Planned)
+
+> **Note:** GitHub integration is planned for v0.5. See [ROADMAP.md](ROADMAP.md) for details.
 
 ```
 ~/.gitconfig:
   [credential "https://github.com"]
     helper = vouch credential git
 
-How it works:
+How it will work:
 1. Git calls credential helper for github.com
 2. vouch requests GitHub App installation token
 3. Server uses GitHub App private key to generate token
