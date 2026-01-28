@@ -14,8 +14,8 @@ pub use client::VouchClient;
 pub use fido2::{AuthenticationResult, FidoDevice, RegistrationResult, YubiKey};
 pub use http::{HttpClient, HttpClientExt, HttpResponse, ReqwestClient};
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 pub use fido2::MockFidoDevice;
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 pub use http::TestHttpClient;

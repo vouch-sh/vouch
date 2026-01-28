@@ -889,10 +889,7 @@ pub async fn enroll_logout(State(state): State<Arc<AppState>>, headers: HeaderMa
     // Get enrollment session from cookie and delete it
     if let Some(session) = get_enrollment_session_from_cookie(&state, &headers).await {
         if let Err(e) = db::delete_enrollment_session(&state.db, &session.id).await {
-            tracing::warn!(
-                "Failed to delete enrollment session during logout: {}",
-                e
-            );
+            tracing::warn!("Failed to delete enrollment session during logout: {}", e);
         }
         tracing::info!("Enrollment logout: {}", session.user_email);
     }

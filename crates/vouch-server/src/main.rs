@@ -105,12 +105,10 @@ async fn main() -> Result<()> {
     let app = Router::new()
         // Landing page with smart routing
         .route("/", get(handlers::home::home_page))
-        .route(
-            "/developer-setup",
-            get(handlers::home::developer_setup_page),
-        )
+        .route("/install", get(handlers::install::install_page))
         .route("/health", get(|| async { "ok" }))
         // Legal pages
+        .route("/about", get(handlers::about::about_page))
         .route("/privacy", get(handlers::legal::privacy_page))
         .route("/terms", get(handlers::legal::terms_page))
         // OIDC Provider endpoints

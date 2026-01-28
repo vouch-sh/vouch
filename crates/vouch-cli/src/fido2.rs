@@ -639,7 +639,7 @@ fn sha256(data: &[u8]) -> Vec<u8> {
         .to_vec()
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 #[allow(dead_code)]
 pub struct MockFidoDevice {
     /// The signing key (Ed25519 private key).
@@ -652,7 +652,7 @@ pub struct MockFidoDevice {
     counter: std::sync::atomic::AtomicU32,
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 #[allow(dead_code)]
 impl MockFidoDevice {
     /// Create a new mock FIDO2 device with random keys.
@@ -738,14 +738,14 @@ impl MockFidoDevice {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 impl Default for MockFidoDevice {
     fn default() -> Self {
         Self::new()
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 impl std::fmt::Debug for MockFidoDevice {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MockFidoDevice")
@@ -755,7 +755,7 @@ impl std::fmt::Debug for MockFidoDevice {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 impl FidoDevice for MockFidoDevice {
     fn register(
         &self,
@@ -892,6 +892,7 @@ fn build_none_attestation_object(auth_data: &[u8]) -> Result<Vec<u8>> {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "test-utils")]
     #[test]
     fn test_mock_device_registration() {
         let device = MockFidoDevice::new();
@@ -920,6 +921,7 @@ mod tests {
         assert!(!reg.attestation_object.is_empty());
     }
 
+    #[cfg(feature = "test-utils")]
     #[test]
     fn test_mock_device_authentication() {
         let device = MockFidoDevice::new();
@@ -942,6 +944,7 @@ mod tests {
         assert_eq!(auth.signature.len(), 64); // Ed25519 signature
     }
 
+    #[cfg(feature = "test-utils")]
     #[test]
     fn test_mock_device_counter_increments() {
         let device = MockFidoDevice::new();

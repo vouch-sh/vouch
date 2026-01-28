@@ -44,13 +44,7 @@ async fn extract_org_admin(
                 &e.to_string(),
             )
         })?
-        .ok_or_else(|| {
-            json_error(
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "User not found",
-            )
-        })?;
+        .ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "unauthorized", "User not found"))?;
 
     if !user.is_org_admin {
         return Err(json_error(

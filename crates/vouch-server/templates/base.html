@@ -11,7 +11,13 @@
     <main class="flex-1 flex flex-col">
         {% block content %}{% endblock %}
     </main>
-    <footer class="py-6 text-center text-xs text-gray-500">Copyright 2026 Smoke Turner, LLC</footer>
+    <footer class="py-6 text-center text-xs text-gray-500">
+        <a href="/about" class="text-vouch-accent hover:text-vouch-accent-hover">About</a>
+        <span class="mx-2">&middot;</span>
+        <a href="/install" class="text-vouch-accent hover:text-vouch-accent-hover">Install</a>
+        <span class="mx-2">&middot;</span>
+        Copyright 2026 Smoke Turner, LLC
+    </footer>
     {% block scripts %}{% endblock %}
 </body>
 </html>

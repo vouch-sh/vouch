@@ -1086,10 +1086,7 @@ pub async fn delete_scim_token(pool: &SqlitePool, token_id: &str) -> Result<()> 
 
 /// List SCIM tokens, optionally filtered by organization.
 #[allow(dead_code)]
-pub async fn list_scim_tokens(
-    pool: &SqlitePool,
-    org_id: Option<&str>,
-) -> Result<Vec<ScimToken>> {
+pub async fn list_scim_tokens(pool: &SqlitePool, org_id: Option<&str>) -> Result<Vec<ScimToken>> {
     let tokens = if let Some(org_id) = org_id {
         sqlx::query_as::<_, ScimToken>(
             "SELECT id, token_hash, org_id, description, created_at, last_used_at, expires_at FROM scim_tokens WHERE org_id = ? ORDER BY created_at DESC"

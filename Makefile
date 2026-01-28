@@ -27,7 +27,7 @@ css-build: ## Build minified CSS for production
 	cd crates/vouch-server && tailwindcss -i styles/input.css -o static/css/output.css --minify
 
 run: ## Run the vouch CLI locally
-	RUST_LOG=debug $(CARGO) run --bin vouch
+	RUST_LOG=debug $(CARGO) run --bin vouch -- ${ARGS}
 
 run-server: ## Run the vouch server locally
 	RUST_LOG=debug \

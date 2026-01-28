@@ -253,10 +253,10 @@ fn handle_response<Resp: DeserializeOwned>(response: HttpResponse) -> Result<Res
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 pub use test_utils::*;
 
-#[cfg(any(test, feature = "test-utils"))]
+#[cfg(feature = "test-utils")]
 mod test_utils {
     use super::*;
     use std::sync::Arc;
@@ -373,6 +373,7 @@ mod tests {
         assert_eq!(response.text().ok(), Some("hello world".to_string()));
     }
 
+    #[cfg(feature = "test-utils")]
     #[tokio::test]
     async fn test_test_http_client_with_router() {
         use axum::{Json, Router, routing::get};
