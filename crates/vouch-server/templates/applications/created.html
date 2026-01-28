@@ -2,6 +2,15 @@
 
 {% block title %}Application Created - Vouch{% endblock %}
 
+{% block header_right %}
+<div class="flex items-center gap-4 text-sm">
+    <span class="text-gray-400">{{ user_email }}</span>
+    <form method="POST" action="/logout" class="inline">
+        <button type="submit" class="text-gray-500 hover:text-gray-300">Sign out</button>
+    </form>
+</div>
+{% endblock %}
+
 {% block content %}
 <div class="max-w-2xl mx-auto p-6">
     <div class="bg-vouch-surface border border-vouch-border rounded-lg p-6">

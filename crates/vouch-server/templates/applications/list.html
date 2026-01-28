@@ -2,13 +2,19 @@
 
 {% block title %}My Applications - Vouch{% endblock %}
 
+{% block header_right %}
+<div class="flex items-center gap-4 text-sm">
+    <span class="text-gray-400">{{ user_email }}</span>
+    <form method="POST" action="/logout" class="inline">
+        <button type="submit" class="text-gray-500 hover:text-gray-300">Sign out</button>
+    </form>
+</div>
+{% endblock %}
+
 {% block content %}
 <div class="max-w-4xl mx-auto p-6">
     <div class="flex justify-between items-center mb-6">
-        <div>
-            <h1 class="text-2xl font-bold text-gray-200">My Applications</h1>
-            <p class="text-gray-400">Logged in as {{ user_email }}</p>
-        </div>
+        <h1 class="text-2xl font-bold text-gray-200">My Applications</h1>
         <a href="/applications/new" class="bg-vouch-accent hover:bg-vouch-accent-hover text-white px-4 py-2 rounded-md font-medium transition-colors">
             New Application
         </a>
@@ -79,9 +85,5 @@
         </table>
     </div>
     {% endif %}
-
-    <div class="mt-8 text-center">
-        <a href="/" class="text-gray-400 hover:text-gray-300">Back to Home</a>
-    </div>
 </div>
 {% endblock %}

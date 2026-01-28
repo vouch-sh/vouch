@@ -2,6 +2,15 @@
 
 {% block title %}Vouch - Connect GitHub{% endblock %}
 
+{% block header_right %}
+<div class="flex items-center gap-4 text-sm">
+    <span class="text-gray-400">{{ user_email }}</span>
+    <form method="POST" action="/logout" class="inline">
+        <button type="submit" class="text-gray-500 hover:text-gray-300">Sign out</button>
+    </form>
+</div>
+{% endblock %}
+
 {% block content %}
 <div class="flex items-center justify-center flex-1 p-5">
     <div class="card max-w-md w-full">
@@ -65,9 +74,6 @@
         </div>
 
         <div class="border-t border-vouch-subtle pt-4">
-            <p class="text-xs text-gray-500 mb-4 text-center">
-                Signed in as <span class="text-gray-400">{{ user_email }}</span>
-            </p>
             <a href="{{ github_app_url }}" class="btn-primary w-full text-center block">
                 {% if connected_accounts.is_empty() %}Connect GitHub{% else %}Connect Another GitHub Account{% endif %}
             </a>
