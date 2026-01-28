@@ -105,7 +105,6 @@ async fn main() -> Result<()> {
     let app = Router::new()
         // Landing page with smart routing
         .route("/", get(handlers::home::home_page))
-        .route("/admin-setup", get(handlers::home::admin_setup_page))
         .route(
             "/developer-setup",
             get(handlers::home::developer_setup_page),
@@ -192,33 +191,17 @@ async fn main() -> Result<()> {
             "/v1/credentials/aws/token",
             get(handlers::credentials::get_aws_token),
         )
-        // Admin login/logout
+        // Org admin API (JSON, JWT Bearer auth)
         .route(
-            "/admin/login",
-            get(handlers::admin::admin_login_page).post(handlers::admin::admin_login_start),
-        )
-        .route("/admin/callback", get(handlers::admin::admin_oidc_callback))
-        .route("/admin/logout", post(handlers::admin::admin_logout))
-        // Admin setup wizard
-        .route("/admin/setup", get(handlers::admin::setup_page))
-        .route("/admin/setup/oidc", post(handlers::admin::setup_save_oidc))
-        .route("/admin/setup/test", post(handlers::admin::setup_test_oidc))
-        .route("/admin/users", get(handlers::admin::list_users))
-        .route(
-            "/admin/users/{id}/delete",
-            post(handlers::admin::delete_user),
-        )
-        // Admin API (JSON)
-        .route(
-            "/api/v1/admin/auth-events",
+            "/api/v1/org/auth-events",
             get(handlers::admin::list_auth_events),
         )
         .route(
-            "/api/v1/admin/scim-tokens",
+            "/api/v1/org/scim-tokens",
             get(handlers::admin::list_scim_tokens).post(handlers::admin::create_scim_token),
         )
         .route(
-            "/api/v1/admin/scim-tokens/{id}",
+            "/api/v1/org/scim-tokens/{id}",
             delete(handlers::admin::delete_scim_token),
         )
         // SCIM 2.0 endpoints (RFC 7643/7644)

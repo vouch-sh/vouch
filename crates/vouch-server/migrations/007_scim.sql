@@ -2,6 +2,7 @@
 CREATE TABLE IF NOT EXISTS scim_tokens (
     id TEXT PRIMARY KEY,
     token_hash TEXT UNIQUE NOT NULL,
+    org_id TEXT REFERENCES organizations(id),
     description TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     last_used_at TEXT,
@@ -27,6 +28,7 @@ ALTER TABLE users ADD COLUMN external_id TEXT;
 
 -- Indexes
 CREATE INDEX IF NOT EXISTS idx_scim_tokens_hash ON scim_tokens(token_hash);
+CREATE INDEX IF NOT EXISTS idx_scim_tokens_org ON scim_tokens(org_id);
 CREATE INDEX IF NOT EXISTS idx_scim_audit_created ON scim_audit_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_users_external_id ON users(external_id);
 CREATE INDEX IF NOT EXISTS idx_users_active ON users(active);

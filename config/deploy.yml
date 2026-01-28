@@ -39,11 +39,9 @@ env:
     RUST_LOG: "info,vouch_server=debug"
   secret:
     - VOUCH_JWT_SECRET
-    - VOUCH_ADMIN_BOOTSTRAP_TOKEN
     - VOUCH_OIDC_ISSUER
     - VOUCH_OIDC_CLIENT_ID
     - VOUCH_OIDC_CLIENT_SECRET
-    - VOUCH_ADMIN_EMAILS
 
 volumes:
   - "/opt/vouch/data:/data"

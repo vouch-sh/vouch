@@ -56,8 +56,6 @@ pub fn test_config() -> ServerConfig {
         verification_base_url: "https://test.example.com".to_string(),
         device_code_expires_seconds: 600,
         device_poll_interval_seconds: 5,
-        admin_bootstrap_token: Some(SecretString::from("test-bootstrap-token")),
-        admin_emails: vec!["admin@example.com".to_string()],
         allowed_domains: Some(vec!["example.com".to_string()]),
         org_name: Some("Test Org".to_string()),
         cli_download_macos: None,
@@ -158,26 +156,17 @@ pub fn test_router(state: Arc<AppState>) -> Router {
             "/v1/credentials/aws/token",
             get(handlers::credentials::get_aws_token),
         )
-        // Admin setup wizard
-        .route("/admin/setup", get(handlers::admin::setup_page))
-        .route("/admin/setup/oidc", post(handlers::admin::setup_save_oidc))
-        .route("/admin/setup/test", post(handlers::admin::setup_test_oidc))
-        .route("/admin/users", get(handlers::admin::list_users))
+        // Org admin API (JSON, JWT Bearer auth)
         .route(
-            "/admin/users/{id}/delete",
-            post(handlers::admin::delete_user),
-        )
-        // Admin API (JSON)
-        .route(
-            "/api/v1/admin/auth-events",
+            "/api/v1/org/auth-events",
             get(handlers::admin::list_auth_events),
         )
         .route(
-            "/api/v1/admin/scim-tokens",
+            "/api/v1/org/scim-tokens",
             get(handlers::admin::list_scim_tokens).post(handlers::admin::create_scim_token),
         )
         .route(
-            "/api/v1/admin/scim-tokens/{id}",
+            "/api/v1/org/scim-tokens/{id}",
             delete(handlers::admin::delete_scim_token),
         )
         // SCIM 2.0 endpoints (RFC 7643/7644)
@@ -447,7 +436,7 @@ pub async fn create_test_scim_token(pool: &SqlitePool, description: &str) -> Str
     let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
 
     // Store in database
-    crate::db::create_scim_token(pool, &token_hash, Some(description), None)
+    crate::db::create_scim_token(pool, &token_hash, Some(description), None, None)
         .await
         .expect("Failed to create SCIM token");
 

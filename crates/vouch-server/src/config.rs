@@ -5,17 +5,11 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use secrecy::{ExposeSecret, SecretString};
 use sqlx::SqlitePool;
-use std::sync::Arc;
-use subtle::ConstantTimeEq;
-use tokio::sync::RwLock;
 
 use crate::db;
 
 /// Configuration keys used in the database.
 pub mod config_keys {
-    pub const OIDC_ISSUER: &str = "oidc_issuer";
-    pub const OIDC_CLIENT_ID: &str = "oidc_client_id";
-    pub const OIDC_CLIENT_SECRET: &str = "oidc_client_secret";
     pub const ALLOWED_DOMAINS: &str = "allowed_domains";
     pub const ORG_NAME: &str = "org_name";
     pub const CLI_DOWNLOAD_MACOS: &str = "cli_download_macos";
@@ -115,14 +109,6 @@ pub struct Args {
     #[arg(long, env = "VOUCH_DEVICE_POLL_INTERVAL", default_value = "5")]
     pub device_poll_interval: u64,
 
-    /// Bootstrap token for initial admin setup.
-    #[arg(long, env = "VOUCH_ADMIN_BOOTSTRAP_TOKEN")]
-    pub admin_bootstrap_token: Option<String>,
-
-    /// Email addresses that are admins (comma-separated).
-    #[arg(long, env = "VOUCH_ADMIN_EMAILS")]
-    pub admin_emails: Option<String>,
-
     /// Allowed email domains for enrollment (comma-separated).
     #[arg(long, env = "VOUCH_ALLOWED_DOMAINS")]
     pub allowed_domains: Option<String>,
@@ -208,10 +194,6 @@ pub struct ServerConfig {
     pub device_code_expires_seconds: u64,
     /// Device code polling interval in seconds (default: 5).
     pub device_poll_interval_seconds: u64,
-    /// Bootstrap token for initial admin setup.
-    pub admin_bootstrap_token: Option<SecretString>,
-    /// Email addresses that are admins (from env var, comma-separated).
-    pub admin_emails: Vec<String>,
     /// Allowed email domains for enrollment (comma-separated).
     pub allowed_domains: Option<Vec<String>>,
     /// Organization name for branding.
@@ -256,12 +238,6 @@ impl ServerConfig {
             .verification_url
             .unwrap_or_else(|| format!("https://{}", args.rp_id));
 
-        // Parse admin emails
-        let admin_emails = args
-            .admin_emails
-            .map(|s| parse_comma_list(&s))
-            .unwrap_or_default();
-
         // Parse allowed domains
         let allowed_domains = args.allowed_domains.map(|s| parse_comma_list(&s));
 
@@ -301,8 +277,6 @@ impl ServerConfig {
             verification_base_url,
             device_code_expires_seconds: args.device_code_expires,
             device_poll_interval_seconds: args.device_poll_interval,
-            admin_bootstrap_token: args.admin_bootstrap_token.map(SecretString::from),
-            admin_emails,
             allowed_domains,
             org_name: args.org_name,
             cli_download_macos: args.cli_download_macos,
@@ -366,15 +340,6 @@ impl ServerConfig {
             .ok()
             .and_then(|s| s.parse().ok())
             .unwrap_or(5);
-
-        // Admin configuration
-        let admin_bootstrap_token = std::env::var("VOUCH_ADMIN_BOOTSTRAP_TOKEN")
-            .ok()
-            .map(SecretString::from);
-        let admin_emails = std::env::var("VOUCH_ADMIN_EMAILS")
-            .ok()
-            .map(|s| parse_comma_list(&s))
-            .unwrap_or_default();
 
         // Allowed domains (optional)
         let allowed_domains = std::env::var("VOUCH_ALLOWED_DOMAINS")
@@ -443,8 +408,6 @@ impl ServerConfig {
             verification_base_url,
             device_code_expires_seconds,
             device_poll_interval_seconds,
-            admin_bootstrap_token,
-            admin_emails,
             allowed_domains,
             org_name,
             cli_download_macos,
@@ -463,17 +426,6 @@ impl ServerConfig {
 
     /// Load additional configuration from database (overrides env vars where set).
     pub async fn load_from_db(&mut self, pool: &SqlitePool) -> Result<()> {
-        // OIDC settings (DB overrides env vars)
-        if let Some(issuer) = db::get_config(pool, config_keys::OIDC_ISSUER).await? {
-            self.oidc_issuer_url = Some(issuer);
-        }
-        if let Some(client_id) = db::get_config(pool, config_keys::OIDC_CLIENT_ID).await? {
-            self.oidc_client_id = Some(client_id);
-        }
-        if let Some(client_secret) = db::get_config(pool, config_keys::OIDC_CLIENT_SECRET).await? {
-            self.oidc_client_secret = Some(SecretString::from(client_secret));
-        }
-
         // Allowed domains (DB overrides env vars)
         if let Some(domains) = db::get_config(pool, config_keys::ALLOWED_DOMAINS).await? {
             self.allowed_domains = Some(parse_comma_list(&domains));
@@ -504,25 +456,6 @@ impl ServerConfig {
             && self.oidc_client_secret.is_some()
     }
 
-    /// Check if admin bootstrap token is valid using constant-time comparison.
-    #[must_use]
-    pub fn verify_bootstrap_token(&self, token: &str) -> bool {
-        self.admin_bootstrap_token.as_ref().is_some_and(|t| {
-            let expected = t.expose_secret().as_bytes();
-            let provided = token.as_bytes();
-            // Use constant-time comparison to prevent timing attacks
-            expected.len() == provided.len() && bool::from(expected.ct_eq(provided))
-        })
-    }
-
-    /// Check if an email is in the admin list (env var list only).
-    #[must_use]
-    pub fn is_env_admin(&self, email: &str) -> bool {
-        self.admin_emails
-            .iter()
-            .any(|e| e.eq_ignore_ascii_case(email))
-    }
-
     /// Get the organization display name.
     #[must_use]
     pub fn get_org_display_name(&self) -> &str {
@@ -540,37 +473,5 @@ impl ServerConfig {
     #[must_use]
     pub fn oidc_client_secret_exposed(&self) -> Option<&str> {
         self.oidc_client_secret.as_ref().map(|s| s.expose_secret())
-    }
-}
-
-/// Dynamic configuration that can be reloaded at runtime.
-#[allow(dead_code)]
-pub struct DynamicConfig {
-    inner: Arc<RwLock<ServerConfig>>,
-}
-
-#[allow(dead_code)]
-impl DynamicConfig {
-    /// Create a new dynamic config wrapper.
-    pub fn new(config: ServerConfig) -> Self {
-        Self {
-            inner: Arc::new(RwLock::new(config)),
-        }
-    }
-
-    /// Get a read lock on the configuration.
-    pub async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, ServerConfig> {
-        self.inner.read().await
-    }
-
-    /// Reload configuration from database.
-    pub async fn reload(&self, pool: &SqlitePool) -> Result<()> {
-        let mut config = self.inner.write().await;
-        config.load_from_db(pool).await
-    }
-
-    /// Clone the inner Arc for sharing.
-    pub fn clone_inner(&self) -> Arc<RwLock<ServerConfig>> {
-        Arc::clone(&self.inner)
     }
 }

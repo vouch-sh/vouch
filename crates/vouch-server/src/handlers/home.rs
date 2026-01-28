@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! Home page handler with smart routing based on configuration.
+//! Home page handler.
 //!
-//! This module provides the main landing page for Vouch that adapts based on
-//! whether OIDC is configured:
-//! - Not configured: Shows admin setup wizard
-//! - Configured: Shows org enrollment page (delegates to landing.rs)
+//! The home page always shows the landing/enrollment page with
+//! "Sign in with Google", CLI instructions, and download links.
 
 use crate::AppState;
 use askama::Template;
@@ -14,42 +12,6 @@ use axum::{
     response::{Html, IntoResponse, Response},
 };
 use std::sync::Arc;
-
-/// Home page template (two-persona selection).
-#[derive(Template)]
-#[template(path = "home.html")]
-pub struct HomeTemplate;
-
-impl IntoResponse for HomeTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
-
-/// Admin setup page template.
-#[derive(Template)]
-#[template(path = "admin_setup.html")]
-pub struct AdminSetupTemplate {
-    pub server_url: String,
-}
-
-impl IntoResponse for AdminSetupTemplate {
-    fn into_response(self) -> Response {
-        match self.render() {
-            Ok(html) => Html(html).into_response(),
-            Err(e) => {
-                tracing::error!("Template render error: {}", e);
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
-        }
-    }
-}
 
 /// Developer setup page template.
 #[derive(Template)]
@@ -73,31 +35,13 @@ impl IntoResponse for DeveloperSetupTemplate {
     }
 }
 
-/// Home page with smart routing.
+/// Home page — always shows the landing/enrollment page.
 /// GET /
-///
-/// If OIDC is not configured, shows the two-persona selection page (admin vs developer).
-/// If OIDC is configured, shows the org enrollment page.
 #[allow(clippy::unused_async)]
 pub async fn home_page(State(state): State<Arc<AppState>>) -> Response {
-    if state.config.oidc_configured() {
-        // OIDC configured - show org enrollment page (delegate to landing)
-        super::landing::landing_page(State(state))
-            .await
-            .into_response()
-    } else {
-        // OIDC not configured - show two-persona selection page
-        HomeTemplate.into_response()
-    }
-}
-
-/// Admin setup page - step-by-step wizard for configuring Vouch.
-/// GET /admin-setup
-#[allow(clippy::unused_async)]
-pub async fn admin_setup_page(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    AdminSetupTemplate {
-        server_url: state.config.verification_base_url.clone(),
-    }
+    super::landing::landing_page(State(state))
+        .await
+        .into_response()
 }
 
 /// Developer setup page - CLI installation and enrollment instructions.

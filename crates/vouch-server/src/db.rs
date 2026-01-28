@@ -592,69 +592,6 @@ pub async fn delete_config(pool: &SqlitePool, key: &str) -> Result<()> {
 }
 
 // ============================================================================
-// Admin Users
-// ============================================================================
-
-/// Admin user record.
-#[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
-pub struct AdminUser {
-    pub id: String,
-    pub email: String,
-    pub created_at: String,
-}
-
-/// Check if an email is an admin.
-#[allow(dead_code)]
-pub async fn is_admin(pool: &SqlitePool, email: &str) -> Result<bool> {
-    let row = sqlx::query_as::<_, AdminUser>(
-        "SELECT id, email, created_at FROM admin_users WHERE email = ?",
-    )
-    .bind(email)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(row.is_some())
-}
-
-/// Get all admin users.
-#[allow(dead_code)]
-pub async fn get_admin_users(pool: &SqlitePool) -> Result<Vec<AdminUser>> {
-    let admins = sqlx::query_as::<_, AdminUser>(
-        "SELECT id, email, created_at FROM admin_users ORDER BY email",
-    )
-    .fetch_all(pool)
-    .await?;
-
-    Ok(admins)
-}
-
-/// Add an admin user.
-#[allow(dead_code)]
-pub async fn add_admin_user(pool: &SqlitePool, email: &str) -> Result<String> {
-    let id = Uuid::now_v7().to_string();
-
-    sqlx::query("INSERT OR IGNORE INTO admin_users (id, email) VALUES (?, ?)")
-        .bind(&id)
-        .bind(email)
-        .execute(pool)
-        .await?;
-
-    Ok(id)
-}
-
-/// Remove an admin user.
-#[allow(dead_code)]
-pub async fn remove_admin_user(pool: &SqlitePool, email: &str) -> Result<()> {
-    sqlx::query("DELETE FROM admin_users WHERE email = ?")
-        .bind(email)
-        .execute(pool)
-        .await?;
-
-    Ok(())
-}
-
-// ============================================================================
 // User Management (Admin)
 // ============================================================================
 
@@ -1079,6 +1016,7 @@ pub async fn delete_old_auth_events(pool: &SqlitePool, before: &str) -> Result<u
 pub struct ScimToken {
     pub id: String,
     pub token_hash: String,
+    pub org_id: Option<String>,
     pub description: Option<String>,
     pub created_at: String,
     pub last_used_at: Option<String>,
@@ -1091,7 +1029,7 @@ pub async fn get_scim_token_by_hash(
     token_hash: &str,
 ) -> Result<Option<ScimToken>> {
     let token = sqlx::query_as::<_, ScimToken>(
-        "SELECT id, token_hash, description, created_at, last_used_at, expires_at FROM scim_tokens WHERE token_hash = ?"
+        "SELECT id, token_hash, org_id, description, created_at, last_used_at, expires_at FROM scim_tokens WHERE token_hash = ?"
     )
     .bind(token_hash)
     .fetch_optional(pool)
@@ -1117,14 +1055,16 @@ pub async fn create_scim_token(
     token_hash: &str,
     description: Option<&str>,
     expires_at: Option<&str>,
+    org_id: Option<&str>,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
 
     sqlx::query(
-        "INSERT INTO scim_tokens (id, token_hash, description, expires_at) VALUES (?, ?, ?, ?)",
+        "INSERT INTO scim_tokens (id, token_hash, org_id, description, expires_at) VALUES (?, ?, ?, ?, ?)",
     )
     .bind(&id)
     .bind(token_hash)
+    .bind(org_id)
     .bind(description)
     .bind(expires_at)
     .execute(pool)
@@ -1144,14 +1084,26 @@ pub async fn delete_scim_token(pool: &SqlitePool, token_id: &str) -> Result<()> 
     Ok(())
 }
 
-/// List all SCIM tokens.
+/// List SCIM tokens, optionally filtered by organization.
 #[allow(dead_code)]
-pub async fn list_scim_tokens(pool: &SqlitePool) -> Result<Vec<ScimToken>> {
-    let tokens = sqlx::query_as::<_, ScimToken>(
-        "SELECT id, token_hash, description, created_at, last_used_at, expires_at FROM scim_tokens ORDER BY created_at DESC"
-    )
-    .fetch_all(pool)
-    .await?;
+pub async fn list_scim_tokens(
+    pool: &SqlitePool,
+    org_id: Option<&str>,
+) -> Result<Vec<ScimToken>> {
+    let tokens = if let Some(org_id) = org_id {
+        sqlx::query_as::<_, ScimToken>(
+            "SELECT id, token_hash, org_id, description, created_at, last_used_at, expires_at FROM scim_tokens WHERE org_id = ? ORDER BY created_at DESC"
+        )
+        .bind(org_id)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, ScimToken>(
+            "SELECT id, token_hash, org_id, description, created_at, last_used_at, expires_at FROM scim_tokens ORDER BY created_at DESC"
+        )
+        .fetch_all(pool)
+        .await?
+    };
 
     Ok(tokens)
 }
@@ -2121,110 +2073,6 @@ pub async fn delete_delegation_policy(pool: &SqlitePool, id: &str) -> Result<boo
         .await?;
 
     Ok(result.rows_affected() > 0)
-}
-
-// ============================================================================
-// Admin Sessions
-// ============================================================================
-
-/// Admin session record for browser-based OIDC login.
-#[allow(dead_code)]
-#[derive(Debug, sqlx::FromRow)]
-pub struct AdminSession {
-    pub id: String,
-    pub admin_email: String,
-    pub session_token_hash: String,
-    pub expires_at: String,
-    pub oidc_provider: Option<String>,
-    pub oidc_subject: Option<String>,
-    pub revoked: i64,
-    pub created_at: String,
-    pub last_used_at: String,
-}
-
-/// Create a new admin session.
-pub async fn create_admin_session(
-    pool: &SqlitePool,
-    admin_email: &str,
-    session_token_hash: &str,
-    expires_at: &str,
-    oidc_provider: Option<&str>,
-    oidc_subject: Option<&str>,
-) -> Result<String> {
-    let id = Uuid::now_v7().to_string();
-
-    sqlx::query(
-        "INSERT INTO admin_sessions (id, admin_email, session_token_hash, expires_at, oidc_provider, oidc_subject)
-         VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(admin_email)
-    .bind(session_token_hash)
-    .bind(expires_at)
-    .bind(oidc_provider)
-    .bind(oidc_subject)
-    .execute(pool)
-    .await?;
-
-    Ok(id)
-}
-
-/// Get an admin session by token hash.
-pub async fn get_admin_session_by_token_hash(
-    pool: &SqlitePool,
-    token_hash: &str,
-) -> Result<Option<AdminSession>> {
-    let session = sqlx::query_as::<_, AdminSession>(
-        "SELECT id, admin_email, session_token_hash, expires_at, oidc_provider, oidc_subject, revoked, created_at, last_used_at
-         FROM admin_sessions
-         WHERE session_token_hash = ? AND revoked = 0",
-    )
-    .bind(token_hash)
-    .fetch_optional(pool)
-    .await?;
-
-    Ok(session)
-}
-
-/// Update admin session last used timestamp.
-#[allow(dead_code)]
-pub async fn touch_admin_session(pool: &SqlitePool, id: &str) -> Result<()> {
-    sqlx::query("UPDATE admin_sessions SET last_used_at = datetime('now') WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-
-    Ok(())
-}
-
-/// Revoke an admin session.
-pub async fn revoke_admin_session(pool: &SqlitePool, id: &str) -> Result<bool> {
-    let result = sqlx::query("UPDATE admin_sessions SET revoked = 1 WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
-
-    Ok(result.rows_affected() > 0)
-}
-
-/// Revoke all admin sessions for an email.
-#[allow(dead_code)]
-pub async fn revoke_admin_sessions_for_email(pool: &SqlitePool, email: &str) -> Result<u64> {
-    let result = sqlx::query("UPDATE admin_sessions SET revoked = 1 WHERE admin_email = ?")
-        .bind(email)
-        .execute(pool)
-        .await?;
-
-    Ok(result.rows_affected())
-}
-
-/// Delete expired admin sessions (for cleanup task).
-pub async fn delete_expired_admin_sessions(pool: &SqlitePool) -> Result<u64> {
-    let result = sqlx::query("DELETE FROM admin_sessions WHERE expires_at < datetime('now')")
-        .execute(pool)
-        .await?;
-
-    Ok(result.rows_affected())
 }
 
 // ============================================================================
@@ -3630,7 +3478,7 @@ mod tests {
         let pool = test_db().await;
 
         // Create a SCIM token first (required for foreign key constraint)
-        let token_id = create_scim_token(&pool, "test_token_hash", Some("Test token"), None)
+        let token_id = create_scim_token(&pool, "test_token_hash", Some("Test token"), None, None)
             .await
             .expect("Failed to create SCIM token");
 
@@ -3860,7 +3708,7 @@ mod tests {
 
         // Create SCIM token
         let token_hash = "hashed_scim_token";
-        let token_id = create_scim_token(&pool, token_hash, Some("Admin token"), None)
+        let token_id = create_scim_token(&pool, token_hash, Some("Admin token"), None, None)
             .await
             .expect("Failed to create SCIM token");
 
@@ -3888,7 +3736,7 @@ mod tests {
         assert!(token.last_used_at.is_some());
 
         // List tokens
-        let tokens = list_scim_tokens(&pool)
+        let tokens = list_scim_tokens(&pool, None)
             .await
             .expect("Failed to list tokens");
 

@@ -3763,7 +3763,6 @@ dependencies = [
  "serde_json",
  "sqlx",
  "ssh-key",
- "subtle",
  "thiserror 2.0.18",
  "tokio",
  "tower",

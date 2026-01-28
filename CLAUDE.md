@@ -77,7 +77,7 @@ Keep it simple. No complex JavaScript frameworks.
 - Any npm/node.js build toolchain for JavaScript
 - External CDN dependencies
 
-**Rationale:** The server UI is for enrollment and admin tasks, not a complex SPA. Askama templates + TailwindCSS + minimal JS keeps it auditable and maintainable.
+**Rationale:** The server UI is for enrollment tasks, not a complex SPA. Askama templates + TailwindCSS + minimal JS keeps it auditable and maintainable.
 
 ### Security Patterns
 
@@ -194,6 +194,8 @@ cargo clippy --all-targets -- -D warnings
 4. **8-hour sessions** — Balance security and usability
 5. **Built-in SSH CA** — Ed25519 signing, no external dependencies
 6. **MDM for distribution** — Don't build what Jamf/Kandji already do
+7. **OIDC config is env-var only** — No admin UI for OIDC configuration
+8. **Org admin via JWT** — SCIM tokens and auth events at `/api/v1/org/*` use JWT Bearer auth from regular FIDO2 sessions
 
 ## Questions to Ask
 
@@ -223,3 +225,4 @@ Before implementing a feature:
 
 **Reference:**
 - [Amazon Midway](https://midway-auth.amazon.com) — Inspiration for hardware-backed auth
+- [Why Strong Authentication Is Your Most Important Security Control](https://www.linkedin.com/pulse/why-strong-authentication-your-most-important-security-schmidt-unm0e/) - LinkedIn post by Stephen Schmidt, SVP & Chief Security Officer at Amazon

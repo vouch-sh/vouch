@@ -34,7 +34,6 @@ run-server: ## Run the vouch server locally
 	VOUCH_RP_ID=localhost \
 	VOUCH_RP_NAME=Vouch \
 	VOUCH_JWT_SECRET=dev-secret-at-least-32-characters-long \
-	VOUCH_ADMIN_BOOTSTRAP_TOKEN=admin123 \
 	$(CARGO) run --bin vouch-server
 
 run-agent:
@@ -68,7 +67,6 @@ docker-run: ## Run Docker container locally
 		-e VOUCH_RP_ID=localhost \
 		-e VOUCH_RP_NAME=Vouch \
 		-e VOUCH_JWT_SECRET=dev-secret-at-least-32-characters-long \
-		-e VOUCH_ADMIN_BOOTSTRAP_TOKEN=admin123 \
 		-e RUST_LOG=debug \
 		-v vouch-data:/data \
 		$(IMAGE_NAME):$(IMAGE_TAG)

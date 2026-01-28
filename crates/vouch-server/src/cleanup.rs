@@ -93,17 +93,6 @@ pub async fn run_cleanup(
         }
     }
 
-    // Clean up expired admin sessions
-    match db::delete_expired_admin_sessions(db).await {
-        Ok(count) if count > 0 => {
-            tracing::info!("Cleaned up {count} expired admin sessions");
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!("Failed to clean up expired admin sessions: {e}");
-        }
-    }
-
     // Clean up expired enrollment sessions
     match db::delete_expired_enrollment_sessions(db).await {
         Ok(count) if count > 0 => {

@@ -95,21 +95,17 @@ env:
 # Secret environment variables
 # Reference an existing secret containing these keys:
 # - VOUCH_JWT_SECRET
-# - VOUCH_ADMIN_BOOTSTRAP_TOKEN
 # - VOUCH_OIDC_ISSUER
 # - VOUCH_OIDC_CLIENT_ID
 # - VOUCH_OIDC_CLIENT_SECRET
-# - VOUCH_ADMIN_EMAILS
 existingSecret: ""
 
 # Or create a new secret (not recommended for production)
 secrets: {}
   # VOUCH_JWT_SECRET: ""
-  # VOUCH_ADMIN_BOOTSTRAP_TOKEN: ""
   # VOUCH_OIDC_ISSUER: ""
   # VOUCH_OIDC_CLIENT_ID: ""
   # VOUCH_OIDC_CLIENT_SECRET: ""
-  # VOUCH_ADMIN_EMAILS: ""
 
 # Health check configuration
 healthcheck:
