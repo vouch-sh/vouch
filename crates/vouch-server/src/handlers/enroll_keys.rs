@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Key management handlers during enrollment (using cookie-based authentication).
 //!
-//! These endpoints allow users to manage their security keys during the enrollment flow,
-//! before they have a session token. Authentication is via the enrollment session cookie.
+//! These endpoints allow users to manage their security keys via browser UI.
+//! Authentication is via the vouch_session cookie.
 
 use crate::AppState;
 use crate::db;
@@ -18,47 +18,48 @@ use vouch_common::{
     lookup_device_model,
 };
 
-use super::enroll::get_enrollment_session_from_cookie;
+use super::common::extract_session_from_cookie;
 use super::json_error;
 
-/// Data extracted from enrollment session.
+/// Data extracted from session.
 #[derive(Debug)]
-struct EnrollmentAuth {
+struct SessionAuth {
     user_id: String,
     #[allow(dead_code)]
     email: String,
+    /// The authenticator ID from the current session (if available).
+    authenticator_id: String,
 }
 
-/// Validate enrollment session from cookie and extract user info.
-async fn validate_enrollment_cookie(
+/// Validate session from cookie and extract user info.
+async fn validate_session_cookie(
     state: &AppState,
     jar: &CookieJar,
-) -> Result<EnrollmentAuth, (StatusCode, Json<ApiError>)> {
-    // Get enrollment session from cookie
-    let session = get_enrollment_session_from_cookie(state, jar)
-        .await
-        .ok_or_else(|| {
-            json_error(
-                StatusCode::UNAUTHORIZED,
-                "invalid_session",
-                "Invalid or expired enrollment session",
-            )
-        })?;
+) -> Result<SessionAuth, (StatusCode, Json<ApiError>)> {
+    // Get session from vouch_session cookie
+    let session = extract_session_from_cookie(state, jar).await.map_err(|_| {
+        json_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_session",
+            "Invalid or expired session",
+        )
+    })?;
 
-    Ok(EnrollmentAuth {
-        user_id: session.user_id,
-        email: session.user_email,
+    Ok(SessionAuth {
+        user_id: session.claims.sub,
+        email: session.claims.email,
+        authenticator_id: session.claims.authenticator_id,
     })
 }
 
 /// List all registered keys for the user (during enrollment).
 /// GET /enroll/keys/api
-/// Authentication is via cookie.
+/// Authentication is via vouch_session cookie.
 pub async fn list_keys(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<Json<ListKeysResponse>, (StatusCode, Json<ApiError>)> {
-    let auth = validate_enrollment_cookie(&state, &jar).await?;
+    let auth = validate_session_cookie(&state, &jar).await?;
 
     // Get all authenticators for this user
     let authenticators = db::get_authenticators_for_user(&state.db, &auth.user_id)
@@ -71,7 +72,7 @@ pub async fn list_keys(
             )
         })?;
 
-    // Convert to KeyInfo (no current session during enrollment)
+    // Convert to KeyInfo, marking the current session's key
     let keys: Vec<KeyInfo> = authenticators
         .into_iter()
         .map(|a| {
@@ -80,11 +81,12 @@ pub async fn list_keys(
                 .as_deref()
                 .and_then(lookup_device_model)
                 .map(String::from);
+            let is_current = a.id == auth.authenticator_id;
             KeyInfo {
                 id: a.id,
                 name: a.name,
                 created_at: a.created_at,
-                is_current_session: false, // No session during enrollment
+                is_current_session: is_current,
                 device_model,
                 aaguid: a.aaguid,
             }
@@ -96,14 +98,14 @@ pub async fn list_keys(
 
 /// Rename a security key (during enrollment).
 /// PATCH /enroll/keys/{id}
-/// Authentication is via cookie.
+/// Authentication is via vouch_session cookie.
 pub async fn rename_key(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(key_id): Path<String>,
     Json(req): Json<RenameKeyRequest>,
 ) -> Result<Json<RenameKeyResponse>, (StatusCode, Json<ApiError>)> {
-    let auth = validate_enrollment_cookie(&state, &jar).await?;
+    let auth = validate_session_cookie(&state, &jar).await?;
 
     // Validate name
     let name = req.name.trim();
@@ -168,13 +170,13 @@ pub async fn rename_key(
 
 /// Delete a security key (during enrollment).
 /// DELETE /enroll/keys/{id}
-/// Authentication is via cookie.
+/// Authentication is via vouch_session cookie.
 pub async fn delete_key(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, (StatusCode, Json<ApiError>)> {
-    let auth = validate_enrollment_cookie(&state, &jar).await?;
+    let auth = validate_session_cookie(&state, &jar).await?;
 
     // Get the authenticator to verify ownership
     let authenticator = db::get_authenticator_by_id(&state.db, &key_id)
@@ -239,7 +241,7 @@ pub async fn delete_key(
         })?;
 
     tracing::info!(
-        "Deleted key {} for user {} during enrollment, revoked {} sessions",
+        "Deleted key {} for user {}, revoked {} sessions",
         key_id,
         auth.user_id,
         sessions_revoked

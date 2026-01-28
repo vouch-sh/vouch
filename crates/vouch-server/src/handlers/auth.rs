@@ -7,10 +7,13 @@ use crate::extractors::ClientInfo;
 use crate::webauthn_verify;
 use axum::{
     Json,
+    body::Body,
     extract::State,
     http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use axum_extra::TypedHeader;
+use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use headers::authorization::{Authorization, Bearer};
@@ -26,7 +29,10 @@ use vouch_common::{
     RegisterStartResponse, SessionStatus, fido2_types::Challenge,
 };
 
-use super::{generate_challenge, hash_token, json_error, validate_registration_attestation};
+use super::{
+    clear_session_cookie, generate_challenge, hash_token, json_error,
+    validate_registration_attestation,
+};
 
 // ============================================================================
 // Registration State (stored temporarily)
@@ -699,4 +705,31 @@ pub async fn status(
         expires_in_seconds: expires_in,
         device_name,
     }))
+}
+
+/// Handle sign-out (clears session cookie).
+/// POST /logout
+pub async fn logout(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
+    // Get session from vouch_session cookie and delete it from database
+    if let Some(token) = jar.get("vouch_session").map(|c| c.value()) {
+        let token_hash = hash_token(token);
+        match db::delete_session_by_token_hash(&state.db, &token_hash).await {
+            Ok(deleted) => {
+                if deleted {
+                    tracing::info!("Session deleted during logout");
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to delete session during logout: {}", e);
+            }
+        }
+    }
+
+    // Clear session cookie and redirect to landing page
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, "/")
+        .header(header::SET_COOKIE, clear_session_cookie().to_string())
+        .body(Body::empty())
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }

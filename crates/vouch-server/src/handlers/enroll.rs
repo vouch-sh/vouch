@@ -7,7 +7,6 @@ use crate::extractors::ClientInfo;
 use crate::impl_template_response;
 use askama::Template;
 use aws_lc_rs::digest::{self, SHA256};
-use aws_lc_rs::rand as aws_rand;
 use axum::{
     Form, Json,
     body::Body,
@@ -15,7 +14,7 @@ use axum::{
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
-use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
@@ -23,14 +22,13 @@ use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode}
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use time::Duration;
 use uuid::Uuid;
 use vouch_common::{ApiError, BrowserRegisterCompleteRequest, BrowserRegisterStartResponse};
 
 use super::auth::SessionClaims;
 use super::{
-    create_session_cookie, generate_random_bytes, hash_token, json_error,
-    validate_registration_attestation,
+    create_session_cookie, extract_session_from_cookie, generate_random_bytes, hash_token,
+    json_error, validate_registration_attestation,
 };
 
 // ============================================================================
@@ -124,71 +122,8 @@ fn cose_key_to_cbor(
 }
 
 // ============================================================================
-// Enrollment Session Cookie Management
+// Enrollment Session Cookie Management (legacy, for CLI backward compatibility)
 // ============================================================================
-
-/// Enrollment session duration (30 minutes).
-const ENROLL_SESSION_MINUTES: i64 = 30;
-
-/// Create an enrollment session cookie.
-/// Returns the cookie, or None on failure.
-async fn create_enrollment_session_cookie(
-    state: &AppState,
-    user_id: &str,
-    user_email: &str,
-    device_auth_id: Option<&str>,
-) -> Option<Cookie<'static>> {
-    // Generate random token
-    let mut token_bytes = [0u8; 32];
-    aws_rand::fill(&mut token_bytes).ok()?;
-    let token = URL_SAFE_NO_PAD.encode(token_bytes);
-
-    // Hash for storage
-    let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
-
-    // Calculate expiration
-    let expires = Timestamp::now()
-        .checked_add(Span::new().minutes(ENROLL_SESSION_MINUTES))
-        .ok()?;
-    let expires_str = expires.strftime("%Y-%m-%d %H:%M:%S").to_string();
-
-    // Store session
-    db::create_enrollment_session(
-        &state.db,
-        user_id,
-        user_email,
-        &token_hash,
-        device_auth_id,
-        &expires_str,
-    )
-    .await
-    .ok()?;
-
-    // Build cookie with security attributes
-    // Use SameSite=Lax (not Strict) because the redirect from Google OAuth
-    // would otherwise prevent the cookie from being sent on the subsequent navigation
-    Some(
-        Cookie::build(("vouch_enroll", token))
-            .path("/enroll")
-            .http_only(true)
-            .secure(true)
-            .same_site(SameSite::Lax)
-            .max_age(Duration::seconds(ENROLL_SESSION_MINUTES * 60))
-            .build(),
-    )
-}
-
-/// Create a cookie that clears the enrollment session.
-/// Returns a Cookie that expires the enrollment cookie.
-fn clear_enrollment_cookie() -> Cookie<'static> {
-    Cookie::build(("vouch_enroll", ""))
-        .path("/enroll")
-        .http_only(true)
-        .secure(true)
-        .same_site(SameSite::Lax)
-        .max_age(Duration::ZERO)
-        .build()
-}
 
 /// Get enrollment session from cookie jar.
 /// Returns the session if valid, None otherwise.
@@ -796,18 +731,14 @@ pub async fn oidc_callback(
         }
     };
 
-    // Create enrollment session cookie
-    let cookie = match create_enrollment_session_cookie(
-        &state,
-        &user.id,
-        &claims.email,
-        Some(&stored_state.device_auth_id),
-    )
-    .await
-    {
-        Some(c) => c,
-        None => {
-            tracing::error!("Failed to create enrollment session");
+    // Create session for this user (using session cookie instead of enrollment cookie)
+    let now = Timestamp::now();
+    let session_hours = i64::try_from(state.config.session_hours).unwrap_or(8);
+    let duration = Span::new().hours(session_hours);
+    let expires = match now.checked_add(duration) {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!("Failed to calculate session expiration: {}", e);
             return ErrorTemplate {
                 title: "Error".to_string(),
                 message: "Failed to create session".to_string(),
@@ -817,13 +748,91 @@ pub async fn oidc_callback(
         }
     };
 
+    // Get authenticator (if any) for session claims, or use placeholder for users without keys yet
+    let existing_auths = db::get_authenticators_for_user(&state.db, &user.id)
+        .await
+        .unwrap_or_default();
+    let authenticator_id = existing_auths
+        .first()
+        .map(|a| a.id.clone())
+        .unwrap_or_else(|| "none".to_string());
+
+    let session_claims = SessionClaims {
+        sub: user.id.clone(),
+        email: user.email.clone(),
+        authenticator_id: authenticator_id.clone(),
+        iat: now.as_second(),
+        exp: expires.as_second(),
+    };
+
+    let token = match encode(
+        &Header::default(),
+        &session_claims,
+        &EncodingKey::from_secret(state.config.jwt_secret_bytes()),
+    ) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!("Failed to create session token: {}", e);
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to create session".to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
+    };
+
+    // Store session in database
+    let token_hash = hash_token(&token);
+    if let Err(e) = db::create_session(
+        &state.db,
+        &user.id,
+        &token_hash,
+        &authenticator_id,
+        &expires.to_string(),
+    )
+    .await
+    {
+        tracing::error!("Failed to store session: {}", e);
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Failed to create session".to_string(),
+            back_url: None,
+        }
+        .into_response();
+    }
+
+    // Also store the device_auth_id association for CLI polling (if this came from device auth flow)
+    // This is needed so the CLI can poll for completion
+    if !stored_state.device_auth_id.is_empty()
+        && !stored_state.device_auth_id.starts_with("DIRECT-")
+    {
+        // Store device auth ID in enrollment session for backward compatibility with CLI polling
+        // The CLI will poll the device auth endpoint to get the session
+        if let Err(e) = db::create_enrollment_session(
+            &state.db,
+            &user.id,
+            &claims.email,
+            &token_hash,
+            Some(&stored_state.device_auth_id),
+            &expires.to_string(),
+        )
+        .await
+        {
+            tracing::warn!("Failed to create enrollment session for CLI: {}", e);
+            // Continue anyway - browser flow will still work
+        }
+    }
+
     // Delete the OIDC state (it's been consumed)
     let _ = db::delete_oidc_state(&state.db, &oidc_state).await;
 
-    tracing::info!("Enrollment session created for: {}", claims.email);
-    tracing::debug!("Setting cookie and redirecting to /enroll/keys");
+    tracing::info!("Session created for user: {}", claims.email);
+    tracing::debug!("Setting vouch_session cookie and redirecting to /enroll/keys");
 
-    // Redirect to keys page with session cookie
+    // Create session cookie and redirect to keys page
+    let cookie = create_session_cookie(&token, session_hours * 3600);
+
     Response::builder()
         .status(StatusCode::SEE_OTHER)
         .header(header::LOCATION, "/enroll/keys")
@@ -834,72 +843,53 @@ pub async fn oidc_callback(
 
 /// Serve the key management page.
 /// GET /enroll/keys
-/// Authentication is via cookie (set by oidc_callback).
+/// Authentication is via vouch_session cookie (set by oidc_callback).
 pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
-    tracing::debug!("enroll_keys_page: checking for enrollment session cookie");
+    tracing::debug!("enroll_keys_page: checking for session cookie");
 
-    // Get enrollment session from cookie
-    let session = match get_enrollment_session_from_cookie(&state, &jar).await {
-        Some(s) => {
-            tracing::debug!("enroll_keys_page: found valid session for {}", s.user_email);
-            s
+    // Get session from vouch_session cookie
+    match extract_session_from_cookie(&state, &jar).await {
+        Ok(session) => {
+            tracing::debug!(
+                "enroll_keys_page: found valid session for {}",
+                session.claims.email
+            );
+            EnrollKeysTemplate {
+                email: session.claims.email,
+                rp_id: state.config.rp_id.clone(),
+            }
+            .into_response()
         }
-        None => {
+        Err(_) => {
             tracing::debug!(
                 "enroll_keys_page: no valid session found, redirecting to /enroll/start"
             );
-            // No valid session - redirect to start enrollment
-            return Redirect::to("/enroll/start").into_response();
+            // No valid session - redirect to sign in
+            Redirect::to("/enroll/start").into_response()
         }
-    };
-
-    EnrollKeysTemplate {
-        email: session.user_email,
-        rp_id: state.config.rp_id.clone(),
     }
-    .into_response()
-}
-
-/// Handle enrollment sign-out.
-/// POST /enroll/logout
-pub async fn enroll_logout(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
-    // Get enrollment session from cookie and delete it
-    if let Some(session) = get_enrollment_session_from_cookie(&state, &jar).await {
-        if let Err(e) = db::delete_enrollment_session(&state.db, &session.id).await {
-            tracing::warn!("Failed to delete enrollment session during logout: {}", e);
-        }
-        tracing::info!("Enrollment logout: {}", session.user_email);
-    }
-
-    // Clear cookie and redirect to landing page
-    Response::builder()
-        .status(StatusCode::SEE_OTHER)
-        .header(header::LOCATION, "/")
-        .header(header::SET_COOKIE, clear_enrollment_cookie().to_string())
-        .body(Body::empty())
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 /// Start browser-based `WebAuthn` registration.
 /// POST /enroll/webauthn/start
-/// Authentication is via cookie (set by oidc_callback).
+/// Authentication is via vouch_session cookie (set by oidc_callback).
 #[allow(clippy::unused_async)]
 pub async fn browser_register_start(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<Json<BrowserRegisterStartResponse>, (StatusCode, Json<ApiError>)> {
-    // Get enrollment session from cookie
-    let enroll_session = get_enrollment_session_from_cookie(&state, &jar)
+    // Get session from vouch_session cookie
+    let session = extract_session_from_cookie(&state, &jar)
         .await
-        .ok_or_else(|| {
+        .map_err(|_| {
             json_error(
                 StatusCode::UNAUTHORIZED,
                 "invalid_session",
-                "Invalid or expired enrollment session",
+                "Invalid or expired session",
             )
         })?;
 
-    let user_id = Uuid::parse_str(&enroll_session.user_id).map_err(|e| {
+    let user_id = Uuid::parse_str(&session.claims.sub).map_err(|e| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "uuid_error",
@@ -907,11 +897,17 @@ pub async fn browser_register_start(
         )
     })?;
 
-    let user_email = enroll_session.user_email.clone();
-    let device_auth_id = enroll_session.device_auth_id.clone().unwrap_or_default();
+    let user_email = session.claims.email.clone();
+
+    // Get device_auth_id from enrollment session if available (for CLI polling)
+    // This is only relevant for CLI-initiated flows
+    let device_auth_id = get_enrollment_session_from_cookie(&state, &jar)
+        .await
+        .and_then(|es| es.device_auth_id)
+        .unwrap_or_default();
 
     // Get any existing credentials for this user to exclude them
-    let existing_auths = db::get_authenticators_for_user(&state.db, &enroll_session.user_id)
+    let existing_auths = db::get_authenticators_for_user(&state.db, &session.claims.sub)
         .await
         .map_err(|e| {
             json_error(
@@ -923,7 +919,7 @@ pub async fn browser_register_start(
 
     tracing::info!(
         "browser_register_start: user {} has {} existing credentials",
-        enroll_session.user_email,
+        session.claims.email,
         existing_auths.len()
     );
 
