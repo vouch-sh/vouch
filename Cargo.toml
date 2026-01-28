@@ -116,7 +116,7 @@ secrecy = { version = "=0.10.3", default-features = false, features = ["serde"] 
 subtle = { version = "=2.6.1", default-features = false }
 
 # SSH keys and certificates
-ssh-key = { version = "=0.6.7", default-features = false, features = ["std", "ed25519", "encryption", "rand_core"] }
+ssh-key = { version = "=0.6.7", default-features = false, features = ["std", "ed25519", "encryption", "rand_core", "getrandom"] }
 
 # Ed25519 signing (for SSH agent)
 ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
