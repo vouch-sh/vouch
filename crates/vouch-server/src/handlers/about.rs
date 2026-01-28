@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! About page handler.
 
-use crate::{impl_template_response, AppState};
+use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::extract::State;
 use axum::response::IntoResponse;

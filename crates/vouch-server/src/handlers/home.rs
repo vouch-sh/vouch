@@ -4,7 +4,7 @@
 //! The home page shows the landing/enrollment page with
 //! "Sign in with Google", CLI instructions, and download links.
 
-use crate::{impl_template_response, AppState};
+use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::{extract::State, response::IntoResponse};
 use std::sync::Arc;
