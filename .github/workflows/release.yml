@@ -287,15 +287,27 @@ jobs:
           sha256sum "${STAGING}.zip" > "${STAGING}.zip.sha256"
 
       - name: Collect SBOM artifacts
+        id: sbom
         shell: bash
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           TARGET="${{ matrix.target }}"
+          MAIN_SBOM=""
           # Find and copy CycloneDX SBOMs with target-specific names
-          for sbom in $(find . -name "*_cdx.json" -not -path "./target/*" 2>/dev/null || find . -name "*.cdx.json" -not -path "./target/*" 2>/dev/null); do
+          for sbom in $(find . -maxdepth 3 -name "*_cdx.json" -o -name "*.cdx.json" 2>/dev/null | grep -v "^./target/"); do
             base=$(basename "${sbom}")
-            cp "${sbom}" "vouch-v${VERSION}-${TARGET}-${base}"
+            dest="vouch-v${VERSION}-${TARGET}-${base}"
+            cp "${sbom}" "${dest}"
+            # Use vouch-cli SBOM as the main one for attestation (always present)
+            if [[ "${base}" == *"vouch-cli"* ]] || [[ "${base}" == *"vouch_cli"* ]]; then
+              MAIN_SBOM="${dest}"
+            fi
           done
+          # Fallback to first SBOM found if no vouch-cli specific one
+          if [[ -z "${MAIN_SBOM}" ]]; then
+            MAIN_SBOM=$(ls vouch-v${VERSION}-${TARGET}-*cdx.json 2>/dev/null | head -1)
+          fi
+          echo "main_sbom=${MAIN_SBOM}" >> "$GITHUB_OUTPUT"
 
       - name: Upload binary artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
@@ -323,10 +335,11 @@ jobs:
           subject-path: vouch-server-v${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz
 
       - name: Attest SBOM
+        if: steps.sbom.outputs.main_sbom != ''
         uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3.0.0
         with:
           subject-path: vouch-v${{ steps.version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive-ext }}
-          sbom-path: vouch-v${{ steps.version.outputs.version }}-${{ matrix.target }}-*cdx.json
+          sbom-path: ${{ steps.sbom.outputs.main_sbom }}
 
   linux-packages:
     name: Linux Packages (${{ matrix.arch }})
