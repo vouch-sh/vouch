@@ -547,4 +547,9 @@ pub struct GitHubAccountStatus {
     pub account_type: String,
     /// Whether the installation is suspended.
     pub suspended: bool,
+    /// Repository selection mode ("all" or "selected").
+    pub repository_selection: String,
+    /// Repository names when repository_selection is "selected".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repositories: Option<Vec<String>>,
 }

@@ -44,6 +44,43 @@ use vouch_common::ApiError;
 use super::hash_token;
 
 // ============================================================================
+// OAuth Grant Types
+// ============================================================================
+
+/// OAuth grant types supported by this server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthGrantType {
+    /// Standard OAuth 2.0 authorization code grant.
+    AuthorizationCode,
+    /// Device authorization grant (RFC 8628).
+    DeviceCode,
+    /// Token exchange grant (RFC 8693).
+    TokenExchange,
+}
+
+impl OAuthGrantType {
+    /// Parse a grant type from a string.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "authorization_code" => Some(Self::AuthorizationCode),
+            "urn:ietf:params:oauth:grant-type:device_code" => Some(Self::DeviceCode),
+            "urn:ietf:params:oauth:grant-type:token-exchange" => Some(Self::TokenExchange),
+            _ => None,
+        }
+    }
+
+    /// Get the string representation of this grant type.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::AuthorizationCode => "authorization_code",
+            Self::DeviceCode => "urn:ietf:params:oauth:grant-type:device_code",
+            Self::TokenExchange => "urn:ietf:params:oauth:grant-type:token-exchange",
+        }
+    }
+}
+
+// ============================================================================
 // Templates
 // ============================================================================
 
@@ -392,8 +429,18 @@ pub async fn token(
     headers: HeaderMap,
     axum::Form(params): axum::Form<UnifiedTokenRequest>,
 ) -> Response {
-    match params.grant_type.as_str() {
-        "authorization_code" => {
+    let Some(grant_type) = OAuthGrantType::from_str(&params.grant_type) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiError::new(
+                "unsupported_grant_type",
+                "Supported grant types: authorization_code, urn:ietf:params:oauth:grant-type:device_code, urn:ietf:params:oauth:grant-type:token-exchange",
+            )),
+        ).into_response();
+    };
+
+    match grant_type {
+        OAuthGrantType::AuthorizationCode => {
             // Convert to TokenRequest and call authorization_code handler
             let token_req = TokenRequest {
                 grant_type: params.grant_type,
@@ -409,7 +456,7 @@ pub async fn token(
                 Err((status, json)) => (status, json).into_response(),
             }
         }
-        "urn:ietf:params:oauth:grant-type:device_code" => {
+        OAuthGrantType::DeviceCode => {
             // Forward to device token handler
             let device_req = vouch_common::DeviceTokenRequest {
                 grant_type: params.grant_type,
@@ -423,7 +470,7 @@ pub async fn token(
                 Err((status, json)) => (status, json).into_response(),
             }
         }
-        TOKEN_EXCHANGE_GRANT_TYPE => {
+        OAuthGrantType::TokenExchange => {
             // Forward to token exchange handler (RFC 8693)
             let exchange_req = TokenExchangeRequest {
                 grant_type: params.grant_type,
@@ -439,13 +486,6 @@ pub async fn token(
                 Err((status, json)) => (status, json).into_response(),
             }
         }
-        _ => (
-            StatusCode::BAD_REQUEST,
-            Json(ApiError::new(
-                "unsupported_grant_type",
-                "Supported grant types: authorization_code, urn:ietf:params:oauth:grant-type:device_code, urn:ietf:params:oauth:grant-type:token-exchange",
-            )),
-        ).into_response(),
     }
 }
 
@@ -614,8 +654,8 @@ async fn token_authorization_code(
     )?;
 
     // Record usage event for registered clients
-    if let Ok(auth_client) = &authenticated_client {
-        let _ = db::record_oauth_event(
+    if let Ok(auth_client) = &authenticated_client
+        && let Err(e) = db::record_oauth_event(
             &state.db,
             &auth_client.client.id,
             db::OAuthEventType::TokenIssued,
@@ -627,7 +667,9 @@ async fn token_authorization_code(
                 .map(|p| format!("dpop_jkt={}", p.jkt))
                 .as_deref(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!("Failed to record OAuth event: {e}");
     }
 
     // RFC 9449: Token type is "DPoP" if proof was provided, otherwise "Bearer"
@@ -804,9 +846,6 @@ pub async fn introspect(
 // Token Exchange (RFC 8693)
 // ============================================================================
 
-/// Token exchange grant type URN.
-pub const TOKEN_EXCHANGE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:token-exchange";
-
 /// Token type URNs for RFC 8693.
 pub mod token_types {
     pub const ACCESS_TOKEN: &str = "urn:ietf:params:oauth:token-type:access_token";
@@ -896,7 +935,7 @@ pub async fn token_exchange(
     axum::Form(params): axum::Form<TokenExchangeRequest>,
 ) -> Result<Json<TokenExchangeResponse>, (StatusCode, Json<ApiError>)> {
     // Validate grant type
-    if params.grant_type != TOKEN_EXCHANGE_GRANT_TYPE {
+    if OAuthGrantType::from_str(&params.grant_type) != Some(OAuthGrantType::TokenExchange) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(ApiError::new(
@@ -1334,7 +1373,9 @@ async fn authenticate_client(
     } else {
         // Public client - no secret required, but PKCE should be used
         // Update last used timestamp
-        let _ = db::update_oauth_client_last_used(&state.db, &client.id).await;
+        if let Err(e) = db::update_oauth_client_last_used(&state.db, &client.id).await {
+            tracing::warn!("Failed to update OAuth client last_used: {e}");
+        }
 
         Ok(AuthenticatedClient {
             client,

@@ -319,10 +319,18 @@ pub async fn get_github_status(
             .await
             .unwrap_or_default()
             .into_iter()
-            .map(|i| vouch_common::GitHubAccountStatus {
-                login: i.github_account_login,
-                account_type: i.github_account_type,
-                suspended: i.suspended_at.is_some(),
+            .map(|i| {
+                let repositories: Option<Vec<String>> = i
+                    .repositories
+                    .as_deref()
+                    .and_then(|r| serde_json::from_str(r).ok());
+                vouch_common::GitHubAccountStatus {
+                    login: i.github_account_login,
+                    account_type: i.github_account_type,
+                    suspended: i.suspended_at.is_some(),
+                    repository_selection: i.repository_selection,
+                    repositories,
+                }
             })
             .collect()
     } else {
@@ -517,7 +525,7 @@ pub async fn get_github_token(
     let perms_json = serde_json::to_string(&token.permissions).unwrap_or_default();
 
     // Log audit event
-    let _ = db::log_github_credential_event(
+    if let Err(e) = db::log_github_credential_event(
         &state.db,
         GitHubCredentialEventParams {
             event_type: "token_issued",
@@ -536,7 +544,10 @@ pub async fn get_github_token(
             user_agent: user_agent.as_deref(),
         },
     )
-    .await;
+    .await
+    {
+        tracing::warn!("Failed to log GitHub credential event: {e}");
+    }
 
     tracing::info!(
         "Issued GitHub token for {} (org {}, installation {})",

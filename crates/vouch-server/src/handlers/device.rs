@@ -2,7 +2,7 @@
 //! Device Authorization Grant handlers (RFC 8628).
 
 use crate::AppState;
-use crate::db;
+use crate::db::{self, DeviceAuthStatus};
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::rand as aws_rand;
 use axum::{Json, extract::State, http::StatusCode};
@@ -193,16 +193,23 @@ pub async fn device_token(
     }
 
     // Check status
-    match request.status.as_str() {
-        "pending" => Err(oauth_error(
+    let status = request.status().ok_or_else(|| {
+        oauth_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            OAuthError::invalid_grant(),
+        )
+    })?;
+
+    match status {
+        DeviceAuthStatus::Pending => Err(oauth_error(
             StatusCode::BAD_REQUEST,
             OAuthError::authorization_pending(),
         )),
-        "denied" => Err(oauth_error(
+        DeviceAuthStatus::Denied => Err(oauth_error(
             StatusCode::BAD_REQUEST,
             OAuthError::access_denied(),
         )),
-        "authorized" => {
+        DeviceAuthStatus::Authorized => {
             // Get user info and create session token
             let user_id = request.user_id.ok_or_else(|| {
                 oauth_error(
@@ -287,10 +294,6 @@ pub async fn device_token(
                 email: user_email,
             }))
         }
-        _ => Err(oauth_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            OAuthError::invalid_grant(),
-        )),
     }
 }
 

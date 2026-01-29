@@ -169,7 +169,9 @@ pub async fn get_enrollment_session_from_cookie(
 
     if expires > Timestamp::now() {
         // Update last used timestamp
-        let _ = db::touch_enrollment_session(&state.db, &session.id).await;
+        if let Err(e) = db::touch_enrollment_session(&state.db, &session.id).await {
+            tracing::warn!("Failed to touch enrollment session: {e}");
+        }
         Some(session)
     } else {
         tracing::debug!("get_enrollment_session: session expired");
@@ -827,7 +829,9 @@ pub async fn oidc_callback(
     }
 
     // Delete the OIDC state (it's been consumed)
-    let _ = db::delete_oidc_state(&state.db, &oidc_state).await;
+    if let Err(e) = db::delete_oidc_state(&state.db, &oidc_state).await {
+        tracing::warn!("Failed to delete OIDC state: {e}");
+    }
 
     tracing::info!("Session created for user: {}", claims.email);
     tracing::debug!("Setting vouch_session cookie and redirecting to /enroll/keys");

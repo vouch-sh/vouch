@@ -120,13 +120,56 @@ impl GitHubStateToken {
 // Webhook Types
 // ============================================================================
 
-/// GitHub webhook payload for installation events.
+/// Installation webhook events with typed actions.
 #[derive(Debug, Deserialize)]
-struct InstallationWebhookPayload {
-    action: String,
-    installation: WebhookInstallation,
-    #[allow(dead_code)]
-    sender: Option<WebhookSender>,
+#[serde(tag = "action", rename_all = "snake_case")]
+enum InstallationEvent {
+    Created {
+        installation: WebhookInstallation,
+        #[serde(default)]
+        repositories: Vec<WebhookRepository>,
+        #[allow(dead_code)]
+        sender: Option<WebhookSender>,
+    },
+    Deleted {
+        installation: WebhookInstallation,
+        #[serde(default)]
+        #[allow(dead_code)]
+        repositories: Vec<WebhookRepository>,
+    },
+    Suspend {
+        installation: WebhookInstallation,
+    },
+    Unsuspend {
+        installation: WebhookInstallation,
+    },
+    /// Catch-all for unhandled actions (e.g., new_permissions_accepted).
+    #[serde(other)]
+    Unknown,
+}
+
+/// Installation repositories webhook events.
+/// Note: Both arrays are always present in GitHub payloads (one may be empty).
+#[derive(Debug, Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case")]
+enum InstallationRepositoriesEvent {
+    Added {
+        installation: WebhookInstallation,
+        #[serde(default)]
+        repositories_added: Vec<WebhookRepository>,
+        #[serde(default)]
+        repositories_removed: Vec<WebhookRepository>,
+    },
+    Removed {
+        installation: WebhookInstallation,
+        #[serde(default)]
+        repositories_added: Vec<WebhookRepository>,
+        #[serde(default)]
+        repositories_removed: Vec<WebhookRepository>,
+    },
+    /// Catch-all for unhandled actions.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Deserialize)]
@@ -141,6 +184,15 @@ struct WebhookAccount {
     #[serde(rename = "type")]
     #[allow(dead_code)]
     account_type: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct WebhookRepository {
+    name: String,
+    #[allow(dead_code)]
+    full_name: String,
+    #[allow(dead_code)]
+    private: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -222,57 +274,177 @@ pub async fn github_webhook(
         .and_then(|h| h.to_str().ok())
         .unwrap_or("");
 
-    // Only handle installation events
-    if event_type != "installation" {
-        tracing::debug!("Ignoring GitHub webhook event: {}", event_type);
-        return Ok(StatusCode::OK);
+    match event_type {
+        "installation" => handle_installation_event(&state, &body).await,
+        "installation_repositories" => handle_installation_repositories_event(&state, &body).await,
+        _ => {
+            tracing::debug!("Ignoring GitHub webhook event: {}", event_type);
+            Ok(StatusCode::OK)
+        }
     }
+}
 
-    // Parse payload
-    let payload: InstallationWebhookPayload = serde_json::from_slice(&body).map_err(|e| {
-        tracing::warn!("Failed to parse webhook payload: {}", e);
+/// Parse webhook payload with standardized error handling.
+fn parse_webhook<T: serde::de::DeserializeOwned>(
+    body: &[u8],
+    event_type: &str,
+) -> Result<T, (StatusCode, Json<ApiError>)> {
+    serde_json::from_slice(body).map_err(|e| {
+        tracing::warn!("Failed to parse {} payload: {}", event_type, e);
         json_error(
             StatusCode::BAD_REQUEST,
             "invalid_payload",
             "Invalid webhook payload",
         )
-    })?;
+    })
+}
 
-    let installation_id = payload.installation.id as i64;
+/// Handle installation webhook events (created, deleted, suspend, unsuspend).
+async fn handle_installation_event(
+    state: &Arc<AppState>,
+    body: &[u8],
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    let event: InstallationEvent = parse_webhook(body, "installation")?;
 
-    match payload.action.as_str() {
-        "deleted" => {
+    match event {
+        InstallationEvent::Created {
+            installation,
+            repositories,
+            ..
+        } => {
+            let installation_id = installation.id as i64;
+            let repo_names: Vec<String> = repositories.iter().map(|r| r.name.clone()).collect();
+            if repo_names.is_empty() {
+                tracing::info!(
+                    "GitHub installation created: {} ({}) with all repositories",
+                    installation_id,
+                    installation.account.login
+                );
+            } else {
+                tracing::info!(
+                    "GitHub installation created: {} ({}) with {} repositories",
+                    installation_id,
+                    installation.account.login,
+                    repo_names.len()
+                );
+                if let Err(e) =
+                    db::update_github_installation_repos(&state.db, installation_id, &repo_names)
+                        .await
+                {
+                    tracing::error!(
+                        "Failed to update repos for installation {}: {}",
+                        installation_id,
+                        e
+                    );
+                }
+            }
+        }
+        InstallationEvent::Deleted { installation, .. } => {
+            let installation_id = installation.id as i64;
             tracing::info!(
                 "GitHub installation deleted: {} ({})",
                 installation_id,
-                payload.installation.account.login
+                installation.account.login
             );
-            let _ =
-                db::delete_github_installation_by_installation_id(&state.db, installation_id).await;
+            if let Err(e) =
+                db::delete_github_installation_by_installation_id(&state.db, installation_id).await
+            {
+                tracing::error!("Failed to delete installation {}: {}", installation_id, e);
+            }
         }
-        "suspend" => {
+        InstallationEvent::Suspend { installation } => {
+            let installation_id = installation.id as i64;
             tracing::info!(
                 "GitHub installation suspended: {} ({})",
                 installation_id,
-                payload.installation.account.login
+                installation.account.login
             );
-            let _ = db::suspend_github_installation(&state.db, installation_id).await;
+            if let Err(e) = db::suspend_github_installation(&state.db, installation_id).await {
+                tracing::error!("Failed to suspend installation {}: {}", installation_id, e);
+            }
         }
-        "unsuspend" => {
+        InstallationEvent::Unsuspend { installation } => {
+            let installation_id = installation.id as i64;
             tracing::info!(
                 "GitHub installation unsuspended: {} ({})",
                 installation_id,
-                payload.installation.account.login
+                installation.account.login
             );
-            let _ = db::unsuspend_github_installation(&state.db, installation_id).await;
+            if let Err(e) = db::unsuspend_github_installation(&state.db, installation_id).await {
+                tracing::error!(
+                    "Failed to unsuspend installation {}: {}",
+                    installation_id,
+                    e
+                );
+            }
         }
-        _ => {
-            tracing::debug!(
-                "Ignoring installation action: {} for {}",
-                payload.action,
-                installation_id
-            );
+        InstallationEvent::Unknown => {
+            tracing::debug!("Ignoring unknown installation action");
         }
+    }
+
+    Ok(StatusCode::OK)
+}
+
+/// Handle installation_repositories webhook events (added/removed repos).
+async fn handle_installation_repositories_event(
+    state: &Arc<AppState>,
+    body: &[u8],
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    let event: InstallationRepositoriesEvent = parse_webhook(body, "installation_repositories")?;
+
+    let (installation, added, removed, action) = match event {
+        InstallationRepositoriesEvent::Added {
+            installation,
+            repositories_added,
+            repositories_removed,
+        } => (
+            installation,
+            repositories_added,
+            repositories_removed,
+            "added",
+        ),
+        InstallationRepositoriesEvent::Removed {
+            installation,
+            repositories_added,
+            repositories_removed,
+        } => (
+            installation,
+            repositories_added,
+            repositories_removed,
+            "removed",
+        ),
+        InstallationRepositoriesEvent::Unknown => {
+            tracing::debug!("Ignoring unknown installation_repositories action");
+            return Ok(StatusCode::OK);
+        }
+    };
+
+    let installation_id = installation.id as i64;
+    let added_names: Vec<String> = added.iter().map(|r| r.name.clone()).collect();
+    let removed_names: Vec<String> = removed.iter().map(|r| r.name.clone()).collect();
+
+    tracing::info!(
+        "GitHub installation {} repositories updated: +{} -{} ({})",
+        installation_id,
+        added_names.len(),
+        removed_names.len(),
+        action
+    );
+
+    if let Err(e) = db::update_github_installation_repos_delta(
+        &state.db,
+        installation_id,
+        &added_names,
+        &removed_names,
+    )
+    .await
+    {
+        tracing::error!(
+            "Failed to update repos delta for installation {}: {}",
+            installation_id,
+            e
+        );
     }
 
     Ok(StatusCode::OK)
@@ -533,7 +705,7 @@ pub async fn github_callback(
     }
 
     // Log audit event
-    let _ = db::log_github_credential_event(
+    if let Err(e) = db::log_github_credential_event(
         &state.db,
         GitHubCredentialEventParams {
             event_type: "installation_connected",
@@ -552,7 +724,10 @@ pub async fn github_callback(
             user_agent: None,
         },
     )
-    .await;
+    .await
+    {
+        tracing::warn!("Failed to log GitHub credential event: {e}");
+    }
 
     Redirect::to(&format!(
         "/github/success?account={}",
@@ -577,4 +752,157 @@ pub async fn github_success_page(
 #[derive(Debug, Deserialize)]
 pub struct GitHubSuccessParams {
     account: Option<String>,
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_installation_created() {
+        let payload = r#"{
+            "action": "created",
+            "installation": { "id": 957387, "account": { "login": "Codertocat", "type": "User" } },
+            "repositories": [{ "name": "Hello-World", "full_name": "Codertocat/Hello-World", "private": false }],
+            "sender": { "login": "Codertocat" }
+        }"#;
+        let event: InstallationEvent = serde_json::from_str(payload).unwrap();
+        match event {
+            InstallationEvent::Created {
+                installation,
+                repositories,
+                ..
+            } => {
+                assert_eq!(installation.id, 957387);
+                assert_eq!(installation.account.login, "Codertocat");
+                assert_eq!(repositories.len(), 1);
+                assert_eq!(repositories[0].name, "Hello-World");
+            }
+            _ => panic!("Expected Created event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_installation_created_without_repos() {
+        let payload = r#"{
+            "action": "created",
+            "installation": { "id": 123, "account": { "login": "test-org", "type": "Organization" } },
+            "sender": { "login": "admin" }
+        }"#;
+        let event: InstallationEvent = serde_json::from_str(payload).unwrap();
+        match event {
+            InstallationEvent::Created { repositories, .. } => {
+                assert!(repositories.is_empty());
+            }
+            _ => panic!("Expected Created event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_installation_deleted() {
+        let payload = r#"{
+            "action": "deleted",
+            "installation": { "id": 957387, "account": { "login": "Codertocat", "type": "User" } },
+            "repositories": []
+        }"#;
+        let event: InstallationEvent = serde_json::from_str(payload).unwrap();
+        assert!(matches!(event, InstallationEvent::Deleted { .. }));
+    }
+
+    #[test]
+    fn test_parse_installation_suspend() {
+        let payload = r#"{
+            "action": "suspend",
+            "installation": { "id": 957387, "account": { "login": "Codertocat", "type": "User" } }
+        }"#;
+        let event: InstallationEvent = serde_json::from_str(payload).unwrap();
+        assert!(matches!(event, InstallationEvent::Suspend { .. }));
+    }
+
+    #[test]
+    fn test_parse_installation_unsuspend() {
+        let payload = r#"{
+            "action": "unsuspend",
+            "installation": { "id": 957387, "account": { "login": "Codertocat", "type": "User" } }
+        }"#;
+        let event: InstallationEvent = serde_json::from_str(payload).unwrap();
+        assert!(matches!(event, InstallationEvent::Unsuspend { .. }));
+    }
+
+    #[test]
+    fn test_parse_installation_unknown_action() {
+        let payload = r#"{
+            "action": "new_permissions_accepted",
+            "installation": { "id": 1, "account": { "login": "x", "type": "User" } }
+        }"#;
+        let event: InstallationEvent = serde_json::from_str(payload).unwrap();
+        assert!(matches!(event, InstallationEvent::Unknown));
+    }
+
+    #[test]
+    fn test_parse_installation_repositories_added() {
+        let payload = r#"{
+            "action": "added",
+            "installation": { "id": 957387, "account": { "login": "Codertocat", "type": "User" } },
+            "repositories_added": [{ "name": "Space", "full_name": "Codertocat/Space", "private": false }],
+            "repositories_removed": []
+        }"#;
+        let event: InstallationRepositoriesEvent = serde_json::from_str(payload).unwrap();
+        match event {
+            InstallationRepositoriesEvent::Added {
+                installation,
+                repositories_added,
+                repositories_removed,
+            } => {
+                assert_eq!(installation.id, 957387);
+                assert_eq!(repositories_added.len(), 1);
+                assert_eq!(repositories_added[0].name, "Space");
+                assert!(repositories_removed.is_empty());
+            }
+            _ => panic!("Expected Added event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_installation_repositories_removed() {
+        let payload = r#"{
+            "action": "removed",
+            "installation": { "id": 957387, "account": { "login": "Codertocat", "type": "User" } },
+            "repositories_added": [],
+            "repositories_removed": [{ "name": "OldRepo", "full_name": "Codertocat/OldRepo", "private": true }]
+        }"#;
+        let event: InstallationRepositoriesEvent = serde_json::from_str(payload).unwrap();
+        match event {
+            InstallationRepositoriesEvent::Removed {
+                repositories_added,
+                repositories_removed,
+                ..
+            } => {
+                assert!(repositories_added.is_empty());
+                assert_eq!(repositories_removed.len(), 1);
+                assert_eq!(repositories_removed[0].name, "OldRepo");
+            }
+            _ => panic!("Expected Removed event"),
+        }
+    }
+
+    #[test]
+    fn test_parse_installation_repositories_unknown_action() {
+        let payload = r#"{
+            "action": "future_action",
+            "installation": { "id": 1, "account": { "login": "x", "type": "User" } }
+        }"#;
+        let event: InstallationRepositoriesEvent = serde_json::from_str(payload).unwrap();
+        assert!(matches!(event, InstallationRepositoriesEvent::Unknown));
+    }
 }

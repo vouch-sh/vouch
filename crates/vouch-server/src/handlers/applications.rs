@@ -285,17 +285,6 @@ fn generate_client_secret() -> String {
     format!("vouch_{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 
-/// Parse application type from string.
-fn parse_application_type(s: &str) -> Option<OAuthClientType> {
-    match s.to_lowercase().as_str() {
-        "web" => Some(OAuthClientType::Web),
-        "native" => Some(OAuthClientType::Native),
-        "spa" => Some(OAuthClientType::Spa),
-        "service" => Some(OAuthClientType::Service),
-        _ => None,
-    }
-}
-
 /// Extract auth context from cookie for web UI.
 ///
 /// Returns `Some(AuthContext)` if a valid session exists, `None` otherwise.
@@ -395,7 +384,7 @@ pub async fn create_application_form(
         .into_response();
     }
 
-    let Some(app_type) = parse_application_type(&form.application_type) else {
+    let Some(app_type) = OAuthClientType::from_str(&form.application_type) else {
         return ApplicationErrorTemplate {
             title: "Invalid Input".to_string(),
             message: "Invalid application type.".to_string(),
@@ -455,7 +444,11 @@ pub async fn create_application_form(
         {
             tracing::error!("Failed to create client secret: {}", e);
             // Clean up the client
-            let _ = db::delete_oauth_client(&state.db, &client.id).await;
+            if let Err(cleanup_err) = db::delete_oauth_client(&state.db, &client.id).await {
+                tracing::warn!(
+                    "Failed to clean up OAuth client after secret creation failure: {cleanup_err}"
+                );
+            }
             return ApplicationErrorTemplate {
                 title: "Error".to_string(),
                 message: "Failed to create application.".to_string(),
@@ -791,7 +784,7 @@ pub async fn create_application_api(
         ));
     }
 
-    let app_type = parse_application_type(&req.application_type).ok_or_else(|| {
+    let app_type = OAuthClientType::from_str(&req.application_type).ok_or_else(|| {
         json_error(
             StatusCode::BAD_REQUEST,
             "invalid_type",
@@ -1138,7 +1131,7 @@ pub async fn revoke_tokens_api(
         })?;
 
     // Log the event
-    let _ = db::record_oauth_event(
+    if let Err(e) = db::record_oauth_event(
         &state.db,
         &app_id,
         OAuthEventType::TokenRevoked,
@@ -1147,7 +1140,10 @@ pub async fn revoke_tokens_api(
         None,
         Some("All tokens revoked"),
     )
-    .await;
+    .await
+    {
+        tracing::warn!("Failed to record OAuth event: {e}");
+    }
 
     tracing::info!(
         "Revoked all tokens for OAuth application: {}",

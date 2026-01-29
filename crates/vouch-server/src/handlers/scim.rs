@@ -126,11 +126,23 @@ pub struct ScimPatchRequest {
     pub operations: Vec<ScimPatchOp>,
 }
 
+/// SCIM Patch operation type (RFC 7644 Section 3.5.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ScimPatchOpType {
+    /// Replace existing attribute value(s).
+    Replace,
+    /// Add attribute value(s).
+    Add,
+    /// Remove attribute value(s).
+    Remove,
+}
+
 /// SCIM Patch operation item.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimPatchOp {
-    pub op: String,
+    pub op: ScimPatchOpType,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -288,7 +300,9 @@ async fn authenticate_scim(
     }
 
     // Update last_used_at
-    let _ = db::update_scim_token_last_used(&state.db, &token_record.id).await;
+    if let Err(e) = db::update_scim_token_last_used(&state.db, &token_record.id).await {
+        tracing::warn!("Failed to update SCIM token last_used_at: {e}");
+    }
 
     Ok(token_record.id)
 }
@@ -484,7 +498,7 @@ pub async fn list_users(
         .collect();
 
     // Audit log
-    let _ = db::insert_scim_audit(
+    if let Err(e) = db::insert_scim_audit(
         &state.db,
         "list",
         "User",
@@ -492,7 +506,10 @@ pub async fn list_users(
         Some(&token_id),
         Some(&format!("{{\"count\": {}}}", resources.len())),
     )
-    .await;
+    .await
+    {
+        tracing::warn!("Failed to record SCIM audit: {e}");
+    }
 
     Json(ScimListResponse {
         schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".to_string()],
@@ -570,7 +587,7 @@ pub async fn create_user(
     };
 
     // Audit log
-    let _ = db::insert_scim_audit(
+    if let Err(e) = db::insert_scim_audit(
         &state.db,
         "create",
         "User",
@@ -578,7 +595,10 @@ pub async fn create_user(
         Some(&token_id),
         Some(&format!("{{\"email\": \"{}\"}}", email)),
     )
-    .await;
+    .await
+    {
+        tracing::warn!("Failed to record SCIM audit: {e}");
+    }
 
     let base_url = format!("https://{}", state.config.rp_id);
     let scim_user = db_user_to_scim(&base_url, db_user);
@@ -660,8 +680,8 @@ pub async fn patch_user(
     let mut deactivated = false;
 
     for op in &patch.operations {
-        match op.op.to_lowercase().as_str() {
-            "replace" => {
+        match op.op {
+            ScimPatchOpType::Replace => {
                 if let Some(path) = &op.path {
                     match path.as_str() {
                         "active" => {
@@ -705,7 +725,7 @@ pub async fn patch_user(
                     }
                 }
             }
-            "add" => {
+            ScimPatchOpType::Add => {
                 // Similar logic for add operations
                 if let Some(path) = &op.path
                     && path == "active"
@@ -718,7 +738,7 @@ pub async fn patch_user(
                     active = new_active;
                 }
             }
-            "remove" => {
+            ScimPatchOpType::Remove => {
                 // Remove operations
                 if let Some(path) = &op.path
                     && path == "externalId"
@@ -726,7 +746,6 @@ pub async fn patch_user(
                     external_id = None;
                 }
             }
-            _ => {}
         }
     }
 
@@ -771,7 +790,7 @@ pub async fn patch_user(
     }
 
     // Audit log
-    let _ = db::insert_scim_audit(
+    if let Err(e) = db::insert_scim_audit(
         &state.db,
         "update",
         "User",
@@ -782,7 +801,10 @@ pub async fn patch_user(
             active, deactivated
         )),
     )
-    .await;
+    .await
+    {
+        tracing::warn!("Failed to record SCIM audit: {e}");
+    }
 
     // Return updated user
     let updated = match db::get_scim_user(&state.db, &id).await {
@@ -865,7 +887,7 @@ pub async fn delete_user(
     }
 
     // Audit log
-    let _ = db::insert_scim_audit(
+    if let Err(e) = db::insert_scim_audit(
         &state.db,
         "delete",
         "User",
@@ -873,7 +895,10 @@ pub async fn delete_user(
         Some(&token_id),
         Some(&format!("{{\"email\": \"{}\"}}", user.email)),
     )
-    .await;
+    .await
+    {
+        tracing::warn!("Failed to record SCIM audit: {e}");
+    }
 
     StatusCode::NO_CONTENT.into_response()
 }
@@ -982,7 +1007,7 @@ pub async fn list_groups(
     }
 
     // Audit log
-    let _ = db::insert_scim_audit(
+    if let Err(e) = db::insert_scim_audit(
         &state.db,
         "list",
         "Group",
@@ -990,7 +1015,10 @@ pub async fn list_groups(
         Some(&token_id),
         Some(&format!("{{\"count\": {}}}", resources.len())),
     )
-    .await;
+    .await
+    {
+        tracing::warn!("Failed to record SCIM audit: {e}");
+    }
 
     Json(ScimListResponse {
         schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".to_string()],
@@ -1046,7 +1074,7 @@ pub async fn create_group(
     }
 
     // Audit log
-    let _ = db::insert_scim_audit(
+    if let Err(e) = db::insert_scim_audit(
         &state.db,
         "create",
         "Group",
@@ -1057,7 +1085,10 @@ pub async fn create_group(
             db_group.display_name
         )),
     )
-    .await;
+    .await
+    {
+        tracing::warn!("Failed to record SCIM audit: {e}");
+    }
 
     let base_url = format!("https://{}", state.config.rp_id);
     let members = get_group_members_scim(&state.db, &base_url, &db_group.id).await;
@@ -1139,8 +1170,8 @@ pub async fn patch_group(
     let mut external_id = group.external_id.clone();
 
     for op in &patch.operations {
-        match op.op.to_lowercase().as_str() {
-            "replace" => {
+        match op.op {
+            ScimPatchOpType::Replace => {
                 if let Some(path) = &op.path {
                     match path.as_str() {
                         "displayName" => {
@@ -1185,7 +1216,7 @@ pub async fn patch_group(
                     }
                 }
             }
-            "add" => {
+            ScimPatchOpType::Add => {
                 if let Some(path) = &op.path
                     && path == "members"
                     && let Some(val) = &op.value
@@ -1203,7 +1234,7 @@ pub async fn patch_group(
                     }
                 }
             }
-            "remove" => {
+            ScimPatchOpType::Remove => {
                 if let Some(path) = &op.path {
                     if path == "externalId" {
                         external_id = None;
@@ -1215,7 +1246,6 @@ pub async fn patch_group(
                     }
                 }
             }
-            _ => {}
         }
     }
 
@@ -1233,7 +1263,11 @@ pub async fn patch_group(
     }
 
     // Audit log
-    let _ = db::insert_scim_audit(&state.db, "update", "Group", &id, Some(&token_id), None).await;
+    if let Err(e) =
+        db::insert_scim_audit(&state.db, "update", "Group", &id, Some(&token_id), None).await
+    {
+        tracing::warn!("Failed to record SCIM audit: {e}");
+    }
 
     // Return updated group
     let updated = match db::get_scim_group(&state.db, &id).await {
@@ -1295,7 +1329,7 @@ pub async fn delete_group(
     }
 
     // Audit log
-    let _ = db::insert_scim_audit(
+    if let Err(e) = db::insert_scim_audit(
         &state.db,
         "delete",
         "Group",
@@ -1303,7 +1337,10 @@ pub async fn delete_group(
         Some(&token_id),
         Some(&format!("{{\"displayName\": \"{}\"}}", group.display_name)),
     )
-    .await;
+    .await
+    {
+        tracing::warn!("Failed to record SCIM audit: {e}");
+    }
 
     StatusCode::NO_CONTENT.into_response()
 }

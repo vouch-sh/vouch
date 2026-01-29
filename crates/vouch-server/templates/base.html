@@ -5,6 +5,32 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link rel="stylesheet" href="/static/css/output.css">
     <title>{% block title %}Vouch{% endblock %}</title>
+
+    <!-- Favicon -->
+    <link rel="icon" href="/static/images/favicon.ico" sizes="32x32">
+    <link rel="icon" type="image/svg+xml" href="/static/images/favicon.svg">
+    <link rel="icon" type="image/png" sizes="32x32" href="/static/images/favicon-32x32.png">
+    <link rel="icon" type="image/png" sizes="16x16" href="/static/images/favicon-16x16.png">
+    <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
+    <link rel="manifest" href="/static/site.webmanifest">
+    <meta name="theme-color" content="#0f1b2d">
+
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="{% block description %}Hardware-backed authentication with short-lived credentials. No credential issuance without human presence proof.{% endblock %}">
+    <meta name="keywords" content="authentication, FIDO2, YubiKey, SSH, security, hardware key">
+
+    <!-- Open Graph -->
+    <meta property="og:type" content="website">
+    <meta property="og:title" content="{% block og_title %}Vouch{% endblock %}">
+    <meta property="og:description" content="{% block og_description %}Hardware-backed authentication with short-lived credentials.{% endblock %}">
+    <meta property="og:image" content="{% block og_image %}/static/images/logo-512.png{% endblock %}">
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary">
+    <meta name="twitter:title" content="{% block twitter_title %}Vouch{% endblock %}">
+    <meta name="twitter:description" content="{% block twitter_description %}Hardware-backed authentication with short-lived credentials.{% endblock %}">
+    <meta name="twitter:image" content="{% block twitter_image %}/static/images/logo-512.png{% endblock %}">
+
     {% block head %}{% endblock %}
 </head>
 <body class="{% block body_class %}min-h-screen flex flex-col bg-vouch-bg text-gray-300{% endblock %}">

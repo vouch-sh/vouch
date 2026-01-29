@@ -295,6 +295,30 @@ pub async fn delete_expired_sessions(pool: &SqlitePool, now: &str) -> Result<u64
 // Device Authorization (RFC 8628)
 // ============================================================================
 
+/// Device authorization status (RFC 8628 state machine).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceAuthStatus {
+    /// Waiting for user to authorize.
+    Pending,
+    /// User has authorized the request.
+    Authorized,
+    /// User denied the request.
+    Denied,
+}
+
+impl DeviceAuthStatus {
+    /// Parse a status string from the database.
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "authorized" => Some(Self::Authorized),
+            "denied" => Some(Self::Denied),
+            _ => None,
+        }
+    }
+}
+
 /// Device authorization request record.
 #[derive(Debug, sqlx::FromRow)]
 #[allow(dead_code)]
@@ -309,6 +333,13 @@ pub struct DeviceAuthRequest {
     pub expires_at: String,
     pub interval_seconds: i64,
     pub last_poll_at: Option<String>,
+}
+
+impl DeviceAuthRequest {
+    /// Get the parsed status enum.
+    pub fn status(&self) -> Option<DeviceAuthStatus> {
+        DeviceAuthStatus::from_str(&self.status)
+    }
 }
 
 /// OIDC state record.
@@ -1341,11 +1372,11 @@ impl OAuthClientType {
         }
     }
 
-    /// Parse from database string.
+    /// Parse from database string (case-insensitive).
     #[must_use]
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
-        match s {
+        match s.to_lowercase().as_str() {
             "web" => Some(Self::Web),
             "native" => Some(Self::Native),
             "spa" => Some(Self::Spa),
@@ -2624,6 +2655,8 @@ pub struct GitHubInstallation {
     pub installed_at: String,
     pub installed_by_user_id: Option<String>,
     pub suspended_at: Option<String>,
+    /// JSON array of repository names when repository_selection is "selected".
+    pub repositories: Option<String>,
 }
 
 /// Create a new GitHub App installation for an organization.
@@ -2664,7 +2697,7 @@ pub async fn get_github_installations_by_org(
     org_id: &str,
 ) -> Result<Vec<GitHubInstallation>> {
     let installations = sqlx::query_as::<_, GitHubInstallation>(
-        "SELECT id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_at, installed_by_user_id, suspended_at
+        "SELECT id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_at, installed_by_user_id, suspended_at, repositories
          FROM github_installations WHERE org_id = ? ORDER BY github_account_login",
     )
     .bind(org_id)
@@ -2681,7 +2714,7 @@ pub async fn get_github_installation_by_org_and_account(
     github_account: &str,
 ) -> Result<Option<GitHubInstallation>> {
     let installation = sqlx::query_as::<_, GitHubInstallation>(
-        "SELECT id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_at, installed_by_user_id, suspended_at
+        "SELECT id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_at, installed_by_user_id, suspended_at, repositories
          FROM github_installations WHERE org_id = ? AND LOWER(github_account_login) = LOWER(?)",
     )
     .bind(org_id)
@@ -2698,7 +2731,7 @@ pub async fn get_github_installation_by_installation_id(
     installation_id: i64,
 ) -> Result<Option<GitHubInstallation>> {
     let installation = sqlx::query_as::<_, GitHubInstallation>(
-        "SELECT id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_at, installed_by_user_id, suspended_at
+        "SELECT id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_at, installed_by_user_id, suspended_at, repositories
          FROM github_installations WHERE installation_id = ?",
     )
     .bind(installation_id)
@@ -2746,6 +2779,58 @@ pub async fn unsuspend_github_installation(
     .await?;
 
     Ok(result.rows_affected() > 0)
+}
+
+/// Update repositories for a GitHub installation (used by webhook handler).
+pub async fn update_github_installation_repos(
+    pool: &SqlitePool,
+    installation_id: i64,
+    repos: &[String],
+) -> Result<bool> {
+    let repos_json = serde_json::to_string(repos)?;
+    let result =
+        sqlx::query("UPDATE github_installations SET repositories = ? WHERE installation_id = ?")
+            .bind(&repos_json)
+            .bind(installation_id)
+            .execute(pool)
+            .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Update repositories for a GitHub installation by adding/removing repos (used by webhook handler).
+pub async fn update_github_installation_repos_delta(
+    pool: &SqlitePool,
+    installation_id: i64,
+    added: &[String],
+    removed: &[String],
+) -> Result<bool> {
+    // Fetch current repos
+    let installation = get_github_installation_by_installation_id(pool, installation_id).await?;
+    let Some(installation) = installation else {
+        return Ok(false);
+    };
+
+    // Parse existing repos
+    let mut repos: Vec<String> = installation
+        .repositories
+        .as_deref()
+        .and_then(|r| serde_json::from_str(r).ok())
+        .unwrap_or_default();
+
+    // Apply delta
+    for repo in added {
+        if !repos.contains(repo) {
+            repos.push(repo.clone());
+        }
+    }
+    repos.retain(|r| !removed.contains(r));
+
+    // Sort for consistency
+    repos.sort();
+
+    // Save
+    update_github_installation_repos(pool, installation_id, &repos).await
 }
 
 // ============================================================================
