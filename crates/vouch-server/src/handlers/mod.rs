@@ -14,6 +14,7 @@ pub mod enroll_keys;
 pub mod github;
 pub mod home;
 pub mod install;
+pub mod integrations;
 pub mod keys;
 pub mod legal;
 pub mod oidc;

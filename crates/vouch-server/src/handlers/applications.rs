@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::ApiError;
 
-use super::auth::SessionClaims;
+use super::common::AuthContext;
 use super::{extract_session, extract_session_from_cookie, json_error};
 
 // ============================================================================
@@ -43,8 +43,9 @@ const SECRET_LENGTH: usize = 32;
 #[derive(Template)]
 #[template(path = "applications/list.html")]
 pub struct ApplicationsListTemplate {
-    pub user_email: String,
     pub applications: Vec<ApplicationInfo>,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
 }
 
 /// Application info for display.
@@ -83,7 +84,8 @@ impl From<OAuthClient> for ApplicationInfo {
 #[template(path = "applications/create.html")]
 #[allow(dead_code)]
 pub struct ApplicationCreateTemplate {
-    pub user_email: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
 }
 
 /// Application created success page (shows credentials once).
@@ -91,12 +93,13 @@ pub struct ApplicationCreateTemplate {
 #[template(path = "applications/created.html")]
 #[allow(dead_code)]
 pub struct ApplicationCreatedTemplate {
-    pub user_email: String,
     pub name: String,
     pub client_id: String,
     pub client_secret: Option<String>,
     pub application_type: String,
     pub requires_secret: bool,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
 }
 
 /// Application detail page template.
@@ -104,10 +107,11 @@ pub struct ApplicationCreatedTemplate {
 #[template(path = "applications/detail.html")]
 #[allow(dead_code)]
 pub struct ApplicationDetailTemplate {
-    pub user_email: String,
     pub app: ApplicationInfo,
     pub secrets_count: usize,
     pub usage_stats: Vec<UsageStat>,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
 }
 
 /// Usage stat for display.
@@ -121,10 +125,11 @@ pub struct UsageStat {
 #[template(path = "applications/rotated.html")]
 #[allow(dead_code)]
 pub struct SecretRotatedTemplate {
-    pub user_email: String,
     pub name: String,
     pub client_id: String,
     pub client_secret: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
 }
 
 /// Error page template.
@@ -291,20 +296,25 @@ fn parse_application_type(s: &str) -> Option<OAuthClientType> {
     }
 }
 
-/// Extract session from cookie for web UI (with user email).
-async fn extract_session_with_email_from_cookie(
-    state: &AppState,
-    jar: &CookieJar,
-) -> Option<(SessionClaims, String)> {
+/// Extract auth context from cookie for web UI.
+///
+/// Returns `Some(AuthContext)` if a valid session exists, `None` otherwise.
+async fn extract_auth_from_cookie(state: &AppState, jar: &CookieJar) -> Option<AuthContext> {
     // Use shared cookie extraction
     let session = extract_session_from_cookie(state, jar).await.ok()?;
 
-    // Get user email
+    // Get user info
     let user = db::get_user_by_id(&state.db, &session.claims.sub)
         .await
         .ok()??;
 
-    Some((session.claims, user.email))
+    Some(AuthContext {
+        authenticated: true,
+        user_id: Some(session.claims.sub),
+        user_email: Some(user.email),
+        has_org: user.org_id.is_some(),
+        is_org_admin: user.is_org_admin,
+    })
 }
 
 /// Parse redirect URIs from form input (newline or comma separated).
@@ -327,12 +337,12 @@ pub async fn list_applications_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Response {
-    let Some((claims, user_email)) = extract_session_with_email_from_cookie(&state, &jar).await
-    else {
+    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
-    let applications = match db::get_oauth_clients_for_user(&state.db, &claims.sub).await {
+    let user_id = auth.user_id.as_deref().unwrap_or_default();
+    let applications = match db::get_oauth_clients_for_user(&state.db, user_id).await {
         Ok(apps) => apps.into_iter().map(ApplicationInfo::from).collect(),
         Err(e) => {
             tracing::error!("Failed to list applications: {}", e);
@@ -345,11 +355,7 @@ pub async fn list_applications_page(
         }
     };
 
-    ApplicationsListTemplate {
-        user_email,
-        applications,
-    }
-    .into_response()
+    ApplicationsListTemplate { applications, auth }.into_response()
 }
 
 /// Show create application form.
@@ -358,11 +364,11 @@ pub async fn create_application_page(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Response {
-    let Some((_, user_email)) = extract_session_with_email_from_cookie(&state, &jar).await else {
+    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
-    ApplicationCreateTemplate { user_email }.into_response()
+    ApplicationCreateTemplate { auth }.into_response()
 }
 
 /// Create a new application.
@@ -372,10 +378,11 @@ pub async fn create_application_form(
     jar: CookieJar,
     Form(form): Form<CreateApplicationForm>,
 ) -> Response {
-    let Some((claims, user_email)) = extract_session_with_email_from_cookie(&state, &jar).await
-    else {
+    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
+
+    let user_id = auth.user_id.as_deref().unwrap_or_default();
 
     // Validate inputs
     let name = form.name.trim();
@@ -412,7 +419,7 @@ pub async fn create_application_form(
     // Create the application
     let (client, client_id) = match db::create_oauth_client(
         &state.db,
-        &claims.sub,
+        user_id,
         name,
         form.description.as_deref(),
         app_type,
@@ -465,12 +472,12 @@ pub async fn create_application_form(
     tracing::info!("Created OAuth application: {} ({})", name, client_id);
 
     ApplicationCreatedTemplate {
-        user_email,
         name: name.to_string(),
         client_id,
         client_secret,
         application_type: form.application_type,
         requires_secret: app_type.requires_secret(),
+        auth,
     }
     .into_response()
 }
@@ -482,14 +489,15 @@ pub async fn detail_application_page(
     jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Response {
-    let Some((claims, user_email)) = extract_session_with_email_from_cookie(&state, &jar).await
-    else {
+    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
+    let user_id = auth.user_id.as_deref().unwrap_or_default();
+
     // Get the application
     let client = match db::get_oauth_client_by_id(&state.db, &app_id).await {
-        Ok(Some(c)) if c.user_id == claims.sub => c,
+        Ok(Some(c)) if c.user_id == user_id => c,
         Ok(Some(_)) => {
             return ApplicationErrorTemplate {
                 title: "Not Found".to_string(),
@@ -536,10 +544,10 @@ pub async fn detail_application_page(
     };
 
     ApplicationDetailTemplate {
-        user_email,
         app: ApplicationInfo::from(client),
         secrets_count,
         usage_stats,
+        auth,
     }
     .into_response()
 }
@@ -552,13 +560,15 @@ pub async fn update_application_form(
     Path(app_id): Path<String>,
     Form(form): Form<UpdateApplicationForm>,
 ) -> Response {
-    let Some((claims, _)) = extract_session_with_email_from_cookie(&state, &jar).await else {
+    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
+    let user_id = auth.user_id.as_deref().unwrap_or_default();
+
     // Verify ownership
     let client = match db::get_oauth_client_by_id(&state.db, &app_id).await {
-        Ok(Some(c)) if c.user_id == claims.sub => c,
+        Ok(Some(c)) if c.user_id == user_id => c,
         _ => {
             return ApplicationErrorTemplate {
                 title: "Not Found".to_string(),
@@ -613,13 +623,15 @@ pub async fn delete_application_form(
     jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Response {
-    let Some((claims, _)) = extract_session_with_email_from_cookie(&state, &jar).await else {
+    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
+    let user_id = auth.user_id.as_deref().unwrap_or_default();
+
     // Verify ownership
     let client = match db::get_oauth_client_by_id(&state.db, &app_id).await {
-        Ok(Some(c)) if c.user_id == claims.sub => c,
+        Ok(Some(c)) if c.user_id == user_id => c,
         _ => {
             return ApplicationErrorTemplate {
                 title: "Not Found".to_string(),
@@ -653,14 +665,15 @@ pub async fn rotate_secret_form(
     jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Response {
-    let Some((claims, user_email)) = extract_session_with_email_from_cookie(&state, &jar).await
-    else {
+    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
+    let user_id = auth.user_id.as_deref().unwrap_or_default();
+
     // Verify ownership
     let client = match db::get_oauth_client_by_id(&state.db, &app_id).await {
-        Ok(Some(c)) if c.user_id == claims.sub => c,
+        Ok(Some(c)) if c.user_id == user_id => c,
         _ => {
             return ApplicationErrorTemplate {
                 title: "Not Found".to_string(),
@@ -721,10 +734,10 @@ pub async fn rotate_secret_form(
     tracing::info!("Rotated secret for OAuth application: {}", client.client_id);
 
     SecretRotatedTemplate {
-        user_email,
         name: client.name,
         client_id: client.client_id,
         client_secret: secret,
+        auth,
     }
     .into_response()
 }

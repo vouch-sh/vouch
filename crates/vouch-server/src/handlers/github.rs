@@ -9,7 +9,7 @@
 
 use crate::db::{self, GitHubCredentialEventParams};
 use crate::github_app::GitHubInstallationId;
-use crate::handlers::common::json_error;
+use crate::handlers::common::{AuthContext, json_error};
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use aws_lc_rs::hmac;
@@ -37,11 +37,12 @@ use vouch_common::ApiError;
 #[template(path = "github/connect.html")]
 pub struct GitHubConnectTemplate {
     pub org_name: String,
-    pub user_email: String,
     pub github_app_url: String,
     pub error: Option<String>,
     /// Already connected GitHub accounts.
     pub connected_accounts: Vec<String>,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
 }
 
 impl_template_response!(GitHubConnectTemplate);
@@ -370,12 +371,20 @@ pub async fn github_connect_page(State(state): State<Arc<AppState>>, jar: Cookie
         urlencoding::encode(&encoded_state)
     );
 
+    let auth = AuthContext {
+        authenticated: true,
+        user_id: Some(user.id.clone()),
+        user_email: Some(user.email),
+        has_org: user.org_id.is_some(),
+        is_org_admin: user.is_org_admin,
+    };
+
     GitHubConnectTemplate {
         org_name: state.config.get_org_display_name().to_string(),
-        user_email: user.email,
         github_app_url,
         error: None,
         connected_accounts,
+        auth,
     }
     .into_response()
 }

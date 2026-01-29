@@ -26,6 +26,7 @@ use uuid::Uuid;
 use vouch_common::{ApiError, BrowserRegisterCompleteRequest, BrowserRegisterStartResponse};
 
 use super::auth::SessionClaims;
+use super::common::AuthContext;
 use super::{
     create_session_cookie, extract_session_from_cookie, generate_random_bytes, hash_token,
     json_error, validate_registration_attestation,
@@ -201,8 +202,9 @@ pub struct EnrollWebauthnTemplate {
 #[derive(Template)]
 #[template(path = "enroll_keys.html")]
 pub struct EnrollKeysTemplate {
-    pub email: String,
     pub rp_id: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
 }
 
 /// Success page template.
@@ -854,9 +856,22 @@ pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar
                 "enroll_keys_page: found valid session for {}",
                 session.claims.email
             );
+            // Look up user to check org membership
+            let (has_org, is_org_admin) =
+                match db::get_user_by_id(&state.db, &session.claims.sub).await {
+                    Ok(Some(user)) => (user.org_id.is_some(), user.is_org_admin),
+                    _ => (false, false),
+                };
+            let auth = AuthContext {
+                authenticated: true,
+                user_id: Some(session.claims.sub),
+                user_email: Some(session.claims.email),
+                has_org,
+                is_org_admin,
+            };
             EnrollKeysTemplate {
-                email: session.claims.email,
                 rp_id: state.config.rp_id.clone(),
+                auth,
             }
             .into_response()
         }

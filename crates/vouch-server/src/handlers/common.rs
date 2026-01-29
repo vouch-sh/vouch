@@ -19,6 +19,68 @@ use vouch_common::{ApiError, extract_aaguid_from_attestation, validate_hardware_
 use super::auth::SessionClaims;
 
 // ============================================================================
+// Authentication Context for Templates
+// ============================================================================
+
+/// Authentication context for templates and handlers.
+///
+/// Provides a consistent way to pass auth state to templates and handlers.
+/// This struct is used by the `header_auth` template macro.
+pub struct AuthContext {
+    /// Whether the user is authenticated.
+    pub authenticated: bool,
+    /// The user's ID if authenticated (for authorization checks).
+    pub user_id: Option<String>,
+    /// The user's email if authenticated.
+    pub user_email: Option<String>,
+    /// Whether the user belongs to an organization.
+    /// Used to show/hide org-specific features like Applications.
+    pub has_org: bool,
+    /// Whether the user is an organization admin.
+    /// Used to show/hide org admin features like connecting GitHub.
+    pub is_org_admin: bool,
+}
+
+impl AuthContext {
+    /// Create an unauthenticated auth context.
+    #[must_use]
+    pub fn unauthenticated() -> Self {
+        Self {
+            authenticated: false,
+            user_id: None,
+            user_email: None,
+            has_org: false,
+            is_org_admin: false,
+        }
+    }
+}
+
+/// Helper to extract auth context from cookie jar.
+///
+/// This is a convenience function for handlers that need to pass
+/// auth state to templates. It looks up the user to determine org membership.
+pub async fn get_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
+    let session = match extract_session_from_cookie(state, jar).await {
+        Ok(s) => s,
+        Err(_) => return AuthContext::unauthenticated(),
+    };
+
+    // Look up user to check org membership and admin status
+    let (has_org, is_org_admin) = match db::get_user_by_id(&state.db, &session.claims.sub).await {
+        Ok(Some(user)) => (user.org_id.is_some(), user.is_org_admin),
+        _ => (false, false),
+    };
+
+    AuthContext {
+        authenticated: true,
+        user_id: Some(session.claims.sub),
+        user_email: Some(session.claims.email),
+        has_org,
+        is_org_admin,
+    }
+}
+
+// ============================================================================
 // JSON Error Helper
 // ============================================================================
 

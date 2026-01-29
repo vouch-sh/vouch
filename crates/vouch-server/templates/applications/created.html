@@ -1,14 +1,10 @@
 {% extends "base.html" %}
+{% import "macros/auth.html" as auth_macros %}
 
 {% block title %}Application Created - Vouch{% endblock %}
 
 {% block header_right %}
-<div class="flex items-center gap-4 text-sm">
-    <span class="text-gray-400">{{ user_email }}</span>
-    <form method="POST" action="/logout" class="inline">
-        <button type="submit" class="text-gray-500 hover:text-gray-300">Sign out</button>
-    </form>
-</div>
+{{ auth_macros::header_auth(auth) }}
 {% endblock %}
 
 {% block content %}

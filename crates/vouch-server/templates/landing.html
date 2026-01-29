@@ -1,16 +1,10 @@
 {% extends "base.html" %}
+{% import "macros/auth.html" as auth_macros %}
 
 {% block title %}Vouch - {{ org_name }}{% endblock %}
 
 {% block header_right %}
-{% if authenticated %}
-<div class="flex items-center gap-4 text-sm">
-    <span class="text-gray-400">{{ user_email.as_deref().unwrap_or("") }}</span>
-    <form method="POST" action="/logout" class="inline">
-        <button type="submit" class="text-gray-500 hover:text-gray-300">Sign out</button>
-    </form>
-</div>
-{% endif %}
+{{ auth_macros::header_auth(auth) }}
 {% endblock %}
 
 {% block content %}
@@ -22,7 +16,7 @@
 
         <!-- Browser-based enrollment or authenticated state -->
         <div class="mb-8">
-            {% if authenticated %}
+            {% if auth.authenticated %}
             <!-- Authenticated user -->
             <a href="/enroll/keys" class="w-full flex items-center justify-center gap-3 bg-vouch-accent text-white font-medium py-3 px-6 rounded-lg hover:bg-vouch-accent/90 transition-colors">
                 <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">

@@ -6,7 +6,7 @@
 //! If the user is already authenticated, it shows a "Manage Security Keys"
 //! button instead.
 
-use crate::handlers::common::extract_session_from_cookie;
+use crate::handlers::common::{AuthContext, get_auth_context};
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::{extract::State, response::IntoResponse};
@@ -23,22 +23,16 @@ pub struct HomeTemplate {
     pub download_macos: Option<String>,
     pub download_linux: Option<String>,
     pub download_windows: Option<String>,
-    /// Whether the user is authenticated.
-    pub authenticated: bool,
-    /// The user's email if authenticated.
-    pub user_email: Option<String>,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
 }
 
 impl_template_response!(HomeTemplate);
 
 /// Home page showing enrollment instructions.
 /// GET /
-pub async fn home_page(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-) -> impl IntoResponse {
-    // Check if user is authenticated
-    let session = extract_session_from_cookie(&state, &jar).await.ok();
+pub async fn home_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
+    let auth = get_auth_context(&state, &jar).await;
 
     let has_downloads = state.config.cli_download_macos.is_some()
         || state.config.cli_download_linux.is_some()
@@ -51,7 +45,6 @@ pub async fn home_page(
         download_macos: state.config.cli_download_macos.clone(),
         download_linux: state.config.cli_download_linux.clone(),
         download_windows: state.config.cli_download_windows.clone(),
-        authenticated: session.is_some(),
-        user_email: session.map(|s| s.claims.email),
+        auth,
     }
 }
