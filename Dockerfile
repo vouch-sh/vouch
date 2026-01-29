@@ -3,14 +3,34 @@
 # CSS build stage - download and run standalone tailwindcss
 FROM debian:trixie-slim AS css-builder
 
+# Declare TARGETARCH to receive automatic value from BuildKit
+ARG TARGETARCH
+
 WORKDIR /app
 
 # Download standalone tailwindcss CLI with checksum verification
+# Checksums for v4.1.8:
+#   tailwindcss-linux-x64:   8f84ce810bdff225e599781d1e2daa82b4282229021c867a71b419f59f9aa836
+#   tailwindcss-linux-arm64: 28a77d1e59b0e45b41683c1e3947621fdfe73f6895b05db7c34f63f3f4898e8d
 RUN apt-get update && apt-get install -y curl \
     && rm -rf /var/lib/apt/lists/* \
-    && curl -sLO https://github.com/tailwindlabs/tailwindcss/releases/download/v4.1.8/tailwindcss-linux-x64 \
-    && echo "8f84ce810bdff225e599781d1e2daa82b4282229021c867a71b419f59f9aa836  tailwindcss-linux-x64" | sha256sum -c - \
-    && chmod +x tailwindcss-linux-x64
+    && case "$TARGETARCH" in \
+         amd64) \
+           BINARY="tailwindcss-linux-x64" \
+           CHECKSUM="8f84ce810bdff225e599781d1e2daa82b4282229021c867a71b419f59f9aa836" \
+           ;; \
+         arm64) \
+           BINARY="tailwindcss-linux-arm64" \
+           CHECKSUM="28a77d1e59b0e45b41683c1e3947621fdfe73f6895b05db7c34f63f3f4898e8d" \
+           ;; \
+         *) \
+           echo "Unsupported architecture: $TARGETARCH" && exit 1 \
+           ;; \
+       esac \
+    && curl -sLO "https://github.com/tailwindlabs/tailwindcss/releases/download/v4.1.8/${BINARY}" \
+    && echo "${CHECKSUM}  ${BINARY}" | sha256sum -c - \
+    && chmod +x "${BINARY}" \
+    && mv "${BINARY}" tailwindcss
 
 # Copy files needed for CSS build
 COPY crates/vouch-server/tailwind.config.js crates/vouch-server/
@@ -21,7 +41,7 @@ COPY crates/vouch-server/src crates/vouch-server/src
 # Build minified CSS
 RUN mkdir -p crates/vouch-server/static/css \
     && cd crates/vouch-server \
-    && /app/tailwindcss-linux-x64 -i styles/input.css -o static/css/output.css --minify
+    && /app/tailwindcss -i styles/input.css -o static/css/output.css --minify
 
 # Rust build stage
 FROM rust:1.93-trixie AS builder
