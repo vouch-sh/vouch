@@ -80,24 +80,6 @@ Vouch configures standard credential providers:
 
 After `vouch login`, existing workflows are unchanged.
 
-### Agent Delegation (Coming Soon)
-Grant scoped, time-limited credentials to AI coding assistants:
-```bash
-$ vouch delegate --to claude-code --scope "github:read,write" --ttl 2h
-```
-Every action carries attestation of who delegated what to whom.
-
-## Comparison
-
-| Feature | Vouch | 1Password | Teleport | Okta |
-|---------|-------|-----------|----------|------|
-| Hardware presence required | ✅ Mandatory | ❌ Optional | ❌ Optional | ❌ Optional |
-| Short-lived credentials | ✅ 8hr certs | ❌ Stored secrets | ✅ Certs | ❌ Long-lived |
-| Self-serve setup | ✅ <5 min | ✅ | ❌ Complex | ❌ Enterprise |
-| Agent delegation | 🔜 Planned | ❌ | ❌ | ❌ |
-| Open source CLI | ✅ Apache-2.0 OR MIT | ❌ | ⚠️ BSL | ❌ |
-| Air-gap support | ✅ | ❌ | ✅ | ❌ |
-
 ## Quick Start
 
 ### Install
@@ -211,4 +193,4 @@ The CLI is open source under Apache-2.0 OR MIT. We believe security tools should
 
 **Vouch** — Prove you're here.
 
-[Website](https://vouch.sh) · [Documentation](https://docs.vouch.sh) · [GitHub](https://github.com/vouch-sh/vouch)
+[Website](https://vouch.sh) · [Documentation](https://vouch.sh/docs) · [GitHub](https://github.com/vouch-sh/vouch)
