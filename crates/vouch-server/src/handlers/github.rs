@@ -278,8 +278,37 @@ pub async fn github_webhook(
     Ok(StatusCode::OK)
 }
 
+/// Query parameters for connect page (may include callback params).
+#[derive(Debug, Deserialize, Default)]
+pub struct GitHubConnectParams {
+    /// Installation ID from GitHub (present when redirected after install).
+    installation_id: Option<u64>,
+    /// State token for CSRF protection.
+    state: Option<String>,
+    /// Setup action (only present during installation).
+    #[allow(dead_code)]
+    setup_action: Option<String>,
+}
+
 /// GET /github/connect - Show GitHub connection page.
-pub async fn github_connect_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
+///
+/// Also handles redirects from GitHub after app installation if the GitHub App's
+/// "Setup URL" points here instead of `/github/callback`.
+pub async fn github_connect_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Query(params): Query<GitHubConnectParams>,
+) -> Response {
+    // If we have installation_id and state, redirect to the callback handler
+    if let (Some(installation_id), Some(state_token)) = (params.installation_id, &params.state) {
+        let callback_url = format!(
+            "/github/callback?installation_id={}&state={}",
+            installation_id,
+            urlencoding::encode(state_token)
+        );
+        return Redirect::to(&callback_url).into_response();
+    }
+
     // Verify GitHub App is configured
     if state.github_app.is_none() {
         return GitHubErrorTemplate {
