@@ -134,6 +134,10 @@ async fn main() -> Result<()> {
         .route("/terms", get(handlers::legal::terms_page))
         // Documentation pages
         .route("/docs", get(handlers::docs::docs_index_page))
+        .route(
+            "/docs/getting-started",
+            get(handlers::docs::getting_started_page),
+        )
         .route("/docs/aws", get(handlers::docs::aws_setup_page))
         .route("/docs/github", get(handlers::docs::github_setup_page))
         // Integrations page

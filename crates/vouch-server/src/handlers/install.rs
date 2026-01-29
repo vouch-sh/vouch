@@ -16,6 +16,8 @@ pub struct InstallTemplate {
     pub download_macos: Option<String>,
     pub download_linux: Option<String>,
     pub download_windows: Option<String>,
+    /// Server URL for enrollment commands.
+    pub server_url: String,
     /// Authentication context for header display.
     pub auth: AuthContext,
 }
@@ -36,6 +38,7 @@ pub async fn install_page(State(state): State<Arc<AppState>>, jar: CookieJar) ->
         download_macos: state.config.cli_download_macos.clone(),
         download_linux: state.config.cli_download_linux.clone(),
         download_windows: state.config.cli_download_windows.clone(),
+        server_url: state.config.verification_base_url.clone(),
         auth,
     }
 }

@@ -13,6 +13,15 @@
         <h1 class="text-3xl font-bold text-gray-200 mb-2">Get Started with Vouch</h1>
         <p class="text-gray-400 mb-8">Install the CLI and enroll your YubiKey</p>
 
+        <!-- Prerequisites -->
+        <div class="mb-8 p-4 bg-vouch-bg rounded-lg border border-vouch-border">
+            <div class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-2">Prerequisites</div>
+            <ul class="text-sm text-gray-400 space-y-1">
+                <li>FIDO2 security key (YubiKey 5 series recommended)</li>
+                <li>Server URL from your admin (or use <code class="text-gray-300">{{ server_url }}</code>)</li>
+            </ul>
+        </div>
+
         <!-- Step 1: Install the CLI -->
         <div class="mb-8">
             <div class="flex items-center gap-3 mb-4">
@@ -94,10 +103,10 @@
             </div>
             <div class="ml-11">
                 <div class="code-block relative">
-                    <span class="text-gray-500 mr-2">$</span>vouch enroll --server &lt;your-company-url&gt;
-                    <button onclick="copyCommand('vouch enroll --server ')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                    <span class="text-gray-500 mr-2">$</span>vouch enroll --server {{ server_url }}
+                    <button onclick="copyCommand('vouch enroll --server {{ server_url }}')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
                 </div>
-                <p class="mt-2 text-sm text-gray-400">Your admin will give you the URL. This opens a browser to verify your identity and register your YubiKey.</p>
+                <p class="mt-2 text-sm text-gray-400">This opens a browser to verify your identity and register your YubiKey.</p>
             </div>
         </div>
 

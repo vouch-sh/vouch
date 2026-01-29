@@ -53,6 +53,20 @@ pub struct DocsGithubTemplate {
 
 impl_template_response!(DocsGithubTemplate);
 
+/// Getting Started documentation page template.
+#[derive(Template)]
+#[template(path = "docs/getting-started.html")]
+pub struct DocsGettingStartedTemplate {
+    /// Organization name for branding.
+    pub org_name: String,
+    /// Server URL for enrollment commands.
+    pub server_url: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
+}
+
+impl_template_response!(DocsGettingStartedTemplate);
+
 /// Documentation index page.
 /// GET /docs
 pub async fn docs_index_page(
@@ -91,6 +105,20 @@ pub async fn github_setup_page(
     DocsGithubTemplate {
         org_name: state.config.get_org_display_name().to_string(),
         github_configured: state.github_app.is_some(),
+        server_url: state.config.verification_base_url.clone(),
+        auth,
+    }
+}
+
+/// Getting Started documentation page.
+/// GET /docs/getting-started
+pub async fn getting_started_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let auth = get_auth_context(&state, &jar).await;
+    DocsGettingStartedTemplate {
+        org_name: state.config.get_org_display_name().to_string(),
         server_url: state.config.verification_base_url.clone(),
         auth,
     }

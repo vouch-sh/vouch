@@ -94,12 +94,18 @@ pub async fn run(server: &str) -> Result<()> {
 
     if agent_stored {
         println!("\nYour identity is now available. Check with: vouch status");
+    } else {
+        println!("\nNote: Agent not running. Start it with: vouch-agent --foreground");
     }
 
     println!();
-    println!("To add additional keys:");
-    println!("  1. vouch login");
-    println!("  2. vouch register --name \"Backup Key\"");
+    println!("Set up integrations:");
+    println!("  vouch setup ssh      # SSH certificates");
+    println!("  vouch setup aws      # AWS credentials");
+    println!("  vouch setup github   # GitHub tokens");
+    println!();
+    println!("Or add a backup key:");
+    println!("  vouch login && vouch register --name \"Backup Key\"");
 
     Ok(())
 }
