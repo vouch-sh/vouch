@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
-use base64::engine::general_purpose::STANDARD;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -30,26 +30,29 @@ pub struct GitHubInstallationId(pub u64);
 pub struct RsaPrivateKeyDer(Zeroizing<Vec<u8>>);
 
 impl RsaPrivateKeyDer {
-    /// Parse PEM-encoded RSA private key and extract DER bytes.
+    /// Parse RSA private key from PEM or base64-encoded DER format.
     ///
-    /// Handles both multi-line PEM and single-line with literal `\n` characters
-    /// (common when passing via environment variables).
-    pub fn from_pem(pem: &str) -> Result<Self> {
-        // Handle single-line keys with literal \n (common in env vars)
-        // Also handle double-escaped \\n (some deployment tools escape backslashes)
-        let pem = pem.replace("\\\\n", "\n").replace("\\n", "\n");
-        let pem = pem.trim();
+    /// Supports:
+    /// - Standard multi-line PEM format
+    /// - Base64-encoded DER (PKCS#8 format) - both standard and URL-safe base64
+    ///
+    /// Base64 DER is preferred for environment variables as it avoids newline handling issues.
+    pub fn from_pem(pem_or_base64: &str) -> Result<Self> {
+        let content = pem_or_base64.trim();
 
-        // Validate it looks like a PEM key
-        if !pem.starts_with("-----BEGIN") {
-            anyhow::bail!("Invalid PEM format: missing BEGIN header");
-        }
-        if !pem.contains("PRIVATE KEY") {
-            anyhow::bail!("Invalid PEM format: not a private key");
-        }
-
-        // Extract base64 content between headers
-        let der_bytes = Self::pem_to_der(pem)?;
+        let der_bytes = if content.starts_with("-----BEGIN") {
+            // Standard PEM format
+            if !content.contains("PRIVATE KEY") {
+                anyhow::bail!("Invalid PEM format: not a private key");
+            }
+            Self::pem_to_der(content)?
+        } else {
+            // Assume base64-encoded DER (PKCS#8 format)
+            URL_SAFE_NO_PAD
+                .decode(content)
+                .or_else(|_| STANDARD.decode(content))
+                .context("Invalid base64 encoding for key")?
+        };
 
         Ok(Self(Zeroizing::new(der_bytes)))
     }
@@ -385,11 +388,26 @@ yzgO9R097vzWd5EHWExte17q
     }
 
     #[test]
-    fn test_rsa_key_from_single_line_pem() {
-        // Test that single-line PEM with literal \n is handled
-        let single_line = TEST_RSA_KEY_PEM.replace('\n', "\\n");
-        let key = RsaPrivateKeyDer::from_pem(&single_line).expect("Should parse single-line PEM");
-        assert!(!key.as_bytes().is_empty());
+    fn test_rsa_key_from_base64_der() {
+        // Extract DER bytes from PEM and encode as base64
+        let pem_key = RsaPrivateKeyDer::from_pem(TEST_RSA_KEY_PEM).expect("Should parse PEM");
+        let base64_der = STANDARD.encode(pem_key.as_bytes());
+
+        // Parse the base64-encoded DER
+        let key = RsaPrivateKeyDer::from_pem(&base64_der).expect("Should parse base64 DER");
+        assert_eq!(key.as_bytes(), pem_key.as_bytes());
+    }
+
+    #[test]
+    fn test_rsa_key_from_url_safe_base64_der() {
+        // Extract DER bytes from PEM and encode as URL-safe base64
+        let pem_key = RsaPrivateKeyDer::from_pem(TEST_RSA_KEY_PEM).expect("Should parse PEM");
+        let base64_der = URL_SAFE_NO_PAD.encode(pem_key.as_bytes());
+
+        // Parse the URL-safe base64-encoded DER
+        let key =
+            RsaPrivateKeyDer::from_pem(&base64_der).expect("Should parse URL-safe base64 DER");
+        assert_eq!(key.as_bytes(), pem_key.as_bytes());
     }
 
     #[test]
