@@ -447,11 +447,11 @@ curl -X POST https://vouch.example.com/oauth/token \
 
 ### v0.5 — GitHub Integration (Month 4)
 
-- [ ] GitHub App registration
-- [ ] Installation token issuance
-- [ ] Git credential helper
-- [ ] `vouch setup github` command
-- [ ] Repository-scoped tokens
+- [x] GitHub App registration
+- [x] Installation token issuance
+- [x] Git credential helper
+- [x] `vouch setup github` command
+- [x] Repository-scoped tokens
 
 ### v0.6 — Enterprise Features (Month 5)
 

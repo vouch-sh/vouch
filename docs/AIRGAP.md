@@ -23,9 +23,9 @@ Vouch's built-in SSH CA and local-first architecture make it well-suited for the
 |  +----------------------------------------------------------------------+  |
 |  |                      On-Premises Vouch Stack                         |  |
 |  |                                                                      |  |
-|  |  +--------------+  +----------------+  +----------------------------+ |  |
-|  |  |   Vouch      |  |   Built-in     |  |       SQLite               | |  |
-|  |  |   Server     |  |   SSH CA       |  |                            | |  |
+|  |  +--------------+  +----------------+  +--------------------------+  |  |
+|  |  |   Vouch      |  |   Built-in     |  |         SQLite           |  |  |
+|  |  |   Server     |  |   SSH CA       |  |                          |  |  |
 |  |  |              |  |                |  |  * Users & credentials     | |  |
 |  |  |  * WebAuthn  |  |  * Ed25519 CA  |  |  * Sessions                | |  |
 |  |  |  * OIDC      |  |  * SSH certs   |  |  * Audit logs              | |  |
@@ -508,7 +508,7 @@ If CA keys are lost, all issued certificates become unverifiable.
 |  |   VLAN          |        |                             |  |
 |  |                 |        |  +-------+  +-----------+   |  |
 |  |  * Vouch Server |<------>|  |Workst.|  | Protected |   |  |
-|  |  * PostgreSQL   |        |  +-------+  | Resources |   |  |
+|  |  * SQLite       |        |  +-------+  | Resources |   |  |
 |  |                 |        |             +-----------+   |  |
 |  +-----------------+        +-----------------------------+  |
 |           |                                                  |

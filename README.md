@@ -105,8 +105,13 @@ Every action carries attestation of who delegated what to whom.
 # macOS
 brew install vouch-sh/tap/vouch
 
-# Linux
-curl -fsSL https://vouch.sh/install.sh | sh
+# Linux (Debian/Ubuntu)
+# See https://packages.vouch.sh for repository setup
+sudo apt install vouch
+
+# Linux (RPM-based)
+# See https://packages.vouch.sh for repository setup
+sudo dnf install vouch
 
 # From source
 cargo install --git https://github.com/vouch-sh/vouch vouch-cli

@@ -625,16 +625,14 @@ How it works:
 5. Credentials expire in 1 hour, auto-refresh within session
 ```
 
-### GitHub Integration (Planned)
-
-> **Note:** GitHub integration is planned for v0.5. See [ROADMAP.md](ROADMAP.md) for details.
+### GitHub Integration
 
 ```
 ~/.gitconfig:
   [credential "https://github.com"]
-    helper = vouch credential git
+    helper = vouch credential github
 
-How it will work:
+How it works:
 1. Git calls credential helper for github.com
 2. vouch requests GitHub App installation token
 3. Server uses GitHub App private key to generate token
