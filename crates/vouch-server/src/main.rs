@@ -140,6 +140,7 @@ async fn main() -> Result<()> {
         )
         .route("/docs/aws", get(handlers::docs::aws_setup_page))
         .route("/docs/github", get(handlers::docs::github_setup_page))
+        .route("/docs/applications", get(handlers::docs::applications_page))
         // Integrations page
         .route(
             "/integrations",

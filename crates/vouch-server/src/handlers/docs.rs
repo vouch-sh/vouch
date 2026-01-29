@@ -67,6 +67,20 @@ pub struct DocsGettingStartedTemplate {
 
 impl_template_response!(DocsGettingStartedTemplate);
 
+/// Application Integration documentation page template.
+#[derive(Template)]
+#[template(path = "docs/applications.html")]
+pub struct DocsApplicationsTemplate {
+    /// The OIDC provider URL (verification_base_url).
+    pub provider_url: String,
+    /// Organization name for branding.
+    pub org_name: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
+}
+
+impl_template_response!(DocsApplicationsTemplate);
+
 /// Documentation index page.
 /// GET /docs
 pub async fn docs_index_page(
@@ -120,6 +134,20 @@ pub async fn getting_started_page(
     DocsGettingStartedTemplate {
         org_name: state.config.get_org_display_name().to_string(),
         server_url: state.config.verification_base_url.clone(),
+        auth,
+    }
+}
+
+/// Application Integration documentation page.
+/// GET /docs/applications
+pub async fn applications_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let auth = get_auth_context(&state, &jar).await;
+    DocsApplicationsTemplate {
+        provider_url: state.config.verification_base_url.clone(),
+        org_name: state.config.get_org_display_name().to_string(),
         auth,
     }
 }

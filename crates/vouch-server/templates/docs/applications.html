@@ -1,0 +1,1056 @@
+{% extends "base.html" %}
+{% import "macros/auth.html" as auth_macros %}
+
+{% block title %}Application Integration Guide - {{ org_name }}{% endblock %}
+
+{% block header_right %}
+{{ auth_macros::header_auth(auth) }}
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center flex-1 p-5">
+    <div class="card max-w-4xl w-full">
+        <a href="/docs" class="inline-flex items-center gap-1.5 text-vouch-accent text-sm mb-6 hover:text-vouch-accent-hover">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+            Back to docs
+        </a>
+        <h1 class="text-3xl font-bold text-gray-200 mb-2">Application Integration Guide</h1>
+        <p class="text-gray-400 mb-8">Add "Sign in with {{ org_name }}" to your web application</p>
+
+        <!-- Overview -->
+        <div class="mb-8 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-2">What you'll build</h2>
+            <p class="text-gray-400 text-sm">
+                Add hardware-backed authentication to your web application using OpenID Connect.
+                Users authenticate with their YubiKey via {{ org_name }}, and your app receives verified identity claims
+                including proof of hardware verification.
+            </p>
+        </div>
+
+        <!-- Prerequisites -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Prerequisites</h2>
+            <ul class="list-disc list-inside text-gray-400 text-sm space-y-2 ml-2">
+                <li>A registered OAuth application (<a href="/applications" class="text-vouch-accent hover:text-vouch-accent-hover">create one here</a>)</li>
+                <li>Your <code class="text-vouch-accent">client_id</code> and <code class="text-vouch-accent">client_secret</code></li>
+                <li>A configured redirect URI (e.g., <code class="text-vouch-accent">https://yourapp.com/auth/callback</code>)</li>
+            </ul>
+        </div>
+
+        <!-- Configuration Reference -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Configuration Reference</h2>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="border-b border-vouch-border">
+                            <th class="text-left py-2 pr-4 text-gray-300 font-medium">Setting</th>
+                            <th class="text-left py-2 text-gray-300 font-medium">Value</th>
+                        </tr>
+                    </thead>
+                    <tbody class="text-gray-400">
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4">Discovery URL</td>
+                            <td class="py-2"><code class="text-vouch-accent">{{ provider_url }}/.well-known/openid-configuration</code></td>
+                        </tr>
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4">Issuer</td>
+                            <td class="py-2"><code class="text-vouch-accent">{{ provider_url }}</code></td>
+                        </tr>
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4">Authorization Endpoint</td>
+                            <td class="py-2"><code class="text-vouch-accent">{{ provider_url }}/oauth/authorize</code></td>
+                        </tr>
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4">Token Endpoint</td>
+                            <td class="py-2"><code class="text-vouch-accent">{{ provider_url }}/oauth/token</code></td>
+                        </tr>
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4">UserInfo Endpoint</td>
+                            <td class="py-2"><code class="text-vouch-accent">{{ provider_url }}/oauth/userinfo</code></td>
+                        </tr>
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4">JWKS Endpoint</td>
+                            <td class="py-2"><code class="text-vouch-accent">{{ provider_url }}/oauth/jwks</code></td>
+                        </tr>
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4">Signing Algorithm</td>
+                            <td class="py-2"><code class="text-vouch-accent">ES256</code> (ECDSA P-256)</td>
+                        </tr>
+                        <tr>
+                            <td class="py-2 pr-4">Scopes</td>
+                            <td class="py-2"><code class="text-vouch-accent">openid email profile</code></td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="mt-4 p-3 bg-vouch-bg rounded border border-vouch-border">
+                <p class="text-gray-400 text-sm">
+                    <strong class="text-gray-300">Note:</strong> {{ org_name }} uses ES256 signing. Most libraries auto-detect this from the JWKS,
+                    but you may need to configure it explicitly if your library defaults to RS256.
+                </p>
+            </div>
+        </div>
+
+        <!-- Framework Examples -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Framework Examples</h2>
+
+            <!-- Framework Tabs -->
+            <div class="flex flex-wrap gap-2 mb-4">
+                <button class="tab tab-active" onclick="showFrameworkTab('rails')">Rails</button>
+                <button class="tab" onclick="showFrameworkTab('django')">Django</button>
+                <button class="tab" onclick="showFrameworkTab('express')">Express.js</button>
+                <button class="tab" onclick="showFrameworkTab('nextjs')">Next.js</button>
+                <button class="tab" onclick="showFrameworkTab('laravel')">Laravel</button>
+                <button class="tab" onclick="showFrameworkTab('flask')">Flask</button>
+                <button class="tab" onclick="showFrameworkTab('fastapi')">FastAPI</button>
+                <button class="tab" onclick="showFrameworkTab('spring')">Spring Boot</button>
+                <button class="tab" onclick="showFrameworkTab('axum')">Axum</button>
+            </div>
+
+            <!-- Rails -->
+            <div id="framework-rails-tab" class="tab-content">
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Ruby on Rails with OmniAuth</h3>
+
+                <p class="text-gray-400 text-sm mb-3">Install the gem:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap"># Gemfile
+gem 'omniauth-openid-connect'</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Configure the provider:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap"># config/initializers/omniauth.rb
+Rails.application.config.middleware.use OmniAuth::Builder do
+  provider :openid_connect,
+    name: :vouch,
+    issuer: '{{ provider_url }}',
+    discovery: true,
+    client_options: {
+      identifier: ENV['VOUCH_CLIENT_ID'],
+      secret: ENV['VOUCH_CLIENT_SECRET'],
+      redirect_uri: 'https://yourapp.com/auth/vouch/callback'
+    },
+    scope: [:openid, :email, :profile]
+end</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Handle the callback:</p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># app/controllers/sessions_controller.rb
+class SessionsController < ApplicationController
+  def create
+    auth = request.env['omniauth.auth']
+    user = User.find_or_create_by(email: auth.info.email) do |u|
+      u.name = auth.info.name
+    end
+
+    # Check hardware verification
+    if auth.extra.raw_info.hardware_verified
+      session[:user_id] = user.id
+      redirect_to root_path, notice: 'Signed in with hardware key!'
+    else
+      redirect_to root_path, alert: 'Hardware verification required'
+    end
+  end
+end</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Django -->
+            <div id="framework-django-tab" class="tab-content hidden">
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Django with mozilla-django-oidc</h3>
+
+                <p class="text-gray-400 text-sm mb-3">Install the package:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">pip install mozilla-django-oidc</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Configure settings:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap"># settings.py
+INSTALLED_APPS = [
+    ...
+    'mozilla_django_oidc',
+]
+
+AUTHENTICATION_BACKENDS = [
+    'mozilla_django_oidc.auth.OIDCAuthenticationBackend',
+    'django.contrib.auth.backends.ModelBackend',
+]
+
+# OIDC Configuration
+OIDC_RP_CLIENT_ID = os.environ.get('VOUCH_CLIENT_ID')
+OIDC_RP_CLIENT_SECRET = os.environ.get('VOUCH_CLIENT_SECRET')
+OIDC_OP_AUTHORIZATION_ENDPOINT = '{{ provider_url }}/oauth/authorize'
+OIDC_OP_TOKEN_ENDPOINT = '{{ provider_url }}/oauth/token'
+OIDC_OP_USER_ENDPOINT = '{{ provider_url }}/oauth/userinfo'
+OIDC_OP_JWKS_ENDPOINT = '{{ provider_url }}/oauth/jwks'
+OIDC_RP_SIGN_ALGO = 'ES256'
+OIDC_RP_SCOPES = 'openid email profile'
+
+LOGIN_REDIRECT_URL = '/'
+LOGOUT_REDIRECT_URL = '/'</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Add URL routes:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap"># urls.py
+urlpatterns = [
+    ...
+    path('oidc/', include('mozilla_django_oidc.urls')),
+]</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Custom authentication backend (optional, for hardware verification):</p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># auth.py
+from mozilla_django_oidc.auth import OIDCAuthenticationBackend
+
+class VouchAuthBackend(OIDCAuthenticationBackend):
+    def verify_claims(self, claims):
+        verified = super().verify_claims(claims)
+        # Require hardware verification
+        return verified and claims.get('hardware_verified', False)
+
+    def create_user(self, claims):
+        user = super().create_user(claims)
+        user.email = claims.get('email', '')
+        user.first_name = claims.get('given_name', '')
+        user.last_name = claims.get('family_name', '')
+        user.save()
+        return user</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Express.js -->
+            <div id="framework-express-tab" class="tab-content hidden">
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Express.js with Passport</h3>
+
+                <p class="text-gray-400 text-sm mb-3">Install dependencies:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">npm install passport passport-openidconnect express-session</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Configure Passport:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">// app.js
+const passport = require('passport');
+const OpenIDConnectStrategy = require('passport-openidconnect');
+
+passport.use('vouch', new OpenIDConnectStrategy({
+  issuer: '{{ provider_url }}',
+  authorizationURL: '{{ provider_url }}/oauth/authorize',
+  tokenURL: '{{ provider_url }}/oauth/token',
+  userInfoURL: '{{ provider_url }}/oauth/userinfo',
+  clientID: process.env.VOUCH_CLIENT_ID,
+  clientSecret: process.env.VOUCH_CLIENT_SECRET,
+  callbackURL: '/auth/vouch/callback',
+  scope: ['openid', 'email', 'profile']
+}, (issuer, profile, context, idToken, accessToken, refreshToken, done) => {
+  // profile contains user info, idToken has hardware_verified claim
+  return done(null, {
+    id: profile.id,
+    email: profile.emails?.[0]?.value,
+    name: profile.displayName,
+    hardwareVerified: idToken.hardware_verified
+  });
+}));
+
+passport.serializeUser((user, done) => done(null, user));
+passport.deserializeUser((user, done) => done(null, user));</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Add routes:</p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">// routes.js
+app.get('/auth/vouch', passport.authenticate('vouch'));
+
+app.get('/auth/vouch/callback',
+  passport.authenticate('vouch', { failureRedirect: '/login' }),
+  (req, res) => {
+    // Check hardware verification for sensitive actions
+    if (!req.user.hardwareVerified) {
+      return res.redirect('/login?error=hardware_required');
+    }
+    res.redirect('/');
+  }
+);
+
+app.get('/logout', (req, res) => {
+  req.logout(() => res.redirect('/'));
+});</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Next.js -->
+            <div id="framework-nextjs-tab" class="tab-content hidden">
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Next.js with NextAuth.js</h3>
+
+                <p class="text-gray-400 text-sm mb-3">Install NextAuth:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">npm install next-auth</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Configure the provider:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">// pages/api/auth/[...nextauth].js (Pages Router)
+// or app/api/auth/[...nextauth]/route.js (App Router)
+import NextAuth from 'next-auth';
+
+export default NextAuth({
+  providers: [{
+    id: 'vouch',
+    name: 'Vouch',
+    type: 'oauth',
+    wellKnown: '{{ provider_url }}/.well-known/openid-configuration',
+    clientId: process.env.VOUCH_CLIENT_ID,
+    clientSecret: process.env.VOUCH_CLIENT_SECRET,
+    authorization: { params: { scope: 'openid email profile' } },
+    idToken: true,
+    profile(profile) {
+      return {
+        id: profile.sub,
+        email: profile.email,
+        name: profile.name,
+        image: profile.picture,
+        hardwareVerified: profile.hardware_verified,
+        hardwareAaguid: profile.hardware_aaguid
+      };
+    }
+  }],
+  callbacks: {
+    async jwt({ token, profile }) {
+      if (profile) {
+        token.hardwareVerified = profile.hardware_verified;
+        token.hardwareAaguid = profile.hardware_aaguid;
+      }
+      return token;
+    },
+    async session({ session, token }) {
+      session.user.hardwareVerified = token.hardwareVerified;
+      session.user.hardwareAaguid = token.hardwareAaguid;
+      return session;
+    }
+  }
+});</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Use in a component:</p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">// components/LoginButton.jsx
+import { signIn, signOut, useSession } from 'next-auth/react';
+
+export default function LoginButton() {
+  const { data: session } = useSession();
+
+  if (session) {
+    return (
+      &lt;div&gt;
+        &lt;p&gt;Signed in as {session.user.email}&lt;/p&gt;
+        {session.user.hardwareVerified && (
+          &lt;span className="badge"&gt;Hardware Verified&lt;/span&gt;
+        )}
+        &lt;button onClick={() =&gt; signOut()}&gt;Sign out&lt;/button&gt;
+      &lt;/div&gt;
+    );
+  }
+
+  return &lt;button onClick={() =&gt; signIn('vouch')}&gt;Sign in with Vouch&lt;/button&gt;;
+}</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Laravel -->
+            <div id="framework-laravel-tab" class="tab-content hidden">
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Laravel with Socialite</h3>
+
+                <p class="text-gray-400 text-sm mb-3">Install the package:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">composer require socialiteproviders/openid-connect</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Configure services:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">// config/services.php
+'vouch' => [
+    'base_url' => '{{ provider_url }}',
+    'client_id' => env('VOUCH_CLIENT_ID'),
+    'client_secret' => env('VOUCH_CLIENT_SECRET'),
+    'redirect' => env('VOUCH_REDIRECT_URI'),
+],</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Register the provider:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">// app/Providers/EventServiceProvider.php
+protected $listen = [
+    \SocialiteProviders\Manager\SocialiteWasCalled::class => [
+        \SocialiteProviders\OpenIDConnect\OpenIDConnectExtendSocialite::class.'@handle',
+    ],
+];</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Controller implementation:</p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">// app/Http/Controllers/AuthController.php
+use Laravel\Socialite\Facades\Socialite;
+
+class AuthController extends Controller
+{
+    public function redirect()
+    {
+        return Socialite::driver('openid-connect')
+            ->setConfig(new \SocialiteProviders\Manager\Config(
+                config('services.vouch.client_id'),
+                config('services.vouch.client_secret'),
+                config('services.vouch.redirect'),
+                ['base_url' => config('services.vouch.base_url')]
+            ))
+            ->scopes(['openid', 'email', 'profile'])
+            ->redirect();
+    }
+
+    public function callback()
+    {
+        $vouchUser = Socialite::driver('openid-connect')->user();
+
+        $user = User::updateOrCreate(
+            ['email' => $vouchUser->email],
+            ['name' => $vouchUser->name]
+        );
+
+        // Store hardware verification status
+        session(['hardware_verified' => $vouchUser->user['hardware_verified'] ?? false]);
+
+        Auth::login($user);
+        return redirect('/dashboard');
+    }
+}</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Flask -->
+            <div id="framework-flask-tab" class="tab-content hidden">
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Flask with Authlib</h3>
+
+                <p class="text-gray-400 text-sm mb-3">Install dependencies:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">pip install authlib flask</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Configure the OAuth client:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap"># app.py
+from flask import Flask, redirect, url_for, session
+from authlib.integrations.flask_client import OAuth
+import os
+
+app = Flask(__name__)
+app.secret_key = os.environ.get('SECRET_KEY')
+
+oauth = OAuth(app)
+oauth.register(
+    name='vouch',
+    client_id=os.environ.get('VOUCH_CLIENT_ID'),
+    client_secret=os.environ.get('VOUCH_CLIENT_SECRET'),
+    server_metadata_url='{{ provider_url }}/.well-known/openid-configuration',
+    client_kwargs={'scope': 'openid email profile'}
+)</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Add routes:</p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">@app.route('/login')
+def login():
+    redirect_uri = url_for('callback', _external=True)
+    return oauth.vouch.authorize_redirect(redirect_uri)
+
+@app.route('/callback')
+def callback():
+    token = oauth.vouch.authorize_access_token()
+    userinfo = token.get('userinfo')
+
+    # Store user info in session
+    session['user'] = {
+        'email': userinfo.get('email'),
+        'name': userinfo.get('name'),
+        'hardware_verified': userinfo.get('hardware_verified', False)
+    }
+
+    return redirect('/')
+
+@app.route('/logout')
+def logout():
+    session.pop('user', None)
+    return redirect('/')</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- FastAPI -->
+            <div id="framework-fastapi-tab" class="tab-content hidden">
+                <h3 class="text-md font-semibold text-gray-300 mb-3">FastAPI with Authlib</h3>
+
+                <p class="text-gray-400 text-sm mb-3">Install dependencies:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">pip install authlib httpx fastapi uvicorn itsdangerous</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Configure OAuth:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap"># main.py
+from fastapi import FastAPI, Request
+from fastapi.responses import RedirectResponse
+from starlette.middleware.sessions import SessionMiddleware
+from authlib.integrations.starlette_client import OAuth
+import os
+
+app = FastAPI()
+app.add_middleware(SessionMiddleware, secret_key=os.environ.get('SECRET_KEY'))
+
+oauth = OAuth()
+oauth.register(
+    name='vouch',
+    client_id=os.environ.get('VOUCH_CLIENT_ID'),
+    client_secret=os.environ.get('VOUCH_CLIENT_SECRET'),
+    server_metadata_url='{{ provider_url }}/.well-known/openid-configuration',
+    client_kwargs={'scope': 'openid email profile'}
+)</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Add routes:</p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">@app.get('/login')
+async def login(request: Request):
+    redirect_uri = request.url_for('callback')
+    return await oauth.vouch.authorize_redirect(request, redirect_uri)
+
+@app.get('/callback')
+async def callback(request: Request):
+    token = await oauth.vouch.authorize_access_token(request)
+    userinfo = token.get('userinfo')
+
+    request.session['user'] = {
+        'email': userinfo.get('email'),
+        'name': userinfo.get('name'),
+        'hardware_verified': userinfo.get('hardware_verified', False)
+    }
+
+    return RedirectResponse(url='/')
+
+@app.get('/logout')
+async def logout(request: Request):
+    request.session.pop('user', None)
+    return RedirectResponse(url='/')</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Spring Boot -->
+            <div id="framework-spring-tab" class="tab-content hidden">
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Spring Boot with Spring Security OAuth2</h3>
+
+                <p class="text-gray-400 text-sm mb-3">Add the dependency:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">&lt;!-- pom.xml --&gt;
+&lt;dependency&gt;
+    &lt;groupId&gt;org.springframework.boot&lt;/groupId&gt;
+    &lt;artifactId&gt;spring-boot-starter-oauth2-client&lt;/artifactId&gt;
+&lt;/dependency&gt;</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Configure application properties:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap"># application.yml
+spring:
+  security:
+    oauth2:
+      client:
+        registration:
+          vouch:
+            client-id: ${VOUCH_CLIENT_ID}
+            client-secret: ${VOUCH_CLIENT_SECRET}
+            scope: openid,email,profile
+            authorization-grant-type: authorization_code
+            redirect-uri: "{baseUrl}/login/oauth2/code/{registrationId}"
+        provider:
+          vouch:
+            issuer-uri: {{ provider_url }}</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Security configuration:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">// SecurityConfig.java
+@Configuration
+@EnableWebSecurity
+public class SecurityConfig {
+
+    @Bean
+    public SecurityFilterChain filterChain(HttpSecurity http) throws Exception {
+        http
+            .authorizeHttpRequests(auth -> auth
+                .requestMatchers("/", "/login").permitAll()
+                .anyRequest().authenticated()
+            )
+            .oauth2Login(oauth2 -> oauth2
+                .defaultSuccessUrl("/dashboard", true)
+            );
+        return http.build();
+    }
+}</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Access user info in a controller:</p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">// DashboardController.java
+@Controller
+public class DashboardController {
+
+    @GetMapping("/dashboard")
+    public String dashboard(@AuthenticationPrincipal OidcUser user, Model model) {
+        model.addAttribute("email", user.getEmail());
+        model.addAttribute("name", user.getFullName());
+
+        // Access custom claims
+        Boolean hardwareVerified = user.getClaim("hardware_verified");
+        model.addAttribute("hardwareVerified", hardwareVerified);
+
+        return "dashboard";
+    }
+}</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Axum -->
+            <div id="framework-axum-tab" class="tab-content hidden">
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Axum with openidconnect-rs</h3>
+
+                <p class="text-gray-400 text-sm mb-3">Add dependencies to Cargo.toml:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">[dependencies]
+axum = "0.8"
+openidconnect = "4"
+tokio = { version = "1", features = ["full"] }
+tower-sessions = "0.14"</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Initialize the OIDC client:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">use openidconnect::{
+    core::{CoreClient, CoreProviderMetadata},
+    ClientId, ClientSecret, IssuerUrl, RedirectUrl,
+};
+
+async fn create_oidc_client() -> Result<CoreClient, Box<dyn std::error::Error>> {
+    let issuer_url = IssuerUrl::new("{{ provider_url }}".to_string())?;
+
+    let provider_metadata = CoreProviderMetadata::discover_async(
+        issuer_url,
+        openidconnect::reqwest::async_http_client,
+    ).await?;
+
+    let client = CoreClient::from_provider_metadata(
+        provider_metadata,
+        ClientId::new(std::env::var("VOUCH_CLIENT_ID")?),
+        Some(ClientSecret::new(std::env::var("VOUCH_CLIENT_SECRET")?)),
+    )
+    .set_redirect_uri(RedirectUrl::new("https://yourapp.com/callback".to_string())?);
+
+    Ok(client)
+}</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Implement login and callback handlers:</p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">use axum::{extract::Query, response::Redirect, Extension};
+use openidconnect::{
+    AuthorizationCode, CsrfToken, Nonce, PkceCodeChallenge,
+    PkceCodeVerifier, Scope, TokenResponse,
+};
+
+async fn login(Extension(client): Extension<CoreClient>) -> Redirect {
+    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
+
+    let (auth_url, csrf_token, nonce) = client
+        .authorize_url(CsrfToken::new_random, Nonce::new_random)
+        .add_scope(Scope::new("email".to_string()))
+        .add_scope(Scope::new("profile".to_string()))
+        .set_pkce_challenge(pkce_challenge)
+        .url();
+
+    // Store pkce_verifier, csrf_token, nonce in session...
+
+    Redirect::to(auth_url.as_str())
+}
+
+#[derive(Deserialize)]
+struct CallbackParams {
+    code: String,
+    state: String,
+}
+
+async fn callback(
+    Query(params): Query<CallbackParams>,
+    Extension(client): Extension<CoreClient>,
+    // session: Session, // retrieve pkce_verifier, csrf_token, nonce
+) -> impl IntoResponse {
+    // Verify CSRF token matches...
+
+    let token_response = client
+        .exchange_code(AuthorizationCode::new(params.code))
+        .set_pkce_verifier(pkce_verifier) // from session
+        .request_async(openidconnect::reqwest::async_http_client)
+        .await?;
+
+    let id_token = token_response.id_token().unwrap();
+    let claims = id_token.claims(&client.id_token_verifier(), &nonce)?;
+
+    // Access custom claims
+    let hardware_verified: Option<bool> = claims
+        .additional_claims()
+        .get("hardware_verified")
+        .and_then(|v| v.as_bool());
+
+    // Create session, redirect to app...
+}</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Vouch-Specific Claims -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Vouch-Specific Claims</h2>
+            <p class="text-gray-400 text-sm mb-4">
+                In addition to standard OIDC claims, {{ org_name }} includes hardware verification information:
+            </p>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="border-b border-vouch-border">
+                            <th class="text-left py-2 pr-4 text-gray-300 font-medium">Claim</th>
+                            <th class="text-left py-2 pr-4 text-gray-300 font-medium">Type</th>
+                            <th class="text-left py-2 text-gray-300 font-medium">Description</th>
+                        </tr>
+                    </thead>
+                    <tbody class="text-gray-400">
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4"><code class="text-vouch-accent">hardware_verified</code></td>
+                            <td class="py-2 pr-4">boolean</td>
+                            <td class="py-2">Whether the user authenticated with a hardware security key</td>
+                        </tr>
+                        <tr>
+                            <td class="py-2 pr-4"><code class="text-vouch-accent">hardware_aaguid</code></td>
+                            <td class="py-2 pr-4">string</td>
+                            <td class="py-2">The AAGUID of the authenticator (identifies the hardware model)</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="mt-4 p-3 bg-vouch-bg rounded border border-vouch-border">
+                <p class="text-gray-400 text-sm">
+                    <strong class="text-gray-300">Security tip:</strong> For sensitive operations (admin actions, financial transactions),
+                    verify that <code class="text-vouch-accent">hardware_verified</code> is <code class="text-vouch-accent">true</code>
+                    before proceeding.
+                </p>
+            </div>
+        </div>
+
+        <!-- Service-to-Service Authentication -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Service-to-Service (M2M) Authentication</h2>
+            <p class="text-gray-400 text-sm mb-4">
+                For backend services that need to call other services on behalf of a user, use the Token Exchange flow (RFC 8693).
+                This exchanges a user's access token for a new token scoped to a specific service.
+            </p>
+
+            <div class="mb-4 p-3 bg-vouch-bg rounded border border-vouch-border">
+                <p class="text-gray-400 text-sm">
+                    <strong class="text-gray-300">When to use:</strong> Your backend receives a user's access token and needs to call
+                    another internal API while preserving the user's identity and permissions.
+                </p>
+            </div>
+
+            <!-- M2M Tabs -->
+            <div class="flex flex-wrap gap-2 mb-4">
+                <button class="tab tab-active" onclick="showM2MTab('python')">Python</button>
+                <button class="tab" onclick="showM2MTab('node')">Node.js</button>
+                <button class="tab" onclick="showM2MTab('rust')">Rust</button>
+            </div>
+
+            <!-- Python -->
+            <div id="m2m-python-tab" class="tab-content">
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># token_exchange.py
+import requests
+import os
+
+def exchange_token(user_access_token: str, target_audience: str) -> str:
+    """Exchange a user's access token for a service-scoped token."""
+
+    response = requests.post(
+        '{{ provider_url }}/oauth/token',
+        auth=(os.environ['VOUCH_CLIENT_ID'], os.environ['VOUCH_CLIENT_SECRET']),
+        data={
+            'grant_type': 'urn:ietf:params:oauth:grant-type:token-exchange',
+            'subject_token': user_access_token,
+            'subject_token_type': 'urn:ietf:params:oauth:token-type:access_token',
+            'audience': target_audience,
+            'scope': 'read:data'  # optional: request specific scopes
+        }
+    )
+    response.raise_for_status()
+    return response.json()['access_token']
+
+# Usage
+user_token = request.headers.get('Authorization').replace('Bearer ', '')
+service_token = exchange_token(user_token, 'https://api.internal.example.com')
+
+# Call internal API with the new token
+response = requests.get(
+    'https://api.internal.example.com/data',
+    headers={'Authorization': f'Bearer {service_token}'}
+)</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Node.js -->
+            <div id="m2m-node-tab" class="tab-content hidden">
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">// tokenExchange.js
+
+async function exchangeToken(userAccessToken, targetAudience) {
+  const credentials = Buffer.from(
+    `${process.env.VOUCH_CLIENT_ID}:${process.env.VOUCH_CLIENT_SECRET}`
+  ).toString('base64');
+
+  const response = await fetch('{{ provider_url }}/oauth/token', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Basic ${credentials}`,
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: new URLSearchParams({
+      grant_type: 'urn:ietf:params:oauth:grant-type:token-exchange',
+      subject_token: userAccessToken,
+      subject_token_type: 'urn:ietf:params:oauth:token-type:access_token',
+      audience: targetAudience
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error(`Token exchange failed: ${response.statusText}`);
+  }
+
+  const data = await response.json();
+  return data.access_token;
+}
+
+// Usage in an Express route
+app.get('/api/aggregate', async (req, res) => {
+  const userToken = req.headers.authorization?.replace('Bearer ', '');
+
+  const serviceToken = await exchangeToken(
+    userToken,
+    'https://api.internal.example.com'
+  );
+
+  const data = await fetch('https://api.internal.example.com/data', {
+    headers: { 'Authorization': `Bearer ${serviceToken}` }
+  }).then(r => r.json());
+
+  res.json(data);
+});</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Rust -->
+            <div id="m2m-rust-tab" class="tab-content hidden">
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">// token_exchange.rs
+use reqwest::Client;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    token_type: String,
+    expires_in: u64,
+}
+
+async fn exchange_token(
+    client: &Client,
+    user_access_token: &str,
+    target_audience: &str,
+) -> Result<String, reqwest::Error> {
+    let client_id = std::env::var("VOUCH_CLIENT_ID").unwrap();
+    let client_secret = std::env::var("VOUCH_CLIENT_SECRET").unwrap();
+
+    let response: TokenResponse = client
+        .post("{{ provider_url }}/oauth/token")
+        .basic_auth(&client_id, Some(&client_secret))
+        .form(&[
+            ("grant_type", "urn:ietf:params:oauth:grant-type:token-exchange"),
+            ("subject_token", user_access_token),
+            ("subject_token_type", "urn:ietf:params:oauth:token-type:access_token"),
+            ("audience", target_audience),
+        ])
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    Ok(response.access_token)
+}
+
+// Usage in an Axum handler
+async fn aggregate_data(
+    Extension(http_client): Extension<Client>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let user_token = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim_start_matches("Bearer "))
+        .unwrap();
+
+    let service_token = exchange_token(
+        &http_client,
+        user_token,
+        "https://api.internal.example.com",
+    ).await?;
+
+    // Call internal API with the exchanged token
+    let data: serde_json::Value = http_client
+        .get("https://api.internal.example.com/data")
+        .bearer_auth(&service_token)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    Json(data)
+}</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Troubleshooting -->
+        <div class="p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-3">Troubleshooting</h2>
+            <dl class="space-y-3 text-sm">
+                <div>
+                    <dt class="text-gray-300 font-medium">ES256 algorithm not supported</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Some libraries default to RS256. Configure your library to use ES256 explicitly,
+                        or ensure it reads the algorithm from the JWKS endpoint.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">No refresh token received</dt>
+                    <dd class="text-gray-400 mt-1">
+                        {{ org_name }} does not issue refresh tokens. Sessions last 8 hours.
+                        After expiration, users must re-authenticate with their hardware key.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">CORS errors in browser</dt>
+                    <dd class="text-gray-400 mt-1">
+                        For single-page applications (SPAs), register your application as type "spa" (public client)
+                        and ensure your origin is in the allowed redirect URIs.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">Invalid redirect_uri</dt>
+                    <dd class="text-gray-400 mt-1">
+                        The redirect URI must exactly match one registered in your
+                        <a href="/applications" class="text-vouch-accent hover:text-vouch-accent-hover">application settings</a>,
+                        including the protocol (https) and any trailing slashes.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">Token signature verification failed</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Ensure your library fetches the JWKS from <code class="text-vouch-accent">{{ provider_url }}/oauth/jwks</code>
+                        and matches the <code class="text-vouch-accent">kid</code> in the token header.
+                    </dd>
+                </div>
+            </dl>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function showFrameworkTab(framework) {
+        // Update tab buttons
+        document.querySelectorAll('[onclick^="showFrameworkTab"]').forEach(el => {
+            el.classList.remove('tab-active');
+        });
+        event.target.classList.add('tab-active');
+
+        // Update tab content
+        document.querySelectorAll('[id^="framework-"][id$="-tab"]').forEach(el => {
+            el.classList.add('hidden');
+        });
+        document.getElementById('framework-' + framework + '-tab').classList.remove('hidden');
+    }
+
+    function showM2MTab(lang) {
+        // Update tab buttons
+        document.querySelectorAll('[onclick^="showM2MTab"]').forEach(el => {
+            el.classList.remove('tab-active');
+        });
+        event.target.classList.add('tab-active');
+
+        // Update tab content
+        document.querySelectorAll('[id^="m2m-"][id$="-tab"]').forEach(el => {
+            el.classList.add('hidden');
+        });
+        document.getElementById('m2m-' + lang + '-tab').classList.remove('hidden');
+    }
+
+    function copyCode(button) {
+        const codeBlock = button.parentElement.querySelector('pre');
+        const text = codeBlock.textContent;
+        navigator.clipboard.writeText(text).then(() => {
+            const original = button.textContent;
+            button.textContent = 'Copied!';
+            setTimeout(() => button.textContent = original, 2000);
+        });
+    }
+</script>
+{% endblock %}
