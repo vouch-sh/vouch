@@ -36,7 +36,8 @@ impl RsaPrivateKeyDer {
     /// (common when passing via environment variables).
     pub fn from_pem(pem: &str) -> Result<Self> {
         // Handle single-line keys with literal \n (common in env vars)
-        let pem = pem.replace("\\n", "\n");
+        // Also handle double-escaped \\n (some deployment tools escape backslashes)
+        let pem = pem.replace("\\\\n", "\n").replace("\\n", "\n");
         let pem = pem.trim();
 
         // Validate it looks like a PEM key
