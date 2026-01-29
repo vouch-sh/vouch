@@ -20,6 +20,12 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup component add rustfmt
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9dbd21f # v2.7.7
+        with:
+          prefix-key: "v1"
+          shared-key: "fmt"
+          cache-targets: false
       - run: cargo fmt --all --check
 
   clippy:
@@ -34,18 +40,11 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup component add clippy
-      - name: Cache Cargo registry and build
-        uses: actions/cache@8b402f58fbc84540c8b491a91e594a4576fec3d7 # v5.0.2
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9dbd21f # v2.7.7
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-clippy-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-clippy-
-            ${{ runner.os }}-cargo-
+          prefix-key: "v1"
+          shared-key: "debug-${{ runner.os }}"
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
@@ -76,18 +75,11 @@ jobs:
         run: |
           rustup toolchain install stable --profile minimal
           rustup default stable
-      - name: Cache Cargo registry and build
-        uses: actions/cache@8b402f58fbc84540c8b491a91e594a4576fec3d7 # v5.0.2
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9dbd21f # v2.7.7
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-test-
-            ${{ runner.os }}-cargo-
+          prefix-key: "v1"
+          shared-key: "debug-${{ runner.os }}"
       - name: Run tests
         run: cargo test ${{ matrix.cargo-args }}
 
@@ -133,18 +125,11 @@ jobs:
           rustup toolchain install stable --profile minimal
           rustup default stable
           rustup target add ${{ matrix.target }}
-      - name: Cache Cargo registry and build
-        uses: actions/cache@8b402f58fbc84540c8b491a91e594a4576fec3d7 # v5.0.2
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9dbd21f # v2.7.7
         with:
-          path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-${{ matrix.target }}-
-            ${{ runner.os }}-cargo-
+          prefix-key: "v1"
+          shared-key: "release-${{ matrix.target }}"
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
 
@@ -172,8 +157,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
       - name: Build image for scanning
-        run: docker build -t vouch-server:scan .
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          load: true
+          tags: vouch-server:scan
+          cache-from: type=gha,scope=ci-scan
+          cache-to: type=gha,mode=max,scope=ci-scan
 
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@b6643a29fecd7f34b3597bc6acb0a98b03d33ff8 # 0.33.1

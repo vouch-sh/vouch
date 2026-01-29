@@ -203,23 +203,25 @@ jobs:
           rustup default stable
           rustup target add ${{ matrix.target }}
 
-      - name: Cache Cargo registry and build
+      - name: Setup Rust cache
+        uses: Swatinem/rust-cache@82a92a6e8fbeee089604da2575dc567ae9dbd21f # v2.7.7
+        with:
+          prefix-key: "v1"
+          shared-key: "release-${{ matrix.target }}"
+
+      - name: Cache cargo binaries
+        id: cache-cargo-bin
         uses: actions/cache@8b402f58fbc84540c8b491a91e594a4576fec3d7 # v5.0.2
         with:
           path: |
-            ~/.cargo/registry/index/
-            ~/.cargo/registry/cache/
-            ~/.cargo/git/db/
-            target/
-          key: ${{ runner.os }}-cargo-release-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-release-${{ matrix.target }}-
-            ${{ runner.os }}-cargo-release-
-            ${{ runner.os }}-cargo-
+            ~/.cargo/bin/cargo-cyclonedx
+            ~/.cargo/bin/cargo-cyclonedx.exe
+          key: ${{ runner.os }}-cargo-bin-cyclonedx-v0.5.6
 
       - name: Install cargo-cyclonedx
+        if: steps.cache-cargo-bin.outputs.cache-hit != 'true'
         shell: bash
-        run: cargo install cargo-cyclonedx
+        run: cargo install cargo-cyclonedx --version 0.5.6
 
       - name: Build CLI and Agent
         if: matrix.bins == 'vouch vouch-agent'
@@ -470,6 +472,7 @@ jobs:
         with:
           files: .helm-packages/*.tgz
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          draft: true
 
       - name: Push Helm chart to OCI registry
         run: |
@@ -506,6 +509,7 @@ jobs:
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          draft: true
           files: |
             artifacts/*.tar.gz
             artifacts/*.zip
@@ -713,6 +717,7 @@ jobs:
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
         with:
           tag_name: ${{ steps.version.outputs.tag }}
+          draft: false
           generate_release_notes: true
           body: |
             ## Installation
