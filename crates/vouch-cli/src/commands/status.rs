@@ -636,7 +636,7 @@ fn print_github_accounts(status: &GitHubStatusResponse, current_repo: &Option<Cu
             let key = format!("{}/{}", r.owner, r.repo).to_lowercase();
             if !printed_remotes.contains(&key) {
                 println!(
-                    "       \u{2718} {}/{} (current, {})",
+                    "       \u{2718} {}/{} ({}) [current]",
                     r.owner, r.repo, r.name
                 );
                 printed_remotes.insert(key);
@@ -687,8 +687,8 @@ fn format_current_tag_for_repo(
 fn format_current_tag(remotes: &[&str]) -> String {
     match remotes {
         [] => String::new(),
-        [single] => format!(" (current, {single})"),
-        multiple => format!(" (current, {})", multiple.join(", ")),
+        [single] => format!(" ({single}) [current]"),
+        multiple => format!(" ({}) [current]", multiple.join(", ")),
     }
 }
 

@@ -53,6 +53,8 @@ impl_template_response!(GitHubConnectTemplate);
 pub struct GitHubSuccessTemplate {
     pub org_name: String,
     pub github_account: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
 }
 
 impl_template_response!(GitHubSuccessTemplate);
@@ -737,14 +739,17 @@ pub async fn github_callback(
 }
 
 /// GET /github/success - Show success page after GitHub connection.
-#[allow(clippy::unused_async)]
 pub async fn github_success_page(
     State(state): State<Arc<AppState>>,
+    jar: CookieJar,
     Query(params): Query<GitHubSuccessParams>,
 ) -> impl IntoResponse {
+    let auth = crate::handlers::common::get_auth_context(&state, &jar).await;
+
     GitHubSuccessTemplate {
         org_name: state.config.get_org_display_name().to_string(),
         github_account: params.account.unwrap_or_else(|| "GitHub".to_string()),
+        auth,
     }
 }
 

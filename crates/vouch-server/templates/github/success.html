@@ -1,6 +1,11 @@
 {% extends "base.html" %}
+{% import "macros/auth.html" as auth_macros %}
 
 {% block title %}Vouch - GitHub Connected{% endblock %}
+
+{% block header_right %}
+{{ auth_macros::header_auth(auth) }}
+{% endblock %}
 
 {% block content %}
 <div class="flex items-center justify-center flex-1 p-5">
