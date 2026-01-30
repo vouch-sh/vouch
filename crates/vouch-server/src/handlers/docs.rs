@@ -168,10 +168,7 @@ pub async fn applications_page(
 
 /// SSH Certificates documentation page.
 /// GET /docs/ssh
-pub async fn ssh_page(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-) -> impl IntoResponse {
+pub async fn ssh_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsSshTemplate {
         provider_url: state.config.verification_base_url.clone(),
