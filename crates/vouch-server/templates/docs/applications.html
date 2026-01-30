@@ -1094,21 +1094,26 @@ checkAuth();</pre>
                         <tr class="border-b border-vouch-border">
                             <td class="py-2 pr-4"><code class="text-vouch-accent">hardware_verified</code></td>
                             <td class="py-2 pr-4">boolean</td>
-                            <td class="py-2">Whether the user authenticated with a hardware security key</td>
+                            <td class="py-2">Always <code class="text-vouch-accent">true</code> for Vouch sessions (hardware authentication is required). Useful when your app accepts tokens from multiple identity providers.</td>
                         </tr>
-                        <tr>
+                        <tr class="border-b border-vouch-border">
                             <td class="py-2 pr-4"><code class="text-vouch-accent">hardware_aaguid</code></td>
                             <td class="py-2 pr-4">string</td>
                             <td class="py-2">The AAGUID of the authenticator (identifies the hardware model)</td>
+                        </tr>
+                        <tr>
+                            <td class="py-2 pr-4"><code class="text-vouch-accent">cnf</code></td>
+                            <td class="py-2 pr-4">object</td>
+                            <td class="py-2">DPoP token binding confirmation (RFC 9449). Only present when DPoP is used.</td>
                         </tr>
                     </tbody>
                 </table>
             </div>
             <div class="mt-4 p-3 bg-vouch-bg rounded border border-vouch-border">
                 <p class="text-gray-400 text-sm">
-                    <strong class="text-gray-300">Security tip:</strong> For sensitive operations (admin actions, financial transactions),
-                    verify that <code class="text-vouch-accent">hardware_verified</code> is <code class="text-vouch-accent">true</code>
-                    before proceeding.
+                    <strong class="text-gray-300">Note:</strong> Since Vouch requires hardware authentication,
+                    <code class="text-vouch-accent">hardware_verified</code> is always <code class="text-vouch-accent">true</code>.
+                    This claim is useful if your application also accepts tokens from other identity providers that may not require hardware verification.
                 </p>
             </div>
         </div>
