@@ -120,9 +120,8 @@ pub async fn integrations_page(State(state): State<Arc<AppState>>, jar: CookieJa
                         .await
                         .unwrap_or(None);
                     let gcp_configured = gcp_integration.is_some();
-                    let gcp_config = gcp_integration.and_then(|i| {
-                        serde_json::from_str::<GcpIntegrationConfig>(&i.config).ok()
-                    });
+                    let gcp_config = gcp_integration
+                        .and_then(|i| serde_json::from_str::<GcpIntegrationConfig>(&i.config).ok());
                     (github_accounts, gcp_configured, gcp_config)
                 } else {
                     (Vec::new(), false, None)
@@ -509,20 +508,18 @@ pub async fn gcp_configure_page(State(state): State<Arc<AppState>>, jar: CookieJ
 
     // Check for existing configuration
     let (config, editing) = match db::get_cloud_integration(&state.db, &org_id, "gcp").await {
-        Ok(Some(i)) => {
-            match serde_json::from_str::<GcpIntegrationConfig>(&i.config) {
-                Ok(c) => (c, true),
-                Err(_) => (
-                    GcpIntegrationConfig {
-                        project_number: String::new(),
-                        pool_id: String::new(),
-                        provider_id: String::new(),
-                        service_account: None,
-                    },
-                    false,
-                ),
-            }
-        }
+        Ok(Some(i)) => match serde_json::from_str::<GcpIntegrationConfig>(&i.config) {
+            Ok(c) => (c, true),
+            Err(_) => (
+                GcpIntegrationConfig {
+                    project_number: String::new(),
+                    pool_id: String::new(),
+                    provider_id: String::new(),
+                    service_account: None,
+                },
+                false,
+            ),
+        },
         _ => (
             GcpIntegrationConfig {
                 project_number: String::new(),
@@ -696,8 +693,8 @@ pub async fn gcp_configure_submit(
         }
     };
 
-    if let Err(e) = db::upsert_cloud_integration(&state.db, &org_id, "gcp", &config_json, &user.id)
-        .await
+    if let Err(e) =
+        db::upsert_cloud_integration(&state.db, &org_id, "gcp", &config_json, &user.id).await
     {
         tracing::error!("Failed to save GCP config: {}", e);
         return GcpConfigureTemplate {
@@ -721,10 +718,7 @@ pub async fn gcp_configure_submit(
 }
 
 /// POST /gcp/configure/delete - Delete GCP configuration.
-pub async fn gcp_configure_delete(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-) -> Response {
+pub async fn gcp_configure_delete(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
     // Extract session from cookie (browser UI)
     let session = match crate::handlers::common::extract_session_from_cookie(&state, &jar).await {
         Ok(s) => s,

@@ -50,7 +50,7 @@ pub async fn list_keys(
                 id: a.id.clone(),
                 name: a.name,
                 created_at: a.created_at,
-                is_current_session: a.id == claims.authenticator_id,
+                is_current_session: claims.authenticator_id.as_ref() == Some(&a.id),
                 device_model,
                 aaguid: a.aaguid,
             }

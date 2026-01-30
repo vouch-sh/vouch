@@ -28,7 +28,8 @@ struct SessionAuth {
     #[allow(dead_code)]
     email: String,
     /// The authenticator ID from the current session (if available).
-    authenticator_id: String,
+    #[allow(dead_code)]
+    authenticator_id: Option<String>,
 }
 
 /// Validate session from cookie and extract user info.
@@ -81,7 +82,7 @@ pub async fn list_keys(
                 .as_deref()
                 .and_then(lookup_device_model)
                 .map(String::from);
-            let is_current = a.id == auth.authenticator_id;
+            let is_current = auth.authenticator_id.as_ref() == Some(&a.id);
             KeyInfo {
                 id: a.id,
                 name: a.name,

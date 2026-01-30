@@ -43,7 +43,8 @@ async fn main() -> Result<()> {
     tracing::info!("Configuration loaded from database");
 
     // Build WebAuthn instance
-    let rp_origin = url::Url::parse(&format!("https://{}", config.rp_id))?;
+    // Use verification_base_url as origin (handles localhost with http and port correctly)
+    let rp_origin = url::Url::parse(&config.verification_base_url)?;
     let webauthn_builder =
         webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)?.rp_name(&config.rp_name);
     let webauthn = webauthn_builder.build()?;

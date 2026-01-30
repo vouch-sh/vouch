@@ -116,7 +116,9 @@ pub struct SessionClaims {
     /// User email.
     pub email: String,
     /// Authenticator ID used for this session.
-    pub authenticator_id: String,
+    /// Optional for OIDC-authenticated users who haven't registered a security key yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authenticator_id: Option<String>,
     /// Issued at (Unix timestamp).
     pub iat: i64,
     /// Expiration (Unix timestamp).
@@ -563,7 +565,7 @@ pub async fn login_complete(
     let claims = SessionClaims {
         sub: user.id.clone(),
         email: user.email.clone(),
-        authenticator_id: authenticator.id.clone(),
+        authenticator_id: Some(authenticator.id.clone()),
         iat: now.as_second(),
         exp: expires.as_second(),
     };
@@ -587,7 +589,7 @@ pub async fn login_complete(
         &state.db,
         &user.id,
         &token_hash,
-        &authenticator.id,
+        Some(&authenticator.id),
         &expires.to_string(),
     )
     .await
@@ -684,12 +686,15 @@ pub async fn status(
         }));
     }
 
-    // Get authenticator name
-    let device_name = db::get_authenticator_by_id(&state.db, &claims.authenticator_id)
-        .await
-        .ok()
-        .flatten()
-        .map(|a| a.name);
+    // Get authenticator name (if session has an authenticator)
+    let device_name = match &claims.authenticator_id {
+        Some(auth_id) => db::get_authenticator_by_id(&state.db, auth_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|a| a.name),
+        None => None,
+    };
 
     // Calculate time remaining
     let now = Timestamp::now().as_second();

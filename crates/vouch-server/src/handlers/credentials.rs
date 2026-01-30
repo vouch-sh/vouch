@@ -207,8 +207,15 @@ pub async fn get_aws_token(
     // Validate session
     let (claims, user_email) = extract_session_with_email(&state, auth_header).await?;
 
-    // Get authenticator info for AAGUID
-    let authenticator = db::get_authenticator_by_id(&state.db, &claims.authenticator_id)
+    // Get authenticator info for AAGUID (required for cloud credentials)
+    let authenticator_id = claims.authenticator_id.as_ref().ok_or_else(|| {
+        json_error(
+            StatusCode::FORBIDDEN,
+            "no_authenticator",
+            "Session does not have a security key - please register one first",
+        )
+    })?;
+    let authenticator = db::get_authenticator_by_id(&state.db, authenticator_id)
         .await
         .map_err(|e| {
             json_error(
@@ -323,8 +330,15 @@ pub async fn get_gcp_token(
     // Validate session
     let (claims, user_email) = extract_session_with_email(&state, auth_header).await?;
 
-    // Get authenticator info for AAGUID
-    let authenticator = db::get_authenticator_by_id(&state.db, &claims.authenticator_id)
+    // Get authenticator info for AAGUID (required for cloud credentials)
+    let authenticator_id = claims.authenticator_id.as_ref().ok_or_else(|| {
+        json_error(
+            StatusCode::FORBIDDEN,
+            "no_authenticator",
+            "Session does not have a security key - please register one first",
+        )
+    })?;
+    let authenticator = db::get_authenticator_by_id(&state.db, authenticator_id)
         .await
         .map_err(|e| {
             json_error(
@@ -622,7 +636,7 @@ pub async fn get_github_token(
             org_id: Some(org_id),
             installation_id: Some(installation.installation_id),
             session_id: None, // Session ID not stored in JWT claims
-            authenticator_id: Some(&session.claims.authenticator_id),
+            authenticator_id: session.claims.authenticator_id.as_deref(),
             repositories: repos_json.as_deref(),
             permissions: Some(&perms_json),
             token_expires_at: Some(&token.expires_at),

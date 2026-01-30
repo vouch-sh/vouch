@@ -244,7 +244,7 @@ pub async fn device_token(
             let claims = crate::handlers::auth::SessionClaims {
                 sub: user_id.clone(),
                 email: user_email.clone(),
-                authenticator_id: authenticator_id.clone(),
+                authenticator_id: Some(authenticator_id.clone()),
                 iat: now.as_second(),
                 exp: session_expires.as_second(),
             };
@@ -271,7 +271,7 @@ pub async fn device_token(
                 &state.db,
                 &user_id,
                 &token_hash,
-                &authenticator_id,
+                Some(&authenticator_id),
                 &session_expires.to_string(),
             )
             .await
