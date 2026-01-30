@@ -12,6 +12,7 @@ pub mod encoding;
 pub mod error;
 pub mod fido2_types;
 pub mod fixtures;
+pub mod oidc;
 pub mod url;
 
 #[cfg(test)]

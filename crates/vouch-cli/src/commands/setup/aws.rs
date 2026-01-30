@@ -7,6 +7,8 @@ use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
 
+use crate::utils::ensure_secure_dir;
+
 /// Get the AWS config directory (~/.aws).
 fn aws_config_dir() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not determine home directory")?;
@@ -72,16 +74,8 @@ fn add_aws_profile(profile: &str, role_arn: &str, vouch_path: &std::path::Path) 
     let config_path = aws_config_path()?;
     let aws_dir = aws_config_dir()?;
 
-    // Ensure .aws directory exists
-    if !aws_dir.exists() {
-        fs::create_dir_all(&aws_dir)
-            .with_context(|| format!("failed to create {}", aws_dir.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&aws_dir, fs::Permissions::from_mode(0o700))?;
-        }
-    }
+    // Ensure .aws directory exists with secure permissions
+    ensure_secure_dir(&aws_dir)?;
 
     // Read existing config or create empty
     let existing = if config_path.exists() {

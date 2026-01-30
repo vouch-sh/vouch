@@ -244,6 +244,24 @@ pub fn test_router(state: Arc<AppState>) -> Router {
             "/api/v1/applications/{id}/revoke",
             post(handlers::applications::revoke_tokens_api),
         )
+        // Cloud integration config API
+        .route(
+            "/v1/integrations/gcp",
+            get(handlers::integrations::get_gcp_integration)
+                .put(handlers::integrations::set_gcp_integration)
+                .delete(handlers::integrations::delete_gcp_integration),
+        )
+        .route(
+            "/v1/integrations/aws",
+            get(handlers::integrations::get_aws_integration)
+                .put(handlers::integrations::set_aws_integration)
+                .delete(handlers::integrations::delete_aws_integration),
+        )
+        // GCP token endpoint
+        .route(
+            "/v1/credentials/gcp/token",
+            get(handlers::credentials::get_gcp_token),
+        )
         .with_state(state)
 }
 
@@ -319,6 +337,27 @@ pub async fn http_post_json(
     http_request(app, "POST", uri, Some(body.to_string()), &all_headers).await
 }
 
+/// Helper for making PUT requests with JSON body.
+pub async fn http_put_json(
+    app: &Router,
+    uri: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, String) {
+    let mut all_headers = vec![("Content-Type", "application/json")];
+    all_headers.extend_from_slice(headers);
+    http_request(app, "PUT", uri, Some(body.to_string()), &all_headers).await
+}
+
+/// Helper for making DELETE requests.
+pub async fn http_delete(
+    app: &Router,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> (StatusCode, String) {
+    http_request(app, "DELETE", uri, None, headers).await
+}
+
 /// Create a valid test JWT session token.
 pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: &str) -> String {
     use jiff::{Span, Timestamp};
@@ -375,6 +414,25 @@ pub async fn create_test_user(pool: &SqlitePool, email: &str) -> crate::db::User
     crate::db::upsert_user(pool, email, Some("Test User"))
         .await
         .expect("Failed to create test user")
+}
+
+/// Create a test organization in the database.
+pub async fn create_test_org(pool: &SqlitePool, domain: &str) -> crate::db::Organization {
+    crate::db::create_organization(pool, domain, Some("Test Org"), None)
+        .await
+        .expect("Failed to create test org")
+}
+
+/// Create a test user with organization membership.
+pub async fn create_test_user_in_org(
+    pool: &SqlitePool,
+    email: &str,
+    org_id: &str,
+    is_admin: bool,
+) -> crate::db::User {
+    crate::db::upsert_user_with_org(pool, email, Some("Test User"), Some(org_id), is_admin)
+        .await
+        .expect("Failed to create test user in org")
 }
 
 /// Create a test authenticator for a user.
