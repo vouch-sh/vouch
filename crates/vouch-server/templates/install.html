@@ -134,9 +134,9 @@
                 <span class="text-lg font-semibold text-gray-200">Enroll your YubiKey</span>
             </div>
             <div class="ml-11">
-                <div class="code-block relative">
-                    <span class="text-gray-500 mr-2">$</span>vouch enroll --server {{ server_url }}
-                    <button onclick="copyCommand('vouch enroll --server {{ server_url }}')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                <div class="code-block relative" data-server-url="{{ server_url }}">
+                    <span class="text-gray-500 mr-2">$</span><span id="step2-command">vouch enroll --server {{ server_url }}</span>
+                    <button id="step2-copy-btn" onclick="copyCommand('vouch enroll --server {{ server_url }}')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
                 </div>
                 <p class="mt-2 text-sm text-gray-400">This opens a browser to verify your identity and register your YubiKey.</p>
             </div>
@@ -151,7 +151,7 @@
             <div class="ml-11">
                 <div class="code-block">
                     <div class="text-gray-500"># Start your day with a single touch</div>
-                    <div><span class="text-gray-500">$</span> vouch login</div>
+                    <div><span class="text-gray-500">$</span> <span id="step3-command">vouch login</span></div>
                     <div>Enter PIN: ****</div>
                     <div>Touch your YubiKey...</div>
                     <div class="text-vouch-accent">&#x2713; Authenticated for 8 hours</div>
@@ -175,6 +175,22 @@
             el.classList.add('hidden');
         });
         document.getElementById(tab + '-tab').classList.remove('hidden');
+
+        // Update command names for Windows vs other platforms
+        const isWindows = tab === 'windows';
+        const cmd = isWindows ? 'vouch.exe' : 'vouch';
+        const serverUrl = document.querySelector('[data-server-url]').dataset.serverUrl;
+
+        // Update step 2 command
+        const step2Cmd = document.getElementById('step2-command');
+        const step2CopyBtn = document.getElementById('step2-copy-btn');
+        const enrollCommand = cmd + ' enroll --server ' + serverUrl;
+        step2Cmd.textContent = enrollCommand;
+        step2CopyBtn.onclick = function() { copyCommand(enrollCommand); };
+
+        // Update step 3 command
+        const step3Cmd = document.getElementById('step3-command');
+        step3Cmd.textContent = cmd + ' login';
     }
 
     function copyCommand(text) {
