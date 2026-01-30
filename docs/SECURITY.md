@@ -289,6 +289,15 @@ Certificate:
 - Credential configuration file permissions: 0600
 - Token cache directory permissions: 0700
 
+**Kubernetes Credentials:**
+- Obtained via Vouch OIDC ID token presented to Kubernetes API server
+- Token validated against Vouch's JWKS endpoint (`/oauth/jwks`)
+- Username derived from `email` claim (configured via `--oidc-username-claim`)
+- Token contains `hardware_verified` and `hardware_aaguid` claims for audit
+- Maximum duration: matches session (8 hours)
+- RBAC bindings use email address as subject
+- Supports EKS, GKE, AKS, and self-managed Kubernetes clusters
+
 ### Audit Layer
 
 Every credential issuance generates an audit log entry:

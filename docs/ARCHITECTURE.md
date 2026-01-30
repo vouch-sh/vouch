@@ -679,6 +679,55 @@ gcloud iam service-accounts add-iam-policy-binding SA@PROJECT.iam.gserviceaccoun
   --member="principalSet://iam.googleapis.com/projects/PROJECT_NUM/locations/global/workloadIdentityPools/vouch-pool/attribute.email/user@example.com"
 ```
 
+### Kubernetes Integration
+
+```
+~/.kube/config:
+  users:
+  - name: vouch-my-cluster
+    user:
+      exec:
+        apiVersion: client.authentication.k8s.io/v1
+        command: vouch
+        args: ["credential", "k8s", "--audience", "my-cluster"]
+        interactiveMode: Never
+
+How it works:
+1. kubectl calls vouch credential k8s via exec credential plugin
+2. vouch exchanges session token for OIDC ID token from server
+3. vouch returns token in ExecCredential format
+4. kubectl presents token to Kubernetes API server
+5. API server validates token against Vouch's JWKS endpoint
+6. Username extracted from email claim for RBAC
+```
+
+**`vouch setup k8s` creates:**
+- Exec credential configuration in `~/.kube/config`
+- New user and context pointing to the Vouch credential plugin
+- Instructions for cluster OIDC configuration
+
+**Kubernetes cluster configuration:**
+- API server must be configured with Vouch as OIDC provider
+- Supports self-managed, EKS, GKE, and AKS clusters
+
+**Self-managed Kubernetes:**
+```bash
+# kube-apiserver flags
+--oidc-issuer-url=https://vouch.example.com
+--oidc-client-id=my-cluster
+--oidc-username-claim=email
+--oidc-username-prefix=-
+```
+
+**Amazon EKS:**
+```bash
+aws eks associate-identity-provider-config \
+  --cluster-name my-cluster \
+  --oidc \
+  --identity-provider-config-name vouch \
+  --identity-provider-config issuerUrl=https://vouch.example.com,clientId=my-cluster,usernameClaim=email
+```
+
 ### GitHub Integration
 
 ```

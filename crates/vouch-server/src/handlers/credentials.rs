@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::{
     ApiError, AwsTokenResponse, GcpTokenResponse, GitHubStatusResponse, GitHubTokenRequest,
-    GitHubTokenResponse, SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
-    oidc::OidcIdTokenClaimsBuilder,
+    GitHubTokenResponse, K8sTokenResponse, SshCaPublicKeyResponse, SshCertificateRequest,
+    SshCertificateResponse, oidc::OidcIdTokenClaimsBuilder,
 };
 
 use super::common::extract_session;
@@ -385,6 +385,119 @@ pub async fn get_gcp_token(
 }
 
 // ============================================================================
+// Kubernetes Token Endpoint
+// ============================================================================
+
+/// Query parameters for Kubernetes token endpoint.
+#[derive(Debug, Deserialize)]
+pub struct K8sTokenQuery {
+    /// Kubernetes cluster audience (matches --oidc-client-id on API server).
+    pub audience: String,
+}
+
+/// Validate Kubernetes audience format.
+///
+/// Kubernetes audiences are typically cluster names or identifiers.
+/// This validation ensures the audience is non-empty and contains valid characters.
+fn validate_k8s_audience_format(audience: &str) -> Result<(), &'static str> {
+    if audience.is_empty() {
+        return Err("Invalid Kubernetes audience: audience cannot be empty");
+    }
+
+    // Kubernetes audiences should be reasonable identifiers
+    // Allow alphanumeric, hyphens, underscores, dots, colons, and forward slashes
+    // This covers cluster names, URLs, and URNs
+    if audience.len() > 253 {
+        return Err("Invalid Kubernetes audience: too long (max 253 characters)");
+    }
+
+    for c in audience.chars() {
+        if !c.is_ascii_alphanumeric() && c != '-' && c != '_' && c != '.' && c != ':' && c != '/' {
+            return Err(
+                "Invalid Kubernetes audience: must contain only alphanumeric characters, hyphens, underscores, dots, colons, or slashes",
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Get an OIDC ID token for Kubernetes authentication.
+///
+/// GET /v1/credentials/k8s/token?audience=...
+///
+/// Returns an OIDC ID token that can be used with Kubernetes OIDC authentication.
+/// The Kubernetes API server must be configured to trust the Vouch OIDC provider.
+///
+/// The audience parameter should match the `--oidc-client-id` flag configured on
+/// the Kubernetes API server (typically the cluster name).
+pub async fn get_k8s_token(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<K8sTokenQuery>,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+) -> Result<Json<K8sTokenResponse>, (StatusCode, Json<ApiError>)> {
+    // Validate audience format
+    validate_k8s_audience_format(&query.audience)
+        .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_audience", e))?;
+
+    // Validate session
+    let (claims, user_email) = extract_session_with_email(&state, auth_header).await?;
+
+    // Get authenticator info for AAGUID (required for cloud credentials)
+    let authenticator_id = claims.authenticator_id.as_ref().ok_or_else(|| {
+        json_error(
+            StatusCode::FORBIDDEN,
+            "no_authenticator",
+            "Session does not have a security key - please register one first",
+        )
+    })?;
+    let authenticator = db::get_authenticator_by_id(&state.db, authenticator_id)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?;
+
+    // Token validity matches session duration
+    let expires_in = state.config.session_hours * 3600;
+
+    // Build OIDC claims using shared builder
+    // For Kubernetes, the audience is the cluster identifier (--oidc-client-id)
+    let id_claims = OidcIdTokenClaimsBuilder::for_k8s(
+        &state.config.verification_base_url,
+        &user_email,
+        &query.audience,
+    )
+    .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
+    .valid_for_seconds(expires_in)
+    .build()
+    .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, "claims_error", e))?;
+
+    // Sign the token with ES256 using the OIDC signing key
+    let id_token = state.oidc_key.sign_jwt(&id_claims).map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "token_error",
+            &format!("Failed to generate ID token: {e}"),
+        )
+    })?;
+
+    tracing::info!(
+        "Issued Kubernetes OIDC token: user={}, audience={}",
+        user_email,
+        query.audience
+    );
+
+    Ok(Json(K8sTokenResponse {
+        id_token,
+        expires_in,
+    }))
+}
+
+// ============================================================================
 // GitHub Token Endpoint
 // ============================================================================
 
@@ -670,4 +783,86 @@ pub async fn get_github_token(
         permissions: token.permissions,
         repositories,
     }))
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    mod k8s_audience_validation {
+        use super::*;
+
+        #[test]
+        fn test_valid_simple_cluster_name() {
+            assert!(validate_k8s_audience_format("my-cluster").is_ok());
+            assert!(validate_k8s_audience_format("production").is_ok());
+            assert!(validate_k8s_audience_format("dev-01").is_ok());
+        }
+
+        #[test]
+        fn test_valid_cluster_name_with_underscores() {
+            assert!(validate_k8s_audience_format("my_cluster").is_ok());
+            assert!(validate_k8s_audience_format("prod_us_east_1").is_ok());
+        }
+
+        #[test]
+        fn test_valid_cluster_name_with_dots() {
+            assert!(validate_k8s_audience_format("cluster.example.com").is_ok());
+            assert!(validate_k8s_audience_format("k8s.prod.internal").is_ok());
+        }
+
+        #[test]
+        fn test_valid_url_like_audience() {
+            assert!(validate_k8s_audience_format("https://k8s.example.com").is_ok());
+            assert!(validate_k8s_audience_format("https://api.cluster.local:6443").is_ok());
+        }
+
+        #[test]
+        fn test_valid_urn_audience() {
+            assert!(validate_k8s_audience_format("urn:k8s:cluster:production").is_ok());
+        }
+
+        #[test]
+        fn test_empty_audience_fails() {
+            assert!(validate_k8s_audience_format("").is_err());
+        }
+
+        #[test]
+        fn test_audience_with_spaces_fails() {
+            assert!(validate_k8s_audience_format("my cluster").is_err());
+            assert!(validate_k8s_audience_format(" production").is_err());
+            assert!(validate_k8s_audience_format("production ").is_err());
+        }
+
+        #[test]
+        fn test_audience_with_special_chars_fails() {
+            assert!(validate_k8s_audience_format("cluster;drop").is_err());
+            assert!(validate_k8s_audience_format("cluster&test").is_err());
+            assert!(validate_k8s_audience_format("cluster|pipe").is_err());
+            assert!(validate_k8s_audience_format("cluster$var").is_err());
+            assert!(validate_k8s_audience_format("cluster`cmd`").is_err());
+        }
+
+        #[test]
+        fn test_audience_too_long_fails() {
+            let long_audience = "a".repeat(254);
+            assert!(validate_k8s_audience_format(&long_audience).is_err());
+        }
+
+        #[test]
+        fn test_audience_max_length_succeeds() {
+            let max_audience = "a".repeat(253);
+            assert!(validate_k8s_audience_format(&max_audience).is_ok());
+        }
+
+        #[test]
+        fn test_numeric_audience() {
+            assert!(validate_k8s_audience_format("123456").is_ok());
+            assert!(validate_k8s_audience_format("cluster-123").is_ok());
+        }
+    }
 }

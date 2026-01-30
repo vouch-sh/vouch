@@ -80,7 +80,15 @@ pub async fn run(server: &str) -> Result<()> {
         all_passed = false;
     }
 
-    // Check 6: Server URL security
+    // Check 6: Kubernetes config
+    print!("Kubernetes configuration ... ");
+    let k8s_result = check_k8s_config();
+    print_result(&k8s_result);
+    if !k8s_result.passed {
+        all_passed = false;
+    }
+
+    // Check 7: Server URL security
     print!("Server URL security ... ");
     let security_result = check_server_url_security(server);
     print_result(&security_result);
@@ -239,6 +247,36 @@ fn check_ssh_config() -> CheckResult {
         CheckResult::pass("SSH configured for Vouch")
     } else {
         CheckResult::fail(issues.join("; "))
+    }
+}
+
+/// Check Kubernetes configuration for Vouch integration.
+fn check_k8s_config() -> CheckResult {
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return CheckResult::fail("Could not determine home directory"),
+    };
+
+    // Check KUBECONFIG env var first, then default path
+    let kubeconfig_path = std::env::var("KUBECONFIG")
+        .ok()
+        .and_then(|k| k.split(':').next().map(std::path::PathBuf::from))
+        .unwrap_or_else(|| home.join(".kube").join("config"));
+
+    if !kubeconfig_path.exists() {
+        return CheckResult::pass("No kubeconfig found (Kubernetes not configured)");
+    }
+
+    match std::fs::read_to_string(&kubeconfig_path) {
+        Ok(content) => {
+            // Check if there's a Vouch user configured
+            if content.contains("vouch credential k8s") || content.contains("vouch-") {
+                CheckResult::pass("Kubernetes configured for Vouch")
+            } else {
+                CheckResult::pass("Kubeconfig exists (no Vouch integration). Run: vouch setup k8s")
+            }
+        }
+        Err(_) => CheckResult::fail("Could not read kubeconfig"),
     }
 }
 

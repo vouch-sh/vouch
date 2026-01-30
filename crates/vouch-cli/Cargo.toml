@@ -45,6 +45,7 @@ ciborium = { workspace = true }
 ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 serde_urlencoded = { version = "=0.7.1", default-features = false }
+serde_yaml = { version = "=0.9.34", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 vouch-agent = { workspace = true }

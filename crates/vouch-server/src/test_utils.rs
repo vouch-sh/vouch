@@ -261,6 +261,11 @@ pub fn test_router(state: Arc<AppState>) -> Router {
             "/v1/credentials/gcp/token",
             get(handlers::credentials::get_gcp_token),
         )
+        // Kubernetes token endpoint
+        .route(
+            "/v1/credentials/k8s/token",
+            get(handlers::credentials::get_k8s_token),
+        )
         .with_state(state)
 }
 

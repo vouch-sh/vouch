@@ -400,6 +400,136 @@ mod auth_security {
             .expect("Failed to get AWS token");
         assert_eq!(response.status, 401);
     }
+
+    /// Test that Kubernetes token endpoint requires authentication.
+    #[tokio::test]
+    async fn test_k8s_token_requires_auth() {
+        let harness = TestHarness::new().await;
+
+        // Without auth
+        let response = harness
+            .get("/v1/credentials/k8s/token?audience=my-cluster")
+            .await
+            .expect("Failed to get K8s token");
+        assert_eq!(response.status, 401);
+
+        // With invalid token
+        let response = harness
+            .get_authenticated(
+                "/v1/credentials/k8s/token?audience=my-cluster",
+                "invalid.token",
+            )
+            .await
+            .expect("Failed to get K8s token");
+        assert_eq!(response.status, 401);
+    }
+
+    /// Test that Kubernetes token endpoint validates audience format.
+    #[tokio::test]
+    async fn test_k8s_token_validates_audience() {
+        let harness = TestHarness::new().await;
+
+        // Create authenticated user
+        let (_user, _auth_id, token) = harness
+            .create_authenticated_user("k8suser@example.com")
+            .await
+            .expect("Failed to create authenticated user");
+
+        // Empty audience should fail
+        let response = harness
+            .get_authenticated("/v1/credentials/k8s/token?audience=", &token)
+            .await
+            .expect("Failed to get K8s token");
+        assert_eq!(response.status, 400);
+
+        // Audience with invalid characters should fail
+        let response = harness
+            .get_authenticated("/v1/credentials/k8s/token?audience=test%20cluster", &token)
+            .await
+            .expect("Failed to get K8s token");
+        assert_eq!(response.status, 400);
+    }
+
+    /// Test that Kubernetes token endpoint returns valid token for authenticated user.
+    #[tokio::test]
+    async fn test_k8s_token_authenticated_user() {
+        let harness = TestHarness::new().await;
+
+        // Create authenticated user
+        let (_user, _auth_id, token) = harness
+            .create_authenticated_user("k8sdev@example.com")
+            .await
+            .expect("Failed to create authenticated user");
+
+        // Valid audience should succeed
+        let response = harness
+            .get_authenticated("/v1/credentials/k8s/token?audience=my-cluster", &token)
+            .await
+            .expect("Failed to get K8s token");
+
+        assert_eq!(response.status, 200);
+
+        // Verify response structure
+        let resp: serde_json::Value = response.json().expect("Failed to parse response");
+        assert!(resp.get("id_token").is_some(), "Should have id_token");
+        assert!(resp.get("expires_in").is_some(), "Should have expires_in");
+
+        // Verify it's a valid JWT (has 3 parts separated by dots)
+        let id_token = resp["id_token"]
+            .as_str()
+            .expect("id_token should be string");
+        assert_eq!(
+            id_token.split('.').count(),
+            3,
+            "Token should be a valid JWT"
+        );
+    }
+
+    /// Test that Kubernetes token endpoint accepts various valid audience formats.
+    #[tokio::test]
+    async fn test_k8s_token_valid_audience_formats() {
+        let harness = TestHarness::new().await;
+
+        // Create authenticated user
+        let (_user, _auth_id, token) = harness
+            .create_authenticated_user("k8sformats@example.com")
+            .await
+            .expect("Failed to create authenticated user");
+
+        // Simple cluster name
+        let response = harness
+            .get_authenticated("/v1/credentials/k8s/token?audience=production", &token)
+            .await
+            .expect("Failed to get K8s token");
+        assert_eq!(response.status, 200);
+
+        // Cluster name with dashes
+        let response = harness
+            .get_authenticated(
+                "/v1/credentials/k8s/token?audience=my-production-cluster",
+                &token,
+            )
+            .await
+            .expect("Failed to get K8s token");
+        assert_eq!(response.status, 200);
+
+        // Cluster name with dots (like DNS name)
+        let response = harness
+            .get_authenticated(
+                "/v1/credentials/k8s/token?audience=cluster.example.com",
+                &token,
+            )
+            .await
+            .expect("Failed to get K8s token");
+        assert_eq!(response.status, 200);
+
+        // Cluster name with underscores
+        let response = harness
+            .get_authenticated("/v1/credentials/k8s/token?audience=prod_us_east_1", &token)
+            .await
+            .expect("Failed to get K8s token");
+        assert_eq!(response.status, 200);
+    }
 }
 
 // ============================================================================

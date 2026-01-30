@@ -108,6 +108,7 @@ vouch enroll
 vouch setup ssh                                    # Configures SSH to use vouch certificates
 vouch setup aws --role arn:aws:iam::ID:role/name   # Configures AWS credential_process
 vouch setup gcp --configure                        # Configures GCP Workload Identity Federation
+vouch setup k8s --configure                        # Configures kubectl OIDC authentication
 vouch setup github --configure                     # Configures git credential helper for GitHub
 ```
 
@@ -131,6 +132,7 @@ vouch status
 - **macOS** 12+ or **Linux** (glibc 2.31+) — Windows support is planned
 - For AWS: IAM role with OIDC federation configured
 - For GCP: Workload Identity Pool with OIDC provider configured
+- For Kubernetes: Cluster configured with OIDC authentication pointing to Vouch
 - For SSH: CA public key distributed to target hosts
 - For GitHub: Organization admin connects the Vouch GitHub App
 

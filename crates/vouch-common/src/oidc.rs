@@ -78,6 +78,19 @@ impl OidcIdTokenClaimsBuilder {
             .email(email)
     }
 
+    /// Create a builder pre-configured for Kubernetes.
+    ///
+    /// Kubernetes uses a custom audience (typically cluster name or API server URL).
+    /// The subject and email are both set to the user's email.
+    #[must_use]
+    pub fn for_k8s(issuer: &str, email: &str, audience: &str) -> Self {
+        Self::new()
+            .issuer(issuer)
+            .subject(email)
+            .audience(audience) // K8s uses --oidc-client-id as audience
+            .email(email)
+    }
+
     /// Set the token issuer (Vouch server URL).
     #[must_use]
     pub fn issuer(mut self, issuer: &str) -> Self {
@@ -254,6 +267,26 @@ mod tests {
             assert_eq!(claims.sub, "user@example.com");
             assert_eq!(claims.aud, audience); // custom audience for GCP
             assert_eq!(claims.email, "user@example.com");
+        }
+    }
+
+    #[test]
+    fn test_for_k8s_uses_custom_audience() {
+        let audience = "my-kubernetes-cluster";
+        let result = OidcIdTokenClaimsBuilder::for_k8s(
+            "https://vouch.example.com",
+            "user@example.com",
+            audience,
+        )
+        .build();
+
+        assert!(result.is_ok());
+        if let Ok(claims) = result {
+            assert_eq!(claims.iss, "https://vouch.example.com");
+            assert_eq!(claims.sub, "user@example.com");
+            assert_eq!(claims.aud, audience); // custom audience for K8s
+            assert_eq!(claims.email, "user@example.com");
+            assert!(claims.hardware_verified);
         }
     }
 }
