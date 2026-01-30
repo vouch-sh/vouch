@@ -78,6 +78,26 @@ impl Response {
             }),
         }
     }
+
+    /// Create a "not authenticated" error response.
+    pub fn not_authenticated(id: u64) -> Self {
+        Self::error(id, NOT_AUTHENTICATED, "not authenticated")
+    }
+
+    /// Create a "session expired" error response.
+    pub fn session_expired(id: u64) -> Self {
+        Self::error(id, SESSION_EXPIRED, "session expired")
+    }
+
+    /// Create an "invalid params" error response.
+    pub fn invalid_params(id: u64, detail: &str) -> Self {
+        Self::error(id, INVALID_PARAMS, &format!("invalid params: {detail}"))
+    }
+
+    /// Create a "method not found" error response.
+    pub fn method_not_found(id: u64) -> Self {
+        Self::error(id, METHOD_NOT_FOUND, "method not found")
+    }
 }
 
 /// JSON-RPC 2.0 error object.

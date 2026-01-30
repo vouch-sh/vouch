@@ -8,9 +8,9 @@ use crate::protocol::{
 };
 use crate::socket::socket_path;
 use crate::state::SessionInfo;
+use crate::wire;
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
 /// Client for communicating with the agent.
@@ -56,23 +56,14 @@ impl AgentClient {
             params,
         };
 
-        // Serialize request
+        // Serialize and send request
         let json = serde_json::to_vec(&request)?;
+        wire::write_message(&mut self.stream, &json).await?;
 
-        // Send length-prefixed message
-        #[allow(clippy::cast_possible_truncation)]
-        let len = (json.len() as u32).to_be_bytes();
-        self.stream.write_all(&len).await?;
-        self.stream.write_all(&json).await?;
-
-        // Read response length
-        let mut len_buf = [0u8; 4];
-        self.stream.read_exact(&mut len_buf).await?;
-        let len = u32::from_be_bytes(len_buf) as usize;
-
-        // Read response body
-        let mut buf = vec![0u8; len];
-        self.stream.read_exact(&mut buf).await?;
+        // Read response
+        let buf = wire::read_message(&mut self.stream)
+            .await?
+            .ok_or_else(|| AgentError::Protocol("unexpected disconnect".to_string()))?;
 
         // Parse response
         let response: Response = serde_json::from_slice(&buf)?;

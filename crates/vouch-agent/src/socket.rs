@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Socket path utilities.
+//! Socket path and lifecycle utilities.
 
 use crate::error::{AgentError, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use tokio::net::UnixListener;
 
 /// Default socket filename.
 const SOCKET_FILENAME: &str = "agent.sock";
@@ -39,18 +40,15 @@ pub fn ensure_vouch_dir() -> Result<()> {
             AgentError::SocketPath(format!("failed to create {}: {e}", dir.display()))
         })?;
 
-        // Set directory permissions to 0700 on Unix
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o700);
-            std::fs::set_permissions(&dir, perms).map_err(|e| {
-                AgentError::SocketPath(format!(
-                    "failed to set permissions on {}: {e}",
-                    dir.display()
-                ))
-            })?;
-        }
+        // Set directory permissions to 0700
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o700);
+        std::fs::set_permissions(&dir, perms).map_err(|e| {
+            AgentError::SocketPath(format!(
+                "failed to set permissions on {}: {e}",
+                dir.display()
+            ))
+        })?;
     }
     Ok(())
 }
@@ -68,6 +66,43 @@ pub fn remove_socket() -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+/// Bind a Unix socket at the given path, removing stale socket if needed.
+///
+/// # Errors
+///
+/// Returns `AgentError::SocketPath` if the socket cannot be bound.
+pub async fn bind_socket(path: &Path) -> Result<UnixListener> {
+    // Remove stale socket if it exists
+    if path.exists() {
+        std::fs::remove_file(path).ok();
+    }
+
+    let listener = UnixListener::bind(path).map_err(|e| {
+        AgentError::SocketPath(format!("failed to bind to {}: {e}", path.display()))
+    })?;
+
+    // Set socket permissions to 0600 (owner read/write only)
+    set_socket_permissions(path)?;
+
+    Ok(listener)
+}
+
+/// Set socket permissions to 0600 (owner read/write only).
+///
+/// # Errors
+///
+/// Returns `AgentError::SocketPath` if permissions cannot be set.
+pub fn set_socket_permissions(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(0o600);
+    std::fs::set_permissions(path, perms).map_err(|e| {
+        AgentError::SocketPath(format!(
+            "failed to set permissions on {}: {e}",
+            path.display()
+        ))
+    })
 }
 
 #[cfg(test)]

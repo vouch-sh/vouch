@@ -41,6 +41,7 @@ pub mod socket;
 pub mod ssh_agent;
 pub mod state;
 pub mod transport;
+pub mod wire;
 
 // Re-export commonly used types
 #[cfg(unix)]
