@@ -278,7 +278,7 @@ jobs:
               --options runtime \
               --timestamp \
               "target/${TARGET}/release/${bin}"
-            /usr/bin/codesign --verify --verbose "target/${TARGET}/release/${bin}"
+            /usr/bin/codesign --verify "target/${TARGET}/release/${bin}"
           done
 
       - name: Notarize macOS binaries
