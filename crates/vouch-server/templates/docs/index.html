@@ -58,6 +58,26 @@
                 </div>
             </a>
 
+            <!-- SSH Certificates -->
+            <a href="/docs/ssh" class="block p-4 bg-vouch-raised rounded-lg border border-vouch-border hover:border-vouch-accent transition-colors">
+                <div class="flex items-start gap-4">
+                    <div class="p-2 bg-vouch-bg rounded-lg">
+                        <svg class="w-6 h-6 text-vouch-accent" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0 0 21 18V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v12a2.25 2.25 0 0 0 2.25 2.25Z" />
+                        </svg>
+                    </div>
+                    <div>
+                        <h2 class="text-lg font-semibold text-gray-200">SSH Certificates</h2>
+                        <p class="text-gray-400 text-sm mt-1">
+                            Configure SSH servers to trust {{ org_name }} certificates for passwordless authentication.
+                        </p>
+                    </div>
+                    <svg class="w-5 h-5 text-gray-500 ml-auto mt-1" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
+                    </svg>
+                </div>
+            </a>
+
             <!-- GitHub Integration -->
             <a href="/docs/github" class="block p-4 bg-vouch-raised rounded-lg border border-vouch-border hover:border-vouch-accent transition-colors">
                 <div class="flex items-start gap-4">
@@ -98,43 +118,6 @@
                 </div>
             </a>
 
-            <!-- OAuth Applications -->
-            <a href="/applications" class="block p-4 bg-vouch-raised rounded-lg border border-vouch-border hover:border-vouch-accent transition-colors">
-                <div class="flex items-start gap-4">
-                    <div class="p-2 bg-vouch-bg rounded-lg">
-                        <svg class="w-6 h-6 text-vouch-accent" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 16.875h3.375m0 0h3.375m-3.375 0V13.5m0 3.375v3.375M6 10.5h2.25a2.25 2.25 0 0 0 2.25-2.25V6a2.25 2.25 0 0 0-2.25-2.25H6A2.25 2.25 0 0 0 3.75 6v2.25A2.25 2.25 0 0 0 6 10.5Zm0 9.75h2.25A2.25 2.25 0 0 0 10.5 18v-2.25a2.25 2.25 0 0 0-2.25-2.25H6a2.25 2.25 0 0 0-2.25 2.25V18A2.25 2.25 0 0 0 6 20.25Zm9.75-9.75H18a2.25 2.25 0 0 0 2.25-2.25V6A2.25 2.25 0 0 0 18 3.75h-2.25A2.25 2.25 0 0 0 13.5 6v2.25a2.25 2.25 0 0 0 2.25 2.25Z" />
-                        </svg>
-                    </div>
-                    <div>
-                        <h2 class="text-lg font-semibold text-gray-200">OAuth Applications</h2>
-                        <p class="text-gray-400 text-sm mt-1">
-                            Register applications that integrate with Vouch. Build internal tools that authenticate users via YubiKey.
-                        </p>
-                    </div>
-                    <svg class="w-5 h-5 text-gray-500 ml-auto mt-1" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                        <path stroke-linecap="round" stroke-linejoin="round" d="m8.25 4.5 7.5 7.5-7.5 7.5" />
-                    </svg>
-                </div>
-            </a>
-
-            <!-- SSH Certificates (placeholder for future) -->
-            <div class="block p-4 bg-vouch-raised rounded-lg border border-vouch-border opacity-50">
-                <div class="flex items-start gap-4">
-                    <div class="p-2 bg-vouch-bg rounded-lg">
-                        <svg class="w-6 h-6 text-gray-500" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0 0 21 18V6a2.25 2.25 0 0 0-2.25-2.25H5.25A2.25 2.25 0 0 0 3 6v12a2.25 2.25 0 0 0 2.25 2.25Z" />
-                        </svg>
-                    </div>
-                    <div>
-                        <h2 class="text-lg font-semibold text-gray-400">SSH Certificates</h2>
-                        <p class="text-gray-500 text-sm mt-1">
-                            Configure SSH servers to trust {{ org_name }} certificates for passwordless authentication.
-                        </p>
-                        <span class="inline-block mt-2 px-2 py-0.5 bg-vouch-bg text-gray-500 text-xs rounded">Coming soon</span>
-                    </div>
-                </div>
-            </div>
         </div>
     </div>
 </div>

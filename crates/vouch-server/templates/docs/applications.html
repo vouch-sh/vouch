@@ -92,9 +92,12 @@
             </div>
         </div>
 
-        <!-- Framework Examples -->
+        <!-- Server-Side Framework Examples -->
         <div class="mb-8">
-            <h2 class="text-lg font-semibold text-gray-200 mb-4">Framework Examples</h2>
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Server-Side Frameworks</h2>
+            <p class="text-gray-400 text-sm mb-4">
+                For traditional web applications with a backend server. Register your app as type <code class="text-vouch-accent">web</code> (confidential client).
+            </p>
 
             <!-- Framework Tabs -->
             <div class="flex flex-wrap gap-2 mb-4">
@@ -163,11 +166,11 @@ end</pre>
 
             <!-- Django -->
             <div id="framework-django-tab" class="tab-content hidden">
-                <h3 class="text-md font-semibold text-gray-300 mb-3">Django with mozilla-django-oidc</h3>
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Django with django-allauth</h3>
 
                 <p class="text-gray-400 text-sm mb-3">Install the package:</p>
                 <div class="code-block relative text-sm mb-4">
-                    <pre class="whitespace-pre-wrap">pip install mozilla-django-oidc</pre>
+                    <pre class="whitespace-pre-wrap">pip install "django-allauth[socialaccount]"</pre>
                     <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
                 </div>
 
@@ -176,23 +179,36 @@ end</pre>
                     <pre class="whitespace-pre-wrap"># settings.py
 INSTALLED_APPS = [
     ...
-    'mozilla_django_oidc',
+    'allauth',
+    'allauth.account',
+    'allauth.socialaccount',
+]
+
+MIDDLEWARE = [
+    ...
+    'allauth.account.middleware.AccountMiddleware',
 ]
 
 AUTHENTICATION_BACKENDS = [
-    'mozilla_django_oidc.auth.OIDCAuthenticationBackend',
     'django.contrib.auth.backends.ModelBackend',
+    'allauth.account.auth_backends.AuthenticationBackend',
 ]
 
-# OIDC Configuration
-OIDC_RP_CLIENT_ID = os.environ.get('VOUCH_CLIENT_ID')
-OIDC_RP_CLIENT_SECRET = os.environ.get('VOUCH_CLIENT_SECRET')
-OIDC_OP_AUTHORIZATION_ENDPOINT = '{{ provider_url }}/oauth/authorize'
-OIDC_OP_TOKEN_ENDPOINT = '{{ provider_url }}/oauth/token'
-OIDC_OP_USER_ENDPOINT = '{{ provider_url }}/oauth/userinfo'
-OIDC_OP_JWKS_ENDPOINT = '{{ provider_url }}/oauth/jwks'
-OIDC_RP_SIGN_ALGO = 'ES256'
-OIDC_RP_SCOPES = 'openid email profile'
+# Allauth OIDC Configuration
+SOCIALACCOUNT_PROVIDERS = {
+    'openid_connect': {
+        'OAUTH_PKCE_ENABLED': True,
+        'APPS': [{
+            'provider_id': 'vouch',
+            'name': 'Vouch',
+            'client_id': os.environ.get('VOUCH_CLIENT_ID'),
+            'secret': os.environ.get('VOUCH_CLIENT_SECRET'),
+            'settings': {
+                'server_url': '{{ provider_url }}',
+            },
+        }],
+    },
+}
 
 LOGIN_REDIRECT_URL = '/'
 LOGOUT_REDIRECT_URL = '/'</pre>
@@ -204,30 +220,38 @@ LOGOUT_REDIRECT_URL = '/'</pre>
                     <pre class="whitespace-pre-wrap"># urls.py
 urlpatterns = [
     ...
-    path('oidc/', include('mozilla_django_oidc.urls')),
+    path('accounts/', include('allauth.urls')),
 ]</pre>
                     <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
                 </div>
 
-                <p class="text-gray-400 text-sm mb-3">Custom authentication backend (optional, for hardware verification):</p>
-                <div class="code-block relative text-sm">
-                    <pre class="whitespace-pre-wrap"># auth.py
-from mozilla_django_oidc.auth import OIDCAuthenticationBackend
+                <p class="text-gray-400 text-sm mb-3">Handle hardware verification with signals (optional):</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap"># signals.py
+from allauth.socialaccount.signals import social_account_added, social_account_updated
+from django.dispatch import receiver
 
-class VouchAuthBackend(OIDCAuthenticationBackend):
-    def verify_claims(self, claims):
-        verified = super().verify_claims(claims)
-        # Require hardware verification
-        return verified and claims.get('hardware_verified', False)
+@receiver(social_account_added)
+@receiver(social_account_updated)
+def handle_vouch_login(sender, request, sociallogin, **kwargs):
+    """Handle Vouch login and check hardware verification."""
+    if sociallogin.account.provider != 'vouch':
+        return
 
-    def create_user(self, claims):
-        user = super().create_user(claims)
-        user.email = claims.get('email', '')
-        user.first_name = claims.get('given_name', '')
-        user.last_name = claims.get('family_name', '')
-        user.save()
-        return user</pre>
+    extra_data = sociallogin.account.extra_data
+
+    # Check hardware verification
+    if not extra_data.get('hardware_verified', False):
+        # Handle unverified hardware (log, restrict access, etc.)
+        pass</pre>
                     <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <div class="p-3 bg-vouch-bg rounded border border-vouch-border">
+                    <p class="text-gray-400 text-sm">
+                        <strong class="text-gray-300">Callback URL:</strong> When registering your application, the callback URL will be:
+                        <code class="text-vouch-accent">https://yourapp.com/accounts/oidc/vouch/login/callback/</code>
+                    </p>
                 </div>
             </div>
 
@@ -747,6 +771,310 @@ async fn callback(
             </div>
         </div>
 
+        <!-- Single Page Application Examples -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Single Page Applications (SPAs)</h2>
+            <p class="text-gray-400 text-sm mb-4">
+                For browser-only applications without a backend. Register your app as type <code class="text-vouch-accent">spa</code> (public client).
+                SPAs use PKCE instead of a client secret.
+            </p>
+
+            <div class="mb-4 p-3 bg-vouch-bg rounded border border-vouch-border">
+                <p class="text-gray-400 text-sm">
+                    <strong class="text-gray-300">Important:</strong> Public clients cannot securely store a client secret.
+                    PKCE (Proof Key for Code Exchange) is required and automatically protects against authorization code interception.
+                </p>
+            </div>
+
+            <!-- SPA Tabs -->
+            <div class="flex flex-wrap gap-2 mb-4">
+                <button class="tab tab-active" onclick="showSPATab('react')">React</button>
+                <button class="tab" onclick="showSPATab('vue')">Vue</button>
+                <button class="tab" onclick="showSPATab('vanilla')">Vanilla JS</button>
+            </div>
+
+            <!-- React -->
+            <div id="spa-react-tab" class="tab-content">
+                <h3 class="text-md font-semibold text-gray-300 mb-3">React with react-oidc-context</h3>
+
+                <p class="text-gray-400 text-sm mb-3">Install dependencies:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">npm install react-oidc-context oidc-client-ts</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Configure the auth provider:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">// src/main.jsx
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { AuthProvider } from 'react-oidc-context';
+import App from './App';
+
+const oidcConfig = {
+  authority: '{{ provider_url }}',
+  client_id: 'YOUR_CLIENT_ID',
+  redirect_uri: window.location.origin + '/callback',
+  post_logout_redirect_uri: window.location.origin,
+  scope: 'openid email profile',
+  // PKCE is enabled by default in oidc-client-ts
+};
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  &lt;AuthProvider {...oidcConfig}&gt;
+    &lt;App /&gt;
+  &lt;/AuthProvider&gt;
+);</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Use in components:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">// src/App.jsx
+import { useAuth } from 'react-oidc-context';
+
+function App() {
+  const auth = useAuth();
+
+  if (auth.isLoading) {
+    return &lt;div&gt;Loading...&lt;/div&gt;;
+  }
+
+  if (auth.error) {
+    return &lt;div&gt;Error: {auth.error.message}&lt;/div&gt;;
+  }
+
+  if (auth.isAuthenticated) {
+    const { user } = auth;
+    return (
+      &lt;div&gt;
+        &lt;p&gt;Welcome, {user?.profile.name}&lt;/p&gt;
+        &lt;p&gt;Email: {user?.profile.email}&lt;/p&gt;
+        {user?.profile.hardware_verified && (
+          &lt;span className="badge"&gt;Hardware Verified&lt;/span&gt;
+        )}
+        &lt;button onClick={() =&gt; auth.removeUser()}&gt;Sign out&lt;/button&gt;
+      &lt;/div&gt;
+    );
+  }
+
+  return &lt;button onClick={() =&gt; auth.signinRedirect()}&gt;Sign in with Vouch&lt;/button&gt;;
+}</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Handle the callback route:</p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">// src/Callback.jsx
+import { useAuth } from 'react-oidc-context';
+import { useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
+
+function Callback() {
+  const auth = useAuth();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!auth.isLoading && auth.isAuthenticated) {
+      navigate('/');
+    }
+  }, [auth.isLoading, auth.isAuthenticated, navigate]);
+
+  return &lt;div&gt;Processing login...&lt;/div&gt;;
+}
+
+export default Callback;</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Vue -->
+            <div id="spa-vue-tab" class="tab-content hidden">
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Vue with oidc-client-ts</h3>
+
+                <p class="text-gray-400 text-sm mb-3">Install dependencies:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">npm install oidc-client-ts</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Create an auth service:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">// src/auth.js
+import { UserManager, WebStorageStateStore } from 'oidc-client-ts';
+
+const config = {
+  authority: '{{ provider_url }}',
+  client_id: 'YOUR_CLIENT_ID',
+  redirect_uri: window.location.origin + '/callback',
+  post_logout_redirect_uri: window.location.origin,
+  scope: 'openid email profile',
+  userStore: new WebStorageStateStore({ store: window.localStorage }),
+};
+
+export const userManager = new UserManager(config);
+
+export async function getUser() {
+  return await userManager.getUser();
+}
+
+export async function login() {
+  return await userManager.signinRedirect();
+}
+
+export async function logout() {
+  return await userManager.signoutRedirect();
+}
+
+export async function handleCallback() {
+  return await userManager.signinRedirectCallback();
+}</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Create a composable for Vue 3:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">// src/composables/useAuth.js
+import { ref, onMounted } from 'vue';
+import { getUser, login, logout } from '../auth';
+
+export function useAuth() {
+  const user = ref(null);
+  const isLoading = ref(true);
+
+  onMounted(async () => {
+    user.value = await getUser();
+    isLoading.value = false;
+  });
+
+  return {
+    user,
+    isLoading,
+    isAuthenticated: () => !!user.value,
+    login,
+    logout,
+    hardwareVerified: () => user.value?.profile?.hardware_verified ?? false,
+  };
+}</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Use in a component:</p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">{% raw %}&lt;!-- src/components/LoginButton.vue --&gt;
+&lt;script setup&gt;
+import { useAuth } from '../composables/useAuth';
+
+const { user, isLoading, isAuthenticated, login, logout, hardwareVerified } = useAuth();
+&lt;/script&gt;
+
+&lt;template&gt;
+  &lt;div v-if="isLoading"&gt;Loading...&lt;/div&gt;
+  &lt;div v-else-if="isAuthenticated()"&gt;
+    &lt;p&gt;Welcome, {{ user.profile.name }}&lt;/p&gt;
+    &lt;span v-if="hardwareVerified()" class="badge"&gt;Hardware Verified&lt;/span&gt;
+    &lt;button @click="logout"&gt;Sign out&lt;/button&gt;
+  &lt;/div&gt;
+  &lt;button v-else @click="login"&gt;Sign in with Vouch&lt;/button&gt;
+&lt;/template&gt;{% endraw %}</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Vanilla JS -->
+            <div id="spa-vanilla-tab" class="tab-content hidden">
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Vanilla JavaScript with oidc-client-ts</h3>
+
+                <p class="text-gray-400 text-sm mb-3">Install via npm or use a CDN:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">npm install oidc-client-ts
+
+# Or use a CDN in your HTML:
+# &lt;script src="https://cdn.jsdelivr.net/npm/oidc-client-ts/dist/browser/oidc-client-ts.min.js"&gt;&lt;/script&gt;</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Initialize and use:</p>
+                <div class="code-block relative text-sm mb-4">
+                    <pre class="whitespace-pre-wrap">// auth.js
+import { UserManager } from 'oidc-client-ts';
+
+const config = {
+  authority: '{{ provider_url }}',
+  client_id: 'YOUR_CLIENT_ID',
+  redirect_uri: window.location.origin + '/callback.html',
+  post_logout_redirect_uri: window.location.origin,
+  scope: 'openid email profile',
+};
+
+const userManager = new UserManager(config);
+
+// Check if user is logged in
+async function checkAuth() {
+  const user = await userManager.getUser();
+  if (user) {
+    document.getElementById('user-info').innerHTML = `
+      &lt;p&gt;Welcome, ${user.profile.name}&lt;/p&gt;
+      &lt;p&gt;Email: ${user.profile.email}&lt;/p&gt;
+      ${user.profile.hardware_verified ? '&lt;span class="badge"&gt;Hardware Verified&lt;/span&gt;' : ''}
+      &lt;button onclick="logout()"&gt;Sign out&lt;/button&gt;
+    `;
+  } else {
+    document.getElementById('user-info').innerHTML = `
+      &lt;button onclick="login()"&gt;Sign in with Vouch&lt;/button&gt;
+    `;
+  }
+}
+
+// Redirect to login
+async function login() {
+  await userManager.signinRedirect();
+}
+
+// Sign out
+async function logout() {
+  await userManager.signoutRedirect();
+}
+
+// Call on page load
+checkAuth();</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+
+                <p class="text-gray-400 text-sm mb-3">Handle the callback (callback.html):</p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">&lt;!-- callback.html --&gt;
+&lt;!DOCTYPE html&gt;
+&lt;html&gt;
+&lt;head&gt;
+  &lt;title&gt;Signing in...&lt;/title&gt;
+&lt;/head&gt;
+&lt;body&gt;
+  &lt;p&gt;Processing login...&lt;/p&gt;
+  &lt;script type="module"&gt;
+    import { UserManager } from 'oidc-client-ts';
+
+    const config = {
+      authority: '{{ provider_url }}',
+      client_id: 'YOUR_CLIENT_ID',
+      redirect_uri: window.location.origin + '/callback.html',
+    };
+
+    const userManager = new UserManager(config);
+
+    userManager.signinRedirectCallback().then(() => {
+      window.location.href = '/';
+    }).catch(err => {
+      console.error('Login error:', err);
+    });
+  &lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+        </div>
+
         <!-- Vouch-Specific Claims -->
         <div class="mb-8">
             <h2 class="text-lg font-semibold text-gray-200 mb-4">Vouch-Specific Claims</h2>
@@ -1027,6 +1355,20 @@ async fn aggregate_data(
             el.classList.add('hidden');
         });
         document.getElementById('framework-' + framework + '-tab').classList.remove('hidden');
+    }
+
+    function showSPATab(spa) {
+        // Update tab buttons
+        document.querySelectorAll('[onclick^="showSPATab"]').forEach(el => {
+            el.classList.remove('tab-active');
+        });
+        event.target.classList.add('tab-active');
+
+        // Update tab content
+        document.querySelectorAll('[id^="spa-"][id$="-tab"]').forEach(el => {
+            el.classList.add('hidden');
+        });
+        document.getElementById('spa-' + spa + '-tab').classList.remove('hidden');
     }
 
     function showM2MTab(lang) {

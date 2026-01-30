@@ -81,6 +81,20 @@ pub struct DocsApplicationsTemplate {
 
 impl_template_response!(DocsApplicationsTemplate);
 
+/// SSH Certificates documentation page template.
+#[derive(Template)]
+#[template(path = "docs/ssh.html")]
+pub struct DocsSshTemplate {
+    /// The OIDC provider URL (verification_base_url).
+    pub provider_url: String,
+    /// Organization name for branding.
+    pub org_name: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
+}
+
+impl_template_response!(DocsSshTemplate);
+
 /// Documentation index page.
 /// GET /docs
 pub async fn docs_index_page(
@@ -146,6 +160,20 @@ pub async fn applications_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsApplicationsTemplate {
+        provider_url: state.config.verification_base_url.clone(),
+        org_name: state.config.get_org_display_name().to_string(),
+        auth,
+    }
+}
+
+/// SSH Certificates documentation page.
+/// GET /docs/ssh
+pub async fn ssh_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let auth = get_auth_context(&state, &jar).await;
+    DocsSshTemplate {
         provider_url: state.config.verification_base_url.clone(),
         org_name: state.config.get_org_display_name().to_string(),
         auth,

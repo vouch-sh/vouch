@@ -247,6 +247,68 @@ jobs:
           VERSION="${VERSION#v}"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      - name: Import Apple Developer Certificate
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE_P12_BASE64: ${{ secrets.APPLE_CERTIFICATE_P12_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          MACOS_KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+        run: |
+          echo "$APPLE_CERTIFICATE_P12_BASE64" | base64 --decode > certificate.p12
+          security create-keychain -p "$MACOS_KEYCHAIN_PASSWORD" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "$MACOS_KEYCHAIN_PASSWORD" build.keychain
+          security import certificate.p12 -k build.keychain \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$MACOS_KEYCHAIN_PASSWORD" build.keychain
+          rm certificate.p12
+
+      - name: Code sign macOS binaries
+        if: runner.os == 'macOS'
+        env:
+          APPLE_CERTIFICATE_NAME: ${{ secrets.APPLE_CERTIFICATE_NAME }}
+        run: |
+          TARGET="${{ matrix.target }}"
+          for bin in ${{ matrix.bins }}; do
+            echo "Signing ${bin}..."
+            /usr/bin/codesign --force \
+              --sign "$APPLE_CERTIFICATE_NAME" \
+              --options runtime \
+              --timestamp \
+              "target/${TARGET}/release/${bin}"
+            /usr/bin/codesign --verify --verbose "target/${TARGET}/release/${bin}"
+          done
+
+      - name: Notarize macOS binaries
+        if: runner.os == 'macOS'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          TARGET="${{ matrix.target }}"
+          VERSION="${{ steps.version.outputs.version }}"
+
+          xcrun notarytool store-credentials "notarytool-profile" \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_ID_PASSWORD"
+
+          NOTARIZE_ZIP="vouch-notarize-${VERSION}.zip"
+          mkdir -p notarize-staging
+          for bin in ${{ matrix.bins }}; do
+            cp "target/${TARGET}/release/${bin}" notarize-staging/
+          done
+          ditto -c -k --keepParent notarize-staging "$NOTARIZE_ZIP"
+
+          xcrun notarytool submit "$NOTARIZE_ZIP" \
+            --keychain-profile "notarytool-profile" \
+            --wait
+
+          rm -rf notarize-staging "$NOTARIZE_ZIP"
+
       - name: Create archive (tar.gz)
         if: matrix.archive-ext == 'tar.gz'
         shell: bash
@@ -342,6 +404,11 @@ jobs:
         with:
           subject-path: vouch-v${{ steps.version.outputs.version }}-${{ matrix.target }}.${{ matrix.archive-ext }}
           sbom-path: ${{ steps.sbom.outputs.main_sbom }}
+
+      - name: Cleanup macOS keychain
+        if: runner.os == 'macOS' && always()
+        run: |
+          security delete-keychain build.keychain 2>/dev/null || true
 
   linux-packages:
     name: Linux Packages (${{ matrix.arch }})

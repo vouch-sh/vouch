@@ -33,6 +33,7 @@
                     <button class="tab tab-active" onclick="showTab('macos')">macOS</button>
                     <button class="tab" onclick="showTab('apt')">Debian / Ubuntu</button>
                     <button class="tab" onclick="showTab('rpm')">Fedora / RHEL</button>
+                    <button class="tab" onclick="showTab('windows')">Windows</button>
                 </div>
 
                 <div id="macos-tab" class="tab-content">
@@ -70,6 +71,37 @@
                         <div class="mt-2 text-gray-500"># Install</div>
                         <div>sudo dnf install -y vouch</div>
                     </div>
+                </div>
+
+                <div id="windows-tab" class="tab-content hidden">
+                    <div class="bg-amber-900/30 border-l-4 border-amber-500 p-4 rounded-r-lg mb-4">
+                        <div class="flex items-start gap-3">
+                            <svg class="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" fill="currentColor" viewBox="0 0 20 20">
+                                <path fill-rule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z" clip-rule="evenodd"/>
+                            </svg>
+                            <div>
+                                <p class="text-amber-500 font-semibold text-sm">Limited Windows Support</p>
+                                <p class="text-gray-300 text-sm mt-1">
+                                    The Vouch agent and SSH integration are not available on Windows.
+                                    Only basic authentication and credential exchange are supported.
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <p class="text-sm text-gray-300 mb-3">
+                        Download the Windows binary from the
+                        <a href="https://github.com/vouch-sh/vouch/releases/latest" class="text-vouch-accent hover:text-vouch-accent-hover">releases page</a>,
+                        extract the zip file, and add <code class="text-gray-200">vouch.exe</code> to a directory in your PATH.
+                    </p>
+
+                    <p class="text-sm text-gray-400">
+                        <strong class="text-gray-300">Supported:</strong>
+                        <code class="text-gray-300">enroll</code>,
+                        <code class="text-gray-300">login</code>,
+                        <code class="text-gray-300">credential aws</code>,
+                        <code class="text-gray-300">credential github</code>
+                    </p>
                 </div>
 
                 {% if has_downloads %}

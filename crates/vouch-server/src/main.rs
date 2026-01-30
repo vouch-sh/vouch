@@ -139,6 +139,7 @@ async fn main() -> Result<()> {
             get(handlers::docs::getting_started_page),
         )
         .route("/docs/aws", get(handlers::docs::aws_setup_page))
+        .route("/docs/ssh", get(handlers::docs::ssh_page))
         .route("/docs/github", get(handlers::docs::github_setup_page))
         .route("/docs/applications", get(handlers::docs::applications_page))
         // Integrations page
