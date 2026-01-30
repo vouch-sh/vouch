@@ -24,7 +24,7 @@
                 Vouch issues OIDC ID tokens signed with ES256 (P-256 ECDSA). AWS fetches the public key from the JWKS endpoint
                 (<code class="text-vouch-accent">{{ provider_url }}/oauth/jwks</code>) to verify tokens.
                 Users authenticate with their YubiKey and then use <code class="text-vouch-accent">vouch credential aws</code>
-                to get temporary AWS credentials via <code class="text-vouch-accent">AssumeRoleWithWebIdentity</code>.
+                to get temporary AWS credentials via <a href="https://docs.aws.amazon.com/STS/latest/APIReference/API_AssumeRoleWithWebIdentity.html" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">AssumeRoleWithWebIdentity</a>.
             </p>
         </div>
 
@@ -32,7 +32,7 @@
         <div class="mb-8">
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">1</span>
-                <span class="text-lg font-semibold text-gray-200">Create the OIDC Provider in AWS</span>
+                <span class="text-lg font-semibold text-gray-200">Create the <a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_roles_providers_create_oidc.html" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">OIDC Provider</a> in AWS</span>
             </div>
             <div class="ml-11">
                 <p class="text-gray-400 text-sm mb-3">
@@ -65,6 +65,7 @@ Description: '{{ org_name }} OIDC Provider'
 
 Resources:
   VouchOIDCProvider:
+    # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-resource-iam-oidcprovider.html
     Type: AWS::IAM::OIDCProvider
     Properties:
       Url: {{ provider_url }}
@@ -91,6 +92,7 @@ Outputs:
                 <div id="provider-terraform-tab" class="tab-content hidden">
                     <div class="code-block relative text-sm">
                         <pre class="whitespace-pre-wrap"># vouch_oidc.tf
+# https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_openid_connect_provider
 
 resource "aws_iam_openid_connect_provider" "vouch" {
   url            = "{{ provider_url }}"

@@ -54,3 +54,6 @@ askama = { version = "=0.15.4", default-features = false, features = ["derive", 
 tower-http = { version = "=0.6.8", default-features = false, features = ["cors", "fs"] }
 ssh-key = { workspace = true }
 tower = { workspace = true, optional = true }
+
+[dev-dependencies]
+tower = { workspace = true }

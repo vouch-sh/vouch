@@ -21,7 +21,7 @@
         <div class="mb-8 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
             <h2 class="text-lg font-semibold text-gray-200 mb-2">How it works</h2>
             <p class="text-gray-400 text-sm">
-                {{ org_name }} runs an SSH Certificate Authority (CA) using Ed25519. After authenticating with your YubiKey,
+                {{ org_name }} runs an <a href="https://man.openbsd.org/ssh-keygen#CERTIFICATES" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">SSH Certificate Authority (CA)</a> using Ed25519. After authenticating with your YubiKey,
                 you can request a short-lived SSH certificate that servers trust automatically. Certificates are valid for
                 8 hours (matching your session duration) and include your email and username as principals.
             </p>
@@ -81,6 +81,7 @@ vouch credential ssh</pre>
 curl -o /etc/ssh/vouch_ca.pub {{ provider_url }}/v1/credentials/ssh/ca
 
 # 2. Configure sshd to trust the CA (using drop-in config)
+# See: https://man.openbsd.org/sshd_config#TrustedUserCAKeys
 cat > /etc/ssh/sshd_config.d/99-vouch-trustca.conf &lt;&lt;'EOF'
 TrustedUserCAKeys /etc/ssh/vouch_ca.pub
 EOF

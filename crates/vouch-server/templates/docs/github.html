@@ -38,7 +38,7 @@
         <div class="mb-8 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
             <h2 class="text-lg font-semibold text-gray-200 mb-2">How it works</h2>
             <p class="text-gray-400 text-sm">
-                {{ org_name }} uses a GitHub App to issue short-lived access tokens for your organization's repositories.
+                {{ org_name }} uses a <a href="https://docs.github.com/en/apps" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">GitHub App</a> to issue short-lived access tokens for your organization's repositories.
                 When you run <code class="text-vouch-accent">git clone</code> or <code class="text-vouch-accent">git push</code>,
                 the Vouch CLI automatically obtains a token scoped to your organization's repositories.
                 Tokens are valid for 15 minutes and require authentication with your YubiKey.
@@ -79,7 +79,7 @@
         <div class="mb-8">
             <div class="flex items-center gap-3 mb-4">
                 <span class="step-number">1</span>
-                <span class="text-lg font-semibold text-gray-200">Configure Git Credential Helper</span>
+                <span class="text-lg font-semibold text-gray-200">Configure <a href="https://git-scm.com/docs/gitcredentials" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">Git Credential Helper</a></span>
             </div>
             <div class="ml-11">
                 <p class="text-gray-400 text-sm mb-3">

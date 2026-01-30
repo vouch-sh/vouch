@@ -21,7 +21,7 @@
         <div class="mb-8 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
             <h2 class="text-lg font-semibold text-gray-200 mb-2">What you'll build</h2>
             <p class="text-gray-400 text-sm">
-                Add hardware-backed authentication to your web application using OpenID Connect.
+                Add hardware-backed authentication to your web application using <a href="https://openid.net/specs/openid-connect-core-1_0.html" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">OpenID Connect</a>.
                 Users authenticate with their YubiKey via {{ org_name }}, and your app receives verified identity claims
                 including proof of hardware verification.
             </p>
@@ -75,7 +75,7 @@
                         </tr>
                         <tr class="border-b border-vouch-border">
                             <td class="py-2 pr-4">Signing Algorithm</td>
-                            <td class="py-2"><code class="text-vouch-accent">ES256</code> (ECDSA P-256)</td>
+                            <td class="py-2"><code class="text-vouch-accent">ES256</code> (<a href="https://www.rfc-editor.org/rfc/rfc7518#section-3.4" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">ECDSA P-256</a>)</td>
                         </tr>
                         <tr>
                             <td class="py-2 pr-4">Scopes</td>
@@ -114,7 +114,7 @@
 
             <!-- Rails -->
             <div id="framework-rails-tab" class="tab-content">
-                <h3 class="text-md font-semibold text-gray-300 mb-3">Ruby on Rails with OmniAuth</h3>
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Ruby on Rails with <a href="https://github.com/omniauth/omniauth_openid_connect" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">OmniAuth</a></h3>
 
                 <p class="text-gray-400 text-sm mb-3">Install the gem:</p>
                 <div class="code-block relative text-sm mb-4">
@@ -166,7 +166,7 @@ end</pre>
 
             <!-- Django -->
             <div id="framework-django-tab" class="tab-content hidden">
-                <h3 class="text-md font-semibold text-gray-300 mb-3">Django with django-allauth</h3>
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Django with <a href="https://docs.allauth.org/" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">django-allauth</a></h3>
 
                 <p class="text-gray-400 text-sm mb-3">Install the package:</p>
                 <div class="code-block relative text-sm mb-4">
@@ -257,7 +257,7 @@ def handle_vouch_login(sender, request, sociallogin, **kwargs):
 
             <!-- Express.js -->
             <div id="framework-express-tab" class="tab-content hidden">
-                <h3 class="text-md font-semibold text-gray-300 mb-3">Express.js with Passport</h3>
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Express.js with <a href="https://www.passportjs.org/packages/passport-openidconnect/" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">Passport</a></h3>
 
                 <p class="text-gray-400 text-sm mb-3">Install dependencies:</p>
                 <div class="code-block relative text-sm mb-4">
@@ -320,7 +320,7 @@ app.get('/logout', (req, res) => {
 
             <!-- Next.js -->
             <div id="framework-nextjs-tab" class="tab-content hidden">
-                <h3 class="text-md font-semibold text-gray-300 mb-3">Next.js with NextAuth.js</h3>
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Next.js with <a href="https://next-auth.js.org/" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">NextAuth.js</a></h3>
 
                 <p class="text-gray-400 text-sm mb-3">Install NextAuth:</p>
                 <div class="code-block relative text-sm mb-4">
@@ -401,7 +401,7 @@ export default function LoginButton() {
 
             <!-- Laravel -->
             <div id="framework-laravel-tab" class="tab-content hidden">
-                <h3 class="text-md font-semibold text-gray-300 mb-3">Laravel with Socialite</h3>
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Laravel with <a href="https://socialiteproviders.com/" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">Socialite</a></h3>
 
                 <p class="text-gray-400 text-sm mb-3">Install the package:</p>
                 <div class="code-block relative text-sm mb-4">
@@ -474,7 +474,7 @@ class AuthController extends Controller
 
             <!-- Flask -->
             <div id="framework-flask-tab" class="tab-content hidden">
-                <h3 class="text-md font-semibold text-gray-300 mb-3">Flask with Authlib</h3>
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Flask with <a href="https://docs.authlib.org/" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">Authlib</a></h3>
 
                 <p class="text-gray-400 text-sm mb-3">Install dependencies:</p>
                 <div class="code-block relative text-sm mb-4">
@@ -595,7 +595,7 @@ async def logout(request: Request):
 
             <!-- Spring Boot -->
             <div id="framework-spring-tab" class="tab-content hidden">
-                <h3 class="text-md font-semibold text-gray-300 mb-3">Spring Boot with Spring Security OAuth2</h3>
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Spring Boot with <a href="https://docs.spring.io/spring-security/reference/servlet/oauth2/index.html" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">Spring Security OAuth2</a></h3>
 
                 <p class="text-gray-400 text-sm mb-3">Add the dependency:</p>
                 <div class="code-block relative text-sm mb-4">
@@ -674,7 +674,7 @@ public class DashboardController {
 
             <!-- Axum -->
             <div id="framework-axum-tab" class="tab-content hidden">
-                <h3 class="text-md font-semibold text-gray-300 mb-3">Axum with openidconnect-rs</h3>
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Axum with <a href="https://docs.rs/openidconnect/" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">openidconnect-rs</a></h3>
 
                 <p class="text-gray-400 text-sm mb-3">Add dependencies to Cargo.toml:</p>
                 <div class="code-block relative text-sm mb-4">
@@ -776,7 +776,7 @@ async fn callback(
             <h2 class="text-lg font-semibold text-gray-200 mb-4">Single Page Applications (SPAs)</h2>
             <p class="text-gray-400 text-sm mb-4">
                 For browser-only applications without a backend. Register your app as type <code class="text-vouch-accent">spa</code> (public client).
-                SPAs use PKCE instead of a client secret.
+                SPAs use <a href="https://www.rfc-editor.org/rfc/rfc7636" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">PKCE</a> instead of a client secret.
             </p>
 
             <div class="mb-4 p-3 bg-vouch-bg rounded border border-vouch-border">
@@ -795,7 +795,7 @@ async fn callback(
 
             <!-- React -->
             <div id="spa-react-tab" class="tab-content">
-                <h3 class="text-md font-semibold text-gray-300 mb-3">React with react-oidc-context</h3>
+                <h3 class="text-md font-semibold text-gray-300 mb-3">React with <a href="https://github.com/authts/react-oidc-context" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">react-oidc-context</a></h3>
 
                 <p class="text-gray-400 text-sm mb-3">Install dependencies:</p>
                 <div class="code-block relative text-sm mb-4">
@@ -890,7 +890,7 @@ export default Callback;</pre>
 
             <!-- Vue -->
             <div id="spa-vue-tab" class="tab-content hidden">
-                <h3 class="text-md font-semibold text-gray-300 mb-3">Vue with oidc-client-ts</h3>
+                <h3 class="text-md font-semibold text-gray-300 mb-3">Vue with <a href="https://github.com/authts/oidc-client-ts" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">oidc-client-ts</a></h3>
 
                 <p class="text-gray-400 text-sm mb-3">Install dependencies:</p>
                 <div class="code-block relative text-sm mb-4">
@@ -1104,7 +1104,7 @@ checkAuth();</pre>
                         <tr>
                             <td class="py-2 pr-4"><code class="text-vouch-accent">cnf</code></td>
                             <td class="py-2 pr-4">object</td>
-                            <td class="py-2">DPoP token binding confirmation (RFC 9449). Only present when DPoP is used.</td>
+                            <td class="py-2">DPoP token binding confirmation (<a href="https://www.rfc-editor.org/rfc/rfc9449" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">RFC 9449</a>). Only present when DPoP is used.</td>
                         </tr>
                     </tbody>
                 </table>
@@ -1122,7 +1122,7 @@ checkAuth();</pre>
         <div class="mb-8">
             <h2 class="text-lg font-semibold text-gray-200 mb-4">Service-to-Service (M2M) Authentication</h2>
             <p class="text-gray-400 text-sm mb-4">
-                For backend services that need to call other services on behalf of a user, use the Token Exchange flow (RFC 8693).
+                For backend services that need to call other services on behalf of a user, use the <a href="https://www.rfc-editor.org/rfc/rfc8693" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">Token Exchange flow (RFC 8693)</a>.
                 This exchanges a user's access token for a new token scoped to a specific service.
             </p>
 
