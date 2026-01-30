@@ -10,7 +10,7 @@ use anyhow::Result;
 
 use vouch_cli::{HttpClient, TestHttpClient};
 use vouch_common::TestClock;
-use vouch_server::{AppState, test_utils};
+use vouch_server::{AppState, db, test_utils};
 
 /// Unified test harness for integration tests.
 ///
@@ -107,6 +107,69 @@ impl TestHarness {
         Ok((user, auth_id, token))
     }
 
+    /// Create a test organization.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if org creation fails.
+    pub async fn create_org(&self, domain: &str) -> Result<db::Organization> {
+        let org = test_utils::create_test_org(&self.state.db, domain).await;
+        Ok(org)
+    }
+
+    /// Create a test user with organization membership.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if user creation fails.
+    pub async fn create_user_in_org(
+        &self,
+        email: &str,
+        org_id: &str,
+        is_admin: bool,
+    ) -> Result<vouch_server::User> {
+        let user =
+            test_utils::create_test_user_in_org(&self.state.db, email, org_id, is_admin).await;
+        Ok(user)
+    }
+
+    /// Create a fully set up org admin with an authenticator and session.
+    ///
+    /// Returns (user, org, auth_id, token).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if setup fails.
+    pub async fn create_authenticated_org_admin(
+        &self,
+        email: &str,
+        domain: &str,
+    ) -> Result<(vouch_server::User, db::Organization, String, String)> {
+        let org = self.create_org(domain).await?;
+        let user = self.create_user_in_org(email, &org.id, true).await?;
+        let auth_id = self.create_authenticator(&user.id).await?;
+        let token = self.create_session(&user.id, email, &auth_id).await?;
+        Ok((user, org, auth_id, token))
+    }
+
+    /// Create a fully set up org member (non-admin) with an authenticator and session.
+    ///
+    /// Returns (user, auth_id, token).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if setup fails.
+    pub async fn create_authenticated_org_member(
+        &self,
+        email: &str,
+        org_id: &str,
+    ) -> Result<(vouch_server::User, String, String)> {
+        let user = self.create_user_in_org(email, org_id, false).await?;
+        let auth_id = self.create_authenticator(&user.id).await?;
+        let token = self.create_session(&user.id, email, &auth_id).await?;
+        Ok((user, auth_id, token))
+    }
+
     /// Make a GET request.
     pub async fn get(&self, path: &str) -> Result<vouch_cli::HttpResponse> {
         let url = self.url(path);
@@ -198,6 +261,27 @@ impl TestHarness {
         self.http_client
             .request(
                 "PATCH",
+                &url,
+                Some(&json),
+                Some("application/json"),
+                Some(&auth),
+            )
+            .await
+    }
+
+    /// Make an authenticated PUT request with JSON body.
+    pub async fn put_json_authenticated<T: serde::Serialize>(
+        &self,
+        path: &str,
+        body: &T,
+        token: &str,
+    ) -> Result<vouch_cli::HttpResponse> {
+        let url = self.url(path);
+        let json = serde_json::to_vec(body)?;
+        let auth = format!("Bearer {}", token);
+        self.http_client
+            .request(
+                "PUT",
                 &url,
                 Some(&json),
                 Some("application/json"),

@@ -281,6 +281,14 @@ Certificate:
 - Role trust policy restricts to Vouch OIDC provider
 - Session tags include attestation timestamp
 
+**GCP Credentials:**
+- Obtained via Workload Identity Federation using Vouch as OIDC provider
+- OIDC token issued with audience validation (must match Workload Identity Pool)
+- Token contains `email` and `email_verified` claims for principal mapping
+- Service account impersonation optional (recommended for production)
+- Credential configuration file permissions: 0600
+- Token cache directory permissions: 0700
+
 ### Audit Layer
 
 Every credential issuance generates an audit log entry:

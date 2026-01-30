@@ -107,6 +107,7 @@ vouch enroll
 # Configure integrations
 vouch setup ssh                                    # Configures SSH to use vouch certificates
 vouch setup aws --role arn:aws:iam::ID:role/name   # Configures AWS credential_process
+vouch setup gcp --configure                        # Configures GCP Workload Identity Federation
 vouch setup github --configure                     # Configures git credential helper for GitHub
 ```
 
@@ -129,6 +130,7 @@ vouch status
 - **YubiKey 5 series** (firmware 5.2+) with FIDO2/WebAuthn support
 - **macOS** 12+ or **Linux** (glibc 2.31+) — Windows support is planned
 - For AWS: IAM role with OIDC federation configured
+- For GCP: Workload Identity Pool with OIDC provider configured
 - For SSH: CA public key distributed to target hosts
 - For GitHub: Organization admin connects the Vouch GitHub App
 

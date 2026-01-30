@@ -51,8 +51,8 @@ $ git push origin main    # Just works
  |  |  * vouch status                                                    |  |
  |  |  * vouch logout                                                    |  |
  |  |  * vouch keys        (interactive menu, or list|remove|rename)     |  |
- |  |  * vouch credential ssh|aws|github                                  |  |
- |  |  * vouch setup ssh|aws|github                                      |  |
+ |  |  * vouch credential ssh|aws|gcp|github                              |  |
+ |  |  * vouch setup ssh|aws|gcp|github                                  |  |
  |  |  * vouch doctor     (diagnostic checks)                            |  |
  |  |  * vouch completions (shell completions)                           |  |
  |  +---------------------------------------------------------------------+  |
@@ -623,6 +623,60 @@ How it works:
 3. vouch calls AWS STS AssumeRoleWithWebIdentity
 4. Returns temporary credentials in credential_process format
 5. Credentials expire in 1 hour, auto-refresh within session
+```
+
+### GCP Integration
+
+```
+~/.config/gcloud/vouch-credentials.json:
+  {
+    "type": "external_account",
+    "audience": "//iam.googleapis.com/projects/PROJECT/locations/global/workloadIdentityPools/POOL/providers/PROVIDER",
+    "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
+    "token_url": "https://sts.googleapis.com/v1/token",
+    "credential_source": {
+      "executable": {
+        "command": "vouch credential gcp --audience AUDIENCE"
+      }
+    }
+  }
+
+How it works:
+1. GCP SDK/CLI calls vouch credential gcp via executable credential source
+2. vouch exchanges session token for OIDC ID token from server
+3. vouch returns token in AIP-4117 external account format
+4. GCP SDK exchanges token with STS for Google access token
+5. If service_account_impersonation_url is set, SDK impersonates the service account
+```
+
+**`vouch setup gcp` creates:**
+- Credential configuration file at `~/.config/gcloud/vouch-credentials.json`
+- Cache directory at `~/.cache/vouch/` for token caching
+- Outputs instructions for setting `GOOGLE_APPLICATION_CREDENTIALS`
+
+**Server-side configuration:**
+- Organization admins configure GCP settings via `/v1/integrations/gcp` API
+- Settings include: project_number, pool_id, provider_id, optional service_account
+- CLI fetches configuration from server when no CLI args provided
+
+**GCP Workload Identity Federation setup:**
+```bash
+# 1. Create Workload Identity Pool
+gcloud iam workload-identity-pools create vouch-pool \
+  --location=global \
+  --display-name="Vouch Pool"
+
+# 2. Create OIDC Provider
+gcloud iam workload-identity-pools providers create-oidc vouch-provider \
+  --location=global \
+  --workload-identity-pool=vouch-pool \
+  --issuer-uri="https://vouch.example.com" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.email=assertion.email"
+
+# 3. Grant service account impersonation
+gcloud iam service-accounts add-iam-policy-binding SA@PROJECT.iam.gserviceaccount.com \
+  --role=roles/iam.workloadIdentityUser \
+  --member="principalSet://iam.googleapis.com/projects/PROJECT_NUM/locations/global/workloadIdentityPools/vouch-pool/attribute.email/user@example.com"
 ```
 
 ### GitHub Integration

@@ -482,16 +482,59 @@ pub struct SshCaPublicKeyResponse {
 }
 
 // ============================================================================
-// AWS Credentials
+// Cloud Provider Credentials (AWS, GCP)
 // ============================================================================
 
-/// Response containing an OIDC ID token for AWS STS.
+/// Cloud provider token response (AWS and GCP use identical format).
+/// Contains an OIDC ID token for use with cloud provider identity federation.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct AwsTokenResponse {
-    /// OIDC ID token for use with AWS STS AssumeRoleWithWebIdentity.
+pub struct CloudTokenResponse {
+    /// OIDC ID token for use with cloud provider identity federation.
     pub id_token: String,
     /// Token validity period in seconds.
     pub expires_in: u64,
+}
+
+/// Response containing an OIDC ID token for AWS STS.
+pub type AwsTokenResponse = CloudTokenResponse;
+
+/// Response containing an OIDC ID token for GCP Workload Identity Federation.
+pub type GcpTokenResponse = CloudTokenResponse;
+
+// ============================================================================
+// Cloud Provider Integration Configs
+// ============================================================================
+
+/// GCP Workload Identity Federation configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GcpIntegrationConfig {
+    /// GCP project number (numeric, not project ID).
+    pub project_number: String,
+    /// Workload Identity Pool ID.
+    pub pool_id: String,
+    /// Provider ID within the Workload Identity Pool.
+    pub provider_id: String,
+    /// Optional service account email to impersonate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_account: Option<String>,
+}
+
+/// AWS OIDC federation configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AwsIntegrationConfig {
+    /// Default IAM role ARN to assume.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_role_arn: Option<String>,
+}
+
+/// Response for GET /v1/integrations/{provider}.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IntegrationConfigResponse<T> {
+    /// Whether the integration is configured for this organization.
+    pub configured: bool,
+    /// The configuration, if configured.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<T>,
 }
 
 // ============================================================================

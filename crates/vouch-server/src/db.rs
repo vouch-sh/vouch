@@ -2901,6 +2901,86 @@ pub async fn delete_old_github_credential_events(
     Ok(result.rows_affected())
 }
 
+// ============================================================================
+// Cloud Provider Integrations (GCP, AWS)
+// ============================================================================
+
+/// Cloud provider integration configuration record.
+#[derive(Debug, sqlx::FromRow)]
+pub struct CloudIntegration {
+    pub id: String,
+    pub org_id: String,
+    pub provider: String,
+    pub config: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub created_by_user_id: Option<String>,
+}
+
+/// Get cloud integration config for an organization and provider.
+pub async fn get_cloud_integration(
+    pool: &SqlitePool,
+    org_id: &str,
+    provider: &str,
+) -> Result<Option<CloudIntegration>> {
+    let integration = sqlx::query_as::<_, CloudIntegration>(
+        "SELECT id, org_id, provider, config, created_at, updated_at, created_by_user_id
+         FROM cloud_integrations WHERE org_id = ? AND provider = ?",
+    )
+    .bind(org_id)
+    .bind(provider)
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(integration)
+}
+
+/// Create or update cloud integration config for an organization.
+pub async fn upsert_cloud_integration(
+    pool: &SqlitePool,
+    org_id: &str,
+    provider: &str,
+    config: &str,
+    user_id: &str,
+) -> Result<CloudIntegration> {
+    let id = Uuid::now_v7().to_string();
+
+    sqlx::query(
+        "INSERT INTO cloud_integrations (id, org_id, provider, config, created_by_user_id)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(org_id, provider) DO UPDATE SET
+             config = excluded.config,
+             updated_at = datetime('now')",
+    )
+    .bind(&id)
+    .bind(org_id)
+    .bind(provider)
+    .bind(config)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+
+    // Return the integration (may be newly created or updated)
+    get_cloud_integration(pool, org_id, provider)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Failed to retrieve cloud integration after upsert"))
+}
+
+/// Delete cloud integration config for an organization.
+pub async fn delete_cloud_integration(
+    pool: &SqlitePool,
+    org_id: &str,
+    provider: &str,
+) -> Result<bool> {
+    let result = sqlx::query("DELETE FROM cloud_integrations WHERE org_id = ? AND provider = ?")
+        .bind(org_id)
+        .bind(provider)
+        .execute(pool)
+        .await?;
+
+    Ok(result.rows_affected() > 0)
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
@@ -4161,5 +4241,194 @@ mod tests {
             .await
             .expect("Failed to get secrets");
         assert!(secrets.is_empty());
+    }
+
+    // ========================================================================
+    // Cloud Integration Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_cloud_integration_crud() {
+        let pool = test_db().await;
+
+        // Create an organization first
+        let org = create_organization(&pool, "test.com", Some("Test Org"), None)
+            .await
+            .expect("Failed to create org");
+
+        // Create a user in the org
+        let user = upsert_user_with_org(&pool, "admin@test.com", None, Some(&org.id), true)
+            .await
+            .expect("Failed to create user");
+
+        // Initially no GCP config
+        let config = get_cloud_integration(&pool, &org.id, "gcp")
+            .await
+            .expect("Failed to get config");
+        assert!(config.is_none());
+
+        // Create GCP config
+        let gcp_config = r#"{"project_number":"123456789","pool_id":"vouch-pool","provider_id":"vouch-provider"}"#;
+        let integration = upsert_cloud_integration(&pool, &org.id, "gcp", gcp_config, &user.id)
+            .await
+            .expect("Failed to create config");
+
+        assert_eq!(integration.org_id, org.id);
+        assert_eq!(integration.provider, "gcp");
+        assert_eq!(integration.config, gcp_config);
+        assert_eq!(integration.created_by_user_id, Some(user.id.clone()));
+
+        // Get the config back
+        let config = get_cloud_integration(&pool, &org.id, "gcp")
+            .await
+            .expect("Failed to get config")
+            .expect("Config should exist");
+
+        assert_eq!(config.org_id, org.id);
+        assert_eq!(config.provider, "gcp");
+        assert_eq!(config.config, gcp_config);
+
+        // Update the config
+        let updated_config =
+            r#"{"project_number":"987654321","pool_id":"new-pool","provider_id":"new-provider"}"#;
+        let updated = upsert_cloud_integration(&pool, &org.id, "gcp", updated_config, &user.id)
+            .await
+            .expect("Failed to update config");
+
+        assert_eq!(updated.config, updated_config);
+
+        // Delete the config
+        let deleted = delete_cloud_integration(&pool, &org.id, "gcp")
+            .await
+            .expect("Failed to delete config");
+        assert!(deleted);
+
+        // Config should be gone
+        let config = get_cloud_integration(&pool, &org.id, "gcp")
+            .await
+            .expect("Failed to get config");
+        assert!(config.is_none());
+
+        // Delete non-existent should return false
+        let deleted_again = delete_cloud_integration(&pool, &org.id, "gcp")
+            .await
+            .expect("Failed to delete config");
+        assert!(!deleted_again);
+    }
+
+    #[tokio::test]
+    async fn test_cloud_integration_multiple_providers() {
+        let pool = test_db().await;
+
+        // Create an organization
+        let org = create_organization(&pool, "multi.com", Some("Multi Org"), None)
+            .await
+            .expect("Failed to create org");
+
+        let user = upsert_user_with_org(&pool, "admin@multi.com", None, Some(&org.id), true)
+            .await
+            .expect("Failed to create user");
+
+        // Create both GCP and AWS configs
+        let gcp_config = r#"{"project_number":"111","pool_id":"pool","provider_id":"provider"}"#;
+        let aws_config = r#"{"default_role_arn":"arn:aws:iam::123:role/Test"}"#;
+
+        upsert_cloud_integration(&pool, &org.id, "gcp", gcp_config, &user.id)
+            .await
+            .expect("Failed to create GCP config");
+
+        upsert_cloud_integration(&pool, &org.id, "aws", aws_config, &user.id)
+            .await
+            .expect("Failed to create AWS config");
+
+        // Both should exist independently
+        let gcp = get_cloud_integration(&pool, &org.id, "gcp")
+            .await
+            .expect("Failed to get GCP config")
+            .expect("GCP config should exist");
+        assert_eq!(gcp.config, gcp_config);
+
+        let aws = get_cloud_integration(&pool, &org.id, "aws")
+            .await
+            .expect("Failed to get AWS config")
+            .expect("AWS config should exist");
+        assert_eq!(aws.config, aws_config);
+
+        // Delete GCP should not affect AWS
+        delete_cloud_integration(&pool, &org.id, "gcp")
+            .await
+            .expect("Failed to delete GCP config");
+
+        let gcp = get_cloud_integration(&pool, &org.id, "gcp")
+            .await
+            .expect("Failed to get GCP config");
+        assert!(gcp.is_none());
+
+        let aws = get_cloud_integration(&pool, &org.id, "aws")
+            .await
+            .expect("Failed to get AWS config")
+            .expect("AWS config should still exist");
+        assert_eq!(aws.config, aws_config);
+    }
+
+    #[tokio::test]
+    async fn test_cloud_integration_org_isolation() {
+        let pool = test_db().await;
+
+        // Create two organizations
+        let org1 = create_organization(&pool, "org1.com", Some("Org 1"), None)
+            .await
+            .expect("Failed to create org1");
+        let org2 = create_organization(&pool, "org2.com", Some("Org 2"), None)
+            .await
+            .expect("Failed to create org2");
+
+        let user1 = upsert_user_with_org(&pool, "admin@org1.com", None, Some(&org1.id), true)
+            .await
+            .expect("Failed to create user1");
+        let user2 = upsert_user_with_org(&pool, "admin@org2.com", None, Some(&org2.id), true)
+            .await
+            .expect("Failed to create user2");
+
+        // Create GCP config for org1
+        let config1 = r#"{"project_number":"111","pool_id":"pool1","provider_id":"provider1"}"#;
+        upsert_cloud_integration(&pool, &org1.id, "gcp", config1, &user1.id)
+            .await
+            .expect("Failed to create config for org1");
+
+        // Create GCP config for org2
+        let config2 = r#"{"project_number":"222","pool_id":"pool2","provider_id":"provider2"}"#;
+        upsert_cloud_integration(&pool, &org2.id, "gcp", config2, &user2.id)
+            .await
+            .expect("Failed to create config for org2");
+
+        // Each org should only see its own config
+        let gcp1 = get_cloud_integration(&pool, &org1.id, "gcp")
+            .await
+            .expect("Failed to get config for org1")
+            .expect("Config should exist");
+        assert_eq!(gcp1.config, config1);
+
+        let gcp2 = get_cloud_integration(&pool, &org2.id, "gcp")
+            .await
+            .expect("Failed to get config for org2")
+            .expect("Config should exist");
+        assert_eq!(gcp2.config, config2);
+
+        // Deleting org1's config should not affect org2
+        delete_cloud_integration(&pool, &org1.id, "gcp")
+            .await
+            .expect("Failed to delete config for org1");
+
+        let gcp1 = get_cloud_integration(&pool, &org1.id, "gcp")
+            .await
+            .expect("Failed to get config");
+        assert!(gcp1.is_none());
+
+        let gcp2 = get_cloud_integration(&pool, &org2.id, "gcp")
+            .await
+            .expect("Failed to get config")
+            .expect("Org2 config should still exist");
+        assert_eq!(gcp2.config, config2);
     }
 }

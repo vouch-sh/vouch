@@ -532,7 +532,12 @@ curl -X POST https://vouch.example.com/oauth/token \
 
 ### Advanced Integrations
 - HashiCorp Vault
-- GCP Workload Identity
+- [x] GCP Workload Identity — **Implemented**
+  - [x] `vouch credential gcp` command (AIP-4117 format)
+  - [x] `vouch setup gcp` command with server-provided config
+  - [x] Server-side integration config API (`/v1/integrations/gcp`)
+  - [x] Organization-wide GCP settings (project_number, pool_id, provider_id)
+  - [x] Profile support for multiple service accounts
 - Azure Managed Identity
 - Database credential rotation
 

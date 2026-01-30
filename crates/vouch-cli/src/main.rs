@@ -9,6 +9,7 @@ mod client;
 mod commands;
 mod config;
 mod fido2;
+mod utils;
 
 /// Hardware-backed identity for developers.
 #[derive(Parser)]
@@ -119,6 +120,17 @@ enum CredentialCommands {
         #[arg(long)]
         session_name: Option<String>,
     },
+    /// Obtain a GCP identity token (executable-sourced credential format).
+    ///
+    /// This is used by GCP libraries as an executable credential source.
+    /// Users should not call this directly.
+    /// Instead, use `vouch setup gcp` to configure GCP.
+    #[command(hide = true)]
+    Gcp {
+        /// Workload Identity Pool provider audience URL.
+        #[arg(long)]
+        audience: String,
+    },
     /// Obtain an SSH certificate.
     Ssh {
         /// Path to SSH private key (default: ~/.ssh/id_ed25519_vouch).
@@ -149,6 +161,38 @@ enum SetupCommands {
         /// Add the profile to ~/.aws/config.
         #[arg(long)]
         add_profile: bool,
+    },
+    /// Configure GCP to use Vouch credentials via Workload Identity Federation.
+    ///
+    /// If no options are provided, configuration is fetched from the server.
+    /// This requires your organization admin to have configured GCP integration.
+    Gcp {
+        /// Profile name for the credential file (e.g., "prod", "staging").
+        /// Creates vouch-credentials-{profile}.json instead of vouch-credentials.json.
+        #[arg(long)]
+        profile: Option<String>,
+        /// GCP project number (numeric, not project ID).
+        /// If not provided, uses server configuration.
+        #[arg(long)]
+        project_number: Option<String>,
+        /// Workload Identity Pool ID.
+        /// If not provided, uses server configuration.
+        #[arg(long)]
+        pool_id: Option<String>,
+        /// Provider ID within the Workload Identity Pool.
+        /// If not provided, uses server configuration.
+        #[arg(long)]
+        provider_id: Option<String>,
+        /// Service account email to impersonate (optional).
+        /// Overrides server configuration if provided.
+        #[arg(long)]
+        service_account: Option<String>,
+        /// Output path for credential configuration file.
+        #[arg(long)]
+        output: Option<String>,
+        /// Write the configuration file (otherwise just show instructions).
+        #[arg(long)]
+        configure: bool,
     },
     /// Configure SSH to use Vouch certificates.
     Ssh {
@@ -228,6 +272,9 @@ async fn main() -> Result<()> {
             CredentialCommands::Aws { role, session_name } => {
                 commands::credential::aws::run(&server, &role, session_name.as_deref()).await
             }
+            CredentialCommands::Gcp { audience } => {
+                commands::credential::gcp::run(&server, &audience).await
+            }
             CredentialCommands::Ssh { key } => {
                 commands::credential::ssh::run(&server, key.as_deref()).await
             }
@@ -241,6 +288,27 @@ async fn main() -> Result<()> {
                 role,
                 add_profile,
             } => commands::setup::aws::run(&profile, &role, add_profile).await,
+            SetupCommands::Gcp {
+                profile,
+                project_number,
+                pool_id,
+                provider_id,
+                service_account,
+                output,
+                configure,
+            } => {
+                commands::setup::gcp::run(
+                    &server,
+                    profile.as_deref(),
+                    project_number.as_deref(),
+                    pool_id.as_deref(),
+                    provider_id.as_deref(),
+                    service_account.as_deref(),
+                    output.as_deref(),
+                    configure,
+                )
+                .await
+            }
             SetupCommands::Ssh { hosts } => {
                 commands::setup::ssh::run(&server, hosts.as_deref()).await
             }

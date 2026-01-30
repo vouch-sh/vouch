@@ -139,6 +139,7 @@ async fn main() -> Result<()> {
             get(handlers::docs::getting_started_page),
         )
         .route("/docs/aws", get(handlers::docs::aws_setup_page))
+        .route("/docs/gcp", get(handlers::docs::gcp_setup_page))
         .route("/docs/ssh", get(handlers::docs::ssh_page))
         .route("/docs/github", get(handlers::docs::github_setup_page))
         .route("/docs/applications", get(handlers::docs::applications_page))
@@ -225,6 +226,10 @@ async fn main() -> Result<()> {
             "/v1/credentials/aws/token",
             get(handlers::credentials::get_aws_token),
         )
+        .route(
+            "/v1/credentials/gcp/token",
+            get(handlers::credentials::get_gcp_token),
+        )
         // GitHub credential endpoints
         .route(
             "/v1/credentials/github/status",
@@ -233,6 +238,19 @@ async fn main() -> Result<()> {
         .route(
             "/v1/credentials/github/token",
             post(handlers::credentials::get_github_token),
+        )
+        // Cloud integration config API
+        .route(
+            "/v1/integrations/gcp",
+            get(handlers::integrations::get_gcp_integration)
+                .put(handlers::integrations::set_gcp_integration)
+                .delete(handlers::integrations::delete_gcp_integration),
+        )
+        .route(
+            "/v1/integrations/aws",
+            get(handlers::integrations::get_aws_integration)
+                .put(handlers::integrations::set_aws_integration)
+                .delete(handlers::integrations::delete_aws_integration),
         )
         // GitHub App installation
         .route(
