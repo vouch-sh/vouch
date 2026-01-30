@@ -585,10 +585,26 @@ jobs:
             artifacts/*cdx.json
             artifacts/SHA256SUMS.txt
 
+  publish-release:
+    name: Publish Release
+    runs-on: ubuntu-latest
+    needs: release-artifacts
+    permissions:
+      contents: write
+
+    steps:
+      - name: Publish release (remove draft status)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ github.event.inputs.tag || github.ref_name }}" \
+            --repo "${{ github.repository }}" \
+            --draft=false
+
   homebrew:
     name: Update Homebrew Tap
     runs-on: ubuntu-latest
-    needs: release-artifacts
+    needs: publish-release
     permissions:
       contents: read
 
@@ -669,7 +685,7 @@ jobs:
   publish-packages:
     name: Publish Package Repositories
     runs-on: ubuntu-latest
-    needs: release-artifacts
+    needs: publish-release
     permissions:
       contents: read
 
@@ -762,7 +778,7 @@ jobs:
   release-notes:
     name: Generate Release Notes
     runs-on: ubuntu-latest
-    needs: [merge, helm, release-artifacts, homebrew, publish-packages]
+    needs: [merge, helm, publish-release, homebrew, publish-packages]
     permissions:
       contents: write
 
