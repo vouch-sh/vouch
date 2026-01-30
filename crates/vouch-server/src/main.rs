@@ -17,6 +17,9 @@ use vouch_server::{AppState, cleanup, config, dpop, github_app, handlers, oidc_k
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load .env file if present (before anything else so env vars are available)
+    dotenvy::dotenv().ok();
+
     // Initialize logging
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::from_default_env())
@@ -251,6 +254,16 @@ async fn main() -> Result<()> {
             get(handlers::integrations::get_aws_integration)
                 .put(handlers::integrations::set_aws_integration)
                 .delete(handlers::integrations::delete_aws_integration),
+        )
+        // GCP browser-based configuration
+        .route(
+            "/gcp/configure",
+            get(handlers::integrations::gcp_configure_page)
+                .post(handlers::integrations::gcp_configure_submit),
+        )
+        .route(
+            "/gcp/configure/delete",
+            post(handlers::integrations::gcp_configure_delete),
         )
         // GitHub App installation
         .route(

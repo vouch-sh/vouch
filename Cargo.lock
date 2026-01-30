@@ -3809,6 +3809,7 @@ dependencies = [
  "base64 0.22.1",
  "ciborium",
  "clap",
+ "dotenvy",
  "ed25519-dalek",
  "headers",
  "hex",
