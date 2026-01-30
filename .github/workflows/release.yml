@@ -667,6 +667,13 @@ jobs:
               error_log_path var/"log/vouch-agent.log"
             end
 
+            def caveats
+              <<~EOS
+                To restart the vouch-agent service after upgrading:
+                  brew services restart vouch
+              EOS
+            end
+
             test do
               assert_match "vouch", shell_output("#{bin}/vouch --version")
             end
