@@ -131,6 +131,17 @@ enum CredentialCommands {
         #[arg(long)]
         audience: String,
     },
+    /// Obtain a Kubernetes identity token (ExecCredential format).
+    ///
+    /// This is used by kubectl as an exec credential plugin.
+    /// Users should not call this directly.
+    /// Instead, use `vouch setup k8s` to configure kubectl.
+    #[command(hide = true)]
+    K8s {
+        /// Kubernetes cluster audience (matches --oidc-client-id on API server).
+        #[arg(long)]
+        audience: String,
+    },
     /// Obtain an SSH certificate.
     Ssh {
         /// Path to SSH private key (default: ~/.ssh/id_ed25519_vouch).
@@ -210,6 +221,21 @@ enum SetupCommands {
         #[arg(long)]
         configure: bool,
     },
+    /// Configure kubectl to use Vouch for Kubernetes OIDC authentication.
+    K8s {
+        /// Cluster name from kubeconfig (prompts if not provided).
+        #[arg(long)]
+        cluster: Option<String>,
+        /// Audience/client-id for OIDC (defaults to cluster name).
+        #[arg(long)]
+        audience: Option<String>,
+        /// Path to kubeconfig file (defaults to ~/.kube/config).
+        #[arg(long)]
+        kubeconfig: Option<String>,
+        /// Write the configuration (otherwise just show instructions).
+        #[arg(long)]
+        configure: bool,
+    },
 }
 
 #[tokio::main]
@@ -275,6 +301,9 @@ async fn main() -> Result<()> {
             CredentialCommands::Gcp { audience } => {
                 commands::credential::gcp::run(&server, &audience).await
             }
+            CredentialCommands::K8s { audience } => {
+                commands::credential::k8s::run(&server, &audience).await
+            }
             CredentialCommands::Ssh { key } => {
                 commands::credential::ssh::run(&server, key.as_deref()).await
             }
@@ -314,6 +343,21 @@ async fn main() -> Result<()> {
             }
             SetupCommands::Github { host, configure } => {
                 commands::setup::github::run(&host, configure).await
+            }
+            SetupCommands::K8s {
+                cluster,
+                audience,
+                kubeconfig,
+                configure,
+            } => {
+                commands::setup::k8s::run(
+                    &server,
+                    cluster.as_deref(),
+                    audience.as_deref(),
+                    kubeconfig.as_deref(),
+                    configure,
+                )
+                .await
             }
         },
         Commands::Completions(args) => {

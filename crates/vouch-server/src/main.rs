@@ -145,6 +145,7 @@ async fn main() -> Result<()> {
         .route("/docs/aws", get(handlers::docs::aws_setup_page))
         .route("/docs/gcp", get(handlers::docs::gcp_setup_page))
         .route("/docs/ssh", get(handlers::docs::ssh_page))
+        .route("/docs/kubernetes", get(handlers::docs::kubernetes_page))
         .route("/docs/github", get(handlers::docs::github_setup_page))
         .route("/docs/applications", get(handlers::docs::applications_page))
         // Integrations page
@@ -233,6 +234,10 @@ async fn main() -> Result<()> {
         .route(
             "/v1/credentials/gcp/token",
             get(handlers::credentials::get_gcp_token),
+        )
+        .route(
+            "/v1/credentials/k8s/token",
+            get(handlers::credentials::get_k8s_token),
         )
         // GitHub credential endpoints
         .route(

@@ -501,6 +501,9 @@ pub type AwsTokenResponse = CloudTokenResponse;
 /// Response containing an OIDC ID token for GCP Workload Identity Federation.
 pub type GcpTokenResponse = CloudTokenResponse;
 
+/// Response containing an OIDC ID token for Kubernetes authentication.
+pub type K8sTokenResponse = CloudTokenResponse;
+
 // ============================================================================
 // Cloud Provider Integration Configs
 // ============================================================================

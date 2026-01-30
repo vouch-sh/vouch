@@ -494,10 +494,10 @@ curl -X POST https://vouch.example.com/oauth/token \
 
 ### v0.9 — Kubernetes Integration (Month 8)
 
-- [ ] Kubernetes exec credential plugin
-- [ ] OIDC authentication to clusters
-- [ ] `vouch setup kube` command
-- [ ] Namespace/cluster scoping
+- [x] Kubernetes exec credential plugin (`vouch credential k8s`)
+- [x] OIDC authentication to clusters
+- [x] `vouch setup k8s` command
+- [x] Namespace scoping via RBAC (standard Kubernetes pattern)
 
 ### v1.0 — Production Ready (Month 9-10)
 
