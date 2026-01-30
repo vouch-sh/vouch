@@ -43,16 +43,13 @@ RUN mkdir -p crates/vouch-server/static/css \
     && cd crates/vouch-server \
     && /app/tailwindcss -i styles/input.css -o static/css/output.css --minify
 
-# Rust build stage
-FROM rust:1.93-trixie AS builder
+# Rust build stage - using musl for static binary
+FROM rust:1.93-alpine AS builder
 
 WORKDIR /app
 
-# Install OpenSSL development files
-RUN apt-get update && apt-get install -y \
-    libssl-dev \
-    pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+# Install build dependencies for static compilation
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
 
 # Copy manifests
 COPY Cargo.toml Cargo.lock ./
@@ -73,14 +70,17 @@ COPY crates/vouch-server/templates crates/vouch-server/templates
 # Touch files to ensure rebuild
 RUN touch crates/vouch-common/src/lib.rs crates/vouch-server/src/main.rs
 
-# Build the release binary
+# Build the release binary with static linking
+ENV OPENSSL_STATIC=1
+ENV OPENSSL_LIB_DIR=/usr/lib
+ENV OPENSSL_INCLUDE_DIR=/usr/include
 RUN cargo build --release --package vouch-server
 
 # Create empty data directory marker
 RUN mkdir -p /data && touch /data/.keep
 
-# Runtime stage - minimal distroless image with glibc
-FROM gcr.io/distroless/cc-debian13:nonroot
+# Runtime stage - minimal static distroless image (no glibc)
+FROM gcr.io/distroless/static-debian13:nonroot
 
 WORKDIR /
 
