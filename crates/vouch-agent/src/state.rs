@@ -154,3 +154,157 @@ impl AgentState {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn future_timestamp(seconds: i64) -> Timestamp {
+        let now = Timestamp::now();
+        Timestamp::from_second(now.as_second() + seconds).unwrap()
+    }
+
+    fn past_timestamp(seconds: i64) -> Timestamp {
+        let now = Timestamp::now();
+        Timestamp::from_second(now.as_second() - seconds).unwrap()
+    }
+
+    #[test]
+    fn test_session_new() {
+        let token = SecretString::from("test_token");
+        let expires = future_timestamp(3600);
+        let session = Session::new(token, "user@example.com".to_string(), expires);
+
+        assert_eq!(session.user_email(), "user@example.com");
+        assert_eq!(session.expires_at(), expires);
+        assert!(!session.is_expired());
+    }
+
+    #[test]
+    fn test_session_is_expired() {
+        let token = SecretString::from("test_token");
+
+        // Not expired (1 hour from now)
+        let future_session = Session::new(
+            token.clone(),
+            "user@example.com".to_string(),
+            future_timestamp(3600),
+        );
+        assert!(!future_session.is_expired());
+
+        // Expired (1 hour ago)
+        let past_session =
+            Session::new(token, "user@example.com".to_string(), past_timestamp(3600));
+        assert!(past_session.is_expired());
+    }
+
+    #[test]
+    fn test_session_expires_in_seconds() {
+        let token = SecretString::from("test_token");
+
+        // Future session (1 hour from now)
+        let future_session = Session::new(
+            token.clone(),
+            "user@example.com".to_string(),
+            future_timestamp(3600),
+        );
+        let remaining = future_session.expires_in_seconds();
+        // Allow some tolerance for test execution time
+        assert!((3590..=3600).contains(&remaining));
+
+        // Expired session
+        let past_session = Session::new(token, "user@example.com".to_string(), past_timestamp(100));
+        assert_eq!(past_session.expires_in_seconds(), 0);
+    }
+
+    #[test]
+    fn test_session_info_from_session() {
+        let token = SecretString::from("test_token");
+        let expires = future_timestamp(3600);
+        let session = Session::new(token, "user@example.com".to_string(), expires);
+
+        let info = SessionInfo::from(&session);
+        assert_eq!(info.user_email, "user@example.com");
+        assert!(!info.expires_at.is_empty());
+        assert!(!info.authenticated_at.is_empty());
+        assert!(info.expires_in_seconds > 0);
+    }
+
+    #[tokio::test]
+    async fn test_agent_state_store_get_session() {
+        let state = AgentState::new();
+        let token = SecretString::from("test_token");
+        let session = Session::new(
+            token,
+            "user@example.com".to_string(),
+            future_timestamp(3600),
+        );
+
+        // Initially no session
+        assert!(state.get_session().await.is_none());
+
+        // Store session
+        state.store_session(session).await;
+
+        // Retrieve session
+        let retrieved = state.get_session().await;
+        assert!(retrieved.is_some());
+        assert_eq!(retrieved.unwrap().user_email(), "user@example.com");
+    }
+
+    #[tokio::test]
+    async fn test_agent_state_clear_session() {
+        let state = AgentState::new();
+        let token = SecretString::from("test_token");
+        let session = Session::new(
+            token,
+            "user@example.com".to_string(),
+            future_timestamp(3600),
+        );
+
+        state.store_session(session).await;
+        assert!(state.get_session().await.is_some());
+
+        state.clear_session().await;
+        assert!(state.get_session().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_agent_state_get_token() {
+        let state = AgentState::new();
+        let token = SecretString::from("secret_jwt_token");
+        let session = Session::new(
+            token,
+            "user@example.com".to_string(),
+            future_timestamp(3600),
+        );
+
+        // No token when no session
+        assert!(state.get_token().await.is_none());
+
+        state.store_session(session).await;
+
+        // Get token
+        let retrieved_token = state.get_token().await;
+        assert!(retrieved_token.is_some());
+        assert_eq!(retrieved_token.unwrap(), "secret_jwt_token");
+    }
+
+    #[tokio::test]
+    async fn test_agent_state_expired_session_not_returned() {
+        let state = AgentState::new();
+        let token = SecretString::from("test_token");
+        let session = Session::new(
+            token,
+            "user@example.com".to_string(),
+            past_timestamp(100), // Already expired
+        );
+
+        state.store_session(session).await;
+
+        // Expired session should not be returned
+        assert!(state.get_session().await.is_none());
+        assert!(state.get_token().await.is_none());
+    }
+}
