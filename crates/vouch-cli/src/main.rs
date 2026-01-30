@@ -9,6 +9,7 @@ mod client;
 mod commands;
 mod config;
 mod fido2;
+mod integrations;
 mod utils;
 
 /// Hardware-backed identity for developers.
