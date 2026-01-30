@@ -1422,11 +1422,15 @@ async fn validate_session_token(
         None => return Ok(None),
     };
 
-    let authenticator =
-        match db::get_authenticator_by_id(&state.db, &claims.authenticator_id).await? {
-            Some(a) => a,
-            None => return Ok(None),
-        };
+    // Get authenticator if session has one
+    let authenticator_id = match &claims.authenticator_id {
+        Some(id) => id,
+        None => return Ok(None), // Session without authenticator can't be validated here
+    };
+    let authenticator = match db::get_authenticator_by_id(&state.db, authenticator_id).await? {
+        Some(a) => a,
+        None => return Ok(None),
+    };
 
     Ok(Some((user, session, authenticator)))
 }

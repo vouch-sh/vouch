@@ -55,7 +55,7 @@ pub struct Session {
     pub id: String,
     pub user_id: String,
     pub token_hash: String,
-    pub authenticator_id: String,
+    pub authenticator_id: Option<String>,
     pub expires_at: String,
 }
 
@@ -233,11 +233,12 @@ pub async fn update_authenticator_counter(
 }
 
 /// Create a new session.
+/// `authenticator_id` is optional for OIDC-authenticated users who haven't registered a security key yet.
 pub async fn create_session(
     pool: &SqlitePool,
     user_id: &str,
     token_hash: &str,
-    authenticator_id: &str,
+    authenticator_id: Option<&str>,
     expires_at: &str,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
@@ -3084,7 +3085,7 @@ mod tests {
             &pool,
             &user_id,
             token_hash,
-            &auth_id,
+            Some(&auth_id),
             "2099-12-31T23:59:59Z",
         )
         .await
@@ -3819,7 +3820,7 @@ mod tests {
             &pool,
             &user.id,
             "scim_token_hash",
-            &auth_id,
+            Some(&auth_id),
             "2099-12-31T23:59:59Z",
         )
         .await
@@ -4154,7 +4155,7 @@ mod tests {
             &pool,
             &user.id,
             "cascade_token",
-            &auth_id,
+            Some(&auth_id),
             "2099-12-31T23:59:59Z",
         )
         .await

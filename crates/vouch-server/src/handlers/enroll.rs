@@ -752,14 +752,11 @@ pub async fn oidc_callback(
         }
     };
 
-    // Get authenticator (if any) for session claims, or use placeholder for users without keys yet
+    // Get authenticator (if any) for session claims
     let existing_auths = db::get_authenticators_for_user(&state.db, &user.id)
         .await
         .unwrap_or_default();
-    let authenticator_id = existing_auths
-        .first()
-        .map(|a| a.id.clone())
-        .unwrap_or_else(|| "none".to_string());
+    let authenticator_id = existing_auths.first().map(|a| a.id.clone());
 
     let session_claims = SessionClaims {
         sub: user.id.clone(),
@@ -792,7 +789,7 @@ pub async fn oidc_callback(
         &state.db,
         &user.id,
         &token_hash,
-        &authenticator_id,
+        authenticator_id.as_deref(),
         &expires.to_string(),
     )
     .await
@@ -1205,7 +1202,7 @@ pub async fn browser_register_complete(
     let claims = SessionClaims {
         sub: reg_state.user_id.to_string(),
         email: reg_state.user_email.clone(),
-        authenticator_id: authenticator_id.clone(),
+        authenticator_id: Some(authenticator_id.clone()),
         iat: now.as_second(),
         exp: expires.as_second(),
     };
@@ -1229,7 +1226,7 @@ pub async fn browser_register_complete(
         &state.db,
         &reg_state.user_id.to_string(),
         &token_hash,
-        &authenticator_id,
+        Some(&authenticator_id),
         &expires.to_string(),
     )
     .await

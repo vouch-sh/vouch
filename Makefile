@@ -1,5 +1,9 @@
 # Makefile for vouch
 
+# Load .env file if present (silently skip if not found)
+-include .env
+export
+
 # Tool binaries
 CARGO ?= cargo
 DOCKER ?= docker
@@ -29,11 +33,7 @@ css-build: ## Build minified CSS for production
 run: ## Run the vouch CLI locally
 	RUST_LOG=debug $(CARGO) run --bin vouch -- ${ARGS}
 
-run-server: ## Run the vouch server locally
-	RUST_LOG=debug \
-	VOUCH_RP_ID=localhost \
-	VOUCH_RP_NAME=Vouch \
-	VOUCH_JWT_SECRET=dev-secret-at-least-32-characters-long \
+run-server: css-build ## Run the vouch server locally (loads .env if present)
 	$(CARGO) run --bin vouch-server
 
 run-agent:

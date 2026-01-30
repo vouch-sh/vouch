@@ -275,9 +275,17 @@ impl ServerConfig {
         }
 
         // Compute default verification URL
-        let verification_base_url = args
-            .verification_url
-            .unwrap_or_else(|| format!("https://{}", args.rp_id));
+        let verification_base_url = args.verification_url.unwrap_or_else(|| {
+            // For local development (localhost/127.0.0.1), use http with port
+            if args.rp_id == "localhost" || args.rp_id == "127.0.0.1" {
+                // Extract port from listen_addr (e.g., "0.0.0.0:3000" -> "3000")
+                let port = args.listen_addr.rsplit(':').next().unwrap_or("3000");
+                format!("http://{}:{}", args.rp_id, port)
+            } else {
+                // Production: use https without port (assumes standard 443)
+                format!("https://{}", args.rp_id)
+            }
+        });
 
         // Parse allowed domains
         let allowed_domains = args.allowed_domains.map(|s| parse_comma_list(&s));

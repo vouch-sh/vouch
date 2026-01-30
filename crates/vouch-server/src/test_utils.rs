@@ -84,8 +84,7 @@ pub async fn test_app_state() -> Arc<AppState> {
     let pool = test_db().await;
     let config = test_config();
 
-    let rp_origin =
-        url::Url::parse(&format!("https://{}", config.rp_id)).expect("Invalid RP origin");
+    let rp_origin = url::Url::parse(&config.verification_base_url).expect("Invalid RP origin");
     let webauthn = webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)
         .expect("Failed to create WebauthnBuilder")
         .rp_name(&config.rp_name)
@@ -372,7 +371,7 @@ pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: 
     let claims = crate::handlers::auth::SessionClaims {
         sub: user_id.to_string(),
         email: email.to_string(),
-        authenticator_id: auth_id.to_string(),
+        authenticator_id: Some(auth_id.to_string()),
         iat: now.as_second(),
         exp,
     };
@@ -396,7 +395,7 @@ pub fn create_expired_token(state: &AppState, user_id: &str, email: &str, auth_i
     let claims = crate::handlers::auth::SessionClaims {
         sub: user_id.to_string(),
         email: email.to_string(),
-        authenticator_id: auth_id.to_string(),
+        authenticator_id: Some(auth_id.to_string()),
         iat: now.as_second() - 36000, // 10 hours ago
         exp: now.as_second() - 3600,  // 1 hour ago (expired)
     };
@@ -481,7 +480,7 @@ pub async fn create_test_session(
         &state.db,
         user_id,
         &token_hash,
-        auth_id,
+        Some(auth_id),
         &expires.to_string(),
     )
     .await
