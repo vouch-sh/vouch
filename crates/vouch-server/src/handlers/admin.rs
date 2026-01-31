@@ -22,7 +22,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 use vouch_common::{ApiError, AuthEventInfo, ListAuthEventsResponse};
 
-use super::common::{extract_session, extract_session_from_cookie};
+use super::common::extract_session;
 use super::json_error;
 
 // ============================================================================
@@ -38,12 +38,7 @@ async fn extract_org_admin(
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     jar: &CookieJar,
 ) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
-    // Try Bearer token first, then fall back to cookie
-    let session = if auth_header.is_some() {
-        extract_session(state, auth_header).await?
-    } else {
-        extract_session_from_cookie(state, jar).await?
-    };
+    let session = extract_session(state, auth_header, jar).await?;
 
     let user = db::get_user_by_id(&state.db, &session.claims.sub)
         .await

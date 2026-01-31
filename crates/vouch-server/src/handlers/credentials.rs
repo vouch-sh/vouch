@@ -7,6 +7,7 @@ use crate::github_app::{GitHubInstallationId, minimal_git_permissions};
 use axum::extract::Query;
 use axum::{Json, extract::State, http::StatusCode};
 use axum_extra::TypedHeader;
+use axum_extra::extract::cookie::CookieJar;
 use headers::authorization::{Authorization, Bearer};
 use jiff::Timestamp;
 use secrecy::ExposeSecret;
@@ -30,10 +31,11 @@ use super::{extract_session_with_email, json_error};
 pub async fn issue_ssh_certificate(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Json(request): Json<SshCertificateRequest>,
 ) -> Result<Json<SshCertificateResponse>, (StatusCode, Json<ApiError>)> {
     // Validate session
-    let (_claims, user_email) = extract_session_with_email(&state, auth_header).await?;
+    let (_claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
 
     // Get SSH CA
     let ssh_ca = state.ssh_ca.as_ref().ok_or_else(|| {
@@ -203,9 +205,10 @@ pub struct SshRevocationCheckResponse {
 pub async fn get_aws_token(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
 ) -> Result<Json<AwsTokenResponse>, (StatusCode, Json<ApiError>)> {
     // Validate session
-    let (claims, user_email) = extract_session_with_email(&state, auth_header).await?;
+    let (claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
 
     // Get authenticator info for AAGUID (required for cloud credentials)
     let authenticator_id = claims.authenticator_id.as_ref().ok_or_else(|| {
@@ -322,13 +325,14 @@ pub async fn get_gcp_token(
     State(state): State<Arc<AppState>>,
     Query(query): Query<GcpTokenQuery>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
 ) -> Result<Json<GcpTokenResponse>, (StatusCode, Json<ApiError>)> {
     // Validate audience format
     validate_gcp_audience_format(&query.audience)
         .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_audience", e))?;
 
     // Validate session
-    let (claims, user_email) = extract_session_with_email(&state, auth_header).await?;
+    let (claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
 
     // Get authenticator info for AAGUID (required for cloud credentials)
     let authenticator_id = claims.authenticator_id.as_ref().ok_or_else(|| {
@@ -435,13 +439,14 @@ pub async fn get_k8s_token(
     State(state): State<Arc<AppState>>,
     Query(query): Query<K8sTokenQuery>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
 ) -> Result<Json<K8sTokenResponse>, (StatusCode, Json<ApiError>)> {
     // Validate audience format
     validate_k8s_audience_format(&query.audience)
         .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_audience", e))?;
 
     // Validate session
-    let (claims, user_email) = extract_session_with_email(&state, auth_header).await?;
+    let (claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
 
     // Get authenticator info for AAGUID (required for cloud credentials)
     let authenticator_id = claims.authenticator_id.as_ref().ok_or_else(|| {
@@ -509,9 +514,10 @@ pub async fn get_k8s_token(
 pub async fn get_github_status(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
 ) -> Result<Json<GitHubStatusResponse>, (StatusCode, Json<ApiError>)> {
     // Validate session
-    let session = extract_session(&state, auth_header).await?;
+    let session = extract_session(&state, auth_header, &jar).await?;
 
     // Get user
     let user = db::get_user_by_id(&state.db, &session.claims.sub)
@@ -571,11 +577,12 @@ pub async fn get_github_status(
 pub async fn get_github_token(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     headers: axum::http::HeaderMap,
     Json(request): Json<GitHubTokenRequest>,
 ) -> Result<Json<GitHubTokenResponse>, (StatusCode, Json<ApiError>)> {
     // Validate session
-    let session = extract_session(&state, auth_header).await?;
+    let session = extract_session(&state, auth_header, &jar).await?;
 
     // Get user
     let user = db::get_user_by_id(&state.db, &session.claims.sub)

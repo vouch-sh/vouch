@@ -137,10 +137,11 @@ pub struct SessionClaims {
 pub async fn register_start(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Json(req): Json<RegisterStartRequest>,
 ) -> Result<Json<RegisterStartResponse>, (StatusCode, Json<ApiError>)> {
     // Require authentication
-    let session = super::extract_session(&state, auth_header).await?;
+    let session = super::extract_session(&state, auth_header, &jar).await?;
     let user_id = Uuid::parse_str(&session.claims.sub).map_err(|e| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,

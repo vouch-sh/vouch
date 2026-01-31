@@ -155,8 +155,9 @@ pub async fn integrations_page(State(state): State<Arc<AppState>>, jar: CookieJa
 async fn extract_user_with_org(
     state: &AppState,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: &CookieJar,
 ) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
-    let session = extract_session(state, auth_header).await?;
+    let session = extract_session(state, auth_header, jar).await?;
 
     let user = db::get_user_by_id(&state.db, &session.claims.sub)
         .await
@@ -185,8 +186,9 @@ async fn extract_user_with_org(
 async fn extract_org_admin(
     state: &AppState,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: &CookieJar,
 ) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
-    let (user, org_id) = extract_user_with_org(state, auth_header).await?;
+    let (user, org_id) = extract_user_with_org(state, auth_header, jar).await?;
 
     if !user.is_org_admin {
         return Err(json_error(
@@ -208,8 +210,9 @@ async fn extract_org_admin(
 pub async fn get_gcp_integration(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
 ) -> Result<Json<IntegrationConfigResponse<GcpIntegrationConfig>>, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_user_with_org(&state, auth_header).await?;
+    let (_user, org_id) = extract_user_with_org(&state, auth_header, &jar).await?;
 
     let integration = db::get_cloud_integration(&state.db, &org_id, "gcp")
         .await
@@ -247,9 +250,10 @@ pub async fn get_gcp_integration(
 pub async fn set_gcp_integration(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Json(config): Json<GcpIntegrationConfig>,
 ) -> Result<Json<GcpIntegrationConfig>, (StatusCode, Json<ApiError>)> {
-    let (user, org_id) = extract_org_admin(&state, auth_header).await?;
+    let (user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
 
     // Validate config
     if config.project_number.is_empty() {
@@ -306,8 +310,9 @@ pub async fn set_gcp_integration(
 pub async fn delete_gcp_integration(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let (user, org_id) = extract_org_admin(&state, auth_header).await?;
+    let (user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
 
     let deleted = db::delete_cloud_integration(&state.db, &org_id, "gcp")
         .await
@@ -344,8 +349,9 @@ pub async fn delete_gcp_integration(
 pub async fn get_aws_integration(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
 ) -> Result<Json<IntegrationConfigResponse<AwsIntegrationConfig>>, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_user_with_org(&state, auth_header).await?;
+    let (_user, org_id) = extract_user_with_org(&state, auth_header, &jar).await?;
 
     let integration = db::get_cloud_integration(&state.db, &org_id, "aws")
         .await
@@ -383,9 +389,10 @@ pub async fn get_aws_integration(
 pub async fn set_aws_integration(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Json(config): Json<AwsIntegrationConfig>,
 ) -> Result<Json<AwsIntegrationConfig>, (StatusCode, Json<ApiError>)> {
-    let (user, org_id) = extract_org_admin(&state, auth_header).await?;
+    let (user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
 
     let config_json = serde_json::to_string(&config).map_err(|e| {
         json_error(
@@ -419,8 +426,9 @@ pub async fn set_aws_integration(
 pub async fn delete_aws_integration(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let (user, org_id) = extract_org_admin(&state, auth_header).await?;
+    let (user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
 
     let deleted = db::delete_cloud_integration(&state.db, &org_id, "aws")
         .await
