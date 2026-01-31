@@ -36,26 +36,30 @@
             </div>
             <div class="ml-11">
                 <p class="text-gray-400 text-sm mb-3">
-                    Organization administrators can create SCIM tokens using the Vouch CLI. You must be logged in with a YubiKey session.
+                    Organization administrators can create SCIM tokens via the API. You must have an active session (authenticate with your YubiKey first).
                 </p>
                 <div class="code-block relative text-sm">
-                    <pre class="whitespace-pre-wrap"># Log in with your YubiKey (if not already)
-vouch login
+                    <pre class="whitespace-pre-wrap"># Create a SCIM token (requires admin session)
+# The SESSION_TOKEN comes from your browser cookie or vouch login
+curl -X POST {{ provider_url }}/api/v1/org/scim-tokens \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Google Workspace SCIM"}'
 
-# Create a SCIM token (admin only)
-vouch admin scim-token create --description "Okta SCIM"
-
-# The token is shown once - save it securely!
-# Example output:
-# Token: vouch_scim_abc123...
-# ID: 01234567-89ab-cdef-0123-456789abcdef</pre>
+# Response includes the token (shown only once):
+# {
+#   "id": "01234567-89ab-cdef-0123-456789abcdef",
+#   "token": "vouch_scim_abc123...",
+#   "description": "Google Workspace SCIM",
+#   "created_at": "2024-01-15T10:30:00Z"
+# }</pre>
                     <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
                 </div>
                 <div class="mt-3 p-3 bg-vouch-bg rounded border border-vouch-border">
                     <p class="text-gray-400 text-sm">
                         <strong class="text-gray-300">Security note:</strong> SCIM tokens are hashed before storage.
                         The plaintext token is only shown once at creation time and cannot be retrieved later.
-                        Tokens can optionally have an expiration date.
+                        Tokens can optionally have an expiration date by adding <code class="text-vouch-accent">"expires_in_days": 365</code> to the request.
                     </p>
                 </div>
             </div>
@@ -90,14 +94,14 @@ vouch admin scim-token create --description "Okta SCIM"
 
                 <!-- Tabs for different IdPs -->
                 <div class="flex gap-2 mb-3 flex-wrap">
-                    <button class="tab tab-active" onclick="showIdpTab('okta')">Okta</button>
+                    <button class="tab tab-active" onclick="showIdpTab('google')">Google Workspace</button>
+                    <button class="tab" onclick="showIdpTab('okta')">Okta</button>
                     <button class="tab" onclick="showIdpTab('azure')">Azure AD</button>
-                    <button class="tab" onclick="showIdpTab('google')">Google Workspace</button>
                     <button class="tab" onclick="showIdpTab('onelogin')">OneLogin</button>
                 </div>
 
                 <!-- Okta -->
-                <div id="idp-okta-tab" class="tab-content">
+                <div id="idp-okta-tab" class="tab-content hidden">
                     <div class="space-y-3 text-sm text-gray-400">
                         <div class="flex gap-3">
                             <span class="text-vouch-accent font-mono">1.</span>
@@ -169,7 +173,7 @@ vouch admin scim-token create --description "Okta SCIM"
                 </div>
 
                 <!-- Google Workspace -->
-                <div id="idp-google-tab" class="tab-content hidden">
+                <div id="idp-google-tab" class="tab-content">
                     <div class="space-y-3 text-sm text-gray-400">
                         <div class="flex gap-3">
                             <span class="text-vouch-accent font-mono">1.</span>
@@ -336,13 +340,18 @@ curl -H "Authorization: Bearer vouch_scim_YOUR_TOKEN" \
             <h2 class="text-lg font-semibold text-gray-200 mb-4">Managing SCIM Tokens</h2>
             <div class="code-block relative text-sm">
                 <pre class="whitespace-pre-wrap"># List all SCIM tokens for your organization
-vouch admin scim-token list
+curl {{ provider_url }}/api/v1/org/scim-tokens \
+  -H "Authorization: Bearer $SESSION_TOKEN"
 
-# Create a token with expiration (in days)
-vouch admin scim-token create --description "Azure AD" --expires-in 365
+# Create a token with expiration (365 days)
+curl -X POST {{ provider_url }}/api/v1/org/scim-tokens \
+  -H "Authorization: Bearer $SESSION_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "Azure AD", "expires_in_days": 365}'
 
 # Revoke a token by ID
-vouch admin scim-token revoke 01234567-89ab-cdef-0123-456789abcdef</pre>
+curl -X DELETE {{ provider_url }}/api/v1/org/scim-tokens/TOKEN_ID \
+  -H "Authorization: Bearer $SESSION_TOKEN"</pre>
                 <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
             </div>
         </div>
@@ -355,8 +364,8 @@ vouch admin scim-token revoke 01234567-89ab-cdef-0123-456789abcdef</pre>
                     <dt class="text-gray-300 font-medium">401 Unauthorized</dt>
                     <dd class="text-gray-400 mt-1">
                         Check that the Bearer token is correct and has not expired. Tokens must start with
-                        <code class="text-vouch-accent">vouch_scim_</code>. Verify the token hasn't been revoked with
-                        <code class="text-vouch-accent">vouch admin scim-token list</code>.
+                        <code class="text-vouch-accent">vouch_scim_</code>. Verify the token hasn't been revoked by
+                        listing tokens via the API.
                     </dd>
                 </div>
                 <div>
