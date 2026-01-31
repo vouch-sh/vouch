@@ -16,7 +16,6 @@
 //!   credential-provider = ["vouch", "credential", "cargo", "--"]
 
 use anyhow::{Context, Result};
-use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
@@ -50,6 +49,7 @@ struct CredentialRequest<'a> {
     action: Action<'a>,
     /// Additional command-line arguments (after `--`).
     #[serde(default)]
+    #[allow(dead_code)]
     args: Vec<&'a str>,
 }
 
@@ -63,6 +63,7 @@ struct RegistryInfo<'a> {
     name: Option<&'a str>,
     /// Headers from HTTP 401 response (if any).
     #[serde(default)]
+    #[allow(dead_code)]
     headers: Vec<String>,
 }
 
@@ -85,6 +86,7 @@ enum Action<'a> {
 /// Operation details for "get" action.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "kebab-case")]
+#[allow(dead_code)]
 enum Operation<'a> {
     /// Reading from registry (cargo fetch, build, etc).
     Read,
@@ -112,6 +114,7 @@ struct LoginOptions<'a> {
     token: Option<&'a str>,
     /// URL for browser-based login (if any).
     #[serde(rename = "login-url")]
+    #[allow(dead_code)]
     login_url: Option<&'a str>,
 }
 
@@ -138,6 +141,7 @@ enum CredentialResponse {
 /// Cache control for tokens.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "kebab-case")]
+#[allow(dead_code)]
 enum CacheControl {
     /// Never cache the token.
     Never,

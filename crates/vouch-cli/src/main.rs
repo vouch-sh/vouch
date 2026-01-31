@@ -435,9 +435,10 @@ async fn main() -> Result<()> {
                 registries,
                 configure,
             } => commands::setup::docker::run(&registries, configure).await,
-            SetupCommands::Cargo { registry, configure } => {
-                commands::setup::cargo::run(registry.as_deref(), configure).await
-            }
+            SetupCommands::Cargo {
+                registry,
+                configure,
+            } => commands::setup::cargo::run(registry.as_deref(), configure).await,
         },
         Commands::Completions(args) => {
             let mut cmd = Cli::command();
