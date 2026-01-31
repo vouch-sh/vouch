@@ -172,6 +172,7 @@ async fn main() -> Result<()> {
         .route("/docs/docker", get(handlers::docs::docker_page))
         .route("/docs/applications", get(handlers::docs::applications_page))
         .route("/docs/scim", get(handlers::docs::scim_page))
+        .route("/docs/cargo", get(handlers::docs::cargo_page))
         // Integrations page
         .route(
             "/integrations",

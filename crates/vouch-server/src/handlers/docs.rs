@@ -151,6 +151,18 @@ pub struct DocsDockerTemplate {
 
 impl_template_response!(DocsDockerTemplate);
 
+/// Cargo registry documentation page template.
+#[derive(Template)]
+#[template(path = "docs/cargo.html")]
+pub struct DocsCargoTemplate {
+    /// Organization name for branding.
+    pub org_name: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
+}
+
+impl_template_response!(DocsCargoTemplate);
+
 /// Documentation index page.
 /// GET /docs
 pub async fn docs_index_page(
@@ -278,6 +290,16 @@ pub async fn scim_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> im
 pub async fn docker_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsDockerTemplate {
+        org_name: state.config.get_org_display_name().to_string(),
+        auth,
+    }
+}
+
+/// Cargo registry documentation page.
+/// GET /docs/cargo
+pub async fn cargo_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
+    let auth = get_auth_context(&state, &jar).await;
+    DocsCargoTemplate {
         org_name: state.config.get_org_display_name().to_string(),
         auth,
     }
