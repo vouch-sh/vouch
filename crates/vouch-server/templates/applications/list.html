@@ -33,25 +33,26 @@
         </a>
     </div>
     {% else %}
-    <div class="bg-vouch-surface border border-vouch-border rounded-lg overflow-hidden">
-        <table class="min-w-full divide-y divide-vouch-border">
+    <div class="bg-vouch-surface border border-vouch-border rounded-lg overflow-x-auto">
+        <table class="w-full divide-y divide-vouch-border">
             <thead class="bg-vouch-raised">
                 <tr>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Name</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Type</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Status</th>
-                    <th class="px-6 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Last Used</th>
-                    <th class="px-6 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">Actions</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Name</th>
+                    <th class="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Type</th>
+                    <th class="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Scope</th>
+                    <th class="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Status</th>
+                    <th class="px-3 py-3 text-left text-xs font-medium text-gray-400 uppercase tracking-wider">Last Used</th>
+                    <th class="px-4 py-3 text-right text-xs font-medium text-gray-400 uppercase tracking-wider">Actions</th>
                 </tr>
             </thead>
             <tbody class="divide-y divide-vouch-border">
                 {% for app in applications %}
                 <tr class="hover:bg-vouch-raised">
-                    <td class="px-6 py-4 whitespace-nowrap">
-                        <div class="text-sm font-medium text-gray-200">{{ app.name }}</div>
-                        <div class="text-sm text-gray-500 font-mono">{{ app.client_id }}</div>
+                    <td class="px-4 py-4 whitespace-nowrap">
+                        <a href="/applications/{{ app.id }}" class="text-sm font-medium text-gray-200 hover:text-vouch-accent transition-colors">{{ app.name }}</a>
+                        <div class="text-xs text-gray-500 font-mono truncate max-w-[200px]">{{ app.client_id }}</div>
                     </td>
-                    <td class="px-6 py-4 whitespace-nowrap">
+                    <td class="px-3 py-4 whitespace-nowrap">
                         <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded
                             {% if app.application_type == "web" %}bg-[#0d1f3c] text-[#539fe5]
                             {% elif app.application_type == "native" %}bg-vouch-success-bg text-vouch-success
@@ -60,7 +61,20 @@
                             {{ app.application_type }}
                         </span>
                     </td>
-                    <td class="px-6 py-4 whitespace-nowrap">
+                    <td class="px-3 py-4 whitespace-nowrap">
+                        <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded cursor-help relative group
+                            {% match app.access_scope %}
+                            {% when crate::db::AccessScope::Organization %}bg-[#0d2d1f] text-[#4ade80]
+                            {% when crate::db::AccessScope::Personal %}bg-[#2d1f0d] text-[#fbbf24]
+                            {% when crate::db::AccessScope::Public %}bg-[#0d1f3c] text-[#539fe5]
+                            {% endmatch %}">
+                            {{ app.access_scope.display_name() }}
+                            <span class="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 text-xs text-gray-200 bg-gray-800 rounded whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none z-10">
+                                {{ app.access_scope.description() }}
+                            </span>
+                        </span>
+                    </td>
+                    <td class="px-3 py-4 whitespace-nowrap">
                         {% if app.active %}
                         <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded bg-vouch-success-bg text-vouch-success">
                             Active
@@ -71,12 +85,25 @@
                         </span>
                         {% endif %}
                     </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
+                    <td class="px-3 py-4 whitespace-nowrap text-sm text-gray-500">
                         {% match app.last_used_at %}
                             {% when Some with (date) %}{{ date }}{% when None %}Never{% endmatch %}
                     </td>
-                    <td class="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
-                        <a href="/applications/{{ app.id }}" class="text-vouch-accent hover:text-vouch-accent-hover">View</a>
+                    <td class="px-4 py-4 whitespace-nowrap text-right">
+                        <div class="flex items-center justify-end gap-3">
+                            <a href="/applications/{{ app.id }}?edit=1" class="text-gray-400 hover:text-vouch-accent transition-colors" title="Edit">
+                                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="m16.862 4.487 1.687-1.688a1.875 1.875 0 1 1 2.652 2.652L10.582 16.07a4.5 4.5 0 0 1-1.897 1.13L6 18l.8-2.685a4.5 4.5 0 0 1 1.13-1.897l8.932-8.931Zm0 0L19.5 7.125"/>
+                                </svg>
+                            </a>
+                            <form action="/applications/{{ app.id }}/delete" method="POST" class="inline" onsubmit="return confirm('Are you sure you want to delete this application?');">
+                                <button type="submit" class="text-gray-400 hover:text-vouch-error transition-colors" title="Delete">
+                                    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                                        <path stroke-linecap="round" stroke-linejoin="round" d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0"/>
+                                    </svg>
+                                </button>
+                            </form>
+                        </div>
                     </td>
                 </tr>
                 {% endfor %}

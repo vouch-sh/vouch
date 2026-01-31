@@ -5,7 +5,7 @@
 //! OAuth applications that can integrate with Vouch.
 
 use crate::AppState;
-use crate::db::{self, OAuthClient, OAuthClientType, OAuthEventType};
+use crate::db::{self, AccessScope, OAuthClient, OAuthClientType, OAuthEventType};
 use crate::impl_template_response;
 use askama::Template;
 use aws_lc_rs::digest::{self, SHA256};
@@ -59,12 +59,15 @@ pub struct ApplicationInfo {
     pub active: bool,
     pub created_at: String,
     pub last_used_at: Option<String>,
+    pub access_scope: AccessScope,
+    pub org_id: Option<String>,
 }
 
 impl From<OAuthClient> for ApplicationInfo {
     fn from(client: OAuthClient) -> Self {
         let redirect_uris = client.get_redirect_uris();
         let active = client.is_active();
+        let access_scope = client.get_access_scope();
         Self {
             id: client.id,
             client_id: client.client_id,
@@ -75,6 +78,8 @@ impl From<OAuthClient> for ApplicationInfo {
             active,
             created_at: client.created_at,
             last_used_at: client.last_used_at,
+            access_scope,
+            org_id: client.org_id,
         }
     }
 }
@@ -86,6 +91,8 @@ impl From<OAuthClient> for ApplicationInfo {
 pub struct ApplicationCreateTemplate {
     /// Authentication context for header display.
     pub auth: AuthContext,
+    /// Whether the user has an organization (affects available access scopes).
+    pub user_has_org: bool,
 }
 
 /// Application created success page (shows credentials once).
@@ -180,6 +187,7 @@ pub struct CreateApplicationForm {
     pub description: Option<String>,
     pub application_type: String,
     pub redirect_uris: String,
+    pub access_scope: String,
 }
 
 /// Form data for updating an application.
@@ -188,6 +196,7 @@ pub struct UpdateApplicationForm {
     pub name: String,
     pub description: Option<String>,
     pub redirect_uris: String,
+    pub access_scope: Option<String>,
 }
 
 /// API request for creating an application.
@@ -197,6 +206,7 @@ pub struct CreateApplicationRequest {
     pub description: Option<String>,
     pub application_type: String,
     pub redirect_uris: Vec<String>,
+    pub access_scope: Option<String>,
 }
 
 /// API request for updating an application.
@@ -205,6 +215,7 @@ pub struct UpdateApplicationRequest {
     pub name: Option<String>,
     pub description: Option<String>,
     pub redirect_uris: Option<Vec<String>>,
+    pub access_scope: Option<String>,
 }
 
 /// API response for a created application.
@@ -215,6 +226,7 @@ pub struct CreateApplicationResponse {
     pub client_secret: Option<String>,
     pub name: String,
     pub application_type: String,
+    pub access_scope: String,
 }
 
 /// API response for application details.
@@ -230,12 +242,15 @@ pub struct ApplicationResponse {
     pub created_at: String,
     pub updated_at: String,
     pub last_used_at: Option<String>,
+    pub access_scope: String,
+    pub org_id: Option<String>,
 }
 
 impl From<OAuthClient> for ApplicationResponse {
     fn from(client: OAuthClient) -> Self {
         let redirect_uris = client.get_redirect_uris();
         let active = client.is_active();
+        let access_scope = client.get_access_scope();
         Self {
             id: client.id,
             client_id: client.client_id,
@@ -247,6 +262,8 @@ impl From<OAuthClient> for ApplicationResponse {
             created_at: client.created_at,
             updated_at: client.updated_at,
             last_used_at: client.last_used_at,
+            access_scope: access_scope.as_str().to_string(),
+            org_id: client.org_id,
         }
     }
 }
@@ -316,6 +333,30 @@ fn parse_redirect_uris(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// Validate that all redirect URIs are valid HTTP(S) URLs.
+/// Returns `Ok(())` if all URIs are valid, or `Err` with a list of invalid URIs.
+fn validate_redirect_uris(uris: &[String]) -> Result<(), Vec<String>> {
+    let invalid: Vec<String> = uris
+        .iter()
+        .filter(|uri| {
+            match url::Url::parse(uri) {
+                Ok(parsed) => {
+                    // Only allow http and https schemes
+                    !matches!(parsed.scheme(), "http" | "https")
+                }
+                Err(_) => true,
+            }
+        })
+        .cloned()
+        .collect();
+
+    if invalid.is_empty() {
+        Ok(())
+    } else {
+        Err(invalid)
+    }
+}
+
 // ============================================================================
 // Web UI Handlers
 // ============================================================================
@@ -357,7 +398,8 @@ pub async fn create_application_page(
         return ApplicationUnauthorizedTemplate.into_response();
     };
 
-    ApplicationCreateTemplate { auth }.into_response()
+    let user_has_org = auth.has_org;
+    ApplicationCreateTemplate { auth, user_has_org }.into_response()
 }
 
 /// Create a new application.
@@ -393,6 +435,37 @@ pub async fn create_application_form(
         .into_response();
     };
 
+    // Parse and validate access scope
+    let access_scope = AccessScope::from_str(&form.access_scope).unwrap_or_default();
+
+    // Validate: Organization scope requires user to have an org
+    if access_scope == AccessScope::Organization && !auth.has_org {
+        return ApplicationErrorTemplate {
+            title: "Invalid Input".to_string(),
+            message: "Organization scope requires organization membership.".to_string(),
+            back_url: "/applications/new".to_string(),
+        }
+        .into_response();
+    }
+
+    // Get user's org_id for org-scoped apps
+    let user_org_id = if auth.has_org {
+        // Fetch user to get org_id
+        match db::get_user_by_id(&state.db, user_id).await {
+            Ok(Some(user)) => user.org_id,
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // Set org_id only for organization-scoped apps
+    let org_id = if access_scope == AccessScope::Organization {
+        user_org_id.as_deref()
+    } else {
+        None
+    };
+
     let redirect_uris = parse_redirect_uris(&form.redirect_uris);
 
     // For non-service apps, at least one redirect URI is required
@@ -400,6 +473,19 @@ pub async fn create_application_form(
         return ApplicationErrorTemplate {
             title: "Invalid Input".to_string(),
             message: "At least one redirect URI is required.".to_string(),
+            back_url: "/applications/new".to_string(),
+        }
+        .into_response();
+    }
+
+    // Validate redirect URIs are valid URLs
+    if let Err(invalid) = validate_redirect_uris(&redirect_uris) {
+        return ApplicationErrorTemplate {
+            title: "Invalid Input".to_string(),
+            message: format!(
+                "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
+                invalid.join(", ")
+            ),
             back_url: "/applications/new".to_string(),
         }
         .into_response();
@@ -413,6 +499,8 @@ pub async fn create_application_form(
         form.description.as_deref(),
         app_type,
         &redirect_uris,
+        access_scope,
+        org_id,
     )
     .await
     {
@@ -583,7 +671,53 @@ pub async fn update_application_form(
         .into_response();
     }
 
+    // Parse access scope if provided
+    let access_scope = form
+        .access_scope
+        .as_ref()
+        .and_then(|s| AccessScope::from_str(s));
+
+    // Validate: Organization scope requires user to have an org
+    if access_scope == Some(AccessScope::Organization) && !auth.has_org {
+        return ApplicationErrorTemplate {
+            title: "Invalid Input".to_string(),
+            message: "Organization scope requires organization membership.".to_string(),
+            back_url: format!("/applications/{}", app_id),
+        }
+        .into_response();
+    }
+
+    // Get user's org_id for org-scoped apps
+    let user_org_id = if auth.has_org {
+        match db::get_user_by_id(&state.db, user_id).await {
+            Ok(Some(user)) => user.org_id,
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    // Set org_id only for organization-scoped apps
+    let org_id = if access_scope == Some(AccessScope::Organization) {
+        user_org_id.as_deref()
+    } else {
+        None
+    };
+
     let redirect_uris = parse_redirect_uris(&form.redirect_uris);
+
+    // Validate redirect URIs are valid URLs
+    if let Err(invalid) = validate_redirect_uris(&redirect_uris) {
+        return ApplicationErrorTemplate {
+            title: "Invalid Input".to_string(),
+            message: format!(
+                "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
+                invalid.join(", ")
+            ),
+            back_url: format!("/applications/{}", app_id),
+        }
+        .into_response();
+    }
 
     // Update the application
     if let Err(e) = db::update_oauth_client(
@@ -592,6 +726,8 @@ pub async fn update_application_form(
         name,
         form.description.as_deref(),
         &redirect_uris,
+        access_scope,
+        org_id,
     )
     .await
     {
@@ -794,12 +930,59 @@ pub async fn create_application_api(
         )
     })?;
 
+    // Parse access scope (default to personal if not provided)
+    let access_scope = req
+        .access_scope
+        .as_ref()
+        .and_then(|s| AccessScope::from_str(s))
+        .unwrap_or_default();
+
+    // Get user to check org membership
+    let user = db::get_user_by_id(&state.db, &claims.sub)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
+
+    // Validate: Organization scope requires user to have an org
+    if access_scope == AccessScope::Organization && user.org_id.is_none() {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_access_scope",
+            "Organization scope requires organization membership",
+        ));
+    }
+
+    // Set org_id only for organization-scoped apps
+    let org_id = if access_scope == AccessScope::Organization {
+        user.org_id.as_deref()
+    } else {
+        None
+    };
+
     // For non-service apps, at least one redirect URI is required
     if !matches!(app_type, OAuthClientType::Service) && req.redirect_uris.is_empty() {
         return Err(json_error(
             StatusCode::BAD_REQUEST,
             "invalid_redirect_uris",
             "At least one redirect URI is required",
+        ));
+    }
+
+    // Validate redirect URIs are valid URLs
+    if let Err(invalid) = validate_redirect_uris(&req.redirect_uris) {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_redirect_uris",
+            &format!(
+                "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
+                invalid.join(", ")
+            ),
         ));
     }
 
@@ -811,6 +994,8 @@ pub async fn create_application_api(
         req.description.as_deref(),
         app_type,
         &req.redirect_uris,
+        access_scope,
+        org_id,
     )
     .await
     .map_err(|e| {
@@ -855,6 +1040,7 @@ pub async fn create_application_api(
         client_secret,
         name: name.to_string(),
         application_type: req.application_type,
+        access_scope: access_scope.as_str().to_string(),
     }))
 }
 
@@ -925,6 +1111,48 @@ pub async fn update_application_api(
         ));
     }
 
+    // Parse access scope if provided
+    let access_scope = req
+        .access_scope
+        .as_ref()
+        .and_then(|s| AccessScope::from_str(s));
+
+    // Get user to check org membership if changing to organization scope
+    let user = if access_scope == Some(AccessScope::Organization) {
+        Some(
+            db::get_user_by_id(&state.db, &claims.sub)
+                .await
+                .map_err(|e| {
+                    json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "db_error",
+                        &e.to_string(),
+                    )
+                })?
+                .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "User not found"))?,
+        )
+    } else {
+        None
+    };
+
+    // Validate: Organization scope requires user to have an org
+    if access_scope == Some(AccessScope::Organization)
+        && user.as_ref().is_some_and(|u| u.org_id.is_none())
+    {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_access_scope",
+            "Organization scope requires organization membership",
+        ));
+    }
+
+    // Set org_id only for organization-scoped apps
+    let org_id = if access_scope == Some(AccessScope::Organization) {
+        user.as_ref().and_then(|u| u.org_id.as_deref())
+    } else {
+        None
+    };
+
     // Apply updates
     let name = req.name.as_deref().unwrap_or(&client.name);
     let description = req.description.as_deref().or(client.description.as_deref());
@@ -933,15 +1161,35 @@ pub async fn update_application_api(
         .clone()
         .unwrap_or_else(|| client.get_redirect_uris());
 
-    db::update_oauth_client(&state.db, &app_id, name, description, &redirect_uris)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?;
+    // Validate redirect URIs are valid URLs
+    if let Err(invalid) = validate_redirect_uris(&redirect_uris) {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_redirect_uris",
+            &format!(
+                "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
+                invalid.join(", ")
+            ),
+        ));
+    }
+
+    db::update_oauth_client(
+        &state.db,
+        &app_id,
+        name,
+        description,
+        &redirect_uris,
+        access_scope,
+        org_id,
+    )
+    .await
+    .map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            &e.to_string(),
+        )
+    })?;
 
     // Fetch updated client
     let updated = db::get_oauth_client_by_id(&state.db, &app_id)
