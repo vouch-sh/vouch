@@ -125,6 +125,20 @@ pub struct DocsKubernetesTemplate {
 
 impl_template_response!(DocsKubernetesTemplate);
 
+/// SCIM Provisioning documentation page template.
+#[derive(Template)]
+#[template(path = "docs/scim.html")]
+pub struct DocsScimTemplate {
+    /// The OIDC provider URL (verification_base_url).
+    pub provider_url: String,
+    /// Organization name for branding.
+    pub org_name: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
+}
+
+impl_template_response!(DocsScimTemplate);
+
 /// Documentation index page.
 /// GET /docs
 pub async fn docs_index_page(
@@ -230,6 +244,17 @@ pub async fn kubernetes_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsKubernetesTemplate {
+        provider_url: state.config.verification_base_url.clone(),
+        org_name: state.config.get_org_display_name().to_string(),
+        auth,
+    }
+}
+
+/// SCIM Provisioning documentation page.
+/// GET /docs/scim
+pub async fn scim_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
+    let auth = get_auth_context(&state, &jar).await;
+    DocsScimTemplate {
         provider_url: state.config.verification_base_url.clone(),
         org_name: state.config.get_org_display_name().to_string(),
         auth,
