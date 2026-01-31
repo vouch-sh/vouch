@@ -2,6 +2,7 @@
 //! Credential issuance commands.
 
 pub mod aws;
+pub mod cargo;
 pub mod docker;
 pub mod gcp;
 pub mod github;
