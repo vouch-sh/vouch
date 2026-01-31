@@ -294,7 +294,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 | ID | Mitigation | Status |
 |----|------------|--------|
 | M-01 | No passwords in authentication flow | Implemented |
-| M-02 | Rate limiting on authentication endpoints | Implemented |
+| M-02 | Rate limiting on authentication endpoints | Planned |
 | M-03 | Account lockout after failed PIN attempts (YubiKey enforced) | Implemented |
 
 ---
@@ -438,7 +438,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 | ID | Mitigation | Status |
 |----|------------|--------|
 | M-29 | Self-hosted deployment option for high-security environments | Implemented |
-| M-30 | Immutable audit logs with tamper detection | Implemented |
+| M-30 | Immutable audit logs with tamper detection | Planned |
 | M-31 | SSH CA key stored with restrictive permissions | Implemented |
 | M-32 | Certificate transparency logging (planned) | Planned |
 | M-33 | Air-gapped deployment option | Planned |
@@ -576,7 +576,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 |----|------------|--------|
 | M-62 | TLS 1.3 mandatory for all connections | Implemented |
 | M-63 | Certificate validation via rustls | Implemented |
-| M-64 | HSTS headers on web endpoints | Implemented |
+| M-64 | HSTS headers on web endpoints | Planned |
 | M-65 | No HTTP downgrade allowed | Implemented |
 
 ---
@@ -612,8 +612,8 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 |----|------------|--------|
 | M-68 | User code ~40 bits entropy | Implemented |
 | M-69 | 10-minute code expiration | Implemented |
-| M-70 | 5 attempts per code before invalidation | Implemented |
-| M-71 | Rate limiting: 10 requests/minute per IP | Implemented |
+| M-70 | 5 attempts per code before invalidation | Planned |
+| M-71 | Rate limiting: 10 requests/minute per IP | Planned |
 | M-72 | `slow_down` response for rapid polling | Implemented |
 
 ---
@@ -686,7 +686,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 | ID | Mitigation | Status |
 |----|------------|--------|
 | M-83 | `authenticatorAttachment: cross-platform` enforced | Implemented |
-| M-84 | AAGUID allowlist (YubiKey 5 series only) | Implemented |
+| M-84 | AAGUID allowlist enforcement (YubiKey 5 series only) | Planned |
 | M-85 | Attestation format validation (reject TPM, AndroidKey, Apple) | Implemented |
 | M-86 | Hardware-bound policy enforced at server | Implemented |
 
@@ -717,8 +717,8 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 | Status | Count | Mitigations |
 |--------|-------|-------------|
-| **Implemented** | 80 | M-01 through M-89 (most) |
-| **Planned** | 5 | M-32, M-33, M-43, M-48a, M-52, M-80 |
+| **Implemented** | 74 | M-01 through M-89 (most) |
+| **Planned** | 12 | M-02, M-30, M-32, M-33, M-43, M-48a, M-52, M-64, M-70, M-71, M-80, M-84 |
 | **Hardware** | 2 | M-09, M-10 (YubiKey enforced) |
 | **Deployment** | 1 | M-88 (infrastructure dependent) |
 | **Documentation** | 1 | M-16 (user guidance) |
