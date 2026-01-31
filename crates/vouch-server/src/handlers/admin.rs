@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Organization admin handlers for SCIM token management and auth events.
 //!
-//! These APIs use JWT Bearer authentication from regular FIDO2 sessions.
-//! Only organization admins can access these endpoints.
+//! These APIs support both JWT Bearer authentication and cookie-based authentication
+//! from regular FIDO2 sessions. Only organization admins can access these endpoints.
 
 use crate::AppState;
 use crate::db;
@@ -14,6 +14,7 @@ use axum::{
     http::StatusCode,
 };
 use axum_extra::TypedHeader;
+use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use headers::authorization::{Authorization, Bearer};
@@ -28,14 +29,16 @@ use super::json_error;
 // Org Admin Extraction
 // ============================================================================
 
-/// Extract and validate an org admin from the JWT Bearer token.
+/// Extract and validate an org admin from Bearer token or cookie.
 ///
+/// Tries Authorization header first, then falls back to vouch_session cookie.
 /// Returns the user and their org_id if they are an org admin.
 async fn extract_org_admin(
     state: &AppState,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: &CookieJar,
 ) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
-    let session = extract_session(state, auth_header).await?;
+    let session = extract_session(state, auth_header, jar).await?;
 
     let user = db::get_user_by_id(&state.db, &session.claims.sub)
         .await
@@ -91,9 +94,10 @@ pub struct AuthEventsQuery {
 pub async fn list_auth_events(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Query(query): Query<AuthEventsQuery>,
 ) -> Result<Json<ListAuthEventsResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, _org_id) = extract_org_admin(&state, auth_header).await?;
+    let (_user, _org_id) = extract_org_admin(&state, auth_header, &jar).await?;
 
     // Build query params
     let db_query = db::AuthEventQuery {
@@ -158,8 +162,8 @@ pub async fn list_auth_events(
 #[derive(Debug, Deserialize)]
 pub struct CreateScimTokenRequest {
     pub description: Option<String>,
-    /// Token expiration in days (optional, None = never expires).
-    pub expires_in_days: Option<i64>,
+    /// Token expiration in days (required, 1-365 days).
+    pub expires_in_days: i64,
 }
 
 /// Response for created SCIM token.
@@ -168,7 +172,7 @@ pub struct CreateScimTokenResponse {
     pub id: String,
     pub token: String,
     pub description: Option<String>,
-    pub expires_at: Option<String>,
+    pub expires_at: String,
 }
 
 /// SCIM token info for listing.
@@ -192,9 +196,19 @@ pub struct ListScimTokensResponse {
 pub async fn create_scim_token(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Json(req): Json<CreateScimTokenRequest>,
 ) -> Result<Json<CreateScimTokenResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_org_admin(&state, auth_header).await?;
+    let (_user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
+
+    // Validate expiration (required, 1-365 days)
+    if req.expires_in_days < 1 || req.expires_in_days > 365 {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_expiration",
+            "expires_in_days must be between 1 and 365",
+        ));
+    }
 
     // Generate a secure random token
     let mut token_bytes = [0u8; 32];
@@ -210,21 +224,19 @@ pub async fn create_scim_token(
     // Hash the token for storage
     let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
 
-    // Calculate expiration if specified
-    let expires_at = req.expires_in_days.map(|days| {
-        let duration = jiff::Span::new().days(days);
-        jiff::Timestamp::now()
-            .checked_add(duration)
-            .map(|t| t.to_string())
-            .unwrap_or_default()
-    });
+    // Calculate expiration
+    let duration = jiff::Span::new().days(req.expires_in_days);
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(duration)
+        .map(|t| t.to_string())
+        .unwrap_or_default();
 
     // Store the token
     let token_id = db::create_scim_token(
         &state.db,
         &token_hash,
         req.description.as_deref(),
-        expires_at.as_deref(),
+        Some(&expires_at),
         Some(&org_id),
     )
     .await
@@ -251,8 +263,9 @@ pub async fn create_scim_token(
 pub async fn list_scim_tokens(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
 ) -> Result<Json<ListScimTokensResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_org_admin(&state, auth_header).await?;
+    let (_user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
 
     let tokens = db::list_scim_tokens(&state.db, Some(&org_id))
         .await
@@ -283,9 +296,10 @@ pub async fn list_scim_tokens(
 pub async fn delete_scim_token(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Path(token_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let (_user, _org_id) = extract_org_admin(&state, auth_header).await?;
+    let (_user, _org_id) = extract_org_admin(&state, auth_header, &jar).await?;
 
     db::delete_scim_token(&state.db, &token_id)
         .await

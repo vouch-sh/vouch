@@ -144,10 +144,11 @@ pub struct ValidatedSession {
     pub token_hash: String,
 }
 
-/// Extract and validate session from Authorization header.
+/// Extract and validate session from Authorization header only.
 ///
 /// This validates the JWT token and checks that a corresponding session
-/// exists in the database.
+/// exists in the database. For APIs that should also accept cookies,
+/// use `extract_session` instead.
 ///
 /// # Errors
 ///
@@ -155,7 +156,7 @@ pub struct ValidatedSession {
 /// - The Authorization header is missing or invalid
 /// - The JWT token is invalid or expired
 /// - No session exists in the database for this token
-pub async fn extract_session(
+async fn extract_session_from_header(
     state: &AppState,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
 ) -> Result<ValidatedSession, (StatusCode, Json<ApiError>)> {
@@ -271,6 +272,24 @@ pub async fn extract_session_from_cookie(
     Ok(ValidatedSession { claims, token_hash })
 }
 
+/// Extract and validate session from Bearer token or cookie.
+///
+/// Tries Authorization header first, then falls back to vouch_session cookie.
+/// This allows API endpoints to be called via curl with either:
+/// - `Authorization: Bearer <token>` header
+/// - `-b ~/.vouch/cookie.txt` cookie file
+pub async fn extract_session(
+    state: &AppState,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: &CookieJar,
+) -> Result<ValidatedSession, (StatusCode, Json<ApiError>)> {
+    if auth_header.is_some() {
+        extract_session_from_header(state, auth_header).await
+    } else {
+        extract_session_from_cookie(state, jar).await
+    }
+}
+
 /// Create a session cookie.
 ///
 /// Returns a Cookie configured with proper security attributes.
@@ -311,8 +330,9 @@ pub fn clear_session_cookie() -> Cookie<'static> {
 pub async fn extract_session_with_email(
     state: &AppState,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: &CookieJar,
 ) -> Result<(SessionClaims, String), (StatusCode, Json<ApiError>)> {
-    let session = extract_session(state, auth_header).await?;
+    let session = extract_session(state, auth_header, jar).await?;
 
     // Get user email
     let user = db::get_user_by_id(&state.db, &session.claims.sub)

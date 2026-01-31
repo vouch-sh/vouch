@@ -9,6 +9,7 @@ use axum::{
     http::StatusCode,
 };
 use axum_extra::TypedHeader;
+use axum_extra::extract::cookie::CookieJar;
 use headers::authorization::{Authorization, Bearer};
 use std::sync::Arc;
 use vouch_common::{
@@ -22,8 +23,9 @@ use super::{extract_session, json_error};
 pub async fn list_keys(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
 ) -> Result<Json<ListKeysResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header).await?;
+    let session = extract_session(&state, auth_header, &jar).await?;
     let claims = session.claims;
 
     // Get all authenticators for this user
@@ -64,10 +66,11 @@ pub async fn list_keys(
 pub async fn rename_key(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Path(key_id): Path<String>,
     Json(req): Json<RenameKeyRequest>,
 ) -> Result<Json<RenameKeyResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header).await?;
+    let session = extract_session(&state, auth_header, &jar).await?;
     let claims = session.claims;
 
     // Validate name
@@ -135,9 +138,10 @@ pub async fn rename_key(
 pub async fn delete_key(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header).await?;
+    let session = extract_session(&state, auth_header, &jar).await?;
     let claims = session.claims;
 
     // Get the authenticator to verify ownership

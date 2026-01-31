@@ -148,6 +148,7 @@ async fn main() -> Result<()> {
         .route("/docs/kubernetes", get(handlers::docs::kubernetes_page))
         .route("/docs/github", get(handlers::docs::github_setup_page))
         .route("/docs/applications", get(handlers::docs::applications_page))
+        .route("/docs/scim", get(handlers::docs::scim_page))
         // Integrations page
         .route(
             "/integrations",

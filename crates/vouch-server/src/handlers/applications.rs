@@ -25,8 +25,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::ApiError;
 
-use super::common::AuthContext;
-use super::{extract_session, extract_session_from_cookie, json_error};
+use super::common::{AuthContext, extract_session};
+use super::{extract_session_from_cookie, json_error};
 
 // ============================================================================
 // Constants
@@ -880,8 +880,9 @@ pub async fn rotate_secret_form(
 pub async fn list_applications_api(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
 ) -> Result<Json<ListApplicationsResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header).await?;
+    let session = extract_session(&state, auth_header, &jar).await?;
     let claims = session.claims;
 
     let applications = db::get_oauth_clients_for_user(&state.db, &claims.sub)
@@ -905,9 +906,10 @@ pub async fn list_applications_api(
 pub async fn create_application_api(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Json(req): Json<CreateApplicationRequest>,
 ) -> Result<Json<CreateApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header).await?;
+    let session = extract_session(&state, auth_header, &jar).await?;
     let claims = session.claims;
 
     // Validate inputs
@@ -1047,9 +1049,10 @@ pub async fn create_application_api(
 pub async fn get_application_api(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header).await?;
+    let session = extract_session(&state, auth_header, &jar).await?;
     let claims = session.claims;
 
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
@@ -1080,10 +1083,11 @@ pub async fn get_application_api(
 pub async fn update_application_api(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Path(app_id): Path<String>,
     Json(req): Json<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header).await?;
+    let session = extract_session(&state, auth_header, &jar).await?;
     let claims = session.claims;
 
     // Get existing application
@@ -1209,9 +1213,10 @@ pub async fn update_application_api(
 pub async fn delete_application_api(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header).await?;
+    let session = extract_session(&state, auth_header, &jar).await?;
     let claims = session.claims;
 
     // Verify ownership
@@ -1254,9 +1259,10 @@ pub async fn delete_application_api(
 pub async fn rotate_secret_api(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Result<Json<RotateSecretResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header).await?;
+    let session = extract_session(&state, auth_header, &jar).await?;
     let claims = session.claims;
 
     // Verify ownership
@@ -1342,9 +1348,10 @@ pub async fn rotate_secret_api(
 pub async fn revoke_tokens_api(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header).await?;
+    let session = extract_session(&state, auth_header, &jar).await?;
     let claims = session.claims;
 
     // Verify ownership
