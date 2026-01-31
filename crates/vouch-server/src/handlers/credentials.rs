@@ -793,6 +793,132 @@ pub async fn get_github_token(
 }
 
 // ============================================================================
+// Docker Registry Config Endpoints
+// ============================================================================
+
+/// Get Docker ECR configuration for the user's organization.
+///
+/// GET /v1/credentials/docker/ecr/config
+///
+/// Returns the IAM role ARN configured for ECR access. The CLI uses this
+/// to assume the role and get ECR authorization tokens.
+pub async fn get_docker_ecr_config(
+    State(state): State<Arc<AppState>>,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+) -> Result<Json<vouch_common::DockerEcrConfigResponse>, (StatusCode, Json<ApiError>)> {
+    // Validate session and get user
+    let session = extract_session(&state, auth_header).await?;
+    let user = db::get_user_by_id(&state.db, &session.claims.sub)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
+
+    // Get AWS integration config for the organization
+    let integration = db::get_cloud_integration(&state.db, &user.org_id, "aws")
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?;
+
+    match integration {
+        Some(config_json) => {
+            // Parse the AWS config
+            let aws_config: vouch_common::AwsIntegrationConfig = serde_json::from_str(&config_json)
+                .map_err(|e| {
+                    json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "config_parse_error",
+                        &format!("Failed to parse AWS config: {e}"),
+                    )
+                })?;
+
+            Ok(Json(vouch_common::DockerEcrConfigResponse {
+                configured: aws_config.default_role_arn.is_some(),
+                role_arn: aws_config.default_role_arn,
+            }))
+        }
+        None => Ok(Json(vouch_common::DockerEcrConfigResponse {
+            configured: false,
+            role_arn: None,
+        })),
+    }
+}
+
+/// Get Docker GCP registry configuration for the user's organization.
+///
+/// GET /v1/credentials/docker/gcp/config
+///
+/// Returns the Workload Identity Pool audience URL for GCP Docker registries
+/// (GCR, Artifact Registry). The CLI uses this to get OIDC tokens for Docker.
+pub async fn get_docker_gcp_config(
+    State(state): State<Arc<AppState>>,
+    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+) -> Result<Json<vouch_common::DockerGcpConfigResponse>, (StatusCode, Json<ApiError>)> {
+    // Validate session and get user
+    let session = extract_session(&state, auth_header).await?;
+    let user = db::get_user_by_id(&state.db, &session.claims.sub)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?
+        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
+
+    // Get GCP integration config for the organization
+    let integration = db::get_cloud_integration(&state.db, &user.org_id, "gcp")
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?;
+
+    match integration {
+        Some(config_json) => {
+            // Parse the GCP config
+            let gcp_config: vouch_common::GcpIntegrationConfig = serde_json::from_str(&config_json)
+                .map_err(|e| {
+                    json_error(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "config_parse_error",
+                        &format!("Failed to parse GCP config: {e}"),
+                    )
+                })?;
+
+            // Build the audience URL from the GCP config
+            let audience = format!(
+                "//iam.googleapis.com/projects/{}/locations/global/workloadIdentityPools/{}/providers/{}",
+                gcp_config.project_number, gcp_config.pool_id, gcp_config.provider_id
+            );
+
+            Ok(Json(vouch_common::DockerGcpConfigResponse {
+                configured: true,
+                audience: Some(audience),
+            }))
+        }
+        None => Ok(Json(vouch_common::DockerGcpConfigResponse {
+            configured: false,
+            audience: None,
+        })),
+    }
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

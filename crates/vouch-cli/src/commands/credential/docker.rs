@@ -252,20 +252,20 @@ async fn get_ecr_credential(
         .context("failed to get OIDC token from Vouch server")?;
 
     // Get the ECR role ARN from config or server
-    // For now, we'll need to get this from the credential config endpoint
-    let ecr_config: EcrConfigResponse = client
+    let ecr_config: vouch_common::DockerEcrConfigResponse = client
         .get_authenticated("/v1/credentials/docker/ecr/config")
         .await
-        .context("ECR not configured - contact your administrator")?;
+        .context("failed to get ECR configuration")?;
+
+    let role_arn = ecr_config.role_arn.ok_or_else(|| {
+        anyhow::anyhow!("ECR not configured - contact your administrator to set up AWS integration")
+    })?;
 
     // Call STS AssumeRoleWithWebIdentity
-    let sts_creds = assume_role_with_web_identity(
-        &ecr_config.role_arn,
-        "vouch-docker",
-        &token_response.id_token,
-    )
-    .await
-    .context("failed to assume AWS role")?;
+    let sts_creds =
+        assume_role_with_web_identity(&role_arn, "vouch-docker", &token_response.id_token)
+            .await
+            .context("failed to assume AWS role")?;
 
     // Call ECR GetAuthorizationToken
     let ecr_token = get_ecr_authorization_token(
@@ -280,12 +280,6 @@ async fn get_ecr_credential(
         username: "AWS".to_string(),
         secret: ecr_token,
     })
-}
-
-/// ECR configuration from server.
-#[derive(Debug, Deserialize)]
-struct EcrConfigResponse {
-    role_arn: String,
 }
 
 /// Call AWS STS AssumeRoleWithWebIdentity.
@@ -530,14 +524,20 @@ async fn get_gcp_credential(server: &str) -> Result<DockerCredential> {
     let client = VouchClient::new(server)?;
 
     // Get GCP configuration to determine the audience
-    let gcp_config: GcpDockerConfigResponse = client
+    let gcp_config: vouch_common::DockerGcpConfigResponse = client
         .get_authenticated("/v1/credentials/docker/gcp/config")
         .await
-        .context("GCP Docker registry not configured - contact your administrator")?;
+        .context("failed to get GCP configuration")?;
+
+    let audience = gcp_config.audience.ok_or_else(|| {
+        anyhow::anyhow!(
+            "GCP Docker registry not configured - contact your administrator to set up GCP integration"
+        )
+    })?;
 
     // URL-encode the audience parameter
     let encoded_audience: String =
-        url::form_urlencoded::byte_serialize(gcp_config.audience.as_bytes()).collect();
+        url::form_urlencoded::byte_serialize(audience.as_bytes()).collect();
     let path = format!("/v1/credentials/gcp/token?audience={encoded_audience}");
 
     // Get OIDC token from Vouch server
@@ -552,12 +552,6 @@ async fn get_gcp_credential(server: &str) -> Result<DockerCredential> {
         username: "oauth2accesstoken".to_string(),
         secret: token_response.id_token,
     })
-}
-
-/// GCP Docker configuration from server.
-#[derive(Debug, Deserialize)]
-struct GcpDockerConfigResponse {
-    audience: String,
 }
 
 /// Get credentials for GitHub Container Registry.

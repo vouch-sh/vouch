@@ -98,24 +98,27 @@ pub async fn run(registries: &[String], configure: bool) -> Result<()> {
     Ok(())
 }
 
-/// Get the path where docker-credential-vouch symlink should be created.
+/// Get the path where docker-credential-vouch should be created.
 fn get_symlink_path() -> Result<PathBuf> {
-    // Prefer ~/.local/bin if it exists or can be created
     let home = dirs::home_dir().context("could not determine home directory")?;
-    let local_bin = home.join(".local/bin");
 
-    // Check if ~/.local/bin is in PATH
-    if let Ok(path) = std::env::var("PATH") {
-        if path.contains(&local_bin.to_string_lossy().to_string()) {
-            return Ok(local_bin.join("docker-credential-vouch"));
-        }
+    #[cfg(unix)]
+    {
+        // On Unix, use ~/.local/bin
+        let local_bin = home.join(".local/bin");
+        Ok(local_bin.join("docker-credential-vouch"))
     }
 
-    // Fall back to ~/.local/bin anyway (user may need to add to PATH)
-    Ok(local_bin.join("docker-credential-vouch"))
+    #[cfg(windows)]
+    {
+        // On Windows, use %USERPROFILE%\.local\bin (we'll create a .bat file)
+        // This matches the Unix convention but Docker will find .bat files
+        let local_bin = home.join(".local").join("bin");
+        Ok(local_bin.join("docker-credential-vouch"))
+    }
 }
 
-/// Create the docker-credential-vouch symlink.
+/// Create the docker-credential-vouch symlink or wrapper script.
 fn create_credential_helper_symlink(vouch_path: &PathBuf, symlink_path: &PathBuf) -> Result<()> {
     // Ensure parent directory exists
     if let Some(parent) = symlink_path.parent() {
@@ -126,48 +129,70 @@ fn create_credential_helper_symlink(vouch_path: &PathBuf, symlink_path: &PathBuf
         }
     }
 
-    // Remove existing symlink if present
-    if symlink_path.exists() || symlink_path.is_symlink() {
-        std::fs::remove_file(symlink_path)
-            .with_context(|| format!("failed to remove existing {}", symlink_path.display()))?;
-    }
-
-    // Create symlink
     #[cfg(unix)]
     {
+        // Remove existing symlink if present
+        if symlink_path.exists() || symlink_path.is_symlink() {
+            std::fs::remove_file(symlink_path)
+                .with_context(|| format!("failed to remove existing {}", symlink_path.display()))?;
+        }
+
+        // Create symlink
         std::os::unix::fs::symlink(vouch_path, symlink_path)
             .with_context(|| format!("failed to create symlink at {}", symlink_path.display()))?;
+
+        println!(
+            "Created symlink: {} -> {}",
+            symlink_path.display(),
+            vouch_path.display()
+        );
+
+        // Check if the symlink directory is in PATH
+        if let Some(parent) = symlink_path.parent() {
+            let parent_str = parent.to_string_lossy().to_string();
+            if let Ok(path) = std::env::var("PATH") {
+                if !path.contains(&parent_str) {
+                    println!();
+                    println!("Note: {} is not in your PATH.", parent.display());
+                    println!("Add it to your shell profile:");
+                    println!("  export PATH=\"$PATH:{}\"", parent.display());
+                }
+            }
+        }
     }
 
     #[cfg(windows)]
     {
-        // On Windows, create a batch file wrapper instead of symlink
+        // On Windows, create a batch file wrapper
+        // Docker looks for docker-credential-vouch.exe or docker-credential-vouch.bat
+        let bat_path = symlink_path.with_extension("bat");
+
+        // Remove existing batch file if present
+        if bat_path.exists() {
+            std::fs::remove_file(&bat_path)
+                .with_context(|| format!("failed to remove existing {}", bat_path.display()))?;
+        }
+
+        // Create batch file that calls vouch with the docker credential subcommand
         let batch_content = format!(
-            "@echo off\r\n\"{}\" credential docker %*\r\n",
+            "@echo off\r\n\"{}\" credential docker %1\r\n",
             vouch_path.display()
         );
-        let batch_path = symlink_path.with_extension("bat");
-        std::fs::write(&batch_path, batch_content)
-            .with_context(|| format!("failed to create {}", batch_path.display()))?;
-        println!("Created: {}", batch_path.display());
-        return Ok(());
-    }
+        std::fs::write(&bat_path, &batch_content)
+            .with_context(|| format!("failed to create {}", bat_path.display()))?;
 
-    println!(
-        "Created symlink: {} -> {}",
-        symlink_path.display(),
-        vouch_path.display()
-    );
+        println!("Created: {}", bat_path.display());
 
-    // Check if the symlink directory is in PATH
-    if let Some(parent) = symlink_path.parent() {
-        let parent_str = parent.to_string_lossy().to_string();
-        if let Ok(path) = std::env::var("PATH") {
-            if !path.contains(&parent_str) {
-                println!();
-                println!("Note: {} is not in your PATH.", parent.display());
-                println!("Add it to your shell profile:");
-                println!("  export PATH=\"$PATH:{}\"", parent.display());
+        // Check if the directory is in PATH
+        if let Some(parent) = bat_path.parent() {
+            let parent_str = parent.to_string_lossy().to_string();
+            if let Ok(path) = std::env::var("PATH") {
+                // Windows PATH uses semicolons
+                if !path.split(';').any(|p| p.eq_ignore_ascii_case(&parent_str)) {
+                    println!();
+                    println!("Note: {} is not in your PATH.", parent.display());
+                    println!("Add it to your system PATH environment variable.");
+                }
             }
         }
     }
@@ -229,9 +254,19 @@ fn print_example_config() {
 
 /// Check if Docker credential helper is configured.
 pub fn check_docker_config() -> DockerSetupStatus {
-    // Check for symlink
+    // Check for symlink or batch file
     let symlink_exists = get_symlink_path()
-        .map(|p| p.exists() || p.is_symlink())
+        .map(|p| {
+            #[cfg(unix)]
+            {
+                p.exists() || p.is_symlink()
+            }
+            #[cfg(windows)]
+            {
+                // On Windows, check for the .bat file
+                p.with_extension("bat").exists()
+            }
+        })
         .unwrap_or(false);
 
     // Check Docker config

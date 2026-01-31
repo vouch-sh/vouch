@@ -259,6 +259,15 @@ async fn main() -> Result<()> {
             "/v1/credentials/github/token",
             post(handlers::credentials::get_github_token),
         )
+        // Docker credential config endpoints
+        .route(
+            "/v1/credentials/docker/ecr/config",
+            get(handlers::credentials::get_docker_ecr_config),
+        )
+        .route(
+            "/v1/credentials/docker/gcp/config",
+            get(handlers::credentials::get_docker_gcp_config),
+        )
         // Cloud integration config API
         .route(
             "/v1/integrations/gcp",
