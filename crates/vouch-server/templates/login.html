@@ -1,0 +1,157 @@
+{% extends "base.html" %}
+
+{% block title %}Vouch - Sign In{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center flex-1 p-5">
+    <div class="card max-w-md w-full text-center">
+        <svg class="w-8 h-8 text-vouch-accent mx-auto mb-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z"/>
+        </svg>
+        <h1 class="text-2xl font-bold text-gray-200 mb-2">Sign In</h1>
+        {% if client_name.is_some() %}
+        <p class="text-gray-400 text-sm mb-6">Sign in to continue to <span class="font-semibold text-gray-300">{{ client_name.as_ref().unwrap() }}</span></p>
+        {% else %}
+        <p class="text-gray-400 text-sm mb-6">Touch your security key to sign in</p>
+        {% endif %}
+
+        <div id="status" class="status-waiting mb-6">Insert your security key and touch it when it blinks.</div>
+
+        <button id="login-btn" onclick="startLogin()" class="btn-primary">Sign In with Security Key</button>
+
+        <p class="text-gray-500 text-xs mt-6">
+            Don't have an account? <a href="/enroll/start" class="text-vouch-accent hover:text-vouch-accent-hover">Enroll now</a>
+        </p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    const rpId = '{{ rp_id }}';
+    const pendingAuth = {% if pending_auth.is_some() %}'{{ pending_auth.as_ref().unwrap() }}'{% else %}null{% endif %};
+
+    async function startLogin() {
+        const btn = document.getElementById('login-btn');
+        const status = document.getElementById('status');
+        btn.disabled = true;
+        btn.classList.add('opacity-60', 'cursor-not-allowed');
+        status.className = 'status-waiting mb-6';
+        status.textContent = 'Touch your security key when it blinks...';
+
+        try {
+            // Get authentication options from server
+            const startResp = await fetch('/login/webauthn/start', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ pending_auth: pendingAuth })
+            });
+
+            if (!startResp.ok) {
+                const err = await startResp.json();
+                throw new Error(err.message || 'Failed to start authentication');
+            }
+
+            const options = await startResp.json();
+
+            // Convert base64url challenge to ArrayBuffer
+            const challenge = base64urlToBuffer(options.challenge);
+
+            // Create credential request options for discoverable credentials
+            const credentialRequestOptions = {
+                publicKey: {
+                    challenge: challenge,
+                    rpId: options.rp_id,
+                    timeout: options.timeout,
+                    userVerification: options.user_verification,
+                    allowCredentials: [] // Empty for discoverable credentials
+                }
+            };
+
+            // Call WebAuthn API
+            status.textContent = 'Waiting for security key...';
+            const credential = await navigator.credentials.get(credentialRequestOptions);
+
+            // Extract assertion data
+            const assertionResponse = credential.response;
+
+            // Send assertion to server
+            const completeResp = await fetch('/login/webauthn/complete', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    state: options.state,
+                    credential_id: bufferToBase64url(credential.rawId),
+                    authenticator_data: bufferToBase64url(assertionResponse.authenticatorData),
+                    client_data_json: bufferToBase64url(assertionResponse.clientDataJSON),
+                    signature: bufferToBase64url(assertionResponse.signature),
+                    user_handle: bufferToBase64url(assertionResponse.userHandle),
+                    pending_auth: pendingAuth
+                })
+            });
+
+            if (!completeResp.ok) {
+                const err = await completeResp.json();
+                throw new Error(err.message || 'Failed to complete authentication');
+            }
+
+            const result = await completeResp.json();
+
+            if (result.success && result.redirect_url) {
+                status.className = 'status-success mb-6';
+                status.textContent = 'Success! Redirecting...';
+                window.location.href = result.redirect_url;
+            } else if (result.error) {
+                throw new Error(result.error);
+            } else {
+                status.className = 'status-success mb-6';
+                status.textContent = 'Signed in successfully!';
+                // Redirect to home if no specific redirect
+                window.location.href = '/';
+            }
+
+        } catch (err) {
+            status.className = 'status-error mb-6';
+
+            // Provide user-friendly error messages for common WebAuthn errors
+            let message = err.message;
+            if (err.name === 'NotAllowedError') {
+                message = 'Authentication was cancelled or timed out. Please try again.';
+            } else if (err.name === 'SecurityError') {
+                message = 'Security error. Please ensure you are on a secure (HTTPS) connection.';
+            } else if (err.name === 'AbortError') {
+                message = 'Authentication was cancelled.';
+            } else if (err.name === 'InvalidStateError') {
+                message = 'No credentials found for this device. Please enroll first.';
+            } else if (message && message.toLowerCase().includes('pin')) {
+                message = 'PIN error. Please check your security key PIN and try again.';
+            }
+
+            status.textContent = 'Error: ' + message;
+            btn.disabled = false;
+            btn.classList.remove('opacity-60', 'cursor-not-allowed');
+        }
+    }
+
+    function base64urlToBuffer(base64url) {
+        const base64 = base64url.replace(/-/g, '+').replace(/_/g, '/');
+        const pad = base64.length % 4;
+        const padded = pad ? base64 + '='.repeat(4 - pad) : base64;
+        const binary = atob(padded);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) {
+            bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes.buffer;
+    }
+
+    function bufferToBase64url(buffer) {
+        const bytes = new Uint8Array(buffer);
+        let binary = '';
+        for (let i = 0; i < bytes.length; i++) {
+            binary += String.fromCharCode(bytes[i]);
+        }
+        return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+    }
+</script>
+{% endblock %}

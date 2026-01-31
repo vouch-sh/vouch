@@ -5,6 +5,7 @@ pub mod about;
 pub mod admin;
 pub mod applications;
 pub mod auth;
+pub mod browser_login;
 pub mod common;
 pub mod credentials;
 pub mod device;

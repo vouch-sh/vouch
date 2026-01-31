@@ -343,6 +343,70 @@ pub struct BrowserRegisterCompleteRequest {
 }
 
 // ============================================================================
+// Browser-based WebAuthn Login (RFC 6749 OAuth authorize flow)
+// ============================================================================
+
+/// Request to start browser-based `WebAuthn` login.
+///
+/// Used during OAuth authorization flow when user is not authenticated.
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct BrowserLoginStartRequest {
+    /// Pending OAuth authorization ID (to maintain OAuth state across login).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_auth: Option<String>,
+}
+
+/// Response containing `WebAuthn` options for browser login.
+///
+/// Uses discoverable credentials (passkeys) so the authenticator identifies the user.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BrowserLoginStartResponse {
+    /// Random challenge bytes (base64url encoded for browser).
+    pub challenge: String,
+    /// Relying Party ID.
+    pub rp_id: String,
+    /// Authentication state token.
+    pub state: String,
+    /// Timeout in milliseconds for WebAuthn operation.
+    pub timeout: u64,
+    /// User verification requirement ("required", "preferred", "discouraged").
+    pub user_verification: String,
+}
+
+/// Request to complete browser-based `WebAuthn` login.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BrowserLoginCompleteRequest {
+    /// Authentication state token from start response.
+    pub state: String,
+    /// Credential ID (base64url encoded).
+    pub credential_id: String,
+    /// Authenticator data (base64url encoded).
+    pub authenticator_data: String,
+    /// Client data JSON (base64url encoded).
+    pub client_data_json: String,
+    /// Signature (base64url encoded).
+    pub signature: String,
+    /// User handle (base64url encoded) - identifies the user from discoverable credential.
+    pub user_handle: String,
+    /// Pending OAuth authorization ID (to resume OAuth flow after login).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending_auth: Option<String>,
+}
+
+/// Response after successful browser login.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BrowserLoginCompleteResponse {
+    /// Whether login was successful.
+    pub success: bool,
+    /// Redirect URL after successful login (e.g., back to /oauth/authorize).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub redirect_url: Option<String>,
+    /// Error message if login failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+// ============================================================================
 // Key Management
 // ============================================================================
 
