@@ -489,17 +489,18 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 **Likelihood**: Low
 **Impact**: Critical
-**Risk**: High
+**Risk**: Medium (reduced by implemented mitigations)
 
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
 | M-42 | Open source CLI for public auditing | Implemented |
 | M-43 | Reproducible builds | Planned |
-| M-44 | Binary signing (macOS notarization, Authenticode) | Planned |
-| M-45 | SHA256 checksums with releases | Planned |
-| M-46 | SBOM with each release | Planned |
-| M-47 | SLSA attestations | Planned |
+| M-44 | Binary signing (macOS code signing + notarization) | Implemented |
+| M-45 | SHA256 checksums with releases (SHA256SUMS.txt) | Implemented |
+| M-46 | SBOM with each release (CycloneDX format) | Implemented |
+| M-47 | SLSA build provenance attestations | Implemented |
+| M-48a | Windows Authenticode signing | Planned |
 
 ---
 
@@ -514,11 +515,12 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-48 | Minimal dependency policy | Implemented |
-| M-49 | `cargo audit` in CI pipeline | Implemented |
-| M-50 | `cargo vet` for dependency review | Planned |
-| M-51 | Prefer well-audited crates (aws-lc-rs, rustls) | Implemented |
-| M-52 | Cargo.lock pinned versions | Implemented |
+| M-49 | Minimal dependency policy | Implemented |
+| M-50 | Dependency review in CI (actions/dependency-review-action) | Implemented |
+| M-51 | Trivy vulnerability scanning in CI | Implemented |
+| M-52 | `cargo vet` for dependency review | Planned |
+| M-53 | Prefer well-audited crates (aws-lc-rs, rustls) | Implemented |
+| M-54 | Cargo.lock pinned versions | Implemented |
 
 ---
 
@@ -535,9 +537,9 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-53 | All credential endpoints require valid JWT session | Implemented |
-| M-54 | JWT signature verification with server key | Implemented |
-| M-55 | Session expiration checked on each request | Implemented |
+| M-55 | All credential endpoints require valid JWT session | Implemented |
+| M-56 | JWT signature verification with server key | Implemented |
+| M-57 | Session expiration checked on each request | Implemented |
 
 ---
 
@@ -552,10 +554,10 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-56 | SSH principals derived from verified email only | Implemented |
-| M-57 | AWS roles require IAM trust policy | Implemented |
-| M-58 | GCP uses Workload Identity with attribute mapping | Implemented |
-| M-59 | OAuth scopes validated against client registration | Implemented |
+| M-58 | SSH principals derived from verified email only | Implemented |
+| M-59 | AWS roles require IAM trust policy | Implemented |
+| M-60 | GCP uses Workload Identity with attribute mapping | Implemented |
+| M-61 | OAuth scopes validated against client registration | Implemented |
 
 ---
 
@@ -572,10 +574,10 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-60 | TLS 1.3 mandatory for all connections | Implemented |
-| M-61 | Certificate validation via rustls | Implemented |
-| M-62 | HSTS headers on web endpoints | Implemented |
-| M-63 | No HTTP downgrade allowed | Implemented |
+| M-62 | TLS 1.3 mandatory for all connections | Implemented |
+| M-63 | Certificate validation via rustls | Implemented |
+| M-64 | HSTS headers on web endpoints | Implemented |
+| M-65 | No HTTP downgrade allowed | Implemented |
 
 ---
 
@@ -590,8 +592,8 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-64 | WebAuthn RP ID binding prevents credential use on wrong domain | Implemented |
-| M-65 | TLS certificate validation fails for spoofed domains | Implemented |
+| M-66 | WebAuthn RP ID binding prevents credential use on wrong domain | Implemented |
+| M-67 | TLS certificate validation fails for spoofed domains | Implemented |
 
 ---
 
@@ -608,11 +610,11 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-66 | User code ~40 bits entropy | Implemented |
-| M-67 | 10-minute code expiration | Implemented |
-| M-68 | 5 attempts per code before invalidation | Implemented |
-| M-69 | Rate limiting: 10 requests/minute per IP | Implemented |
-| M-70 | `slow_down` response for rapid polling | Implemented |
+| M-68 | User code ~40 bits entropy | Implemented |
+| M-69 | 10-minute code expiration | Implemented |
+| M-70 | 5 attempts per code before invalidation | Implemented |
+| M-71 | Rate limiting: 10 requests/minute per IP | Implemented |
+| M-72 | `slow_down` response for rapid polling | Implemented |
 
 ---
 
@@ -627,9 +629,9 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-71 | Device code alone cannot complete enrollment | Implemented |
-| M-72 | OIDC authentication required in browser | Implemented |
-| M-73 | WebAuthn registration required with physical YubiKey | Implemented |
+| M-73 | Device code alone cannot complete enrollment | Implemented |
+| M-74 | OIDC authentication required in browser | Implemented |
+| M-75 | WebAuthn registration required with physical YubiKey | Implemented |
 
 ---
 
@@ -646,9 +648,9 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-74 | Key registration requires valid session (recent FIDO2 auth) | Implemented |
-| M-75 | Email derived from session claims, not request | Implemented |
-| M-76 | excludeCredentials prevents duplicate registration | Implemented |
+| M-76 | Key registration requires valid session (recent FIDO2 auth) | Implemented |
+| M-77 | Email derived from session claims, not request | Implemented |
+| M-78 | excludeCredentials prevents duplicate registration | Implemented |
 
 ---
 
@@ -663,10 +665,10 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-77 | Key removal logged in audit trail | Implemented |
-| M-78 | Admin notification on key changes (planned) | Planned |
-| M-79 | Recovery flow via OIDC re-enrollment | Implemented |
-| M-80 | 8-hour session limits attack window | Implemented |
+| M-79 | Key removal logged in audit trail | Implemented |
+| M-80 | Admin notification on key changes | Planned |
+| M-81 | Recovery flow via OIDC re-enrollment | Implemented |
+| M-82 | 8-hour session limits attack window | Implemented |
 
 ---
 
@@ -683,10 +685,10 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-81 | `authenticatorAttachment: cross-platform` enforced | Implemented |
-| M-82 | AAGUID allowlist (YubiKey 5 series only) | Implemented |
-| M-83 | Attestation format validation (reject TPM, AndroidKey, Apple) | Implemented |
-| M-84 | Hardware-bound policy enforced at server | Implemented |
+| M-83 | `authenticatorAttachment: cross-platform` enforced | Implemented |
+| M-84 | AAGUID allowlist (YubiKey 5 series only) | Implemented |
+| M-85 | Attestation format validation (reject TPM, AndroidKey, Apple) | Implemented |
+| M-86 | Hardware-bound policy enforced at server | Implemented |
 
 ---
 
@@ -703,9 +705,9 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-85 | Rate limiting on all endpoints | Implemented |
-| M-86 | DDoS protection via infrastructure (cloud provider) | Deployment |
-| M-87 | Self-hosted option for critical environments | Implemented |
+| M-87 | Rate limiting on all endpoints | Implemented |
+| M-88 | DDoS protection via infrastructure (cloud provider) | Deployment |
+| M-89 | Self-hosted option for critical environments | Implemented |
 
 ---
 
@@ -715,10 +717,10 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 | Status | Count | Mitigations |
 |--------|-------|-------------|
-| **Implemented** | 74 | M-01 through M-85 (most) |
-| **Planned** | 8 | M-32, M-33, M-42-M-47, M-50, M-78 |
+| **Implemented** | 80 | M-01 through M-89 (most) |
+| **Planned** | 5 | M-32, M-33, M-43, M-48a, M-52, M-80 |
 | **Hardware** | 2 | M-09, M-10 (YubiKey enforced) |
-| **Deployment** | 1 | M-86 (infrastructure dependent) |
+| **Deployment** | 1 | M-88 (infrastructure dependent) |
 | **Documentation** | 1 | M-16 (user guidance) |
 
 ### By Control Category
@@ -728,12 +730,12 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 | **Authentication** | M-01 through M-16 |
 | **Session Management** | M-17 through M-28 |
 | **Server Security** | M-29 through M-41 |
-| **Supply Chain** | M-42 through M-52 |
-| **Credential Issuance** | M-53 through M-59 |
-| **Network Security** | M-60 through M-65 |
-| **Enrollment Security** | M-66 through M-76 |
-| **Key Management** | M-77 through M-84 |
-| **Availability** | M-85 through M-87 |
+| **Supply Chain** | M-42 through M-54 |
+| **Credential Issuance** | M-55 through M-61 |
+| **Network Security** | M-62 through M-67 |
+| **Enrollment Security** | M-68 through M-78 |
+| **Key Management** | M-79 through M-86 |
+| **Availability** | M-87 through M-89 |
 
 ---
 
