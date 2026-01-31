@@ -36,13 +36,15 @@
             </div>
             <div class="ml-11">
                 <p class="text-gray-400 text-sm mb-3">
-                    Organization administrators can create SCIM tokens via the API. You must have an active session (authenticate with your YubiKey first).
+                    Organization administrators can create SCIM tokens via the API. First, authenticate with the CLI to create your session cookie.
                 </p>
                 <div class="code-block relative text-sm">
-                    <pre class="whitespace-pre-wrap"># Create a SCIM token (requires admin session)
-# Export your vouch_session cookie from your browser first
+                    <pre class="whitespace-pre-wrap"># First, log in with your YubiKey
+vouch login
+
+# Create a SCIM token (uses ~/.vouch/cookie.txt automatically)
 curl -X POST {{ provider_url }}/api/v1/org/scim-tokens \
-  -b "vouch_session=YOUR_SESSION_COOKIE" \
+  -b ~/.vouch/cookie.txt \
   -H "Content-Type: application/json" \
   -d '{"description": "Google Workspace SCIM"}'
 
@@ -341,17 +343,17 @@ curl -H "Authorization: Bearer vouch_scim_YOUR_TOKEN" \
             <div class="code-block relative text-sm">
                 <pre class="whitespace-pre-wrap"># List all SCIM tokens for your organization
 curl {{ provider_url }}/api/v1/org/scim-tokens \
-  -b "vouch_session=YOUR_SESSION_COOKIE"
+  -b ~/.vouch/cookie.txt
 
 # Create a token with expiration (365 days)
 curl -X POST {{ provider_url }}/api/v1/org/scim-tokens \
-  -b "vouch_session=YOUR_SESSION_COOKIE" \
+  -b ~/.vouch/cookie.txt \
   -H "Content-Type: application/json" \
   -d '{"description": "Azure AD", "expires_in_days": 365}'
 
 # Revoke a token by ID
 curl -X DELETE {{ provider_url }}/api/v1/org/scim-tokens/TOKEN_ID \
-  -b "vouch_session=YOUR_SESSION_COOKIE"</pre>
+  -b ~/.vouch/cookie.txt</pre>
                 <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
             </div>
         </div>
