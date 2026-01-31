@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Organization admin handlers for SCIM token management and auth events.
 //!
-//! These APIs use JWT Bearer authentication from regular FIDO2 sessions.
-//! Only organization admins can access these endpoints.
+//! These APIs support both JWT Bearer authentication and cookie-based authentication
+//! from regular FIDO2 sessions. Only organization admins can access these endpoints.
 
 use crate::AppState;
 use crate::db;
@@ -14,6 +14,7 @@ use axum::{
     http::StatusCode,
 };
 use axum_extra::TypedHeader;
+use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use headers::authorization::{Authorization, Bearer};
@@ -21,21 +22,28 @@ use serde::Deserialize;
 use std::sync::Arc;
 use vouch_common::{ApiError, AuthEventInfo, ListAuthEventsResponse};
 
-use super::common::extract_session;
+use super::common::{extract_session, extract_session_from_cookie};
 use super::json_error;
 
 // ============================================================================
 // Org Admin Extraction
 // ============================================================================
 
-/// Extract and validate an org admin from the JWT Bearer token.
+/// Extract and validate an org admin from Bearer token or cookie.
 ///
+/// Tries Authorization header first, then falls back to vouch_session cookie.
 /// Returns the user and their org_id if they are an org admin.
 async fn extract_org_admin(
     state: &AppState,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: &CookieJar,
 ) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
-    let session = extract_session(state, auth_header).await?;
+    // Try Bearer token first, then fall back to cookie
+    let session = if auth_header.is_some() {
+        extract_session(state, auth_header).await?
+    } else {
+        extract_session_from_cookie(state, jar).await?
+    };
 
     let user = db::get_user_by_id(&state.db, &session.claims.sub)
         .await
@@ -91,9 +99,10 @@ pub struct AuthEventsQuery {
 pub async fn list_auth_events(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Query(query): Query<AuthEventsQuery>,
 ) -> Result<Json<ListAuthEventsResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, _org_id) = extract_org_admin(&state, auth_header).await?;
+    let (_user, _org_id) = extract_org_admin(&state, auth_header, &jar).await?;
 
     // Build query params
     let db_query = db::AuthEventQuery {
@@ -192,9 +201,10 @@ pub struct ListScimTokensResponse {
 pub async fn create_scim_token(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Json(req): Json<CreateScimTokenRequest>,
 ) -> Result<Json<CreateScimTokenResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_org_admin(&state, auth_header).await?;
+    let (_user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
 
     // Generate a secure random token
     let mut token_bytes = [0u8; 32];
@@ -251,8 +261,9 @@ pub async fn create_scim_token(
 pub async fn list_scim_tokens(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
 ) -> Result<Json<ListScimTokensResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_org_admin(&state, auth_header).await?;
+    let (_user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
 
     let tokens = db::list_scim_tokens(&state.db, Some(&org_id))
         .await
@@ -283,9 +294,10 @@ pub async fn list_scim_tokens(
 pub async fn delete_scim_token(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    jar: CookieJar,
     Path(token_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let (_user, _org_id) = extract_org_admin(&state, auth_header).await?;
+    let (_user, _org_id) = extract_org_admin(&state, auth_header, &jar).await?;
 
     db::delete_scim_token(&state.db, &token_id)
         .await

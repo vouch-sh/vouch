@@ -37,13 +37,12 @@
             <div class="ml-11">
                 <p class="text-gray-400 text-sm mb-3">
                     Organization administrators can create SCIM tokens via the API. You must have an active session (authenticate with your YubiKey first).
-                    Get your session token from the <code class="text-vouch-accent">vouch_session</code> cookie in your browser (DevTools &rarr; Application &rarr; Cookies).
                 </p>
                 <div class="code-block relative text-sm">
                     <pre class="whitespace-pre-wrap"># Create a SCIM token (requires admin session)
-# Copy the vouch_session cookie value from your browser
+# Export your vouch_session cookie from your browser first
 curl -X POST {{ provider_url }}/api/v1/org/scim-tokens \
-  -H "Authorization: Bearer YOUR_VOUCH_SESSION_COOKIE" \
+  -b "vouch_session=YOUR_SESSION_COOKIE" \
   -H "Content-Type: application/json" \
   -d '{"description": "Google Workspace SCIM"}'
 
@@ -339,23 +338,20 @@ curl -H "Authorization: Bearer vouch_scim_YOUR_TOKEN" \
         <!-- Managing Tokens -->
         <div class="mb-8">
             <h2 class="text-lg font-semibold text-gray-200 mb-4">Managing SCIM Tokens</h2>
-            <p class="text-gray-400 text-sm mb-3">
-                Use the <code class="text-vouch-accent">vouch_session</code> cookie value from your browser as the Bearer token.
-            </p>
             <div class="code-block relative text-sm">
                 <pre class="whitespace-pre-wrap"># List all SCIM tokens for your organization
 curl {{ provider_url }}/api/v1/org/scim-tokens \
-  -H "Authorization: Bearer YOUR_VOUCH_SESSION_COOKIE"
+  -b "vouch_session=YOUR_SESSION_COOKIE"
 
 # Create a token with expiration (365 days)
 curl -X POST {{ provider_url }}/api/v1/org/scim-tokens \
-  -H "Authorization: Bearer YOUR_VOUCH_SESSION_COOKIE" \
+  -b "vouch_session=YOUR_SESSION_COOKIE" \
   -H "Content-Type: application/json" \
   -d '{"description": "Azure AD", "expires_in_days": 365}'
 
 # Revoke a token by ID
 curl -X DELETE {{ provider_url }}/api/v1/org/scim-tokens/TOKEN_ID \
-  -H "Authorization: Bearer YOUR_VOUCH_SESSION_COOKIE"</pre>
+  -b "vouch_session=YOUR_SESSION_COOKIE"</pre>
                 <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
             </div>
         </div>
