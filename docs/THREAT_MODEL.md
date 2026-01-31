@@ -686,9 +686,9 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 | ID | Mitigation | Status |
 |----|------------|--------|
 | M-83 | `authenticatorAttachment: cross-platform` enforced | Implemented |
-| M-84 | AAGUID allowlist enforcement (YubiKey 5 series only) | Planned |
+| M-84 | AAGUID map for device identification (display only) | Implemented |
 | M-85 | Attestation format validation (reject TPM, AndroidKey, Apple) | Implemented |
-| M-86 | Hardware-bound policy enforced at server | Implemented |
+| M-86 | User verification (PIN) required for all authenticators | Implemented |
 
 ---
 
@@ -717,8 +717,8 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 | Status | Count | Mitigations |
 |--------|-------|-------------|
-| **Implemented** | 74 | M-01 through M-89 (most) |
-| **Planned** | 12 | M-02, M-30, M-32, M-33, M-43, M-48a, M-52, M-64, M-70, M-71, M-80, M-84 |
+| **Implemented** | 75 | M-01 through M-89 (most) |
+| **Planned** | 11 | M-02, M-30, M-32, M-33, M-43, M-48a, M-52, M-64, M-70, M-71, M-80 |
 | **Hardware** | 2 | M-09, M-10 (YubiKey enforced) |
 | **Deployment** | 1 | M-88 (infrastructure dependent) |
 | **Documentation** | 1 | M-16 (user guidance) |
