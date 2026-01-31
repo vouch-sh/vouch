@@ -2,6 +2,7 @@
 //! Setup and configuration commands.
 
 pub mod aws;
+pub mod docker;
 pub mod gcp;
 pub mod github;
 pub mod k8s;

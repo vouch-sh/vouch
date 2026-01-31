@@ -12,6 +12,32 @@ mod fido2;
 mod integrations;
 mod utils;
 
+/// Check if invoked as docker-credential-vouch and handle accordingly.
+/// Returns true if this was a Docker credential helper invocation.
+fn check_docker_credential_invocation() -> bool {
+    let argv0 = std::env::args().next().unwrap_or_default();
+
+    // Check if invoked as docker-credential-vouch (via symlink or direct call)
+    if argv0.ends_with("docker-credential-vouch") || argv0.ends_with("docker-credential-vouch.exe")
+    {
+        // Docker passes the operation as the first argument
+        let operation = std::env::args().nth(1).unwrap_or_default();
+
+        // Run the Docker credential helper
+        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
+        let result = rt.block_on(commands::credential::docker::run(&operation));
+
+        if let Err(e) = result {
+            eprintln!("docker-credential-vouch: {e}");
+            std::process::exit(1);
+        }
+
+        return true;
+    }
+
+    false
+}
+
 /// Hardware-backed identity for developers.
 #[derive(Parser)]
 #[command(
@@ -158,6 +184,15 @@ enum CredentialCommands {
         /// Git credential operation (get, store, erase).
         operation: String,
     },
+    /// Docker credential helper for container registries.
+    ///
+    /// This is used by Docker as a credential helper. Users should not call this directly.
+    /// Instead, use `vouch setup docker` to configure Docker.
+    #[command(hide = true)]
+    Docker {
+        /// Docker credential operation (get, store, erase, list).
+        operation: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -237,10 +272,24 @@ enum SetupCommands {
         #[arg(long)]
         configure: bool,
     },
+    /// Configure Docker to use Vouch for container registry authentication.
+    Docker {
+        /// Container registries to configure (e.g., ghcr.io, gcr.io).
+        #[arg(trailing_var_arg = true)]
+        registries: Vec<String>,
+        /// Automatically configure Docker (otherwise just show instructions).
+        #[arg(long)]
+        configure: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Check if invoked as docker-credential-vouch (via symlink)
+    if check_docker_credential_invocation() {
+        return Ok(());
+    }
+
     let cli = Cli::parse();
 
     // Initialize logging
@@ -311,6 +360,9 @@ async fn main() -> Result<()> {
             CredentialCommands::Github { operation } => {
                 commands::credential::github::run(&operation).await
             }
+            CredentialCommands::Docker { operation } => {
+                commands::credential::docker::run(&operation).await
+            }
         },
         Commands::Setup { command } => match command {
             SetupCommands::Aws {
@@ -360,6 +412,10 @@ async fn main() -> Result<()> {
                 )
                 .await
             }
+            SetupCommands::Docker {
+                registries,
+                configure,
+            } => commands::setup::docker::run(&registries, configure).await,
         },
         Commands::Completions(args) => {
             let mut cmd = Cli::command();
