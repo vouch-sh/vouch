@@ -162,8 +162,8 @@ pub async fn list_auth_events(
 #[derive(Debug, Deserialize)]
 pub struct CreateScimTokenRequest {
     pub description: Option<String>,
-    /// Token expiration in days (optional, None = never expires).
-    pub expires_in_days: Option<i64>,
+    /// Token expiration in days (required, 1-365 days).
+    pub expires_in_days: i64,
 }
 
 /// Response for created SCIM token.
@@ -172,7 +172,7 @@ pub struct CreateScimTokenResponse {
     pub id: String,
     pub token: String,
     pub description: Option<String>,
-    pub expires_at: Option<String>,
+    pub expires_at: String,
 }
 
 /// SCIM token info for listing.
@@ -201,6 +201,15 @@ pub async fn create_scim_token(
 ) -> Result<Json<CreateScimTokenResponse>, (StatusCode, Json<ApiError>)> {
     let (_user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
 
+    // Validate expiration (required, 1-365 days)
+    if req.expires_in_days < 1 || req.expires_in_days > 365 {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_expiration",
+            "expires_in_days must be between 1 and 365",
+        ));
+    }
+
     // Generate a secure random token
     let mut token_bytes = [0u8; 32];
     aws_rand::fill(&mut token_bytes).map_err(|_| {
@@ -215,21 +224,19 @@ pub async fn create_scim_token(
     // Hash the token for storage
     let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
 
-    // Calculate expiration if specified
-    let expires_at = req.expires_in_days.map(|days| {
-        let duration = jiff::Span::new().days(days);
-        jiff::Timestamp::now()
-            .checked_add(duration)
-            .map(|t| t.to_string())
-            .unwrap_or_default()
-    });
+    // Calculate expiration
+    let duration = jiff::Span::new().days(req.expires_in_days);
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(duration)
+        .map(|t| t.to_string())
+        .unwrap_or_default();
 
     // Store the token
     let token_id = db::create_scim_token(
         &state.db,
         &token_hash,
         req.description.as_deref(),
-        expires_at.as_deref(),
+        Some(&expires_at),
         Some(&org_id),
     )
     .await

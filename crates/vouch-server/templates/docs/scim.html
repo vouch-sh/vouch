@@ -46,14 +46,14 @@ vouch login
 curl -X POST {{ provider_url }}/api/v1/org/scim-tokens \
   -b ~/.vouch/cookie.txt \
   -H "Content-Type: application/json" \
-  -d '{"description": "Google Workspace SCIM"}'
+  -d '{"description": "Google Workspace SCIM", "expires_in_days": 365}'
 
 # Response includes the token (shown only once):
 # {
 #   "id": "01234567-89ab-cdef-0123-456789abcdef",
 #   "token": "vouch_scim_abc123...",
 #   "description": "Google Workspace SCIM",
-#   "created_at": "2024-01-15T10:30:00Z"
+#   "expires_at": "2025-01-15T10:30:00Z"
 # }</pre>
                     <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
                 </div>
@@ -61,7 +61,7 @@ curl -X POST {{ provider_url }}/api/v1/org/scim-tokens \
                     <p class="text-gray-400 text-sm">
                         <strong class="text-gray-300">Security note:</strong> SCIM tokens are hashed before storage.
                         The plaintext token is only shown once at creation time and cannot be retrieved later.
-                        Tokens can optionally have an expiration date by adding <code class="text-vouch-accent">"expires_in_days": 365</code> to the request.
+                        The <code class="text-vouch-accent">expires_in_days</code> field is required and must be between 1 and 365 days.
                     </p>
                 </div>
             </div>
@@ -345,7 +345,7 @@ curl -H "Authorization: Bearer vouch_scim_YOUR_TOKEN" \
 curl {{ provider_url }}/api/v1/org/scim-tokens \
   -b ~/.vouch/cookie.txt
 
-# Create a token with expiration (365 days)
+# Create a token with expiration (1-365 days required)
 curl -X POST {{ provider_url }}/api/v1/org/scim-tokens \
   -b ~/.vouch/cookie.txt \
   -H "Content-Type: application/json" \
@@ -355,6 +355,27 @@ curl -X POST {{ provider_url }}/api/v1/org/scim-tokens \
 curl -X DELETE {{ provider_url }}/api/v1/org/scim-tokens/TOKEN_ID \
   -b ~/.vouch/cookie.txt</pre>
                 <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+            </div>
+        </div>
+
+        <!-- Token Rotation -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Rotating SCIM Tokens</h2>
+            <p class="text-gray-400 text-sm mb-3">
+                To rotate a SCIM token without interrupting provisioning sync:
+            </p>
+            <ol class="space-y-2 text-sm text-gray-400 list-decimal list-inside mb-4">
+                <li><strong class="text-gray-300">Create a new token</strong> using the API above</li>
+                <li><strong class="text-gray-300">Update your identity provider</strong> with the new token</li>
+                <li><strong class="text-gray-300">Test the connection</strong> in your IdP's provisioning settings</li>
+                <li><strong class="text-gray-300">Delete the old token</strong> once the new one is confirmed working</li>
+            </ol>
+            <div class="p-3 bg-vouch-bg rounded border border-vouch-border">
+                <p class="text-gray-400 text-sm">
+                    <strong class="text-gray-300">Important:</strong> Always create and configure the new token
+                    <em>before</em> deleting the old one. Deleting a token immediately invalidates it, which
+                    would cause sync failures if your IdP is still using it.
+                </p>
             </div>
         </div>
 
