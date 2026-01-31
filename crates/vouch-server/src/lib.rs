@@ -12,6 +12,7 @@ pub mod extractors;
 pub mod github_app;
 pub mod handlers;
 pub mod oidc_key;
+pub mod services;
 pub mod ssh_ca;
 pub mod webauthn_verify;
 

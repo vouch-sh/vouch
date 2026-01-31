@@ -37,6 +37,54 @@
             </ul>
         </div>
 
+        <!-- Access Scopes -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Access Scopes</h2>
+            <p class="text-gray-400 text-sm mb-4">
+                Control who can authenticate with your application by setting an access scope when you create it.
+            </p>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="border-b border-vouch-border">
+                            <th class="text-left py-2 pr-4 text-gray-300 font-medium">Scope</th>
+                            <th class="text-left py-2 pr-4 text-gray-300 font-medium">Who Can Access</th>
+                            <th class="text-left py-2 text-gray-300 font-medium">Use Case</th>
+                        </tr>
+                    </thead>
+                    <tbody class="text-gray-400">
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4">
+                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded bg-[#0d2d1f] text-[#4ade80]">Organization</span>
+                            </td>
+                            <td class="py-2 pr-4">Only users in your organization</td>
+                            <td class="py-2">Internal tools, company dashboards, team applications</td>
+                        </tr>
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4">
+                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded bg-[#2d1f0d] text-[#fbbf24]">Personal</span>
+                            </td>
+                            <td class="py-2 pr-4">Only you (the app creator)</td>
+                            <td class="py-2">Personal projects, development/testing, private tools</td>
+                        </tr>
+                        <tr>
+                            <td class="py-2 pr-4">
+                                <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded bg-[#0d1f3c] text-[#539fe5]">Public</span>
+                            </td>
+                            <td class="py-2 pr-4">Any authenticated Vouch user</td>
+                            <td class="py-2">Public services, open platforms, community tools</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+            <div class="mt-4 p-3 bg-vouch-bg rounded border border-vouch-border">
+                <p class="text-gray-400 text-sm">
+                    <strong class="text-gray-300">Note:</strong> The "Organization" scope is only available if you're a member of an organization.
+                    Users outside your organization will see an "Access Denied" error when trying to authorize.
+                </p>
+            </div>
+        </div>
+
         <!-- Configuration Reference -->
         <div class="mb-8">
             <h2 class="text-lg font-semibold text-gray-200 mb-4">Configuration Reference</h2>

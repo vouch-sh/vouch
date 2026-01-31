@@ -10,8 +10,23 @@
         <p class="text-gray-400 text-sm mb-6">Hardware authentication required</p>
 
         <div class="bg-vouch-raised rounded-lg p-4 mb-6 text-left">
+            {% match client_name %}
+            {% when Some with (name) %}
+            <strong class="text-gray-300">{{ name }}</strong>
+            {% when None %}
             <strong class="text-gray-300">{{ client_id }}</strong>
+            {% endmatch %}
             <p class="text-gray-400 text-sm mt-1">wants to access your Vouch identity</p>
+            {% if is_org_app %}
+            <p class="text-xs text-gray-500 mt-2">
+                {% match org_name %}
+                {% when Some with (org) %}
+                This is an organizational application for <strong class="text-gray-400">{{ org }}</strong>
+                {% when None %}
+                This is an organizational application
+                {% endmatch %}
+            </p>
+            {% endif %}
         </div>
 
         <div class="bg-vouch-warning-bg border-l-4 border-vouch-warning p-4 rounded-r-lg text-left">
