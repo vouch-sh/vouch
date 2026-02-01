@@ -93,6 +93,17 @@ pub async fn run_cleanup(
         }
     }
 
+    // Clean up expired pending OAuth authorizations (RFC 6749 browser login flow)
+    match db::delete_expired_pending_oauth_authorizations(db, &now_str).await {
+        Ok(count) if count > 0 => {
+            tracing::info!("Cleaned up {count} expired pending OAuth authorizations");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("Failed to clean up expired pending OAuth authorizations: {e}");
+        }
+    }
+
     // Clean up expired enrollment sessions
     match db::delete_expired_enrollment_sessions(db).await {
         Ok(count) if count > 0 => {

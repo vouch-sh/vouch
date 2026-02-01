@@ -183,6 +183,16 @@ async fn main() -> Result<()> {
         .route("/oauth/device/code", post(handlers::device::device_code))
         // Unified token endpoint (handles both authorization_code and device_code grants)
         .route("/oauth/token", post(handlers::oidc::token))
+        // Browser-based WebAuthn login (RFC 6749, RFC 9207, RFC 9700)
+        .route("/login", get(handlers::browser_login::login_page))
+        .route(
+            "/login/webauthn/start",
+            post(handlers::browser_login::browser_login_start),
+        )
+        .route(
+            "/login/webauthn/complete",
+            post(handlers::browser_login::browser_login_complete),
+        )
         // Browser-based enrollment
         .route("/device", get(handlers::enroll::device_verify_page))
         .route("/device", post(handlers::enroll::device_verify_submit))

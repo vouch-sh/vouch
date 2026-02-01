@@ -12,6 +12,7 @@ mod error;
 mod github;
 mod oauth;
 mod organizations;
+mod pending_oauth;
 mod scim;
 mod sessions;
 mod users;
@@ -105,6 +106,13 @@ pub use github::{
     get_github_installations_by_org, log_github_credential_event, suspend_github_installation,
     unsuspend_github_installation, update_github_installation_repos,
     update_github_installation_repos_delta,
+};
+
+// Re-export pending OAuth types and functions (RFC 6749, RFC 9700)
+pub use pending_oauth::{
+    CreatePendingOAuthParams, PendingOAuthAuthorization, consume_pending_oauth_authorization,
+    create_pending_oauth_authorization, delete_expired_pending_oauth_authorizations,
+    get_pending_oauth_authorization,
 };
 
 #[cfg(test)]

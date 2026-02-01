@@ -51,6 +51,10 @@ pub struct OidcDiscoveryDocument {
     /// RFC 9449: Supported DPoP signing algorithms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dpop_signing_alg_values_supported: Option<Vec<String>>,
+    /// RFC 9207: Authorization Response Issuer Identifier support.
+    /// Indicates that the authorization server includes the `iss` parameter
+    /// in authorization responses to prevent mix-up attacks.
+    pub authorization_response_iss_parameter_supported: bool,
 }
 
 /// JSON Web Key Set response.
@@ -120,6 +124,8 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         } else {
             None
         },
+        // RFC 9207: Advertise that we include `iss` in authorization responses
+        authorization_response_iss_parameter_supported: true,
     }
 }
 
