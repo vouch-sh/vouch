@@ -67,7 +67,7 @@ fn hash_device_code(code: &str) -> String {
 }
 
 /// Start device authorization flow.
-/// POST /oauth/device/code
+/// POST /oauth/device (canonical) or POST /oauth/device/code (legacy)
 ///
 /// RFC 8628 Section 3.1: The client makes a request using
 /// "application/x-www-form-urlencoded" format.
@@ -346,6 +346,28 @@ mod tests {
             resp["expires_in"].is_number(),
             "expires_in must be a number"
         );
+    }
+
+    #[tokio::test]
+    async fn test_rfc8628_canonical_device_endpoint() {
+        // RFC 8628: The canonical /oauth/device endpoint should work
+        let (app, _state) = test_app().await;
+
+        // Test the canonical /oauth/device endpoint
+        let (status, body) =
+            http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
+
+        assert_eq!(status, StatusCode::OK);
+        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+        // Verify required fields are present
+        assert!(resp.get("device_code").is_some(), "device_code is REQUIRED");
+        assert!(resp.get("user_code").is_some(), "user_code is REQUIRED");
+        assert!(
+            resp.get("verification_uri").is_some(),
+            "verification_uri is REQUIRED"
+        );
+        assert!(resp.get("expires_in").is_some(), "expires_in is REQUIRED");
     }
 
     #[tokio::test]

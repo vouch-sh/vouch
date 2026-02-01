@@ -122,7 +122,8 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         .route("/oauth/introspect", post(handlers::oidc::introspect))
         .route("/oauth/token", post(handlers::oidc::token))
         // Device Authorization Grant (RFC 8628)
-        .route("/oauth/device/code", post(handlers::device::device_code))
+        .route("/oauth/device", post(handlers::device::device_code))
+        .route("/oauth/device/code", post(handlers::device::device_code)) // Legacy alias
         // Legacy auth endpoints
         .route(
             "/v1/auth/register/start",
