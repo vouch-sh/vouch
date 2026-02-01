@@ -181,7 +181,7 @@ async fn main() -> Result<()> {
         )
         .route("/v1/auth/status", get(handlers::auth::status))
         // Device Authorization Grant (RFC 8628)
-        .route("/oauth/device/code", post(handlers::device::device_code))
+        .route("/oauth/device", post(handlers::device::device_code))
         // Unified token endpoint (handles both authorization_code and device_code grants)
         .route("/oauth/token", post(handlers::oidc::token))
         // Browser-based WebAuthn login (RFC 6749, RFC 9207, RFC 9700)

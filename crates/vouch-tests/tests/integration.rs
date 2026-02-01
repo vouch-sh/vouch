@@ -545,7 +545,7 @@ mod device_flow {
         let harness = TestHarness::new().await;
 
         let response = harness
-            .post_form("/oauth/device/code", "client_id=test")
+            .post_form("/oauth/device", "client_id=test")
             .await
             .expect("Failed to post device code");
 
@@ -568,7 +568,7 @@ mod device_flow {
         let harness = TestHarness::new().await;
 
         let response = harness
-            .post_form("/oauth/device/code", "client_id=test")
+            .post_form("/oauth/device", "client_id=test")
             .await
             .expect("Failed to post device code");
 
@@ -593,7 +593,7 @@ mod device_flow {
 
         // Create device code
         let response = harness
-            .post_form("/oauth/device/code", "client_id=test")
+            .post_form("/oauth/device", "client_id=test")
             .await
             .expect("Failed to post device code");
         let resp: serde_json::Value = response.json().expect("Failed to parse response");
@@ -653,7 +653,7 @@ mod device_flow {
 
         // Create device code
         let response = harness
-            .post_form("/oauth/device/code", "client_id=test")
+            .post_form("/oauth/device", "client_id=test")
             .await
             .expect("Failed to post device code");
         let resp: serde_json::Value = response.json().expect("Failed to parse response");
@@ -691,7 +691,7 @@ mod device_flow {
         let harness = TestHarness::new().await;
 
         let response = harness
-            .post_form("/oauth/device/code", "client_id=test")
+            .post_form("/oauth/device", "client_id=test")
             .await
             .expect("Failed to post device code");
 

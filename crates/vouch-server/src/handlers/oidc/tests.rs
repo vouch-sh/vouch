@@ -119,6 +119,37 @@ async fn test_oidc_discovery_supported_grant_types() {
     );
 }
 
+#[tokio::test]
+async fn test_oidc_discovery_device_authorization_endpoint() {
+    // RFC 8628 Section 4: device_authorization_endpoint must be advertised
+    // when device_code grant type is supported
+    let (app, state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    // RFC 8628: device_authorization_endpoint is required when device_code is supported
+    let endpoint = discovery
+        .get("device_authorization_endpoint")
+        .expect("device_authorization_endpoint is required per RFC 8628");
+
+    let endpoint_url = endpoint.as_str().expect("Should be a string");
+    assert!(
+        endpoint_url.starts_with("https://"),
+        "device_authorization_endpoint should be an absolute HTTPS URL"
+    );
+    assert!(
+        endpoint_url.ends_with("/oauth/device"),
+        "device_authorization_endpoint should point to /oauth/device"
+    );
+
+    // Verify it matches the configured base URL
+    let expected = format!("{}/oauth/device", state.config.verification_base_url);
+    assert_eq!(endpoint_url, expected);
+}
+
 // ========================================================================
 // JWKS Endpoint Tests (OIDC Core 1.0 Section 3)
 // ========================================================================

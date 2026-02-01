@@ -28,6 +28,8 @@ pub struct OidcDiscoveryDocument {
     pub revocation_endpoint: String,
     /// URL of the token introspection endpoint.
     pub introspection_endpoint: String,
+    /// URL of the device authorization endpoint (RFC 8628).
+    pub device_authorization_endpoint: String,
     /// URL of the dynamic registration endpoint (optional).
     pub registration_endpoint: Option<String>,
     /// Supported scopes.
@@ -83,6 +85,7 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         jwks_uri: format!("{base_url}/oauth/jwks"),
         revocation_endpoint: format!("{base_url}/oauth/revoke"),
         introspection_endpoint: format!("{base_url}/oauth/introspect"),
+        device_authorization_endpoint: format!("{base_url}/oauth/device"),
         registration_endpoint: None, // Dynamic registration not supported
         scopes_supported: vec![
             "openid".to_string(),
