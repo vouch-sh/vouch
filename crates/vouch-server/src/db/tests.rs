@@ -4,20 +4,24 @@
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 
 use super::*;
-use sqlx::SqlitePool;
-use uuid::Uuid;
 
 /// Create an in-memory SQLite database for testing.
-async fn test_db() -> SqlitePool {
-    let pool = SqlitePool::connect("sqlite::memory:")
+async fn test_db() -> Pool {
+    let pool = Pool::connect("sqlite::memory:")
         .await
         .expect("Failed to create test database");
 
-    // Run migrations
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
+    // Run migrations based on database type
+    match &pool {
+        Pool::Sqlite(p) => sqlx::migrate!("./migrations/sqlite")
+            .run(p)
+            .await
+            .expect("Failed to run migrations"),
+        Pool::Postgres(p) => sqlx::migrate!("./migrations/postgres")
+            .run(p)
+            .await
+            .expect("Failed to run migrations"),
+    }
 
     pool
 }
@@ -84,17 +88,15 @@ async fn test_session_lifecycle() {
     let user_id = user.id;
 
     // Create authenticator (simplified - normally needs more fields)
-    let auth_id = Uuid::now_v7().to_string();
-    sqlx::query(
-        "INSERT INTO authenticators (id, user_id, name, credential_id, public_key, counter, created_at, user_handle) VALUES (?, ?, ?, ?, ?, 0, datetime('now'), ?)"
+    let auth_id = create_authenticator(
+        &pool,
+        &user_id,
+        "Test Key",
+        b"test-cred-id",
+        &[0u8; 32],
+        None,
+        Some(user_id.as_bytes()),
     )
-    .bind(&auth_id)
-    .bind(&user_id)
-    .bind("Test Key")
-    .bind("test-cred-id")
-    .bind(vec![0u8; 32])
-    .bind(&user_id)
-    .execute(&pool)
     .await
     .expect("Failed to create authenticator");
 
@@ -228,17 +230,15 @@ async fn test_device_auth_authorization_flow() {
         .expect("Failed to create user");
 
     // Create authenticator
-    let auth_id = Uuid::now_v7().to_string();
-    sqlx::query(
-        "INSERT INTO authenticators (id, user_id, name, credential_id, public_key, counter, created_at, user_handle) VALUES (?, ?, ?, ?, ?, 0, datetime('now'), ?)"
+    let auth_id = create_authenticator(
+        &pool,
+        &user.id,
+        "Test Key",
+        b"test-cred-id-device",
+        &[0u8; 32],
+        None,
+        Some(user.id.as_bytes()),
     )
-    .bind(&auth_id)
-    .bind(&user.id)
-    .bind("Test Key")
-    .bind("test-cred-id-device")
-    .bind(vec![0u8; 32])
-    .bind(&user.id)
-    .execute(&pool)
     .await
     .expect("Failed to create authenticator");
 
@@ -830,17 +830,15 @@ async fn test_scim_session_invalidation_on_deactivation() {
         .expect("Failed to create user");
 
     // Create authenticator
-    let auth_id = Uuid::now_v7().to_string();
-    sqlx::query(
-        "INSERT INTO authenticators (id, user_id, name, credential_id, public_key, counter, created_at, user_handle) VALUES (?, ?, ?, ?, ?, 0, datetime('now'), ?)"
+    let auth_id = create_authenticator(
+        &pool,
+        &user.id,
+        "SCIM Key",
+        b"scim-cred-id",
+        &[0u8; 32],
+        None,
+        Some(user.id.as_bytes()),
     )
-    .bind(&auth_id)
-    .bind(&user.id)
-    .bind("SCIM Key")
-    .bind("scim-cred-id")
-    .bind(vec![0u8; 32])
-    .bind(&user.id)
-    .execute(&pool)
     .await
     .expect("Failed to create authenticator");
 

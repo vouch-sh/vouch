@@ -1347,7 +1347,7 @@ pub async fn delete_group(
 
 /// Helper to get group members in SCIM format.
 async fn get_group_members_scim(
-    db: &sqlx::SqlitePool,
+    db: &crate::db::Pool,
     base_url: &str,
     group_id: &str,
 ) -> Vec<ScimGroupMember> {

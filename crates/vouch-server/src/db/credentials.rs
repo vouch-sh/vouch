@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Credential-related database operations (SSH revocation, enrollment, token exchange, cloud integrations).
 
+use super::Pool;
+use super::compat::{BuildSql, now_expr};
+use super::schema::SshRevokedCertificates;
+use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional};
 use anyhow::Result;
-use sqlx::SqlitePool;
+use sea_query::{OnConflict, Query};
 use uuid::Uuid;
 
 // ============================================================================
@@ -12,7 +16,7 @@ use uuid::Uuid;
 /// Insert a token exchange audit record.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_token_exchange(
-    pool: &SqlitePool,
+    pool: &Pool,
     subject_user_id: &str,
     subject_token_hash: &str,
     actor_user_id: Option<&str>,
@@ -23,20 +27,21 @@ pub async fn insert_token_exchange(
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
 
-    sqlx::query(
-        "INSERT INTO token_exchanges (id, subject_user_id, subject_token_hash, actor_user_id, issued_token_hash, requested_audience, granted_scope, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(subject_user_id)
-    .bind(subject_token_hash)
-    .bind(actor_user_id)
-    .bind(issued_token_hash)
-    .bind(requested_audience)
-    .bind(granted_scope)
-    .bind(expires_at)
-    .execute(pool)
-    .await?;
+    db_execute!(
+        pool,
+        sqlx::query(
+            "INSERT INTO token_exchanges (id, subject_user_id, subject_token_hash, actor_user_id, issued_token_hash, requested_audience, granted_scope, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&id)
+        .bind(subject_user_id)
+        .bind(subject_token_hash)
+        .bind(actor_user_id)
+        .bind(issued_token_hash)
+        .bind(requested_audience)
+        .bind(granted_scope)
+        .bind(expires_at)
+    )?;
 
     Ok(id)
 }
@@ -44,18 +49,19 @@ pub async fn insert_token_exchange(
 /// Get token exchange records for a user.
 #[allow(dead_code)]
 pub async fn get_token_exchanges_for_user(
-    pool: &SqlitePool,
+    pool: &Pool,
     user_id: &str,
     limit: i64,
 ) -> Result<Vec<TokenExchangeRecord>> {
-    let records = sqlx::query_as::<_, TokenExchangeRecord>(
-        "SELECT id, subject_user_id, subject_token_hash, actor_user_id, issued_token_hash, requested_audience, granted_scope, created_at, expires_at
-         FROM token_exchanges WHERE subject_user_id = ? ORDER BY created_at DESC LIMIT ?",
-    )
-    .bind(user_id)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
+    let records = db_fetch_all!(
+        pool,
+        sqlx::query_as::<_, TokenExchangeRecord>(
+            "SELECT id, subject_user_id, subject_token_hash, actor_user_id, issued_token_hash, requested_audience, granted_scope, created_at, expires_at
+         FROM token_exchanges WHERE subject_user_id = ? ORDER BY created_at DESC LIMIT ?"
+        )
+        .bind(user_id)
+        .bind(limit)
+    )?;
 
     Ok(records)
 }
@@ -98,17 +104,18 @@ pub struct DelegationPolicy {
 ///
 /// Returns the matching policy if delegation is allowed, None otherwise.
 pub async fn check_delegation_policy(
-    pool: &SqlitePool,
+    pool: &Pool,
     grantor_email: &str,
     grantee_audience: Option<&str>,
 ) -> Result<Option<DelegationPolicy>> {
     // Get all enabled policies
-    let policies = sqlx::query_as::<_, DelegationPolicy>(
-        "SELECT id, name, grantor_pattern, grantee_pattern, allowed_scopes, max_ttl_seconds, enabled, created_at, updated_at
-         FROM delegation_policies WHERE enabled = 1 ORDER BY created_at ASC",
-    )
-    .fetch_all(pool)
-    .await?;
+    let policies = db_fetch_all!(
+        pool,
+        sqlx::query_as::<_, DelegationPolicy>(
+            "SELECT id, name, grantor_pattern, grantee_pattern, allowed_scopes, max_ttl_seconds, enabled, created_at, updated_at
+         FROM delegation_policies WHERE enabled = 1 ORDER BY created_at ASC"
+        )
+    )?;
 
     for policy in policies {
         // Check grantor pattern
@@ -156,7 +163,7 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
 /// Create a delegation policy.
 #[allow(dead_code)]
 pub async fn create_delegation_policy(
-    pool: &SqlitePool,
+    pool: &Pool,
     name: &str,
     grantor_pattern: &str,
     grantee_pattern: &str,
@@ -165,59 +172,59 @@ pub async fn create_delegation_policy(
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
 
-    sqlx::query(
-        "INSERT INTO delegation_policies (id, name, grantor_pattern, grantee_pattern, allowed_scopes, max_ttl_seconds)
-         VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(name)
-    .bind(grantor_pattern)
-    .bind(grantee_pattern)
-    .bind(allowed_scopes)
-    .bind(max_ttl_seconds)
-    .execute(pool)
-    .await?;
+    db_execute!(
+        pool,
+        sqlx::query(
+            "INSERT INTO delegation_policies (id, name, grantor_pattern, grantee_pattern, allowed_scopes, max_ttl_seconds)
+         VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&id)
+        .bind(name)
+        .bind(grantor_pattern)
+        .bind(grantee_pattern)
+        .bind(allowed_scopes)
+        .bind(max_ttl_seconds)
+    )?;
 
     Ok(id)
 }
 
 /// Get all delegation policies.
-pub async fn get_delegation_policies(pool: &SqlitePool) -> Result<Vec<DelegationPolicy>> {
-    let policies = sqlx::query_as::<_, DelegationPolicy>(
-        "SELECT id, name, grantor_pattern, grantee_pattern, allowed_scopes, max_ttl_seconds, enabled, created_at, updated_at
-         FROM delegation_policies ORDER BY created_at DESC",
-    )
-    .fetch_all(pool)
-    .await?;
+pub async fn get_delegation_policies(pool: &Pool) -> Result<Vec<DelegationPolicy>> {
+    let policies = db_fetch_all!(
+        pool,
+        sqlx::query_as::<_, DelegationPolicy>(
+            "SELECT id, name, grantor_pattern, grantee_pattern, allowed_scopes, max_ttl_seconds, enabled, created_at, updated_at
+         FROM delegation_policies ORDER BY created_at DESC"
+        )
+    )?;
 
     Ok(policies)
 }
 
 /// Update a delegation policy's enabled status.
 #[allow(dead_code)]
-pub async fn set_delegation_policy_enabled(
-    pool: &SqlitePool,
-    id: &str,
-    enabled: bool,
-) -> Result<bool> {
-    let result = sqlx::query(
-        "UPDATE delegation_policies SET enabled = ?, updated_at = datetime('now') WHERE id = ?",
-    )
-    .bind(if enabled { 1 } else { 0 })
-    .bind(id)
-    .execute(pool)
-    .await?;
+pub async fn set_delegation_policy_enabled(pool: &Pool, id: &str, enabled: bool) -> Result<bool> {
+    let db_type = pool.db_type();
+    let now = now_expr(db_type);
+    let sql =
+        format!("UPDATE delegation_policies SET enabled = ?, updated_at = {now} WHERE id = ?");
+
+    let result = db_execute!(
+        pool,
+        sqlx::query(&sql).bind(if enabled { 1 } else { 0 }).bind(id)
+    )?;
 
     Ok(result.rows_affected() > 0)
 }
 
 /// Delete a delegation policy.
 #[allow(dead_code)]
-pub async fn delete_delegation_policy(pool: &SqlitePool, id: &str) -> Result<bool> {
-    let result = sqlx::query("DELETE FROM delegation_policies WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
+pub async fn delete_delegation_policy(pool: &Pool, id: &str) -> Result<bool> {
+    let result = db_execute!(
+        pool,
+        sqlx::query("DELETE FROM delegation_policies WHERE id = ?").bind(id)
+    )?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -244,7 +251,7 @@ pub struct EnrollmentSession {
 
 /// Create a new enrollment session.
 pub async fn create_enrollment_session(
-    pool: &SqlitePool,
+    pool: &Pool,
     user_id: &str,
     user_email: &str,
     session_token_hash: &str,
@@ -253,64 +260,69 @@ pub async fn create_enrollment_session(
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
 
-    sqlx::query(
-        "INSERT INTO enrollment_sessions (id, user_id, user_email, session_token_hash, device_auth_id, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(user_id)
-    .bind(user_email)
-    .bind(session_token_hash)
-    .bind(device_auth_id)
-    .bind(expires_at)
-    .execute(pool)
-    .await?;
+    db_execute!(
+        pool,
+        sqlx::query(
+            "INSERT INTO enrollment_sessions (id, user_id, user_email, session_token_hash, device_auth_id, expires_at)
+         VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&id)
+        .bind(user_id)
+        .bind(user_email)
+        .bind(session_token_hash)
+        .bind(device_auth_id)
+        .bind(expires_at)
+    )?;
 
     Ok(id)
 }
 
 /// Get an enrollment session by token hash.
 pub async fn get_enrollment_session_by_token_hash(
-    pool: &SqlitePool,
+    pool: &Pool,
     token_hash: &str,
 ) -> Result<Option<EnrollmentSession>> {
-    let session = sqlx::query_as::<_, EnrollmentSession>(
-        "SELECT id, user_id, user_email, session_token_hash, device_auth_id, expires_at, created_at, last_used_at
+    let session = db_fetch_optional!(
+        pool,
+        sqlx::query_as::<_, EnrollmentSession>(
+            "SELECT id, user_id, user_email, session_token_hash, device_auth_id, expires_at, created_at, last_used_at
          FROM enrollment_sessions
-         WHERE session_token_hash = ?",
-    )
-    .bind(token_hash)
-    .fetch_optional(pool)
-    .await?;
+         WHERE session_token_hash = ?"
+        )
+        .bind(token_hash)
+    )?;
 
     Ok(session)
 }
 
 /// Update enrollment session last used timestamp.
-pub async fn touch_enrollment_session(pool: &SqlitePool, id: &str) -> Result<()> {
-    sqlx::query("UPDATE enrollment_sessions SET last_used_at = datetime('now') WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
+pub async fn touch_enrollment_session(pool: &Pool, id: &str) -> Result<()> {
+    let db_type = pool.db_type();
+    let now = now_expr(db_type);
+    let sql = format!("UPDATE enrollment_sessions SET last_used_at = {now} WHERE id = ?");
+
+    db_execute!(pool, sqlx::query(&sql).bind(id))?;
 
     Ok(())
 }
 
 /// Delete an enrollment session.
-pub async fn delete_enrollment_session(pool: &SqlitePool, id: &str) -> Result<bool> {
-    let result = sqlx::query("DELETE FROM enrollment_sessions WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
+pub async fn delete_enrollment_session(pool: &Pool, id: &str) -> Result<bool> {
+    let result = db_execute!(
+        pool,
+        sqlx::query("DELETE FROM enrollment_sessions WHERE id = ?").bind(id)
+    )?;
 
     Ok(result.rows_affected() > 0)
 }
 
 /// Delete expired enrollment sessions (for cleanup task).
-pub async fn delete_expired_enrollment_sessions(pool: &SqlitePool) -> Result<u64> {
-    let result = sqlx::query("DELETE FROM enrollment_sessions WHERE expires_at < datetime('now')")
-        .execute(pool)
-        .await?;
+pub async fn delete_expired_enrollment_sessions(pool: &Pool) -> Result<u64> {
+    let db_type = pool.db_type();
+    let now = now_expr(db_type);
+    let sql = format!("DELETE FROM enrollment_sessions WHERE expires_at < {now}");
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected())
 }
@@ -340,7 +352,7 @@ pub struct RevokedSshCertificate {
 /// Revoke an SSH certificate.
 #[allow(dead_code)]
 pub async fn revoke_ssh_certificate(
-    pool: &SqlitePool,
+    pool: &Pool,
     serial: &str,
     user_id: &str,
     expires_at: &str,
@@ -348,52 +360,68 @@ pub async fn revoke_ssh_certificate(
     revoked_by: Option<&str>,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
 
-    sqlx::query(
-        "INSERT OR IGNORE INTO ssh_revoked_certificates (id, serial, user_id, expires_at, reason, revoked_by)
-         VALUES (?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(serial)
-    .bind(user_id)
-    .bind(expires_at)
-    .bind(reason)
-    .bind(revoked_by)
-    .execute(pool)
-    .await?;
+    // Build SQL in a block to ensure query is dropped before await
+    let sql = {
+        let query = Query::insert()
+            .into_table(SshRevokedCertificates::Table)
+            .columns([
+                SshRevokedCertificates::Id,
+                SshRevokedCertificates::Serial,
+                SshRevokedCertificates::UserId,
+                SshRevokedCertificates::ExpiresAt,
+                SshRevokedCertificates::Reason,
+                SshRevokedCertificates::RevokedBy,
+            ])
+            .values_panic([
+                id.clone().into(),
+                serial.into(),
+                user_id.into(),
+                expires_at.into(),
+                reason.into(),
+                revoked_by.into(),
+            ])
+            .on_conflict(OnConflict::new().do_nothing().to_owned())
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(id)
 }
 
 /// Check if an SSH certificate is revoked.
-pub async fn is_ssh_certificate_revoked(pool: &SqlitePool, serial: &str) -> Result<bool> {
-    let result = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM ssh_revoked_certificates WHERE serial = ?",
-    )
-    .bind(serial)
-    .fetch_one(pool)
-    .await?;
+pub async fn is_ssh_certificate_revoked(pool: &Pool, serial: &str) -> Result<bool> {
+    let result: (i64,) = db_fetch_one!(
+        pool,
+        sqlx::query_as("SELECT COUNT(*) FROM ssh_revoked_certificates WHERE serial = ?")
+            .bind(serial)
+    )?;
 
-    Ok(result > 0)
+    Ok(result.0 > 0)
 }
 
 /// Get all revoked SSH certificates (for KRL generation).
-pub async fn get_revoked_ssh_certificates(pool: &SqlitePool) -> Result<Vec<RevokedSshCertificate>> {
-    let certs = sqlx::query_as::<_, RevokedSshCertificate>(
+pub async fn get_revoked_ssh_certificates(pool: &Pool) -> Result<Vec<RevokedSshCertificate>> {
+    let db_type = pool.db_type();
+    let now = now_expr(db_type);
+    let sql = format!(
         "SELECT id, serial, user_id, reason, revoked_at, expires_at, revoked_by
          FROM ssh_revoked_certificates
-         WHERE expires_at > datetime('now')
-         ORDER BY revoked_at DESC",
-    )
-    .fetch_all(pool)
-    .await?;
+         WHERE expires_at > {now}
+         ORDER BY revoked_at DESC"
+    );
+
+    let certs = db_fetch_all!(pool, sqlx::query_as::<_, RevokedSshCertificate>(&sql))?;
 
     Ok(certs)
 }
 
 /// Revoke all SSH certificates for a user.
 pub async fn revoke_all_ssh_certificates_for_user(
-    pool: &SqlitePool,
+    pool: &Pool,
     user_id: &str,
     reason: Option<&str>,
     revoked_by: Option<&str>,
@@ -401,27 +429,51 @@ pub async fn revoke_all_ssh_certificates_for_user(
     // Note: This only marks future certificates as needing revocation check.
     // Existing issued certificates are tracked separately via serial numbers.
     // The caller should also add any known serials to the revocation list.
-    let result = sqlx::query(
-        "INSERT OR IGNORE INTO ssh_revoked_certificates (id, serial, user_id, expires_at, reason, revoked_by)
-         SELECT ?, 'user:' || ?, ?, datetime('now', '+1 year'), ?, ?",
-    )
-    .bind(Uuid::now_v7().to_string())
-    .bind(user_id)
-    .bind(user_id)
-    .bind(reason)
-    .bind(revoked_by)
-    .execute(pool)
-    .await?;
+    let db_type = pool.db_type();
+
+    // Compute expiry (1 year from now)
+    let expires_at = jiff::Timestamp::now()
+        .checked_add(jiff::Span::new().years(1))
+        .map_err(|_| anyhow::anyhow!("Time calculation overflow"))?
+        .to_string();
+
+    // Build SQL in a block to ensure query is dropped before await
+    let sql = {
+        let query = Query::insert()
+            .into_table(SshRevokedCertificates::Table)
+            .columns([
+                SshRevokedCertificates::Id,
+                SshRevokedCertificates::Serial,
+                SshRevokedCertificates::UserId,
+                SshRevokedCertificates::ExpiresAt,
+                SshRevokedCertificates::Reason,
+                SshRevokedCertificates::RevokedBy,
+            ])
+            .values_panic([
+                Uuid::now_v7().to_string().into(),
+                format!("user:{user_id}").into(),
+                user_id.into(),
+                expires_at.into(),
+                reason.into(),
+                revoked_by.into(),
+            ])
+            .on_conflict(OnConflict::new().do_nothing().to_owned())
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected())
 }
 
 /// Delete expired SSH certificate revocations (cleanup).
-pub async fn delete_expired_ssh_revocations(pool: &SqlitePool) -> Result<u64> {
-    let result =
-        sqlx::query("DELETE FROM ssh_revoked_certificates WHERE expires_at < datetime('now')")
-            .execute(pool)
-            .await?;
+pub async fn delete_expired_ssh_revocations(pool: &Pool) -> Result<u64> {
+    let db_type = pool.db_type();
+    let now = now_expr(db_type);
+    let sql = format!("DELETE FROM ssh_revoked_certificates WHERE expires_at < {now}");
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected())
 }
@@ -444,46 +496,52 @@ pub struct CloudIntegration {
 
 /// Get cloud integration config for an organization and provider.
 pub async fn get_cloud_integration(
-    pool: &SqlitePool,
+    pool: &Pool,
     org_id: &str,
     provider: &str,
 ) -> Result<Option<CloudIntegration>> {
-    let integration = sqlx::query_as::<_, CloudIntegration>(
-        "SELECT id, org_id, provider, config, created_at, updated_at, created_by_user_id
-         FROM cloud_integrations WHERE org_id = ? AND provider = ?",
-    )
-    .bind(org_id)
-    .bind(provider)
-    .fetch_optional(pool)
-    .await?;
+    let integration = db_fetch_optional!(
+        pool,
+        sqlx::query_as::<_, CloudIntegration>(
+            "SELECT id, org_id, provider, config, created_at, updated_at, created_by_user_id
+         FROM cloud_integrations WHERE org_id = ? AND provider = ?"
+        )
+        .bind(org_id)
+        .bind(provider)
+    )?;
 
     Ok(integration)
 }
 
 /// Create or update cloud integration config for an organization.
 pub async fn upsert_cloud_integration(
-    pool: &SqlitePool,
+    pool: &Pool,
     org_id: &str,
     provider: &str,
     config: &str,
     user_id: &str,
 ) -> Result<CloudIntegration> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
+    let now = now_expr(db_type);
 
-    sqlx::query(
+    let sql = format!(
         "INSERT INTO cloud_integrations (id, org_id, provider, config, created_by_user_id)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(org_id, provider) DO UPDATE SET
              config = excluded.config,
-             updated_at = datetime('now')",
-    )
-    .bind(&id)
-    .bind(org_id)
-    .bind(provider)
-    .bind(config)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
+             updated_at = {now}"
+    );
+
+    db_execute!(
+        pool,
+        sqlx::query(&sql)
+            .bind(&id)
+            .bind(org_id)
+            .bind(provider)
+            .bind(config)
+            .bind(user_id)
+    )?;
 
     // Return the integration (may be newly created or updated)
     get_cloud_integration(pool, org_id, provider)
@@ -492,16 +550,13 @@ pub async fn upsert_cloud_integration(
 }
 
 /// Delete cloud integration config for an organization.
-pub async fn delete_cloud_integration(
-    pool: &SqlitePool,
-    org_id: &str,
-    provider: &str,
-) -> Result<bool> {
-    let result = sqlx::query("DELETE FROM cloud_integrations WHERE org_id = ? AND provider = ?")
-        .bind(org_id)
-        .bind(provider)
-        .execute(pool)
-        .await?;
+pub async fn delete_cloud_integration(pool: &Pool, org_id: &str, provider: &str) -> Result<bool> {
+    let result = db_execute!(
+        pool,
+        sqlx::query("DELETE FROM cloud_integrations WHERE org_id = ? AND provider = ?")
+            .bind(org_id)
+            .bind(provider)
+    )?;
 
     Ok(result.rows_affected() > 0)
 }

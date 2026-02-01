@@ -549,9 +549,7 @@ mod tests {
         .expect("Failed to create device auth request");
 
         // Mark as denied
-        sqlx::query("UPDATE device_auth_requests SET status = 'denied' WHERE id = ?")
-            .bind(&id)
-            .execute(&state.db)
+        crate::db::deny_device_auth(&state.db, &id)
             .await
             .expect("Failed to update status");
 

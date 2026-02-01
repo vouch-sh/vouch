@@ -4,9 +4,8 @@
 use anyhow::Result;
 use clap::Parser;
 use secrecy::{ExposeSecret, SecretString};
-use sqlx::SqlitePool;
 
-use crate::db;
+use crate::db::{self, Pool};
 
 /// Configuration keys used in the database.
 pub mod config_keys {
@@ -349,7 +348,7 @@ impl ServerConfig {
     }
 
     /// Load additional configuration from database (overrides env vars where set).
-    pub async fn load_from_db(&mut self, pool: &SqlitePool) -> Result<()> {
+    pub async fn load_from_db(&mut self, pool: &Pool) -> Result<()> {
         // Allowed domains (DB overrides env vars)
         if let Some(domains) = db::get_config(pool, config_keys::ALLOWED_DOMAINS).await? {
             self.allowed_domains = Some(parse_comma_list(&domains));

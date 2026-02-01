@@ -7,13 +7,14 @@ use axum::{
     routing::{delete, get, patch, post},
 };
 use clap::Parser;
-use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::signal;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing_subscriber::EnvFilter;
 
-use vouch_server::{AppState, cleanup, config, dpop, github_app, handlers, oidc_key, ssh_ca};
+use vouch_server::{
+    AppState, cleanup, config, db::Pool, dpop, github_app, handlers, oidc_key, ssh_ca,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -31,11 +32,14 @@ async fn main() -> Result<()> {
     tracing::info!("Starting vouch-server on {}", config.listen_addr);
 
     // Connect to database
-    let db = SqlitePool::connect(&config.database_url).await?;
-    tracing::info!("Connected to database");
+    let db = Pool::connect(&config.database_url).await?;
+    tracing::info!("Connected to {:?} database", db.db_type());
 
-    // Run migrations
-    sqlx::migrate!("./migrations").run(&db).await?;
+    // Run migrations based on database type
+    match &db {
+        Pool::Sqlite(pool) => sqlx::migrate!("./migrations/sqlite").run(pool).await?,
+        Pool::Postgres(pool) => sqlx::migrate!("./migrations/postgres").run(pool).await?,
+    }
     tracing::info!("Database migrations complete");
 
     // Load configuration from database (overrides env vars where set)

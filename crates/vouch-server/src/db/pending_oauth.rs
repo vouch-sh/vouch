@@ -4,9 +4,10 @@
 //! Implements storage for OAuth authorization requests during browser login flow
 //! per RFC 6749 and RFC 9700 security best practices.
 
+use super::Pool;
+use crate::{db_execute, db_fetch_optional};
 use anyhow::Result;
 use jiff::{Span, Timestamp};
-use sqlx::SqlitePool;
 use uuid::Uuid;
 
 /// Pending OAuth authorization record.
@@ -51,7 +52,7 @@ pub struct CreatePendingOAuthParams<'a> {
 ///
 /// Returns an error if the database operation fails or if the time calculation overflows.
 pub async fn create_pending_oauth_authorization(
-    pool: &SqlitePool,
+    pool: &Pool,
     params: CreatePendingOAuthParams<'_>,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
@@ -61,24 +62,25 @@ pub async fn create_pending_oauth_authorization(
         .map_err(|_| anyhow::anyhow!("Time calculation overflow when computing expiration"))?
         .to_string();
 
-    sqlx::query(
-        r"INSERT INTO pending_oauth_authorizations
+    db_execute!(
+        pool,
+        sqlx::query(
+            r"INSERT INTO pending_oauth_authorizations
             (id, client_id, redirect_uri, response_type, state, scope, nonce,
              code_challenge, code_challenge_method, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(params.client_id)
-    .bind(params.redirect_uri)
-    .bind(params.response_type)
-    .bind(params.state)
-    .bind(params.scope)
-    .bind(params.nonce)
-    .bind(params.code_challenge)
-    .bind(params.code_challenge_method)
-    .bind(&expires_at)
-    .execute(pool)
-    .await?;
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(&id)
+        .bind(params.client_id)
+        .bind(params.redirect_uri)
+        .bind(params.response_type)
+        .bind(params.state)
+        .bind(params.scope)
+        .bind(params.nonce)
+        .bind(params.code_challenge)
+        .bind(params.code_challenge_method)
+        .bind(&expires_at)
+    )?;
 
     Ok(id)
 }
@@ -87,21 +89,22 @@ pub async fn create_pending_oauth_authorization(
 ///
 /// Returns None if not found, expired, or already consumed.
 pub async fn get_pending_oauth_authorization(
-    pool: &SqlitePool,
+    pool: &Pool,
     id: &str,
 ) -> Result<Option<PendingOAuthAuthorization>> {
     let now = Timestamp::now().to_string();
 
-    let record = sqlx::query_as::<_, PendingOAuthAuthorization>(
-        r"SELECT id, client_id, redirect_uri, response_type, state, scope, nonce,
+    let record = db_fetch_optional!(
+        pool,
+        sqlx::query_as::<_, PendingOAuthAuthorization>(
+            r"SELECT id, client_id, redirect_uri, response_type, state, scope, nonce,
                  code_challenge, code_challenge_method, created_at, expires_at, consumed_at
          FROM pending_oauth_authorizations
-         WHERE id = ? AND expires_at > ? AND consumed_at IS NULL",
-    )
-    .bind(id)
-    .bind(&now)
-    .fetch_optional(pool)
-    .await?;
+         WHERE id = ? AND expires_at > ? AND consumed_at IS NULL"
+        )
+        .bind(id)
+        .bind(&now)
+    )?;
 
     Ok(record)
 }
@@ -115,23 +118,24 @@ pub async fn get_pending_oauth_authorization(
 /// race conditions where two concurrent requests could both consume the same
 /// authorization.
 pub async fn consume_pending_oauth_authorization(
-    pool: &SqlitePool,
+    pool: &Pool,
     id: &str,
 ) -> Result<Option<PendingOAuthAuthorization>> {
     let now = Timestamp::now().to_string();
 
     // Atomically attempt to consume the authorization.
     // The WHERE clause ensures only one request can succeed for a given ID.
-    let result = sqlx::query(
-        "UPDATE pending_oauth_authorizations
+    let result = db_execute!(
+        pool,
+        sqlx::query(
+            "UPDATE pending_oauth_authorizations
          SET consumed_at = ?
-         WHERE id = ? AND expires_at > ? AND consumed_at IS NULL",
-    )
-    .bind(&now)
-    .bind(id)
-    .bind(&now)
-    .execute(pool)
-    .await?;
+         WHERE id = ? AND expires_at > ? AND consumed_at IS NULL"
+        )
+        .bind(&now)
+        .bind(id)
+        .bind(&now)
+    )?;
 
     // If no rows were affected, the authorization doesn't exist,
     // was expired, or was already consumed
@@ -140,15 +144,16 @@ pub async fn consume_pending_oauth_authorization(
     }
 
     // Successfully consumed - now fetch the record
-    let record = sqlx::query_as::<_, PendingOAuthAuthorization>(
-        r"SELECT id, client_id, redirect_uri, response_type, state, scope, nonce,
+    let record = db_fetch_optional!(
+        pool,
+        sqlx::query_as::<_, PendingOAuthAuthorization>(
+            r"SELECT id, client_id, redirect_uri, response_type, state, scope, nonce,
                  code_challenge, code_challenge_method, created_at, expires_at, consumed_at
          FROM pending_oauth_authorizations
-         WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+         WHERE id = ?"
+        )
+        .bind(id)
+    )?;
 
     Ok(record)
 }
@@ -156,14 +161,11 @@ pub async fn consume_pending_oauth_authorization(
 /// Delete expired pending OAuth authorizations.
 ///
 /// Called by the cleanup task to remove old records.
-pub async fn delete_expired_pending_oauth_authorizations(
-    pool: &SqlitePool,
-    now: &str,
-) -> Result<u64> {
-    let result = sqlx::query("DELETE FROM pending_oauth_authorizations WHERE expires_at < ?")
-        .bind(now)
-        .execute(pool)
-        .await?;
+pub async fn delete_expired_pending_oauth_authorizations(pool: &Pool, now: &str) -> Result<u64> {
+    let result = db_execute!(
+        pool,
+        sqlx::query("DELETE FROM pending_oauth_authorizations WHERE expires_at < ?").bind(now)
+    )?;
 
     Ok(result.rows_affected())
 }
@@ -172,15 +174,17 @@ pub async fn delete_expired_pending_oauth_authorizations(
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
 
-    async fn test_pool() -> SqlitePool {
-        let pool = SqlitePoolOptions::new()
-            .connect("sqlite::memory:")
-            .await
-            .unwrap();
+    async fn test_pool() -> Pool {
+        let pool = Pool::connect("sqlite::memory:").await.unwrap();
 
-        sqlx::migrate!("./migrations").run(&pool).await.unwrap();
+        match &pool {
+            Pool::Sqlite(p) => sqlx::migrate!("./migrations/sqlite").run(p).await.unwrap(),
+            Pool::Postgres(p) => sqlx::migrate!("./migrations/postgres")
+                .run(p)
+                .await
+                .unwrap(),
+        }
 
         pool
     }

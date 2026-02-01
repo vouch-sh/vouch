@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! GitHub App installation database operations.
 
+use super::Pool;
+use super::compat::now_expr;
+use crate::{db_execute, db_fetch_all, db_fetch_optional};
 use anyhow::Result;
 use jiff::Timestamp;
-use sqlx::SqlitePool;
 use uuid::Uuid;
 
 // ============================================================================
@@ -30,7 +32,7 @@ pub struct GitHubInstallation {
 /// Create a new GitHub App installation for an organization.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_github_installation(
-    pool: &SqlitePool,
+    pool: &Pool,
     org_id: &str,
     installation_id: i64,
     github_account_login: &str,
@@ -41,134 +43,137 @@ pub async fn create_github_installation(
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
 
-    sqlx::query(
-        "INSERT INTO github_installations (id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_by_user_id)
+    db_execute!(
+        pool,
+        sqlx::query(
+            "INSERT INTO github_installations (id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_by_user_id)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    .bind(&id)
-    .bind(org_id)
-    .bind(installation_id)
-    .bind(github_account_login)
-    .bind(github_account_type)
-    .bind(permissions)
-    .bind(repository_selection)
-    .bind(installed_by_user_id)
-    .execute(pool)
-    .await?;
+        )
+        .bind(&id)
+        .bind(org_id)
+        .bind(installation_id)
+        .bind(github_account_login)
+        .bind(github_account_type)
+        .bind(permissions)
+        .bind(repository_selection)
+        .bind(installed_by_user_id)
+    )?;
 
     Ok(id)
 }
 
 /// Get all GitHub installations for an organization.
 pub async fn get_github_installations_by_org(
-    pool: &SqlitePool,
+    pool: &Pool,
     org_id: &str,
 ) -> Result<Vec<GitHubInstallation>> {
-    let installations = sqlx::query_as::<_, GitHubInstallation>(
-        "SELECT id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_at, installed_by_user_id, suspended_at, repositories
-         FROM github_installations WHERE org_id = ? ORDER BY github_account_login",
-    )
-    .bind(org_id)
-    .fetch_all(pool)
-    .await?;
+    let installations = db_fetch_all!(
+        pool,
+        sqlx::query_as::<_, GitHubInstallation>(
+            "SELECT id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_at, installed_by_user_id, suspended_at, repositories
+         FROM github_installations WHERE org_id = ? ORDER BY github_account_login"
+        )
+        .bind(org_id)
+    )?;
 
     Ok(installations)
 }
 
 /// Get GitHub installation by organization ID and GitHub account login.
 pub async fn get_github_installation_by_org_and_account(
-    pool: &SqlitePool,
+    pool: &Pool,
     org_id: &str,
     github_account: &str,
 ) -> Result<Option<GitHubInstallation>> {
-    let installation = sqlx::query_as::<_, GitHubInstallation>(
-        "SELECT id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_at, installed_by_user_id, suspended_at, repositories
-         FROM github_installations WHERE org_id = ? AND LOWER(github_account_login) = LOWER(?)",
-    )
-    .bind(org_id)
-    .bind(github_account)
-    .fetch_optional(pool)
-    .await?;
+    let installation = db_fetch_optional!(
+        pool,
+        sqlx::query_as::<_, GitHubInstallation>(
+            "SELECT id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_at, installed_by_user_id, suspended_at, repositories
+         FROM github_installations WHERE org_id = ? AND LOWER(github_account_login) = LOWER(?)"
+        )
+        .bind(org_id)
+        .bind(github_account)
+    )?;
 
     Ok(installation)
 }
 
 /// Get GitHub installation by installation ID.
 pub async fn get_github_installation_by_installation_id(
-    pool: &SqlitePool,
+    pool: &Pool,
     installation_id: i64,
 ) -> Result<Option<GitHubInstallation>> {
-    let installation = sqlx::query_as::<_, GitHubInstallation>(
-        "SELECT id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_at, installed_by_user_id, suspended_at, repositories
-         FROM github_installations WHERE installation_id = ?",
-    )
-    .bind(installation_id)
-    .fetch_optional(pool)
-    .await?;
+    let installation = db_fetch_optional!(
+        pool,
+        sqlx::query_as::<_, GitHubInstallation>(
+            "SELECT id, org_id, installation_id, github_account_login, github_account_type, permissions, repository_selection, installed_at, installed_by_user_id, suspended_at, repositories
+         FROM github_installations WHERE installation_id = ?"
+        )
+        .bind(installation_id)
+    )?;
 
     Ok(installation)
 }
 
 /// Delete GitHub installation by installation ID (used by webhook handler).
 pub async fn delete_github_installation_by_installation_id(
-    pool: &SqlitePool,
+    pool: &Pool,
     installation_id: i64,
 ) -> Result<bool> {
-    let result = sqlx::query("DELETE FROM github_installations WHERE installation_id = ?")
-        .bind(installation_id)
-        .execute(pool)
-        .await?;
+    let result = db_execute!(
+        pool,
+        sqlx::query("DELETE FROM github_installations WHERE installation_id = ?")
+            .bind(installation_id)
+    )?;
 
     Ok(result.rows_affected() > 0)
 }
 
 /// Suspend GitHub installation (used by webhook handler).
-pub async fn suspend_github_installation(pool: &SqlitePool, installation_id: i64) -> Result<bool> {
-    let result = sqlx::query(
-        "UPDATE github_installations SET suspended_at = datetime('now') WHERE installation_id = ?",
-    )
-    .bind(installation_id)
-    .execute(pool)
-    .await?;
+pub async fn suspend_github_installation(pool: &Pool, installation_id: i64) -> Result<bool> {
+    let db_type = pool.db_type();
+    let now = now_expr(db_type);
+    let sql =
+        format!("UPDATE github_installations SET suspended_at = {now} WHERE installation_id = ?");
+
+    let result = db_execute!(pool, sqlx::query(&sql).bind(installation_id))?;
 
     Ok(result.rows_affected() > 0)
 }
 
 /// Unsuspend GitHub installation (used by webhook handler).
-pub async fn unsuspend_github_installation(
-    pool: &SqlitePool,
-    installation_id: i64,
-) -> Result<bool> {
-    let result = sqlx::query(
-        "UPDATE github_installations SET suspended_at = NULL WHERE installation_id = ?",
-    )
-    .bind(installation_id)
-    .execute(pool)
-    .await?;
+pub async fn unsuspend_github_installation(pool: &Pool, installation_id: i64) -> Result<bool> {
+    let result = db_execute!(
+        pool,
+        sqlx::query(
+            "UPDATE github_installations SET suspended_at = NULL WHERE installation_id = ?"
+        )
+        .bind(installation_id)
+    )?;
 
     Ok(result.rows_affected() > 0)
 }
 
 /// Update repositories for a GitHub installation (used by webhook handler).
 pub async fn update_github_installation_repos(
-    pool: &SqlitePool,
+    pool: &Pool,
     installation_id: i64,
     repos: &[String],
 ) -> Result<bool> {
     let repos_json = serde_json::to_string(repos)?;
-    let result =
+    let result = db_execute!(
+        pool,
         sqlx::query("UPDATE github_installations SET repositories = ? WHERE installation_id = ?")
             .bind(&repos_json)
             .bind(installation_id)
-            .execute(pool)
-            .await?;
+    )?;
 
     Ok(result.rows_affected() > 0)
 }
 
 /// Update repositories for a GitHub installation by adding/removing repos (used by webhook handler).
 pub async fn update_github_installation_repos_delta(
-    pool: &SqlitePool,
+    pool: &Pool,
     installation_id: i64,
     added: &[String],
     removed: &[String],
@@ -225,46 +230,44 @@ pub struct GitHubCredentialEventParams<'a> {
 
 /// Log a GitHub credential event (audit log).
 pub async fn log_github_credential_event(
-    pool: &SqlitePool,
+    pool: &Pool,
     params: GitHubCredentialEventParams<'_>,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
 
-    sqlx::query(
-        "INSERT INTO github_credential_events (id, event_type, user_id, user_email, org_id, installation_id, session_id, authenticator_id, repositories, permissions, token_expires_at, success, error_code, ip_address, user_agent)
+    db_execute!(
+        pool,
+        sqlx::query(
+            "INSERT INTO github_credential_events (id, event_type, user_id, user_email, org_id, installation_id, session_id, authenticator_id, repositories, permissions, token_expires_at, success, error_code, ip_address, user_agent)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-    )
-    .bind(&id)
-    .bind(params.event_type)
-    .bind(params.user_id)
-    .bind(params.user_email)
-    .bind(params.org_id)
-    .bind(params.installation_id)
-    .bind(params.session_id)
-    .bind(params.authenticator_id)
-    .bind(params.repositories)
-    .bind(params.permissions)
-    .bind(params.token_expires_at)
-    .bind(params.success)
-    .bind(params.error_code)
-    .bind(params.ip_address)
-    .bind(params.user_agent)
-    .execute(pool)
-    .await?;
+        )
+        .bind(&id)
+        .bind(params.event_type)
+        .bind(params.user_id)
+        .bind(params.user_email)
+        .bind(params.org_id)
+        .bind(params.installation_id)
+        .bind(params.session_id)
+        .bind(params.authenticator_id)
+        .bind(params.repositories)
+        .bind(params.permissions)
+        .bind(params.token_expires_at)
+        .bind(params.success)
+        .bind(params.error_code)
+        .bind(params.ip_address)
+        .bind(params.user_agent)
+    )?;
 
     Ok(id)
 }
 
 /// Delete old GitHub credential events (retention).
-pub async fn delete_old_github_credential_events(
-    pool: &SqlitePool,
-    before: &Timestamp,
-) -> Result<u64> {
+pub async fn delete_old_github_credential_events(pool: &Pool, before: &Timestamp) -> Result<u64> {
     let before_str = before.strftime("%Y-%m-%d %H:%M:%S").to_string();
-    let result = sqlx::query("DELETE FROM github_credential_events WHERE created_at < ?")
-        .bind(before_str)
-        .execute(pool)
-        .await?;
+    let result = db_execute!(
+        pool,
+        sqlx::query("DELETE FROM github_credential_events WHERE created_at < ?").bind(before_str)
+    )?;
 
     Ok(result.rows_affected())
 }

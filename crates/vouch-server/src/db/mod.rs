@@ -3,8 +3,17 @@
 //!
 //! This module provides database operations for the Vouch server, organized
 //! into domain-specific submodules for maintainability.
+//!
+//! # Multi-Database Support
+//!
+//! This module supports both SQLite and PostgreSQL backends via feature flags:
+//! - `sqlite` (default): Uses SQLite for development and testing
+//! - `postgres`: Uses PostgreSQL/Aurora DSQL for production
+//!
+//! Use the `Pool` type alias for database operations to work with either backend.
 
 mod authenticators;
+pub mod compat;
 mod config;
 mod credentials;
 mod device_auth;
@@ -13,9 +22,14 @@ mod github;
 mod oauth;
 mod organizations;
 mod pending_oauth;
+mod pool;
+pub mod schema;
 mod scim;
 mod sessions;
 mod users;
+
+// Re-export Pool, DatabaseType, and Transaction for use throughout the application
+pub use pool::{DatabaseType, Pool, Transaction};
 
 // Re-export error types
 pub use error::{DbError, DbResult};

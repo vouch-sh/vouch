@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Server configuration and authentication event database operations.
 
+use super::Pool;
+use super::compat::{BuildSql, now_expr};
+use super::schema::{AuthEvents, ServerConfig};
+use crate::{db_execute, db_fetch_all, db_fetch_optional};
 use anyhow::Result;
-use sqlx::SqlitePool;
+use sea_query::{OnConflict, Query, SimpleExpr};
 use uuid::Uuid;
 
 // ============================================================================
@@ -20,49 +24,69 @@ pub struct ServerConfigRow {
 }
 
 /// Get a config value by key.
-pub async fn get_config(pool: &SqlitePool, key: &str) -> Result<Option<String>> {
-    let row = sqlx::query_as::<_, ServerConfigRow>(
-        "SELECT key, value, updated_at FROM server_config WHERE key = ?",
-    )
-    .bind(key)
-    .fetch_optional(pool)
-    .await?;
+pub async fn get_config(pool: &Pool, key: &str) -> Result<Option<String>> {
+    let row = db_fetch_optional!(
+        pool,
+        sqlx::query_as::<_, ServerConfigRow>(
+            "SELECT key, value, updated_at FROM server_config WHERE key = ?"
+        )
+        .bind(key)
+    )?;
 
     Ok(row.map(|r| r.value))
 }
 
 /// Get all config values.
 #[allow(dead_code)]
-pub async fn get_all_config(pool: &SqlitePool) -> Result<Vec<ServerConfigRow>> {
-    let rows =
+pub async fn get_all_config(pool: &Pool) -> Result<Vec<ServerConfigRow>> {
+    let rows = db_fetch_all!(
+        pool,
         sqlx::query_as::<_, ServerConfigRow>("SELECT key, value, updated_at FROM server_config")
-            .fetch_all(pool)
-            .await?;
+    )?;
 
     Ok(rows)
 }
 
 /// Set a config value.
-pub async fn set_config(pool: &SqlitePool, key: &str, value: &str) -> Result<()> {
-    sqlx::query(
-        "INSERT INTO server_config (key, value, updated_at) VALUES (?, ?, datetime('now'))
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-    )
-    .bind(key)
-    .bind(value)
-    .execute(pool)
-    .await?;
+pub async fn set_config(pool: &Pool, key: &str, value: &str) -> Result<()> {
+    let db_type = pool.db_type();
+
+    // Build upsert query using sea-query
+    // Build SQL in a block to ensure query is dropped before await
+    let sql = {
+        let query = Query::insert()
+            .into_table(ServerConfig::Table)
+            .columns([
+                ServerConfig::Key,
+                ServerConfig::Value,
+                ServerConfig::UpdatedAt,
+            ])
+            .values_panic([
+                key.into(),
+                value.into(),
+                SimpleExpr::Custom(now_expr(db_type).to_string()),
+            ])
+            .on_conflict(
+                OnConflict::column(ServerConfig::Key)
+                    .update_columns([ServerConfig::Value, ServerConfig::UpdatedAt])
+                    .to_owned(),
+            )
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
 
 /// Delete a config value.
 #[allow(dead_code)]
-pub async fn delete_config(pool: &SqlitePool, key: &str) -> Result<()> {
-    sqlx::query("DELETE FROM server_config WHERE key = ?")
-        .bind(key)
-        .execute(pool)
-        .await?;
+pub async fn delete_config(pool: &Pool, key: &str) -> Result<()> {
+    db_execute!(
+        pool,
+        sqlx::query("DELETE FROM server_config WHERE key = ?").bind(key)
+    )?;
 
     Ok(())
 }
@@ -143,27 +167,47 @@ pub struct AuthEventParams {
 }
 
 /// Insert a new authentication event.
-pub async fn insert_auth_event(pool: &SqlitePool, params: &AuthEventParams) -> Result<String> {
+pub async fn insert_auth_event(pool: &Pool, params: &AuthEventParams) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
 
-    sqlx::query(
-        "INSERT INTO auth_events (id, user_id, event_type, authenticator_id, client_ip, user_agent, client_hostname, client_os, client_arch, client_version, success, failure_reason)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(&params.user_id)
-    .bind(params.event_type.as_str())
-    .bind(&params.authenticator_id)
-    .bind(&params.client_ip)
-    .bind(&params.user_agent)
-    .bind(&params.client_hostname)
-    .bind(&params.client_os)
-    .bind(&params.client_arch)
-    .bind(&params.client_version)
-    .bind(i64::from(params.success))
-    .bind(&params.failure_reason)
-    .execute(pool)
-    .await?;
+    // Build SQL in a block to ensure query is dropped before await
+    let sql = {
+        let query = Query::insert()
+            .into_table(AuthEvents::Table)
+            .columns([
+                AuthEvents::Id,
+                AuthEvents::UserId,
+                AuthEvents::EventType,
+                AuthEvents::AuthenticatorId,
+                AuthEvents::ClientIp,
+                AuthEvents::UserAgent,
+                AuthEvents::ClientHostname,
+                AuthEvents::ClientOs,
+                AuthEvents::ClientArch,
+                AuthEvents::ClientVersion,
+                AuthEvents::Success,
+                AuthEvents::FailureReason,
+            ])
+            .values_panic([
+                id.clone().into(),
+                params.user_id.clone().into(),
+                params.event_type.as_str().into(),
+                params.authenticator_id.clone().into(),
+                params.client_ip.clone().into(),
+                params.user_agent.clone().into(),
+                params.client_hostname.clone().into(),
+                params.client_os.clone().into(),
+                params.client_arch.clone().into(),
+                params.client_version.clone().into(),
+                i64::from(params.success).into(),
+                params.failure_reason.clone().into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(id)
 }
@@ -179,7 +223,7 @@ pub struct AuthEventQuery {
 }
 
 /// Get authentication events with optional filtering.
-pub async fn get_auth_events(pool: &SqlitePool, query: &AuthEventQuery) -> Result<Vec<AuthEvent>> {
+pub async fn get_auth_events(pool: &Pool, query: &AuthEventQuery) -> Result<Vec<AuthEvent>> {
     let mut sql = String::from(
         "SELECT id, user_id, event_type, authenticator_id, client_ip, user_agent, client_hostname, client_os, client_arch, client_version, success, failure_reason, created_at
          FROM auth_events WHERE 1=1",
@@ -212,23 +256,34 @@ pub async fn get_auth_events(pool: &SqlitePool, query: &AuthEventQuery) -> Resul
     sql.push_str(" LIMIT ?");
     binds.push(limit.to_string());
 
-    // Build the query dynamically
-    let mut db_query = sqlx::query_as::<_, AuthEvent>(&sql);
-    for bind in binds {
-        db_query = db_query.bind(bind);
-    }
-
-    let events = db_query.fetch_all(pool).await?;
+    // Execute the query based on database type
+    // We need to build the query inside each match arm because SQLx queries are typed to specific databases
+    let events = match pool {
+        Pool::Sqlite(p) => {
+            let mut q = sqlx::query_as::<_, AuthEvent>(&sql);
+            for bind in &binds {
+                q = q.bind(bind);
+            }
+            q.fetch_all(p).await?
+        }
+        Pool::Postgres(p) => {
+            let mut q = sqlx::query_as::<_, AuthEvent>(&sql);
+            for bind in &binds {
+                q = q.bind(bind);
+            }
+            q.fetch_all(p).await?
+        }
+    };
     Ok(events)
 }
 
 /// Delete authentication events older than the specified timestamp.
 /// Use for retention policy enforcement (e.g., delete events older than 90 days).
-pub async fn delete_old_auth_events(pool: &SqlitePool, before: &str) -> Result<u64> {
-    let result = sqlx::query("DELETE FROM auth_events WHERE created_at < ?")
-        .bind(before)
-        .execute(pool)
-        .await?;
+pub async fn delete_old_auth_events(pool: &Pool, before: &str) -> Result<u64> {
+    let result = db_execute!(
+        pool,
+        sqlx::query("DELETE FROM auth_events WHERE created_at < ?").bind(before)
+    )?;
 
     Ok(result.rows_affected())
 }
