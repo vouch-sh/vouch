@@ -91,9 +91,11 @@ impl ReqwestClient {
     ///
     /// Returns an error if the client cannot be built.
     pub fn new() -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .build()
-            .context("failed to create HTTP client")?;
+        let client = vouch_common::http::interactive_client(&format!(
+            "vouch-cli/{}",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .context("failed to create HTTP client")?;
 
         Ok(Self { client })
     }
@@ -102,7 +104,10 @@ impl ReqwestClient {
 impl Default for ReqwestClient {
     fn default() -> Self {
         Self::new().unwrap_or_else(|_| Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .user_agent(format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+                .build()
+                .unwrap_or_default(),
         })
     }
 }

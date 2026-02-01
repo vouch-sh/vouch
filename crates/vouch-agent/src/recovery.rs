@@ -13,7 +13,6 @@ use crate::state::{AgentState, Session};
 use jiff::Timestamp;
 use secrecy::SecretString;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing::{debug, info};
 
 /// Try to recover a session from credentials persisted on disk.
@@ -70,9 +69,8 @@ async fn try_recover_inner(
     debug!("Found persisted token, validating with server");
 
     // Validate token with the server
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()?;
+    let client =
+        vouch_common::http::agent_client(&format!("vouch-agent/{}", env!("CARGO_PKG_VERSION")))?;
 
     let response = client
         .get(format!("{server_url}/v1/auth/status"))

@@ -17,9 +17,11 @@ pub struct VouchClient {
 impl VouchClient {
     /// Create a new client for the given server URL.
     pub fn new(base_url: &str) -> Result<Self> {
-        let client = Client::builder()
-            .build()
-            .context("failed to create HTTP client")?;
+        let client = vouch_common::http::interactive_client(&format!(
+            "vouch-cli/{}",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .context("failed to create HTTP client")?;
 
         Ok(Self {
             client,
