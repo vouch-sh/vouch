@@ -4,9 +4,9 @@
 //! Configures AWS CLI/SDK to use Vouch for credential federation.
 
 use anyhow::{Context, Result};
-use std::fs;
 use std::path::PathBuf;
 
+use crate::aws::{AwsConfig, AwsProfile};
 use crate::utils::ensure_secure_dir;
 
 /// Get the AWS config directory (~/.aws).
@@ -15,9 +15,11 @@ fn aws_config_dir() -> Result<PathBuf> {
     Ok(home.join(".aws"))
 }
 
-/// Get the AWS config file path (~/.aws/config).
-fn aws_config_path() -> Result<PathBuf> {
-    Ok(aws_config_dir()?.join("config"))
+/// Check if a profile already exists in AWS config.
+fn profile_exists(profile: &str) -> bool {
+    AwsConfig::load()
+        .map(|c| c.profile_exists(profile))
+        .unwrap_or(false)
 }
 
 /// Run the AWS setup command.
@@ -25,7 +27,26 @@ fn aws_config_path() -> Result<PathBuf> {
 /// This command:
 /// 1. Shows how to configure AWS CLI/SDK to use Vouch
 /// 2. Optionally adds a profile to ~/.aws/config
-pub async fn run(profile: &str, role_arn: &str, add_profile: bool) -> Result<()> {
+pub async fn run(profile: Option<&str>, role_arn: &str, add_profile: bool) -> Result<()> {
+    // Determine profile name
+    let profile = match profile {
+        Some(p) => p.to_string(),
+        None => {
+            // Default to "vouch" if it doesn't exist yet
+            if profile_exists("vouch") {
+                println!("Profile [vouch] already exists in ~/.aws/config.");
+                println!();
+                println!("To add another profile with a different role, run:");
+                println!();
+                println!("  vouch setup aws --profile <name> --role {role_arn}");
+                println!();
+                println!("To update the existing [vouch] profile, edit ~/.aws/config directly.");
+                return Ok(());
+            }
+            "vouch".to_string()
+        }
+    };
+
     // Get the path to the vouch binary
     let vouch_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("vouch"));
 
@@ -35,7 +56,7 @@ pub async fn run(profile: &str, role_arn: &str, add_profile: bool) -> Result<()>
 
     if add_profile {
         // Add profile to AWS config
-        add_aws_profile(profile, role_arn, &vouch_path)?;
+        add_aws_profile(&profile, role_arn, &vouch_path)?;
         println!("Added profile [{profile}] to ~/.aws/config");
         println!();
     }
@@ -71,37 +92,31 @@ pub async fn run(profile: &str, role_arn: &str, add_profile: bool) -> Result<()>
 
 /// Add a profile to the AWS config file.
 fn add_aws_profile(profile: &str, role_arn: &str, vouch_path: &std::path::Path) -> Result<()> {
-    let config_path = aws_config_path()?;
+    let config_path = AwsConfig::default_path()?;
     let aws_dir = aws_config_dir()?;
 
     // Ensure .aws directory exists with secure permissions
     ensure_secure_dir(&aws_dir)?;
 
-    // Read existing config or create empty
-    let existing = if config_path.exists() {
-        fs::read_to_string(&config_path)
-            .with_context(|| format!("failed to read {}", config_path.display()))?
-    } else {
-        String::new()
-    };
+    // Load existing config or create empty
+    let mut config =
+        AwsConfig::load_from(config_path.clone()).unwrap_or_else(|_| AwsConfig::empty(config_path));
 
     // Check if profile already exists
-    let profile_header = format!("[profile {profile}]");
-    if existing.contains(&profile_header) {
+    if config.profile_exists(profile) {
         println!("Profile [{profile}] already exists in AWS config");
         println!("Please update it manually if needed.");
         return Ok(());
     }
 
-    // Append new profile
-    let profile_config = format!(
-        "\n{profile_header}\ncredential_process = {} credential aws --role {role_arn}\n",
-        vouch_path.display()
-    );
-    let new_config = format!("{existing}{profile_config}");
-
-    fs::write(&config_path, new_config)
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
-
-    Ok(())
+    // Add new profile and save (preserves all existing sections/keys)
+    config.set_profile(&AwsProfile {
+        name: profile.to_string(),
+        credential_process: Some(format!(
+            "{} credential aws --role {role_arn}",
+            vouch_path.display()
+        )),
+        region: None,
+    });
+    config.save()
 }

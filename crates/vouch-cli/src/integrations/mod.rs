@@ -2,15 +2,17 @@
 //! Integration status checking for cloud providers and services.
 //!
 //! This module provides a trait-based system for checking the configuration
-//! status of various integrations (AWS, GCP, GitHub, K8s, SSH).
+//! status of various integrations (AWS, GCP, GitHub, K8s, SSH, Docker).
 
 pub mod aws;
+pub mod docker;
 pub mod gcp;
 pub mod github;
 pub mod k8s;
 pub mod ssh;
 
 pub use aws::AwsIntegration;
+pub use docker::DockerIntegration;
 pub use gcp::GcpIntegration;
 pub use github::GitHubIntegration;
 pub use k8s::K8sIntegration;
