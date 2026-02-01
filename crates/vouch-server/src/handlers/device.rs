@@ -67,7 +67,7 @@ fn hash_device_code(code: &str) -> String {
 }
 
 /// Start device authorization flow.
-/// POST /oauth/device (canonical) or POST /oauth/device/code (legacy)
+/// POST /oauth/device
 ///
 /// RFC 8628 Section 3.1: The client makes a request using
 /// "application/x-www-form-urlencoded" format.
@@ -318,7 +318,7 @@ mod tests {
 
         // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
         let (status, body) =
-            http_post_form(&app, "/oauth/device/code", "client_id=test", &[]).await;
+            http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -349,35 +349,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_rfc8628_canonical_device_endpoint() {
-        // RFC 8628: The canonical /oauth/device endpoint should work
-        let (app, _state) = test_app().await;
-
-        // Test the canonical /oauth/device endpoint
-        let (status, body) =
-            http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
-
-        assert_eq!(status, StatusCode::OK);
-        let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-
-        // Verify required fields are present
-        assert!(resp.get("device_code").is_some(), "device_code is REQUIRED");
-        assert!(resp.get("user_code").is_some(), "user_code is REQUIRED");
-        assert!(
-            resp.get("verification_uri").is_some(),
-            "verification_uri is REQUIRED"
-        );
-        assert!(resp.get("expires_in").is_some(), "expires_in is REQUIRED");
-    }
-
-    #[tokio::test]
     async fn test_rfc8628_device_code_interval() {
         // RFC 8628 Section 3.2: interval field is OPTIONAL but recommended
         let (app, _state) = test_app().await;
 
         // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
         let (status, body) =
-            http_post_form(&app, "/oauth/device/code", "client_id=test", &[]).await;
+            http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -403,7 +381,7 @@ mod tests {
 
         // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
         let (status, body) =
-            http_post_form(&app, "/oauth/device/code", "client_id=test", &[]).await;
+            http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -432,7 +410,7 @@ mod tests {
         for _ in 0..5 {
             // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
             let (status, body) =
-                http_post_form(&app, "/oauth/device/code", "client_id=test", &[]).await;
+                http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
 
             assert_eq!(status, StatusCode::OK);
             let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -474,7 +452,7 @@ mod tests {
 
         // Create a device auth request (RFC 8628 Section 3.1: form-urlencoded)
         let (status, body) =
-            http_post_form(&app, "/oauth/device/code", "client_id=test", &[]).await;
+            http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
         assert_eq!(status, StatusCode::OK);
         let code_resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         let device_code = code_resp["device_code"].as_str().expect("device_code");
@@ -710,7 +688,7 @@ mod tests {
 
         // Attempt to use JSON content-type (should be rejected)
         let (status, _body) =
-            http_post_json(&app, "/oauth/device/code", r#"{"client_id": "test"}"#, &[]).await;
+            http_post_json(&app, "/oauth/device", r#"{"client_id": "test"}"#, &[]).await;
 
         // Axum's Form extractor returns 415 Unsupported Media Type for JSON
         assert_eq!(
