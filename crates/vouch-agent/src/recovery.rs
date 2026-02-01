@@ -69,7 +69,8 @@ async fn try_recover_inner(
     debug!("Found persisted token, validating with server");
 
     // Validate token with the server
-    let client = vouch_common::http::agent_client()?;
+    let client =
+        vouch_common::http::agent_client(&format!("vouch-agent/{}", env!("CARGO_PKG_VERSION")))?;
 
     let response = client
         .get(format!("{server_url}/v1/auth/status"))

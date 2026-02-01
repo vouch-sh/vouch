@@ -37,11 +37,16 @@ pub mod timeouts {
 /// Credential helpers are called by tools (aws, docker, gcloud) that have
 /// their own retry logic.
 ///
+/// # Arguments
+///
+/// * `user_agent` - The User-Agent header value for outgoing requests.
+///
 /// # Errors
 ///
 /// Returns an error if the client cannot be built.
-pub fn credential_client() -> Result<reqwest::Client, reqwest::Error> {
+pub fn credential_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
+        .user_agent(user_agent)
         .timeout(timeouts::CREDENTIAL_TOTAL)
         .connect_timeout(timeouts::CREDENTIAL_CONNECT)
         .build()
@@ -52,11 +57,16 @@ pub fn credential_client() -> Result<reqwest::Client, reqwest::Error> {
 /// Uses longer timeouts (30s total, 10s connect) since users expect
 /// some latency for interactive commands.
 ///
+/// # Arguments
+///
+/// * `user_agent` - The User-Agent header value for outgoing requests.
+///
 /// # Errors
 ///
 /// Returns an error if the client cannot be built.
-pub fn interactive_client() -> Result<reqwest::Client, reqwest::Error> {
+pub fn interactive_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
+        .user_agent(user_agent)
         .timeout(timeouts::INTERACTIVE_TOTAL)
         .connect_timeout(timeouts::INTERACTIVE_CONNECT)
         .build()
@@ -67,11 +77,16 @@ pub fn interactive_client() -> Result<reqwest::Client, reqwest::Error> {
 /// Uses short timeouts (5s total, 3s connect) for best-effort,
 /// non-blocking background work.
 ///
+/// # Arguments
+///
+/// * `user_agent` - The User-Agent header value for outgoing requests.
+///
 /// # Errors
 ///
 /// Returns an error if the client cannot be built.
-pub fn agent_client() -> Result<reqwest::Client, reqwest::Error> {
+pub fn agent_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
+        .user_agent(user_agent)
         .timeout(timeouts::AGENT_TOTAL)
         .connect_timeout(timeouts::AGENT_CONNECT)
         .build()
@@ -103,19 +118,19 @@ mod tests {
 
     #[test]
     fn test_credential_client_builds() {
-        let client = credential_client();
+        let client = credential_client("test-credential/1.0.0");
         assert!(client.is_ok());
     }
 
     #[test]
     fn test_interactive_client_builds() {
-        let client = interactive_client();
+        let client = interactive_client("test-cli/1.0.0");
         assert!(client.is_ok());
     }
 
     #[test]
     fn test_agent_client_builds() {
-        let client = agent_client();
+        let client = agent_client("test-agent/1.0.0");
         assert!(client.is_ok());
     }
 

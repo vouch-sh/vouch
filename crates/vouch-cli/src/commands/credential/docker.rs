@@ -312,7 +312,8 @@ async fn get_ecr_authorization_token(
 
     // We need to sign the request with AWS SigV4
     let http_client =
-        vouch_common::http::credential_client().context("failed to create HTTP client")?;
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
 
     // ECR uses JSON-RPC style API
     let request_body = serde_json::json!({

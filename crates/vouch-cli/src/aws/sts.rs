@@ -59,7 +59,8 @@ pub async fn assume_role_with_web_identity(
     domain_suffix: &str,
 ) -> Result<AssumeRoleWithWebIdentityResponse> {
     let http_client =
-        vouch_common::http::credential_client().context("failed to create HTTP client")?;
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
 
     // Use regional STS endpoint for the appropriate partition
     // e.g., "sts.us-east-1.amazonaws.com" or "sts.cn-north-1.amazonaws.cn"
