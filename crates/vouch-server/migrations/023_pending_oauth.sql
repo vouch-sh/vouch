@@ -25,6 +25,3 @@ CREATE TABLE pending_oauth_authorizations (
 
 -- Index for cleanup of expired entries
 CREATE INDEX idx_pending_oauth_expires ON pending_oauth_authorizations(expires_at);
-
--- Index for lookup by ID (already primary key, but explicit for clarity)
-CREATE INDEX idx_pending_oauth_id ON pending_oauth_authorizations(id);

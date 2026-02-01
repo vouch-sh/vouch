@@ -46,6 +46,10 @@ pub struct CreatePendingOAuthParams<'a> {
 ///
 /// Returns the ID of the created record which should be passed to the login page.
 /// The pending authorization expires after 10 minutes.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails or if the time calculation overflows.
 pub async fn create_pending_oauth_authorization(
     pool: &SqlitePool,
     params: CreatePendingOAuthParams<'_>,
@@ -54,7 +58,7 @@ pub async fn create_pending_oauth_authorization(
     let now = Timestamp::now();
     let expires_at = now
         .checked_add(Span::new().minutes(10))
-        .unwrap_or(now)
+        .map_err(|_| anyhow::anyhow!("Time calculation overflow when computing expiration"))?
         .to_string();
 
     sqlx::query(
@@ -104,25 +108,47 @@ pub async fn get_pending_oauth_authorization(
 
 /// Consume a pending OAuth authorization (single-use).
 ///
-/// Marks the authorization as consumed and returns it if valid.
+/// Atomically marks the authorization as consumed and returns it if valid.
 /// Returns None if not found, expired, or already consumed.
+///
+/// This function uses an atomic UPDATE with WHERE clause to prevent TOCTOU
+/// race conditions where two concurrent requests could both consume the same
+/// authorization.
 pub async fn consume_pending_oauth_authorization(
     pool: &SqlitePool,
     id: &str,
 ) -> Result<Option<PendingOAuthAuthorization>> {
     let now = Timestamp::now().to_string();
 
-    // First, get the record if it's valid
-    let record = get_pending_oauth_authorization(pool, id).await?;
+    // Atomically attempt to consume the authorization.
+    // The WHERE clause ensures only one request can succeed for a given ID.
+    let result = sqlx::query(
+        "UPDATE pending_oauth_authorizations
+         SET consumed_at = ?
+         WHERE id = ? AND expires_at > ? AND consumed_at IS NULL",
+    )
+    .bind(&now)
+    .bind(id)
+    .bind(&now)
+    .execute(pool)
+    .await?;
 
-    if record.is_some() {
-        // Mark as consumed
-        sqlx::query("UPDATE pending_oauth_authorizations SET consumed_at = ? WHERE id = ?")
-            .bind(&now)
-            .bind(id)
-            .execute(pool)
-            .await?;
+    // If no rows were affected, the authorization doesn't exist,
+    // was expired, or was already consumed
+    if result.rows_affected() == 0 {
+        return Ok(None);
     }
+
+    // Successfully consumed - now fetch the record
+    let record = sqlx::query_as::<_, PendingOAuthAuthorization>(
+        r"SELECT id, client_id, redirect_uri, response_type, state, scope, nonce,
+                 code_challenge, code_challenge_method, created_at, expires_at, consumed_at
+         FROM pending_oauth_authorizations
+         WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
 
     Ok(record)
 }

@@ -20,6 +20,7 @@ use jiff::{Timestamp, ToSpan};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 
 /// Supported DPoP signing algorithms (asymmetric only per RFC 9449).
@@ -414,18 +415,28 @@ pub fn validate_dpop_claims(
         return Err(DpopError::Expired);
     }
 
-    // Check nonce if required
+    // Check nonce if required (constant-time comparison for defense-in-depth)
     if require_nonce {
         match (&claims.nonce, expected_nonce) {
-            (Some(proof_nonce), Some(expected)) if proof_nonce == expected => {}
+            (Some(proof_nonce), Some(expected)) => {
+                let is_valid: bool = proof_nonce.as_bytes().ct_eq(expected.as_bytes()).into();
+                if !is_valid {
+                    return Err(DpopError::InvalidNonce);
+                }
+            }
             _ => return Err(DpopError::InvalidNonce),
         }
     }
 
-    // Check access token hash if provided
+    // Check access token hash if provided (constant-time comparison for defense-in-depth)
     if let Some(expected_ath) = expected_ath {
         match &claims.ath {
-            Some(proof_ath) if proof_ath == expected_ath => {}
+            Some(proof_ath) => {
+                let is_valid: bool = proof_ath.as_bytes().ct_eq(expected_ath.as_bytes()).into();
+                if !is_valid {
+                    return Err(DpopError::TokenHashMismatch);
+                }
+            }
             _ => return Err(DpopError::TokenHashMismatch),
         }
     }

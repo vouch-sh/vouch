@@ -20,6 +20,7 @@ use jiff::Timestamp;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, encode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 use super::authorization::{AuthorizationCode, decode_authorization_code};
 
@@ -274,6 +275,8 @@ pub async fn exchange_authorization_code(
 }
 
 /// Validate PKCE code verifier against code challenge.
+///
+/// Uses constant-time comparison to prevent timing side-channel attacks.
 fn validate_pkce(auth_code: &AuthorizationCode, code_verifier: Option<&str>) -> ServiceResult<()> {
     let Some(code_challenge) = &auth_code.code_challenge else {
         // No PKCE challenge in authorization code
@@ -296,7 +299,13 @@ fn validate_pkce(auth_code: &AuthorizationCode, code_verifier: Option<&str>) -> 
         code_verifier.to_string()
     };
 
-    if &computed_challenge != code_challenge {
+    // Use constant-time comparison to prevent timing side-channel attacks
+    let is_valid: bool = computed_challenge
+        .as_bytes()
+        .ct_eq(code_challenge.as_bytes())
+        .into();
+
+    if !is_valid {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidGrant,
             "Invalid code_verifier",

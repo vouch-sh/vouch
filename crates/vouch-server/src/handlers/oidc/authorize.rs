@@ -151,6 +151,23 @@ pub async fn authorize(
             }
         };
 
+    // RFC 6749 Section 10.6: Validate redirect_uri against registered URIs
+    // This prevents attackers from redirecting authorization codes to malicious endpoints
+    if !oauth_client.is_valid_redirect_uri(&validated.redirect_uri) {
+        tracing::warn!(
+            "Invalid redirect_uri '{}' for client '{}'. Registered URIs: {:?}",
+            validated.redirect_uri,
+            validated.client_id,
+            oauth_client.get_redirect_uris()
+        );
+        // Show error page instead of redirecting to unregistered URI
+        return AuthorizeDeniedTemplate {
+            client_name: oauth_client.name,
+            error_message: "Invalid redirect_uri: not registered for this application".to_string(),
+        }
+        .into_response();
+    }
+
     // Try to get existing session from cookie
     let session_token = jar.get("vouch_session").map(|c| c.value());
 

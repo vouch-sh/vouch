@@ -187,7 +187,13 @@ pub async fn browser_login_start(
     let now = Timestamp::now();
     let exp = now
         .checked_add(Span::new().minutes(5))
-        .unwrap_or(now)
+        .map_err(|_| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "time_error",
+                "Time calculation overflow",
+            )
+        })?
         .as_second();
 
     // Create state token
@@ -584,8 +590,8 @@ mod tests {
         };
 
         let encoded = state.encode(secret).expect("Failed to encode state");
-        let decoded = BrowserAuthenticationState::decode(&encoded, secret)
-            .expect("Failed to decode state");
+        let decoded =
+            BrowserAuthenticationState::decode(&encoded, secret).expect("Failed to decode state");
 
         assert_eq!(decoded.challenge, vec![1, 2, 3, 4]);
         assert_eq!(decoded.rp_id, "example.com");
@@ -602,7 +608,9 @@ mod tests {
             pending_auth: None,
         };
 
-        let encoded = state.encode("correct-secret").expect("Failed to encode state");
+        let encoded = state
+            .encode("correct-secret")
+            .expect("Failed to encode state");
         let result = BrowserAuthenticationState::decode(&encoded, "wrong-secret");
 
         assert!(result.is_err());
