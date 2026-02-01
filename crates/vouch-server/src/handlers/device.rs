@@ -317,8 +317,7 @@ mod tests {
         let (app, _state) = test_app().await;
 
         // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
-        let (status, body) =
-            http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
+        let (status, body) = http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -354,8 +353,7 @@ mod tests {
         let (app, _state) = test_app().await;
 
         // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
-        let (status, body) =
-            http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
+        let (status, body) = http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -380,8 +378,7 @@ mod tests {
         let (app, _state) = test_app().await;
 
         // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
-        let (status, body) =
-            http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
+        let (status, body) = http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -409,8 +406,7 @@ mod tests {
         // Generate multiple codes to test the character set
         for _ in 0..5 {
             // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
-            let (status, body) =
-                http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
+            let (status, body) = http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
 
             assert_eq!(status, StatusCode::OK);
             let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -451,8 +447,7 @@ mod tests {
         let (app, _state) = test_app().await;
 
         // Create a device auth request (RFC 8628 Section 3.1: form-urlencoded)
-        let (status, body) =
-            http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
+        let (status, body) = http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
         assert_eq!(status, StatusCode::OK);
         let code_resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         let device_code = code_resp["device_code"].as_str().expect("device_code");
