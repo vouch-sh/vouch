@@ -14,6 +14,8 @@ Vouch is designed around three core principles:
 
 ## Threat Model
 
+> For the comprehensive threat model with detailed threat statements, mitigations, and STRIDE analysis, see [THREAT_MODEL.md](THREAT_MODEL.md).
+
 ### What Vouch Protects Against
 
 | Threat | Mitigation |
@@ -28,12 +30,12 @@ Vouch is designed around three core principles:
 
 ### What Vouch Does NOT Protect Against
 
-| Threat | Why | Mitigation |
-|--------|-----|------------|
-| **Physical YubiKey theft + known PIN** | Attacker has both factors | Use biometric YubiKey (Bio series), rotate PIN |
-| **Compromised Vouch server** | Server issues credentials | Self-host for high-security, monitor audit logs |
-| **Malware stealing session after login** | Session token in memory | Minimize session duration, endpoint protection |
-| **Supply chain attacks on CLI** | Compromised binary | Reproducible builds, code signing, open source auditing |
+| Threat | Why | Mitigation | Monitoring |
+|--------|-----|------------|------------|
+| **Physical YubiKey theft + known PIN** | Attacker has both factors | Use biometric YubiKey (Bio series), rotate PIN | Audit logs, anomaly detection for unusual access patterns |
+| **Compromised Vouch server** | Server issues credentials | Self-host for high-security, air-gapped deployment (planned) | Server integrity monitoring, audit log analysis |
+| **Malware stealing session after login** | Session token in memory | 8-hour session lifetime, endpoint protection | EDR solutions, anomalous session usage patterns |
+| **Supply chain attacks on CLI** | Compromised binary | Reproducible builds, code signing, open source auditing | Security researcher engagement, build provenance verification |
 
 ### Attacker Profiles
 
@@ -48,6 +50,30 @@ Vouch is designed around three core principles:
 #### Nation-State
 - **Capabilities**: Zero-days, supply chain compromise, physical access
 - **Vouch defense**: Air-gapped deployment (planned), reproducible builds
+
+### Trust Boundaries
+
+| Boundary | Description | Protection |
+|----------|-------------|------------|
+| **Internet ↔ Server** | Public network to Vouch server | TLS 1.3, certificate validation |
+| **Server ↔ Workstation** | Server to user machine | TLS 1.3, JWT validation |
+| **CLI ↔ Agent** | User commands to daemon | Unix socket permissions (0700) |
+| **Agent ↔ YubiKey** | Software to hardware | CTAP2 protocol, PIN verification |
+
+### Security Assumptions
+
+Vouch's security model relies on the following assumptions. If any assumption is violated, the corresponding security properties may be compromised.
+
+| ID | Assumption | Rationale | If Violated |
+|----|------------|-----------|-------------|
+| **A-01** | **Hardware Authenticator Integrity**: YubiKey 5 series devices correctly implement FIDO2/CTAP2 and protect private keys from extraction | Yubico has undergone independent security audits. The secure element prevents key extraction even with physical access. | Attackers could clone YubiKey credentials, defeating hardware-bound authentication |
+| **A-02** | **TLS Implementation Correctness**: The TLS 1.3 implementation (rustls) correctly encrypts communications and validates certificates | rustls is a well-audited, memory-safe TLS implementation with no OpenSSL dependencies | Network attackers could intercept or modify communications between components |
+| **A-03** | **Cryptographic Primitive Security**: Ed25519, AES-GCM, and Argon2id provide their claimed security properties | These are widely reviewed, standardized algorithms implemented by aws-lc-rs (FIPS-validated) | Signature forgery, token decryption, or password hash reversal could occur |
+| **A-04** | **Operating System Isolation**: The operating system provides process isolation and file permission enforcement | Unix socket permissions (0700) and file permissions (0600) are enforced by the kernel | Malicious processes could access agent sockets or credential files |
+| **A-05** | **User PIN Confidentiality**: Users protect their YubiKey PIN and do not share it | PIN is verified on-device and never transmitted to servers | PIN + physical YubiKey access enables impersonation |
+| **A-06** | **Server Infrastructure Security**: The Vouch server runs on secure, patched infrastructure with appropriate access controls | Server-side vulnerabilities are outside application scope but critical to overall security | Database access, CA key theft, or session injection could occur |
+| **A-07** | **External IdP Trustworthiness**: External identity providers (Google Workspace, Entra ID) correctly verify user identities | These are enterprise-grade identity providers with their own security models | Unauthorized users could enroll by compromising external IdP accounts |
+| **A-08** | **Clock Synchronization**: All systems maintain reasonably accurate time (within minutes) | JWT expiration and certificate validity depend on timestamp comparison | Expired tokens could be accepted or valid tokens rejected |
 
 ## Security Controls
 
@@ -203,7 +229,7 @@ Nonce:         32 random bytes, prevents token replay
 - OIDC state parameter prevents authorization code injection
 - Nonce in ID token prevents replay attacks
 
-**Rate Limiting:**
+**Rate Limiting** (planned):
 ```
 POST /oauth/device/code    10 requests/minute per IP
 POST /oauth/token          1 request/5 seconds per device_code
@@ -326,9 +352,10 @@ Every credential issuance generates an audit log entry:
 ```
 
 Audit logs are:
-- Immutable (append-only database storage)
+- Immutable (append-only database storage); tamper detection (planned)
 - Retained for compliance period (configurable, default 2 years)
-- SIEM export planned (Splunk, Datadog, etc.) — see [ROADMAP.md](ROADMAP.md)
+- SIEM export (planned) (Splunk, Datadog, etc.) — see [ROADMAP.md](ROADMAP.md)
+- Certificate transparency logging (planned)
 
 ## Session Storage Security
 
@@ -706,9 +733,108 @@ cargo vet
 
 - CLI binaries are signed with our release key
 - macOS binaries are notarized with Apple
-- Windows binaries are Authenticode signed
+- Windows binaries are Authenticode signed (planned)
 - SHA256 checksums published with every release
 - Source releases include signed git tags
+- Reproducible builds (see below)
+- HSTS headers on web endpoints (planned)
+
+### Reproducible Builds
+
+Vouch implements reproducible builds to enable independent verification that the released binaries match the source code. This allows anyone to rebuild from source and compare checksums.
+
+**How Reproducibility is Achieved:**
+
+| Technique | Purpose |
+|-----------|---------|
+| **Pinned Rust toolchain** | `rust-toolchain.toml` specifies exact version (1.93.0) |
+| **SOURCE_DATE_EPOCH** | Timestamps derived from git commit time, not build time |
+| **Locked dependencies** | `Cargo.lock` ensures identical dependency versions |
+| **Deterministic archives** | tar archives use `--sort=name`, `--mtime`, `--owner=0` |
+| **CI verification** | Automated rebuild job compares hashes in release workflow |
+
+**Verifying a Release (Linux):**
+
+```bash
+# Clone the repository at the release tag
+git clone --branch v0.1.0 https://github.com/vouch-sh/vouch.git
+cd vouch
+
+# Set SOURCE_DATE_EPOCH from the commit
+export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+
+# Build with locked dependencies
+cargo build --release --locked -p vouch-cli -p vouch-agent
+
+# Download the official release
+curl -LO https://github.com/vouch-sh/vouch/releases/download/v0.1.0/vouch-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+tar xzf vouch-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
+
+# Compare hashes
+sha256sum target/release/vouch vouch-v0.1.0-x86_64-unknown-linux-gnu/vouch
+# Hashes should match for Linux builds
+```
+
+**Platform Notes:**
+
+| Platform | Reproducibility |
+|----------|-----------------|
+| **Linux** | Fully reproducible with matching toolchain |
+| **macOS** | Binaries differ due to Apple code signing and notarization |
+| **Windows** | Binaries differ due to Authenticode signing (planned) |
+
+**Why This Matters:**
+
+Reproducible builds provide defense against:
+- Compromised build infrastructure
+- Supply chain attacks on CI/CD
+- Tampering during distribution
+
+If you can rebuild the exact same binary from source, you can trust that the released binary was built from that source code.
+
+## Residual Risks
+
+Despite comprehensive mitigations, the following residual risks remain and have been accepted:
+
+### RR-01: Physical YubiKey Theft with PIN Knowledge
+
+**Risk**: If an attacker obtains both physical possession of a YubiKey and knowledge of the PIN, they can authenticate as the user.
+
+| Aspect | Detail |
+|--------|--------|
+| **Residual Impact** | Medium |
+| **Acceptance Rationale** | This requires two independent factors to be compromised. The 8-hour session limit bounds the impact. Biometric YubiKeys (Bio series) can eliminate the PIN knowledge factor. |
+| **Monitoring** | Audit logs track all authentication events. Anomaly detection can flag unusual access patterns. |
+
+### RR-02: Compromised Vouch Server
+
+**Risk**: A sophisticated attacker with server access could potentially extract the SSH CA key or manipulate authentication logic.
+
+| Aspect | Detail |
+|--------|--------|
+| **Residual Impact** | High |
+| **Acceptance Rationale** | Self-hosted deployment shifts this risk to the organization. Air-gapped deployment (planned) provides additional protection. Audit logs provide detection capability. |
+| **Monitoring** | Server integrity monitoring, audit log analysis, and anomaly detection. |
+
+### RR-03: Session Token Theft via Advanced Malware
+
+**Risk**: Sophisticated malware with root/admin access could potentially extract session tokens from memory despite protections.
+
+| Aspect | Detail |
+|--------|--------|
+| **Residual Impact** | Medium |
+| **Acceptance Rationale** | 8-hour session lifetime limits the window. This risk exists for any authentication system and is mitigated by endpoint security. |
+| **Monitoring** | Endpoint detection and response (EDR) solutions, anomalous session usage patterns. |
+
+### RR-04: Supply Chain Compromise Before Detection
+
+**Risk**: A supply chain attack could potentially affect users between compromise and detection.
+
+| Aspect | Detail |
+|--------|--------|
+| **Residual Impact** | Medium-High |
+| **Acceptance Rationale** | Open source code enables community review. Reproducible builds and SLSA attestations further reduce this risk. |
+| **Monitoring** | Security researcher engagement, automated vulnerability scanning, build provenance verification. |
 
 ## Incident Response
 

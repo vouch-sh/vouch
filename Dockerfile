@@ -46,6 +46,9 @@ RUN mkdir -p crates/vouch-server/static/css \
 # Rust build stage - using musl for static binary
 FROM rust:1.93-alpine AS builder
 
+# Build argument for reproducible builds
+ARG SOURCE_DATE_EPOCH=0
+
 WORKDIR /app
 
 # Install build dependencies for static compilation
@@ -67,8 +70,8 @@ COPY crates/vouch-server/src crates/vouch-server/src
 COPY crates/vouch-server/migrations crates/vouch-server/migrations
 COPY crates/vouch-server/templates crates/vouch-server/templates
 
-# Touch files to ensure rebuild
-RUN touch crates/vouch-common/src/lib.rs crates/vouch-server/src/main.rs
+# Touch files with deterministic timestamp to ensure rebuild
+RUN touch -d "@${SOURCE_DATE_EPOCH}" crates/vouch-common/src/lib.rs crates/vouch-server/src/main.rs
 
 # Build the release binary with static linking
 ENV OPENSSL_STATIC=1

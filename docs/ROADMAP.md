@@ -573,15 +573,15 @@ curl -X POST https://vouch.example.com/oauth/token \
 ## Distribution & Deployment
 
 ### CLI Distribution
-- [ ] GitHub Releases with pre-compiled binaries (macOS, Linux, Windows)
-- [ ] SBOM (Software Bill of Materials) for each release
-- [ ] SLSA attestations for supply chain security
-- [ ] Homebrew tap (`vouch-sh/tap/vouch`)
-- [ ] APT/RPM repositories
+- [x] GitHub Releases with pre-compiled binaries (macOS, Linux, Windows)
+- [x] SBOM (Software Bill of Materials) for each release (CycloneDX format)
+- [x] SLSA build provenance attestations
+- [x] Homebrew tap (`vouch-sh/tap/vouch`)
+- [x] APT/RPM repositories
 
 ### Server Distribution
-- [ ] Docker images (multi-arch: amd64, arm64)
-- [ ] Helm charts for Kubernetes deployment
+- [x] Docker images (multi-arch: amd64, arm64)
+- [x] Helm charts for Kubernetes deployment
 - [ ] Terraform modules (AWS, GCP, Azure)
 - [ ] docker-compose examples
 
@@ -601,7 +601,7 @@ curl -X POST https://vouch.example.com/oauth/token \
 
 Tracked but not blocking releases:
 
-- [ ] Reproducible builds
+- [x] Reproducible builds
 - [ ] Fuzzing for FIDO2 parsing
 - [ ] Performance benchmarks
 - [x] Integration test suite (34 tests covering RFC compliance)
