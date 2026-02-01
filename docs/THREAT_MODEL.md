@@ -495,7 +495,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 | ID | Mitigation | Status |
 |----|------------|--------|
 | M-42 | Open source CLI for public auditing | Implemented |
-| M-43 | Reproducible builds | Planned |
+| M-43 | Reproducible builds | Implemented |
 | M-44 | Binary signing (macOS code signing + notarization) | Implemented |
 | M-45 | SHA256 checksums with releases (SHA256SUMS.txt) | Implemented |
 | M-46 | SBOM with each release (CycloneDX format) | Implemented |
@@ -717,8 +717,8 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 | Status | Count | Mitigations |
 |--------|-------|-------------|
-| **Implemented** | 75 | M-01 through M-89 (most) |
-| **Planned** | 11 | M-02, M-30, M-32, M-33, M-43, M-48a, M-52, M-64, M-70, M-71, M-80 |
+| **Implemented** | 76 | M-01 through M-89 (most) |
+| **Planned** | 10 | M-02, M-30, M-32, M-33, M-48a, M-52, M-64, M-70, M-71, M-80 |
 | **Hardware** | 2 | M-09, M-10 (YubiKey enforced) |
 | **Deployment** | 1 | M-88 (infrastructure dependent) |
 | **Documentation** | 1 | M-16 (user guidance) |
@@ -775,7 +775,7 @@ Despite comprehensive mitigations, the following residual risks remain:
 **Risk**: A supply chain attack could potentially affect users between compromise and detection.
 
 **Residual Impact**: Medium-High
-**Acceptance Rationale**: Open source code enables community review. Planned reproducible builds and SLSA attestations will further reduce this risk.
+**Acceptance Rationale**: Open source code enables community review. Reproducible builds and SLSA attestations further reduce this risk.
 
 **Monitoring**: Security researcher engagement, automated vulnerability scanning, build provenance verification.
 
