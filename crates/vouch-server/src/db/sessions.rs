@@ -6,7 +6,7 @@ use super::compat::BuildSql;
 use super::schema::Sessions;
 use crate::{db_execute, db_fetch_optional};
 use anyhow::Result;
-use sea_query::Query;
+use sea_query::{Expr, Query};
 use uuid::Uuid;
 
 /// Session record.
@@ -61,43 +61,75 @@ pub async fn create_session(
 
 /// Get a session by token hash.
 pub async fn get_session_by_token_hash(pool: &Pool, token_hash: &str) -> Result<Option<Session>> {
-    let session = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, Session>(
-            "SELECT id, user_id, token_hash, authenticator_id, expires_at FROM sessions WHERE token_hash = ?"
-        )
-        .bind(token_hash)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                Sessions::Id,
+                Sessions::UserId,
+                Sessions::TokenHash,
+                Sessions::AuthenticatorId,
+                Sessions::ExpiresAt,
+            ])
+            .from(Sessions::Table)
+            .and_where(Expr::col(Sessions::TokenHash).eq(token_hash))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let session = db_fetch_optional!(pool, sqlx::query_as::<_, Session>(&sql))?;
 
     Ok(session)
 }
 
 /// Delete a session by token hash.
 pub async fn delete_session_by_token_hash(pool: &Pool, token_hash: &str) -> Result<bool> {
-    let result = db_execute!(
-        pool,
-        sqlx::query("DELETE FROM sessions WHERE token_hash = ?").bind(token_hash)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(Sessions::Table)
+            .and_where(Expr::col(Sessions::TokenHash).eq(token_hash))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected() > 0)
 }
 
 /// Delete expired sessions.
 pub async fn delete_expired_sessions(pool: &Pool, now: &str) -> Result<u64> {
-    let result = db_execute!(
-        pool,
-        sqlx::query("DELETE FROM sessions WHERE expires_at < ?").bind(now)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(Sessions::Table)
+            .and_where(Expr::col(Sessions::ExpiresAt).lt(now))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected())
 }
 
 /// Delete all sessions for a user (for immediate session invalidation on SCIM deactivation).
 pub async fn delete_sessions_for_user(pool: &Pool, user_id: &str) -> Result<u64> {
-    let result = db_execute!(
-        pool,
-        sqlx::query("DELETE FROM sessions WHERE user_id = ?").bind(user_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(Sessions::Table)
+            .and_where(Expr::col(Sessions::UserId).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected())
 }

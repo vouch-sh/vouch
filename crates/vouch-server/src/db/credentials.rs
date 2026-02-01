@@ -3,10 +3,13 @@
 
 use super::Pool;
 use super::compat::{BuildSql, now_expr};
-use super::schema::SshRevokedCertificates;
+use super::schema::{
+    CloudIntegrations, DelegationPolicies, EnrollmentSessions, SshRevokedCertificates,
+    TokenExchanges,
+};
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional};
 use anyhow::Result;
-use sea_query::{OnConflict, Query};
+use sea_query::{Expr, OnConflict, Order, Query, SimpleExpr};
 use uuid::Uuid;
 
 // ============================================================================
@@ -26,22 +29,36 @@ pub async fn insert_token_exchange(
     expires_at: &str,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
 
-    db_execute!(
-        pool,
-        sqlx::query(
-            "INSERT INTO token_exchanges (id, subject_user_id, subject_token_hash, actor_user_id, issued_token_hash, requested_audience, granted_scope, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(&id)
-        .bind(subject_user_id)
-        .bind(subject_token_hash)
-        .bind(actor_user_id)
-        .bind(issued_token_hash)
-        .bind(requested_audience)
-        .bind(granted_scope)
-        .bind(expires_at)
-    )?;
+    let sql = {
+        let query = Query::insert()
+            .into_table(TokenExchanges::Table)
+            .columns([
+                TokenExchanges::Id,
+                TokenExchanges::SubjectUserId,
+                TokenExchanges::SubjectTokenHash,
+                TokenExchanges::ActorUserId,
+                TokenExchanges::IssuedTokenHash,
+                TokenExchanges::RequestedAudience,
+                TokenExchanges::GrantedScope,
+                TokenExchanges::ExpiresAt,
+            ])
+            .values_panic([
+                id.clone().into(),
+                subject_user_id.into(),
+                subject_token_hash.into(),
+                actor_user_id.into(),
+                issued_token_hash.into(),
+                requested_audience.into(),
+                granted_scope.into(),
+                expires_at.into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(id)
 }
@@ -53,15 +70,30 @@ pub async fn get_token_exchanges_for_user(
     user_id: &str,
     limit: i64,
 ) -> Result<Vec<TokenExchangeRecord>> {
-    let records = db_fetch_all!(
-        pool,
-        sqlx::query_as::<_, TokenExchangeRecord>(
-            "SELECT id, subject_user_id, subject_token_hash, actor_user_id, issued_token_hash, requested_audience, granted_scope, created_at, expires_at
-         FROM token_exchanges WHERE subject_user_id = ? ORDER BY created_at DESC LIMIT ?"
-        )
-        .bind(user_id)
-        .bind(limit)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                TokenExchanges::Id,
+                TokenExchanges::SubjectUserId,
+                TokenExchanges::SubjectTokenHash,
+                TokenExchanges::ActorUserId,
+                TokenExchanges::IssuedTokenHash,
+                TokenExchanges::RequestedAudience,
+                TokenExchanges::GrantedScope,
+                TokenExchanges::CreatedAt,
+                TokenExchanges::ExpiresAt,
+            ])
+            .from(TokenExchanges::Table)
+            .and_where(Expr::col(TokenExchanges::SubjectUserId).eq(user_id))
+            .order_by(TokenExchanges::CreatedAt, Order::Desc)
+            .limit(limit as u64)
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let records = db_fetch_all!(pool, sqlx::query_as::<_, TokenExchangeRecord>(&sql))?;
 
     Ok(records)
 }
@@ -95,7 +127,7 @@ pub struct DelegationPolicy {
     pub grantee_pattern: String,
     pub allowed_scopes: Option<String>,
     pub max_ttl_seconds: Option<i64>,
-    pub enabled: i64,
+    pub enabled: bool,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -108,14 +140,30 @@ pub async fn check_delegation_policy(
     grantor_email: &str,
     grantee_audience: Option<&str>,
 ) -> Result<Option<DelegationPolicy>> {
+    let db_type = pool.db_type();
+
     // Get all enabled policies
-    let policies = db_fetch_all!(
-        pool,
-        sqlx::query_as::<_, DelegationPolicy>(
-            "SELECT id, name, grantor_pattern, grantee_pattern, allowed_scopes, max_ttl_seconds, enabled, created_at, updated_at
-         FROM delegation_policies WHERE enabled = 1 ORDER BY created_at ASC"
-        )
-    )?;
+    let sql = {
+        let query = Query::select()
+            .columns([
+                DelegationPolicies::Id,
+                DelegationPolicies::Name,
+                DelegationPolicies::GrantorPattern,
+                DelegationPolicies::GranteePattern,
+                DelegationPolicies::AllowedScopes,
+                DelegationPolicies::MaxTtlSeconds,
+                DelegationPolicies::Enabled,
+                DelegationPolicies::CreatedAt,
+                DelegationPolicies::UpdatedAt,
+            ])
+            .from(DelegationPolicies::Table)
+            .and_where(Expr::col(DelegationPolicies::Enabled).eq(true))
+            .order_by(DelegationPolicies::CreatedAt, Order::Asc)
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let policies = db_fetch_all!(pool, sqlx::query_as::<_, DelegationPolicy>(&sql))?;
 
     for policy in policies {
         // Check grantor pattern
@@ -171,33 +219,60 @@ pub async fn create_delegation_policy(
     max_ttl_seconds: Option<i64>,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
 
-    db_execute!(
-        pool,
-        sqlx::query(
-            "INSERT INTO delegation_policies (id, name, grantor_pattern, grantee_pattern, allowed_scopes, max_ttl_seconds)
-         VALUES (?, ?, ?, ?, ?, ?)"
-        )
-        .bind(&id)
-        .bind(name)
-        .bind(grantor_pattern)
-        .bind(grantee_pattern)
-        .bind(allowed_scopes)
-        .bind(max_ttl_seconds)
-    )?;
+    let sql = {
+        let query = Query::insert()
+            .into_table(DelegationPolicies::Table)
+            .columns([
+                DelegationPolicies::Id,
+                DelegationPolicies::Name,
+                DelegationPolicies::GrantorPattern,
+                DelegationPolicies::GranteePattern,
+                DelegationPolicies::AllowedScopes,
+                DelegationPolicies::MaxTtlSeconds,
+            ])
+            .values_panic([
+                id.clone().into(),
+                name.into(),
+                grantor_pattern.into(),
+                grantee_pattern.into(),
+                allowed_scopes.into(),
+                max_ttl_seconds.into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(id)
 }
 
 /// Get all delegation policies.
 pub async fn get_delegation_policies(pool: &Pool) -> Result<Vec<DelegationPolicy>> {
-    let policies = db_fetch_all!(
-        pool,
-        sqlx::query_as::<_, DelegationPolicy>(
-            "SELECT id, name, grantor_pattern, grantee_pattern, allowed_scopes, max_ttl_seconds, enabled, created_at, updated_at
-         FROM delegation_policies ORDER BY created_at DESC"
-        )
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                DelegationPolicies::Id,
+                DelegationPolicies::Name,
+                DelegationPolicies::GrantorPattern,
+                DelegationPolicies::GranteePattern,
+                DelegationPolicies::AllowedScopes,
+                DelegationPolicies::MaxTtlSeconds,
+                DelegationPolicies::Enabled,
+                DelegationPolicies::CreatedAt,
+                DelegationPolicies::UpdatedAt,
+            ])
+            .from(DelegationPolicies::Table)
+            .order_by(DelegationPolicies::CreatedAt, Order::Desc)
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let policies = db_fetch_all!(pool, sqlx::query_as::<_, DelegationPolicy>(&sql))?;
 
     Ok(policies)
 }
@@ -206,14 +281,21 @@ pub async fn get_delegation_policies(pool: &Pool) -> Result<Vec<DelegationPolicy
 #[allow(dead_code)]
 pub async fn set_delegation_policy_enabled(pool: &Pool, id: &str, enabled: bool) -> Result<bool> {
     let db_type = pool.db_type();
-    let now = now_expr(db_type);
-    let sql =
-        format!("UPDATE delegation_policies SET enabled = ?, updated_at = {now} WHERE id = ?");
 
-    let result = db_execute!(
-        pool,
-        sqlx::query(&sql).bind(if enabled { 1 } else { 0 }).bind(id)
-    )?;
+    let sql = {
+        let query = Query::update()
+            .table(DelegationPolicies::Table)
+            .value(DelegationPolicies::Enabled, enabled)
+            .value(
+                DelegationPolicies::UpdatedAt,
+                SimpleExpr::Custom(now_expr(db_type).to_string()),
+            )
+            .and_where(Expr::col(DelegationPolicies::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -221,10 +303,17 @@ pub async fn set_delegation_policy_enabled(pool: &Pool, id: &str, enabled: bool)
 /// Delete a delegation policy.
 #[allow(dead_code)]
 pub async fn delete_delegation_policy(pool: &Pool, id: &str) -> Result<bool> {
-    let result = db_execute!(
-        pool,
-        sqlx::query("DELETE FROM delegation_policies WHERE id = ?").bind(id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(DelegationPolicies::Table)
+            .and_where(Expr::col(DelegationPolicies::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -259,20 +348,32 @@ pub async fn create_enrollment_session(
     expires_at: &str,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
 
-    db_execute!(
-        pool,
-        sqlx::query(
-            "INSERT INTO enrollment_sessions (id, user_id, user_email, session_token_hash, device_auth_id, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?)"
-        )
-        .bind(&id)
-        .bind(user_id)
-        .bind(user_email)
-        .bind(session_token_hash)
-        .bind(device_auth_id)
-        .bind(expires_at)
-    )?;
+    let sql = {
+        let query = Query::insert()
+            .into_table(EnrollmentSessions::Table)
+            .columns([
+                EnrollmentSessions::Id,
+                EnrollmentSessions::UserId,
+                EnrollmentSessions::UserEmail,
+                EnrollmentSessions::SessionTokenHash,
+                EnrollmentSessions::DeviceAuthId,
+                EnrollmentSessions::ExpiresAt,
+            ])
+            .values_panic([
+                id.clone().into(),
+                user_id.into(),
+                user_email.into(),
+                session_token_hash.into(),
+                device_auth_id.into(),
+                expires_at.into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(id)
 }
@@ -282,15 +383,27 @@ pub async fn get_enrollment_session_by_token_hash(
     pool: &Pool,
     token_hash: &str,
 ) -> Result<Option<EnrollmentSession>> {
-    let session = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, EnrollmentSession>(
-            "SELECT id, user_id, user_email, session_token_hash, device_auth_id, expires_at, created_at, last_used_at
-         FROM enrollment_sessions
-         WHERE session_token_hash = ?"
-        )
-        .bind(token_hash)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                EnrollmentSessions::Id,
+                EnrollmentSessions::UserId,
+                EnrollmentSessions::UserEmail,
+                EnrollmentSessions::SessionTokenHash,
+                EnrollmentSessions::DeviceAuthId,
+                EnrollmentSessions::ExpiresAt,
+                EnrollmentSessions::CreatedAt,
+                EnrollmentSessions::LastUsedAt,
+            ])
+            .from(EnrollmentSessions::Table)
+            .and_where(Expr::col(EnrollmentSessions::SessionTokenHash).eq(token_hash))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let session = db_fetch_optional!(pool, sqlx::query_as::<_, EnrollmentSession>(&sql))?;
 
     Ok(session)
 }
@@ -298,20 +411,37 @@ pub async fn get_enrollment_session_by_token_hash(
 /// Update enrollment session last used timestamp.
 pub async fn touch_enrollment_session(pool: &Pool, id: &str) -> Result<()> {
     let db_type = pool.db_type();
-    let now = now_expr(db_type);
-    let sql = format!("UPDATE enrollment_sessions SET last_used_at = {now} WHERE id = ?");
 
-    db_execute!(pool, sqlx::query(&sql).bind(id))?;
+    let sql = {
+        let query = Query::update()
+            .table(EnrollmentSessions::Table)
+            .value(
+                EnrollmentSessions::LastUsedAt,
+                SimpleExpr::Custom(now_expr(db_type).to_string()),
+            )
+            .and_where(Expr::col(EnrollmentSessions::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
 
 /// Delete an enrollment session.
 pub async fn delete_enrollment_session(pool: &Pool, id: &str) -> Result<bool> {
-    let result = db_execute!(
-        pool,
-        sqlx::query("DELETE FROM enrollment_sessions WHERE id = ?").bind(id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(EnrollmentSessions::Table)
+            .and_where(Expr::col(EnrollmentSessions::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected() > 0)
 }
@@ -319,8 +449,17 @@ pub async fn delete_enrollment_session(pool: &Pool, id: &str) -> Result<bool> {
 /// Delete expired enrollment sessions (for cleanup task).
 pub async fn delete_expired_enrollment_sessions(pool: &Pool) -> Result<u64> {
     let db_type = pool.db_type();
-    let now = now_expr(db_type);
-    let sql = format!("DELETE FROM enrollment_sessions WHERE expires_at < {now}");
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(EnrollmentSessions::Table)
+            .and_where(
+                Expr::col(EnrollmentSessions::ExpiresAt)
+                    .lt(SimpleExpr::Custom(now_expr(db_type).to_string())),
+            )
+            .to_owned();
+        query.build_sql(db_type)
+    };
 
     let result = db_execute!(pool, sqlx::query(&sql))?;
 
@@ -394,11 +533,18 @@ pub async fn revoke_ssh_certificate(
 
 /// Check if an SSH certificate is revoked.
 pub async fn is_ssh_certificate_revoked(pool: &Pool, serial: &str) -> Result<bool> {
-    let result: (i64,) = db_fetch_one!(
-        pool,
-        sqlx::query_as("SELECT COUNT(*) FROM ssh_revoked_certificates WHERE serial = ?")
-            .bind(serial)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .expr(Expr::col(SshRevokedCertificates::Id).count())
+            .from(SshRevokedCertificates::Table)
+            .and_where(Expr::col(SshRevokedCertificates::Serial).eq(serial))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result: (i64,) = db_fetch_one!(pool, sqlx::query_as(&sql))?;
 
     Ok(result.0 > 0)
 }
@@ -406,13 +552,27 @@ pub async fn is_ssh_certificate_revoked(pool: &Pool, serial: &str) -> Result<boo
 /// Get all revoked SSH certificates (for KRL generation).
 pub async fn get_revoked_ssh_certificates(pool: &Pool) -> Result<Vec<RevokedSshCertificate>> {
     let db_type = pool.db_type();
-    let now = now_expr(db_type);
-    let sql = format!(
-        "SELECT id, serial, user_id, reason, revoked_at, expires_at, revoked_by
-         FROM ssh_revoked_certificates
-         WHERE expires_at > {now}
-         ORDER BY revoked_at DESC"
-    );
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                SshRevokedCertificates::Id,
+                SshRevokedCertificates::Serial,
+                SshRevokedCertificates::UserId,
+                SshRevokedCertificates::Reason,
+                SshRevokedCertificates::RevokedAt,
+                SshRevokedCertificates::ExpiresAt,
+                SshRevokedCertificates::RevokedBy,
+            ])
+            .from(SshRevokedCertificates::Table)
+            .and_where(
+                Expr::col(SshRevokedCertificates::ExpiresAt)
+                    .gt(SimpleExpr::Custom(now_expr(db_type).to_string())),
+            )
+            .order_by(SshRevokedCertificates::RevokedAt, Order::Desc)
+            .to_owned();
+        query.build_sql(db_type)
+    };
 
     let certs = db_fetch_all!(pool, sqlx::query_as::<_, RevokedSshCertificate>(&sql))?;
 
@@ -470,8 +630,17 @@ pub async fn revoke_all_ssh_certificates_for_user(
 /// Delete expired SSH certificate revocations (cleanup).
 pub async fn delete_expired_ssh_revocations(pool: &Pool) -> Result<u64> {
     let db_type = pool.db_type();
-    let now = now_expr(db_type);
-    let sql = format!("DELETE FROM ssh_revoked_certificates WHERE expires_at < {now}");
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(SshRevokedCertificates::Table)
+            .and_where(
+                Expr::col(SshRevokedCertificates::ExpiresAt)
+                    .lt(SimpleExpr::Custom(now_expr(db_type).to_string())),
+            )
+            .to_owned();
+        query.build_sql(db_type)
+    };
 
     let result = db_execute!(pool, sqlx::query(&sql))?;
 
@@ -500,15 +669,27 @@ pub async fn get_cloud_integration(
     org_id: &str,
     provider: &str,
 ) -> Result<Option<CloudIntegration>> {
-    let integration = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, CloudIntegration>(
-            "SELECT id, org_id, provider, config, created_at, updated_at, created_by_user_id
-         FROM cloud_integrations WHERE org_id = ? AND provider = ?"
-        )
-        .bind(org_id)
-        .bind(provider)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                CloudIntegrations::Id,
+                CloudIntegrations::OrgId,
+                CloudIntegrations::Provider,
+                CloudIntegrations::Config,
+                CloudIntegrations::CreatedAt,
+                CloudIntegrations::UpdatedAt,
+                CloudIntegrations::CreatedByUserId,
+            ])
+            .from(CloudIntegrations::Table)
+            .and_where(Expr::col(CloudIntegrations::OrgId).eq(org_id))
+            .and_where(Expr::col(CloudIntegrations::Provider).eq(provider))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let integration = db_fetch_optional!(pool, sqlx::query_as::<_, CloudIntegration>(&sql))?;
 
     Ok(integration)
 }
@@ -523,25 +704,38 @@ pub async fn upsert_cloud_integration(
 ) -> Result<CloudIntegration> {
     let id = Uuid::now_v7().to_string();
     let db_type = pool.db_type();
-    let now = now_expr(db_type);
 
-    let sql = format!(
-        "INSERT INTO cloud_integrations (id, org_id, provider, config, created_by_user_id)
-         VALUES (?, ?, ?, ?, ?)
-         ON CONFLICT(org_id, provider) DO UPDATE SET
-             config = excluded.config,
-             updated_at = {now}"
-    );
+    let sql = {
+        let query = Query::insert()
+            .into_table(CloudIntegrations::Table)
+            .columns([
+                CloudIntegrations::Id,
+                CloudIntegrations::OrgId,
+                CloudIntegrations::Provider,
+                CloudIntegrations::Config,
+                CloudIntegrations::CreatedByUserId,
+            ])
+            .values_panic([
+                id.into(),
+                org_id.into(),
+                provider.into(),
+                config.into(),
+                user_id.into(),
+            ])
+            .on_conflict(
+                OnConflict::columns([CloudIntegrations::OrgId, CloudIntegrations::Provider])
+                    .update_column(CloudIntegrations::Config)
+                    .value(
+                        CloudIntegrations::UpdatedAt,
+                        SimpleExpr::Custom(now_expr(db_type).to_string()),
+                    )
+                    .to_owned(),
+            )
+            .to_owned();
+        query.build_sql(db_type)
+    };
 
-    db_execute!(
-        pool,
-        sqlx::query(&sql)
-            .bind(&id)
-            .bind(org_id)
-            .bind(provider)
-            .bind(config)
-            .bind(user_id)
-    )?;
+    db_execute!(pool, sqlx::query(&sql))?;
 
     // Return the integration (may be newly created or updated)
     get_cloud_integration(pool, org_id, provider)
@@ -551,12 +745,18 @@ pub async fn upsert_cloud_integration(
 
 /// Delete cloud integration config for an organization.
 pub async fn delete_cloud_integration(pool: &Pool, org_id: &str, provider: &str) -> Result<bool> {
-    let result = db_execute!(
-        pool,
-        sqlx::query("DELETE FROM cloud_integrations WHERE org_id = ? AND provider = ?")
-            .bind(org_id)
-            .bind(provider)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(CloudIntegrations::Table)
+            .and_where(Expr::col(CloudIntegrations::OrgId).eq(org_id))
+            .and_where(Expr::col(CloudIntegrations::Provider).eq(provider))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected() > 0)
 }

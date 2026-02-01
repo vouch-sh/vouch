@@ -164,6 +164,7 @@ pub enum ScimGroupMembers {
 /// OAuth clients table.
 #[derive(Iden)]
 pub enum OAuthClients {
+    #[iden = "oauth_clients"]
     Table,
     Id,
     UserId,
@@ -183,8 +184,10 @@ pub enum OAuthClients {
 /// OAuth client secrets table.
 #[derive(Iden)]
 pub enum OAuthClientSecrets {
+    #[iden = "oauth_client_secrets"]
     Table,
     Id,
+    #[iden = "oauth_client_id"]
     OAuthClientId,
     SecretHash,
     Description,
@@ -196,8 +199,10 @@ pub enum OAuthClientSecrets {
 /// OAuth usage events table.
 #[derive(Iden)]
 pub enum OAuthUsageEvents {
+    #[iden = "oauth_usage_events"]
     Table,
     Id,
+    #[iden = "oauth_client_id"]
     OAuthClientId,
     EventType,
     UserId,
@@ -210,6 +215,7 @@ pub enum OAuthUsageEvents {
 /// Pending OAuth authorizations table.
 #[derive(Iden)]
 pub enum PendingOAuthAuthorizations {
+    #[iden = "pending_oauth_authorizations"]
     Table,
     Id,
     ClientId,
@@ -304,11 +310,14 @@ pub enum EnrollmentSessions {
 /// GitHub installations table.
 #[derive(Iden)]
 pub enum GitHubInstallations {
+    #[iden = "github_installations"]
     Table,
     Id,
     OrgId,
     InstallationId,
+    #[iden = "github_account_login"]
     GitHubAccountLogin,
+    #[iden = "github_account_type"]
     GitHubAccountType,
     Permissions,
     RepositorySelection,
@@ -321,6 +330,7 @@ pub enum GitHubInstallations {
 /// GitHub credential events table.
 #[derive(Iden)]
 pub enum GitHubCredentialEvents {
+    #[iden = "github_credential_events"]
     Table,
     Id,
     EventType,

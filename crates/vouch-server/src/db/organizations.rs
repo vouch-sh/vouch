@@ -2,8 +2,14 @@
 //! Organization database operations.
 
 use super::Pool;
+use super::compat::BuildSql;
+use super::schema::{
+    CloudIntegrations, GitHubCredentialEvents, GitHubInstallations, Organizations, ScimAuditLog,
+    ScimTokens, Users,
+};
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute, tx_fetch_all};
 use anyhow::Result;
+use sea_query::{Expr, Order, Query};
 use uuid::Uuid;
 
 /// Organization record for domain-based multi-tenancy.
@@ -19,13 +25,24 @@ pub struct Organization {
 
 /// Get an organization by domain.
 pub async fn get_org_by_domain(pool: &Pool, domain: &str) -> Result<Option<Organization>> {
-    let org = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, Organization>(
-            "SELECT id, domain, name, created_at, created_by_user_id FROM organizations WHERE domain = ?"
-        )
-        .bind(domain)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                Organizations::Id,
+                Organizations::Domain,
+                Organizations::Name,
+                Organizations::CreatedAt,
+                Organizations::CreatedByUserId,
+            ])
+            .from(Organizations::Table)
+            .and_where(Expr::col(Organizations::Domain).eq(domain))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let org = db_fetch_optional!(pool, sqlx::query_as::<_, Organization>(&sql))?;
 
     Ok(org)
 }
@@ -33,13 +50,24 @@ pub async fn get_org_by_domain(pool: &Pool, domain: &str) -> Result<Option<Organ
 /// Get an organization by ID.
 #[allow(dead_code)]
 pub async fn get_org_by_id(pool: &Pool, org_id: &str) -> Result<Option<Organization>> {
-    let org = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, Organization>(
-            "SELECT id, domain, name, created_at, created_by_user_id FROM organizations WHERE id = ?"
-        )
-        .bind(org_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                Organizations::Id,
+                Organizations::Domain,
+                Organizations::Name,
+                Organizations::CreatedAt,
+                Organizations::CreatedByUserId,
+            ])
+            .from(Organizations::Table)
+            .and_where(Expr::col(Organizations::Id).eq(org_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let org = db_fetch_optional!(pool, sqlx::query_as::<_, Organization>(&sql))?;
 
     Ok(org)
 }
@@ -52,25 +80,45 @@ pub async fn create_organization(
     created_by_user_id: Option<&str>,
 ) -> Result<Organization> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
 
-    db_execute!(
-        pool,
-        sqlx::query(
-            "INSERT INTO organizations (id, domain, name, created_by_user_id) VALUES (?, ?, ?, ?)"
-        )
-        .bind(&id)
-        .bind(domain)
-        .bind(name)
-        .bind(created_by_user_id)
-    )?;
+    let insert_sql = {
+        let query = Query::insert()
+            .into_table(Organizations::Table)
+            .columns([
+                Organizations::Id,
+                Organizations::Domain,
+                Organizations::Name,
+                Organizations::CreatedByUserId,
+            ])
+            .values_panic([
+                id.clone().into(),
+                domain.into(),
+                name.into(),
+                created_by_user_id.into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
 
-    let org = db_fetch_one!(
-        pool,
-        sqlx::query_as::<_, Organization>(
-            "SELECT id, domain, name, created_at, created_by_user_id FROM organizations WHERE id = ?"
-        )
-        .bind(&id)
-    )?;
+    db_execute!(pool, sqlx::query(&insert_sql))?;
+
+    let select_sql = {
+        let query = Query::select()
+            .columns([
+                Organizations::Id,
+                Organizations::Domain,
+                Organizations::Name,
+                Organizations::CreatedAt,
+                Organizations::CreatedByUserId,
+            ])
+            .from(Organizations::Table)
+            .and_where(Expr::col(Organizations::Id).eq(&id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let org = db_fetch_one!(pool, sqlx::query_as::<_, Organization>(&select_sql))?;
 
     Ok(org)
 }
@@ -97,16 +145,23 @@ pub async fn get_or_create_org_by_domain(
 #[allow(dead_code)]
 pub async fn set_user_org(
     pool: &Pool,
-    _user_id: &str,
+    user_id: &str,
     org_id: Option<&str>,
     is_org_admin: bool,
 ) -> Result<()> {
-    db_execute!(
-        pool,
-        sqlx::query("UPDATE users SET org_id = ?, is_org_admin = ? WHERE id = ?")
-            .bind(org_id)
-            .bind(is_org_admin)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::update()
+            .table(Users::Table)
+            .value(Users::OrgId, org_id)
+            .value(Users::IsOrgAdmin, is_org_admin)
+            .and_where(Expr::col(Users::Id).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
@@ -114,10 +169,18 @@ pub async fn set_user_org(
 /// Count users in an organization.
 #[allow(dead_code)]
 pub async fn count_users_in_org(pool: &Pool, org_id: &str) -> Result<i64> {
-    let row: (i64,) = db_fetch_one!(
-        pool,
-        sqlx::query_as("SELECT COUNT(*) FROM users WHERE org_id = ?").bind(org_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .expr(Expr::col(Users::Id).count())
+            .from(Users::Table)
+            .and_where(Expr::col(Users::OrgId).eq(org_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let row: (i64,) = db_fetch_one!(pool, sqlx::query_as(&sql))?;
 
     Ok(row.0)
 }
@@ -125,12 +188,24 @@ pub async fn count_users_in_org(pool: &Pool, org_id: &str) -> Result<i64> {
 /// List all organizations.
 #[allow(dead_code)]
 pub async fn list_organizations(pool: &Pool) -> Result<Vec<Organization>> {
-    let orgs = db_fetch_all!(
-        pool,
-        sqlx::query_as::<_, Organization>(
-            "SELECT id, domain, name, created_at, created_by_user_id FROM organizations ORDER BY domain"
-        )
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                Organizations::Id,
+                Organizations::Domain,
+                Organizations::Name,
+                Organizations::CreatedAt,
+                Organizations::CreatedByUserId,
+            ])
+            .from(Organizations::Table)
+            .order_by(Organizations::Domain, Order::Asc)
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let orgs = db_fetch_all!(pool, sqlx::query_as::<_, Organization>(&sql))?;
 
     Ok(orgs)
 }
@@ -147,56 +222,92 @@ pub async fn list_organizations(pool: &Pool) -> Result<Vec<Organization>> {
 #[allow(dead_code)]
 pub async fn delete_organization(pool: &Pool, org_id: &str) -> Result<bool> {
     let mut tx = pool.begin().await?;
+    let db_type = tx.db_type();
 
     // 1. Delete cloud integrations
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM cloud_integrations WHERE org_id = ?").bind(org_id)
-    )?;
+    let sql1 = {
+        let query = Query::delete()
+            .from_table(CloudIntegrations::Table)
+            .and_where(Expr::col(CloudIntegrations::OrgId).eq(org_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql1))?;
 
     // 2. Delete GitHub installations
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM github_installations WHERE org_id = ?").bind(org_id)
-    )?;
+    let sql2 = {
+        let query = Query::delete()
+            .from_table(GitHubInstallations::Table)
+            .and_where(Expr::col(GitHubInstallations::OrgId).eq(org_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql2))?;
 
     // 3. Delete SCIM tokens (handle audit log SET NULL first)
-    let token_ids: Vec<(String,)> = tx_fetch_all!(
-        tx,
-        sqlx::query_as("SELECT id FROM scim_tokens WHERE org_id = ?").bind(org_id)
-    )?;
+    let sql_select_tokens = {
+        let query = Query::select()
+            .column(ScimTokens::Id)
+            .from(ScimTokens::Table)
+            .and_where(Expr::col(ScimTokens::OrgId).eq(org_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    let token_ids: Vec<(String,)> = tx_fetch_all!(tx, sqlx::query_as(&sql_select_tokens))?;
 
     for (token_id,) in token_ids {
-        tx_execute!(
-            tx,
-            sqlx::query("UPDATE scim_audit_log SET actor_token_id = NULL WHERE actor_token_id = ?")
-                .bind(&token_id)
-        )?;
+        let sql_update_audit = {
+            let query = Query::update()
+                .table(ScimAuditLog::Table)
+                .value(ScimAuditLog::ActorTokenId, Option::<String>::None)
+                .and_where(Expr::col(ScimAuditLog::ActorTokenId).eq(&token_id))
+                .to_owned();
+            query.build_sql(db_type)
+        };
+        tx_execute!(tx, sqlx::query(&sql_update_audit))?;
     }
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM scim_tokens WHERE org_id = ?").bind(org_id)
-    )?;
+
+    let sql_delete_tokens = {
+        let query = Query::delete()
+            .from_table(ScimTokens::Table)
+            .and_where(Expr::col(ScimTokens::OrgId).eq(org_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql_delete_tokens))?;
 
     // 4. SET NULL for github_credential_events.org_id (preserve audit trail)
-    tx_execute!(
-        tx,
-        sqlx::query("UPDATE github_credential_events SET org_id = NULL WHERE org_id = ?")
-            .bind(org_id)
-    )?;
+    let sql4 = {
+        let query = Query::update()
+            .table(GitHubCredentialEvents::Table)
+            .value(GitHubCredentialEvents::OrgId, Option::<String>::None)
+            .and_where(Expr::col(GitHubCredentialEvents::OrgId).eq(org_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql4))?;
 
     // 5. SET NULL for users.org_id (unlink users from org, don't delete them)
-    tx_execute!(
-        tx,
-        sqlx::query("UPDATE users SET org_id = NULL, is_org_admin = 0 WHERE org_id = ?")
-            .bind(org_id)
-    )?;
+    let sql5 = {
+        let query = Query::update()
+            .table(Users::Table)
+            .value(Users::OrgId, Option::<String>::None)
+            .value(Users::IsOrgAdmin, false)
+            .and_where(Expr::col(Users::OrgId).eq(org_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql5))?;
 
     // 6. Delete the organization
-    let result = tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM organizations WHERE id = ?").bind(org_id)
-    )?;
+    let sql6 = {
+        let query = Query::delete()
+            .from_table(Organizations::Table)
+            .and_where(Expr::col(Organizations::Id).eq(org_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    let result = tx_execute!(tx, sqlx::query(&sql6))?;
 
     tx.commit().await?;
     Ok(result.rows_affected() > 0)

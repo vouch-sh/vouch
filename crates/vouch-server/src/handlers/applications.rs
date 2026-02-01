@@ -66,7 +66,6 @@ pub struct ApplicationInfo {
 impl From<OAuthClient> for ApplicationInfo {
     fn from(client: OAuthClient) -> Self {
         let redirect_uris = client.get_redirect_uris();
-        let active = client.is_active();
         let access_scope = client.get_access_scope();
         Self {
             id: client.id,
@@ -75,7 +74,7 @@ impl From<OAuthClient> for ApplicationInfo {
             description: client.description,
             application_type: client.application_type,
             redirect_uris,
-            active,
+            active: client.active,
             created_at: client.created_at,
             last_used_at: client.last_used_at,
             access_scope,
@@ -249,7 +248,6 @@ pub struct ApplicationResponse {
 impl From<OAuthClient> for ApplicationResponse {
     fn from(client: OAuthClient) -> Self {
         let redirect_uris = client.get_redirect_uris();
-        let active = client.is_active();
         let access_scope = client.get_access_scope();
         Self {
             id: client.id,
@@ -258,7 +256,7 @@ impl From<OAuthClient> for ApplicationResponse {
             description: client.description,
             application_type: client.application_type,
             redirect_uris,
-            active,
+            active: client.active,
             created_at: client.created_at,
             updated_at: client.updated_at,
             last_used_at: client.last_used_at,

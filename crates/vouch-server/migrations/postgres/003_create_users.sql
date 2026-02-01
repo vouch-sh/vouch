@@ -1,0 +1,12 @@
+-- Users table
+-- DSQL compatible: no REFERENCES constraints (org_id references organizations.id)
+CREATE TABLE users (
+    id TEXT PRIMARY KEY,
+    email TEXT UNIQUE NOT NULL,
+    name TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    external_id TEXT,
+    org_id TEXT,  -- references organizations(id)
+    is_org_admin BOOLEAN NOT NULL DEFAULT FALSE
+);

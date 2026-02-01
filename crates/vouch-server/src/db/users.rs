@@ -3,10 +3,14 @@
 
 use super::Pool;
 use super::compat::BuildSql;
-use super::schema::Users;
+use super::schema::{
+    AuthEvents, Authenticators, DeviceAuthRequests, EnrollmentSessions, OAuthClientSecrets,
+    OAuthClients, OAuthUsageEvents, ScimGroupMembers, Sessions, SshRevokedCertificates,
+    TokenExchanges, Users,
+};
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute, tx_fetch_all};
 use anyhow::Result;
-use sea_query::{OnConflict, Query};
+use sea_query::{Expr, OnConflict, Query};
 use uuid::Uuid;
 
 /// User record.
@@ -61,13 +65,22 @@ pub async fn upsert_user(pool: &Pool, email: &str, name: Option<&str>) -> Result
     db_execute!(pool, sqlx::query(&sql))?;
 
     // Fetch the user
-    let user = db_fetch_one!(
-        pool,
-        sqlx::query_as::<_, User>(
-            "SELECT id, email, name, org_id, is_org_admin FROM users WHERE email = ?"
-        )
-        .bind(email)
-    )?;
+    let fetch_sql = {
+        let query = Query::select()
+            .columns([
+                Users::Id,
+                Users::Email,
+                Users::Name,
+                Users::OrgId,
+                Users::IsOrgAdmin,
+            ])
+            .from(Users::Table)
+            .and_where(Expr::col(Users::Email).eq(email))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let user = db_fetch_one!(pool, sqlx::query_as::<_, User>(&fetch_sql))?;
 
     Ok(user)
 }
@@ -110,13 +123,22 @@ pub async fn upsert_user_with_org(
     db_execute!(pool, sqlx::query(&sql))?;
 
     // Fetch the user
-    let user = db_fetch_one!(
-        pool,
-        sqlx::query_as::<_, User>(
-            "SELECT id, email, name, org_id, is_org_admin FROM users WHERE email = ?"
-        )
-        .bind(email)
-    )?;
+    let fetch_sql = {
+        let query = Query::select()
+            .columns([
+                Users::Id,
+                Users::Email,
+                Users::Name,
+                Users::OrgId,
+                Users::IsOrgAdmin,
+            ])
+            .from(Users::Table)
+            .and_where(Expr::col(Users::Email).eq(email))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let user = db_fetch_one!(pool, sqlx::query_as::<_, User>(&fetch_sql))?;
 
     Ok(user)
 }
@@ -124,26 +146,48 @@ pub async fn upsert_user_with_org(
 /// Get a user by email.
 #[allow(dead_code)]
 pub async fn get_user_by_email(pool: &Pool, email: &str) -> Result<Option<User>> {
-    let user = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, User>(
-            "SELECT id, email, name, org_id, is_org_admin FROM users WHERE email = ?"
-        )
-        .bind(email)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                Users::Id,
+                Users::Email,
+                Users::Name,
+                Users::OrgId,
+                Users::IsOrgAdmin,
+            ])
+            .from(Users::Table)
+            .and_where(Expr::col(Users::Email).eq(email))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let user = db_fetch_optional!(pool, sqlx::query_as::<_, User>(&sql))?;
 
     Ok(user)
 }
 
 /// Get a user by ID.
 pub async fn get_user_by_id(pool: &Pool, user_id: &str) -> Result<Option<User>> {
-    let user = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, User>(
-            "SELECT id, email, name, org_id, is_org_admin FROM users WHERE id = ?"
-        )
-        .bind(user_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                Users::Id,
+                Users::Email,
+                Users::Name,
+                Users::OrgId,
+                Users::IsOrgAdmin,
+            ])
+            .from(Users::Table)
+            .and_where(Expr::col(Users::Id).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let user = db_fetch_optional!(pool, sqlx::query_as::<_, User>(&sql))?;
 
     Ok(user)
 }
@@ -154,95 +198,157 @@ pub async fn get_user_by_id(pool: &Pool, user_id: &str) -> Result<Option<User>> 
 /// Order matters - child records must be deleted before parent records.
 pub async fn delete_user(pool: &Pool, user_id: &str) -> Result<()> {
     let mut tx = pool.begin().await?;
+    let db_type = tx.db_type();
 
     // 1. Delete sessions (references user_id and authenticator_id)
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM sessions WHERE user_id = ?").bind(user_id)
-    )?;
+    let sql1 = {
+        let query = Query::delete()
+            .from_table(Sessions::Table)
+            .and_where(Expr::col(Sessions::UserId).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql1))?;
 
     // 2. Delete enrollment sessions
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM enrollment_sessions WHERE user_id = ?").bind(user_id)
-    )?;
+    let sql2 = {
+        let query = Query::delete()
+            .from_table(EnrollmentSessions::Table)
+            .and_where(Expr::col(EnrollmentSessions::UserId).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql2))?;
 
     // 3. Delete auth events
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM auth_events WHERE user_id = ?").bind(user_id)
-    )?;
+    let sql3 = {
+        let query = Query::delete()
+            .from_table(AuthEvents::Table)
+            .and_where(Expr::col(AuthEvents::UserId).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql3))?;
 
     // 4. Delete SCIM group memberships
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM scim_group_members WHERE user_id = ?").bind(user_id)
-    )?;
+    let sql4 = {
+        let query = Query::delete()
+            .from_table(ScimGroupMembers::Table)
+            .and_where(Expr::col(ScimGroupMembers::UserId).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql4))?;
 
     // 5. Handle token exchanges - SET NULL for actor, DELETE for subject
-    tx_execute!(
-        tx,
-        sqlx::query("UPDATE token_exchanges SET actor_user_id = NULL WHERE actor_user_id = ?")
-            .bind(user_id)
-    )?;
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM token_exchanges WHERE subject_user_id = ?").bind(user_id)
-    )?;
+    let sql5a = {
+        let query = Query::update()
+            .table(TokenExchanges::Table)
+            .value(TokenExchanges::ActorUserId, Option::<String>::None)
+            .and_where(Expr::col(TokenExchanges::ActorUserId).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql5a))?;
+
+    let sql5b = {
+        let query = Query::delete()
+            .from_table(TokenExchanges::Table)
+            .and_where(Expr::col(TokenExchanges::SubjectUserId).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql5b))?;
 
     // 6. Delete SSH revoked certificates
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM ssh_revoked_certificates WHERE user_id = ?").bind(user_id)
-    )?;
+    let sql6 = {
+        let query = Query::delete()
+            .from_table(SshRevokedCertificates::Table)
+            .and_where(Expr::col(SshRevokedCertificates::UserId).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql6))?;
 
     // 7. Delete OAuth clients and their children
     // First get all client IDs owned by this user
-    let client_ids: Vec<(String,)> = tx_fetch_all!(
-        tx,
-        sqlx::query_as("SELECT id FROM oauth_clients WHERE user_id = ?").bind(user_id)
-    )?;
+    let sql7_select = {
+        let query = Query::select()
+            .column(OAuthClients::Id)
+            .from(OAuthClients::Table)
+            .and_where(Expr::col(OAuthClients::UserId).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    let client_ids: Vec<(String,)> = tx_fetch_all!(tx, sqlx::query_as(&sql7_select))?;
 
     for (client_id,) in client_ids {
         // Delete usage events first
-        tx_execute!(
-            tx,
-            sqlx::query("DELETE FROM oauth_usage_events WHERE oauth_client_id = ?")
-                .bind(&client_id)
-        )?;
+        let sql_usage = {
+            let query = Query::delete()
+                .from_table(OAuthUsageEvents::Table)
+                .and_where(Expr::col(OAuthUsageEvents::OAuthClientId).eq(&client_id))
+                .to_owned();
+            query.build_sql(db_type)
+        };
+        tx_execute!(tx, sqlx::query(&sql_usage))?;
+
         // Delete secrets
-        tx_execute!(
-            tx,
-            sqlx::query("DELETE FROM oauth_client_secrets WHERE oauth_client_id = ?")
-                .bind(&client_id)
-        )?;
+        let sql_secrets = {
+            let query = Query::delete()
+                .from_table(OAuthClientSecrets::Table)
+                .and_where(Expr::col(OAuthClientSecrets::OAuthClientId).eq(&client_id))
+                .to_owned();
+            query.build_sql(db_type)
+        };
+        tx_execute!(tx, sqlx::query(&sql_secrets))?;
+
         // Delete client
-        tx_execute!(
-            tx,
-            sqlx::query("DELETE FROM oauth_clients WHERE id = ?").bind(&client_id)
-        )?;
+        let sql_client = {
+            let query = Query::delete()
+                .from_table(OAuthClients::Table)
+                .and_where(Expr::col(OAuthClients::Id).eq(&client_id))
+                .to_owned();
+            query.build_sql(db_type)
+        };
+        tx_execute!(tx, sqlx::query(&sql_client))?;
     }
 
     // 8. Clear authenticator references in device_auth_requests, then delete authenticators
-    tx_execute!(
-        tx,
-        sqlx::query(
-            "UPDATE device_auth_requests SET authenticator_id = NULL
-             WHERE authenticator_id IN (SELECT id FROM authenticators WHERE user_id = ?)"
-        )
-        .bind(user_id)
-    )?;
+    // For the subquery, we need to use raw SQL as sea-query subqueries are complex
+    let sql8a = {
+        let subquery = Query::select()
+            .column(Authenticators::Id)
+            .from(Authenticators::Table)
+            .and_where(Expr::col(Authenticators::UserId).eq(user_id))
+            .to_owned();
+        let query = Query::update()
+            .table(DeviceAuthRequests::Table)
+            .value(DeviceAuthRequests::AuthenticatorId, Option::<String>::None)
+            .and_where(Expr::col(DeviceAuthRequests::AuthenticatorId).in_subquery(subquery))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql8a))?;
 
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM authenticators WHERE user_id = ?").bind(user_id)
-    )?;
+    let sql8b = {
+        let query = Query::delete()
+            .from_table(Authenticators::Table)
+            .and_where(Expr::col(Authenticators::UserId).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql8b))?;
 
     // 9. Finally delete the user
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM users WHERE id = ?").bind(user_id)
-    )?;
+    let sql9 = {
+        let query = Query::delete()
+            .from_table(Users::Table)
+            .and_where(Expr::col(Users::Id).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql9))?;
 
     tx.commit().await?;
     Ok(())

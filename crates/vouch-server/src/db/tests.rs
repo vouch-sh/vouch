@@ -407,7 +407,7 @@ async fn test_oauth_client_crud() {
     assert!(!client_id.is_empty());
     assert_eq!(client.name, "My App");
     assert_eq!(client.application_type, "web");
-    assert!(client.is_active());
+    assert!(client.active);
 
     // Get by ID
     let fetched = get_oauth_client_by_id(&pool, &client.id)
@@ -625,7 +625,7 @@ async fn test_oauth_client_deactivation() {
     .await
     .expect("Failed to create client");
 
-    assert!(client.is_active());
+    assert!(client.active);
 
     // Deactivate
     deactivate_oauth_client(&pool, &client.id)
@@ -636,7 +636,7 @@ async fn test_oauth_client_deactivation() {
         .await
         .expect("Failed to get client")
         .expect("Client should exist");
-    assert!(!client.is_active());
+    assert!(!client.active);
 
     // Reactivate
     reactivate_oauth_client(&pool, &client.id)
@@ -647,7 +647,7 @@ async fn test_oauth_client_deactivation() {
         .await
         .expect("Failed to get client")
         .expect("Client should exist");
-    assert!(client.is_active());
+    assert!(client.active);
 }
 
 #[tokio::test]

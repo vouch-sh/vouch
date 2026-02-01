@@ -2,8 +2,11 @@
 //! Authenticator (WebAuthn credential) database operations.
 
 use super::Pool;
+use super::compat::BuildSql;
+use super::schema::{Authenticators, DeviceAuthRequests, Sessions};
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute};
 use anyhow::Result;
+use sea_query::{Expr, Query};
 use uuid::Uuid;
 
 /// Authenticator (credential) record.
@@ -35,33 +38,64 @@ pub async fn create_authenticator(
     user_handle: Option<&[u8]>,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
 
-    db_execute!(
-        pool,
-        sqlx::query(
-            "INSERT INTO authenticators (id, user_id, name, credential_id, public_key, counter, aaguid, user_handle) VALUES (?, ?, ?, ?, ?, 0, ?, ?)"
-        )
-        .bind(&id)
-        .bind(user_id)
-        .bind(name)
-        .bind(credential_id)
-        .bind(public_key)
-        .bind(aaguid)
-        .bind(user_handle)
-    )?;
+    let sql = {
+        let query = Query::insert()
+            .into_table(Authenticators::Table)
+            .columns([
+                Authenticators::Id,
+                Authenticators::UserId,
+                Authenticators::Name,
+                Authenticators::CredentialId,
+                Authenticators::PublicKey,
+                Authenticators::Counter,
+                Authenticators::Aaguid,
+                Authenticators::UserHandle,
+            ])
+            .values_panic([
+                id.clone().into(),
+                user_id.into(),
+                name.into(),
+                credential_id.into(),
+                public_key.into(),
+                0i64.into(),
+                aaguid.into(),
+                user_handle.map(|h| h.to_vec()).into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(id)
 }
 
 /// Get authenticators for a user.
 pub async fn get_authenticators_for_user(pool: &Pool, user_id: &str) -> Result<Vec<Authenticator>> {
-    let authenticators = db_fetch_all!(
-        pool,
-        sqlx::query_as::<_, Authenticator>(
-            "SELECT id, user_id, name, credential_id, public_key, counter, created_at, aaguid, user_handle FROM authenticators WHERE user_id = ?"
-        )
-        .bind(user_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                Authenticators::Id,
+                Authenticators::UserId,
+                Authenticators::Name,
+                Authenticators::CredentialId,
+                Authenticators::PublicKey,
+                Authenticators::Counter,
+                Authenticators::CreatedAt,
+                Authenticators::Aaguid,
+                Authenticators::UserHandle,
+            ])
+            .from(Authenticators::Table)
+            .and_where(Expr::col(Authenticators::UserId).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let authenticators = db_fetch_all!(pool, sqlx::query_as::<_, Authenticator>(&sql))?;
 
     Ok(authenticators)
 }
@@ -71,13 +105,28 @@ pub async fn get_authenticator_by_credential_id(
     pool: &Pool,
     credential_id: &[u8],
 ) -> Result<Option<Authenticator>> {
-    let authenticator = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, Authenticator>(
-            "SELECT id, user_id, name, credential_id, public_key, counter, created_at, aaguid, user_handle FROM authenticators WHERE credential_id = ?"
-        )
-        .bind(credential_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                Authenticators::Id,
+                Authenticators::UserId,
+                Authenticators::Name,
+                Authenticators::CredentialId,
+                Authenticators::PublicKey,
+                Authenticators::Counter,
+                Authenticators::CreatedAt,
+                Authenticators::Aaguid,
+                Authenticators::UserHandle,
+            ])
+            .from(Authenticators::Table)
+            .and_where(Expr::col(Authenticators::CredentialId).eq(credential_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let authenticator = db_fetch_optional!(pool, sqlx::query_as::<_, Authenticator>(&sql))?;
 
     Ok(authenticator)
 }
@@ -87,13 +136,28 @@ pub async fn get_authenticator_by_id(
     pool: &Pool,
     authenticator_id: &str,
 ) -> Result<Option<Authenticator>> {
-    let authenticator = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, Authenticator>(
-            "SELECT id, user_id, name, credential_id, public_key, counter, created_at, aaguid, user_handle FROM authenticators WHERE id = ?"
-        )
-        .bind(authenticator_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                Authenticators::Id,
+                Authenticators::UserId,
+                Authenticators::Name,
+                Authenticators::CredentialId,
+                Authenticators::PublicKey,
+                Authenticators::Counter,
+                Authenticators::CreatedAt,
+                Authenticators::Aaguid,
+                Authenticators::UserHandle,
+            ])
+            .from(Authenticators::Table)
+            .and_where(Expr::col(Authenticators::Id).eq(authenticator_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let authenticator = db_fetch_optional!(pool, sqlx::query_as::<_, Authenticator>(&sql))?;
 
     Ok(authenticator)
 }
@@ -104,33 +168,54 @@ pub async fn update_authenticator_counter(
     authenticator_id: &str,
     counter: i64,
 ) -> Result<()> {
-    db_execute!(
-        pool,
-        sqlx::query("UPDATE authenticators SET counter = ? WHERE id = ?")
-            .bind(counter)
-            .bind(authenticator_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::update()
+            .table(Authenticators::Table)
+            .value(Authenticators::Counter, counter)
+            .and_where(Expr::col(Authenticators::Id).eq(authenticator_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
 
 /// Count the number of authenticators for a user.
 pub async fn count_authenticators_for_user(pool: &Pool, user_id: &str) -> Result<i64> {
-    let row: (i64,) = db_fetch_one!(
-        pool,
-        sqlx::query_as("SELECT COUNT(*) FROM authenticators WHERE user_id = ?").bind(user_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .expr(Expr::col(Authenticators::Id).count())
+            .from(Authenticators::Table)
+            .and_where(Expr::col(Authenticators::UserId).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let row: (i64,) = db_fetch_one!(pool, sqlx::query_as(&sql))?;
 
     Ok(row.0)
 }
 
 /// Count the number of sessions for an authenticator.
 pub async fn count_sessions_for_authenticator(pool: &Pool, authenticator_id: &str) -> Result<i64> {
-    let row: (i64,) = db_fetch_one!(
-        pool,
-        sqlx::query_as("SELECT COUNT(*) FROM sessions WHERE authenticator_id = ?")
-            .bind(authenticator_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .expr(Expr::col(Sessions::Id).count())
+            .from(Sessions::Table)
+            .and_where(Expr::col(Sessions::AuthenticatorId).eq(authenticator_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let row: (i64,) = db_fetch_one!(pool, sqlx::query_as(&sql))?;
 
     Ok(row.0)
 }
@@ -144,27 +229,38 @@ pub async fn count_sessions_for_authenticator(pool: &Pool, authenticator_id: &st
 /// 3. Delete the authenticator
 pub async fn delete_authenticator(pool: &Pool, authenticator_id: &str) -> Result<u64> {
     let mut tx = pool.begin().await?;
+    let db_type = tx.db_type();
 
     // 1. Clear authenticator_id references in device_auth_requests
-    tx_execute!(
-        tx,
-        sqlx::query(
-            "UPDATE device_auth_requests SET authenticator_id = NULL WHERE authenticator_id = ?"
-        )
-        .bind(authenticator_id)
-    )?;
+    let sql1 = {
+        let query = Query::update()
+            .table(DeviceAuthRequests::Table)
+            .value(DeviceAuthRequests::AuthenticatorId, Option::<String>::None)
+            .and_where(Expr::col(DeviceAuthRequests::AuthenticatorId).eq(authenticator_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql1))?;
 
     // 2. Delete sessions using this authenticator
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM sessions WHERE authenticator_id = ?").bind(authenticator_id)
-    )?;
+    let sql2 = {
+        let query = Query::delete()
+            .from_table(Sessions::Table)
+            .and_where(Expr::col(Sessions::AuthenticatorId).eq(authenticator_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql2))?;
 
     // 3. Delete the authenticator
-    let result = tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM authenticators WHERE id = ?").bind(authenticator_id)
-    )?;
+    let sql3 = {
+        let query = Query::delete()
+            .from_table(Authenticators::Table)
+            .and_where(Expr::col(Authenticators::Id).eq(authenticator_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    let result = tx_execute!(tx, sqlx::query(&sql3))?;
 
     tx.commit().await?;
     Ok(result.rows_affected())
@@ -176,12 +272,18 @@ pub async fn update_authenticator_name(
     authenticator_id: &str,
     name: &str,
 ) -> Result<bool> {
-    let result = db_execute!(
-        pool,
-        sqlx::query("UPDATE authenticators SET name = ? WHERE id = ?")
-            .bind(name)
-            .bind(authenticator_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::update()
+            .table(Authenticators::Table)
+            .value(Authenticators::Name, name)
+            .and_where(Expr::col(Authenticators::Id).eq(authenticator_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected() > 0)
 }

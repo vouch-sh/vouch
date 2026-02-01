@@ -2,9 +2,12 @@
 //! Device Authorization (RFC 8628) database operations.
 
 use super::Pool;
+use super::compat::BuildSql;
+use super::schema::{DeviceAuthRequests, OidcStates};
 use crate::{db_execute, db_fetch_optional, tx_execute};
 use anyhow::Result;
 use jiff::Timestamp;
+use sea_query::{Expr, Query};
 use uuid::Uuid;
 
 /// Device authorization status (RFC 8628 state machine).
@@ -74,18 +77,30 @@ pub async fn create_device_auth_request(
     interval_seconds: i64,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
 
-    db_execute!(
-        pool,
-        sqlx::query(
-            "INSERT INTO device_auth_requests (id, device_code_hash, user_code, expires_at, interval_seconds) VALUES (?, ?, ?, ?, ?)"
-        )
-        .bind(&id)
-        .bind(device_code_hash)
-        .bind(user_code)
-        .bind(expires_at)
-        .bind(interval_seconds)
-    )?;
+    let sql = {
+        let query = Query::insert()
+            .into_table(DeviceAuthRequests::Table)
+            .columns([
+                DeviceAuthRequests::Id,
+                DeviceAuthRequests::DeviceCodeHash,
+                DeviceAuthRequests::UserCode,
+                DeviceAuthRequests::ExpiresAt,
+                DeviceAuthRequests::IntervalSeconds,
+            ])
+            .values_panic([
+                id.clone().into(),
+                device_code_hash.into(),
+                user_code.into(),
+                expires_at.into(),
+                interval_seconds.into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(id)
 }
@@ -95,13 +110,29 @@ pub async fn get_device_auth_by_code_hash(
     pool: &Pool,
     device_code_hash: &str,
 ) -> Result<Option<DeviceAuthRequest>> {
-    let request = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, DeviceAuthRequest>(
-            "SELECT id, device_code_hash, user_code, status, user_id, user_email, authenticator_id, expires_at, interval_seconds, last_poll_at FROM device_auth_requests WHERE device_code_hash = ?"
-        )
-        .bind(device_code_hash)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                DeviceAuthRequests::Id,
+                DeviceAuthRequests::DeviceCodeHash,
+                DeviceAuthRequests::UserCode,
+                DeviceAuthRequests::Status,
+                DeviceAuthRequests::UserId,
+                DeviceAuthRequests::UserEmail,
+                DeviceAuthRequests::AuthenticatorId,
+                DeviceAuthRequests::ExpiresAt,
+                DeviceAuthRequests::IntervalSeconds,
+                DeviceAuthRequests::LastPollAt,
+            ])
+            .from(DeviceAuthRequests::Table)
+            .and_where(Expr::col(DeviceAuthRequests::DeviceCodeHash).eq(device_code_hash))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let request = db_fetch_optional!(pool, sqlx::query_as::<_, DeviceAuthRequest>(&sql))?;
 
     Ok(request)
 }
@@ -111,26 +142,58 @@ pub async fn get_device_auth_by_user_code(
     pool: &Pool,
     user_code: &str,
 ) -> Result<Option<DeviceAuthRequest>> {
-    let request = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, DeviceAuthRequest>(
-            "SELECT id, device_code_hash, user_code, status, user_id, user_email, authenticator_id, expires_at, interval_seconds, last_poll_at FROM device_auth_requests WHERE user_code = ?"
-        )
-        .bind(user_code)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                DeviceAuthRequests::Id,
+                DeviceAuthRequests::DeviceCodeHash,
+                DeviceAuthRequests::UserCode,
+                DeviceAuthRequests::Status,
+                DeviceAuthRequests::UserId,
+                DeviceAuthRequests::UserEmail,
+                DeviceAuthRequests::AuthenticatorId,
+                DeviceAuthRequests::ExpiresAt,
+                DeviceAuthRequests::IntervalSeconds,
+                DeviceAuthRequests::LastPollAt,
+            ])
+            .from(DeviceAuthRequests::Table)
+            .and_where(Expr::col(DeviceAuthRequests::UserCode).eq(user_code))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let request = db_fetch_optional!(pool, sqlx::query_as::<_, DeviceAuthRequest>(&sql))?;
 
     Ok(request)
 }
 
 /// Get a device auth request by ID.
 pub async fn get_device_auth_by_id(pool: &Pool, id: &str) -> Result<Option<DeviceAuthRequest>> {
-    let request = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, DeviceAuthRequest>(
-            "SELECT id, device_code_hash, user_code, status, user_id, user_email, authenticator_id, expires_at, interval_seconds, last_poll_at FROM device_auth_requests WHERE id = ?"
-        )
-        .bind(id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                DeviceAuthRequests::Id,
+                DeviceAuthRequests::DeviceCodeHash,
+                DeviceAuthRequests::UserCode,
+                DeviceAuthRequests::Status,
+                DeviceAuthRequests::UserId,
+                DeviceAuthRequests::UserEmail,
+                DeviceAuthRequests::AuthenticatorId,
+                DeviceAuthRequests::ExpiresAt,
+                DeviceAuthRequests::IntervalSeconds,
+                DeviceAuthRequests::LastPollAt,
+            ])
+            .from(DeviceAuthRequests::Table)
+            .and_where(Expr::col(DeviceAuthRequests::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let request = db_fetch_optional!(pool, sqlx::query_as::<_, DeviceAuthRequest>(&sql))?;
 
     Ok(request)
 }
@@ -143,16 +206,21 @@ pub async fn authorize_device_auth(
     user_email: &str,
     authenticator_id: &str,
 ) -> Result<()> {
-    db_execute!(
-        pool,
-        sqlx::query(
-            "UPDATE device_auth_requests SET status = 'authorized', user_id = ?, user_email = ?, authenticator_id = ? WHERE id = ?"
-        )
-        .bind(user_id)
-        .bind(user_email)
-        .bind(authenticator_id)
-        .bind(id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::update()
+            .table(DeviceAuthRequests::Table)
+            .value(DeviceAuthRequests::Status, "authorized")
+            .value(DeviceAuthRequests::UserId, user_id)
+            .value(DeviceAuthRequests::UserEmail, user_email)
+            .value(DeviceAuthRequests::AuthenticatorId, authenticator_id)
+            .and_where(Expr::col(DeviceAuthRequests::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
@@ -160,10 +228,18 @@ pub async fn authorize_device_auth(
 /// Deny a device auth request.
 #[allow(dead_code)]
 pub async fn deny_device_auth(pool: &Pool, id: &str) -> Result<()> {
-    db_execute!(
-        pool,
-        sqlx::query("UPDATE device_auth_requests SET status = 'denied' WHERE id = ?").bind(id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::update()
+            .table(DeviceAuthRequests::Table)
+            .value(DeviceAuthRequests::Status, "denied")
+            .and_where(Expr::col(DeviceAuthRequests::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
@@ -195,12 +271,17 @@ pub async fn update_device_auth_poll_time(
     }
 
     // Update last poll time
-    db_execute!(
-        pool,
-        sqlx::query("UPDATE device_auth_requests SET last_poll_at = ? WHERE id = ?")
-            .bind(&now_str)
-            .bind(id)
-    )?;
+    let db_type = pool.db_type();
+    let sql = {
+        let query = Query::update()
+            .table(DeviceAuthRequests::Table)
+            .value(DeviceAuthRequests::LastPollAt, now_str.clone())
+            .and_where(Expr::col(DeviceAuthRequests::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(true)
 }
@@ -212,22 +293,32 @@ pub async fn update_device_auth_poll_time(
 /// 2. Delete the expired requests
 pub async fn delete_expired_device_auth_requests(pool: &Pool, now: &str) -> Result<u64> {
     let mut tx = pool.begin().await?;
+    let db_type = tx.db_type();
 
     // 1. Delete oidc_states for expired device auth requests
-    tx_execute!(
-        tx,
-        sqlx::query(
-            "DELETE FROM oidc_states WHERE device_auth_id IN
-             (SELECT id FROM device_auth_requests WHERE expires_at < ?)"
-        )
-        .bind(now)
-    )?;
+    let sql1 = {
+        let subquery = Query::select()
+            .column(DeviceAuthRequests::Id)
+            .from(DeviceAuthRequests::Table)
+            .and_where(Expr::col(DeviceAuthRequests::ExpiresAt).lt(now))
+            .to_owned();
+        let query = Query::delete()
+            .from_table(OidcStates::Table)
+            .and_where(Expr::col(OidcStates::DeviceAuthId).in_subquery(subquery))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql1))?;
 
     // 2. Delete the expired requests
-    let result = tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM device_auth_requests WHERE expires_at < ?").bind(now)
-    )?;
+    let sql2 = {
+        let query = Query::delete()
+            .from_table(DeviceAuthRequests::Table)
+            .and_where(Expr::col(DeviceAuthRequests::ExpiresAt).lt(now))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    let result = tx_execute!(tx, sqlx::query(&sql2))?;
 
     tx.commit().await?;
     Ok(result.rows_affected())
@@ -246,51 +337,88 @@ pub async fn create_oidc_state(
     expires_at: &str,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
 
-    db_execute!(
-        pool,
-        sqlx::query(
-            "INSERT INTO oidc_states (id, state, device_auth_id, nonce, expires_at) VALUES (?, ?, ?, ?, ?)"
-        )
-        .bind(&id)
-        .bind(state)
-        .bind(device_auth_id)
-        .bind(nonce)
-        .bind(expires_at)
-    )?;
+    let sql = {
+        let query = Query::insert()
+            .into_table(OidcStates::Table)
+            .columns([
+                OidcStates::Id,
+                OidcStates::State,
+                OidcStates::DeviceAuthId,
+                OidcStates::Nonce,
+                OidcStates::ExpiresAt,
+            ])
+            .values_panic([
+                id.clone().into(),
+                state.into(),
+                device_auth_id.into(),
+                nonce.into(),
+                expires_at.into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(id)
 }
 
 /// Get an OIDC state by state value.
 pub async fn get_oidc_state(pool: &Pool, state: &str) -> Result<Option<OidcState>> {
-    let oidc_state = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, OidcState>(
-            "SELECT id, state, device_auth_id, nonce, expires_at FROM oidc_states WHERE state = ?"
-        )
-        .bind(state)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                OidcStates::Id,
+                OidcStates::State,
+                OidcStates::DeviceAuthId,
+                OidcStates::Nonce,
+                OidcStates::ExpiresAt,
+            ])
+            .from(OidcStates::Table)
+            .and_where(Expr::col(OidcStates::State).eq(state))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let oidc_state = db_fetch_optional!(pool, sqlx::query_as::<_, OidcState>(&sql))?;
 
     Ok(oidc_state)
 }
 
 /// Delete an OIDC state.
 pub async fn delete_oidc_state(pool: &Pool, state: &str) -> Result<()> {
-    db_execute!(
-        pool,
-        sqlx::query("DELETE FROM oidc_states WHERE state = ?").bind(state)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(OidcStates::Table)
+            .and_where(Expr::col(OidcStates::State).eq(state))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
 
 /// Delete expired OIDC states.
 pub async fn delete_expired_oidc_states(pool: &Pool, now: &str) -> Result<u64> {
-    let result = db_execute!(
-        pool,
-        sqlx::query("DELETE FROM oidc_states WHERE expires_at < ?").bind(now)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(OidcStates::Table)
+            .and_where(Expr::col(OidcStates::ExpiresAt).lt(now))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected())
 }

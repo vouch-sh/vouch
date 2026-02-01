@@ -6,7 +6,7 @@ use super::compat::{BuildSql, now_expr};
 use super::schema::{AuthEvents, ServerConfig};
 use crate::{db_execute, db_fetch_all, db_fetch_optional};
 use anyhow::Result;
-use sea_query::{OnConflict, Query, SimpleExpr};
+use sea_query::{Expr, OnConflict, Query, SimpleExpr};
 use uuid::Uuid;
 
 // ============================================================================
@@ -25,13 +25,22 @@ pub struct ServerConfigRow {
 
 /// Get a config value by key.
 pub async fn get_config(pool: &Pool, key: &str) -> Result<Option<String>> {
-    let row = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, ServerConfigRow>(
-            "SELECT key, value, updated_at FROM server_config WHERE key = ?"
-        )
-        .bind(key)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                ServerConfig::Key,
+                ServerConfig::Value,
+                ServerConfig::UpdatedAt,
+            ])
+            .from(ServerConfig::Table)
+            .and_where(Expr::col(ServerConfig::Key).eq(key))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let row = db_fetch_optional!(pool, sqlx::query_as::<_, ServerConfigRow>(&sql))?;
 
     Ok(row.map(|r| r.value))
 }
@@ -39,10 +48,21 @@ pub async fn get_config(pool: &Pool, key: &str) -> Result<Option<String>> {
 /// Get all config values.
 #[allow(dead_code)]
 pub async fn get_all_config(pool: &Pool) -> Result<Vec<ServerConfigRow>> {
-    let rows = db_fetch_all!(
-        pool,
-        sqlx::query_as::<_, ServerConfigRow>("SELECT key, value, updated_at FROM server_config")
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                ServerConfig::Key,
+                ServerConfig::Value,
+                ServerConfig::UpdatedAt,
+            ])
+            .from(ServerConfig::Table)
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let rows = db_fetch_all!(pool, sqlx::query_as::<_, ServerConfigRow>(&sql))?;
 
     Ok(rows)
 }
@@ -83,10 +103,17 @@ pub async fn set_config(pool: &Pool, key: &str, value: &str) -> Result<()> {
 /// Delete a config value.
 #[allow(dead_code)]
 pub async fn delete_config(pool: &Pool, key: &str) -> Result<()> {
-    db_execute!(
-        pool,
-        sqlx::query("DELETE FROM server_config WHERE key = ?").bind(key)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(ServerConfig::Table)
+            .and_where(Expr::col(ServerConfig::Key).eq(key))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
@@ -280,10 +307,17 @@ pub async fn get_auth_events(pool: &Pool, query: &AuthEventQuery) -> Result<Vec<
 /// Delete authentication events older than the specified timestamp.
 /// Use for retention policy enforcement (e.g., delete events older than 90 days).
 pub async fn delete_old_auth_events(pool: &Pool, before: &str) -> Result<u64> {
-    let result = db_execute!(
-        pool,
-        sqlx::query("DELETE FROM auth_events WHERE created_at < ?").bind(before)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(AuthEvents::Table)
+            .and_where(Expr::col(AuthEvents::CreatedAt).lt(before))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected())
 }

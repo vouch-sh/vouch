@@ -375,7 +375,7 @@ mod tests {
             description: None,
             application_type: "web".to_string(),
             redirect_uris: "[]".to_string(),
-            active: 1,
+            active: true,
             created_at: "2024-01-01".to_string(),
             updated_at: "2024-01-01".to_string(),
             last_used_at: None,

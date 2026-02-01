@@ -3,10 +3,10 @@
 
 use super::Pool;
 use super::compat::{BuildSql, now_expr};
-use super::schema::ScimGroupMembers;
+use super::schema::{ScimAuditLog, ScimGroupMembers, ScimGroups, ScimTokens, Users};
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute};
 use anyhow::Result;
-use sea_query::{OnConflict, Query};
+use sea_query::{Expr, OnConflict, Order, Query, SimpleExpr};
 use uuid::Uuid;
 
 // ============================================================================
@@ -28,13 +28,26 @@ pub struct ScimToken {
 
 /// Get a SCIM token by its hash.
 pub async fn get_scim_token_by_hash(pool: &Pool, token_hash: &str) -> Result<Option<ScimToken>> {
-    let token = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, ScimToken>(
-            "SELECT id, token_hash, org_id, description, created_at, last_used_at, expires_at FROM scim_tokens WHERE token_hash = ?"
-        )
-        .bind(token_hash)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                ScimTokens::Id,
+                ScimTokens::TokenHash,
+                ScimTokens::OrgId,
+                ScimTokens::Description,
+                ScimTokens::CreatedAt,
+                ScimTokens::LastUsedAt,
+                ScimTokens::ExpiresAt,
+            ])
+            .from(ScimTokens::Table)
+            .and_where(Expr::col(ScimTokens::TokenHash).eq(token_hash))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let token = db_fetch_optional!(pool, sqlx::query_as::<_, ScimToken>(&sql))?;
 
     Ok(token)
 }
@@ -42,12 +55,20 @@ pub async fn get_scim_token_by_hash(pool: &Pool, token_hash: &str) -> Result<Opt
 /// Update SCIM token last used timestamp.
 pub async fn update_scim_token_last_used(pool: &Pool, token_id: &str) -> Result<()> {
     let db_type = pool.db_type();
-    let sql = format!(
-        "UPDATE scim_tokens SET last_used_at = {} WHERE id = ?",
-        now_expr(db_type)
-    );
 
-    db_execute!(pool, sqlx::query(&sql).bind(token_id))?;
+    let sql = {
+        let query = Query::update()
+            .table(ScimTokens::Table)
+            .value(
+                ScimTokens::LastUsedAt,
+                SimpleExpr::Custom(now_expr(db_type).to_string()),
+            )
+            .and_where(Expr::col(ScimTokens::Id).eq(token_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
@@ -62,18 +83,30 @@ pub async fn create_scim_token(
     org_id: Option<&str>,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
 
-    db_execute!(
-        pool,
-        sqlx::query(
-            "INSERT INTO scim_tokens (id, token_hash, org_id, description, expires_at) VALUES (?, ?, ?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(token_hash)
-        .bind(org_id)
-        .bind(description)
-        .bind(expires_at)
-    )?;
+    let sql = {
+        let query = Query::insert()
+            .into_table(ScimTokens::Table)
+            .columns([
+                ScimTokens::Id,
+                ScimTokens::TokenHash,
+                ScimTokens::OrgId,
+                ScimTokens::Description,
+                ScimTokens::ExpiresAt,
+            ])
+            .values_panic([
+                id.clone().into(),
+                token_hash.into(),
+                org_id.into(),
+                description.into(),
+                expires_at.into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(id)
 }
@@ -86,19 +119,28 @@ pub async fn create_scim_token(
 #[allow(dead_code)]
 pub async fn delete_scim_token(pool: &Pool, token_id: &str) -> Result<()> {
     let mut tx = pool.begin().await?;
+    let db_type = tx.db_type();
 
     // 1. SET NULL for audit log references (preserves audit trail)
-    tx_execute!(
-        tx,
-        sqlx::query("UPDATE scim_audit_log SET actor_token_id = NULL WHERE actor_token_id = ?")
-            .bind(token_id)
-    )?;
+    let sql1 = {
+        let query = Query::update()
+            .table(ScimAuditLog::Table)
+            .value(ScimAuditLog::ActorTokenId, Option::<String>::None)
+            .and_where(Expr::col(ScimAuditLog::ActorTokenId).eq(token_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql1))?;
 
     // 2. Delete the token
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM scim_tokens WHERE id = ?").bind(token_id)
-    )?;
+    let sql2 = {
+        let query = Query::delete()
+            .from_table(ScimTokens::Table)
+            .and_where(Expr::col(ScimTokens::Id).eq(token_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql2))?;
 
     tx.commit().await?;
     Ok(())
@@ -107,21 +149,45 @@ pub async fn delete_scim_token(pool: &Pool, token_id: &str) -> Result<()> {
 /// List SCIM tokens, optionally filtered by organization.
 #[allow(dead_code)]
 pub async fn list_scim_tokens(pool: &Pool, org_id: Option<&str>) -> Result<Vec<ScimToken>> {
+    let db_type = pool.db_type();
+
     let tokens = if let Some(org_id) = org_id {
-        db_fetch_all!(
-            pool,
-            sqlx::query_as::<_, ScimToken>(
-                "SELECT id, token_hash, org_id, description, created_at, last_used_at, expires_at FROM scim_tokens WHERE org_id = ? ORDER BY created_at DESC"
-            )
-            .bind(org_id)
-        )?
+        let sql = {
+            let query = Query::select()
+                .columns([
+                    ScimTokens::Id,
+                    ScimTokens::TokenHash,
+                    ScimTokens::OrgId,
+                    ScimTokens::Description,
+                    ScimTokens::CreatedAt,
+                    ScimTokens::LastUsedAt,
+                    ScimTokens::ExpiresAt,
+                ])
+                .from(ScimTokens::Table)
+                .and_where(Expr::col(ScimTokens::OrgId).eq(org_id))
+                .order_by(ScimTokens::CreatedAt, Order::Desc)
+                .to_owned();
+            query.build_sql(db_type)
+        };
+        db_fetch_all!(pool, sqlx::query_as::<_, ScimToken>(&sql))?
     } else {
-        db_fetch_all!(
-            pool,
-            sqlx::query_as::<_, ScimToken>(
-                "SELECT id, token_hash, org_id, description, created_at, last_used_at, expires_at FROM scim_tokens ORDER BY created_at DESC"
-            )
-        )?
+        let sql = {
+            let query = Query::select()
+                .columns([
+                    ScimTokens::Id,
+                    ScimTokens::TokenHash,
+                    ScimTokens::OrgId,
+                    ScimTokens::Description,
+                    ScimTokens::CreatedAt,
+                    ScimTokens::LastUsedAt,
+                    ScimTokens::ExpiresAt,
+                ])
+                .from(ScimTokens::Table)
+                .order_by(ScimTokens::CreatedAt, Order::Desc)
+                .to_owned();
+            query.build_sql(db_type)
+        };
+        db_fetch_all!(pool, sqlx::query_as::<_, ScimToken>(&sql))?
     };
 
     Ok(tokens)
@@ -137,19 +203,32 @@ pub async fn insert_scim_audit(
     details: Option<&str>,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
 
-    db_execute!(
-        pool,
-        sqlx::query(
-            "INSERT INTO scim_audit_log (id, operation, resource_type, resource_id, actor_token_id, details) VALUES (?, ?, ?, ?, ?, ?)"
-        )
-        .bind(&id)
-        .bind(operation)
-        .bind(resource_type)
-        .bind(resource_id)
-        .bind(actor_token_id)
-        .bind(details)
-    )?;
+    let sql = {
+        let query = Query::insert()
+            .into_table(ScimAuditLog::Table)
+            .columns([
+                ScimAuditLog::Id,
+                ScimAuditLog::Operation,
+                ScimAuditLog::ResourceType,
+                ScimAuditLog::ResourceId,
+                ScimAuditLog::ActorTokenId,
+                ScimAuditLog::Details,
+            ])
+            .values_panic([
+                id.clone().into(),
+                operation.into(),
+                resource_type.into(),
+                resource_id.into(),
+                actor_token_id.into(),
+                details.into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(id)
 }
@@ -276,13 +355,25 @@ pub(crate) fn parse_scim_filter(filter: &str, attr: &str) -> Option<String> {
 
 /// Get a user by ID for SCIM.
 pub async fn get_scim_user(pool: &Pool, user_id: &str) -> Result<Option<ScimUserRecord>> {
-    let user = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, ScimUserRecord>(
-            "SELECT id, email, name, created_at, active, external_id FROM users WHERE id = ?",
-        )
-        .bind(user_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                Users::Id,
+                Users::Email,
+                Users::Name,
+                Users::CreatedAt,
+                Users::Active,
+                Users::ExternalId,
+            ])
+            .from(Users::Table)
+            .and_where(Expr::col(Users::Id).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let user = db_fetch_optional!(pool, sqlx::query_as::<_, ScimUserRecord>(&sql))?;
 
     Ok(user)
 }
@@ -296,27 +387,49 @@ pub async fn create_scim_user(
     active: bool,
 ) -> Result<ScimUserRecord> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
 
-    db_execute!(
-        pool,
-        sqlx::query(
-            "INSERT INTO users (id, email, name, external_id, active) VALUES (?, ?, ?, ?, ?)"
-        )
-        .bind(&id)
-        .bind(email)
-        .bind(name)
-        .bind(external_id)
-        .bind(active)
-    )?;
+    let insert_sql = {
+        let query = Query::insert()
+            .into_table(Users::Table)
+            .columns([
+                Users::Id,
+                Users::Email,
+                Users::Name,
+                Users::ExternalId,
+                Users::Active,
+            ])
+            .values_panic([
+                id.clone().into(),
+                email.into(),
+                name.into(),
+                external_id.into(),
+                active.into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&insert_sql))?;
 
     // Fetch and return the created user
-    let user = db_fetch_one!(
-        pool,
-        sqlx::query_as::<_, ScimUserRecord>(
-            "SELECT id, email, name, created_at, active, external_id FROM users WHERE id = ?",
-        )
-        .bind(&id)
-    )?;
+    let select_sql = {
+        let query = Query::select()
+            .columns([
+                Users::Id,
+                Users::Email,
+                Users::Name,
+                Users::CreatedAt,
+                Users::Active,
+                Users::ExternalId,
+            ])
+            .from(Users::Table)
+            .and_where(Expr::col(Users::Id).eq(&id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let user = db_fetch_one!(pool, sqlx::query_as::<_, ScimUserRecord>(&select_sql))?;
 
     Ok(user)
 }
@@ -329,14 +442,20 @@ pub async fn update_scim_user(
     external_id: Option<&str>,
     active: bool,
 ) -> Result<()> {
-    db_execute!(
-        pool,
-        sqlx::query("UPDATE users SET name = ?, external_id = ?, active = ? WHERE id = ?")
-            .bind(name)
-            .bind(external_id)
-            .bind(active)
-            .bind(user_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::update()
+            .table(Users::Table)
+            .value(Users::Name, name)
+            .value(Users::ExternalId, external_id)
+            .value(Users::Active, active)
+            .and_where(Expr::col(Users::Id).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
@@ -371,17 +490,22 @@ pub async fn create_scim_group(
     external_id: Option<&str>,
 ) -> Result<ScimGroupRecord> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
 
-    db_execute!(
-        pool,
-        sqlx::query(
-            "INSERT INTO scim_groups (id, display_name, external_id)
-             VALUES (?, ?, ?)",
-        )
-        .bind(&id)
-        .bind(display_name)
-        .bind(external_id)
-    )?;
+    let sql = {
+        let query = Query::insert()
+            .into_table(ScimGroups::Table)
+            .columns([
+                ScimGroups::Id,
+                ScimGroups::DisplayName,
+                ScimGroups::ExternalId,
+            ])
+            .values_panic([id.clone().into(), display_name.into(), external_id.into()])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     // Return the created group
     get_scim_group(pool, &id)
@@ -391,14 +515,24 @@ pub async fn create_scim_group(
 
 /// Get a SCIM group by ID.
 pub async fn get_scim_group(pool: &Pool, id: &str) -> Result<Option<ScimGroupRecord>> {
-    let group = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, ScimGroupRecord>(
-            "SELECT id, display_name, external_id, created_at, updated_at
-             FROM scim_groups WHERE id = ?",
-        )
-        .bind(id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                ScimGroups::Id,
+                ScimGroups::DisplayName,
+                ScimGroups::ExternalId,
+                ScimGroups::CreatedAt,
+                ScimGroups::UpdatedAt,
+            ])
+            .from(ScimGroups::Table)
+            .and_where(Expr::col(ScimGroups::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let group = db_fetch_optional!(pool, sqlx::query_as::<_, ScimGroupRecord>(&sql))?;
 
     Ok(group)
 }
@@ -409,14 +543,24 @@ pub async fn get_scim_group_by_name(
     pool: &Pool,
     display_name: &str,
 ) -> Result<Option<ScimGroupRecord>> {
-    let group = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, ScimGroupRecord>(
-            "SELECT id, display_name, external_id, created_at, updated_at
-             FROM scim_groups WHERE display_name = ?",
-        )
-        .bind(display_name)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                ScimGroups::Id,
+                ScimGroups::DisplayName,
+                ScimGroups::ExternalId,
+                ScimGroups::CreatedAt,
+                ScimGroups::UpdatedAt,
+            ])
+            .from(ScimGroups::Table)
+            .and_where(Expr::col(ScimGroups::DisplayName).eq(display_name))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let group = db_fetch_optional!(pool, sqlx::query_as::<_, ScimGroupRecord>(&sql))?;
 
     Ok(group)
 }
@@ -533,6 +677,8 @@ pub async fn update_scim_group(
     external_id: Option<&str>,
 ) -> Result<()> {
     let db_type = pool.db_type();
+
+    // COALESCE is tricky in sea-query, so we keep using raw SQL for this
     let sql = format!(
         "UPDATE scim_groups SET
             display_name = COALESCE(?, display_name),
@@ -560,18 +706,27 @@ pub async fn update_scim_group(
 /// 2. Delete the group
 pub async fn delete_scim_group(pool: &Pool, id: &str) -> Result<bool> {
     let mut tx = pool.begin().await?;
+    let db_type = tx.db_type();
 
     // 1. Delete group memberships
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM scim_group_members WHERE group_id = ?").bind(id)
-    )?;
+    let sql1 = {
+        let query = Query::delete()
+            .from_table(ScimGroupMembers::Table)
+            .and_where(Expr::col(ScimGroupMembers::GroupId).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql1))?;
 
     // 2. Delete the group
-    let result = tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM scim_groups WHERE id = ?").bind(id)
-    )?;
+    let sql2 = {
+        let query = Query::delete()
+            .from_table(ScimGroups::Table)
+            .and_where(Expr::col(ScimGroups::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    let result = tx_execute!(tx, sqlx::query(&sql2))?;
 
     tx.commit().await?;
     Ok(result.rows_affected() > 0)
@@ -614,20 +769,31 @@ pub async fn remove_scim_group_member(pool: &Pool, group_id: &str, user_id: &str
     let mut tx = pool.begin().await?;
     let db_type = tx.db_type();
 
-    let result = tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM scim_group_members WHERE group_id = ? AND user_id = ?")
-            .bind(group_id)
-            .bind(user_id)
-    )?;
+    let delete_sql = {
+        let query = Query::delete()
+            .from_table(ScimGroupMembers::Table)
+            .and_where(Expr::col(ScimGroupMembers::GroupId).eq(group_id))
+            .and_where(Expr::col(ScimGroupMembers::UserId).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = tx_execute!(tx, sqlx::query(&delete_sql))?;
 
     if result.rows_affected() > 0 {
         // Update group's updated_at
-        let update_sql = format!(
-            "UPDATE scim_groups SET updated_at = {} WHERE id = ?",
-            now_expr(db_type)
-        );
-        tx_execute!(tx, sqlx::query(&update_sql).bind(group_id))?;
+        let update_sql = {
+            let query = Query::update()
+                .table(ScimGroups::Table)
+                .value(
+                    ScimGroups::UpdatedAt,
+                    SimpleExpr::Custom(now_expr(db_type).to_string()),
+                )
+                .and_where(Expr::col(ScimGroups::Id).eq(group_id))
+                .to_owned();
+            query.build_sql(db_type)
+        };
+        tx_execute!(tx, sqlx::query(&update_sql))?;
         tx.commit().await?;
         Ok(true)
     } else {
@@ -682,10 +848,14 @@ pub async fn replace_scim_group_members(
     let db_type = tx.db_type();
 
     // Delete all existing members
-    tx_execute!(
-        tx,
-        sqlx::query("DELETE FROM scim_group_members WHERE group_id = ?").bind(group_id)
-    )?;
+    let delete_sql = {
+        let query = Query::delete()
+            .from_table(ScimGroupMembers::Table)
+            .and_where(Expr::col(ScimGroupMembers::GroupId).eq(group_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&delete_sql))?;
 
     // Add new members using sea-query
     for user_id in user_ids {
@@ -704,11 +874,18 @@ pub async fn replace_scim_group_members(
     }
 
     // Update group's updated_at
-    let update_sql = format!(
-        "UPDATE scim_groups SET updated_at = {} WHERE id = ?",
-        now_expr(db_type)
-    );
-    tx_execute!(tx, sqlx::query(&update_sql).bind(group_id))?;
+    let update_sql = {
+        let query = Query::update()
+            .table(ScimGroups::Table)
+            .value(
+                ScimGroups::UpdatedAt,
+                SimpleExpr::Custom(now_expr(db_type).to_string()),
+            )
+            .and_where(Expr::col(ScimGroups::Id).eq(group_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&update_sql))?;
 
     tx.commit().await?;
     Ok(())

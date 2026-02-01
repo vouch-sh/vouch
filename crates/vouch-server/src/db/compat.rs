@@ -24,7 +24,8 @@
 
 use super::pool::DatabaseType;
 use sea_query::{
-    InsertStatement, PostgresQueryBuilder, SelectStatement, SqliteQueryBuilder, UpdateStatement,
+    DeleteStatement, InsertStatement, PostgresQueryBuilder, SelectStatement, SqliteQueryBuilder,
+    UpdateStatement,
 };
 
 /// Returns the SQL expression for the current timestamp.
@@ -168,6 +169,15 @@ impl BuildSql for SelectStatement {
 }
 
 impl BuildSql for UpdateStatement {
+    fn build_sql(&self, db_type: DatabaseType) -> String {
+        match db_type {
+            DatabaseType::Sqlite => self.to_string(SqliteQueryBuilder),
+            DatabaseType::Postgres => self.to_string(PostgresQueryBuilder),
+        }
+    }
+}
+
+impl BuildSql for DeleteStatement {
     fn build_sql(&self, db_type: DatabaseType) -> String {
         match db_type {
             DatabaseType::Sqlite => self.to_string(SqliteQueryBuilder),
