@@ -19,15 +19,15 @@
 //! - Single-use challenges
 //! - Session binding to authenticator
 
+use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::extractors::ClientInfo;
+use crate::handlers::auth::SessionClaims;
 use crate::handlers::common::{
     create_session_cookie, generate_challenge, get_auth_context, hash_token, json_error,
 };
-use crate::handlers::auth::SessionClaims;
 use crate::impl_template_response;
 use crate::webauthn_verify;
-use crate::AppState;
 use askama::Template;
 use axum::{
     Json,
@@ -101,7 +101,11 @@ impl BrowserAuthenticationState {
         let mut validation = Validation::default();
         validation.required_spec_claims.clear();
         validation.validate_exp = false;
-        let data = decode::<Self>(token, &DecodingKey::from_secret(secret.as_bytes()), &validation)?;
+        let data = decode::<Self>(
+            token,
+            &DecodingKey::from_secret(secret.as_bytes()),
+            &validation,
+        )?;
         Ok(data.claims)
     }
 }
@@ -248,9 +252,13 @@ pub async fn browser_login_complete(
     }
 
     // Decode base64url inputs
-    let credential_id = URL_SAFE_NO_PAD
-        .decode(&req.credential_id)
-        .map_err(|_| json_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid credential_id"))?;
+    let credential_id = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|_| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Invalid credential_id",
+        )
+    })?;
 
     let authenticator_data = URL_SAFE_NO_PAD
         .decode(&req.authenticator_data)
@@ -262,23 +270,29 @@ pub async fn browser_login_complete(
             )
         })?;
 
-    let client_data_json = URL_SAFE_NO_PAD
-        .decode(&req.client_data_json)
-        .map_err(|_| {
-            json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_input",
-                "Invalid client_data_json",
-            )
-        })?;
+    let client_data_json = URL_SAFE_NO_PAD.decode(&req.client_data_json).map_err(|_| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Invalid client_data_json",
+        )
+    })?;
 
-    let signature = URL_SAFE_NO_PAD
-        .decode(&req.signature)
-        .map_err(|_| json_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid signature"))?;
+    let signature = URL_SAFE_NO_PAD.decode(&req.signature).map_err(|_| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Invalid signature",
+        )
+    })?;
 
-    let user_handle = URL_SAFE_NO_PAD
-        .decode(&req.user_handle)
-        .map_err(|_| json_error(StatusCode::BAD_REQUEST, "invalid_input", "Invalid user_handle"))?;
+    let user_handle = URL_SAFE_NO_PAD.decode(&req.user_handle).map_err(|_| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Invalid user_handle",
+        )
+    })?;
 
     // Parse user_handle as UUID to identify the user
     let user_id = Uuid::from_slice(&user_handle).map_err(|_| {
@@ -510,11 +524,7 @@ pub async fn browser_login_complete(
         error: None,
     };
 
-    Ok((
-        [(header::SET_COOKIE, cookie.to_string())],
-        Json(response),
-    )
-        .into_response())
+    Ok(([(header::SET_COOKIE, cookie.to_string())], Json(response)).into_response())
 }
 
 // ============================================================================
@@ -559,6 +569,7 @@ fn validate_origin(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
 
     #[test]
@@ -572,8 +583,9 @@ mod tests {
             pending_auth: Some("pending-123".to_string()),
         };
 
-        let encoded = state.encode(secret).unwrap();
-        let decoded = BrowserAuthenticationState::decode(&encoded, secret).unwrap();
+        let encoded = state.encode(secret).expect("Failed to encode state");
+        let decoded = BrowserAuthenticationState::decode(&encoded, secret)
+            .expect("Failed to decode state");
 
         assert_eq!(decoded.challenge, vec![1, 2, 3, 4]);
         assert_eq!(decoded.rp_id, "example.com");
@@ -590,7 +602,7 @@ mod tests {
             pending_auth: None,
         };
 
-        let encoded = state.encode("correct-secret").unwrap();
+        let encoded = state.encode("correct-secret").expect("Failed to encode state");
         let result = BrowserAuthenticationState::decode(&encoded, "wrong-secret");
 
         assert!(result.is_err());

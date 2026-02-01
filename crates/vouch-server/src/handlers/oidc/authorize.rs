@@ -251,16 +251,15 @@ pub async fn authorize(
 }
 
 /// Handle returning from login with a pending auth ID.
-async fn handle_pending_auth(
-    state: &Arc<AppState>,
-    pending_id: &str,
-    jar: &CookieJar,
-) -> Response {
+async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &CookieJar) -> Response {
     // Consume the pending auth (single-use)
     let pending = match db::consume_pending_oauth_authorization(&state.db, pending_id).await {
         Ok(Some(p)) => p,
         Ok(None) => {
-            tracing::warn!("Pending OAuth authorization not found or expired: {}", pending_id);
+            tracing::warn!(
+                "Pending OAuth authorization not found or expired: {}",
+                pending_id
+            );
             return AuthorizeDeniedTemplate {
                 client_name: "Unknown Application".to_string(),
                 error_message: "Authorization session expired. Please try again.".to_string(),

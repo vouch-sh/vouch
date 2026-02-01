@@ -174,7 +174,9 @@ mod tests {
             code_challenge_method: Some("S256"),
         };
 
-        let id = create_pending_oauth_authorization(&pool, params).await.unwrap();
+        let id = create_pending_oauth_authorization(&pool, params)
+            .await
+            .unwrap();
 
         let record = get_pending_oauth_authorization(&pool, &id).await.unwrap();
         assert!(record.is_some());
@@ -201,14 +203,20 @@ mod tests {
             code_challenge_method: None,
         };
 
-        let id = create_pending_oauth_authorization(&pool, params).await.unwrap();
+        let id = create_pending_oauth_authorization(&pool, params)
+            .await
+            .unwrap();
 
         // First consume should succeed
-        let record = consume_pending_oauth_authorization(&pool, &id).await.unwrap();
+        let record = consume_pending_oauth_authorization(&pool, &id)
+            .await
+            .unwrap();
         assert!(record.is_some());
 
         // Second consume should fail (already consumed)
-        let record = consume_pending_oauth_authorization(&pool, &id).await.unwrap();
+        let record = consume_pending_oauth_authorization(&pool, &id)
+            .await
+            .unwrap();
         assert!(record.is_none());
     }
 
