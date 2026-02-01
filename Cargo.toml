@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.93"
@@ -96,6 +96,9 @@ tower = { version = "=0.5.3", default-features = false, features = ["util"] }
 
 # HTTP types
 http = { version = "=1.4.0", default-features = false }
+
+# Testing
+tempfile = { version = "=3.24.0", default-features = false }
 
 # Internal
 vouch-common = { path = "crates/vouch-common" }

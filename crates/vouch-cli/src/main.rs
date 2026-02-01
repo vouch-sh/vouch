@@ -5,6 +5,7 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
+mod aws_config;
 mod client;
 mod commands;
 mod config;
@@ -13,8 +14,9 @@ mod integrations;
 mod utils;
 
 /// Check if invoked as docker-credential-vouch and handle accordingly.
-/// Returns true if this was a Docker credential helper invocation.
-fn check_docker_credential_invocation() -> bool {
+/// Returns `Ok(true)` if this was a Docker credential helper invocation (handled),
+/// `Ok(false)` if not, or an error if the Docker credential helper failed.
+fn check_docker_credential_invocation() -> Result<bool> {
     let argv0 = std::env::args().next().unwrap_or_default();
 
     // Check if invoked as docker-credential-vouch (via symlink or direct call)
@@ -24,18 +26,14 @@ fn check_docker_credential_invocation() -> bool {
         let operation = std::env::args().nth(1).unwrap_or_default();
 
         // Run the Docker credential helper
-        let rt = tokio::runtime::Runtime::new().expect("failed to create tokio runtime");
-        let result = rt.block_on(commands::credential::docker::run(&operation));
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(commands::credential::docker::run(&operation))
+            .map_err(|e| anyhow::anyhow!("docker-credential-vouch: {e}"))?;
 
-        if let Err(e) = result {
-            eprintln!("docker-credential-vouch: {e}");
-            std::process::exit(1);
-        }
-
-        return true;
+        return Ok(true);
     }
 
-    false
+    Ok(false)
 }
 
 /// Hardware-backed identity for developers.
@@ -199,9 +197,9 @@ enum CredentialCommands {
 enum SetupCommands {
     /// Configure AWS CLI/SDK to use Vouch credentials.
     Aws {
-        /// AWS profile name to configure.
-        #[arg(long, default_value = "vouch")]
-        profile: String,
+        /// AWS profile name to configure. Defaults to "vouch" if not specified.
+        #[arg(long)]
+        profile: Option<String>,
         /// AWS IAM role ARN to assume.
         #[arg(long)]
         role: String,
@@ -286,7 +284,7 @@ enum SetupCommands {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Check if invoked as docker-credential-vouch (via symlink)
-    if check_docker_credential_invocation() {
+    if check_docker_credential_invocation()? {
         return Ok(());
     }
 
@@ -369,7 +367,7 @@ async fn main() -> Result<()> {
                 profile,
                 role,
                 add_profile,
-            } => commands::setup::aws::run(&profile, &role, add_profile).await,
+            } => commands::setup::aws::run(profile.as_deref(), &role, add_profile).await,
             SetupCommands::Gcp {
                 profile,
                 project_number,

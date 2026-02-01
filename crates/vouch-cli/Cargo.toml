@@ -46,6 +46,7 @@ ed25519-dalek = { workspace = true }
 hex = { workspace = true }
 serde_urlencoded = { version = "=0.7.1", default-features = false }
 serde_yaml = { version = "=0.9.34", default-features = false }
+rust-ini = { version = "=0.21.3", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
 vouch-agent = { workspace = true }
@@ -55,3 +56,6 @@ libc = { workspace = true }
 axum = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

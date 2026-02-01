@@ -663,29 +663,3 @@ pub struct GitHubAccountStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repositories: Option<Vec<String>>,
 }
-
-// ============================================================================
-// Docker Registry Credentials
-// ============================================================================
-
-/// Response for Docker ECR configuration.
-/// GET /v1/credentials/docker/ecr/config
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DockerEcrConfigResponse {
-    /// Whether ECR is configured for this organization.
-    pub configured: bool,
-    /// IAM role ARN to assume for ECR access.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub role_arn: Option<String>,
-}
-
-/// Response for Docker GCP registry configuration.
-/// GET /v1/credentials/docker/gcp/config
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DockerGcpConfigResponse {
-    /// Whether GCP registry is configured for this organization.
-    pub configured: bool,
-    /// Workload Identity Pool audience URL for GCP Docker registries.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audience: Option<String>,
-}

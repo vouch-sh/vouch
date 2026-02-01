@@ -55,8 +55,8 @@ fn check_docker_status(status: &DockerSetupStatus) -> IntegrationState {
     }
 
     // Fully configured
-    let summary = if status.configured_registries.len() == 1 {
-        format!("1 registry: {}", status.configured_registries[0])
+    let summary = if let [registry] = status.configured_registries.as_slice() {
+        format!("1 registry: {registry}")
     } else {
         format!("{} registries", status.configured_registries.len())
     };

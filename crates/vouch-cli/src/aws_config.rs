@@ -1,0 +1,557 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+//! AWS config file (~/.aws/config) parsing utilities.
+//!
+//! Uses proper INI parsing instead of fragile string manipulation.
+//! This preserves existing configuration when adding/modifying profiles.
+
+use anyhow::{Context, Result};
+use ini::Ini;
+use std::path::PathBuf;
+
+/// Represents an AWS profile configuration.
+#[derive(Debug, Clone)]
+pub struct AwsProfile {
+    /// Profile name (e.g., "vouch", "default", "prod").
+    pub name: String,
+    /// The credential_process command if configured.
+    pub credential_process: Option<String>,
+    /// The AWS region if configured.
+    pub region: Option<String>,
+}
+
+/// AWS config file parser and writer.
+///
+/// Uses rust-ini to properly parse and modify ~/.aws/config files,
+/// preserving existing sections and keys when making changes.
+pub struct AwsConfig {
+    ini: Ini,
+    path: PathBuf,
+}
+
+impl AwsConfig {
+    /// Load AWS config from the default path (~/.aws/config).
+    pub fn load() -> Result<Self> {
+        let path = Self::default_path()?;
+        Self::load_from(path)
+    }
+
+    /// Load AWS config from a specific path.
+    pub fn load_from(path: PathBuf) -> Result<Self> {
+        let ini = if path.exists() {
+            Ini::load_from_file(&path)
+                .with_context(|| format!("failed to load {}", path.display()))?
+        } else {
+            Ini::new()
+        };
+        Ok(Self { ini, path })
+    }
+
+    /// Create an empty config for a specific path.
+    #[must_use]
+    pub fn empty(path: PathBuf) -> Self {
+        Self {
+            ini: Ini::new(),
+            path,
+        }
+    }
+
+    /// Check if a profile exists in the config.
+    #[must_use]
+    pub fn profile_exists(&self, name: &str) -> bool {
+        let section = Self::profile_to_section(name);
+        self.ini.section(Some(section.as_str())).is_some()
+    }
+
+    /// Get a profile by name.
+    #[must_use]
+    #[allow(dead_code)] // Used in tests and useful for future features
+    pub fn get_profile(&self, name: &str) -> Option<AwsProfile> {
+        let section_name = Self::profile_to_section(name);
+        let section = self.ini.section(Some(section_name.as_str()))?;
+        Some(AwsProfile {
+            name: name.to_string(),
+            credential_process: section.get("credential_process").map(|s| s.to_string()),
+            region: section.get("region").map(|s| s.to_string()),
+        })
+    }
+
+    /// Find the first profile that uses vouch for credential_process.
+    #[must_use]
+    pub fn find_vouch_profile(&self) -> Option<AwsProfile> {
+        for (section_name, props) in &self.ini {
+            // Skip sections that are not profiles
+            let Some(section_str) = section_name else {
+                continue;
+            };
+            let Some(profile_name) = Self::section_to_profile(section_str) else {
+                continue;
+            };
+
+            if let Some(cp) = props.get("credential_process")
+                && cp.contains("vouch")
+            {
+                return Some(AwsProfile {
+                    name: profile_name,
+                    credential_process: Some(cp.to_string()),
+                    region: props.get("region").map(|s| s.to_string()),
+                });
+            }
+        }
+        None
+    }
+
+    /// Set or update a profile in the config.
+    ///
+    /// This preserves existing keys in the profile section that are not
+    /// explicitly set in the AwsProfile.
+    pub fn set_profile(&mut self, profile: &AwsProfile) {
+        let section = Self::profile_to_section(&profile.name);
+        if let Some(ref cp) = profile.credential_process {
+            self.ini
+                .with_section(Some(section.clone()))
+                .set("credential_process", cp);
+        }
+        if let Some(ref region) = profile.region {
+            self.ini.with_section(Some(section)).set("region", region);
+        }
+    }
+
+    /// Save the config to its file path.
+    pub fn save(&self) -> Result<()> {
+        self.ini
+            .write_to_file(&self.path)
+            .with_context(|| format!("failed to write {}", self.path.display()))
+    }
+
+    /// Convert a profile name to its INI section name.
+    ///
+    /// The "default" profile is stored as `[default]`, while all other
+    /// profiles are stored as `[profile name]`.
+    fn profile_to_section(name: &str) -> String {
+        if name == "default" {
+            "default".to_string()
+        } else {
+            format!("profile {name}")
+        }
+    }
+
+    /// Extract a profile name from an INI section name.
+    ///
+    /// Returns None for sections that are not profiles (e.g., `[sso-session]`).
+    fn section_to_profile(section: &str) -> Option<String> {
+        if section == "default" {
+            Some("default".to_string())
+        } else {
+            section.strip_prefix("profile ").map(|s| s.to_string())
+        }
+    }
+
+    /// Get the default AWS config path (~/.aws/config).
+    pub fn default_path() -> Result<PathBuf> {
+        let home = dirs::home_dir().context("could not determine home directory")?;
+        Ok(home.join(".aws").join("config"))
+    }
+}
+
+/// Extract the AWS role ARN from a credential_process command.
+///
+/// Looks for `--role <arn>` in the command string.
+#[must_use]
+pub fn extract_role_from_credential_process(credential_process: &str) -> Option<String> {
+    // Find --role and extract the next token
+    if let Some(role_start) = credential_process.find("--role") {
+        let after_flag = credential_process.get(role_start + 6..)?.trim_start();
+        // Role ARN is the next whitespace-delimited token
+        let role_arn = after_flag.split_whitespace().next()?;
+        if role_arn.starts_with("arn:aws") {
+            return Some(role_arn.to_string());
+        }
+    }
+    None
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
+
+    fn create_temp_config(content: &str) -> NamedTempFile {
+        let mut file = NamedTempFile::new().expect("failed to create temp file");
+        file.write_all(content.as_bytes())
+            .expect("failed to write temp file");
+        file
+    }
+
+    #[test]
+    fn test_profile_exists_vouch() {
+        let content = r#"
+[profile vouch]
+credential_process = /usr/local/bin/vouch credential aws --role arn:aws:iam::123456789012:role/MyRole
+region = us-east-1
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        assert!(config.profile_exists("vouch"));
+        assert!(!config.profile_exists("nonexistent"));
+    }
+
+    #[test]
+    fn test_profile_exists_default() {
+        let content = r#"
+[default]
+credential_process = vouch credential aws --role arn:aws:iam::123456789012:role/DefaultRole
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        assert!(config.profile_exists("default"));
+        assert!(!config.profile_exists("vouch"));
+    }
+
+    #[test]
+    fn test_get_profile() {
+        let content = r#"
+[profile vouch]
+credential_process = /usr/local/bin/vouch credential aws --role arn:aws:iam::123456789012:role/MyRole
+region = us-east-1
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        let profile = config.get_profile("vouch").expect("profile should exist");
+        assert_eq!(profile.name, "vouch");
+        assert_eq!(
+            profile.credential_process,
+            Some(
+                "/usr/local/bin/vouch credential aws --role arn:aws:iam::123456789012:role/MyRole"
+                    .to_string()
+            )
+        );
+        assert_eq!(profile.region, Some("us-east-1".to_string()));
+    }
+
+    #[test]
+    fn test_get_profile_default() {
+        let content = r#"
+[default]
+credential_process = vouch credential aws --role arn:aws:iam::123456789012:role/DefaultRole
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        let profile = config.get_profile("default").expect("profile should exist");
+        assert_eq!(profile.name, "default");
+        assert_eq!(
+            profile.credential_process,
+            Some(
+                "vouch credential aws --role arn:aws:iam::123456789012:role/DefaultRole"
+                    .to_string()
+            )
+        );
+        assert_eq!(profile.region, None);
+    }
+
+    #[test]
+    fn test_find_vouch_profile() {
+        let content = r#"
+[profile prod]
+aws_access_key_id = AKIAIOSFODNN7EXAMPLE
+aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+region = us-west-2
+
+[profile vouch]
+credential_process = /usr/local/bin/vouch credential aws --role arn:aws:iam::123456789012:role/MyRole
+region = us-east-1
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        let profile = config
+            .find_vouch_profile()
+            .expect("should find vouch profile");
+        assert_eq!(profile.name, "vouch");
+        assert!(
+            profile
+                .credential_process
+                .as_ref()
+                .unwrap()
+                .contains("vouch")
+        );
+    }
+
+    #[test]
+    fn test_find_vouch_profile_in_default() {
+        let content = r#"
+[default]
+credential_process = vouch credential aws --role arn:aws:iam::123456789012:role/DefaultRole
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        let profile = config
+            .find_vouch_profile()
+            .expect("should find vouch profile");
+        assert_eq!(profile.name, "default");
+    }
+
+    #[test]
+    fn test_find_vouch_profile_none() {
+        let content = r#"
+[profile prod]
+aws_access_key_id = AKIAIOSFODNN7EXAMPLE
+aws_secret_access_key = wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        assert!(config.find_vouch_profile().is_none());
+    }
+
+    #[test]
+    fn test_sso_session_is_not_profile() {
+        // [sso-session] sections should not be treated as profiles
+        let content = r#"
+[sso-session my-sso]
+sso_start_url = https://my-sso.awsapps.com/start
+credential_process = vouch credential aws --role some-role
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        // Should not find vouch because [sso-session] is not a profile
+        assert!(config.find_vouch_profile().is_none());
+        assert!(!config.profile_exists("my-sso"));
+    }
+
+    #[test]
+    fn test_set_profile_new() {
+        let content = r#"
+[profile existing]
+region = us-west-2
+"#;
+        let file = create_temp_config(content);
+        let mut config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        config.set_profile(&AwsProfile {
+            name: "vouch".to_string(),
+            credential_process: Some(
+                "vouch credential aws --role arn:aws:iam::123:role/Test".to_string(),
+            ),
+            region: Some("us-east-1".to_string()),
+        });
+        config.save().unwrap();
+
+        // Reload and verify
+        let reloaded = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+        assert!(reloaded.profile_exists("vouch"));
+        assert!(reloaded.profile_exists("existing"));
+
+        let vouch = reloaded.get_profile("vouch").unwrap();
+        assert_eq!(
+            vouch.credential_process,
+            Some("vouch credential aws --role arn:aws:iam::123:role/Test".to_string())
+        );
+        assert_eq!(vouch.region, Some("us-east-1".to_string()));
+
+        // Verify existing profile is preserved
+        let existing = reloaded.get_profile("existing").unwrap();
+        assert_eq!(existing.region, Some("us-west-2".to_string()));
+    }
+
+    #[test]
+    fn test_set_profile_default() {
+        let file = create_temp_config("");
+        let mut config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        config.set_profile(&AwsProfile {
+            name: "default".to_string(),
+            credential_process: Some(
+                "vouch credential aws --role arn:aws:iam::123:role/Test".to_string(),
+            ),
+            region: None,
+        });
+        config.save().unwrap();
+
+        let reloaded = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+        assert!(reloaded.profile_exists("default"));
+        let profile = reloaded.get_profile("default").unwrap();
+        assert!(
+            profile
+                .credential_process
+                .as_ref()
+                .unwrap()
+                .contains("vouch")
+        );
+    }
+
+    #[test]
+    fn test_complex_config_preservation() {
+        // Test that complex configs with SSO sessions, multiple profiles, etc. are preserved
+        let content = r#"
+[sso-session my-sso]
+sso_start_url = https://my-sso.awsapps.com/start
+sso_region = us-east-1
+
+[profile sso-user]
+sso_session = my-sso
+sso_account_id = 123456789012
+sso_role_name = Developer
+region = us-east-1
+
+[profile prod]
+role_arn = arn:aws:iam::111111111111:role/AdminRole
+source_profile = sso-user
+region = us-west-2
+
+[default]
+region = us-east-1
+output = json
+"#;
+        let file = create_temp_config(content);
+        let mut config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        // Add a new vouch profile
+        config.set_profile(&AwsProfile {
+            name: "vouch".to_string(),
+            credential_process: Some(
+                "vouch credential aws --role arn:aws:iam::123:role/Test".to_string(),
+            ),
+            region: None,
+        });
+        config.save().unwrap();
+
+        // Reload and verify all existing sections are preserved
+        let reloaded = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        // Check vouch profile was added
+        assert!(reloaded.profile_exists("vouch"));
+
+        // Check existing profiles are preserved
+        assert!(reloaded.profile_exists("sso-user"));
+        assert!(reloaded.profile_exists("prod"));
+        assert!(reloaded.profile_exists("default"));
+
+        // Verify sso-user has its settings
+        let sso_user = reloaded.get_profile("sso-user").unwrap();
+        assert_eq!(sso_user.region, Some("us-east-1".to_string()));
+
+        // Verify default has its settings
+        let default = reloaded.get_profile("default").unwrap();
+        assert_eq!(default.region, Some("us-east-1".to_string()));
+    }
+
+    #[test]
+    fn test_empty_file() {
+        let file = create_temp_config("");
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        assert!(!config.profile_exists("vouch"));
+        assert!(!config.profile_exists("default"));
+        assert!(config.find_vouch_profile().is_none());
+    }
+
+    #[test]
+    fn test_load_nonexistent_file() {
+        let path = PathBuf::from("/tmp/nonexistent_aws_config_test_12345");
+        let config = AwsConfig::load_from(path).unwrap();
+
+        assert!(!config.profile_exists("vouch"));
+        assert!(config.find_vouch_profile().is_none());
+    }
+
+    #[test]
+    fn test_extract_role_from_credential_process() {
+        assert_eq!(
+            extract_role_from_credential_process(
+                "/usr/local/bin/vouch credential aws --role arn:aws:iam::123456789012:role/MyRole"
+            ),
+            Some("arn:aws:iam::123456789012:role/MyRole".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_role_with_extra_spaces() {
+        assert_eq!(
+            extract_role_from_credential_process(
+                "vouch credential aws --role   arn:aws:iam::999888777666:role/DevRole"
+            ),
+            Some("arn:aws:iam::999888777666:role/DevRole".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_role_govcloud() {
+        assert_eq!(
+            extract_role_from_credential_process(
+                "vouch credential aws --role arn:aws-us-gov:iam::123456789012:role/GovRole"
+            ),
+            Some("arn:aws-us-gov:iam::123456789012:role/GovRole".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_role_no_role_flag() {
+        assert_eq!(
+            extract_role_from_credential_process("vouch credential aws"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_role_invalid_arn() {
+        assert_eq!(
+            extract_role_from_credential_process("vouch credential aws --role not-an-arn"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_multiple_profiles_finds_first_vouch() {
+        let content = r#"
+[profile regular]
+aws_access_key_id = AKIAIOSFODNN7EXAMPLE
+aws_secret_access_key = secret
+
+[profile vouch-prod]
+credential_process = vouch credential aws --role arn:aws:iam::111:role/Prod
+
+[profile vouch-staging]
+credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        let profile = config
+            .find_vouch_profile()
+            .expect("should find vouch profile");
+        // Should find one of the vouch profiles (order depends on INI iteration)
+        assert!(profile.name == "vouch-prod" || profile.name == "vouch-staging");
+        assert!(
+            profile
+                .credential_process
+                .as_ref()
+                .unwrap()
+                .contains("vouch")
+        );
+    }
+
+    #[test]
+    fn test_whitespace_handling() {
+        let content = r#"
+  [profile vouch]
+  credential_process = vouch credential aws --role arn:aws:iam::123:role/Test
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        // rust-ini handles whitespace properly
+        assert!(config.profile_exists("vouch"));
+        let profile = config
+            .find_vouch_profile()
+            .expect("should find vouch profile");
+        assert_eq!(profile.name, "vouch");
+    }
+}

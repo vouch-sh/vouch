@@ -23,6 +23,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
+use crate::aws_config::{AwsConfig, extract_role_from_credential_process};
 use crate::client::VouchClient;
 use crate::config::Config;
 
@@ -39,7 +40,12 @@ struct DockerCredential {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegistryType {
     /// AWS Elastic Container Registry
-    AwsEcr { account_id: String, region: String },
+    AwsEcr {
+        account_id: String,
+        region: String,
+        /// Domain suffix (e.g., "amazonaws.com", "amazonaws.cn", "amazonaws.eu")
+        domain_suffix: String,
+    },
     /// Google Container Registry (gcr.io)
     Gcr,
     /// Google Artifact Registry (*-docker.pkg.dev)
@@ -135,13 +141,12 @@ fn read_server_url() -> Result<String> {
     let stdin = std::io::stdin();
     let mut url = String::new();
 
-    for line in stdin.lock().lines() {
+    // Docker sends just the URL on a single line
+    if let Some(line) = stdin.lock().lines().next() {
         let line = line.context("failed to read stdin")?;
-        if line.is_empty() {
-            break;
+        if !line.is_empty() {
+            url = line;
         }
-        url = line;
-        break; // Docker sends just the URL on a single line
     }
 
     Ok(url.trim().to_string())
@@ -151,13 +156,23 @@ fn read_server_url() -> Result<String> {
 pub fn detect_registry_type(server_url: &str) -> RegistryType {
     let url = server_url.to_lowercase();
 
-    // AWS ECR: 123456789012.dkr.ecr.us-east-1.amazonaws.com
-    if url.contains(".dkr.ecr.") && url.contains(".amazonaws.com") {
-        if let Some((account_id, rest)) = url.split_once(".dkr.ecr.") {
-            if let Some((region, _)) = rest.split_once(".amazonaws.com") {
+    // AWS ECR: account.dkr.ecr.region.amazonaws.{com,cn,eu}
+    // Supports all AWS partitions:
+    // - Commercial: amazonaws.com
+    // - China: amazonaws.cn
+    // - EU Sovereign Cloud: amazonaws.eu
+    // - GovCloud: amazonaws.com (but with us-gov-* regions)
+    if let Some((account_id, rest)) = url.split_once(".dkr.ecr.") {
+        // rest = "region.amazonaws.com" or "region.amazonaws.cn" or "region.amazonaws.eu"
+        // Split on first dot to separate region from domain
+        if let Some((region, domain_suffix)) = rest.split_once('.') {
+            // domain_suffix = "amazonaws.com", "amazonaws.cn", or "amazonaws.eu"
+            // Validate it looks like an AWS domain
+            if domain_suffix.starts_with("amazonaws.") {
                 return RegistryType::AwsEcr {
                     account_id: account_id.to_string(),
                     region: region.to_string(),
+                    domain_suffix: domain_suffix.to_string(),
                 };
             }
         }
@@ -179,13 +194,11 @@ pub fn detect_registry_type(server_url: &str) -> RegistryType {
     }
 
     // Google Artifact Registry: us-docker.pkg.dev, europe-docker.pkg.dev, etc.
-    if url.ends_with("-docker.pkg.dev") {
-        if let Some(region) = url.strip_suffix("-docker.pkg.dev") {
-            return RegistryType::GarDocker {
-                region: region.to_string(),
-                project: None,
-            };
-        }
+    if let Some(region) = url.strip_suffix("-docker.pkg.dev") {
+        return RegistryType::GarDocker {
+            region: region.to_string(),
+            project: None,
+        };
     }
 
     RegistryType::Unknown
@@ -216,9 +229,11 @@ async fn get_credential() -> Result<()> {
 
     // Get credentials based on registry type
     let credential = match registry_type {
-        RegistryType::AwsEcr { region, .. } => {
-            get_ecr_credential(server, &region, &server_url).await?
-        }
+        RegistryType::AwsEcr {
+            region,
+            domain_suffix,
+            ..
+        } => get_ecr_credential(server, &region, &domain_suffix, &server_url).await?,
         RegistryType::Gcr | RegistryType::GarDocker { .. } => get_gcp_credential(server).await?,
         RegistryType::Ghcr => get_ghcr_credential(server).await?,
         RegistryType::Unknown => {
@@ -237,10 +252,20 @@ async fn get_credential() -> Result<()> {
     Ok(())
 }
 
+/// Try to read the AWS role ARN from the local ~/.aws/config file.
+///
+/// Finds the first vouch profile and extracts the role ARN from its credential_process.
+fn get_local_aws_role() -> Option<String> {
+    let config = AwsConfig::load().ok()?;
+    let profile = config.find_vouch_profile()?;
+    extract_role_from_credential_process(&profile.credential_process?)
+}
+
 /// Get credentials for AWS ECR.
 async fn get_ecr_credential(
     server: &str,
     region: &str,
+    domain_suffix: &str,
     registry_url: &str,
 ) -> Result<DockerCredential> {
     let client = VouchClient::new(server)?;
@@ -251,25 +276,29 @@ async fn get_ecr_credential(
         .await
         .context("failed to get OIDC token from Vouch server")?;
 
-    // Get the ECR role ARN from config or server
-    let ecr_config: vouch_common::DockerEcrConfigResponse = client
-        .get_authenticated("/v1/credentials/docker/ecr/config")
-        .await
-        .context("failed to get ECR configuration")?;
-
-    let role_arn = ecr_config.role_arn.ok_or_else(|| {
-        anyhow::anyhow!("ECR not configured - contact your administrator to set up AWS integration")
+    // Get the AWS role ARN from local ~/.aws/config
+    // This uses the same role configured via 'vouch setup aws --role ...'
+    let role_arn = get_local_aws_role().ok_or_else(|| {
+        anyhow::anyhow!(
+            "AWS not configured. Run 'vouch setup aws --role <role-arn>' with a role that has ECR permissions"
+        )
     })?;
 
     // Call STS AssumeRoleWithWebIdentity
-    let sts_creds =
-        assume_role_with_web_identity(&role_arn, "vouch-docker", &token_response.id_token)
-            .await
-            .context("failed to assume AWS role")?;
+    let sts_creds = assume_role_with_web_identity(
+        &role_arn,
+        "vouch-docker",
+        &token_response.id_token,
+        region,
+        domain_suffix,
+    )
+    .await
+    .context("failed to assume AWS role")?;
 
     // Call ECR GetAuthorizationToken
     let ecr_token = get_ecr_authorization_token(
         region,
+        domain_suffix,
         registry_url,
         &sts_creds.assume_role_with_web_identity_result.credentials,
     )
@@ -287,11 +316,17 @@ async fn assume_role_with_web_identity(
     role_arn: &str,
     role_session_name: &str,
     web_identity_token: &str,
+    region: &str,
+    domain_suffix: &str,
 ) -> Result<AssumeRoleWithWebIdentityResponse> {
     let http_client = reqwest::Client::new();
 
+    // Use regional STS endpoint for the appropriate partition
+    // e.g., "sts.us-east-1.amazonaws.com" or "sts.cn-north-1.amazonaws.cn"
+    let sts_url = format!("https://sts.{region}.{domain_suffix}/");
+
     let response = http_client
-        .post("https://sts.amazonaws.com/")
+        .post(&sts_url)
         .form(&[
             ("Action", "AssumeRoleWithWebIdentity"),
             ("Version", "2011-06-15"),
@@ -355,6 +390,7 @@ fn parse_sts_xml_response(xml: &str) -> Result<AssumeRoleWithWebIdentityResponse
 /// Get ECR authorization token using AWS credentials.
 async fn get_ecr_authorization_token(
     region: &str,
+    domain_suffix: &str,
     registry_url: &str,
     creds: &StsCredentials,
 ) -> Result<String> {
@@ -366,7 +402,8 @@ async fn get_ecr_authorization_token(
 
     // Build the ECR GetAuthorizationToken request
     // This requires AWS Signature Version 4 signing
-    let ecr_endpoint = format!("https://api.ecr.{region}.amazonaws.com");
+    // Use the domain suffix from registry detection for the appropriate partition
+    let ecr_endpoint = format!("https://api.ecr.{region}.{domain_suffix}");
 
     // We need to sign the request with AWS SigV4
     // For simplicity, we'll use the aws-sigv4 crate approach
@@ -382,7 +419,7 @@ async fn get_ecr_authorization_token(
     let date_stamp = format_date_stamp(now);
 
     // Create canonical request for signing
-    let host = format!("api.ecr.{region}.amazonaws.com");
+    let host = format!("api.ecr.{region}.{domain_suffix}");
     let payload_hash = sha256_hex(request_body.to_string().as_bytes());
 
     let canonical_headers = format!(
@@ -519,19 +556,51 @@ fn base64_decode(input: &str) -> Result<Vec<u8>> {
         .context("invalid base64")
 }
 
+/// GCP external account credential configuration (partial, for reading audience).
+#[derive(Debug, Deserialize)]
+struct GcpExternalAccountConfig {
+    audience: Option<String>,
+}
+
+/// Try to read the GCP audience from local config files.
+///
+/// Looks for vouch credential files in ~/.config/gcloud/vouch-credentials*.json
+fn get_local_gcp_audience() -> Option<String> {
+    let home = dirs::home_dir()?;
+    let gcloud_dir = home.join(".config/gcloud");
+
+    if !gcloud_dir.exists() {
+        return None;
+    }
+
+    // Look for vouch credential files
+    let entries = std::fs::read_dir(&gcloud_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let filename = path.file_name()?.to_string_lossy();
+
+        // Match vouch-credentials.json or vouch-credentials-*.json
+        if filename.starts_with("vouch-credentials")
+            && filename.ends_with(".json")
+            && let Ok(content) = std::fs::read_to_string(&path)
+            && let Ok(config) = serde_json::from_str::<GcpExternalAccountConfig>(&content)
+            && let Some(audience) = config.audience
+        {
+            return Some(audience);
+        }
+    }
+
+    None
+}
+
 /// Get credentials for GCP (GCR and Artifact Registry).
 async fn get_gcp_credential(server: &str) -> Result<DockerCredential> {
     let client = VouchClient::new(server)?;
 
-    // Get GCP configuration to determine the audience
-    let gcp_config: vouch_common::DockerGcpConfigResponse = client
-        .get_authenticated("/v1/credentials/docker/gcp/config")
-        .await
-        .context("failed to get GCP configuration")?;
-
-    let audience = gcp_config.audience.ok_or_else(|| {
+    // Get GCP audience from local config (created by 'vouch setup gcp --configure')
+    let audience = get_local_gcp_audience().ok_or_else(|| {
         anyhow::anyhow!(
-            "GCP Docker registry not configured - contact your administrator to set up GCP integration"
+            "GCP not configured. Run 'vouch setup gcp --configure' to set up GCP Workload Identity Federation"
         )
     })?;
 
@@ -576,6 +645,7 @@ async fn get_ghcr_credential(server: &str) -> Result<DockerCredential> {
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -587,6 +657,7 @@ mod tests {
             RegistryType::AwsEcr {
                 account_id: "123456789012".to_string(),
                 region: "us-east-1".to_string(),
+                domain_suffix: "amazonaws.com".to_string(),
             }
         );
     }
@@ -599,6 +670,72 @@ mod tests {
             RegistryType::AwsEcr {
                 account_id: "999888777666".to_string(),
                 region: "eu-west-2".to_string(),
+                domain_suffix: "amazonaws.com".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_detect_aws_ecr_china() {
+        let result = detect_registry_type("123456789012.dkr.ecr.cn-north-1.amazonaws.cn");
+        assert_eq!(
+            result,
+            RegistryType::AwsEcr {
+                account_id: "123456789012".to_string(),
+                region: "cn-north-1".to_string(),
+                domain_suffix: "amazonaws.cn".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_detect_aws_ecr_china_northwest() {
+        let result = detect_registry_type("123456789012.dkr.ecr.cn-northwest-1.amazonaws.cn");
+        assert_eq!(
+            result,
+            RegistryType::AwsEcr {
+                account_id: "123456789012".to_string(),
+                region: "cn-northwest-1".to_string(),
+                domain_suffix: "amazonaws.cn".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_detect_aws_ecr_eu_sovereign() {
+        let result = detect_registry_type("097677866361.dkr.ecr.eusc-de-east-1.amazonaws.eu");
+        assert_eq!(
+            result,
+            RegistryType::AwsEcr {
+                account_id: "097677866361".to_string(),
+                region: "eusc-de-east-1".to_string(),
+                domain_suffix: "amazonaws.eu".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_detect_aws_ecr_govcloud() {
+        let result = detect_registry_type("123456789012.dkr.ecr.us-gov-west-1.amazonaws.com");
+        assert_eq!(
+            result,
+            RegistryType::AwsEcr {
+                account_id: "123456789012".to_string(),
+                region: "us-gov-west-1".to_string(),
+                domain_suffix: "amazonaws.com".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_detect_aws_ecr_govcloud_east() {
+        let result = detect_registry_type("123456789012.dkr.ecr.us-gov-east-1.amazonaws.com");
+        assert_eq!(
+            result,
+            RegistryType::AwsEcr {
+                account_id: "123456789012".to_string(),
+                region: "us-gov-east-1".to_string(),
+                domain_suffix: "amazonaws.com".to_string(),
             }
         );
     }
@@ -638,5 +775,83 @@ mod tests {
     fn test_detect_unknown() {
         assert_eq!(detect_registry_type("docker.io"), RegistryType::Unknown);
         assert_eq!(detect_registry_type("quay.io"), RegistryType::Unknown);
+    }
+
+    #[test]
+    fn test_format_amz_date() {
+        // Create a known timestamp: 2024-01-15 10:50:45 UTC
+        let ts = jiff::Timestamp::from_second(1705315845).expect("valid timestamp");
+        let result = format_amz_date(ts);
+        assert_eq!(result, "20240115T105045Z");
+    }
+
+    #[test]
+    fn test_format_date_stamp() {
+        // Create a known timestamp: 2024-01-15 10:50:45 UTC
+        let ts = jiff::Timestamp::from_second(1705315845).expect("valid timestamp");
+        let result = format_date_stamp(ts);
+        assert_eq!(result, "20240115");
+    }
+
+    #[test]
+    fn test_parse_sts_xml_response_valid() {
+        let xml = r#"
+            <AssumeRoleWithWebIdentityResponse>
+                <AssumeRoleWithWebIdentityResult>
+                    <Credentials>
+                        <AccessKeyId>AKIAIOSFODNN7EXAMPLE</AccessKeyId>
+                        <SecretAccessKey>wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY</SecretAccessKey>
+                        <SessionToken>FwoGZXIvYXdzEBYaDM...</SessionToken>
+                        <Expiration>2024-01-15T18:30:45Z</Expiration>
+                    </Credentials>
+                </AssumeRoleWithWebIdentityResult>
+            </AssumeRoleWithWebIdentityResponse>
+        "#;
+
+        let result = parse_sts_xml_response(xml).expect("valid XML");
+        let creds = &result.assume_role_with_web_identity_result.credentials;
+        assert_eq!(creds.access_key_id, "AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(
+            creds.secret_access_key,
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        );
+        assert_eq!(creds.session_token, "FwoGZXIvYXdzEBYaDM...");
+        assert_eq!(creds.expiration, "2024-01-15T18:30:45Z");
+    }
+
+    #[test]
+    fn test_parse_sts_xml_response_missing_access_key() {
+        let xml = r#"
+            <AssumeRoleWithWebIdentityResponse>
+                <AssumeRoleWithWebIdentityResult>
+                    <Credentials>
+                        <SecretAccessKey>wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY</SecretAccessKey>
+                        <SessionToken>FwoGZXIvYXdzEBYaDM...</SessionToken>
+                        <Expiration>2024-01-15T18:30:45Z</Expiration>
+                    </Credentials>
+                </AssumeRoleWithWebIdentityResult>
+            </AssumeRoleWithWebIdentityResponse>
+        "#;
+
+        let result = parse_sts_xml_response(xml);
+        assert!(result.is_err());
+        let err = result.expect_err("should fail with missing AccessKeyId");
+        assert!(err.to_string().contains("AccessKeyId"));
+    }
+
+    #[test]
+    fn test_base64_decode_valid() {
+        // "AWS:password" encoded in base64
+        let encoded = "QVdTOnBhc3N3b3Jk";
+        let result = base64_decode(encoded).expect("valid base64");
+        let decoded = String::from_utf8(result).expect("valid UTF-8");
+        assert_eq!(decoded, "AWS:password");
+    }
+
+    #[test]
+    fn test_base64_decode_invalid() {
+        let invalid = "not-valid-base64!!!";
+        let result = base64_decode(invalid);
+        assert!(result.is_err());
     }
 }

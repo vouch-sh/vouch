@@ -147,6 +147,7 @@ async fn main() -> Result<()> {
         .route("/docs/ssh", get(handlers::docs::ssh_page))
         .route("/docs/kubernetes", get(handlers::docs::kubernetes_page))
         .route("/docs/github", get(handlers::docs::github_setup_page))
+        .route("/docs/docker", get(handlers::docs::docker_page))
         .route("/docs/applications", get(handlers::docs::applications_page))
         .route("/docs/scim", get(handlers::docs::scim_page))
         // Integrations page
@@ -258,15 +259,6 @@ async fn main() -> Result<()> {
         .route(
             "/v1/credentials/github/token",
             post(handlers::credentials::get_github_token),
-        )
-        // Docker credential config endpoints
-        .route(
-            "/v1/credentials/docker/ecr/config",
-            get(handlers::credentials::get_docker_ecr_config),
-        )
-        .route(
-            "/v1/credentials/docker/gcp/config",
-            get(handlers::credentials::get_docker_gcp_config),
         )
         // Cloud integration config API
         .route(

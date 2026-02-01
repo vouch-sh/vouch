@@ -121,12 +121,12 @@ fn get_symlink_path() -> Result<PathBuf> {
 /// Create the docker-credential-vouch symlink or wrapper script.
 fn create_credential_helper_symlink(vouch_path: &PathBuf, symlink_path: &PathBuf) -> Result<()> {
     // Ensure parent directory exists
-    if let Some(parent) = symlink_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create directory {}", parent.display()))?;
-            println!("Created directory: {}", parent.display());
-        }
+    if let Some(parent) = symlink_path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        println!("Created directory: {}", parent.display());
     }
 
     #[cfg(unix)]
@@ -150,13 +150,13 @@ fn create_credential_helper_symlink(vouch_path: &PathBuf, symlink_path: &PathBuf
         // Check if the symlink directory is in PATH
         if let Some(parent) = symlink_path.parent() {
             let parent_str = parent.to_string_lossy().to_string();
-            if let Ok(path) = std::env::var("PATH") {
-                if !path.contains(&parent_str) {
-                    println!();
-                    println!("Note: {} is not in your PATH.", parent.display());
-                    println!("Add it to your shell profile:");
-                    println!("  export PATH=\"$PATH:{}\"", parent.display());
-                }
+            if let Ok(path) = std::env::var("PATH")
+                && !path.contains(&parent_str)
+            {
+                println!();
+                println!("Note: {} is not in your PATH.", parent.display());
+                println!("Add it to your shell profile:");
+                println!("  export PATH=\"$PATH:{}\"", parent.display());
             }
         }
     }
@@ -222,11 +222,11 @@ fn configure_docker_config(registries: &[String]) -> Result<()> {
     }
 
     // Ensure .docker directory exists
-    if let Some(parent) = docker_config_path.parent() {
-        if !parent.exists() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
-        }
+    if let Some(parent) = docker_config_path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
     // Write config

@@ -9,8 +9,8 @@ use vouch_common::SessionStatus;
 use crate::client::VouchClient;
 use crate::config::Config;
 use crate::integrations::{
-    AwsIntegration, GcpIntegration, GitHubIntegration, K8sIntegration, SshIntegration,
-    print_integration_status,
+    AwsIntegration, DockerIntegration, GcpIntegration, GitHubIntegration, K8sIntegration,
+    SshIntegration, print_integration_status,
 };
 
 /// Run the status command.
@@ -117,5 +117,6 @@ async fn print_all_integrations(server: &str) {
     print_integration_status(&AwsIntegration::new());
     print_integration_status(&GcpIntegration::new());
     print_integration_status(&K8sIntegration::new());
+    print_integration_status(&DockerIntegration::new());
     GitHubIntegration::new(server).check_and_print().await;
 }

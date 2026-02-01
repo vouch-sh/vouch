@@ -1,0 +1,278 @@
+{% extends "base.html" %}
+{% import "macros/auth.html" as auth_macros %}
+
+{% block title %}Docker Registries - {{ org_name }}{% endblock %}
+
+{% block header_right %}
+{{ auth_macros::header_auth(auth) }}
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center flex-1 p-5">
+    <div class="card max-w-4xl w-full">
+        <a href="/docs" class="inline-flex items-center gap-1.5 text-vouch-accent text-sm mb-6 hover:text-vouch-accent-hover">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+            Back to docs
+        </a>
+        <h1 class="text-3xl font-bold text-gray-200 mb-2">Docker Registry Integration</h1>
+        <p class="text-gray-400 mb-8">Authenticate to container registries using {{ org_name }}</p>
+
+        <!-- Overview -->
+        <div class="mb-8 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-2">How it works</h2>
+            <p class="text-gray-400 text-sm">
+                {{ org_name }} provides a Docker <a href="https://docs.docker.com/engine/reference/commandline/login/#credential-helpers" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">credential helper</a> that automatically obtains short-lived tokens for container registries.
+                When you run <code class="text-vouch-accent">docker pull</code> or <code class="text-vouch-accent">docker push</code>,
+                the Vouch CLI exchanges your session for registry-specific credentials.
+            </p>
+        </div>
+
+        <!-- Supported Registries -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Supported Registries</h2>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div class="p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+                    <div class="flex items-center gap-2 mb-2">
+                        <svg class="w-5 h-5 text-orange-400" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M6.763 10.036c0 .296.032.535.088.71.064.176.144.368.256.576.04.063.056.127.056.183 0 .08-.048.16-.152.24l-.503.335a.383.383 0 0 1-.208.072c-.08 0-.16-.04-.239-.112a2.47 2.47 0 0 1-.287-.375 6.18 6.18 0 0 1-.248-.471c-.622.734-1.405 1.101-2.347 1.101-.67 0-1.205-.191-1.596-.574-.391-.384-.59-.894-.59-1.533 0-.678.239-1.23.726-1.644.487-.415 1.133-.623 1.955-.623.272 0 .551.024.846.064.296.04.6.104.918.176v-.583c0-.607-.127-1.03-.375-1.277-.255-.248-.686-.367-1.3-.367-.28 0-.568.032-.863.104-.296.072-.583.16-.863.271a2.287 2.287 0 0 1-.28.104.488.488 0 0 1-.127.024c-.112 0-.168-.08-.168-.247v-.391c0-.128.016-.224.056-.28a.597.597 0 0 1 .224-.167c.28-.144.614-.264 1.005-.36a4.84 4.84 0 0 1 1.246-.151c.95 0 1.644.216 2.091.647.439.43.662 1.085.662 1.963v2.586zm-3.24 1.214c.263 0 .534-.048.822-.144.287-.096.543-.271.758-.51.128-.152.224-.32.272-.512.047-.191.08-.423.08-.694v-.335a6.66 6.66 0 0 0-.735-.136 6.02 6.02 0 0 0-.75-.048c-.535 0-.926.104-1.19.32-.263.215-.39.518-.39.917 0 .375.095.655.295.846.191.2.47.296.838.296zm6.41.862c-.144 0-.24-.024-.304-.08-.064-.048-.12-.16-.168-.311L7.586 5.55a1.398 1.398 0 0 1-.072-.32c0-.128.064-.2.191-.2h.783c.151 0 .255.025.31.08.065.048.113.16.16.312l1.342 5.284 1.245-5.284c.04-.16.088-.264.151-.312a.549.549 0 0 1 .32-.08h.638c.152 0 .256.025.32.08.063.048.12.16.151.312l1.261 5.348 1.381-5.348c.048-.16.104-.264.16-.312a.52.52 0 0 1 .311-.08h.743c.127 0 .2.065.2.2 0 .04-.009.08-.017.128a1.137 1.137 0 0 1-.056.2l-1.923 6.17c-.048.16-.104.263-.168.311a.51.51 0 0 1-.303.08h-.687c-.151 0-.255-.024-.32-.08-.063-.056-.119-.16-.15-.32l-1.238-5.148-1.23 5.14c-.04.16-.087.264-.15.32-.065.056-.177.08-.32.08zm10.256.215c-.415 0-.83-.048-1.229-.143-.399-.096-.71-.2-.918-.32-.128-.071-.215-.151-.247-.223a.563.563 0 0 1-.048-.224v-.407c0-.167.064-.247.183-.247.048 0 .096.008.144.024.048.016.12.048.2.08.271.12.566.215.878.279.319.064.63.096.95.096.502 0 .894-.088 1.165-.264a.86.86 0 0 0 .415-.758.777.777 0 0 0-.215-.559c-.144-.151-.416-.287-.807-.414l-1.157-.36c-.583-.183-1.014-.454-1.277-.813a1.902 1.902 0 0 1-.4-1.158c0-.335.073-.63.216-.886.144-.255.335-.479.575-.654.24-.184.51-.32.83-.415.32-.096.655-.136 1.006-.136.175 0 .359.008.535.032.183.024.35.056.518.088.16.04.312.08.455.127.144.048.256.096.336.144a.69.69 0 0 1 .24.2.43.43 0 0 1 .071.263v.375c0 .168-.064.256-.184.256a.83.83 0 0 1-.303-.096 3.652 3.652 0 0 0-1.532-.311c-.455 0-.815.071-1.062.223-.248.152-.375.383-.375.71 0 .224.08.416.24.567.159.152.454.304.877.44l1.134.358c.574.184.99.44 1.237.767.247.327.367.702.367 1.117 0 .343-.072.655-.207.926-.144.272-.336.511-.583.703-.248.2-.543.343-.886.447-.36.111-.734.167-1.142.167zM21.698 16.207c-2.626 1.94-6.442 2.969-9.722 2.969-4.598 0-8.74-1.7-11.87-4.526-.247-.223-.024-.527.27-.351 3.384 1.963 7.559 3.153 11.877 3.153 2.914 0 6.114-.607 9.06-1.852.439-.2.814.287.385.607zM22.792 14.961c-.336-.43-2.22-.207-3.074-.103-.255.032-.295-.192-.063-.36 1.5-1.053 3.967-.75 4.254-.399.287.36-.08 2.826-1.485 4.007-.215.184-.423.088-.327-.151.32-.79 1.03-2.57.695-2.994z"/>
+                        </svg>
+                        <h3 class="font-medium text-gray-200">AWS ECR</h3>
+                    </div>
+                    <p class="text-gray-400 text-xs">Elastic Container Registry</p>
+                    <code class="text-gray-500 text-xs block mt-1">*.dkr.ecr.*.amazonaws.*</code>
+                </div>
+                <div class="p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+                    <div class="flex items-center gap-2 mb-2">
+                        <svg class="w-5 h-5 text-blue-400" fill="currentColor" viewBox="0 0 24 24">
+                            <path d="M12.19 2.38a9.344 9.344 0 0 0-9.234 6.893c.053-.02-.055.013 0 0-3.875 2.551-3.922 8.11-.247 10.941l.006-.007-.007.03a6.717 6.717 0 0 0 4.077 1.356h5.173l.03.03h5.192c6.687.053 9.376-8.605 3.835-12.35a9.365 9.365 0 0 0-8.825-6.893zM8.073 19.215a4.413 4.413 0 0 1-2.553-8.151l-.006.006.162-.094.164-.092c.268-.139.558-.242.857-.31l.068-.013-.003.002a3.68 3.68 0 0 1 .74-.077h.007a3.68 3.68 0 0 1 2.593 1.098 3.68 3.68 0 0 1 1.034 3.341 3.68 3.68 0 0 1-3.063 2.29zM12 17.09a2.816 2.816 0 0 0 .262-.012l-.006.001h5.062a2.797 2.797 0 0 0 2.794-2.78 2.797 2.797 0 0 0-2.78-2.813l-.019-.001h-.075a3.47 3.47 0 0 0-.348.017l.013-.001a5.923 5.923 0 0 0-5.18-3.046h-.02a5.941 5.941 0 0 0-5.603 3.972l-.012.039a5.863 5.863 0 0 0-.203 1.53v.013a2.81 2.81 0 0 0 2.809 2.794z"/>
+                        </svg>
+                        <h3 class="font-medium text-gray-200">GCP</h3>
+                    </div>
+                    <p class="text-gray-400 text-xs">GCR &amp; Artifact Registry</p>
+                    <code class="text-gray-500 text-xs block mt-1">gcr.io, *-docker.pkg.dev</code>
+                </div>
+                <div class="p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+                    <div class="flex items-center gap-2 mb-2">
+                        <svg class="w-5 h-5 text-gray-400" fill="currentColor" viewBox="0 0 24 24">
+                            <path fill-rule="evenodd" d="M12 2C6.477 2 2 6.484 2 12.017c0 4.425 2.865 8.18 6.839 9.504.5.092.682-.217.682-.483 0-.237-.008-.868-.013-1.703-2.782.605-3.369-1.343-3.369-1.343-.454-1.158-1.11-1.466-1.11-1.466-.908-.62.069-.608.069-.608 1.003.07 1.531 1.032 1.531 1.032.892 1.53 2.341 1.088 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.113-4.555-4.951 0-1.093.39-1.988 1.029-2.688-.103-.253-.446-1.272.098-2.65 0 0 .84-.27 2.75 1.026A9.564 9.564 0 0112 6.844c.85.004 1.705.115 2.504.337 1.909-1.296 2.747-1.027 2.747-1.027.546 1.379.202 2.398.1 2.651.64.7 1.028 1.595 1.028 2.688 0 3.848-2.339 4.695-4.566 4.943.359.309.678.92.678 1.855 0 1.338-.012 2.419-.012 2.747 0 .268.18.58.688.482A10.019 10.019 0 0022 12.017C22 6.484 17.522 2 12 2z" clip-rule="evenodd" />
+                        </svg>
+                        <h3 class="font-medium text-gray-200">GitHub</h3>
+                    </div>
+                    <p class="text-gray-400 text-xs">Container Registry</p>
+                    <code class="text-gray-500 text-xs block mt-1">ghcr.io</code>
+                </div>
+            </div>
+        </div>
+
+        <!-- Prerequisites -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Prerequisites</h2>
+            <ul class="space-y-2 text-gray-400 text-sm ml-4">
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-accent mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    <span>Vouch CLI installed and enrolled (<code class="text-vouch-accent">vouch enroll</code>)</span>
+                </li>
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-accent mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    <span>Docker installed</span>
+                </li>
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-accent mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    <span>Underlying cloud integration configured (AWS, GCP, or GitHub)</span>
+                </li>
+            </ul>
+        </div>
+
+        <!-- Step 1: Configure Docker -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">1</span>
+                <span class="text-lg font-semibold text-gray-200">Configure Docker Credential Helper</span>
+            </div>
+            <div class="ml-11">
+                <p class="text-gray-400 text-sm mb-3">
+                    Run the setup command to configure Docker to use Vouch for registry authentication.
+                </p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># Check status and see configuration
+vouch setup docker
+
+# Automatically configure for specific registries
+vouch setup docker --configure ghcr.io
+vouch setup docker --configure 123456789012.dkr.ecr.us-east-1.amazonaws.com
+vouch setup docker --configure us-docker.pkg.dev gcr.io</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+                <p class="text-gray-500 text-sm mt-3">
+                    This creates a symlink and updates <code class="text-vouch-accent">~/.docker/config.json</code>:
+                </p>
+                <div class="code-block relative text-sm mt-2">
+                    <pre class="whitespace-pre-wrap">{
+  "credHelpers": {
+    "ghcr.io": "vouch",
+    "gcr.io": "vouch",
+    "us-docker.pkg.dev": "vouch",
+    "123456789012.dkr.ecr.us-east-1.amazonaws.com": "vouch"
+  }
+}</pre>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 2: Log In -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">2</span>
+                <span class="text-lg font-semibold text-gray-200">Authenticate with Your YubiKey</span>
+            </div>
+            <div class="ml-11">
+                <p class="text-gray-400 text-sm mb-3">
+                    Log in with your YubiKey to start a session.
+                </p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">vouch login</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 3: Use Docker -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">3</span>
+                <span class="text-lg font-semibold text-gray-200">Use Docker Normally</span>
+            </div>
+            <div class="ml-11">
+                <p class="text-gray-400 text-sm mb-3">
+                    Docker operations to configured registries will automatically use Vouch for authentication.
+                </p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># Pull from AWS ECR
+docker pull 123456789012.dkr.ecr.us-east-1.amazonaws.com/my-image:latest
+
+# Push to GCP Artifact Registry
+docker push us-docker.pkg.dev/my-project/my-repo/my-image:v1
+
+# Pull from GitHub Container Registry
+docker pull ghcr.io/my-org/my-image:latest</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Registry-Specific Notes -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Registry-Specific Setup</h2>
+
+            <!-- AWS ECR -->
+            <div class="mb-4 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+                <h3 class="font-medium text-gray-200 mb-2">AWS ECR</h3>
+                <p class="text-gray-400 text-sm mb-2">
+                    Docker ECR authentication uses your existing AWS setup. The IAM role must include
+                    <code class="text-vouch-accent">AmazonEC2ContainerRegistryReadOnly</code> or
+                    <code class="text-vouch-accent">AmazonEC2ContainerRegistryPowerUser</code> policy.
+                </p>
+                <div class="code-block relative text-sm mt-2">
+                    <pre class="whitespace-pre-wrap">vouch setup aws --role arn:aws:iam::ACCOUNT:role/ROLE</pre>
+                </div>
+                <p class="text-gray-400 text-sm mt-2">
+                    See the <a href="/docs/aws" class="text-vouch-accent hover:text-vouch-accent-hover">AWS setup guide</a> for OIDC trust configuration.
+                </p>
+            </div>
+
+            <!-- GCP -->
+            <div class="mb-4 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+                <h3 class="font-medium text-gray-200 mb-2">GCP (GCR &amp; Artifact Registry)</h3>
+                <p class="text-gray-400 text-sm mb-2">
+                    Docker GCP authentication uses your existing GCP setup. The service account must have
+                    <code class="text-vouch-accent">roles/artifactregistry.reader</code> or
+                    <code class="text-vouch-accent">roles/artifactregistry.writer</code>.
+                </p>
+                <div class="code-block relative text-sm mt-2">
+                    <pre class="whitespace-pre-wrap">vouch setup gcp --configure</pre>
+                </div>
+                <p class="text-gray-400 text-sm mt-2">
+                    See the <a href="/docs/gcp" class="text-vouch-accent hover:text-vouch-accent-hover">GCP setup guide</a> for Workload Identity Federation setup.
+                </p>
+            </div>
+
+            <!-- GitHub -->
+            <div class="p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+                <h3 class="font-medium text-gray-200 mb-2">GitHub Container Registry</h3>
+                <p class="text-gray-400 text-sm mb-2">
+                    GHCR uses the same GitHub App tokens as Git operations.
+                </p>
+                <p class="text-gray-400 text-sm">
+                    First, set up GitHub integration following the <a href="/docs/github" class="text-vouch-accent hover:text-vouch-accent-hover">GitHub setup guide</a>.
+                </p>
+            </div>
+        </div>
+
+        <!-- Troubleshooting -->
+        <div class="mt-10 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-3">Troubleshooting</h2>
+            <dl class="space-y-3 text-sm">
+                <div>
+                    <dt class="text-gray-300 font-medium">"docker-credential-vouch" not found</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Ensure <code class="text-vouch-accent">~/.local/bin</code> is in your PATH. Run <code class="text-vouch-accent">vouch setup docker --configure</code> to recreate the symlink.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">Authentication failed</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Make sure you're logged in with <code class="text-vouch-accent">vouch login</code>. Sessions expire after 8 hours.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">"AWS not configured" error</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Run <code class="text-vouch-accent">vouch setup aws --role &lt;role-arn&gt;</code> with an IAM role that has ECR permissions.
+                        See the <a href="/docs/aws" class="text-vouch-accent hover:text-vouch-accent-hover">AWS setup guide</a>.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">"GCP not configured" error</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Run <code class="text-vouch-accent">vouch setup gcp --configure</code> to set up Workload Identity Federation.
+                        See the <a href="/docs/gcp" class="text-vouch-accent hover:text-vouch-accent-hover">GCP setup guide</a>.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">"unsupported registry" error</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Vouch only supports AWS ECR, GCP registries (GCR, Artifact Registry), and GitHub Container Registry.
+                        For other registries, use <code class="text-vouch-accent">docker login</code> directly.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">Credentials not being used</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Check your Docker config with <code class="text-vouch-accent">cat ~/.docker/config.json</code> and ensure the registry is listed in <code class="text-vouch-accent">credHelpers</code>.
+                    </dd>
+                </div>
+            </dl>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function copyCode(button) {
+        const codeBlock = button.parentElement.querySelector('pre');
+        const text = codeBlock.textContent;
+        navigator.clipboard.writeText(text).then(() => {
+            const original = button.textContent;
+            button.textContent = 'Copied!';
+            setTimeout(() => button.textContent = original, 2000);
+        });
+    }
+</script>
+{% endblock %}
