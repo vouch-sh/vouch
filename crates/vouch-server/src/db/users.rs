@@ -119,13 +119,99 @@ pub async fn get_user_by_id(pool: &SqlitePool, user_id: &str) -> Result<Option<U
 }
 
 /// Delete a user and all associated data.
+///
+/// Performs application-level cascade deletes for DSQL compatibility.
+/// Order matters - child records must be deleted before parent records.
 pub async fn delete_user(pool: &SqlitePool, user_id: &str) -> Result<()> {
-    // Due to CASCADE, this will delete authenticators and sessions
-    sqlx::query("DELETE FROM users WHERE id = ?")
+    let mut tx = pool.begin().await?;
+
+    // 1. Delete sessions (references user_id and authenticator_id)
+    sqlx::query("DELETE FROM sessions WHERE user_id = ?")
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
+    // 2. Delete enrollment sessions
+    sqlx::query("DELETE FROM enrollment_sessions WHERE user_id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 3. Delete auth events
+    sqlx::query("DELETE FROM auth_events WHERE user_id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 4. Delete SCIM group memberships
+    sqlx::query("DELETE FROM scim_group_members WHERE user_id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 5. Handle token exchanges - SET NULL for actor, DELETE for subject
+    sqlx::query("UPDATE token_exchanges SET actor_user_id = NULL WHERE actor_user_id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("DELETE FROM token_exchanges WHERE subject_user_id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 6. Delete SSH revoked certificates
+    sqlx::query("DELETE FROM ssh_revoked_certificates WHERE user_id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 7. Delete OAuth clients and their children
+    // First get all client IDs owned by this user
+    let client_ids: Vec<(String,)> =
+        sqlx::query_as("SELECT id FROM oauth_clients WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_all(&mut *tx)
+            .await?;
+
+    for (client_id,) in client_ids {
+        // Delete usage events first
+        sqlx::query("DELETE FROM oauth_usage_events WHERE oauth_client_id = ?")
+            .bind(&client_id)
+            .execute(&mut *tx)
+            .await?;
+        // Delete secrets
+        sqlx::query("DELETE FROM oauth_client_secrets WHERE oauth_client_id = ?")
+            .bind(&client_id)
+            .execute(&mut *tx)
+            .await?;
+        // Delete client
+        sqlx::query("DELETE FROM oauth_clients WHERE id = ?")
+            .bind(&client_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    // 8. Clear authenticator references in device_auth_requests, then delete authenticators
+    sqlx::query(
+        "UPDATE device_auth_requests SET authenticator_id = NULL
+         WHERE authenticator_id IN (SELECT id FROM authenticators WHERE user_id = ?)",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("DELETE FROM authenticators WHERE user_id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 9. Finally delete the user
+    sqlx::query("DELETE FROM users WHERE id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
     Ok(())
 }
 

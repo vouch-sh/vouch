@@ -320,12 +320,33 @@ pub async fn reactivate_oauth_client(pool: &SqlitePool, id: &str) -> Result<()> 
 }
 
 /// Delete an OAuth client permanently.
+///
+/// Performs application-level cascade deletes for DSQL compatibility:
+/// 1. Delete usage events
+/// 2. Delete secrets
+/// 3. Delete the client
 pub async fn delete_oauth_client(pool: &SqlitePool, id: &str) -> Result<u64> {
-    let result = sqlx::query("DELETE FROM oauth_clients WHERE id = ?")
+    let mut tx = pool.begin().await?;
+
+    // 1. Delete usage events
+    sqlx::query("DELETE FROM oauth_usage_events WHERE oauth_client_id = ?")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
+    // 2. Delete secrets
+    sqlx::query("DELETE FROM oauth_client_secrets WHERE oauth_client_id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 3. Delete the client
+    let result = sqlx::query("DELETE FROM oauth_clients WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 

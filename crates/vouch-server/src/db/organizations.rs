@@ -127,3 +127,68 @@ pub async fn list_organizations(pool: &SqlitePool) -> Result<Vec<Organization>> 
 
     Ok(orgs)
 }
+
+/// Delete an organization and all associated data.
+///
+/// Performs application-level cascade deletes for DSQL compatibility:
+/// 1. Delete cloud integrations
+/// 2. Delete GitHub installations
+/// 3. Delete SCIM tokens (with audit log SET NULL)
+/// 4. SET NULL for github_credential_events.org_id (preserve audit trail)
+/// 5. SET NULL for users.org_id (users are not deleted, just unlinked)
+/// 6. Delete the organization
+#[allow(dead_code)]
+pub async fn delete_organization(pool: &SqlitePool, org_id: &str) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+
+    // 1. Delete cloud integrations
+    sqlx::query("DELETE FROM cloud_integrations WHERE org_id = ?")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 2. Delete GitHub installations
+    sqlx::query("DELETE FROM github_installations WHERE org_id = ?")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 3. Delete SCIM tokens (handle audit log SET NULL first)
+    let token_ids: Vec<(String,)> =
+        sqlx::query_as("SELECT id FROM scim_tokens WHERE org_id = ?")
+            .bind(org_id)
+            .fetch_all(&mut *tx)
+            .await?;
+
+    for (token_id,) in token_ids {
+        sqlx::query("UPDATE scim_audit_log SET actor_token_id = NULL WHERE actor_token_id = ?")
+            .bind(&token_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    sqlx::query("DELETE FROM scim_tokens WHERE org_id = ?")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 4. SET NULL for github_credential_events.org_id (preserve audit trail)
+    sqlx::query("UPDATE github_credential_events SET org_id = NULL WHERE org_id = ?")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 5. SET NULL for users.org_id (unlink users from org, don't delete them)
+    sqlx::query("UPDATE users SET org_id = NULL, is_org_admin = 0 WHERE org_id = ?")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 6. Delete the organization
+    let result = sqlx::query("DELETE FROM organizations WHERE id = ?")
+        .bind(org_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(result.rows_affected() > 0)
+}

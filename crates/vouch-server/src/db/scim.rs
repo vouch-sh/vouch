@@ -73,13 +73,27 @@ pub async fn create_scim_token(
 }
 
 /// Delete a SCIM token.
+///
+/// Performs application-level SET NULL for DSQL compatibility:
+/// 1. Set scim_audit_log.actor_token_id to NULL for this token
+/// 2. Delete the token
 #[allow(dead_code)]
 pub async fn delete_scim_token(pool: &SqlitePool, token_id: &str) -> Result<()> {
-    sqlx::query("DELETE FROM scim_tokens WHERE id = ?")
+    let mut tx = pool.begin().await?;
+
+    // 1. SET NULL for audit log references (preserves audit trail)
+    sqlx::query("UPDATE scim_audit_log SET actor_token_id = NULL WHERE actor_token_id = ?")
         .bind(token_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
+    // 2. Delete the token
+    sqlx::query("DELETE FROM scim_tokens WHERE id = ?")
+        .bind(token_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
     Ok(())
 }
 
@@ -502,12 +516,26 @@ pub async fn update_scim_group(
 }
 
 /// Delete a SCIM group.
+///
+/// Performs application-level cascade deletes for DSQL compatibility:
+/// 1. Delete group memberships
+/// 2. Delete the group
 pub async fn delete_scim_group(pool: &SqlitePool, id: &str) -> Result<bool> {
-    let result = sqlx::query("DELETE FROM scim_groups WHERE id = ?")
+    let mut tx = pool.begin().await?;
+
+    // 1. Delete group memberships
+    sqlx::query("DELETE FROM scim_group_members WHERE group_id = ?")
         .bind(id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
+    // 2. Delete the group
+    let result = sqlx::query("DELETE FROM scim_groups WHERE id = ?")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 

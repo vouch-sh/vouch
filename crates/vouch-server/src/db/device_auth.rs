@@ -202,12 +202,29 @@ pub async fn update_device_auth_poll_time(
 }
 
 /// Delete expired device auth requests.
+///
+/// Performs application-level cascade deletes for DSQL compatibility:
+/// 1. Delete oidc_states for expired requests
+/// 2. Delete the expired requests
 pub async fn delete_expired_device_auth_requests(pool: &SqlitePool, now: &str) -> Result<u64> {
+    let mut tx = pool.begin().await?;
+
+    // 1. Delete oidc_states for expired device auth requests
+    sqlx::query(
+        "DELETE FROM oidc_states WHERE device_auth_id IN
+         (SELECT id FROM device_auth_requests WHERE expires_at < ?)",
+    )
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+
+    // 2. Delete the expired requests
     let result = sqlx::query("DELETE FROM device_auth_requests WHERE expires_at < ?")
         .bind(now)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 

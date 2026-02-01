@@ -136,14 +136,15 @@ pub async fn count_sessions_for_authenticator(
 
 /// Delete an authenticator by ID.
 /// Returns the number of rows affected.
-/// Note: Due to CASCADE, this will also delete associated sessions.
-/// Device auth requests referencing this authenticator will have their reference cleared.
-/// This operation is atomic - both FK cleanup and deletion happen together.
+///
+/// Performs application-level cascade deletes for DSQL compatibility:
+/// 1. Clear authenticator_id references in device_auth_requests
+/// 2. Delete sessions using this authenticator
+/// 3. Delete the authenticator
 pub async fn delete_authenticator(pool: &SqlitePool, authenticator_id: &str) -> Result<u64> {
     let mut tx = pool.begin().await?;
 
-    // Clear authenticator_id references in device_auth_requests
-    // (the FK doesn't have ON DELETE CASCADE/SET NULL)
+    // 1. Clear authenticator_id references in device_auth_requests
     sqlx::query(
         "UPDATE device_auth_requests SET authenticator_id = NULL WHERE authenticator_id = ?",
     )
@@ -151,6 +152,13 @@ pub async fn delete_authenticator(pool: &SqlitePool, authenticator_id: &str) -> 
     .execute(&mut *tx)
     .await?;
 
+    // 2. Delete sessions using this authenticator
+    sqlx::query("DELETE FROM sessions WHERE authenticator_id = ?")
+        .bind(authenticator_id)
+        .execute(&mut *tx)
+        .await?;
+
+    // 3. Delete the authenticator
     let result = sqlx::query("DELETE FROM authenticators WHERE id = ?")
         .bind(authenticator_id)
         .execute(&mut *tx)
