@@ -3850,6 +3850,7 @@ dependencies = [
  "reqwest",
  "rpassword",
  "rust-ini",
+ "secrecy",
  "serde",
  "serde_json",
  "serde_urlencoded",

@@ -2,7 +2,7 @@
 //! AWS integration status checking.
 
 use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
-use crate::aws_config::{AwsConfig, extract_role_from_credential_process};
+use crate::aws::{AwsConfig, extract_role_from_credential_process};
 
 /// AWS integration checker.
 pub struct AwsIntegration;

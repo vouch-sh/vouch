@@ -20,10 +20,12 @@
 //! Or use `vouch setup docker --configure` to set this up automatically.
 
 use anyhow::{Context, Result};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
-use crate::aws_config::{AwsConfig, extract_role_from_credential_process};
+use crate::aws::sts::{StsCredentials, assume_role_with_web_identity};
+use crate::aws::{AwsConfig, extract_role_from_credential_process};
 use crate::client::VouchClient;
 use crate::config::Config;
 
@@ -84,29 +86,6 @@ struct GitHubTokenRequest {
 #[derive(Debug, Deserialize)]
 struct AwsOidcTokenResponse {
     id_token: String,
-}
-
-/// AWS STS AssumeRoleWithWebIdentity response (simplified).
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct AssumeRoleWithWebIdentityResponse {
-    assume_role_with_web_identity_result: AssumeRoleResult,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct AssumeRoleResult {
-    credentials: StsCredentials,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "PascalCase")]
-struct StsCredentials {
-    access_key_id: String,
-    secret_access_key: String,
-    session_token: String,
-    #[allow(dead_code)]
-    expiration: String,
 }
 
 /// Run the Docker credential helper.
@@ -284,8 +263,8 @@ async fn get_ecr_credential(
         )
     })?;
 
-    // Call STS AssumeRoleWithWebIdentity
-    let sts_creds = assume_role_with_web_identity(
+    // Call STS AssumeRoleWithWebIdentity using the shared module
+    let sts_response = assume_role_with_web_identity(
         &role_arn,
         "vouch-docker",
         &token_response.id_token,
@@ -300,7 +279,9 @@ async fn get_ecr_credential(
         region,
         domain_suffix,
         registry_url,
-        &sts_creds.assume_role_with_web_identity_result.credentials,
+        &sts_response
+            .assume_role_with_web_identity_result
+            .credentials,
     )
     .await
     .context("failed to get ECR authorization token")?;
@@ -308,82 +289,6 @@ async fn get_ecr_credential(
     Ok(DockerCredential {
         username: "AWS".to_string(),
         secret: ecr_token,
-    })
-}
-
-/// Call AWS STS AssumeRoleWithWebIdentity.
-async fn assume_role_with_web_identity(
-    role_arn: &str,
-    role_session_name: &str,
-    web_identity_token: &str,
-    region: &str,
-    domain_suffix: &str,
-) -> Result<AssumeRoleWithWebIdentityResponse> {
-    let http_client = reqwest::Client::new();
-
-    // Use regional STS endpoint for the appropriate partition
-    // e.g., "sts.us-east-1.amazonaws.com" or "sts.cn-north-1.amazonaws.cn"
-    let sts_url = format!("https://sts.{region}.{domain_suffix}/");
-
-    let response = http_client
-        .post(&sts_url)
-        .form(&[
-            ("Action", "AssumeRoleWithWebIdentity"),
-            ("Version", "2011-06-15"),
-            ("RoleArn", role_arn),
-            ("RoleSessionName", role_session_name),
-            ("WebIdentityToken", web_identity_token),
-        ])
-        .send()
-        .await
-        .context("failed to call AWS STS")?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("AWS STS returned error {status}: {body}");
-    }
-
-    let body = response
-        .text()
-        .await
-        .context("failed to read STS response")?;
-
-    parse_sts_xml_response(&body)
-}
-
-/// Parse AWS STS XML response.
-fn parse_sts_xml_response(xml: &str) -> Result<AssumeRoleWithWebIdentityResponse> {
-    fn extract_tag(xml: &str, tag: &str) -> Option<String> {
-        let start_tag = format!("<{tag}>");
-        let end_tag = format!("</{tag}>");
-        let start = xml.find(&start_tag)? + start_tag.len();
-        let end = xml.find(&end_tag)?;
-        if start < end {
-            Some(xml.get(start..end)?.to_string())
-        } else {
-            None
-        }
-    }
-
-    let access_key_id =
-        extract_tag(xml, "AccessKeyId").context("missing AccessKeyId in STS response")?;
-    let secret_access_key =
-        extract_tag(xml, "SecretAccessKey").context("missing SecretAccessKey in STS response")?;
-    let session_token =
-        extract_tag(xml, "SessionToken").context("missing SessionToken in STS response")?;
-    let expiration =
-        extract_tag(xml, "Expiration").context("missing Expiration in STS response")?;
-
-    Ok(AssumeRoleWithWebIdentityResponse {
-        assume_role_with_web_identity_result: AssumeRoleResult {
-            credentials: StsCredentials {
-                access_key_id,
-                secret_access_key,
-                session_token,
-                expiration,
-            },
-        },
     })
 }
 
@@ -406,7 +311,6 @@ async fn get_ecr_authorization_token(
     let ecr_endpoint = format!("https://api.ecr.{region}.{domain_suffix}");
 
     // We need to sign the request with AWS SigV4
-    // For simplicity, we'll use the aws-sigv4 crate approach
     let http_client = reqwest::Client::new();
 
     // ECR uses JSON-RPC style API
@@ -419,12 +323,13 @@ async fn get_ecr_authorization_token(
     let date_stamp = format_date_stamp(now);
 
     // Create canonical request for signing
+    // Use ExposeSecret to access the sensitive credential values
     let host = format!("api.ecr.{region}.{domain_suffix}");
     let payload_hash = sha256_hex(request_body.to_string().as_bytes());
 
     let canonical_headers = format!(
         "content-type:application/x-amz-json-1.1\nhost:{host}\nx-amz-date:{amz_date}\nx-amz-security-token:{}\nx-amz-target:AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken\n",
-        creds.session_token
+        creds.session_token.expose_secret()
     );
     let signed_headers = "content-type;host;x-amz-date;x-amz-security-token;x-amz-target";
 
@@ -438,9 +343,9 @@ async fn get_ecr_authorization_token(
     let string_to_sign =
         format!("{algorithm}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
 
-    // Derive signing key
+    // Derive signing key using the exposed secret
     let k_date = hmac_sha256(
-        format!("AWS4{}", creds.secret_access_key).as_bytes(),
+        format!("AWS4{}", creds.secret_access_key.expose_secret()).as_bytes(),
         date_stamp.as_bytes(),
     );
     let k_region = hmac_sha256(&k_date, region.as_bytes());
@@ -458,7 +363,7 @@ async fn get_ecr_authorization_token(
         .post(&ecr_endpoint)
         .header("Content-Type", "application/x-amz-json-1.1")
         .header("X-Amz-Date", &amz_date)
-        .header("X-Amz-Security-Token", &creds.session_token)
+        .header("X-Amz-Security-Token", creds.session_token.expose_secret())
         .header(
             "X-Amz-Target",
             "AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken",
@@ -791,52 +696,6 @@ mod tests {
         let ts = jiff::Timestamp::from_second(1705315845).expect("valid timestamp");
         let result = format_date_stamp(ts);
         assert_eq!(result, "20240115");
-    }
-
-    #[test]
-    fn test_parse_sts_xml_response_valid() {
-        let xml = r#"
-            <AssumeRoleWithWebIdentityResponse>
-                <AssumeRoleWithWebIdentityResult>
-                    <Credentials>
-                        <AccessKeyId>AKIAIOSFODNN7EXAMPLE</AccessKeyId>
-                        <SecretAccessKey>wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY</SecretAccessKey>
-                        <SessionToken>FwoGZXIvYXdzEBYaDM...</SessionToken>
-                        <Expiration>2024-01-15T18:30:45Z</Expiration>
-                    </Credentials>
-                </AssumeRoleWithWebIdentityResult>
-            </AssumeRoleWithWebIdentityResponse>
-        "#;
-
-        let result = parse_sts_xml_response(xml).expect("valid XML");
-        let creds = &result.assume_role_with_web_identity_result.credentials;
-        assert_eq!(creds.access_key_id, "AKIAIOSFODNN7EXAMPLE");
-        assert_eq!(
-            creds.secret_access_key,
-            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-        );
-        assert_eq!(creds.session_token, "FwoGZXIvYXdzEBYaDM...");
-        assert_eq!(creds.expiration, "2024-01-15T18:30:45Z");
-    }
-
-    #[test]
-    fn test_parse_sts_xml_response_missing_access_key() {
-        let xml = r#"
-            <AssumeRoleWithWebIdentityResponse>
-                <AssumeRoleWithWebIdentityResult>
-                    <Credentials>
-                        <SecretAccessKey>wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY</SecretAccessKey>
-                        <SessionToken>FwoGZXIvYXdzEBYaDM...</SessionToken>
-                        <Expiration>2024-01-15T18:30:45Z</Expiration>
-                    </Credentials>
-                </AssumeRoleWithWebIdentityResult>
-            </AssumeRoleWithWebIdentityResponse>
-        "#;
-
-        let result = parse_sts_xml_response(xml);
-        assert!(result.is_err());
-        let err = result.expect_err("should fail with missing AccessKeyId");
-        assert!(err.to_string().contains("AccessKeyId"));
     }
 
     #[test]
