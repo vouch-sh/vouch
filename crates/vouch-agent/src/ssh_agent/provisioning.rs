@@ -178,10 +178,7 @@ fn spawn_lazy_provision(
         info!("Lazy-provisioning SSH certificate from {server_url}");
 
         // Make the HTTP request with a short timeout
-        let client = match reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-        {
+        let client = match vouch_common::http::agent_client() {
             Ok(c) => c,
             Err(e) => {
                 debug!("Failed to create HTTP client for lazy provisioning: {e}");
@@ -285,7 +282,8 @@ pub(super) async fn refresh_certificate(
     info!("Refreshing SSH certificate from {}", server_url);
 
     // Make the refresh request
-    let client = reqwest::Client::new();
+    let client = vouch_common::http::agent_client()
+        .map_err(|e| AgentError::Protocol(format!("failed to create HTTP client: {e}")))?;
     let request = vouch_common::SshCertificateRequest { public_key };
 
     let response = client

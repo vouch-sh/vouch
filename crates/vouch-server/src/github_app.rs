@@ -199,10 +199,11 @@ impl GitHubApp {
         let private_key = RsaPrivateKeyDer::from_pem(private_key_pem)
             .context("Failed to parse GitHub App private key")?;
 
-        let http_client = reqwest::Client::builder()
-            .user_agent("vouch-server")
-            .build()
-            .context("Failed to create HTTP client for GitHub App")?;
+        let http_client = vouch_common::http::server_client(&format!(
+            "vouch-server/{}",
+            env!("CARGO_PKG_VERSION")
+        ))
+        .context("Failed to create HTTP client for GitHub App")?;
 
         tracing::info!("GitHub App loaded: app_id={}", app_id.0);
 

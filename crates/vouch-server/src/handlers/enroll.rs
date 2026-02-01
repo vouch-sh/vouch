@@ -582,7 +582,21 @@ pub async fn oidc_callback(
         oidc_issuer.replace("accounts.google.com", "oauth2.googleapis.com")
     );
 
-    let client = reqwest::Client::new();
+    let client = match vouch_common::http::server_client(&format!(
+        "vouch-server/{}",
+        env!("CARGO_PKG_VERSION")
+    )) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!("Failed to create HTTP client: {}", e);
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to complete authentication".to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
+    };
     let token_response = match client
         .post(&token_url)
         .form(&[

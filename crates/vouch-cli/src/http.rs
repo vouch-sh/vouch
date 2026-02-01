@@ -91,9 +91,8 @@ impl ReqwestClient {
     ///
     /// Returns an error if the client cannot be built.
     pub fn new() -> Result<Self> {
-        let client = reqwest::Client::builder()
-            .build()
-            .context("failed to create HTTP client")?;
+        let client =
+            vouch_common::http::interactive_client().context("failed to create HTTP client")?;
 
         Ok(Self { client })
     }
