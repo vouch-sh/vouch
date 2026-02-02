@@ -38,29 +38,27 @@ struct CredentialHello {
 
 /// Request from Cargo to credential provider.
 #[derive(Debug, Deserialize)]
-struct CredentialRequest<'a> {
+struct CredentialRequest {
     /// Negotiated protocol version.
     v: u32,
     /// Registry information.
-    #[serde(borrow)]
-    registry: RegistryInfo<'a>,
+    registry: RegistryInfo,
     /// Action to perform.
-    #[serde(borrow)]
-    action: Action<'a>,
+    action: Action,
     /// Additional command-line arguments (after `--`).
     #[serde(default)]
     #[allow(dead_code)]
-    args: Vec<&'a str>,
+    args: Vec<String>,
 }
 
 /// Registry information from Cargo.
 #[derive(Debug, Deserialize)]
-struct RegistryInfo<'a> {
+struct RegistryInfo {
     /// Registry index URL.
     #[serde(rename = "index-url")]
-    index_url: &'a str,
+    index_url: String,
     /// Registry name from config (if any).
-    name: Option<&'a str>,
+    name: Option<String>,
     /// Headers from HTTP 401 response (if any).
     #[serde(default)]
     #[allow(dead_code)]
@@ -70,12 +68,11 @@ struct RegistryInfo<'a> {
 /// Action requested by Cargo.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
-enum Action<'a> {
+enum Action {
     /// Get a token for authentication.
-    #[serde(borrow)]
-    Get(Operation<'a>),
+    Get(Operation),
     /// Store/login with credentials.
-    Login(LoginOptions<'a>),
+    Login(LoginOptions),
     /// Remove stored credentials.
     Logout,
     /// Unknown action (forward compatibility).
@@ -87,21 +84,21 @@ enum Action<'a> {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "operation", rename_all = "kebab-case")]
 #[allow(dead_code)]
-enum Operation<'a> {
+enum Operation {
     /// Reading from registry (cargo fetch, build, etc).
     Read,
     /// Publishing a crate.
     Publish {
-        name: &'a str,
-        vers: &'a str,
-        cksum: &'a str,
+        name: String,
+        vers: String,
+        cksum: String,
     },
     /// Yanking a crate version.
-    Yank { name: &'a str, vers: &'a str },
+    Yank { name: String, vers: String },
     /// Unyanking a crate version.
-    Unyank { name: &'a str, vers: &'a str },
+    Unyank { name: String, vers: String },
     /// Managing crate owners.
-    Owners { name: &'a str },
+    Owners { name: String },
     /// Unknown operation (forward compatibility).
     #[serde(other)]
     Unknown,
@@ -109,15 +106,15 @@ enum Operation<'a> {
 
 /// Login options from Cargo.
 #[derive(Debug, Deserialize)]
-struct LoginOptions<'a> {
+struct LoginOptions {
     /// Token provided by user (if any).
     /// We don't use this - vouch manages its own authentication.
     #[allow(dead_code)]
-    token: Option<&'a str>,
+    token: Option<String>,
     /// URL for browser-based login (if any).
     #[serde(rename = "login-url")]
     #[allow(dead_code)]
-    login_url: Option<&'a str>,
+    login_url: Option<String>,
 }
 
 /// Response from credential provider to Cargo.
@@ -157,9 +154,9 @@ enum CacheControl {
 
 /// Error response from credential provider.
 #[derive(Debug, Serialize)]
-struct CredentialError<'a> {
+struct CredentialError {
     /// Error kind.
-    kind: &'a str,
+    kind: String,
     /// Human-readable error message (optional).
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
@@ -208,7 +205,7 @@ pub async fn run() -> Result<()> {
 }
 
 /// Handle "get" action - return authentication token.
-async fn handle_get(registry: &RegistryInfo<'_>) -> Result<()> {
+async fn handle_get(registry: &RegistryInfo) -> Result<()> {
     // Load Vouch config
     let config = match Config::load() {
         Ok(c) => c,
@@ -225,7 +222,7 @@ async fn handle_get(registry: &RegistryInfo<'_>) -> Result<()> {
                 "not-found",
                 Some(format!(
                     "not authenticated for registry '{}' - run 'vouch login' first",
-                    registry.name.unwrap_or(registry.index_url)
+                    registry.name.as_deref().unwrap_or(&registry.index_url)
                 )),
             );
         }
@@ -247,14 +244,14 @@ async fn handle_get(registry: &RegistryInfo<'_>) -> Result<()> {
 }
 
 /// Handle "login" action - direct users to vouch login.
-fn handle_login(registry: &RegistryInfo<'_>, _options: LoginOptions<'_>) -> Result<()> {
+fn handle_login(registry: &RegistryInfo, _options: LoginOptions) -> Result<()> {
     // Vouch manages authentication via `vouch login`, not cargo login.
     // This is consistent with AWS/SSH/GCP integrations where the user
     // authenticates with Vouch once, and native tools use credential helpers.
     eprintln!();
     eprintln!(
         "To authenticate with registry '{}', run:",
-        registry.name.unwrap_or(registry.index_url)
+        registry.name.as_deref().unwrap_or(&registry.index_url)
     );
     eprintln!();
     eprintln!("    vouch login");
@@ -268,12 +265,12 @@ fn handle_login(registry: &RegistryInfo<'_>, _options: LoginOptions<'_>) -> Resu
 }
 
 /// Handle "logout" action - remove stored credentials.
-fn handle_logout(registry: &RegistryInfo<'_>) -> Result<()> {
+fn handle_logout(registry: &RegistryInfo) -> Result<()> {
     // We don't clear Vouch's session on cargo logout, as the user might
     // want to keep using Vouch for other purposes. Just acknowledge.
     eprintln!(
         "Note: 'cargo logout' does not affect your Vouch session for registry '{}'.",
-        registry.name.unwrap_or(registry.index_url)
+        registry.name.as_deref().unwrap_or(&registry.index_url)
     );
     eprintln!("To fully log out, run: vouch logout");
 
@@ -292,7 +289,10 @@ fn send_message<T: Serialize>(message: &T) -> Result<()> {
 
 /// Send an error response to stdout.
 fn send_error(kind: &str, message: Option<String>) -> Result<()> {
-    let error = CredentialError { kind, message };
+    let error = CredentialError {
+        kind: kind.to_string(),
+        message,
+    };
     send_message(&error)
 }
 
@@ -367,7 +367,7 @@ mod tests {
     #[test]
     fn test_error_serialization() {
         let error = CredentialError {
-            kind: "not-found",
+            kind: "not-found".to_string(),
             message: Some("no token".to_string()),
         };
         let json = serde_json::to_string(&error).unwrap();
@@ -392,7 +392,7 @@ mod tests {
         let request: CredentialRequest = serde_json::from_str(json).unwrap();
         assert_eq!(request.v, 1);
         assert_eq!(request.registry.index_url, "https://index.crates.io/");
-        assert_eq!(request.registry.name, Some("crates-io"));
+        assert_eq!(request.registry.name.as_deref(), Some("crates-io"));
     }
 
     #[test]
@@ -436,7 +436,7 @@ mod tests {
         let request: CredentialRequest = serde_json::from_str(json).unwrap();
         match request.action {
             Action::Login(opts) => {
-                assert_eq!(opts.token, Some("secret-token"));
+                assert_eq!(opts.token.as_deref(), Some("secret-token"));
             }
             _ => panic!("expected Login"),
         }
