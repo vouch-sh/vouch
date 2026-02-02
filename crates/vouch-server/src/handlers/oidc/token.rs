@@ -157,7 +157,7 @@ async fn handle_authorization_code_grant(
     };
 
     // Extract client credentials from headers or body
-    let credentials = extract_client_credentials(
+    let owned_credentials = extract_client_credentials(
         &headers,
         params.client_id.as_deref(),
         params.client_secret.as_deref(),
@@ -170,6 +170,12 @@ async fn handle_authorization_code_grant(
             Ok(proof) => proof,
             Err(e) => return service_error_to_api_error(e).into_response(),
         };
+
+    // Convert owned credentials to service credentials
+    let credentials = owned_credentials.as_ref().map(|c| SvcClientCredentials {
+        client_id: &c.client_id,
+        client_secret: c.client_secret.as_deref(),
+    });
 
     // Exchange the authorization code
     let exchange_params = AuthCodeExchangeParams {
@@ -268,35 +274,46 @@ fn service_error_to_api_error(e: crate::services::ServiceError) -> (StatusCode, 
     }
 }
 
+/// Owned client credentials extracted from the request.
+struct OwnedClientCredentials {
+    client_id: String,
+    client_secret: Option<String>,
+}
+
 /// Extract client credentials from Authorization header or request body.
-fn extract_client_credentials<'a>(
-    headers: &'a HeaderMap,
-    client_id_param: Option<&'a str>,
-    client_secret_param: Option<&'a str>,
-) -> Option<SvcClientCredentials<'a>> {
+///
+/// Supports both `client_secret_basic` (RFC 6749 Section 2.3.1) and
+/// `client_secret_post` (RFC 6749 Section 2.3.1) authentication methods.
+fn extract_client_credentials(
+    headers: &HeaderMap,
+    client_id_param: Option<&str>,
+    client_secret_param: Option<&str>,
+) -> Option<OwnedClientCredentials> {
     // Try Authorization header first (client_secret_basic)
     if let Some(auth_header) = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Basic "))
     {
-        // Decode Base64 credentials
+        // Decode Base64 credentials (try URL-safe first, then standard)
         if let Ok(decoded) = URL_SAFE_NO_PAD
             .decode(auth_header.trim())
             .or_else(|_| base64::engine::general_purpose::STANDARD.decode(auth_header.trim()))
         {
-            let creds = String::from_utf8_lossy(&decoded);
-            if let Some((id, secret)) = creds.split_once(':') {
-                // We need to return owned data here, but the function signature expects references
-                // This is a limitation - for now, fall through to body params
-                let _ = (id, secret);
+            if let Ok(creds) = String::from_utf8(decoded) {
+                if let Some((id, secret)) = creds.split_once(':') {
+                    return Some(OwnedClientCredentials {
+                        client_id: id.to_string(),
+                        client_secret: Some(secret.to_string()),
+                    });
+                }
             }
         }
     }
 
-    // Use request body parameters (client_secret_post)
-    client_id_param.map(|id| SvcClientCredentials {
-        client_id: id,
-        client_secret: client_secret_param,
+    // Fall back to request body parameters (client_secret_post)
+    client_id_param.map(|id| OwnedClientCredentials {
+        client_id: id.to_string(),
+        client_secret: client_secret_param.map(String::from),
     })
 }

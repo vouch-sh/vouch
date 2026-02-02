@@ -399,11 +399,6 @@ pub async fn login_complete(
     };
 
     // Get the authenticator by credential_id
-    tracing::info!(
-        "login_complete: credential_id_hex={} (len={})",
-        hex::encode(&req.credential_id),
-        req.credential_id.len()
-    );
     let authenticator = db::get_authenticator_by_credential_id(&state.db, &req.credential_id)
         .await
         .map_err(|e| {
@@ -422,20 +417,9 @@ pub async fn login_complete(
             )
         })?;
 
-    // Log the authenticator details for debugging
-    tracing::info!(
-        "login_complete: found authenticator id={}, stored_cred_id_hex={} (len={})",
-        authenticator.id,
-        hex::encode(&authenticator.credential_id),
-        authenticator.credential_id.len()
-    );
     // Sanity check: credential_id should match (lookup was by credential_id)
     if authenticator.credential_id.as_slice() != req.credential_id.as_bytes() {
-        tracing::error!(
-            "CRITICAL: credential_id mismatch after lookup! req={} vs stored={}",
-            hex::encode(req.credential_id.as_bytes()),
-            hex::encode(&authenticator.credential_id)
-        );
+        tracing::error!("CRITICAL: credential_id mismatch after lookup");
     }
 
     // Verify authenticator belongs to this user (from user_handle)
@@ -479,31 +463,15 @@ pub async fn login_complete(
     // Get stored counter from authenticator
     let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
 
-    // Debug logging for signature verification
-    tracing::info!(
-        "login_complete: stored_public_key_hex={}, sig_len={}, auth_data_len={}",
-        hex::encode(&authenticator.public_key),
-        req.signature.len(),
-        req.authenticator_data.len()
-    );
-    tracing::info!(
-        "login_complete: authenticator_data_hex={}",
-        hex::encode(&req.authenticator_data)
-    );
-    tracing::info!(
-        "login_complete: signature_hex={}",
-        hex::encode(&req.signature)
-    );
-    tracing::info!(
-        "login_complete: client_data_json={}",
-        String::from_utf8_lossy(&req.client_data_json)
-    );
-    // Compute and log the client_data_hash for comparison
-    let debug_hash = aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, &req.client_data_json);
-    tracing::info!(
-        "login_complete: client_data_hash={}",
-        hex::encode(debug_hash.as_ref())
-    );
+    // Debug logging for signature verification (debug builds only)
+    #[cfg(debug_assertions)]
+    {
+        tracing::debug!(
+            "login_complete: sig_len={}, auth_data_len={}",
+            req.signature.len(),
+            req.authenticator_data.len()
+        );
+    }
 
     // Verify the WebAuthn assertion server-side
     let verification_result = webauthn_verify::verify_assertion(
