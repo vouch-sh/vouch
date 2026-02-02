@@ -100,6 +100,7 @@ pub fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode,
 ///
 /// Returns a base64url-encoded hash of the token. This is used to store
 /// tokens securely in the database without keeping the raw token value.
+#[must_use]
 pub fn hash_token(token: &str) -> String {
     let hash = digest::digest(&SHA256, token.as_bytes());
     URL_SAFE_NO_PAD.encode(hash.as_ref())
@@ -116,6 +117,7 @@ pub fn hash_token(token: &str) -> String {
 /// Panics if the system RNG fails, which should never happen on a correctly
 /// functioning system. This is acceptable during request handling as an RNG
 /// failure indicates a critical system problem.
+#[must_use]
 #[allow(clippy::expect_used)]
 pub fn generate_random_bytes(len: usize) -> Vec<u8> {
     let mut bytes = vec![0u8; len];
@@ -127,6 +129,7 @@ pub fn generate_random_bytes(len: usize) -> Vec<u8> {
 ///
 /// This is a convenience wrapper around `generate_random_bytes(32)` for
 /// WebAuthn challenge generation.
+#[must_use]
 pub fn generate_challenge() -> Vec<u8> {
     generate_random_bytes(32)
 }

@@ -401,6 +401,15 @@ impl ServerConfig {
         self.org_name.as_deref().unwrap_or(&self.rp_name)
     }
 
+    /// Get the base URL for this server.
+    ///
+    /// This returns `verification_base_url` which handles both production
+    /// (https://{rp_id}) and local development (http://localhost:port).
+    #[must_use]
+    pub fn base_url(&self) -> &str {
+        &self.verification_base_url
+    }
+
     /// Get the JWT secret as bytes for encoding/decoding.
     /// This method exposes the secret - use with care.
     #[must_use]

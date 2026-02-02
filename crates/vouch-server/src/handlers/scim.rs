@@ -312,7 +312,7 @@ async fn authenticate_scim(
 
 /// GET /scim/v2/ServiceProviderConfig
 pub async fn service_provider_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let base_url = format!("https://{}", state.config.rp_id);
+    let base_url = state.config.base_url();
 
     Json(ScimServiceProviderConfig {
         schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig".to_string()],
@@ -428,7 +428,7 @@ pub async fn schemas() -> impl IntoResponse {
 
 /// GET /scim/v2/ResourceTypes
 pub async fn resource_types(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let base_url = format!("https://{}", state.config.rp_id);
+    let base_url = state.config.base_url();
 
     Json(ScimListResponse {
         schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".to_string()],
@@ -490,7 +490,7 @@ pub async fn list_users(
         Err(_) => users.len(),
     };
 
-    let base_url = format!("https://{}", state.config.rp_id);
+    let base_url = state.config.base_url();
     let resources: Vec<ScimUser> = users
         .into_iter()
         .map(|u| db_user_to_scim(&base_url, u))
@@ -599,7 +599,7 @@ pub async fn create_user(
         tracing::warn!("Failed to record SCIM audit: {e}");
     }
 
-    let base_url = format!("https://{}", state.config.rp_id);
+    let base_url = state.config.base_url();
     let scim_user = db_user_to_scim(&base_url, db_user);
 
     (StatusCode::CREATED, Json(scim_user)).into_response()
@@ -635,7 +635,7 @@ pub async fn get_user(
         }
     };
 
-    let base_url = format!("https://{}", state.config.rp_id);
+    let base_url = state.config.base_url();
     Json(db_user_to_scim(&base_url, user)).into_response()
 }
 
@@ -817,7 +817,7 @@ pub async fn patch_user(
         }
     };
 
-    let base_url = format!("https://{}", state.config.rp_id);
+    let base_url = state.config.base_url();
     Json(db_user_to_scim(&base_url, updated)).into_response()
 }
 
@@ -998,7 +998,7 @@ pub async fn list_groups(
         Err(_) => groups.len(),
     };
 
-    let base_url = format!("https://{}", state.config.rp_id);
+    let base_url = state.config.base_url();
     let mut resources = Vec::new();
     for g in groups {
         let members = get_group_members_scim(&state.db, &base_url, &g.id).await;
@@ -1089,7 +1089,7 @@ pub async fn create_group(
         tracing::warn!("Failed to record SCIM audit: {e}");
     }
 
-    let base_url = format!("https://{}", state.config.rp_id);
+    let base_url = state.config.base_url();
     let members = get_group_members_scim(&state.db, &base_url, &db_group.id).await;
     let scim_group = db_group_to_scim(&base_url, db_group, members);
 
@@ -1126,7 +1126,7 @@ pub async fn get_group(
         }
     };
 
-    let base_url = format!("https://{}", state.config.rp_id);
+    let base_url = state.config.base_url();
     let members = get_group_members_scim(&state.db, &base_url, &group.id).await;
     Json(db_group_to_scim(&base_url, group, members)).into_response()
 }
@@ -1280,7 +1280,7 @@ pub async fn patch_group(
         }
     };
 
-    let base_url = format!("https://{}", state.config.rp_id);
+    let base_url = state.config.base_url();
     let members = get_group_members_scim(&state.db, &base_url, &updated.id).await;
     Json(db_group_to_scim(&base_url, updated, members)).into_response()
 }
