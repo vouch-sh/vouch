@@ -22,11 +22,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::ApiError;
 
-// Re-export types needed by other modules
-pub use crate::impl_template_response;
-pub use crate::services::oidc::token::{AuthenticatedClient, ClientAuthError, IdTokenClaims};
+use crate::impl_template_response;
 
-/// Authorization page template (re-exported for mod.rs).
+/// Authorization page template.
 #[derive(Template)]
 #[template(path = "authorize.html")]
 pub struct AuthorizeTemplate {

@@ -33,11 +33,5 @@ pub use introspect::{introspect, revoke};
 pub use token::token;
 pub use userinfo::userinfo;
 
-// Re-export types needed by other modules
-pub use token::{
-    AuthenticatedClient, AuthorizeTemplate, ClientAuthError, IdTokenClaims, OAuthGrantType,
-    TokenExchangeRequest, TokenExchangeResponse, TokenRequest, TokenResponse, UnifiedTokenRequest,
-};
-
 #[cfg(test)]
 mod tests;
