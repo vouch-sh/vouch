@@ -63,7 +63,7 @@ pub struct OidcDiscoveryDocument {
 #[derive(Debug, Serialize)]
 pub struct JwksResponse {
     /// The keys in this key set.
-    pub keys: Vec<crate::oidc_key::EcJwk>,
+    pub keys: Vec<super::keys::EcJwk>,
 }
 
 /// Build the OIDC discovery document for this server.

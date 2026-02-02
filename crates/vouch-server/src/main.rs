@@ -15,8 +15,8 @@ use tracing_subscriber::EnvFilter;
 use vouch_server::{
     AppState, cleanup, config,
     db::{Pool, dsql::is_dsql_endpoint, migrations::run_dsql_migrations},
-    dpop, handlers, oidc_key,
-    services::integrations::github::GitHubApp,
+    dpop, handlers,
+    services::{integrations::github::GitHubApp, oidc::OidcSigningKey},
     ssh_ca,
 };
 
@@ -97,7 +97,7 @@ async fn main() -> Result<()> {
     };
 
     // Initialize OIDC signing key (ES256 for AWS and OIDC ID tokens)
-    let oidc_key = oidc_key::OidcSigningKey::load_or_generate(config.oidc_signing_key.as_deref())?;
+    let oidc_key = OidcSigningKey::load_or_generate(config.oidc_signing_key.as_deref())?;
     tracing::info!("OIDC signing key initialized: {}", oidc_key.key_id());
 
     // Initialize GitHub App if configured

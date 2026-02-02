@@ -27,7 +27,7 @@
 
 use crate::config::ServerConfig;
 use crate::db::{self, Authenticator, Pool};
-use crate::oidc_key::OidcSigningKey;
+use crate::services::oidc::OidcSigningKey;
 use vouch_common::oidc::OidcIdTokenClaimsBuilder;
 
 /// Error types for Kubernetes integration operations.

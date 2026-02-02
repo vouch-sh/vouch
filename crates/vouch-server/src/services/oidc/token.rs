@@ -17,7 +17,7 @@ use aws_lc_rs::rand as aws_rand;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, encode};
+use jsonwebtoken::{DecodingKey, Validation};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -436,12 +436,10 @@ fn generate_id_token(
         cnf,
     };
 
-    encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(state.config.jwt_secret_bytes()),
-    )
-    .map_err(|e| ServiceError::Internal(format!("Failed to generate ID token: {e}")))
+    state
+        .oidc_key
+        .sign_jwt(&claims)
+        .map_err(|e| ServiceError::Internal(format!("Failed to generate ID token: {e}")))
 }
 
 /// Validate DPoP proof if present in the request.
