@@ -44,6 +44,7 @@
 //! Services return [`ServiceError`] which can be converted to protocol-appropriate
 //! responses (OAuth, SCIM, or standard HTTP errors).
 
+pub mod auth;
 pub mod error;
 pub mod integrations;
 pub mod oidc;

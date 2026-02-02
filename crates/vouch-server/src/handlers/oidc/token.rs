@@ -294,21 +294,16 @@ fn extract_client_credentials(
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Basic "))
-    {
-        // Decode Base64 credentials (try URL-safe first, then standard)
-        if let Ok(decoded) = URL_SAFE_NO_PAD
+        && let Ok(decoded) = URL_SAFE_NO_PAD
             .decode(auth_header.trim())
             .or_else(|_| base64::engine::general_purpose::STANDARD.decode(auth_header.trim()))
-        {
-            if let Ok(creds) = String::from_utf8(decoded) {
-                if let Some((id, secret)) = creds.split_once(':') {
-                    return Some(ClientCredentials {
-                        client_id: id.to_string(),
-                        client_secret: Some(secret.to_string()),
-                    });
-                }
-            }
-        }
+        && let Ok(creds) = String::from_utf8(decoded)
+        && let Some((id, secret)) = creds.split_once(':')
+    {
+        return Some(ClientCredentials {
+            client_id: id.to_string(),
+            client_secret: Some(secret.to_string()),
+        });
     }
 
     // Fall back to request body parameters (client_secret_post)

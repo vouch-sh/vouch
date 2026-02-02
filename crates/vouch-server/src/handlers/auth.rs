@@ -4,7 +4,10 @@
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::extractors::ClientInfo;
-use crate::webauthn_verify;
+use crate::services::auth::{
+    AuthenticatorLookupParams, CreateSessionParams, LoginAssertionParams, create_login_session,
+    lookup_and_verify_authenticator, verify_login_assertion,
+};
 use axum::{
     Json,
     body::Body,
@@ -14,10 +17,8 @@ use axum::{
 };
 use axum_extra::TypedHeader;
 use axum_extra::extract::cookie::CookieJar;
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use headers::authorization::{Authorization, Bearer};
-use jiff::{Span, Timestamp};
+use jiff::Timestamp;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,9 @@ use vouch_common::{
     Raw, RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest,
     RegisterStartResponse, SessionStatus, fido2_types::Challenge,
 };
+
+// Re-export SessionClaims from the service layer for backwards compatibility
+pub use crate::services::auth::SessionClaims;
 
 use super::{
     clear_session_cookie, generate_challenge, hash_token, json_error,
@@ -102,27 +106,6 @@ impl AuthenticationState {
         )?;
         Ok(data.claims)
     }
-}
-
-// ============================================================================
-// JWT Session Claims
-// ============================================================================
-
-/// JWT claims for session tokens.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SessionClaims {
-    /// Subject (user ID).
-    pub sub: String,
-    /// User email.
-    pub email: String,
-    /// Authenticator ID used for this session.
-    /// Optional for OIDC-authenticated users who haven't registered a security key yet.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authenticator_id: Option<String>,
-    /// Issued at (Unix timestamp).
-    pub iat: i64,
-    /// Expiration (Unix timestamp).
-    pub exp: i64,
 }
 
 // ============================================================================
@@ -346,7 +329,6 @@ pub async fn login_start(
 
 /// Complete login - verify assertion and issue session token.
 /// Uses discoverable credential flow: credential_id and user_handle identify the user.
-#[allow(clippy::too_many_lines)]
 pub async fn login_complete(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -356,8 +338,6 @@ pub async fn login_complete(
 
     // Extract client info from headers
     let client_info = ClientInfo::from_headers(&headers);
-
-    // Get client context from request (sent by CLI)
     let client_ctx = req.client_context.as_ref();
 
     // Decode state (only contains challenge and rp_id)
@@ -374,7 +354,7 @@ pub async fn login_complete(
         )
     })?;
 
-    // Helper to log failed login attempts
+    // Helper to log failed login attempts (captures client context)
     let log_failure = |user_id: &str, authenticator_id: Option<&str>, reason: &str| {
         let params = AuthEventParams {
             user_id: user_id.to_string(),
@@ -389,7 +369,6 @@ pub async fn login_complete(
             success: false,
             failure_reason: Some(reason.to_string()),
         };
-        // Spawn to avoid blocking the response
         let db = state.db.clone();
         tokio::spawn(async move {
             if let Err(e) = db::insert_auth_event(&db, &params).await {
@@ -398,168 +377,62 @@ pub async fn login_complete(
         });
     };
 
-    // Get the authenticator by credential_id
-    let authenticator = db::get_authenticator_by_credential_id(&state.db, &req.credential_id)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
-        .ok_or_else(|| {
-            log_failure(&user_id.to_string(), None, "credential_not_found");
-            json_error(
-                StatusCode::NOT_FOUND,
-                "credential_not_found",
-                "Credential not registered with this server",
-            )
-        })?;
-
-    // Sanity check: credential_id should match (lookup was by credential_id)
-    if authenticator.credential_id.as_slice() != req.credential_id.as_bytes() {
-        tracing::error!("CRITICAL: credential_id mismatch after lookup");
-    }
-
-    // Verify authenticator belongs to this user (from user_handle)
-    if authenticator.user_id != user_id.to_string() {
-        log_failure(
-            &user_id.to_string(),
-            Some(&authenticator.id),
-            "user_mismatch",
-        );
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "user_mismatch",
-            "Credential does not belong to this user",
-        ));
-    }
-
-    // Get user for email
-    let user = db::get_user_by_id(&state.db, &user_id.to_string())
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
-        .ok_or_else(|| {
-            log_failure(
-                &user_id.to_string(),
-                Some(&authenticator.id),
-                "user_not_found",
-            );
-            json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found")
-        })?;
-
-    // Server-side WebAuthn signature verification
-    // Build expected origin from RP ID
-    let expected_origin = format!("https://{}", auth_state.rp_id);
-    let expected_challenge = URL_SAFE_NO_PAD.encode(&auth_state.challenge);
-
-    // Get stored counter from authenticator
-    let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
-
-    // Debug logging for signature verification (debug builds only)
-    #[cfg(debug_assertions)]
-    {
-        tracing::debug!(
-            "login_complete: sig_len={}, auth_data_len={}",
-            req.signature.len(),
-            req.authenticator_data.len()
-        );
-    }
-
-    // Verify the WebAuthn assertion server-side
-    let verification_result = webauthn_verify::verify_assertion(
-        &req.authenticator_data,
-        &req.client_data_json,
-        &req.signature,
-        &authenticator.public_key,
-        &auth_state.rp_id,
-        &expected_challenge,
-        &expected_origin,
-        stored_counter,
-        true, // require_user_verification
+    // Look up authenticator and verify ownership
+    let lookup_result = lookup_and_verify_authenticator(
+        &state,
+        AuthenticatorLookupParams {
+            credential_id: &req.credential_id,
+            user_id,
+        },
     )
+    .await
     .map_err(|e| {
-        log_failure(&user.id, Some(&authenticator.id), &e.to_string());
-        json_error(
-            StatusCode::BAD_REQUEST,
+        let reason = match &e {
+            crate::services::ServiceError::NotFound(entity) => {
+                format!("{entity}_not_found")
+            }
+            crate::services::ServiceError::Forbidden(_) => "user_mismatch".to_string(),
+            _ => "lookup_error".to_string(),
+        };
+        log_failure(&user_id.to_string(), None, &reason);
+        service_error_to_handler_error(e)
+    })?;
+
+    let authenticator = lookup_result.authenticator;
+    let user = lookup_result.user;
+
+    // Verify WebAuthn assertion
+    let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
+    let assertion_result = verify_login_assertion(LoginAssertionParams {
+        authenticator_data: &req.authenticator_data,
+        client_data_json: &req.client_data_json,
+        signature: &req.signature,
+        public_key: &authenticator.public_key,
+        rp_id: &auth_state.rp_id,
+        challenge: &auth_state.challenge,
+        stored_counter,
+    })
+    .map_err(|e| {
+        log_failure(
+            &user.id,
+            Some(&authenticator.id),
             "signature_verification_failed",
-            &e.to_string(),
-        )
+        );
+        service_error_to_handler_error(e)
     })?;
 
     tracing::info!(
         "WebAuthn assertion verified for user {}: counter={}, uv={}",
         user.email,
-        verification_result.counter,
-        verification_result.user_verified
+        assertion_result.new_counter,
+        assertion_result.user_verified
     );
 
-    // Update counter in database (WebAuthn counter is u32, stored as i32)
-    let new_counter = verification_result.counter as i32;
-    db::update_authenticator_counter(&state.db, &authenticator.id, new_counter)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?;
-
-    // Generate session token
-    let now = Timestamp::now();
-    let session_hours = i64::try_from(state.config.session_hours).map_err(|_| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "time_error",
-            "Invalid session hours",
-        )
-    })?;
-    let duration = Span::new().hours(session_hours);
-    let expires = now.checked_add(duration).map_err(|_| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "time_error",
-            "Time overflow",
-        )
-    })?;
-
-    let claims = SessionClaims {
-        sub: user.id.clone(),
-        email: user.email.clone(),
-        authenticator_id: Some(authenticator.id.clone()),
-        iat: now.as_second(),
-        exp: expires.as_second(),
-    };
-
-    let token = encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(state.config.jwt_secret_bytes()),
-    )
-    .map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "token_error",
-            &e.to_string(),
-        )
-    })?;
-
-    // Store session
-    let token_hash = hash_token(&token);
-    db::create_session(
+    // Update counter in database
+    db::update_authenticator_counter(
         &state.db,
-        &user.id,
-        &token_hash,
-        Some(&authenticator.id),
-        &expires.to_string(),
+        &authenticator.id,
+        assertion_result.new_counter as i32,
     )
     .await
     .map_err(|e| {
@@ -569,6 +442,18 @@ pub async fn login_complete(
             &e.to_string(),
         )
     })?;
+
+    // Create session
+    let session_result = create_login_session(
+        &state,
+        CreateSessionParams {
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: Some(&authenticator.id),
+        },
+    )
+    .await
+    .map_err(service_error_to_handler_error)?;
 
     // Log successful login event
     let auth_event_params = AuthEventParams {
@@ -591,10 +476,45 @@ pub async fn login_complete(
     tracing::info!("Login successful for user: {}", user.email);
 
     Ok(Json(LoginCompleteResponse {
-        token,
-        expires_at: expires.to_string(),
+        token: session_result.token,
+        expires_at: session_result.expires_at,
         email: user.email,
     }))
+}
+
+/// Convert a ServiceError to a handler error response.
+fn service_error_to_handler_error(
+    e: crate::services::ServiceError,
+) -> (StatusCode, Json<ApiError>) {
+    use crate::services::ServiceError;
+
+    match e {
+        ServiceError::NotFound(entity) => json_error(
+            StatusCode::NOT_FOUND,
+            &format!("{entity}_not_found"),
+            &format!("{entity} not found"),
+        ),
+        ServiceError::Forbidden(msg) => json_error(StatusCode::FORBIDDEN, "forbidden", msg),
+        ServiceError::Validation(msg) => {
+            json_error(StatusCode::BAD_REQUEST, "invalid_request", &msg)
+        }
+        ServiceError::OAuth { code, description } => {
+            json_error(code.status_code(), code.as_str(), &description)
+        }
+        ServiceError::Internal(msg) => {
+            tracing::error!("Internal error: {}", msg);
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Internal server error",
+            )
+        }
+        _ => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "Internal server error",
+        ),
+    }
 }
 
 /// Get current session status.

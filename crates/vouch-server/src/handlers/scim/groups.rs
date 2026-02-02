@@ -1,0 +1,457 @@
+// SPDX-License-Identifier: BUSL-1.1
+//! SCIM 2.0 Group operations (RFC 7644).
+
+use axum::{
+    Json,
+    extract::{Path, Query, State},
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
+use std::sync::Arc;
+
+use super::authenticate_scim;
+use super::types::{
+    ScimError, ScimGroup, ScimGroupMember, ScimListQuery, ScimListResponse, ScimMeta,
+    ScimPatchOpType, ScimPatchRequest,
+};
+use crate::AppState;
+use crate::db;
+
+/// GET /scim/v2/Groups
+pub async fn list_groups(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<ScimListQuery>,
+) -> Response {
+    // Authenticate
+    let token_id = match authenticate_scim(&state, &headers).await {
+        Ok(id) => id,
+        Err((status, json)) => return (status, json).into_response(),
+    };
+
+    let start_index = query.start_index.unwrap_or(1);
+    let count = query.count.unwrap_or(100).min(100);
+
+    // Get groups from database
+    let groups =
+        match db::list_scim_groups(&state.db, query.filter.as_deref(), start_index, count).await {
+            Ok(groups) => groups,
+            Err(e) => {
+                tracing::error!("Failed to list groups: {e}");
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ScimError::new(500, "Failed to list groups")),
+                )
+                    .into_response();
+            }
+        };
+
+    let total = match db::count_scim_groups(&state.db, query.filter.as_deref()).await {
+        Ok(count) => count,
+        Err(_) => groups.len(),
+    };
+
+    let base_url = &state.config.base_url;
+    let mut resources = Vec::new();
+    for g in groups {
+        let members = get_group_members_scim(&state.db, base_url, &g.id).await;
+        resources.push(db_group_to_scim(base_url, g, members));
+    }
+
+    // Audit log
+    if let Err(e) = db::insert_scim_audit(
+        &state.db,
+        "list",
+        "Group",
+        "*",
+        Some(&token_id),
+        Some(&format!("{{\"count\": {}}}", resources.len())),
+    )
+    .await
+    {
+        tracing::warn!("Failed to record SCIM audit: {e}");
+    }
+
+    Json(ScimListResponse {
+        schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".to_string()],
+        total_results: total,
+        items_per_page: resources.len(),
+        start_index,
+        resources,
+    })
+    .into_response()
+}
+
+/// POST /scim/v2/Groups
+pub async fn create_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(group): Json<ScimGroup>,
+) -> Response {
+    // Authenticate
+    let token_id = match authenticate_scim(&state, &headers).await {
+        Ok(id) => id,
+        Err((status, json)) => return (status, json).into_response(),
+    };
+
+    // Create group
+    let db_group =
+        match db::create_scim_group(&state.db, &group.display_name, group.external_id.as_deref())
+            .await
+        {
+            Ok(g) => g,
+            Err(e) => {
+                tracing::error!("Failed to create group: {e}");
+                let detail = if e.to_string().contains("UNIQUE") {
+                    "Group already exists"
+                } else {
+                    "Failed to create group"
+                };
+                return (
+                    StatusCode::CONFLICT,
+                    Json(ScimError::new(409, detail).with_type("uniqueness")),
+                )
+                    .into_response();
+            }
+        };
+
+    // Add members if provided
+    if let Some(members) = &group.members {
+        for member in members {
+            if let Err(e) = db::add_scim_group_member(&state.db, &db_group.id, &member.value).await
+            {
+                tracing::warn!("Failed to add member {} to group: {e}", member.value);
+            }
+        }
+    }
+
+    // Audit log
+    if let Err(e) = db::insert_scim_audit(
+        &state.db,
+        "create",
+        "Group",
+        &db_group.id,
+        Some(&token_id),
+        Some(&format!(
+            "{{\"displayName\": \"{}\"}}",
+            db_group.display_name
+        )),
+    )
+    .await
+    {
+        tracing::warn!("Failed to record SCIM audit: {e}");
+    }
+
+    let base_url = &state.config.base_url;
+    let members = get_group_members_scim(&state.db, base_url, &db_group.id).await;
+    let scim_group = db_group_to_scim(base_url, db_group, members);
+
+    (StatusCode::CREATED, Json(scim_group)).into_response()
+}
+
+/// GET /scim/v2/Groups/:id
+pub async fn get_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    // Authenticate
+    if let Err((status, json)) = authenticate_scim(&state, &headers).await {
+        return (status, json).into_response();
+    }
+
+    let group = match db::get_scim_group(&state.db, &id).await {
+        Ok(Some(g)) => g,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ScimError::new(404, "Group not found")),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to get group: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to get group")),
+            )
+                .into_response();
+        }
+    };
+
+    let base_url = &state.config.base_url;
+    let members = get_group_members_scim(&state.db, base_url, &group.id).await;
+    Json(db_group_to_scim(base_url, group, members)).into_response()
+}
+
+/// PATCH /scim/v2/Groups/:id
+#[allow(clippy::too_many_lines)]
+pub async fn patch_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(patch): Json<ScimPatchRequest>,
+) -> Response {
+    // Authenticate
+    let token_id = match authenticate_scim(&state, &headers).await {
+        Ok(id) => id,
+        Err((status, json)) => return (status, json).into_response(),
+    };
+
+    // Get existing group
+    let group = match db::get_scim_group(&state.db, &id).await {
+        Ok(Some(g)) => g,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ScimError::new(404, "Group not found")),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to get group: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to get group")),
+            )
+                .into_response();
+        }
+    };
+
+    // Apply patch operations
+    let mut display_name = group.display_name.clone();
+    let mut external_id = group.external_id.clone();
+
+    for op in &patch.operations {
+        match op.op {
+            ScimPatchOpType::Replace => {
+                if let Some(path) = &op.path {
+                    match path.as_str() {
+                        "displayName" => {
+                            if let Some(val) = &op.value
+                                && let Some(s) = val.as_str()
+                            {
+                                display_name = s.to_string();
+                            }
+                        }
+                        "externalId" => {
+                            if let Some(val) = &op.value {
+                                external_id = val.as_str().map(String::from);
+                            }
+                        }
+                        "members" => {
+                            // Replace all members
+                            if let Some(val) = &op.value
+                                && let Some(arr) = val.as_array()
+                            {
+                                let user_ids: Vec<String> = arr
+                                    .iter()
+                                    .filter_map(|v| {
+                                        v.get("value").and_then(|v| v.as_str()).map(String::from)
+                                    })
+                                    .collect();
+                                if let Err(e) =
+                                    db::replace_scim_group_members(&state.db, &id, &user_ids).await
+                                {
+                                    tracing::error!("Failed to replace group members: {e}");
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                } else if let Some(val) = &op.value {
+                    // Replace entire resource
+                    if let Some(n) = val.get("displayName").and_then(|v| v.as_str()) {
+                        display_name = n.to_string();
+                    }
+                    if let Some(e) = val.get("externalId").and_then(|v| v.as_str()) {
+                        external_id = Some(e.to_string());
+                    }
+                }
+            }
+            ScimPatchOpType::Add => {
+                if let Some(path) = &op.path
+                    && path == "members"
+                    && let Some(val) = &op.value
+                {
+                    // Add members
+                    if let Some(arr) = val.as_array() {
+                        for member in arr {
+                            if let Some(user_id) = member.get("value").and_then(|v| v.as_str())
+                                && let Err(e) =
+                                    db::add_scim_group_member(&state.db, &id, user_id).await
+                            {
+                                tracing::warn!("Failed to add member: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+            ScimPatchOpType::Remove => {
+                if let Some(path) = &op.path {
+                    if path == "externalId" {
+                        external_id = None;
+                    } else if path.starts_with("members")
+                        && let Some(user_id) = parse_member_filter(path)
+                        && let Err(e) = db::remove_scim_group_member(&state.db, &id, &user_id).await
+                    {
+                        tracing::warn!("Failed to remove member: {e}");
+                    }
+                }
+            }
+        }
+    }
+
+    // Update group in database
+    if (display_name != group.display_name || external_id != group.external_id)
+        && let Err(e) =
+            db::update_scim_group(&state.db, &id, Some(&display_name), external_id.as_deref()).await
+    {
+        tracing::error!("Failed to update group: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ScimError::new(500, "Failed to update group")),
+        )
+            .into_response();
+    }
+
+    // Audit log
+    if let Err(e) =
+        db::insert_scim_audit(&state.db, "update", "Group", &id, Some(&token_id), None).await
+    {
+        tracing::warn!("Failed to record SCIM audit: {e}");
+    }
+
+    // Return updated group
+    let updated = match db::get_scim_group(&state.db, &id).await {
+        Ok(Some(g)) => g,
+        Ok(None) | Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to get updated group")),
+            )
+                .into_response();
+        }
+    };
+
+    let base_url = &state.config.base_url;
+    let members = get_group_members_scim(&state.db, base_url, &updated.id).await;
+    Json(db_group_to_scim(base_url, updated, members)).into_response()
+}
+
+/// DELETE /scim/v2/Groups/:id
+pub async fn delete_group(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    // Authenticate
+    let token_id = match authenticate_scim(&state, &headers).await {
+        Ok(id) => id,
+        Err((status, json)) => return (status, json).into_response(),
+    };
+
+    // Check group exists
+    let group = match db::get_scim_group(&state.db, &id).await {
+        Ok(Some(g)) => g,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(ScimError::new(404, "Group not found")),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to get group: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to get group")),
+            )
+                .into_response();
+        }
+    };
+
+    // Delete group (cascades to memberships)
+    if let Err(e) = db::delete_scim_group(&state.db, &id).await {
+        tracing::error!("Failed to delete group: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ScimError::new(500, "Failed to delete group")),
+        )
+            .into_response();
+    }
+
+    // Audit log
+    if let Err(e) = db::insert_scim_audit(
+        &state.db,
+        "delete",
+        "Group",
+        &id,
+        Some(&token_id),
+        Some(&format!("{{\"displayName\": \"{}\"}}", group.display_name)),
+    )
+    .await
+    {
+        tracing::warn!("Failed to record SCIM audit: {e}");
+    }
+
+    StatusCode::NO_CONTENT.into_response()
+}
+
+/// Helper to get group members in SCIM format.
+pub async fn get_group_members_scim(
+    db: &crate::db::Pool,
+    base_url: &str,
+    group_id: &str,
+) -> Vec<ScimGroupMember> {
+    match db::get_scim_group_members(db, group_id).await {
+        Ok(users) => users
+            .into_iter()
+            .map(|u| ScimGroupMember {
+                value: u.id.clone(),
+                ref_url: Some(format!("{base_url}/scim/v2/Users/{}", u.id)),
+                display: Some(u.email),
+            })
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Convert database group to SCIM group.
+pub fn db_group_to_scim(
+    base_url: &str,
+    group: db::ScimGroupRecord,
+    members: Vec<ScimGroupMember>,
+) -> ScimGroup {
+    ScimGroup {
+        schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:Group".to_string()],
+        id: Some(group.id.clone()),
+        external_id: group.external_id,
+        display_name: group.display_name,
+        members: if members.is_empty() {
+            None
+        } else {
+            Some(members)
+        },
+        meta: Some(ScimMeta {
+            resource_type: "Group".to_string(),
+            created: group.created_at.to_jiff().to_string(),
+            last_modified: Some(group.updated_at.to_jiff().to_string()),
+            location: format!("{base_url}/scim/v2/Groups/{}", group.id),
+        }),
+    }
+}
+
+/// Parse members filter path like "members[value eq \"user-id\"]".
+fn parse_member_filter(path: &str) -> Option<String> {
+    // Simple parser for members[value eq "user-id"]
+    if let Some(start) = path.find("value eq \"") {
+        let start_idx = start + 10;
+        if let Some(rest) = path.get(start_idx..)
+            && let Some(end) = rest.find('"')
+        {
+            return rest.get(..end).map(String::from);
+        }
+    }
+    None
+}
