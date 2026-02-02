@@ -111,6 +111,8 @@ enum Operation<'a> {
 #[derive(Debug, Deserialize)]
 struct LoginOptions<'a> {
     /// Token provided by user (if any).
+    /// We don't use this - vouch manages its own authentication.
+    #[allow(dead_code)]
     token: Option<&'a str>,
     /// URL for browser-based login (if any).
     #[serde(rename = "login-url")]
@@ -133,6 +135,8 @@ enum CredentialResponse {
         operation_independent: bool,
     },
     /// Successful login response.
+    /// We don't use this - vouch doesn't support cargo login.
+    #[allow(dead_code)]
     Login,
     /// Successful logout response.
     Logout,
@@ -242,35 +246,24 @@ async fn handle_get(registry: &RegistryInfo<'_>) -> Result<()> {
     send_message(&response)
 }
 
-/// Handle "login" action - store credentials or prompt user.
-fn handle_login(registry: &RegistryInfo<'_>, options: LoginOptions<'_>) -> Result<()> {
-    if let Some(token) = options.token {
-        // User provided a token directly (e.g., `cargo login <token>`)
-        // We don't store arbitrary tokens - Vouch manages its own tokens
-        // But we can accept a Vouch token if the user wants to set it manually
-        let mut config = Config::load().unwrap_or_default();
-        if let Err(e) = config.save_token(token) {
-            return send_error("unknown", Some(format!("failed to save token: {e}")));
-        }
-        send_message(&CredentialResponse::Login)
-    } else {
-        // No token provided - user needs to authenticate via Vouch
-        // Print instructions to stderr (which is connected to the terminal)
-        eprintln!();
-        eprintln!(
-            "To authenticate with registry '{}', run:",
-            registry.name.unwrap_or(registry.index_url)
-        );
-        eprintln!();
-        eprintln!("    vouch login");
-        eprintln!();
+/// Handle "login" action - direct users to vouch login.
+fn handle_login(registry: &RegistryInfo<'_>, _options: LoginOptions<'_>) -> Result<()> {
+    // Vouch manages authentication - don't accept tokens via cargo login
+    // Always direct users to authenticate through vouch
+    eprintln!();
+    eprintln!(
+        "To authenticate with registry '{}', run:",
+        registry.name.unwrap_or(registry.index_url)
+    );
+    eprintln!();
+    eprintln!("    vouch login");
+    eprintln!();
 
-        // Return not-found to indicate no credentials are stored yet
-        send_error(
-            "not-found",
-            Some("run 'vouch login' to authenticate".to_string()),
-        )
-    }
+    // Return url-not-supported to indicate we don't support cargo login
+    send_error(
+        "url-not-supported",
+        Some("use 'vouch login' to authenticate".to_string()),
+    )
 }
 
 /// Handle "logout" action - remove stored credentials.
