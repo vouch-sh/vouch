@@ -55,7 +55,7 @@ impl CargoConfig {
         self.doc
             .get("registry")
             .and_then(|r| r.get("global-credential-providers"))
-            .is_some_and(|providers| Self::array_contains_vouch(providers))
+            .is_some_and(Self::array_contains_vouch)
     }
 
     /// Check if vouch is configured for a specific registry.
@@ -65,11 +65,12 @@ impl CargoConfig {
             .get("registries")
             .and_then(|r| r.get(registry))
             .and_then(|r| r.get("credential-provider"))
-            .is_some_and(|provider| Self::item_contains_vouch(provider))
+            .is_some_and(Self::item_contains_vouch)
     }
 
     /// Check if vouch is configured anywhere (global or any registry).
     #[must_use]
+    #[allow(dead_code)] // Useful utility, may be used in future
     pub fn has_vouch_configured(&self) -> bool {
         // Check global providers
         if self.has_global_vouch() {
@@ -79,10 +80,10 @@ impl CargoConfig {
         // Check all registries
         if let Some(registries) = self.doc.get("registries").and_then(|r| r.as_table()) {
             for (_name, config) in registries.iter() {
-                if let Some(provider) = config.get("credential-provider") {
-                    if Self::item_contains_vouch(provider) {
-                        return true;
-                    }
+                if let Some(provider) = config.get("credential-provider")
+                    && Self::item_contains_vouch(provider)
+                {
+                    return true;
                 }
             }
         }
@@ -95,10 +96,10 @@ impl CargoConfig {
     pub fn find_vouch_registry(&self) -> Option<String> {
         if let Some(registries) = self.doc.get("registries").and_then(|r| r.as_table()) {
             for (name, config) in registries.iter() {
-                if let Some(provider) = config.get("credential-provider") {
-                    if Self::item_contains_vouch(provider) {
-                        return Some(name.to_string());
-                    }
+                if let Some(provider) = config.get("credential-provider")
+                    && Self::item_contains_vouch(provider)
+                {
+                    return Some(name.to_string());
                 }
             }
         }
@@ -108,6 +109,7 @@ impl CargoConfig {
     /// Set the global credential providers.
     ///
     /// This sets the `[registry].global-credential-providers` array.
+    #[allow(clippy::indexing_slicing)] // toml_edit indexing creates entries if missing
     pub fn set_global_provider(&mut self, command: &[&str]) {
         // Ensure [registry] section exists
         if !self.doc.contains_key("registry") {
@@ -121,6 +123,7 @@ impl CargoConfig {
     /// Set the credential provider for a specific registry.
     ///
     /// This sets `[registries.<name>].credential-provider`.
+    #[allow(clippy::indexing_slicing)] // toml_edit indexing creates entries if missing
     pub fn set_registry_provider(&mut self, registry: &str, command: &[&str]) {
         // Ensure [registries] section exists
         if !self.doc.contains_key("registries") {
@@ -189,7 +192,7 @@ impl CargoConfig {
     /// Check if a TOML array contains "vouch" in any element.
     fn array_contains_vouch(item: &Item) -> bool {
         item.as_array()
-            .is_some_and(|arr| Self::value_array_contains_vouch(arr))
+            .is_some_and(Self::value_array_contains_vouch)
     }
 
     /// Check if a TOML array value contains "vouch" in any element.

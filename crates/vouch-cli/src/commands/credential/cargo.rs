@@ -325,7 +325,7 @@ fn parse_jwt_expiration(token: &str) -> Option<i64> {
     // Decode the payload (second part)
     use base64::Engine;
     let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(parts[1])
+        .decode(parts.get(1)?)
         .ok()?;
 
     // Parse as JSON
@@ -336,6 +336,7 @@ fn parse_jwt_expiration(token: &str) -> Option<i64> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
 
