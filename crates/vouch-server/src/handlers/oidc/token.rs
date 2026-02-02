@@ -81,8 +81,9 @@ pub struct TokenRequest {
     pub redirect_uri: Option<String>,
     #[serde(default)]
     pub client_id: Option<String>,
+    /// Client secret (wrapped in SecretString to prevent accidental logging).
     #[serde(default)]
-    pub client_secret: Option<String>,
+    pub client_secret: Option<SecretString>,
     #[serde(default)]
     pub code_verifier: Option<String>,
     #[serde(default)]
@@ -158,11 +159,8 @@ async fn handle_authorization_code_grant(
     };
 
     // Extract client credentials from headers or body
-    let credentials = extract_client_credentials(
-        &headers,
-        params.client_id.as_deref(),
-        params.client_secret.as_deref(),
-    );
+    let credentials =
+        extract_client_credentials(&headers, params.client_id.as_deref(), params.client_secret);
 
     // Validate DPoP if present
     let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
@@ -279,7 +277,7 @@ fn service_error_to_api_error(e: crate::services::ServiceError) -> (StatusCode, 
 fn extract_client_credentials(
     headers: &HeaderMap,
     client_id_param: Option<&str>,
-    client_secret_param: Option<&str>,
+    client_secret_param: Option<SecretString>,
 ) -> Option<ClientCredentials> {
     // Try Authorization header first (client_secret_basic)
     if let Some(auth_header) = headers
@@ -301,6 +299,6 @@ fn extract_client_credentials(
     // Fall back to request body parameters (client_secret_post)
     client_id_param.map(|id| ClientCredentials {
         client_id: id.to_string(),
-        client_secret: client_secret_param.map(|s| SecretString::from(s.to_string())),
+        client_secret: client_secret_param,
     })
 }
