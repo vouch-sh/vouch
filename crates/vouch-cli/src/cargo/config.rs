@@ -94,7 +94,10 @@ impl CargoConfig {
 
         let array = Self::command_to_array(command);
         if let Some(registry) = self.doc.get_mut("registry").and_then(|r| r.as_table_mut()) {
-            registry.insert("global-credential-providers", Item::Value(Value::Array(array)));
+            registry.insert(
+                "global-credential-providers",
+                Item::Value(Value::Array(array)),
+            );
         }
     }
 
@@ -108,7 +111,11 @@ impl CargoConfig {
         }
 
         // Ensure [registries.<name>] section exists and set credential-provider
-        if let Some(registries) = self.doc.get_mut("registries").and_then(|r| r.as_table_mut()) {
+        if let Some(registries) = self
+            .doc
+            .get_mut("registries")
+            .and_then(|r| r.as_table_mut())
+        {
             if registries.get(registry).is_none() {
                 registries.insert(registry, Item::Table(Table::new()));
             }
