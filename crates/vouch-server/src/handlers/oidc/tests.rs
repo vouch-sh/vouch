@@ -61,7 +61,7 @@ async fn test_oidc_discovery_issuer_matches_base_url() {
     let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
 
     let issuer = discovery["issuer"].as_str().expect("issuer is a string");
-    assert_eq!(issuer, state.config.verification_base_url);
+    assert_eq!(issuer, state.config.base_url);
 }
 
 #[tokio::test]
@@ -146,7 +146,7 @@ async fn test_oidc_discovery_device_authorization_endpoint() {
     );
 
     // Verify it matches the configured base URL
-    let expected = format!("{}/oauth/device", state.config.verification_base_url);
+    let expected = format!("{}/oauth/device", state.config.base_url);
     assert_eq!(endpoint_url, expected);
 }
 

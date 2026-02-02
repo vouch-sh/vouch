@@ -502,48 +502,36 @@ fn verify_es256(
     // Extract y coordinate (label -3)
     let y = get_cose_bytes(map, -3)?;
 
-    // Detailed logging for debugging
-    tracing::info!(
-        "verify_es256: x_len={}, y_len={}, x_hex={}, y_hex={}",
-        x.len(),
-        y.len(),
-        hex::encode(&x),
-        hex::encode(&y)
-    );
-    tracing::info!(
-        "verify_es256: message_len={}, message_hex={}",
-        message.len(),
-        hex::encode(message)
-    );
-    tracing::info!(
-        "verify_es256: signature_len={}, signature_hex={}",
-        signature.len(),
-        hex::encode(signature)
-    );
-
     // Build uncompressed SEC1 point: 0x04 || x || y
     let mut point = Vec::with_capacity(1 + x.len() + y.len());
     point.push(0x04);
     point.extend_from_slice(&x);
     point.extend_from_slice(&y);
 
-    tracing::info!("verify_es256: point_hex={}", hex::encode(&point));
+    // Detailed logging for debugging (debug builds only)
+    #[cfg(debug_assertions)]
+    {
+        tracing::debug!(
+            "verify_es256: x_len={}, y_len={}, point_len={}",
+            x.len(),
+            y.len(),
+            point.len()
+        );
+    }
 
     // Try raw format first (64 bytes, r || s) - used by browser WebAuthn
     // Then try DER/ASN.1 format (70-72 bytes) - used by CTAP2/YubiKey
     if signature.len() == 64 {
-        tracing::info!("verify_es256: using FIXED (raw r||s) format");
         let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_FIXED, &point);
         public_key.verify(message, signature).map_err(|e| {
-            tracing::error!("verify_es256: FIXED verification failed: {:?}", e);
+            tracing::warn!("verify_es256: FIXED verification failed: {e:?}");
             VerifyError::SignatureInvalid
         })
     } else {
-        tracing::info!("verify_es256: using ASN1 (DER) format");
         // DER-encoded signature from CTAP2
         let public_key = UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, &point);
         public_key.verify(message, signature).map_err(|e| {
-            tracing::error!("verify_es256: ASN1 verification failed: {:?}", e);
+            tracing::warn!("verify_es256: ASN1 verification failed: {e:?}");
             VerifyError::SignatureInvalid
         })
     }

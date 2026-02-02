@@ -6,8 +6,8 @@
 
 use crate::AppState;
 use crate::db;
-use crate::handlers::auth::SessionClaims;
 use crate::handlers::hash_token;
+use crate::services::auth::SessionClaims;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::Timestamp;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, encode};
@@ -230,7 +230,7 @@ pub async fn exchange_token(
 
     let exchanged_claims = ExchangedTokenClaims {
         sub: subject_claims.email.clone(),
-        iss: state.config.verification_base_url.clone(),
+        iss: state.config.base_url.clone(),
         aud: params.audience.map(String::from),
         exp,
         iat: now.as_second(),

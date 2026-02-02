@@ -15,7 +15,9 @@ use tracing_subscriber::EnvFilter;
 use vouch_server::{
     AppState, cleanup, config,
     db::{Pool, dsql::is_dsql_endpoint, migrations::run_dsql_migrations},
-    dpop, github_app, handlers, oidc_key, ssh_ca,
+    dpop, handlers, oidc_key,
+    services::integrations::github::GitHubApp,
+    ssh_ca,
 };
 
 #[tokio::main]
@@ -63,8 +65,8 @@ async fn main() -> Result<()> {
     tracing::info!("Configuration loaded from database");
 
     // Build WebAuthn instance
-    // Use verification_base_url as origin (handles localhost with http and port correctly)
-    let rp_origin = url::Url::parse(&config.verification_base_url)?;
+    // Use base_url as origin (handles localhost with http and port correctly)
+    let rp_origin = url::Url::parse(&config.base_url)?;
     let webauthn_builder =
         webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)?.rp_name(&config.rp_name);
     let webauthn = webauthn_builder.build()?;
@@ -99,10 +101,10 @@ async fn main() -> Result<()> {
     tracing::info!("OIDC signing key initialized: {}", oidc_key.key_id());
 
     // Initialize GitHub App if configured
-    let github_app = match github_app::GitHubApp::load(&config) {
+    let github_app = match GitHubApp::load(&config) {
         Ok(Some(app)) => {
             tracing::info!("GitHub App initialized: app_id={}", app.app_id().0);
-            Some(app)
+            Some(Arc::new(app))
         }
         Ok(None) => {
             tracing::info!("GitHub App not configured");

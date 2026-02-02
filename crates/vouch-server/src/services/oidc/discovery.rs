@@ -75,7 +75,7 @@ pub struct JwksResponse {
 /// The OIDC discovery document with all endpoints and capabilities advertised.
 #[must_use]
 pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument {
-    let base_url = &state.config.verification_base_url;
+    let base_url = &state.config.base_url;
 
     OidcDiscoveryDocument {
         issuer: base_url.clone(),

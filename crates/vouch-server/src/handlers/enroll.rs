@@ -25,12 +25,12 @@ use std::sync::Arc;
 use uuid::Uuid;
 use vouch_common::{ApiError, BrowserRegisterCompleteRequest, BrowserRegisterStartResponse};
 
-use super::auth::SessionClaims;
 use super::common::AuthContext;
 use super::{
     create_session_cookie, extract_session_from_cookie, generate_random_bytes, hash_token,
     json_error, validate_registration_attestation,
 };
+use crate::services::auth::SessionClaims;
 
 // ============================================================================
 // COSE Key Serialization
@@ -445,7 +445,7 @@ pub async fn device_verify_submit(
     }
 
     // Build redirect URL
-    let redirect_uri = format!("{}/oauth/callback", state.config.verification_base_url);
+    let redirect_uri = format!("{}/oauth/callback", state.config.base_url);
     let auth_url = format!(
         "{}/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email&state={}&nonce={}&prompt=login",
         oidc_issuer,
@@ -547,7 +547,7 @@ pub async fn oidc_callback(
         .as_ref()
         .map_or("", String::as_str);
     let client_secret = state.config.oidc_client_secret_exposed().unwrap_or("");
-    let redirect_uri = format!("{}/oauth/callback", state.config.verification_base_url);
+    let redirect_uri = format!("{}/oauth/callback", state.config.base_url);
 
     let token_url = format!(
         "{}/token",
@@ -1328,7 +1328,7 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
 
     // Build authorization URL
     // Google's OIDC authorization endpoint is /o/oauth2/v2/auth (not /authorize)
-    let redirect_uri = format!("{}/oauth/callback", state.config.verification_base_url);
+    let redirect_uri = format!("{}/oauth/callback", state.config.base_url);
     let auth_url = format!(
         "{}/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email&state={}&nonce={}&prompt=login",
         oidc_issuer,

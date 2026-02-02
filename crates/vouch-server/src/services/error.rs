@@ -101,23 +101,7 @@ pub enum OAuthErrorCode {
 
 impl std::fmt::Display for OAuthErrorCode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = match self {
-            Self::InvalidRequest => "invalid_request",
-            Self::InvalidClient => "invalid_client",
-            Self::InvalidGrant => "invalid_grant",
-            Self::UnauthorizedClient => "unauthorized_client",
-            Self::UnsupportedGrantType => "unsupported_grant_type",
-            Self::InvalidScope => "invalid_scope",
-            Self::ServerError => "server_error",
-            Self::TemporarilyUnavailable => "temporarily_unavailable",
-            Self::AuthorizationPending => "authorization_pending",
-            Self::SlowDown => "slow_down",
-            Self::ExpiredToken => "expired_token",
-            Self::AccessDenied => "access_denied",
-            Self::InvalidDpopProof => "invalid_dpop_proof",
-            Self::UseDpopNonce => "use_dpop_nonce",
-        };
-        write!(f, "{s}")
+        write!(f, "{}", self.as_str())
     }
 }
 

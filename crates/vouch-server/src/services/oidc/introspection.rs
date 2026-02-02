@@ -7,9 +7,9 @@
 
 use crate::AppState;
 use crate::db;
-use crate::handlers::auth::SessionClaims;
 use crate::handlers::hash_token;
 use crate::services::ServiceResult;
+use crate::services::auth::SessionClaims;
 use jsonwebtoken::{DecodingKey, Validation};
 use serde::Serialize;
 use std::sync::Arc;
@@ -127,7 +127,7 @@ pub async fn introspect_token(
         iat: Some(claims.iat),
         sub: Some(claims.email),
         aud: None,
-        iss: Some(state.config.verification_base_url.clone()),
+        iss: Some(state.config.base_url.clone()),
     })
 }
 

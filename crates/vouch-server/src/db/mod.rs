@@ -18,7 +18,6 @@ mod credentials;
 mod device_auth;
 pub mod dsql;
 mod enrollment;
-mod error;
 mod github;
 pub mod migrations;
 mod oauth;
@@ -33,9 +32,6 @@ mod users;
 
 // Re-export Pool, DatabaseType, and Transaction for use throughout the application
 pub use pool::{DatabaseType, Pool, Transaction};
-
-// Re-export error types
-pub use error::{DbError, DbResult};
 
 // Re-export user types and functions
 pub use users::{

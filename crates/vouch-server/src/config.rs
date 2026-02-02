@@ -223,8 +223,8 @@ pub struct ServerConfig {
     pub oidc_client_id: Option<String>,
     /// OIDC client secret.
     pub oidc_client_secret: Option<SecretString>,
-    /// Base URL for device verification (defaults to `https://{rp_id}`).
-    pub verification_base_url: String,
+    /// Base URL for this server (defaults to `https://{rp_id}`, or `http://localhost:port` for local dev).
+    pub base_url: String,
     /// Device code expiration in seconds (default: 600).
     pub device_code_expires_seconds: u64,
     /// Device code polling interval in seconds (default: 5).
@@ -287,8 +287,8 @@ impl ServerConfig {
             anyhow::bail!("JWT secret must be at least 32 characters");
         }
 
-        // Compute default verification URL
-        let verification_base_url = args.verification_url.unwrap_or_else(|| {
+        // Compute base URL (handles both production https and local http)
+        let base_url = args.verification_url.unwrap_or_else(|| {
             // For local development (localhost/127.0.0.1), use http with port
             if args.rp_id == "localhost" || args.rp_id == "127.0.0.1" {
                 // Extract port from listen_addr (e.g., "0.0.0.0:3000" -> "3000")
@@ -336,7 +336,7 @@ impl ServerConfig {
             oidc_issuer_url: args.oidc_issuer,
             oidc_client_id: args.oidc_client_id,
             oidc_client_secret: args.oidc_client_secret.map(SecretString::from),
-            verification_base_url,
+            base_url,
             device_code_expires_seconds: args.device_code_expires,
             device_poll_interval_seconds: args.device_poll_interval,
             allowed_domains,

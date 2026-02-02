@@ -5,8 +5,8 @@ use crate::AppState;
 use crate::services::oidc::{
     exchange::{TokenExchangeParams, exchange_token},
     token::{
-        AuthCodeExchangeParams, ClientCredentials as SvcClientCredentials,
-        exchange_authorization_code, validate_dpop_if_present,
+        AuthCodeExchangeParams, ClientCredentials, exchange_authorization_code,
+        validate_dpop_if_present,
     },
 };
 use askama::Template;
@@ -18,15 +18,14 @@ use axum::{
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::ApiError;
 
-// Re-export types needed by other modules
-pub use crate::impl_template_response;
-pub use crate::services::oidc::token::{AuthenticatedClient, ClientAuthError, IdTokenClaims};
+use crate::impl_template_response;
 
-/// Authorization page template (re-exported for mod.rs).
+/// Authorization page template.
 #[derive(Template)]
 #[template(path = "authorize.html")]
 pub struct AuthorizeTemplate {
@@ -60,32 +59,9 @@ impl OAuthGrantType {
             _ => None,
         }
     }
-
-    /// Get the string representation of this grant type.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::AuthorizationCode => "authorization_code",
-            Self::DeviceCode => "urn:ietf:params:oauth:grant-type:device_code",
-            Self::TokenExchange => "urn:ietf:params:oauth:grant-type:token-exchange",
-        }
-    }
-}
-
-/// Token request parameters.
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-pub struct TokenRequest {
-    pub grant_type: String,
-    pub code: Option<String>,
-    pub redirect_uri: Option<String>,
-    pub client_id: Option<String>,
-    pub client_secret: Option<String>,
-    pub code_verifier: Option<String>,
-    pub device_code: Option<String>,
 }
 
 /// Token response.
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct TokenResponse {
     pub access_token: String,
@@ -95,9 +71,9 @@ pub struct TokenResponse {
     pub scope: Option<String>,
 }
 
-/// Unified token request that includes both authorization_code and device_code parameters.
+/// Token request for all grant types (authorization_code, device_code, token_exchange).
 #[derive(Debug, Deserialize)]
-pub struct UnifiedTokenRequest {
+pub struct TokenRequest {
     pub grant_type: String,
     #[serde(default)]
     pub code: Option<String>,
@@ -105,8 +81,9 @@ pub struct UnifiedTokenRequest {
     pub redirect_uri: Option<String>,
     #[serde(default)]
     pub client_id: Option<String>,
+    /// Client secret (wrapped in SecretString to prevent accidental logging).
     #[serde(default)]
-    pub client_secret: Option<String>,
+    pub client_secret: Option<SecretString>,
     #[serde(default)]
     pub code_verifier: Option<String>,
     #[serde(default)]
@@ -116,22 +93,6 @@ pub struct UnifiedTokenRequest {
     pub subject_token: Option<String>,
     #[serde(default)]
     pub subject_token_type: Option<String>,
-    #[serde(default)]
-    pub actor_token: Option<String>,
-    #[serde(default)]
-    pub actor_token_type: Option<String>,
-    #[serde(default)]
-    pub audience: Option<String>,
-    #[serde(default)]
-    pub scope: Option<String>,
-}
-
-/// Token exchange request (RFC 8693).
-#[derive(Debug, Deserialize)]
-pub struct TokenExchangeRequest {
-    pub grant_type: String,
-    pub subject_token: String,
-    pub subject_token_type: String,
     #[serde(default)]
     pub actor_token: Option<String>,
     #[serde(default)]
@@ -159,7 +120,7 @@ pub struct TokenExchangeResponse {
 pub async fn token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    axum::Form(params): axum::Form<UnifiedTokenRequest>,
+    axum::Form(params): axum::Form<TokenRequest>,
 ) -> Response {
     let Some(grant_type) = OAuthGrantType::from_str(&params.grant_type) else {
         return (
@@ -184,7 +145,7 @@ pub async fn token(
 async fn handle_authorization_code_grant(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    params: UnifiedTokenRequest,
+    params: TokenRequest,
 ) -> Response {
     let code = match &params.code {
         Some(c) => c,
@@ -198,11 +159,8 @@ async fn handle_authorization_code_grant(
     };
 
     // Extract client credentials from headers or body
-    let credentials = extract_client_credentials(
-        &headers,
-        params.client_id.as_deref(),
-        params.client_secret.as_deref(),
-    );
+    let credentials =
+        extract_client_credentials(&headers, params.client_id.as_deref(), params.client_secret);
 
     // Validate DPoP if present
     let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
@@ -216,7 +174,7 @@ async fn handle_authorization_code_grant(
     let exchange_params = AuthCodeExchangeParams {
         code,
         redirect_uri: params.redirect_uri.as_deref(),
-        credentials,
+        credentials: credentials.as_ref(),
         code_verifier: params.code_verifier.as_deref(),
         dpop_proof,
     };
@@ -237,7 +195,7 @@ async fn handle_authorization_code_grant(
 /// Handle device code grant.
 async fn handle_device_code_grant(
     State(state): State<Arc<AppState>>,
-    params: UnifiedTokenRequest,
+    params: TokenRequest,
 ) -> Response {
     let device_req = vouch_common::DeviceTokenRequest {
         grant_type: params.grant_type,
@@ -252,7 +210,7 @@ async fn handle_device_code_grant(
 /// Handle token exchange grant (RFC 8693).
 async fn handle_token_exchange_grant(
     State(state): State<Arc<AppState>>,
-    params: UnifiedTokenRequest,
+    params: TokenRequest,
 ) -> Response {
     let exchange_params = TokenExchangeParams {
         subject_token: params.subject_token.as_deref().unwrap_or_default(),
@@ -310,34 +268,37 @@ fn service_error_to_api_error(e: crate::services::ServiceError) -> (StatusCode, 
 }
 
 /// Extract client credentials from Authorization header or request body.
-fn extract_client_credentials<'a>(
-    headers: &'a HeaderMap,
-    client_id_param: Option<&'a str>,
-    client_secret_param: Option<&'a str>,
-) -> Option<SvcClientCredentials<'a>> {
+///
+/// Supports both `client_secret_basic` (RFC 6749 Section 2.3.1) and
+/// `client_secret_post` (RFC 6749 Section 2.3.1) authentication methods.
+///
+/// The client secret is wrapped in `SecretString` to prevent accidental logging
+/// and ensure it is zeroized on drop.
+fn extract_client_credentials(
+    headers: &HeaderMap,
+    client_id_param: Option<&str>,
+    client_secret_param: Option<SecretString>,
+) -> Option<ClientCredentials> {
     // Try Authorization header first (client_secret_basic)
     if let Some(auth_header) = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Basic "))
-    {
-        // Decode Base64 credentials
-        if let Ok(decoded) = URL_SAFE_NO_PAD
+        && let Ok(decoded) = URL_SAFE_NO_PAD
             .decode(auth_header.trim())
             .or_else(|_| base64::engine::general_purpose::STANDARD.decode(auth_header.trim()))
-        {
-            let creds = String::from_utf8_lossy(&decoded);
-            if let Some((id, secret)) = creds.split_once(':') {
-                // We need to return owned data here, but the function signature expects references
-                // This is a limitation - for now, fall through to body params
-                let _ = (id, secret);
-            }
-        }
+        && let Ok(creds) = String::from_utf8(decoded)
+        && let Some((id, secret)) = creds.split_once(':')
+    {
+        return Some(ClientCredentials {
+            client_id: id.to_string(),
+            client_secret: Some(SecretString::from(secret.to_string())),
+        });
     }
 
-    // Use request body parameters (client_secret_post)
-    client_id_param.map(|id| SvcClientCredentials {
-        client_id: id,
+    // Fall back to request body parameters (client_secret_post)
+    client_id_param.map(|id| ClientCredentials {
+        client_id: id.to_string(),
         client_secret: client_secret_param,
     })
 }
