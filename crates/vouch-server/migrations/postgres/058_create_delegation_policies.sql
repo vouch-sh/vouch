@@ -1,4 +1,5 @@
 -- Delegation policies table for token exchange authorization
+-- Timestamps generated in application code
 CREATE TABLE delegation_policies (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
@@ -7,6 +8,6 @@ CREATE TABLE delegation_policies (
     allowed_scopes TEXT,
     max_ttl_seconds INTEGER DEFAULT 28800,
     enabled BOOLEAN DEFAULT TRUE,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL,
+    updated_at TIMESTAMPTZ NOT NULL
 );

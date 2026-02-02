@@ -2,14 +2,16 @@
 //! Credential-related database operations (SSH revocation, enrollment, token exchange, cloud integrations).
 
 use super::Pool;
-use super::compat::{BuildSql, now_expr};
+use super::compat::BuildSql;
 use super::schema::{
     CloudIntegrations, DelegationPolicies, EnrollmentSessions, SshRevokedCertificates,
     TokenExchanges,
 };
+use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional};
 use anyhow::Result;
-use sea_query::{Expr, OnConflict, Order, Query, SimpleExpr};
+use jiff::Timestamp;
+use sea_query::{Expr, OnConflict, Order, Query};
 use uuid::Uuid;
 
 // ============================================================================
@@ -30,6 +32,7 @@ pub async fn insert_token_exchange(
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::insert()
@@ -43,6 +46,7 @@ pub async fn insert_token_exchange(
                 TokenExchanges::RequestedAudience,
                 TokenExchanges::GrantedScope,
                 TokenExchanges::ExpiresAt,
+                TokenExchanges::CreatedAt,
             ])
             .values_panic([
                 id.clone().into(),
@@ -53,6 +57,7 @@ pub async fn insert_token_exchange(
                 requested_audience.into(),
                 granted_scope.into(),
                 expires_at.into(),
+                now.as_str().into(),
             ])
             .to_owned();
         query.build_sql(db_type)
@@ -109,8 +114,8 @@ pub struct TokenExchangeRecord {
     pub issued_token_hash: String,
     pub requested_audience: Option<String>,
     pub granted_scope: Option<String>,
-    pub created_at: String,
-    pub expires_at: String,
+    pub created_at: DbTimestamp,
+    pub expires_at: DbTimestamp,
 }
 
 // ============================================================================
@@ -128,8 +133,8 @@ pub struct DelegationPolicy {
     pub allowed_scopes: Option<String>,
     pub max_ttl_seconds: Option<i64>,
     pub enabled: bool,
-    pub created_at: String,
-    pub updated_at: String,
+    pub created_at: DbTimestamp,
+    pub updated_at: DbTimestamp,
 }
 
 /// Check if a delegation is allowed by any policy.
@@ -220,6 +225,7 @@ pub async fn create_delegation_policy(
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::insert()
@@ -231,6 +237,8 @@ pub async fn create_delegation_policy(
                 DelegationPolicies::GranteePattern,
                 DelegationPolicies::AllowedScopes,
                 DelegationPolicies::MaxTtlSeconds,
+                DelegationPolicies::CreatedAt,
+                DelegationPolicies::UpdatedAt,
             ])
             .values_panic([
                 id.clone().into(),
@@ -239,6 +247,8 @@ pub async fn create_delegation_policy(
                 grantee_pattern.into(),
                 allowed_scopes.into(),
                 max_ttl_seconds.into(),
+                now.as_str().into(),
+                now.as_str().into(),
             ])
             .to_owned();
         query.build_sql(db_type)
@@ -281,15 +291,13 @@ pub async fn get_delegation_policies(pool: &Pool) -> Result<Vec<DelegationPolicy
 #[allow(dead_code)]
 pub async fn set_delegation_policy_enabled(pool: &Pool, id: &str, enabled: bool) -> Result<bool> {
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::update()
             .table(DelegationPolicies::Table)
             .value(DelegationPolicies::Enabled, enabled)
-            .value(
-                DelegationPolicies::UpdatedAt,
-                SimpleExpr::Custom(now_expr(db_type).to_string()),
-            )
+            .value(DelegationPolicies::UpdatedAt, now.as_str())
             .and_where(Expr::col(DelegationPolicies::Id).eq(id))
             .to_owned();
         query.build_sql(db_type)
@@ -331,11 +339,11 @@ pub struct EnrollmentSession {
     #[allow(dead_code)]
     pub session_token_hash: String,
     pub device_auth_id: Option<String>,
-    pub expires_at: String,
+    pub expires_at: DbTimestamp,
     #[allow(dead_code)]
-    pub created_at: String,
+    pub created_at: DbTimestamp,
     #[allow(dead_code)]
-    pub last_used_at: String,
+    pub last_used_at: DbTimestamp,
 }
 
 /// Create a new enrollment session.
@@ -349,6 +357,7 @@ pub async fn create_enrollment_session(
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::insert()
@@ -360,6 +369,8 @@ pub async fn create_enrollment_session(
                 EnrollmentSessions::SessionTokenHash,
                 EnrollmentSessions::DeviceAuthId,
                 EnrollmentSessions::ExpiresAt,
+                EnrollmentSessions::CreatedAt,
+                EnrollmentSessions::LastUsedAt,
             ])
             .values_panic([
                 id.clone().into(),
@@ -368,6 +379,8 @@ pub async fn create_enrollment_session(
                 session_token_hash.into(),
                 device_auth_id.into(),
                 expires_at.into(),
+                now.as_str().into(),
+                now.as_str().into(),
             ])
             .to_owned();
         query.build_sql(db_type)
@@ -411,14 +424,12 @@ pub async fn get_enrollment_session_by_token_hash(
 /// Update enrollment session last used timestamp.
 pub async fn touch_enrollment_session(pool: &Pool, id: &str) -> Result<()> {
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::update()
             .table(EnrollmentSessions::Table)
-            .value(
-                EnrollmentSessions::LastUsedAt,
-                SimpleExpr::Custom(now_expr(db_type).to_string()),
-            )
+            .value(EnrollmentSessions::LastUsedAt, now.as_str())
             .and_where(Expr::col(EnrollmentSessions::Id).eq(id))
             .to_owned();
         query.build_sql(db_type)
@@ -449,14 +460,12 @@ pub async fn delete_enrollment_session(pool: &Pool, id: &str) -> Result<bool> {
 /// Delete expired enrollment sessions (for cleanup task).
 pub async fn delete_expired_enrollment_sessions(pool: &Pool) -> Result<u64> {
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::delete()
             .from_table(EnrollmentSessions::Table)
-            .and_where(
-                Expr::col(EnrollmentSessions::ExpiresAt)
-                    .lt(SimpleExpr::Custom(now_expr(db_type).to_string())),
-            )
+            .and_where(Expr::col(EnrollmentSessions::ExpiresAt).lt(now.as_str()))
             .to_owned();
         query.build_sql(db_type)
     };
@@ -481,9 +490,9 @@ pub struct RevokedSshCertificate {
     #[allow(dead_code)]
     pub reason: Option<String>,
     #[allow(dead_code)]
-    pub revoked_at: String,
+    pub revoked_at: DbTimestamp,
     #[allow(dead_code)]
-    pub expires_at: String,
+    pub expires_at: DbTimestamp,
     #[allow(dead_code)]
     pub revoked_by: Option<String>,
 }
@@ -500,6 +509,7 @@ pub async fn revoke_ssh_certificate(
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     // Build SQL in a block to ensure query is dropped before await
     let sql = {
@@ -512,6 +522,7 @@ pub async fn revoke_ssh_certificate(
                 SshRevokedCertificates::ExpiresAt,
                 SshRevokedCertificates::Reason,
                 SshRevokedCertificates::RevokedBy,
+                SshRevokedCertificates::RevokedAt,
             ])
             .values_panic([
                 id.clone().into(),
@@ -520,6 +531,7 @@ pub async fn revoke_ssh_certificate(
                 expires_at.into(),
                 reason.into(),
                 revoked_by.into(),
+                now.as_str().into(),
             ])
             .on_conflict(OnConflict::new().do_nothing().to_owned())
             .to_owned();
@@ -552,6 +564,7 @@ pub async fn is_ssh_certificate_revoked(pool: &Pool, serial: &str) -> Result<boo
 /// Get all revoked SSH certificates (for KRL generation).
 pub async fn get_revoked_ssh_certificates(pool: &Pool) -> Result<Vec<RevokedSshCertificate>> {
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::select()
@@ -565,10 +578,7 @@ pub async fn get_revoked_ssh_certificates(pool: &Pool) -> Result<Vec<RevokedSshC
                 SshRevokedCertificates::RevokedBy,
             ])
             .from(SshRevokedCertificates::Table)
-            .and_where(
-                Expr::col(SshRevokedCertificates::ExpiresAt)
-                    .gt(SimpleExpr::Custom(now_expr(db_type).to_string())),
-            )
+            .and_where(Expr::col(SshRevokedCertificates::ExpiresAt).gt(now.as_str()))
             .order_by(SshRevokedCertificates::RevokedAt, Order::Desc)
             .to_owned();
         query.build_sql(db_type)
@@ -590,6 +600,7 @@ pub async fn revoke_all_ssh_certificates_for_user(
     // Existing issued certificates are tracked separately via serial numbers.
     // The caller should also add any known serials to the revocation list.
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     // Compute expiry (1 year from now)
     let expires_at = jiff::Timestamp::now()
@@ -608,6 +619,7 @@ pub async fn revoke_all_ssh_certificates_for_user(
                 SshRevokedCertificates::ExpiresAt,
                 SshRevokedCertificates::Reason,
                 SshRevokedCertificates::RevokedBy,
+                SshRevokedCertificates::RevokedAt,
             ])
             .values_panic([
                 Uuid::now_v7().to_string().into(),
@@ -616,6 +628,7 @@ pub async fn revoke_all_ssh_certificates_for_user(
                 expires_at.into(),
                 reason.into(),
                 revoked_by.into(),
+                now.as_str().into(),
             ])
             .on_conflict(OnConflict::new().do_nothing().to_owned())
             .to_owned();
@@ -630,14 +643,12 @@ pub async fn revoke_all_ssh_certificates_for_user(
 /// Delete expired SSH certificate revocations (cleanup).
 pub async fn delete_expired_ssh_revocations(pool: &Pool) -> Result<u64> {
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::delete()
             .from_table(SshRevokedCertificates::Table)
-            .and_where(
-                Expr::col(SshRevokedCertificates::ExpiresAt)
-                    .lt(SimpleExpr::Custom(now_expr(db_type).to_string())),
-            )
+            .and_where(Expr::col(SshRevokedCertificates::ExpiresAt).lt(now.as_str()))
             .to_owned();
         query.build_sql(db_type)
     };
@@ -658,8 +669,8 @@ pub struct CloudIntegration {
     pub org_id: String,
     pub provider: String,
     pub config: String,
-    pub created_at: String,
-    pub updated_at: String,
+    pub created_at: DbTimestamp,
+    pub updated_at: DbTimestamp,
     pub created_by_user_id: Option<String>,
 }
 
@@ -704,6 +715,7 @@ pub async fn upsert_cloud_integration(
 ) -> Result<CloudIntegration> {
     let id = Uuid::now_v7().to_string();
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::insert()
@@ -714,6 +726,8 @@ pub async fn upsert_cloud_integration(
                 CloudIntegrations::Provider,
                 CloudIntegrations::Config,
                 CloudIntegrations::CreatedByUserId,
+                CloudIntegrations::CreatedAt,
+                CloudIntegrations::UpdatedAt,
             ])
             .values_panic([
                 id.into(),
@@ -721,14 +735,13 @@ pub async fn upsert_cloud_integration(
                 provider.into(),
                 config.into(),
                 user_id.into(),
+                now.as_str().into(),
+                now.as_str().into(),
             ])
             .on_conflict(
                 OnConflict::columns([CloudIntegrations::OrgId, CloudIntegrations::Provider])
                     .update_column(CloudIntegrations::Config)
-                    .value(
-                        CloudIntegrations::UpdatedAt,
-                        SimpleExpr::Custom(now_expr(db_type).to_string()),
-                    )
+                    .value(CloudIntegrations::UpdatedAt, now.as_str())
                     .to_owned(),
             )
             .to_owned();

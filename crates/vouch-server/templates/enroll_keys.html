@@ -321,8 +321,13 @@
 
     function formatDate(dateStr) {
         if (!dateStr) return '';
-        // SQLite datetime format is "YYYY-MM-DD HH:MM:SS"
-        const date = new Date(dateStr.replace(' ', 'T') + 'Z');
+        // Handle both SQLite format ("YYYY-MM-DD HH:MM:SS") and ISO 8601 ("YYYY-MM-DDTHH:MM:SS.ffffffZ")
+        let normalized = dateStr;
+        if (!dateStr.includes('T')) {
+            // SQLite format: add T separator and Z suffix
+            normalized = dateStr.replace(' ', 'T') + 'Z';
+        }
+        const date = new Date(normalized);
         return date.toLocaleDateString(undefined, {
             year: 'numeric',
             month: 'short',

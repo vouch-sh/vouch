@@ -4,8 +4,10 @@
 use super::Pool;
 use super::compat::BuildSql;
 use super::schema::Sessions;
+use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_optional};
 use anyhow::Result;
+use jiff::Timestamp;
 use sea_query::{Expr, Query};
 use uuid::Uuid;
 
@@ -17,7 +19,7 @@ pub struct Session {
     pub user_id: String,
     pub token_hash: String,
     pub authenticator_id: Option<String>,
-    pub expires_at: String,
+    pub expires_at: DbTimestamp,
 }
 
 /// Create a new session.
@@ -30,6 +32,7 @@ pub async fn create_session(
     expires_at: &str,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let now = Timestamp::now().to_string();
     let db_type = pool.db_type();
 
     // Build SQL in a block to ensure query is dropped before await
@@ -42,6 +45,7 @@ pub async fn create_session(
                 Sessions::TokenHash,
                 Sessions::AuthenticatorId,
                 Sessions::ExpiresAt,
+                Sessions::CreatedAt,
             ])
             .values_panic([
                 id.clone().into(),
@@ -49,6 +53,7 @@ pub async fn create_session(
                 token_hash.into(),
                 authenticator_id.into(),
                 expires_at.into(),
+                now.as_str().into(),
             ])
             .to_owned();
         query.build_sql(db_type)

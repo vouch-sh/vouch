@@ -8,9 +8,17 @@ use super::schema::{
     OAuthClients, OAuthUsageEvents, ScimGroupMembers, Sessions, SshRevokedCertificates,
     TokenExchanges, Users,
 };
-use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute, tx_fetch_all};
+use super::types::DbTimestamp;
+#[cfg(any(test, feature = "test-utils"))]
+use crate::{db_execute, db_fetch_one};
+use crate::{db_fetch_all, db_fetch_optional, tx_execute, tx_fetch_all};
 use anyhow::Result;
-use sea_query::{Expr, OnConflict, Query};
+#[cfg(any(test, feature = "test-utils"))]
+use jiff::Timestamp;
+#[cfg(any(test, feature = "test-utils"))]
+use sea_query::OnConflict;
+use sea_query::{Alias, Expr, Func, JoinType, Order, Query};
+#[cfg(any(test, feature = "test-utils"))]
 use uuid::Uuid;
 
 /// User record.
@@ -33,7 +41,7 @@ pub struct UserWithAuthCount {
     pub email: String,
     #[allow(dead_code)]
     pub name: Option<String>,
-    pub created_at: String,
+    pub created_at: DbTimestamp,
     pub authenticator_count: i64,
     #[allow(dead_code)]
     pub org_id: Option<String>,
@@ -43,11 +51,12 @@ pub struct UserWithAuthCount {
 
 /// Create or get a user by email.
 ///
-/// Note: This function is primarily used for testing. In production, users are
-/// created via the OIDC enrollment flow using `upsert_user_with_org`.
-#[allow(dead_code)]
+/// Note: This function is only used in tests. Production code uses the
+/// transactional `enroll_user_with_org` function.
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn upsert_user(pool: &Pool, email: &str, name: Option<&str>) -> Result<User> {
     let id = Uuid::now_v7().to_string();
+    let now = Timestamp::now().to_string();
     let db_type = pool.db_type();
 
     // Try to insert, ignore if exists using sea-query
@@ -55,8 +64,8 @@ pub async fn upsert_user(pool: &Pool, email: &str, name: Option<&str>) -> Result
     let sql = {
         let query = Query::insert()
             .into_table(Users::Table)
-            .columns([Users::Id, Users::Email, Users::Name])
-            .values_panic([id.clone().into(), email.into(), name.into()])
+            .columns([Users::Id, Users::Email, Users::Name, Users::CreatedAt])
+            .values_panic([id.clone().into(), email.into(), name.into(), now.as_str().into()])
             .on_conflict(OnConflict::new().do_nothing().to_owned())
             .to_owned();
         query.build_sql(db_type)
@@ -86,6 +95,11 @@ pub async fn upsert_user(pool: &Pool, email: &str, name: Option<&str>) -> Result
 }
 
 /// Create or get a user by email, associating them with an organization.
+///
+/// Note: This function is only used in tests. Production code uses the
+/// transactional `enroll_user_with_org` function which handles organization
+/// and user creation atomically.
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn upsert_user_with_org(
     pool: &Pool,
     email: &str,
@@ -94,6 +108,7 @@ pub async fn upsert_user_with_org(
     is_org_admin: bool,
 ) -> Result<User> {
     let id = Uuid::now_v7().to_string();
+    let now = Timestamp::now().to_string();
     let db_type = pool.db_type();
 
     // Try to insert with org info, ignore if exists using sea-query
@@ -107,6 +122,7 @@ pub async fn upsert_user_with_org(
                 Users::Name,
                 Users::OrgId,
                 Users::IsOrgAdmin,
+                Users::CreatedAt,
             ])
             .values_panic([
                 id.clone().into(),
@@ -114,6 +130,7 @@ pub async fn upsert_user_with_org(
                 name.into(),
                 org_id.into(),
                 is_org_admin.into(),
+                now.as_str().into(),
             ])
             .on_conflict(OnConflict::new().do_nothing().to_owned())
             .to_owned();
@@ -356,16 +373,39 @@ pub async fn delete_user(pool: &Pool, user_id: &str) -> Result<()> {
 
 /// List all users with their authenticator counts.
 pub async fn list_users_with_auth_count(pool: &Pool) -> Result<Vec<UserWithAuthCount>> {
-    let users = db_fetch_all!(
-        pool,
-        sqlx::query_as::<_, UserWithAuthCount>(
-            "SELECT u.id, u.email, u.name, u.created_at,
-                (SELECT COUNT(*) FROM authenticators a WHERE a.user_id = u.id) as authenticator_count,
-                u.org_id, u.is_org_admin
-         FROM users u
-         ORDER BY u.email"
-        )
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .column((Users::Table, Users::Id))
+            .column((Users::Table, Users::Email))
+            .column((Users::Table, Users::Name))
+            .column((Users::Table, Users::CreatedAt))
+            .expr_as(
+                Func::count(Expr::col((Authenticators::Table, Authenticators::Id))),
+                Alias::new("authenticator_count"),
+            )
+            .column((Users::Table, Users::OrgId))
+            .column((Users::Table, Users::IsOrgAdmin))
+            .from(Users::Table)
+            .join(
+                JoinType::LeftJoin,
+                Authenticators::Table,
+                Expr::col((Users::Table, Users::Id))
+                    .equals((Authenticators::Table, Authenticators::UserId)),
+            )
+            .group_by_col((Users::Table, Users::Id))
+            .group_by_col((Users::Table, Users::Email))
+            .group_by_col((Users::Table, Users::Name))
+            .group_by_col((Users::Table, Users::CreatedAt))
+            .group_by_col((Users::Table, Users::OrgId))
+            .group_by_col((Users::Table, Users::IsOrgAdmin))
+            .order_by((Users::Table, Users::Email), Order::Asc)
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let users = db_fetch_all!(pool, sqlx::query_as::<_, UserWithAuthCount>(&sql))?;
 
     Ok(users)
 }
@@ -375,18 +415,40 @@ pub async fn list_users_with_auth_count_by_org(
     pool: &Pool,
     org_id: &str,
 ) -> Result<Vec<UserWithAuthCount>> {
-    let users = db_fetch_all!(
-        pool,
-        sqlx::query_as::<_, UserWithAuthCount>(
-            "SELECT u.id, u.email, u.name, u.created_at,
-                (SELECT COUNT(*) FROM authenticators a WHERE a.user_id = u.id) as authenticator_count,
-                u.org_id, u.is_org_admin
-         FROM users u
-         WHERE u.org_id = ?
-         ORDER BY u.email"
-        )
-        .bind(org_id)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .column((Users::Table, Users::Id))
+            .column((Users::Table, Users::Email))
+            .column((Users::Table, Users::Name))
+            .column((Users::Table, Users::CreatedAt))
+            .expr_as(
+                Func::count(Expr::col((Authenticators::Table, Authenticators::Id))),
+                Alias::new("authenticator_count"),
+            )
+            .column((Users::Table, Users::OrgId))
+            .column((Users::Table, Users::IsOrgAdmin))
+            .from(Users::Table)
+            .join(
+                JoinType::LeftJoin,
+                Authenticators::Table,
+                Expr::col((Users::Table, Users::Id))
+                    .equals((Authenticators::Table, Authenticators::UserId)),
+            )
+            .and_where(Expr::col((Users::Table, Users::OrgId)).eq(org_id))
+            .group_by_col((Users::Table, Users::Id))
+            .group_by_col((Users::Table, Users::Email))
+            .group_by_col((Users::Table, Users::Name))
+            .group_by_col((Users::Table, Users::CreatedAt))
+            .group_by_col((Users::Table, Users::OrgId))
+            .group_by_col((Users::Table, Users::IsOrgAdmin))
+            .order_by((Users::Table, Users::Email), Order::Asc)
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let users = db_fetch_all!(pool, sqlx::query_as::<_, UserWithAuthCount>(&sql))?;
 
     Ok(users)
 }

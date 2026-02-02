@@ -5,9 +5,13 @@
 //! per RFC 6749 and RFC 9700 security best practices.
 
 use super::Pool;
+use super::compat::BuildSql;
+use super::schema::PendingOAuthAuthorizations;
+use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_optional};
 use anyhow::Result;
 use jiff::{Span, Timestamp};
+use sea_query::{Expr, Query};
 use uuid::Uuid;
 
 /// Pending OAuth authorization record.
@@ -25,9 +29,9 @@ pub struct PendingOAuthAuthorization {
     pub nonce: Option<String>,
     pub code_challenge: Option<String>,
     pub code_challenge_method: Option<String>,
-    pub created_at: String,
-    pub expires_at: String,
-    pub consumed_at: Option<String>,
+    pub created_at: DbTimestamp,
+    pub expires_at: DbTimestamp,
+    pub consumed_at: Option<DbTimestamp>,
 }
 
 /// Parameters for creating a pending OAuth authorization.
@@ -56,31 +60,48 @@ pub async fn create_pending_oauth_authorization(
     params: CreatePendingOAuthParams<'_>,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
     let now = Timestamp::now();
     let expires_at = now
         .checked_add(Span::new().minutes(10))
         .map_err(|_| anyhow::anyhow!("Time calculation overflow when computing expiration"))?
         .to_string();
 
-    db_execute!(
-        pool,
-        sqlx::query(
-            r"INSERT INTO pending_oauth_authorizations
-            (id, client_id, redirect_uri, response_type, state, scope, nonce,
-             code_challenge, code_challenge_method, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-        )
-        .bind(&id)
-        .bind(params.client_id)
-        .bind(params.redirect_uri)
-        .bind(params.response_type)
-        .bind(params.state)
-        .bind(params.scope)
-        .bind(params.nonce)
-        .bind(params.code_challenge)
-        .bind(params.code_challenge_method)
-        .bind(&expires_at)
-    )?;
+    let created_at = now.to_string();
+    let sql = {
+        let query = Query::insert()
+            .into_table(PendingOAuthAuthorizations::Table)
+            .columns([
+                PendingOAuthAuthorizations::Id,
+                PendingOAuthAuthorizations::ClientId,
+                PendingOAuthAuthorizations::RedirectUri,
+                PendingOAuthAuthorizations::ResponseType,
+                PendingOAuthAuthorizations::State,
+                PendingOAuthAuthorizations::Scope,
+                PendingOAuthAuthorizations::Nonce,
+                PendingOAuthAuthorizations::CodeChallenge,
+                PendingOAuthAuthorizations::CodeChallengeMethod,
+                PendingOAuthAuthorizations::CreatedAt,
+                PendingOAuthAuthorizations::ExpiresAt,
+            ])
+            .values_panic([
+                id.clone().into(),
+                params.client_id.into(),
+                params.redirect_uri.into(),
+                params.response_type.into(),
+                params.state.into(),
+                params.scope.into(),
+                params.nonce.into(),
+                params.code_challenge.into(),
+                params.code_challenge_method.into(),
+                created_at.as_str().into(),
+                expires_at.as_str().into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(id)
 }
@@ -93,18 +114,33 @@ pub async fn get_pending_oauth_authorization(
     id: &str,
 ) -> Result<Option<PendingOAuthAuthorization>> {
     let now = Timestamp::now().to_string();
+    let db_type = pool.db_type();
 
-    let record = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, PendingOAuthAuthorization>(
-            r"SELECT id, client_id, redirect_uri, response_type, state, scope, nonce,
-                 code_challenge, code_challenge_method, created_at, expires_at, consumed_at
-         FROM pending_oauth_authorizations
-         WHERE id = ? AND expires_at > ? AND consumed_at IS NULL"
-        )
-        .bind(id)
-        .bind(&now)
-    )?;
+    let sql = {
+        let query = Query::select()
+            .columns([
+                PendingOAuthAuthorizations::Id,
+                PendingOAuthAuthorizations::ClientId,
+                PendingOAuthAuthorizations::RedirectUri,
+                PendingOAuthAuthorizations::ResponseType,
+                PendingOAuthAuthorizations::State,
+                PendingOAuthAuthorizations::Scope,
+                PendingOAuthAuthorizations::Nonce,
+                PendingOAuthAuthorizations::CodeChallenge,
+                PendingOAuthAuthorizations::CodeChallengeMethod,
+                PendingOAuthAuthorizations::CreatedAt,
+                PendingOAuthAuthorizations::ExpiresAt,
+                PendingOAuthAuthorizations::ConsumedAt,
+            ])
+            .from(PendingOAuthAuthorizations::Table)
+            .and_where(Expr::col(PendingOAuthAuthorizations::Id).eq(id))
+            .and_where(Expr::col(PendingOAuthAuthorizations::ExpiresAt).gt(&now))
+            .and_where(Expr::col(PendingOAuthAuthorizations::ConsumedAt).is_null())
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let record = db_fetch_optional!(pool, sqlx::query_as::<_, PendingOAuthAuthorization>(&sql))?;
 
     Ok(record)
 }
@@ -121,21 +157,23 @@ pub async fn consume_pending_oauth_authorization(
     pool: &Pool,
     id: &str,
 ) -> Result<Option<PendingOAuthAuthorization>> {
+    let db_type = pool.db_type();
     let now = Timestamp::now().to_string();
 
     // Atomically attempt to consume the authorization.
     // The WHERE clause ensures only one request can succeed for a given ID.
-    let result = db_execute!(
-        pool,
-        sqlx::query(
-            "UPDATE pending_oauth_authorizations
-         SET consumed_at = ?
-         WHERE id = ? AND expires_at > ? AND consumed_at IS NULL"
-        )
-        .bind(&now)
-        .bind(id)
-        .bind(&now)
-    )?;
+    let update_sql = {
+        let query = Query::update()
+            .table(PendingOAuthAuthorizations::Table)
+            .value(PendingOAuthAuthorizations::ConsumedAt, now.as_str())
+            .and_where(Expr::col(PendingOAuthAuthorizations::Id).eq(id))
+            .and_where(Expr::col(PendingOAuthAuthorizations::ExpiresAt).gt(now.as_str()))
+            .and_where(Expr::col(PendingOAuthAuthorizations::ConsumedAt).is_null())
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&update_sql))?;
 
     // If no rows were affected, the authorization doesn't exist,
     // was expired, or was already consumed
@@ -144,16 +182,30 @@ pub async fn consume_pending_oauth_authorization(
     }
 
     // Successfully consumed - now fetch the record
-    let record = db_fetch_optional!(
-        pool,
-        sqlx::query_as::<_, PendingOAuthAuthorization>(
-            r"SELECT id, client_id, redirect_uri, response_type, state, scope, nonce,
-                 code_challenge, code_challenge_method, created_at, expires_at, consumed_at
-         FROM pending_oauth_authorizations
-         WHERE id = ?"
-        )
-        .bind(id)
-    )?;
+    let db_type = pool.db_type();
+    let sql = {
+        let query = Query::select()
+            .columns([
+                PendingOAuthAuthorizations::Id,
+                PendingOAuthAuthorizations::ClientId,
+                PendingOAuthAuthorizations::RedirectUri,
+                PendingOAuthAuthorizations::ResponseType,
+                PendingOAuthAuthorizations::State,
+                PendingOAuthAuthorizations::Scope,
+                PendingOAuthAuthorizations::Nonce,
+                PendingOAuthAuthorizations::CodeChallenge,
+                PendingOAuthAuthorizations::CodeChallengeMethod,
+                PendingOAuthAuthorizations::CreatedAt,
+                PendingOAuthAuthorizations::ExpiresAt,
+                PendingOAuthAuthorizations::ConsumedAt,
+            ])
+            .from(PendingOAuthAuthorizations::Table)
+            .and_where(Expr::col(PendingOAuthAuthorizations::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let record = db_fetch_optional!(pool, sqlx::query_as::<_, PendingOAuthAuthorization>(&sql))?;
 
     Ok(record)
 }
@@ -162,10 +214,17 @@ pub async fn consume_pending_oauth_authorization(
 ///
 /// Called by the cleanup task to remove old records.
 pub async fn delete_expired_pending_oauth_authorizations(pool: &Pool, now: &str) -> Result<u64> {
-    let result = db_execute!(
-        pool,
-        sqlx::query("DELETE FROM pending_oauth_authorizations WHERE expires_at < ?").bind(now)
-    )?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(PendingOAuthAuthorizations::Table)
+            .and_where(Expr::col(PendingOAuthAuthorizations::ExpiresAt).lt(now))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected())
 }

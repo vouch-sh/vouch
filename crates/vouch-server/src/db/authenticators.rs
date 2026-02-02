@@ -4,8 +4,10 @@
 use super::Pool;
 use super::compat::BuildSql;
 use super::schema::{Authenticators, DeviceAuthRequests, Sessions};
+use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute};
 use anyhow::Result;
+use jiff::Timestamp;
 use sea_query::{Expr, Query};
 use uuid::Uuid;
 
@@ -18,8 +20,9 @@ pub struct Authenticator {
     pub credential_id: Vec<u8>,
     #[allow(dead_code)]
     pub public_key: Vec<u8>,
-    pub counter: i64,
-    pub created_at: String,
+    /// WebAuthn signature counter (32-bit per spec).
+    pub counter: i32,
+    pub created_at: DbTimestamp,
     /// AAGUID (Authenticator Attestation GUID) identifies the authenticator model.
     pub aaguid: Option<String>,
     /// User handle stored in discoverable credentials (resident keys).
@@ -38,6 +41,7 @@ pub async fn create_authenticator(
     user_handle: Option<&[u8]>,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let now = Timestamp::now().to_string();
     let db_type = pool.db_type();
 
     let sql = {
@@ -50,6 +54,7 @@ pub async fn create_authenticator(
                 Authenticators::CredentialId,
                 Authenticators::PublicKey,
                 Authenticators::Counter,
+                Authenticators::CreatedAt,
                 Authenticators::Aaguid,
                 Authenticators::UserHandle,
             ])
@@ -59,7 +64,8 @@ pub async fn create_authenticator(
                 name.into(),
                 credential_id.into(),
                 public_key.into(),
-                0i64.into(),
+                0i32.into(),
+                now.as_str().into(),
                 aaguid.into(),
                 user_handle.map(|h| h.to_vec()).into(),
             ])
@@ -166,7 +172,7 @@ pub async fn get_authenticator_by_id(
 pub async fn update_authenticator_counter(
     pool: &Pool,
     authenticator_id: &str,
-    counter: i64,
+    counter: i32,
 ) -> Result<()> {
     let db_type = pool.db_type();
 

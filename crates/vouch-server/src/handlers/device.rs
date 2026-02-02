@@ -160,12 +160,7 @@ pub async fn device_token(
 
     // Check if expired
     let now = Timestamp::now();
-    let expires_at: Timestamp = request.expires_at.parse().map_err(|_| {
-        oauth_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            OAuthError::invalid_grant(),
-        )
-    })?;
+    let expires_at = request.expires_at.to_jiff();
 
     if now > expires_at {
         return Err(oauth_error(

@@ -2,11 +2,13 @@
 //! Server configuration and authentication event database operations.
 
 use super::Pool;
-use super::compat::{BuildSql, now_expr};
+use super::compat::BuildSql;
 use super::schema::{AuthEvents, ServerConfig};
+use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_all, db_fetch_optional};
 use anyhow::Result;
-use sea_query::{Expr, OnConflict, Query, SimpleExpr};
+use jiff::Timestamp;
+use sea_query::{Expr, OnConflict, Order, Query};
 use uuid::Uuid;
 
 // ============================================================================
@@ -20,7 +22,7 @@ pub struct ServerConfigRow {
     pub key: String,
     pub value: String,
     #[allow(dead_code)]
-    pub updated_at: String,
+    pub updated_at: DbTimestamp,
 }
 
 /// Get a config value by key.
@@ -70,6 +72,7 @@ pub async fn get_all_config(pool: &Pool) -> Result<Vec<ServerConfigRow>> {
 /// Set a config value.
 pub async fn set_config(pool: &Pool, key: &str, value: &str) -> Result<()> {
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     // Build upsert query using sea-query
     // Build SQL in a block to ensure query is dropped before await
@@ -81,11 +84,7 @@ pub async fn set_config(pool: &Pool, key: &str, value: &str) -> Result<()> {
                 ServerConfig::Value,
                 ServerConfig::UpdatedAt,
             ])
-            .values_panic([
-                key.into(),
-                value.into(),
-                SimpleExpr::Custom(now_expr(db_type).to_string()),
-            ])
+            .values_panic([key.into(), value.into(), now.as_str().into()])
             .on_conflict(
                 OnConflict::column(ServerConfig::Key)
                     .update_columns([ServerConfig::Value, ServerConfig::UpdatedAt])
@@ -174,7 +173,7 @@ pub struct AuthEvent {
     pub client_version: Option<String>,
     pub success: i64,
     pub failure_reason: Option<String>,
-    pub created_at: String,
+    pub created_at: DbTimestamp,
 }
 
 /// Parameters for creating an authentication event.
@@ -197,6 +196,7 @@ pub struct AuthEventParams {
 pub async fn insert_auth_event(pool: &Pool, params: &AuthEventParams) -> Result<String> {
     let id = Uuid::now_v7().to_string();
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     // Build SQL in a block to ensure query is dropped before await
     let sql = {
@@ -215,6 +215,7 @@ pub async fn insert_auth_event(pool: &Pool, params: &AuthEventParams) -> Result<
                 AuthEvents::ClientVersion,
                 AuthEvents::Success,
                 AuthEvents::FailureReason,
+                AuthEvents::CreatedAt,
             ])
             .values_panic([
                 id.clone().into(),
@@ -229,6 +230,7 @@ pub async fn insert_auth_event(pool: &Pool, params: &AuthEventParams) -> Result<
                 params.client_version.clone().into(),
                 i64::from(params.success).into(),
                 params.failure_reason.clone().into(),
+                now.as_str().into(),
             ])
             .to_owned();
         query.build_sql(db_type)
@@ -250,57 +252,64 @@ pub struct AuthEventQuery {
 }
 
 /// Get authentication events with optional filtering.
-pub async fn get_auth_events(pool: &Pool, query: &AuthEventQuery) -> Result<Vec<AuthEvent>> {
-    let mut sql = String::from(
-        "SELECT id, user_id, event_type, authenticator_id, client_ip, user_agent, client_hostname, client_os, client_arch, client_version, success, failure_reason, created_at
-         FROM auth_events WHERE 1=1",
-    );
-    let mut binds: Vec<String> = Vec::new();
+pub async fn get_auth_events(pool: &Pool, query_params: &AuthEventQuery) -> Result<Vec<AuthEvent>> {
+    let db_type = pool.db_type();
+    let limit = query_params.limit.unwrap_or(100);
 
-    if let Some(user_id) = &query.user_id {
-        sql.push_str(" AND user_id = ?");
-        binds.push(user_id.clone());
-    }
+    let sql = {
+        let mut query = Query::select()
+            .columns([
+                AuthEvents::Id,
+                AuthEvents::UserId,
+                AuthEvents::EventType,
+                AuthEvents::AuthenticatorId,
+                AuthEvents::ClientIp,
+                AuthEvents::UserAgent,
+                AuthEvents::ClientHostname,
+                AuthEvents::ClientOs,
+                AuthEvents::ClientArch,
+                AuthEvents::ClientVersion,
+                AuthEvents::Success,
+                AuthEvents::FailureReason,
+                AuthEvents::CreatedAt,
+            ])
+            .from(AuthEvents::Table)
+            .to_owned();
 
-    if let Some(event_type) = &query.event_type {
-        sql.push_str(" AND event_type = ?");
-        binds.push(event_type.clone());
-    }
-
-    if let Some(client_ip) = &query.client_ip {
-        sql.push_str(" AND client_ip = ?");
-        binds.push(client_ip.clone());
-    }
-
-    if let Some(since) = &query.since {
-        sql.push_str(" AND created_at >= ?");
-        binds.push(since.clone());
-    }
-
-    sql.push_str(" ORDER BY created_at DESC");
-
-    let limit = query.limit.unwrap_or(100);
-    sql.push_str(" LIMIT ?");
-    binds.push(limit.to_string());
-
-    // Execute the query based on database type
-    // We need to build the query inside each match arm because SQLx queries are typed to specific databases
-    let events = match pool {
-        Pool::Sqlite(p) => {
-            let mut q = sqlx::query_as::<_, AuthEvent>(&sql);
-            for bind in &binds {
-                q = q.bind(bind);
-            }
-            q.fetch_all(p).await?
+        if let Some(user_id) = &query_params.user_id {
+            query = query
+                .and_where(Expr::col(AuthEvents::UserId).eq(user_id.as_str()))
+                .to_owned();
         }
-        Pool::Postgres(p) => {
-            let mut q = sqlx::query_as::<_, AuthEvent>(&sql);
-            for bind in &binds {
-                q = q.bind(bind);
-            }
-            q.fetch_all(p).await?
+
+        if let Some(event_type) = &query_params.event_type {
+            query = query
+                .and_where(Expr::col(AuthEvents::EventType).eq(event_type.as_str()))
+                .to_owned();
         }
+
+        if let Some(client_ip) = &query_params.client_ip {
+            query = query
+                .and_where(Expr::col(AuthEvents::ClientIp).eq(client_ip.as_str()))
+                .to_owned();
+        }
+
+        if let Some(since) = &query_params.since {
+            query = query
+                .and_where(Expr::col(AuthEvents::CreatedAt).gte(since.as_str()))
+                .to_owned();
+        }
+
+        query = query
+            .order_by(AuthEvents::CreatedAt, Order::Desc)
+            .limit(limit as u64)
+            .to_owned();
+
+        query.build_sql(db_type)
     };
+
+    let events = db_fetch_all!(pool, sqlx::query_as::<_, AuthEvent>(&sql))?;
+
     Ok(events)
 }
 

@@ -1,6 +1,7 @@
 -- GitHub credential events table for audit logging
 -- DSQL compatible: no REFERENCES constraints
 -- (user_id references users.id, org_id references organizations.id)
+-- Timestamps generated in application code
 CREATE TABLE github_credential_events (
     id TEXT PRIMARY KEY,
     event_type TEXT NOT NULL,
@@ -17,5 +18,5 @@ CREATE TABLE github_credential_events (
     error_code TEXT,
     ip_address TEXT,
     user_agent TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL
 );

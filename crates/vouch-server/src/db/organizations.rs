@@ -7,9 +7,13 @@ use super::schema::{
     CloudIntegrations, GitHubCredentialEvents, GitHubInstallations, Organizations, ScimAuditLog,
     ScimTokens, Users,
 };
+use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute, tx_fetch_all};
 use anyhow::Result;
+#[cfg(any(test, feature = "test-utils"))]
+use jiff::Timestamp;
 use sea_query::{Expr, Order, Query};
+#[cfg(any(test, feature = "test-utils"))]
 use uuid::Uuid;
 
 /// Organization record for domain-based multi-tenancy.
@@ -19,7 +23,7 @@ pub struct Organization {
     pub id: String,
     pub domain: String,
     pub name: Option<String>,
-    pub created_at: String,
+    pub created_at: DbTimestamp,
     pub created_by_user_id: Option<String>,
 }
 
@@ -73,6 +77,11 @@ pub async fn get_org_by_id(pool: &Pool, org_id: &str) -> Result<Option<Organizat
 }
 
 /// Create a new organization.
+///
+/// Note: This function is only used in tests. Production code uses the
+/// transactional `enroll_user_with_org` function which handles organization
+/// creation atomically with user creation.
+#[cfg(any(test, feature = "test-utils"))]
 pub async fn create_organization(
     pool: &Pool,
     domain: &str,
@@ -80,6 +89,7 @@ pub async fn create_organization(
     created_by_user_id: Option<&str>,
 ) -> Result<Organization> {
     let id = Uuid::now_v7().to_string();
+    let now = Timestamp::now().to_string();
     let db_type = pool.db_type();
 
     let insert_sql = {
@@ -89,12 +99,14 @@ pub async fn create_organization(
                 Organizations::Id,
                 Organizations::Domain,
                 Organizations::Name,
+                Organizations::CreatedAt,
                 Organizations::CreatedByUserId,
             ])
             .values_panic([
                 id.clone().into(),
                 domain.into(),
                 name.into(),
+                now.as_str().into(),
                 created_by_user_id.into(),
             ])
             .to_owned();
@@ -121,24 +133,6 @@ pub async fn create_organization(
     let org = db_fetch_one!(pool, sqlx::query_as::<_, Organization>(&select_sql))?;
 
     Ok(org)
-}
-
-/// Get or create an organization by domain.
-/// Returns (org, is_new) tuple where is_new indicates if the org was just created.
-pub async fn get_or_create_org_by_domain(
-    pool: &Pool,
-    domain: &str,
-    name: Option<&str>,
-    created_by_user_id: Option<&str>,
-) -> Result<(Organization, bool)> {
-    // Check if org exists
-    if let Some(org) = get_org_by_domain(pool, domain).await? {
-        return Ok((org, false));
-    }
-
-    // Create new org
-    let org = create_organization(pool, domain, name, created_by_user_id).await?;
-    Ok((org, true))
 }
 
 /// Update a user's organization membership.

@@ -1,5 +1,6 @@
 -- Authentication events for audit logging
 -- DSQL compatible: no REFERENCES constraints (user_id references users.id)
+-- Timestamps generated in application code
 CREATE TABLE auth_events (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,  -- references users(id)
@@ -13,5 +14,5 @@ CREATE TABLE auth_events (
     client_version TEXT,
     success BOOLEAN NOT NULL DEFAULT TRUE,
     failure_reason TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL
 );

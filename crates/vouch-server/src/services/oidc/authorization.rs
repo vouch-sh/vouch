@@ -364,9 +364,11 @@ pub fn check_client_access(client: &OAuthClient, user: &User) -> ServiceResult<(
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use jiff_sqlx::ToSqlx;
 
     // Helper to create a test OAuthClient
     fn test_client(user_id: &str, access_scope: &str, org_id: Option<&str>) -> OAuthClient {
+        let ts = jiff::Timestamp::now().to_sqlx();
         OAuthClient {
             id: "client-1".to_string(),
             user_id: user_id.to_string(),
@@ -376,8 +378,8 @@ mod tests {
             application_type: "web".to_string(),
             redirect_uris: "[]".to_string(),
             active: true,
-            created_at: "2024-01-01".to_string(),
-            updated_at: "2024-01-01".to_string(),
+            created_at: ts,
+            updated_at: ts,
             last_used_at: None,
             access_scope: access_scope.to_string(),
             org_id: org_id.map(String::from),

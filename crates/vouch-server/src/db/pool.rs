@@ -10,6 +10,14 @@
 //! - `sqlite:` - SQLite database (including `sqlite::memory:` for in-memory)
 //! - `postgres:` or `postgresql:` - PostgreSQL database
 //!
+//! # Aurora DSQL Support
+//!
+//! When the PostgreSQL URL points to a DSQL endpoint (hostname contains `.dsql.`
+//! and ends with `.on.aws`), the pool automatically:
+//! - Generates IAM authentication tokens using AWS credentials
+//! - Refreshes tokens every 10 minutes (tokens expire after 15 minutes)
+//! - Uses SSL with certificate verification (`sslmode=verify-full`)
+//!
 //! # Example
 //!
 //! ```rust,ignore
@@ -21,9 +29,20 @@
 //!
 //! let pool = Pool::connect("postgres://localhost/vouch").await?;
 //! assert_eq!(pool.db_type(), DatabaseType::Postgres);
+//!
+//! // DSQL endpoint - uses IAM authentication automatically
+//! let pool = Pool::connect("postgres://admin@abc123.dsql.us-east-1.on.aws/postgres").await?;
+//! assert_eq!(pool.db_type(), DatabaseType::Postgres);
 //! ```
 
-use anyhow::{Result, bail};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+
+use super::dsql::{
+    extract_region_from_endpoint, generate_dsql_token, is_dsql_endpoint, load_sdk_config,
+};
 
 /// Database type enum for runtime SQL dialect selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,11 +92,19 @@ impl Pool {
     ///
     /// * `url` - Database URL with scheme prefix (`sqlite:`, `postgres:`, or `postgresql:`)
     ///
+    /// # Aurora DSQL
+    ///
+    /// When connecting to a DSQL endpoint (hostname contains `.dsql.` and ends
+    /// with `.on.aws`), IAM authentication is used automatically. AWS credentials
+    /// are loaded from the standard credential chain (environment variables,
+    /// AWS profiles, EKS IRSA, ECS task roles, EC2 IMDS).
+    ///
     /// # Errors
     ///
     /// Returns an error if:
     /// - The URL scheme is not supported
     /// - The connection fails
+    /// - For DSQL: AWS credentials cannot be loaded or token generation fails
     pub async fn connect(url: &str) -> Result<Self> {
         let db_type = DatabaseType::from_url(url)?;
 
@@ -87,10 +114,90 @@ impl Pool {
                 Ok(Self::Sqlite(pool))
             }
             DatabaseType::Postgres => {
-                let pool = sqlx::PgPool::connect(url).await?;
-                Ok(Self::Postgres(pool))
+                let parsed = url::Url::parse(url).context("failed to parse PostgreSQL URL")?;
+                let host = parsed.host_str().unwrap_or("");
+
+                if is_dsql_endpoint(host) {
+                    Self::connect_dsql(host, parsed.username()).await
+                } else {
+                    let pool = sqlx::PgPool::connect(url).await?;
+                    Ok(Self::Postgres(pool))
+                }
             }
         }
+    }
+
+    /// Connect to an Aurora DSQL cluster using IAM authentication.
+    ///
+    /// This method:
+    /// 1. Loads AWS credentials from the standard credential chain
+    /// 2. Generates a DSQL authentication token
+    /// 3. Creates a connection pool with appropriate settings
+    /// 4. Spawns a background task to refresh tokens before expiry
+    ///
+    /// # Arguments
+    ///
+    /// * `endpoint` - DSQL cluster endpoint hostname
+    /// * `user` - Database username (typically "admin" for admin access)
+    async fn connect_dsql(endpoint: &str, user: &str) -> Result<Self> {
+        // Determine the AWS region from the endpoint or environment
+        let region = extract_region_from_endpoint(endpoint)
+            .map(String::from)
+            .or_else(|| std::env::var("AWS_REGION").ok())
+            .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
+            .context("cannot determine AWS region from DSQL endpoint or environment")?;
+
+        // Use provided user or default to "admin"
+        let user = if user.is_empty() {
+            std::env::var("DSQL_USER").unwrap_or_else(|_| "admin".to_string())
+        } else {
+            user.to_string()
+        };
+        let is_admin = user == "admin";
+
+        tracing::info!(
+            endpoint = endpoint,
+            region = region,
+            user = user,
+            "connecting to Aurora DSQL with IAM authentication"
+        );
+
+        // Load AWS SDK config (handles all credential sources)
+        let sdk_config = load_sdk_config(Some(&region)).await;
+
+        // Generate initial authentication token
+        let token = generate_dsql_token(&sdk_config, endpoint, &region, is_admin).await?;
+
+        // Build connection options with SSL required for DSQL
+        let connect_options = PgConnectOptions::new()
+            .host(endpoint)
+            .port(5432)
+            .database("postgres")
+            .username(&user)
+            .password(&token)
+            .ssl_mode(PgSslMode::VerifyFull);
+
+        // Create pool with appropriate lifetime settings for DSQL:
+        // - max_lifetime: 55 min (DSQL terminates connections after 60 min)
+        // - idle_timeout: 10 min (close unused connections to allow token refresh)
+        // - acquire_timeout: 30 sec (prevent indefinite waits)
+        // - min_connections: 1 (keep one warm connection for lower latency)
+        // - test_before_acquire: true (validate connections; DSQL may close idle ones)
+        let pool = PgPoolOptions::new()
+            .max_connections(10)
+            .min_connections(1)
+            .max_lifetime(Duration::from_secs(55 * 60))
+            .idle_timeout(Duration::from_secs(10 * 60))
+            .acquire_timeout(Duration::from_secs(30))
+            .test_before_acquire(true)
+            .connect_with(connect_options)
+            .await
+            .context("failed to connect to DSQL cluster")?;
+
+        // Spawn background task to refresh tokens before they expire
+        spawn_token_refresh(pool.clone(), endpoint.to_string(), region, user, is_admin);
+
+        Ok(Self::Postgres(pool))
     }
 
     /// Get the database type for this pool.
@@ -117,6 +224,28 @@ impl Pool {
                 let tx = pool.begin().await?;
                 Ok(Transaction::Postgres(tx))
             }
+        }
+    }
+
+    /// Close the pool and release all connections.
+    ///
+    /// For DSQL pools, this also signals the background token refresh task to stop.
+    /// After calling this method, the pool should not be used.
+    ///
+    /// This method is idempotent - calling it multiple times has no additional effect.
+    pub async fn close(&self) {
+        match self {
+            Self::Sqlite(pool) => pool.close().await,
+            Self::Postgres(pool) => pool.close().await,
+        }
+    }
+
+    /// Check if the pool has been closed.
+    #[must_use]
+    pub fn is_closed(&self) -> bool {
+        match self {
+            Self::Sqlite(pool) => pool.is_closed(),
+            Self::Postgres(pool) => pool.is_closed(),
         }
     }
 }
@@ -270,6 +399,92 @@ macro_rules! tx_fetch_all {
             $crate::db::Transaction::Postgres(ref mut t) => $query.fetch_all(&mut **t).await,
         }
     };
+}
+
+/// Fetch a single row from a query against a transaction.
+#[macro_export]
+macro_rules! tx_fetch_one {
+    ($tx:expr, $query:expr) => {
+        match $tx {
+            $crate::db::Transaction::Sqlite(ref mut t) => $query.fetch_one(&mut **t).await,
+            $crate::db::Transaction::Postgres(ref mut t) => $query.fetch_one(&mut **t).await,
+        }
+    };
+}
+
+/// Fetch an optional row from a query against a transaction.
+#[macro_export]
+macro_rules! tx_fetch_optional {
+    ($tx:expr, $query:expr) => {
+        match $tx {
+            $crate::db::Transaction::Sqlite(ref mut t) => $query.fetch_optional(&mut **t).await,
+            $crate::db::Transaction::Postgres(ref mut t) => $query.fetch_optional(&mut **t).await,
+        }
+    };
+}
+
+// ============================================================================
+// DSQL Token Refresh
+// ============================================================================
+
+/// Spawn a background task that periodically refreshes DSQL authentication tokens.
+///
+/// DSQL tokens expire after 15 minutes by default. This task refreshes the token
+/// every 10 minutes to ensure new connections always use a valid token.
+///
+/// The task exits gracefully when the pool is closed (via `Pool::close()`),
+/// enabling clean shutdown integration.
+///
+/// When a token refresh fails, the task logs a warning but continues running.
+/// Existing connections remain valid until they're closed or the connection
+/// lifetime limit (60 minutes) is reached.
+fn spawn_token_refresh(
+    pool: sqlx::PgPool,
+    endpoint: String,
+    region: String,
+    user: String,
+    is_admin: bool,
+) {
+    tokio::spawn(async move {
+        // Refresh every 10 minutes (tokens expire after 15 min by default)
+        let refresh_interval = Duration::from_secs(10 * 60);
+
+        loop {
+            tokio::time::sleep(refresh_interval).await;
+
+            // Check if pool has been closed (graceful shutdown)
+            if pool.is_closed() {
+                tracing::debug!("DSQL pool closed, stopping token refresh task");
+                break;
+            }
+
+            // Reload AWS credentials (in case they've been rotated)
+            let sdk_config = load_sdk_config(Some(&region)).await;
+
+            match generate_dsql_token(&sdk_config, &endpoint, &region, is_admin).await {
+                Ok(new_token) => {
+                    // Update the pool's connect options with the new token
+                    let new_options = PgConnectOptions::new()
+                        .host(&endpoint)
+                        .port(5432)
+                        .database("postgres")
+                        .username(&user)
+                        .password(&new_token)
+                        .ssl_mode(PgSslMode::VerifyFull);
+
+                    pool.set_connect_options(new_options);
+                    tracing::debug!("DSQL authentication token refreshed successfully");
+                }
+                Err(e) => {
+                    // Log warning but continue - existing connections still work
+                    tracing::warn!(
+                        error = %e,
+                        "failed to refresh DSQL authentication token"
+                    );
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]

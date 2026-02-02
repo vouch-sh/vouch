@@ -2,12 +2,13 @@
 //! OAuth Client Application database operations.
 
 use super::Pool;
-use super::compat::{BuildSql, now_expr};
+use super::compat::BuildSql;
 use super::schema::{OAuthClientSecrets, OAuthClients, OAuthUsageEvents};
+use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute};
 use anyhow::Result;
 use jiff::Timestamp;
-use sea_query::{Expr, Order, Query, SimpleExpr};
+use sea_query::{Alias, Asterisk, Expr, Func, Order, Query};
 use uuid::Uuid;
 
 // ============================================================================
@@ -135,9 +136,9 @@ pub struct OAuthClient {
     pub application_type: String,
     pub redirect_uris: String,
     pub active: bool,
-    pub created_at: String,
-    pub updated_at: String,
-    pub last_used_at: Option<String>,
+    pub created_at: DbTimestamp,
+    pub updated_at: DbTimestamp,
+    pub last_used_at: Option<DbTimestamp>,
     /// Access scope controlling who can use this application.
     pub access_scope: String,
     /// Organization ID for organization-scoped apps.
@@ -186,6 +187,7 @@ pub async fn create_oauth_client(
     let client_id = Uuid::now_v7().to_string();
     let redirect_uris_json = serde_json::to_string(redirect_uris)?;
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::insert()
@@ -200,6 +202,8 @@ pub async fn create_oauth_client(
                 OAuthClients::RedirectUris,
                 OAuthClients::AccessScope,
                 OAuthClients::OrgId,
+                OAuthClients::CreatedAt,
+                OAuthClients::UpdatedAt,
             ])
             .values_panic([
                 id.clone().into(),
@@ -211,6 +215,8 @@ pub async fn create_oauth_client(
                 redirect_uris_json.into(),
                 access_scope.as_str().into(),
                 org_id.into(),
+                now.as_str().into(),
+                now.as_str().into(),
             ])
             .to_owned();
         query.build_sql(db_type)
@@ -337,38 +343,32 @@ pub async fn update_oauth_client(
 ) -> Result<()> {
     let redirect_uris_json = serde_json::to_string(redirect_uris)?;
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
-    if let Some(scope) = access_scope {
-        let sql = format!(
-            "UPDATE oauth_clients SET name = ?, description = ?, redirect_uris = ?, access_scope = ?, org_id = ?, updated_at = {}
-             WHERE id = ?",
-            now_expr(db_type)
-        );
-        db_execute!(
-            pool,
-            sqlx::query(&sql)
-                .bind(name)
-                .bind(description)
-                .bind(&redirect_uris_json)
-                .bind(scope.as_str())
-                .bind(org_id)
-                .bind(id)
-        )?;
-    } else {
-        let sql = format!(
-            "UPDATE oauth_clients SET name = ?, description = ?, redirect_uris = ?, updated_at = {}
-             WHERE id = ?",
-            now_expr(db_type)
-        );
-        db_execute!(
-            pool,
-            sqlx::query(&sql)
-                .bind(name)
-                .bind(description)
-                .bind(&redirect_uris_json)
-                .bind(id)
-        )?;
-    }
+    let sql = {
+        let mut query = Query::update()
+            .table(OAuthClients::Table)
+            .value(OAuthClients::Name, name)
+            .value(OAuthClients::Description, description)
+            .value(OAuthClients::RedirectUris, redirect_uris_json.as_str())
+            .value(OAuthClients::UpdatedAt, now.as_str())
+            .to_owned();
+
+        if let Some(scope) = access_scope {
+            query = query
+                .value(OAuthClients::AccessScope, scope.as_str())
+                .value(OAuthClients::OrgId, org_id)
+                .to_owned();
+        }
+
+        query = query
+            .and_where(Expr::col(OAuthClients::Id).eq(id))
+            .to_owned();
+
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
@@ -377,15 +377,13 @@ pub async fn update_oauth_client(
 #[allow(dead_code)]
 pub async fn deactivate_oauth_client(pool: &Pool, id: &str) -> Result<()> {
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::update()
             .table(OAuthClients::Table)
             .value(OAuthClients::Active, false)
-            .value(
-                OAuthClients::UpdatedAt,
-                SimpleExpr::Custom(now_expr(db_type).to_string()),
-            )
+            .value(OAuthClients::UpdatedAt, now.as_str())
             .and_where(Expr::col(OAuthClients::Id).eq(id))
             .to_owned();
         query.build_sql(db_type)
@@ -400,15 +398,13 @@ pub async fn deactivate_oauth_client(pool: &Pool, id: &str) -> Result<()> {
 #[allow(dead_code)]
 pub async fn reactivate_oauth_client(pool: &Pool, id: &str) -> Result<()> {
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::update()
             .table(OAuthClients::Table)
             .value(OAuthClients::Active, true)
-            .value(
-                OAuthClients::UpdatedAt,
-                SimpleExpr::Custom(now_expr(db_type).to_string()),
-            )
+            .value(OAuthClients::UpdatedAt, now.as_str())
             .and_where(Expr::col(OAuthClients::Id).eq(id))
             .to_owned();
         query.build_sql(db_type)
@@ -466,14 +462,12 @@ pub async fn delete_oauth_client(pool: &Pool, id: &str) -> Result<u64> {
 /// Update last used timestamp for an OAuth client.
 pub async fn update_oauth_client_last_used(pool: &Pool, id: &str) -> Result<()> {
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::update()
             .table(OAuthClients::Table)
-            .value(
-                OAuthClients::LastUsedAt,
-                SimpleExpr::Custom(now_expr(db_type).to_string()),
-            )
+            .value(OAuthClients::LastUsedAt, now.as_str())
             .and_where(Expr::col(OAuthClients::Id).eq(id))
             .to_owned();
         query.build_sql(db_type)
@@ -496,20 +490,20 @@ pub struct OAuthClientSecret {
     pub oauth_client_id: String,
     pub secret_hash: String,
     pub description: Option<String>,
-    pub created_at: String,
-    pub expires_at: Option<String>,
-    pub revoked_at: Option<String>,
+    pub created_at: DbTimestamp,
+    pub expires_at: Option<DbTimestamp>,
+    pub revoked_at: Option<DbTimestamp>,
 }
 
 impl OAuthClientSecret {
     /// Check if this secret is valid (not revoked and not expired).
     #[must_use]
-    pub fn is_valid(&self, now: &str) -> bool {
+    pub fn is_valid(&self, now: &Timestamp) -> bool {
         if self.revoked_at.is_some() {
             return false;
         }
         if let Some(expires) = &self.expires_at
-            && expires.as_str() < now
+            && expires.to_jiff() < *now
         {
             return false;
         }
@@ -528,6 +522,7 @@ pub async fn create_oauth_client_secret(
 ) -> Result<OAuthClientSecret> {
     let id = Uuid::now_v7().to_string();
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let insert_sql = {
         let query = Query::insert()
@@ -538,6 +533,7 @@ pub async fn create_oauth_client_secret(
                 OAuthClientSecrets::SecretHash,
                 OAuthClientSecrets::Description,
                 OAuthClientSecrets::ExpiresAt,
+                OAuthClientSecrets::CreatedAt,
             ])
             .values_panic([
                 id.clone().into(),
@@ -545,6 +541,7 @@ pub async fn create_oauth_client_secret(
                 secret_hash.into(),
                 description.into(),
                 expires_at.into(),
+                now.as_str().into(),
             ])
             .to_owned();
         query.build_sql(db_type)
@@ -637,14 +634,12 @@ pub async fn get_oauth_secret_by_hash(
 #[allow(dead_code)]
 pub async fn revoke_oauth_client_secret(pool: &Pool, secret_id: &str) -> Result<()> {
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::update()
             .table(OAuthClientSecrets::Table)
-            .value(
-                OAuthClientSecrets::RevokedAt,
-                SimpleExpr::Custom(now_expr(db_type).to_string()),
-            )
+            .value(OAuthClientSecrets::RevokedAt, now.as_str())
             .and_where(Expr::col(OAuthClientSecrets::Id).eq(secret_id))
             .to_owned();
         query.build_sql(db_type)
@@ -658,14 +653,12 @@ pub async fn revoke_oauth_client_secret(pool: &Pool, secret_id: &str) -> Result<
 /// Revoke all secrets for an OAuth client.
 pub async fn revoke_all_oauth_client_secrets(pool: &Pool, oauth_client_id: &str) -> Result<u64> {
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::update()
             .table(OAuthClientSecrets::Table)
-            .value(
-                OAuthClientSecrets::RevokedAt,
-                SimpleExpr::Custom(now_expr(db_type).to_string()),
-            )
+            .value(OAuthClientSecrets::RevokedAt, now.as_str())
             .and_where(Expr::col(OAuthClientSecrets::OAuthClientId).eq(oauth_client_id))
             .and_where(Expr::col(OAuthClientSecrets::RevokedAt).is_null())
             .to_owned();
@@ -692,7 +685,7 @@ pub struct OAuthUsageEvent {
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
     pub details: Option<String>,
-    pub created_at: String,
+    pub created_at: DbTimestamp,
 }
 
 /// OAuth usage event types.
@@ -732,6 +725,7 @@ pub async fn record_oauth_event(
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::insert()
@@ -744,6 +738,7 @@ pub async fn record_oauth_event(
                 OAuthUsageEvents::IpAddress,
                 OAuthUsageEvents::UserAgent,
                 OAuthUsageEvents::Details,
+                OAuthUsageEvents::CreatedAt,
             ])
             .values_panic([
                 id.clone().into(),
@@ -753,6 +748,7 @@ pub async fn record_oauth_event(
                 ip_address.into(),
                 user_agent.into(),
                 details.into(),
+                now.as_str().into(),
             ])
             .to_owned();
         query.build_sql(db_type)
@@ -809,28 +805,30 @@ pub async fn get_oauth_usage_stats(
     oauth_client_id: &str,
     since: Option<&str>,
 ) -> Result<Vec<OAuthUsageStats>> {
-    let stats = if let Some(since) = since {
-        db_fetch_all!(
-            pool,
-            sqlx::query_as::<_, OAuthUsageStats>(
-                "SELECT event_type, COUNT(*) as count FROM oauth_usage_events
-                 WHERE oauth_client_id = ? AND created_at >= ?
-                 GROUP BY event_type",
-            )
-            .bind(oauth_client_id)
-            .bind(since)
-        )?
-    } else {
-        db_fetch_all!(
-            pool,
-            sqlx::query_as::<_, OAuthUsageStats>(
-                "SELECT event_type, COUNT(*) as count FROM oauth_usage_events
-                 WHERE oauth_client_id = ?
-                 GROUP BY event_type",
-            )
-            .bind(oauth_client_id)
-        )?
+    let db_type = pool.db_type();
+
+    let sql = {
+        let mut query = Query::select()
+            .column(OAuthUsageEvents::EventType)
+            .expr_as(Func::count(Expr::col(Asterisk)), Alias::new("count"))
+            .from(OAuthUsageEvents::Table)
+            .and_where(Expr::col(OAuthUsageEvents::OAuthClientId).eq(oauth_client_id))
+            .to_owned();
+
+        if let Some(since) = since {
+            query = query
+                .and_where(Expr::col(OAuthUsageEvents::CreatedAt).gte(since))
+                .to_owned();
+        }
+
+        query = query
+            .group_by_col(OAuthUsageEvents::EventType)
+            .to_owned();
+
+        query.build_sql(db_type)
     };
+
+    let stats = db_fetch_all!(pool, sqlx::query_as::<_, OAuthUsageStats>(&sql))?;
 
     Ok(stats)
 }
@@ -879,7 +877,7 @@ pub async fn validate_oauth_client_credentials(
     }
 
     // Check if secret is valid
-    let now = Timestamp::now().to_string();
+    let now = Timestamp::now();
     if !secret.is_valid(&now) {
         return Ok(None);
     }

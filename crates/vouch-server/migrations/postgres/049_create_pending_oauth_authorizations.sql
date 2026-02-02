@@ -1,4 +1,5 @@
 -- Pending OAuth authorizations table for authorization code flow
+-- Timestamps generated in application code
 CREATE TABLE pending_oauth_authorizations (
     id TEXT PRIMARY KEY,
     client_id TEXT NOT NULL,
@@ -9,7 +10,7 @@ CREATE TABLE pending_oauth_authorizations (
     nonce TEXT,
     code_challenge TEXT,
     code_challenge_method TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    created_at TIMESTAMPTZ NOT NULL,
     expires_at TIMESTAMPTZ NOT NULL,
     consumed_at TIMESTAMPTZ
 );

@@ -4,6 +4,7 @@
 use super::Pool;
 use super::compat::BuildSql;
 use super::schema::{DeviceAuthRequests, OidcStates};
+use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_optional, tx_execute};
 use anyhow::Result;
 use jiff::Timestamp;
@@ -45,9 +46,9 @@ pub struct DeviceAuthRequest {
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub authenticator_id: Option<String>,
-    pub expires_at: String,
+    pub expires_at: DbTimestamp,
     pub interval_seconds: i64,
-    pub last_poll_at: Option<String>,
+    pub last_poll_at: Option<DbTimestamp>,
 }
 
 impl DeviceAuthRequest {
@@ -65,7 +66,7 @@ pub struct OidcState {
     pub state: String,
     pub device_auth_id: String,
     pub nonce: String,
-    pub expires_at: String,
+    pub expires_at: DbTimestamp,
 }
 
 /// Create a new device authorization request.
@@ -77,6 +78,7 @@ pub async fn create_device_auth_request(
     interval_seconds: i64,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let now = Timestamp::now().to_string();
     let db_type = pool.db_type();
 
     let sql = {
@@ -88,6 +90,7 @@ pub async fn create_device_auth_request(
                 DeviceAuthRequests::UserCode,
                 DeviceAuthRequests::ExpiresAt,
                 DeviceAuthRequests::IntervalSeconds,
+                DeviceAuthRequests::CreatedAt,
             ])
             .values_panic([
                 id.clone().into(),
@@ -95,6 +98,7 @@ pub async fn create_device_auth_request(
                 user_code.into(),
                 expires_at.into(),
                 interval_seconds.into(),
+                now.as_str().into(),
             ])
             .to_owned();
         query.build_sql(db_type)
@@ -261,9 +265,8 @@ pub async fn update_device_auth_poll_time(
     };
 
     // Check if polling too fast
-    if let Some(last_poll) = &request.last_poll_at
-        && let Ok(last_poll_ts) = last_poll.parse::<Timestamp>()
-    {
+    if let Some(last_poll) = &request.last_poll_at {
+        let last_poll_ts = last_poll.to_jiff();
         let elapsed = now.as_second() - last_poll_ts.as_second();
         if elapsed < interval_seconds {
             return Ok(false);
@@ -337,6 +340,7 @@ pub async fn create_oidc_state(
     expires_at: &str,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let now = Timestamp::now().to_string();
     let db_type = pool.db_type();
 
     let sql = {
@@ -348,6 +352,7 @@ pub async fn create_oidc_state(
                 OidcStates::DeviceAuthId,
                 OidcStates::Nonce,
                 OidcStates::ExpiresAt,
+                OidcStates::CreatedAt,
             ])
             .values_panic([
                 id.clone().into(),
@@ -355,6 +360,7 @@ pub async fn create_oidc_state(
                 device_auth_id.into(),
                 nonce.into(),
                 expires_at.into(),
+                now.as_str().into(),
             ])
             .to_owned();
         query.build_sql(db_type)

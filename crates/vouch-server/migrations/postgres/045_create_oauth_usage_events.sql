@@ -1,5 +1,6 @@
 -- OAuth usage events table for tracking client activity
 -- DSQL compatible: no REFERENCES constraints (oauth_client_id references oauth_clients.id)
+-- Timestamps generated in application code
 CREATE TABLE oauth_usage_events (
     id TEXT PRIMARY KEY,
     oauth_client_id TEXT NOT NULL,  -- references oauth_clients(id)
@@ -8,5 +9,5 @@ CREATE TABLE oauth_usage_events (
     ip_address TEXT,
     user_agent TEXT,
     details TEXT,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL
 );

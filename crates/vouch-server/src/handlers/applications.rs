@@ -75,8 +75,8 @@ impl From<OAuthClient> for ApplicationInfo {
             application_type: client.application_type,
             redirect_uris,
             active: client.active,
-            created_at: client.created_at,
-            last_used_at: client.last_used_at,
+            created_at: client.created_at.to_jiff().to_string(),
+            last_used_at: client.last_used_at.map(|ts| ts.to_jiff().to_string()),
             access_scope,
             org_id: client.org_id,
         }
@@ -257,9 +257,9 @@ impl From<OAuthClient> for ApplicationResponse {
             application_type: client.application_type,
             redirect_uris,
             active: client.active,
-            created_at: client.created_at,
-            updated_at: client.updated_at,
-            last_used_at: client.last_used_at,
+            created_at: client.created_at.to_jiff().to_string(),
+            updated_at: client.updated_at.to_jiff().to_string(),
+            last_used_at: client.last_used_at.map(|ts| ts.to_jiff().to_string()),
             access_scope: access_scope.as_str().to_string(),
             org_id: client.org_id,
         }
@@ -1336,8 +1336,8 @@ pub async fn rotate_secret_api(
 
     Ok(Json(RotateSecretResponse {
         client_secret: secret,
-        created_at: secret_record.created_at,
-        expires_at: secret_record.expires_at,
+        created_at: secret_record.created_at.to_jiff().to_string(),
+        expires_at: secret_record.expires_at.map(|ts| ts.to_jiff().to_string()),
     }))
 }
 

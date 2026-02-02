@@ -1,12 +1,13 @@
 -- Squashed migration: combines all previous migrations into a single initial schema
 -- This migration is for fresh installations only
+-- Note: Timestamps are generated in application code for DSQL compatibility
 
 -- Organizations (must be created before users due to foreign key)
 CREATE TABLE organizations (
     id TEXT PRIMARY KEY,
     domain TEXT UNIQUE NOT NULL,
     name TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL,
     created_by_user_id TEXT
 );
 
@@ -17,7 +18,7 @@ CREATE TABLE users (
     id TEXT PRIMARY KEY,
     email TEXT UNIQUE NOT NULL,
     name TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL,
     active INTEGER NOT NULL DEFAULT 1,
     external_id TEXT,
     org_id TEXT REFERENCES organizations(id),
@@ -37,7 +38,7 @@ CREATE TABLE authenticators (
     credential_id BLOB UNIQUE NOT NULL,
     public_key BLOB NOT NULL,
     counter INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL,
     aaguid TEXT,
     user_handle BLOB
 );
@@ -52,7 +53,7 @@ CREATE TABLE sessions (
     token_hash TEXT UNIQUE NOT NULL,
     authenticator_id TEXT REFERENCES authenticators(id) ON DELETE CASCADE,
     expires_at TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL
 );
 
 CREATE INDEX idx_sessions_token ON sessions(token_hash);
@@ -71,7 +72,7 @@ CREATE TABLE device_auth_requests (
     expires_at TEXT NOT NULL,
     interval_seconds INTEGER NOT NULL DEFAULT 5,
     last_poll_at TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL
 );
 
 CREATE INDEX idx_device_auth_user_code ON device_auth_requests(user_code);
@@ -84,7 +85,7 @@ CREATE TABLE oidc_states (
     device_auth_id TEXT NOT NULL REFERENCES device_auth_requests(id) ON DELETE CASCADE,
     nonce TEXT NOT NULL,
     expires_at TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL
 );
 
 CREATE INDEX idx_oidc_states_state ON oidc_states(state);
@@ -94,7 +95,7 @@ CREATE INDEX idx_oidc_states_expires ON oidc_states(expires_at);
 CREATE TABLE server_config (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at TEXT NOT NULL
 );
 
 -- Authentication events for audit logging
@@ -111,7 +112,7 @@ CREATE TABLE auth_events (
     client_version TEXT,
     success INTEGER NOT NULL DEFAULT 1,
     failure_reason TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
@@ -126,7 +127,7 @@ CREATE TABLE scim_tokens (
     token_hash TEXT UNIQUE NOT NULL,
     org_id TEXT REFERENCES organizations(id),
     description TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL,
     last_used_at TEXT,
     expires_at TEXT
 );
@@ -142,7 +143,7 @@ CREATE TABLE scim_audit_log (
     resource_id TEXT NOT NULL,
     actor_token_id TEXT REFERENCES scim_tokens(id) ON DELETE SET NULL,
     details TEXT,  -- JSON with operation details
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL
 );
 
 CREATE INDEX idx_scim_audit_created ON scim_audit_log(created_at);
@@ -152,8 +153,8 @@ CREATE TABLE scim_groups (
     id TEXT PRIMARY KEY,
     display_name TEXT UNIQUE NOT NULL,
     external_id TEXT,
-    created_at TEXT DEFAULT (datetime('now')),
-    updated_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT,
+    updated_at TEXT
 );
 
 CREATE INDEX idx_scim_groups_external_id ON scim_groups(external_id);
@@ -162,7 +163,7 @@ CREATE INDEX idx_scim_groups_external_id ON scim_groups(external_id);
 CREATE TABLE scim_group_members (
     group_id TEXT NOT NULL,
     user_id TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now')),
+    created_at TEXT,
     PRIMARY KEY (group_id, user_id),
     FOREIGN KEY (group_id) REFERENCES scim_groups(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -181,8 +182,8 @@ CREATE TABLE oauth_clients (
     application_type TEXT NOT NULL CHECK (application_type IN ('web', 'native', 'spa', 'service')),
     redirect_uris TEXT NOT NULL DEFAULT '[]',
     active INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
     last_used_at TEXT,
     access_scope TEXT NOT NULL DEFAULT 'personal'
         CHECK (access_scope IN ('organization', 'personal', 'public')),
@@ -201,7 +202,7 @@ CREATE TABLE oauth_client_secrets (
     oauth_client_id TEXT NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE,
     secret_hash TEXT UNIQUE NOT NULL,
     description TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL,
     expires_at TEXT,
     revoked_at TEXT
 );
@@ -218,7 +219,7 @@ CREATE TABLE oauth_usage_events (
     ip_address TEXT,
     user_agent TEXT,
     details TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL
 );
 
 CREATE INDEX idx_oauth_usage_client ON oauth_usage_events(oauth_client_id);
@@ -236,7 +237,7 @@ CREATE TABLE pending_oauth_authorizations (
     nonce TEXT,
     code_challenge TEXT,
     code_challenge_method TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
     consumed_at TEXT
 );
@@ -247,7 +248,7 @@ CREATE INDEX idx_pending_oauth_expires ON pending_oauth_authorizations(expires_a
 CREATE TABLE dpop_nonces (
     id TEXT PRIMARY KEY,
     nonce TEXT UNIQUE NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
 
@@ -256,7 +257,7 @@ CREATE INDEX idx_dpop_nonces_expires ON dpop_nonces(expires_at);
 -- DPoP JTI cache (prevents replay attacks)
 CREATE TABLE dpop_jti_cache (
     jti TEXT PRIMARY KEY,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
 
@@ -271,7 +272,7 @@ CREATE TABLE token_exchanges (
     issued_token_hash TEXT UNIQUE NOT NULL,
     requested_audience TEXT,
     granted_scope TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL
 );
 
@@ -287,8 +288,8 @@ CREATE TABLE delegation_policies (
     allowed_scopes TEXT,
     max_ttl_seconds INTEGER DEFAULT 28800,
     enabled INTEGER DEFAULT 1,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 
 CREATE INDEX idx_delegation_policies_enabled ON delegation_policies(enabled);
@@ -299,7 +300,7 @@ CREATE TABLE ssh_revoked_certificates (
     serial TEXT UNIQUE NOT NULL,
     user_id TEXT NOT NULL,
     reason TEXT,
-    revoked_at TEXT DEFAULT (datetime('now')),
+    revoked_at TEXT,
     expires_at TEXT NOT NULL,
     revoked_by TEXT,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
@@ -317,8 +318,8 @@ CREATE TABLE enrollment_sessions (
     session_token_hash TEXT UNIQUE NOT NULL,
     device_auth_id TEXT,
     expires_at TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now')),
-    last_used_at TEXT DEFAULT (datetime('now'))
+    created_at TEXT,
+    last_used_at TEXT
 );
 
 CREATE INDEX idx_enrollment_sessions_token_hash ON enrollment_sessions(session_token_hash);
@@ -334,7 +335,7 @@ CREATE TABLE github_installations (
     github_account_type TEXT NOT NULL,  -- "Organization" or "User"
     permissions TEXT NOT NULL,           -- JSON
     repository_selection TEXT NOT NULL,  -- "all" or "selected"
-    installed_at TEXT NOT NULL DEFAULT (datetime('now')),
+    installed_at TEXT NOT NULL,
     installed_by_user_id TEXT REFERENCES users(id),
     suspended_at TEXT,
     repositories TEXT
@@ -360,7 +361,7 @@ CREATE TABLE github_credential_events (
     error_code TEXT,
     ip_address TEXT,
     user_agent TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at TEXT NOT NULL
 );
 
 CREATE INDEX idx_github_events_user ON github_credential_events(user_id);
@@ -373,8 +374,8 @@ CREATE TABLE cloud_integrations (
     org_id TEXT NOT NULL REFERENCES organizations(id),
     provider TEXT NOT NULL,  -- 'gcp', 'aws'
     config TEXT NOT NULL,    -- JSON configuration
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
     created_by_user_id TEXT,
     UNIQUE(org_id, provider)
 );

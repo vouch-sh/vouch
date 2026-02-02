@@ -1,6 +1,7 @@
 -- Device authorization requests table (OAuth 2.0 Device Authorization Grant - RFC 8628)
 -- DSQL compatible: no REFERENCES constraints
 -- (user_id references users.id, authenticator_id references authenticators.id)
+-- Timestamps generated in application code
 CREATE TABLE device_auth_requests (
     id TEXT PRIMARY KEY,
     device_code_hash TEXT UNIQUE NOT NULL,
@@ -12,5 +13,5 @@ CREATE TABLE device_auth_requests (
     expires_at TIMESTAMPTZ NOT NULL,
     interval_seconds INTEGER NOT NULL DEFAULT 5,
     last_poll_at TIMESTAMPTZ,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    created_at TIMESTAMPTZ NOT NULL
 );
