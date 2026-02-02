@@ -6,6 +6,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
 mod aws;
+mod cargo;
 mod client;
 mod commands;
 mod config;
@@ -191,6 +192,17 @@ enum CredentialCommands {
         /// Docker credential operation (get, store, erase, list).
         operation: String,
     },
+    /// Cargo credential provider for private registries.
+    ///
+    /// This implements Cargo's credential provider protocol.
+    /// Users should not call this directly.
+    /// Instead, use `vouch setup cargo` to configure Cargo.
+    #[command(hide = true)]
+    Cargo {
+        /// Cargo plugin marker (always passed by Cargo).
+        #[arg(long = "cargo-plugin", hide = true)]
+        _cargo_plugin: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -279,6 +291,15 @@ enum SetupCommands {
         #[arg(long)]
         configure: bool,
     },
+    /// Configure Cargo to use Vouch for private registry authentication.
+    Cargo {
+        /// Registry name to configure (if not specified, configures global provider).
+        #[arg(long)]
+        registry: Option<String>,
+        /// Write the configuration (otherwise just show instructions).
+        #[arg(long)]
+        configure: bool,
+    },
 }
 
 #[tokio::main]
@@ -361,6 +382,7 @@ async fn main() -> Result<()> {
             CredentialCommands::Docker { operation } => {
                 commands::credential::docker::run(&operation).await
             }
+            CredentialCommands::Cargo { .. } => commands::credential::cargo::run().await,
         },
         Commands::Setup { command } => match command {
             SetupCommands::Aws {
@@ -414,6 +436,10 @@ async fn main() -> Result<()> {
                 registries,
                 configure,
             } => commands::setup::docker::run(&registries, configure).await,
+            SetupCommands::Cargo {
+                registry,
+                configure,
+            } => commands::setup::cargo::run(registry.as_deref(), configure).await,
         },
         Commands::Completions(args) => {
             let mut cmd = Cli::command();

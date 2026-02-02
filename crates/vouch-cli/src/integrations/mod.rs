@@ -5,6 +5,7 @@
 //! status of various integrations (AWS, GCP, GitHub, K8s, SSH, Docker).
 
 pub mod aws;
+pub mod cargo;
 pub mod docker;
 pub mod gcp;
 pub mod github;
@@ -12,6 +13,7 @@ pub mod k8s;
 pub mod ssh;
 
 pub use aws::AwsIntegration;
+pub use cargo::CargoIntegration;
 pub use docker::DockerIntegration;
 pub use gcp::GcpIntegration;
 pub use github::GitHubIntegration;

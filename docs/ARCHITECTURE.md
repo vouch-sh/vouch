@@ -51,8 +51,8 @@ $ git push origin main    # Just works
  |  |  * vouch status                                                    |  |
  |  |  * vouch logout                                                    |  |
  |  |  * vouch keys        (interactive menu, or list|remove|rename)     |  |
- |  |  * vouch credential ssh|aws|gcp|github                              |  |
- |  |  * vouch setup ssh|aws|gcp|github                                  |  |
+ |  |  * vouch credential ssh|aws|gcp|github|k8s|cargo                    |  |
+ |  |  * vouch setup ssh|aws|gcp|github|k8s|cargo                        |  |
  |  |  * vouch doctor     (diagnostic checks)                            |  |
  |  |  * vouch completions (shell completions)                           |  |
  |  +---------------------------------------------------------------------+  |
@@ -65,7 +65,7 @@ $ git push origin main    # Just works
  |  |                      |     |  ssh --> IdentityAgent --> vouch agent |  |
  |  |  * Session cache     |     |  aws --> credential_process --> vouch  |  |
  |  |  * SSH certs         |     |  git --> credential helper --> vouch   |  |
- |  |  * SSH agent protocol|     |                                        |  |
+ |  |  * SSH agent protocol|     |  cargo -> credential provider -> vouch |  |
  |  +----------------------+     +----------------------------------------+  |
  |            |                                                              |
  |            | HTTPS                                                        |
@@ -741,6 +741,48 @@ How it works:
 3. Server uses GitHub App private key to generate token
 4. Token scoped to repositories org has granted access to
 5. Short-lived (default 1 hour)
+```
+
+### Cargo Integration (Private Registries)
+
+```
+~/.cargo/config.toml:
+  [registry]
+  global-credential-providers = ["vouch", "credential", "cargo", "--"]
+
+  # Or for a specific registry:
+  [registries.my-private-registry]
+  credential-provider = ["vouch", "credential", "cargo", "--"]
+
+How it works:
+1. Cargo invokes vouch as credential provider (RFC 2730/3139 protocol)
+2. vouch sends Hello message with supported protocol versions
+3. Cargo sends JSON request with registry info and action (get/login/logout)
+4. vouch returns session token for registry authentication
+5. Token cached by Cargo based on JWT expiration
+```
+
+**`vouch setup cargo` creates:**
+- Global credential provider configuration in `~/.cargo/config.toml`
+- Or per-registry configuration with `--registry` flag
+
+**Protocol details:**
+- Implements Cargo's credential provider protocol (stdin/stdout JSON)
+- Supports actions: `get` (return token), `login` (redirect to vouch login), `logout`
+- Token cache control derived from JWT expiration claim
+- Compatible with any private Cargo registry that accepts Bearer tokens
+
+**Usage:**
+```bash
+# Configure Cargo to use Vouch
+vouch setup cargo --configure
+
+# Or for a specific registry
+vouch setup cargo --registry my-private-registry --configure
+
+# Then use Cargo normally
+cargo publish --registry my-private-registry
+cargo build  # fetches from private registries automatically
 ```
 
 ## Data Model
