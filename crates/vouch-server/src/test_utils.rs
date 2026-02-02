@@ -27,7 +27,7 @@ use crate::AppState;
 use crate::config::ServerConfig;
 use crate::dpop::DpopState;
 use crate::handlers;
-use crate::oidc_key::OidcSigningKey;
+use crate::services::oidc::OidcSigningKey;
 
 /// Create an in-memory SQLite database with migrations for testing.
 pub async fn test_db() -> Pool {

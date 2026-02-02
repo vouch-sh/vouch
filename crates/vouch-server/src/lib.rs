@@ -10,7 +10,6 @@ pub mod db;
 pub mod dpop;
 pub mod extractors;
 pub mod handlers;
-pub mod oidc_key;
 pub mod services;
 pub mod ssh_ca;
 pub mod webauthn_verify;
@@ -41,7 +40,7 @@ pub struct AppState {
     /// RFC 9449 DPoP state (nonce manager, JTI cache).
     pub dpop: dpop::DpopState,
     /// OIDC signing key for ES256 JWT signing.
-    pub oidc_key: oidc_key::OidcSigningKey,
+    pub oidc_key: services::oidc::OidcSigningKey,
     /// GitHub App for credential issuance (optional, None if not configured).
     pub github_app: Option<std::sync::Arc<services::integrations::github::GitHubApp>>,
 }

@@ -17,6 +17,7 @@
 //!
 //! ## Module Organization
 //!
+//! - [`keys`] - ES256 signing key management and JWK export
 //! - [`discovery`] - OIDC Discovery document and JWKS generation
 //! - [`authorization`] - Authorization code issuance and validation
 //! - [`token`] - Token endpoint logic (auth code, device code grants)
@@ -27,6 +28,7 @@ pub mod authorization;
 pub mod discovery;
 pub mod exchange;
 pub mod introspection;
+pub mod keys;
 pub mod token;
 
 // Re-export commonly used types
@@ -34,6 +36,7 @@ pub use authorization::{AuthorizationCodeParams, ValidatedAuthRequest, check_cli
 pub use discovery::{OidcDiscoveryDocument, build_discovery_document, build_jwks};
 pub use exchange::{TokenExchangeParams, TokenExchangeResult};
 pub use introspection::{IntrospectionResult, RevocationResult};
+pub use keys::{EcJwk, OidcSigningKey};
 pub use token::{
     AuthCodeExchangeParams, AuthCodeExchangeResult, AuthenticatedClient, ClientAuthError,
     ClientCredentials,
