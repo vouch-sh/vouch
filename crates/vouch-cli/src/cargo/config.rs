@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use toml_edit::{Array, DocumentMut, Item, Value};
+use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 /// Cargo config file parser and writer.
 ///
@@ -111,11 +111,11 @@ impl CargoConfig {
     pub fn set_global_provider(&mut self, command: &[&str]) {
         // Ensure [registry] section exists
         if !self.doc.contains_key("registry") {
-            self.doc["registry"] = toml_edit::table();
+            self.doc["registry"] = Item::Table(Table::new());
         }
 
         let array = Self::command_to_array(command);
-        self.doc["registry"]["global-credential-providers"] = toml_edit::value(array);
+        self.doc["registry"]["global-credential-providers"] = Item::Value(Value::Array(array));
     }
 
     /// Set the credential provider for a specific registry.
@@ -124,16 +124,16 @@ impl CargoConfig {
     pub fn set_registry_provider(&mut self, registry: &str, command: &[&str]) {
         // Ensure [registries] section exists
         if !self.doc.contains_key("registries") {
-            self.doc["registries"] = toml_edit::table();
+            self.doc["registries"] = Item::Table(Table::new());
         }
 
         // Ensure [registries.<name>] section exists
         if self.doc["registries"].get(registry).is_none() {
-            self.doc["registries"][registry] = toml_edit::table();
+            self.doc["registries"][registry] = Item::Table(Table::new());
         }
 
         let array = Self::command_to_array(command);
-        self.doc["registries"][registry]["credential-provider"] = toml_edit::value(array);
+        self.doc["registries"][registry]["credential-provider"] = Item::Value(Value::Array(array));
     }
 
     /// Save the config to its file path.
