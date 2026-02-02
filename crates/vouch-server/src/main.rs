@@ -15,8 +15,11 @@ use tracing_subscriber::EnvFilter;
 use vouch_server::{
     AppState, cleanup, config,
     db::{Pool, dsql::is_dsql_endpoint, migrations::run_dsql_migrations},
-    dpop, handlers,
-    services::{integrations::github::GitHubApp, oidc::OidcSigningKey},
+    handlers,
+    services::{
+        integrations::github::GitHubApp,
+        oidc::{OidcSigningKey, dpop},
+    },
     ssh_ca,
 };
 

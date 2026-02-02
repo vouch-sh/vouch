@@ -6,9 +6,9 @@
 //! - RFC 7636 - PKCE (Proof Key for Code Exchange)
 //! - RFC 9449 - DPoP (Demonstrating Proof of Possession)
 
+use super::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
 use crate::AppState;
 use crate::db::{self, Authenticator, OAuthClient, OAuthClientType, Session, User};
-use crate::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
 use crate::handlers::hash_token;
 use crate::services::auth::SessionClaims;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};

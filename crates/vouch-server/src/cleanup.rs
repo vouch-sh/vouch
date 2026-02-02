@@ -10,7 +10,7 @@
 //! - DPoP nonces and JTI cache
 
 use crate::db::{self, Pool};
-use crate::dpop::DpopState;
+use crate::services::oidc::dpop::DpopState;
 use jiff::{Timestamp, ToSpan};
 use std::sync::Arc;
 use tokio::task::JoinHandle;

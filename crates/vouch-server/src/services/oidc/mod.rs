@@ -26,6 +26,7 @@
 
 pub mod authorization;
 pub mod discovery;
+pub mod dpop;
 pub mod exchange;
 pub mod introspection;
 pub mod keys;
