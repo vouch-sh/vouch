@@ -18,6 +18,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, encode};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
@@ -32,7 +33,7 @@ pub struct AuthCodeExchangeParams<'a> {
     /// The redirect URI (must match original request).
     pub redirect_uri: Option<&'a str>,
     /// Client credentials.
-    pub credentials: Option<ClientCredentials<'a>>,
+    pub credentials: Option<&'a ClientCredentials>,
     /// PKCE code verifier.
     pub code_verifier: Option<&'a str>,
     /// Validated DPoP proof (if present).
@@ -40,12 +41,15 @@ pub struct AuthCodeExchangeParams<'a> {
 }
 
 /// Client credentials for authentication.
+///
+/// The client secret is wrapped in `SecretString` to prevent accidental logging
+/// and ensure it is zeroized on drop.
 #[derive(Debug)]
-pub struct ClientCredentials<'a> {
+pub struct ClientCredentials {
     /// Client ID.
-    pub client_id: &'a str,
+    pub client_id: String,
     /// Client secret (optional for public clients).
-    pub client_secret: Option<&'a str>,
+    pub client_secret: Option<SecretString>,
 }
 
 /// Result of exchanging an authorization code.
@@ -322,10 +326,10 @@ fn validate_pkce(auth_code: &AuthorizationCode, code_verifier: Option<&str>) -> 
 /// - Public clients (native/SPA) without secret (must use PKCE)
 pub async fn authenticate_client(
     state: &Arc<AppState>,
-    credentials: ClientCredentials<'_>,
+    credentials: &ClientCredentials,
 ) -> Result<AuthenticatedClient, ClientAuthError> {
     // Look up the client
-    let client = db::get_oauth_client_by_client_id(&state.db, credentials.client_id)
+    let client = db::get_oauth_client_by_client_id(&state.db, &credentials.client_id)
         .await
         .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?
         .ok_or(ClientAuthError::InvalidClient)?;
@@ -343,14 +347,15 @@ pub async fn authenticate_client(
         // Secret is required - validate it
         let secret = credentials
             .client_secret
+            .as_ref()
             .ok_or(ClientAuthError::SecretRequired)?;
 
         // Hash the provided secret and validate against stored hash
-        let secret_hash = hash_client_secret(secret);
+        let secret_hash = hash_client_secret(secret.expose_secret());
 
         // Validate credentials
         let validated =
-            db::validate_oauth_client_credentials(&state.db, credentials.client_id, &secret_hash)
+            db::validate_oauth_client_credentials(&state.db, &credentials.client_id, &secret_hash)
                 .await
                 .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
 

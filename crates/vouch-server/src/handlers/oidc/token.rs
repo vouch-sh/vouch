@@ -5,8 +5,8 @@ use crate::AppState;
 use crate::services::oidc::{
     exchange::{TokenExchangeParams, exchange_token},
     token::{
-        AuthCodeExchangeParams, ClientCredentials as SvcClientCredentials,
-        exchange_authorization_code, validate_dpop_if_present,
+        AuthCodeExchangeParams, ClientCredentials, exchange_authorization_code,
+        validate_dpop_if_present,
     },
 };
 use askama::Template;
@@ -18,6 +18,7 @@ use axum::{
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::ApiError;
@@ -171,17 +172,11 @@ async fn handle_authorization_code_grant(
             Err(e) => return service_error_to_api_error(e).into_response(),
         };
 
-    // Convert to service-layer credentials
-    let svc_credentials = credentials.as_ref().map(|c| SvcClientCredentials {
-        client_id: &c.client_id,
-        client_secret: c.client_secret.as_deref(),
-    });
-
     // Exchange the authorization code
     let exchange_params = AuthCodeExchangeParams {
         code,
         redirect_uri: params.redirect_uri.as_deref(),
-        credentials: svc_credentials,
+        credentials: credentials.as_ref(),
         code_verifier: params.code_verifier.as_deref(),
         dpop_proof,
     };
@@ -274,16 +269,13 @@ fn service_error_to_api_error(e: crate::services::ServiceError) -> (StatusCode, 
     }
 }
 
-/// Client credentials extracted from the request.
-struct ClientCredentials {
-    client_id: String,
-    client_secret: Option<String>,
-}
-
 /// Extract client credentials from Authorization header or request body.
 ///
 /// Supports both `client_secret_basic` (RFC 6749 Section 2.3.1) and
 /// `client_secret_post` (RFC 6749 Section 2.3.1) authentication methods.
+///
+/// The client secret is wrapped in `SecretString` to prevent accidental logging
+/// and ensure it is zeroized on drop.
 fn extract_client_credentials(
     headers: &HeaderMap,
     client_id_param: Option<&str>,
@@ -302,13 +294,13 @@ fn extract_client_credentials(
     {
         return Some(ClientCredentials {
             client_id: id.to_string(),
-            client_secret: Some(secret.to_string()),
+            client_secret: Some(SecretString::from(secret.to_string())),
         });
     }
 
     // Fall back to request body parameters (client_secret_post)
     client_id_param.map(|id| ClientCredentials {
         client_id: id.to_string(),
-        client_secret: client_secret_param.map(String::from),
+        client_secret: client_secret_param.map(|s| SecretString::from(s.to_string())),
     })
 }
