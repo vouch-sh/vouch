@@ -248,8 +248,9 @@ async fn handle_get(registry: &RegistryInfo<'_>) -> Result<()> {
 
 /// Handle "login" action - direct users to vouch login.
 fn handle_login(registry: &RegistryInfo<'_>, _options: LoginOptions<'_>) -> Result<()> {
-    // Vouch manages authentication - don't accept tokens via cargo login
-    // Always direct users to authenticate through vouch
+    // Vouch manages authentication via `vouch login`, not cargo login.
+    // This is consistent with AWS/SSH/GCP integrations where the user
+    // authenticates with Vouch once, and native tools use credential helpers.
     eprintln!();
     eprintln!(
         "To authenticate with registry '{}', run:",
