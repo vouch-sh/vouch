@@ -48,6 +48,7 @@ secrecy = { workspace = true }
 serde_urlencoded = { version = "=0.7.1", default-features = false }
 serde_yaml = { version = "=0.9.34", default-features = false }
 rust-ini = { version = "=0.21.3", default-features = false }
+toml_edit = { version = "=0.22.26", default-features = false, features = ["parse"] }
 
 [target.'cfg(unix)'.dependencies]
 vouch-agent = { workspace = true }
