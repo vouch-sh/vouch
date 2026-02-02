@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
-use crate::aws::sts::{
+use crate::integrations::aws::sts::{
     assume_role_with_web_identity, extract_partition_from_role_arn,
     get_default_region_for_partition, get_domain_suffix_for_partition,
 };

@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Integration status checking for cloud providers and services.
+//! Integration utilities and status checking for cloud providers and services.
 //!
-//! This module provides a trait-based system for checking the configuration
-//! status of various integrations (AWS, GCP, GitHub, K8s, SSH, Docker).
+//! This module provides:
+//! - Integration-specific utilities (config parsing, API clients)
+//! - A trait-based system for checking configuration status
+//!
+//! Each integration is organized as a submodule containing both utilities
+//! and status checking (AWS, Cargo, GCP, GitHub, K8s, SSH, Docker).
 
 pub mod aws;
 pub mod cargo;
