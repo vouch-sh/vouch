@@ -17,8 +17,11 @@ pub mod compat;
 mod config;
 mod credentials;
 mod device_auth;
+pub mod dsql;
+mod enrollment;
 mod error;
 mod github;
+pub mod migrations;
 mod oauth;
 mod organizations;
 mod pending_oauth;
@@ -26,6 +29,7 @@ mod pool;
 pub mod schema;
 mod scim;
 mod sessions;
+pub mod types;
 mod users;
 
 // Re-export Pool, DatabaseType, and Transaction for use throughout the application
@@ -37,9 +41,12 @@ pub use error::{DbError, DbResult};
 // Re-export user types and functions
 pub use users::{
     User, UserWithAuthCount, delete_user, get_user_by_email, get_user_by_id,
-    list_users_with_auth_count, list_users_with_auth_count_by_org, upsert_user,
-    upsert_user_with_org,
+    list_users_with_auth_count, list_users_with_auth_count_by_org,
 };
+
+// Re-export user test helpers (only available in tests)
+#[cfg(any(test, feature = "test-utils"))]
+pub use users::{upsert_user, upsert_user_with_org};
 
 // Re-export session types and functions
 pub use sessions::{
@@ -57,9 +64,13 @@ pub use authenticators::{
 
 // Re-export organization types and functions
 pub use organizations::{
-    Organization, count_users_in_org, create_organization, get_or_create_org_by_domain,
-    get_org_by_domain, get_org_by_id, list_organizations, set_user_org,
+    Organization, count_users_in_org, get_org_by_domain, get_org_by_id, list_organizations,
+    set_user_org,
 };
+
+// Re-export organization test helpers (only available in tests)
+#[cfg(any(test, feature = "test-utils"))]
+pub use organizations::create_organization;
 
 // Re-export device auth types and functions
 pub use device_auth::{
@@ -116,10 +127,10 @@ pub use credentials::{
 pub use github::{
     GitHubCredentialEventParams, GitHubInstallation, create_github_installation,
     delete_github_installation_by_installation_id, delete_old_github_credential_events,
-    get_github_installation_by_installation_id, get_github_installation_by_org_and_account,
-    get_github_installations_by_org, log_github_credential_event, suspend_github_installation,
-    unsuspend_github_installation, update_github_installation_repos,
-    update_github_installation_repos_delta,
+    get_all_linked_installation_ids, get_github_installation_by_installation_id,
+    get_github_installation_by_org_and_account, get_github_installations_by_org,
+    log_github_credential_event, suspend_github_installation, unsuspend_github_installation,
+    update_github_installation_repos, update_github_installation_repos_delta,
 };
 
 // Re-export pending OAuth types and functions (RFC 6749, RFC 9700)
@@ -128,6 +139,9 @@ pub use pending_oauth::{
     create_pending_oauth_authorization, delete_expired_pending_oauth_authorizations,
     get_pending_oauth_authorization,
 };
+
+// Re-export enrollment types and functions
+pub use enrollment::{EnrolledUser, EnrollmentResult, enroll_user_with_org};
 
 #[cfg(test)]
 mod tests;

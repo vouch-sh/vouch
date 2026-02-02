@@ -8,7 +8,7 @@
 //!
 //! | Feature | SQLite | PostgreSQL/DSQL |
 //! |---------|--------|-----------------|
-//! | Current timestamp | `datetime('now')` | `NOW()` |
+//! | Current timestamp | `strftime('%Y-%m-%dT%H:%M:%SZ', 'now')` | `NOW()` |
 //! | Upsert ignore | `INSERT OR IGNORE` | `INSERT ... ON CONFLICT DO NOTHING` |
 //! | Boolean literals | `0` / `1` | `FALSE` / `TRUE` |
 //! | Parameter placeholders | `?` | `$1, $2, ...` |
@@ -27,18 +27,6 @@ use sea_query::{
     DeleteStatement, InsertStatement, PostgresQueryBuilder, SelectStatement, SqliteQueryBuilder,
     UpdateStatement,
 };
-
-/// Returns the SQL expression for the current timestamp.
-///
-/// - SQLite: `datetime('now')`
-/// - PostgreSQL: `NOW()`
-#[must_use]
-pub fn now_expr(db_type: DatabaseType) -> &'static str {
-    match db_type {
-        DatabaseType::Sqlite => "datetime('now')",
-        DatabaseType::Postgres => "NOW()",
-    }
-}
 
 /// Returns the SQL for inserting a row if it doesn't exist.
 ///
@@ -186,37 +174,9 @@ impl BuildSql for DeleteStatement {
     }
 }
 
-/// Custom expression for database-specific current timestamp.
-///
-/// This struct implements `sea_query::Iden` to produce the appropriate
-/// timestamp function for each database type.
-#[derive(Clone, Copy)]
-pub struct CurrentTimestamp(pub DatabaseType);
-
-impl sea_query::Iden for CurrentTimestamp {
-    fn unquoted(&self, s: &mut dyn std::fmt::Write) {
-        let expr = match self.0 {
-            DatabaseType::Sqlite => "datetime('now')",
-            DatabaseType::Postgres => "NOW()",
-        };
-        // Ignore the Result since Iden doesn't return Result
-        let _ = write!(s, "{expr}");
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_now_expr_sqlite() {
-        assert_eq!(now_expr(DatabaseType::Sqlite), "datetime('now')");
-    }
-
-    #[test]
-    fn test_now_expr_postgres() {
-        assert_eq!(now_expr(DatabaseType::Postgres), "NOW()");
-    }
 
     #[test]
     fn test_build_insert_or_ignore_sqlite() {

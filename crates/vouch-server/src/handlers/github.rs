@@ -32,6 +32,13 @@ use vouch_common::ApiError;
 // Templates
 // ============================================================================
 
+/// Unlinked GitHub installation (exists on GitHub but not in our database).
+pub struct UnlinkedInstallation {
+    pub id: u64,
+    pub account_login: String,
+    pub account_type: String,
+}
+
 /// GitHub connect page template.
 #[derive(Template)]
 #[template(path = "github/connect.html")]

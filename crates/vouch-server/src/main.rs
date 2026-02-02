@@ -13,7 +13,9 @@ use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing_subscriber::EnvFilter;
 
 use vouch_server::{
-    AppState, cleanup, config, db::Pool, dpop, github_app, handlers, oidc_key, ssh_ca,
+    AppState, cleanup, config,
+    db::{Pool, dsql::is_dsql_endpoint, migrations::run_dsql_migrations},
+    dpop, github_app, handlers, oidc_key, ssh_ca,
 };
 
 #[tokio::main]
@@ -36,9 +38,23 @@ async fn main() -> Result<()> {
     tracing::info!("Connected to {:?} database", db.db_type());
 
     // Run migrations based on database type
+    // Note: DSQL requires a custom migration runner due to DDL/DML transaction restrictions
     match &db {
         Pool::Sqlite(pool) => sqlx::migrate!("./migrations/sqlite").run(pool).await?,
-        Pool::Postgres(pool) => sqlx::migrate!("./migrations/postgres").run(pool).await?,
+        Pool::Postgres(pool) => {
+            // Check if this is a DSQL endpoint
+            let is_dsql = url::Url::parse(&config.database_url)
+                .ok()
+                .and_then(|url| url.host_str().map(is_dsql_endpoint))
+                .unwrap_or(false);
+
+            if is_dsql {
+                tracing::info!("DSQL detected, using DSQL-compatible migration runner");
+                run_dsql_migrations(pool).await?;
+            } else {
+                sqlx::migrate!("./migrations/postgres").run(pool).await?;
+            }
+        }
     }
     tracing::info!("Database migrations complete");
 
@@ -119,7 +135,7 @@ async fn main() -> Result<()> {
             config.cleanup_interval_minutes
         );
         Some(cleanup::start_cleanup_task(
-            db,
+            db.clone(),
             dpop_state,
             config.cleanup_interval_minutes,
             config.auth_events_retention_days,
@@ -415,6 +431,10 @@ async fn main() -> Result<()> {
         tracing::info!("Shutting down cleanup task");
         handle.abort();
     }
+
+    // Close database pool (signals DSQL token refresh task to stop)
+    tracing::info!("Closing database pool");
+    db.close().await;
 
     tracing::info!("Server shutdown complete");
     Ok(())
