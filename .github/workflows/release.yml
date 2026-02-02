@@ -210,6 +210,10 @@ jobs:
         if: matrix.install != ''
         run: ${{ matrix.install }}
 
+      - name: Install GNU tar (macOS)
+        if: runner.os == 'macOS'
+        run: brew install gnu-tar
+
       - name: Setup Rust toolchain
         run: |
           rustup toolchain install stable --profile minimal
@@ -330,28 +334,35 @@ jobs:
           TARGET="${{ matrix.target }}"
           STAGING="vouch-v${VERSION}-${TARGET}"
 
+          # Use GNU tar (gtar on macOS, tar on Linux)
+          if command -v gtar &> /dev/null; then
+            TAR_CMD="gtar"
+          else
+            TAR_CMD="tar"
+          fi
+
           mkdir -p "${STAGING}"
           for bin in ${{ matrix.bins }}; do
             cp "target/${TARGET}/release/${bin}" "${STAGING}/"
           done
 
           # Create deterministic archive for reproducible builds
-          tar --sort=name \
+          $TAR_CMD --sort=name \
               --mtime="@${SOURCE_DATE_EPOCH}" \
               --owner=0 --group=0 --numeric-owner \
               -czf "${STAGING}.tar.gz" "${STAGING}"
-          sha256sum "${STAGING}.tar.gz" > "${STAGING}.tar.gz.sha256"
+          shasum -a 256 "${STAGING}.tar.gz" > "${STAGING}.tar.gz.sha256"
 
           # Server archive (separate)
           if [ "${{ matrix.server }}" = "true" ]; then
             SERVER_STAGING="vouch-server-v${VERSION}-${TARGET}"
             mkdir -p "${SERVER_STAGING}"
             cp "target/${TARGET}/release/vouch-server" "${SERVER_STAGING}/"
-            tar --sort=name \
+            $TAR_CMD --sort=name \
                 --mtime="@${SOURCE_DATE_EPOCH}" \
                 --owner=0 --group=0 --numeric-owner \
                 -czf "${SERVER_STAGING}.tar.gz" "${SERVER_STAGING}"
-            sha256sum "${SERVER_STAGING}.tar.gz" > "${SERVER_STAGING}.tar.gz.sha256"
+            shasum -a 256 "${SERVER_STAGING}.tar.gz" > "${SERVER_STAGING}.tar.gz.sha256"
           fi
 
       - name: Create archive (zip)
