@@ -25,7 +25,7 @@ impl_template_response!(DocsIndexTemplate);
 #[derive(Template)]
 #[template(path = "docs/aws.html")]
 pub struct DocsAwsTemplate {
-    /// The OIDC provider URL (verification_base_url).
+    /// The OIDC provider URL (base_url).
     pub provider_url: String,
     /// The RP ID (domain) for the OIDC provider.
     pub rp_id: String,
@@ -41,7 +41,7 @@ impl_template_response!(DocsAwsTemplate);
 #[derive(Template)]
 #[template(path = "docs/gcp.html")]
 pub struct DocsGcpTemplate {
-    /// The OIDC provider URL (verification_base_url).
+    /// The OIDC provider URL (base_url).
     pub provider_url: String,
     /// The RP ID (domain) for the OIDC provider.
     pub rp_id: String,
@@ -87,7 +87,7 @@ impl_template_response!(DocsGettingStartedTemplate);
 #[derive(Template)]
 #[template(path = "docs/applications.html")]
 pub struct DocsApplicationsTemplate {
-    /// The OIDC provider URL (verification_base_url).
+    /// The OIDC provider URL (base_url).
     pub provider_url: String,
     /// Organization name for branding.
     pub org_name: String,
@@ -101,7 +101,7 @@ impl_template_response!(DocsApplicationsTemplate);
 #[derive(Template)]
 #[template(path = "docs/ssh.html")]
 pub struct DocsSshTemplate {
-    /// The OIDC provider URL (verification_base_url).
+    /// The OIDC provider URL (base_url).
     pub provider_url: String,
     /// Organization name for branding.
     pub org_name: String,
@@ -115,7 +115,7 @@ impl_template_response!(DocsSshTemplate);
 #[derive(Template)]
 #[template(path = "docs/kubernetes.html")]
 pub struct DocsKubernetesTemplate {
-    /// The OIDC provider URL (verification_base_url).
+    /// The OIDC provider URL (base_url).
     pub provider_url: String,
     /// Organization name for branding.
     pub org_name: String,
@@ -129,7 +129,7 @@ impl_template_response!(DocsKubernetesTemplate);
 #[derive(Template)]
 #[template(path = "docs/scim.html")]
 pub struct DocsScimTemplate {
-    /// The OIDC provider URL (verification_base_url).
+    /// The OIDC provider URL (base_url).
     pub provider_url: String,
     /// Organization name for branding.
     pub org_name: String,
@@ -172,7 +172,7 @@ pub async fn aws_setup_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsAwsTemplate {
-        provider_url: state.config.verification_base_url.clone(),
+        provider_url: state.config.base_url.clone(),
         rp_id: state.config.rp_id.clone(),
         org_name: state.config.get_org_display_name().to_string(),
         auth,
@@ -187,7 +187,7 @@ pub async fn gcp_setup_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsGcpTemplate {
-        provider_url: state.config.verification_base_url.clone(),
+        provider_url: state.config.base_url.clone(),
         rp_id: state.config.rp_id.clone(),
         org_name: state.config.get_org_display_name().to_string(),
         auth,
@@ -204,7 +204,7 @@ pub async fn github_setup_page(
     DocsGithubTemplate {
         org_name: state.config.get_org_display_name().to_string(),
         github_configured: state.github_app.is_some(),
-        server_url: state.config.verification_base_url.clone(),
+        server_url: state.config.base_url.clone(),
         auth,
     }
 }
@@ -218,7 +218,7 @@ pub async fn getting_started_page(
     let auth = get_auth_context(&state, &jar).await;
     DocsGettingStartedTemplate {
         org_name: state.config.get_org_display_name().to_string(),
-        server_url: state.config.verification_base_url.clone(),
+        server_url: state.config.base_url.clone(),
         auth,
     }
 }
@@ -231,7 +231,7 @@ pub async fn applications_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsApplicationsTemplate {
-        provider_url: state.config.verification_base_url.clone(),
+        provider_url: state.config.base_url.clone(),
         org_name: state.config.get_org_display_name().to_string(),
         auth,
     }
@@ -242,7 +242,7 @@ pub async fn applications_page(
 pub async fn ssh_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsSshTemplate {
-        provider_url: state.config.verification_base_url.clone(),
+        provider_url: state.config.base_url.clone(),
         org_name: state.config.get_org_display_name().to_string(),
         auth,
     }
@@ -256,7 +256,7 @@ pub async fn kubernetes_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsKubernetesTemplate {
-        provider_url: state.config.verification_base_url.clone(),
+        provider_url: state.config.base_url.clone(),
         org_name: state.config.get_org_display_name().to_string(),
         auth,
     }
@@ -267,7 +267,7 @@ pub async fn kubernetes_page(
 pub async fn scim_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsScimTemplate {
-        provider_url: state.config.verification_base_url.clone(),
+        provider_url: state.config.base_url.clone(),
         org_name: state.config.get_org_display_name().to_string(),
         auth,
     }

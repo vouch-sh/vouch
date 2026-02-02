@@ -417,7 +417,7 @@ fn generate_id_token(
     });
 
     let claims = IdTokenClaims {
-        iss: state.config.verification_base_url.clone(),
+        iss: state.config.base_url.clone(),
         sub: email.to_string(), // Use email as subject
         aud: client_id.to_string(),
         exp,
@@ -468,7 +468,7 @@ pub async fn validate_dpop_if_present(
     };
 
     // Construct the full URI for validation
-    let full_uri = format!("{}{}", state.config.verification_base_url, uri);
+    let full_uri = format!("{}{}", state.config.base_url, uri);
 
     // Validate the DPoP proof
     match dpop::validate_dpop_proof(

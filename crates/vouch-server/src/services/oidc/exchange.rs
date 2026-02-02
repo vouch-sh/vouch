@@ -230,7 +230,7 @@ pub async fn exchange_token(
 
     let exchanged_claims = ExchangedTokenClaims {
         sub: subject_claims.email.clone(),
-        iss: state.config.verification_base_url.clone(),
+        iss: state.config.base_url.clone(),
         aud: params.audience.map(String::from),
         exp,
         iat: now.as_second(),

@@ -116,15 +116,12 @@ impl<'a> KubernetesService<'a> {
 
         // Build OIDC claims
         // For Kubernetes, the audience is the cluster identifier (--oidc-client-id)
-        let id_claims = OidcIdTokenClaimsBuilder::for_k8s(
-            &self.config.verification_base_url,
-            user_email,
-            audience,
-        )
-        .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
-        .valid_for_seconds(expires_in)
-        .build()
-        .map_err(|e| K8sError::ClaimsBuild(e.to_string()))?;
+        let id_claims =
+            OidcIdTokenClaimsBuilder::for_k8s(&self.config.base_url, user_email, audience)
+                .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
+                .valid_for_seconds(expires_in)
+                .build()
+                .map_err(|e| K8sError::ClaimsBuild(e.to_string()))?;
 
         // Sign the token with ES256
         let id_token = self

@@ -178,7 +178,7 @@ pub async fn browser_login_start(
     Json(req): Json<BrowserLoginStartRequest>,
 ) -> Result<Json<BrowserLoginStartResponse>, (StatusCode, Json<ApiError>)> {
     // Validate Origin header for CSRF protection (RFC 9700)
-    validate_origin(&headers, &state.config.verification_base_url)?;
+    validate_origin(&headers, &state.config.base_url)?;
 
     tracing::info!("Browser login start (discoverable credential flow)");
 
@@ -235,7 +235,7 @@ pub async fn browser_login_complete(
     Json(req): Json<BrowserLoginCompleteRequest>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
     // Validate Origin header for CSRF protection (RFC 9700)
-    validate_origin(&headers, &state.config.verification_base_url)?;
+    validate_origin(&headers, &state.config.base_url)?;
 
     tracing::info!("Browser login complete (discoverable credential flow)");
 

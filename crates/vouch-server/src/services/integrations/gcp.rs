@@ -111,15 +111,12 @@ impl<'a> GcpService<'a> {
 
         // Build OIDC claims
         // For GCP, the audience is the Workload Identity Pool provider resource name
-        let id_claims = OidcIdTokenClaimsBuilder::for_gcp(
-            &self.config.verification_base_url,
-            user_email,
-            audience,
-        )
-        .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
-        .valid_for_seconds(expires_in)
-        .build()
-        .map_err(|e| GcpError::ClaimsBuild(e.to_string()))?;
+        let id_claims =
+            OidcIdTokenClaimsBuilder::for_gcp(&self.config.base_url, user_email, audience)
+                .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
+                .valid_for_seconds(expires_in)
+                .build()
+                .map_err(|e| GcpError::ClaimsBuild(e.to_string()))?;
 
         // Sign the token with ES256
         let id_token = self

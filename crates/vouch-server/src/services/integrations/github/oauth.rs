@@ -127,7 +127,7 @@ impl GitHubService<'_> {
     /// * `state` - The encoded state token for CSRF protection
     pub fn build_oauth_url(&self, state: &str) -> GitHubResult<String> {
         let client_id = self.oauth_client_id()?;
-        let redirect_uri = format!("{}/github/callback", self.config.verification_base_url);
+        let redirect_uri = format!("{}/github/callback", self.config.base_url);
 
         Ok(format!(
             "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&state={}",

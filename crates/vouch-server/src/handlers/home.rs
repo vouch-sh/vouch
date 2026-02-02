@@ -39,7 +39,7 @@ pub async fn home_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> im
         || state.config.cli_download_windows.is_some();
 
     HomeTemplate {
-        server_url: state.config.verification_base_url.clone(),
+        server_url: state.config.base_url.clone(),
         org_name: state.config.get_org_display_name().to_string(),
         has_downloads,
         download_macos: state.config.cli_download_macos.clone(),

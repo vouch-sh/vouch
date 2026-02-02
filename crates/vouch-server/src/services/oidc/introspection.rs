@@ -127,7 +127,7 @@ pub async fn introspect_token(
         iat: Some(claims.iat),
         sub: Some(claims.email),
         aud: None,
-        iss: Some(state.config.verification_base_url.clone()),
+        iss: Some(state.config.base_url.clone()),
     })
 }
 

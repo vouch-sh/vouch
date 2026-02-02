@@ -115,7 +115,7 @@ pub async fn device_code(
     })?;
 
     // Build verification URL
-    let verification_uri = format!("{}/device", state.config.verification_base_url);
+    let verification_uri = format!("{}/device", state.config.base_url);
 
     tracing::info!("Created device auth request, user_code: {}", user_code);
 

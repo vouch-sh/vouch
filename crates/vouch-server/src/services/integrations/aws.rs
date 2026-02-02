@@ -112,12 +112,11 @@ impl<'a> AwsService<'a> {
 
         // Build OIDC claims
         // For AWS, the audience is the issuer URL (AWS matches against the OIDC provider)
-        let id_claims =
-            OidcIdTokenClaimsBuilder::for_aws(&self.config.verification_base_url, user_email)
-                .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
-                .valid_for_seconds(expires_in)
-                .build()
-                .map_err(|e| AwsError::ClaimsBuild(e.to_string()))?;
+        let id_claims = OidcIdTokenClaimsBuilder::for_aws(&self.config.base_url, user_email)
+            .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
+            .valid_for_seconds(expires_in)
+            .build()
+            .map_err(|e| AwsError::ClaimsBuild(e.to_string()))?;
 
         // Sign the token with ES256
         let id_token = self

@@ -62,7 +62,7 @@ pub fn test_config() -> ServerConfig {
         oidc_issuer_url: Some("https://accounts.google.com".to_string()),
         oidc_client_id: Some("test-client-id".to_string()),
         oidc_client_secret: Some(SecretString::from("test-client-secret")),
-        verification_base_url: "https://test.example.com".to_string(),
+        base_url: "https://test.example.com".to_string(),
         device_code_expires_seconds: 600,
         device_poll_interval_seconds: 5,
         allowed_domains: Some(vec!["example.com".to_string()]),
@@ -94,7 +94,7 @@ pub async fn test_app_state() -> Arc<AppState> {
     let pool = test_db().await;
     let config = test_config();
 
-    let rp_origin = url::Url::parse(&config.verification_base_url).expect("Invalid RP origin");
+    let rp_origin = url::Url::parse(&config.base_url).expect("Invalid RP origin");
     let webauthn = webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)
         .expect("Failed to create WebauthnBuilder")
         .rp_name(&config.rp_name)
