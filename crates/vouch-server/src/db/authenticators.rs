@@ -2,8 +2,8 @@
 //! Authenticator (WebAuthn credential) database operations.
 
 use super::Pool;
-use super::compat::BuildSql;
 use super::schema::{Authenticators, DeviceAuthRequests, Sessions};
+use super::types::BuildSql;
 use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute};
 use anyhow::Result;

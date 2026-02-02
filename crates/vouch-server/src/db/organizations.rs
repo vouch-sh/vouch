@@ -2,17 +2,19 @@
 //! Organization database operations.
 
 use super::Pool;
-use super::compat::BuildSql;
 use super::schema::{
     CloudIntegrations, GitHubCredentialEvents, GitHubInstallations, Organizations, ScimAuditLog,
     ScimTokens, Users,
 };
+use super::types::BuildSql;
 use super::types::DbTimestamp;
-use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute, tx_fetch_all};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::{db_execute, db_fetch_one};
+use crate::{tx_execute, tx_fetch_all};
 use anyhow::Result;
 #[cfg(any(test, feature = "test-utils"))]
 use jiff::Timestamp;
-use sea_query::{Expr, Order, Query};
+use sea_query::{Expr, Query};
 #[cfg(any(test, feature = "test-utils"))]
 use uuid::Uuid;
 
@@ -25,55 +27,6 @@ pub struct Organization {
     pub name: Option<String>,
     pub created_at: DbTimestamp,
     pub created_by_user_id: Option<String>,
-}
-
-/// Get an organization by domain.
-pub async fn get_org_by_domain(pool: &Pool, domain: &str) -> Result<Option<Organization>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .columns([
-                Organizations::Id,
-                Organizations::Domain,
-                Organizations::Name,
-                Organizations::CreatedAt,
-                Organizations::CreatedByUserId,
-            ])
-            .from(Organizations::Table)
-            .and_where(Expr::col(Organizations::Domain).eq(domain))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let org = db_fetch_optional!(pool, sqlx::query_as::<_, Organization>(&sql))?;
-
-    Ok(org)
-}
-
-/// Get an organization by ID.
-#[allow(dead_code)]
-pub async fn get_org_by_id(pool: &Pool, org_id: &str) -> Result<Option<Organization>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .columns([
-                Organizations::Id,
-                Organizations::Domain,
-                Organizations::Name,
-                Organizations::CreatedAt,
-                Organizations::CreatedByUserId,
-            ])
-            .from(Organizations::Table)
-            .and_where(Expr::col(Organizations::Id).eq(org_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let org = db_fetch_optional!(pool, sqlx::query_as::<_, Organization>(&sql))?;
-
-    Ok(org)
 }
 
 /// Create a new organization.
@@ -133,75 +86,6 @@ pub async fn create_organization(
     let org = db_fetch_one!(pool, sqlx::query_as::<_, Organization>(&select_sql))?;
 
     Ok(org)
-}
-
-/// Update a user's organization membership.
-#[allow(dead_code)]
-pub async fn set_user_org(
-    pool: &Pool,
-    user_id: &str,
-    org_id: Option<&str>,
-    is_org_admin: bool,
-) -> Result<()> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::update()
-            .table(Users::Table)
-            .value(Users::OrgId, org_id)
-            .value(Users::IsOrgAdmin, is_org_admin)
-            .and_where(Expr::col(Users::Id).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(())
-}
-
-/// Count users in an organization.
-#[allow(dead_code)]
-pub async fn count_users_in_org(pool: &Pool, org_id: &str) -> Result<i64> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .expr(Expr::col(Users::Id).count())
-            .from(Users::Table)
-            .and_where(Expr::col(Users::OrgId).eq(org_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let row: (i64,) = db_fetch_one!(pool, sqlx::query_as(&sql))?;
-
-    Ok(row.0)
-}
-
-/// List all organizations.
-#[allow(dead_code)]
-pub async fn list_organizations(pool: &Pool) -> Result<Vec<Organization>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .columns([
-                Organizations::Id,
-                Organizations::Domain,
-                Organizations::Name,
-                Organizations::CreatedAt,
-                Organizations::CreatedByUserId,
-            ])
-            .from(Organizations::Table)
-            .order_by(Organizations::Domain, Order::Asc)
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let orgs = db_fetch_all!(pool, sqlx::query_as::<_, Organization>(&sql))?;
-
-    Ok(orgs)
 }
 
 /// Delete an organization and all associated data.

@@ -2,8 +2,8 @@
 //! Session database operations.
 
 use super::Pool;
-use super::compat::BuildSql;
 use super::schema::Sessions;
+use super::types::BuildSql;
 use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_optional};
 use anyhow::Result;

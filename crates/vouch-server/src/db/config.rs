@@ -2,8 +2,8 @@
 //! Server configuration and authentication event database operations.
 
 use super::Pool;
-use super::compat::BuildSql;
 use super::schema::{AuthEvents, ServerConfig};
+use super::types::BuildSql;
 use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_all, db_fetch_optional};
 use anyhow::Result;

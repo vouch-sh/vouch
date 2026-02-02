@@ -2,22 +2,21 @@
 //! User database operations.
 
 use super::Pool;
-use super::compat::BuildSql;
 use super::schema::{
     AuthEvents, Authenticators, DeviceAuthRequests, EnrollmentSessions, OAuthClientSecrets,
     OAuthClients, OAuthUsageEvents, ScimGroupMembers, Sessions, SshRevokedCertificates,
     TokenExchanges, Users,
 };
-use super::types::DbTimestamp;
+use super::types::BuildSql;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::{db_execute, db_fetch_one};
-use crate::{db_fetch_all, db_fetch_optional, tx_execute, tx_fetch_all};
+use crate::{db_fetch_optional, tx_execute, tx_fetch_all};
 use anyhow::Result;
 #[cfg(any(test, feature = "test-utils"))]
 use jiff::Timestamp;
 #[cfg(any(test, feature = "test-utils"))]
 use sea_query::OnConflict;
-use sea_query::{Alias, Expr, Func, JoinType, Order, Query};
+use sea_query::{Expr, Query};
 #[cfg(any(test, feature = "test-utils"))]
 use uuid::Uuid;
 
@@ -31,21 +30,6 @@ pub struct User {
     /// Organization ID (NULL for personal accounts like gmail.com).
     pub org_id: Option<String>,
     /// Whether this user is an admin of their organization.
-    pub is_org_admin: bool,
-}
-
-/// User with authenticator count for admin listing.
-#[derive(Debug, sqlx::FromRow)]
-pub struct UserWithAuthCount {
-    pub id: String,
-    pub email: String,
-    #[allow(dead_code)]
-    pub name: Option<String>,
-    pub created_at: DbTimestamp,
-    pub authenticator_count: i64,
-    #[allow(dead_code)]
-    pub org_id: Option<String>,
-    #[allow(dead_code)]
     pub is_org_admin: bool,
 }
 
@@ -65,7 +49,12 @@ pub async fn upsert_user(pool: &Pool, email: &str, name: Option<&str>) -> Result
         let query = Query::insert()
             .into_table(Users::Table)
             .columns([Users::Id, Users::Email, Users::Name, Users::CreatedAt])
-            .values_panic([id.clone().into(), email.into(), name.into(), now.as_str().into()])
+            .values_panic([
+                id.clone().into(),
+                email.into(),
+                name.into(),
+                now.as_str().into(),
+            ])
             .on_conflict(OnConflict::new().do_nothing().to_owned())
             .to_owned();
         query.build_sql(db_type)
@@ -369,86 +358,4 @@ pub async fn delete_user(pool: &Pool, user_id: &str) -> Result<()> {
 
     tx.commit().await?;
     Ok(())
-}
-
-/// List all users with their authenticator counts.
-pub async fn list_users_with_auth_count(pool: &Pool) -> Result<Vec<UserWithAuthCount>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .column((Users::Table, Users::Id))
-            .column((Users::Table, Users::Email))
-            .column((Users::Table, Users::Name))
-            .column((Users::Table, Users::CreatedAt))
-            .expr_as(
-                Func::count(Expr::col((Authenticators::Table, Authenticators::Id))),
-                Alias::new("authenticator_count"),
-            )
-            .column((Users::Table, Users::OrgId))
-            .column((Users::Table, Users::IsOrgAdmin))
-            .from(Users::Table)
-            .join(
-                JoinType::LeftJoin,
-                Authenticators::Table,
-                Expr::col((Users::Table, Users::Id))
-                    .equals((Authenticators::Table, Authenticators::UserId)),
-            )
-            .group_by_col((Users::Table, Users::Id))
-            .group_by_col((Users::Table, Users::Email))
-            .group_by_col((Users::Table, Users::Name))
-            .group_by_col((Users::Table, Users::CreatedAt))
-            .group_by_col((Users::Table, Users::OrgId))
-            .group_by_col((Users::Table, Users::IsOrgAdmin))
-            .order_by((Users::Table, Users::Email), Order::Asc)
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let users = db_fetch_all!(pool, sqlx::query_as::<_, UserWithAuthCount>(&sql))?;
-
-    Ok(users)
-}
-
-/// List users in a specific organization with their authenticator counts.
-pub async fn list_users_with_auth_count_by_org(
-    pool: &Pool,
-    org_id: &str,
-) -> Result<Vec<UserWithAuthCount>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .column((Users::Table, Users::Id))
-            .column((Users::Table, Users::Email))
-            .column((Users::Table, Users::Name))
-            .column((Users::Table, Users::CreatedAt))
-            .expr_as(
-                Func::count(Expr::col((Authenticators::Table, Authenticators::Id))),
-                Alias::new("authenticator_count"),
-            )
-            .column((Users::Table, Users::OrgId))
-            .column((Users::Table, Users::IsOrgAdmin))
-            .from(Users::Table)
-            .join(
-                JoinType::LeftJoin,
-                Authenticators::Table,
-                Expr::col((Users::Table, Users::Id))
-                    .equals((Authenticators::Table, Authenticators::UserId)),
-            )
-            .and_where(Expr::col((Users::Table, Users::OrgId)).eq(org_id))
-            .group_by_col((Users::Table, Users::Id))
-            .group_by_col((Users::Table, Users::Email))
-            .group_by_col((Users::Table, Users::Name))
-            .group_by_col((Users::Table, Users::CreatedAt))
-            .group_by_col((Users::Table, Users::OrgId))
-            .group_by_col((Users::Table, Users::IsOrgAdmin))
-            .order_by((Users::Table, Users::Email), Order::Asc)
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let users = db_fetch_all!(pool, sqlx::query_as::<_, UserWithAuthCount>(&sql))?;
-
-    Ok(users)
 }

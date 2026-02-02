@@ -2,11 +2,11 @@
 //! Credential-related database operations (SSH revocation, enrollment, token exchange, cloud integrations).
 
 use super::Pool;
-use super::compat::BuildSql;
 use super::schema::{
     CloudIntegrations, DelegationPolicies, EnrollmentSessions, SshRevokedCertificates,
     TokenExchanges,
 };
+use super::types::BuildSql;
 use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional};
 use anyhow::Result;
@@ -438,23 +438,6 @@ pub async fn touch_enrollment_session(pool: &Pool, id: &str) -> Result<()> {
     db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
-}
-
-/// Delete an enrollment session.
-pub async fn delete_enrollment_session(pool: &Pool, id: &str) -> Result<bool> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::delete()
-            .from_table(EnrollmentSessions::Table)
-            .and_where(Expr::col(EnrollmentSessions::Id).eq(id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let result = db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(result.rows_affected() > 0)
 }
 
 /// Delete expired enrollment sessions (for cleanup task).

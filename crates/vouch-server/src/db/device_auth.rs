@@ -2,8 +2,8 @@
 //! Device Authorization (RFC 8628) database operations.
 
 use super::Pool;
-use super::compat::BuildSql;
 use super::schema::{DeviceAuthRequests, OidcStates};
+use super::types::BuildSql;
 use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_optional, tx_execute};
 use anyhow::Result;

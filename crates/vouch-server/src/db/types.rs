@@ -13,6 +13,17 @@
 //!
 //! `jiff_sqlx::Timestamp` implements `sqlx::Type`, `sqlx::Encode`, and `sqlx::Decode`
 //! for both database backends, automatically handling the conversion.
+//!
+//! # Sea-Query Integration
+//!
+//! This module also provides the `BuildSql` trait for converting sea-query statements
+//! to SQL strings for the appropriate database dialect.
+
+use super::pool::DatabaseType;
+use sea_query::{
+    DeleteStatement, InsertStatement, PostgresQueryBuilder, SelectStatement, SqliteQueryBuilder,
+    UpdateStatement,
+};
 
 /// Database timestamp type that works with both SQLite and PostgreSQL.
 ///
@@ -46,3 +57,49 @@ pub type DbTimestamp = jiff_sqlx::Timestamp;
 ///
 /// Re-exported from jiff_sqlx for convenience.
 pub use jiff_sqlx::ToSqlx;
+
+// ============================================================================
+// Sea-Query Integration Helpers
+// ============================================================================
+
+/// Trait for converting sea-query statements to SQL strings based on database type.
+pub trait BuildSql {
+    /// Build the SQL string for the given database type.
+    fn build_sql(&self, db_type: DatabaseType) -> String;
+}
+
+impl BuildSql for InsertStatement {
+    fn build_sql(&self, db_type: DatabaseType) -> String {
+        match db_type {
+            DatabaseType::Sqlite => self.to_string(SqliteQueryBuilder),
+            DatabaseType::Postgres => self.to_string(PostgresQueryBuilder),
+        }
+    }
+}
+
+impl BuildSql for SelectStatement {
+    fn build_sql(&self, db_type: DatabaseType) -> String {
+        match db_type {
+            DatabaseType::Sqlite => self.to_string(SqliteQueryBuilder),
+            DatabaseType::Postgres => self.to_string(PostgresQueryBuilder),
+        }
+    }
+}
+
+impl BuildSql for UpdateStatement {
+    fn build_sql(&self, db_type: DatabaseType) -> String {
+        match db_type {
+            DatabaseType::Sqlite => self.to_string(SqliteQueryBuilder),
+            DatabaseType::Postgres => self.to_string(PostgresQueryBuilder),
+        }
+    }
+}
+
+impl BuildSql for DeleteStatement {
+    fn build_sql(&self, db_type: DatabaseType) -> String {
+        match db_type {
+            DatabaseType::Sqlite => self.to_string(SqliteQueryBuilder),
+            DatabaseType::Postgres => self.to_string(PostgresQueryBuilder),
+        }
+    }
+}

@@ -2,8 +2,8 @@
 //! SCIM 2.0 (RFC 7643/7644) database operations.
 
 use super::Pool;
-use super::compat::BuildSql;
 use super::schema::{ScimAuditLog, ScimGroupMembers, ScimGroups, ScimTokens, Users};
+use super::types::BuildSql;
 use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute};
 use anyhow::Result;
@@ -280,9 +280,13 @@ pub async fn list_scim_users(
         // Parse simple SCIM filter (userName eq "value" or email eq "value")
         if let Some(f) = filter {
             if let Some(value) = parse_scim_filter(f, "userName") {
-                query = query.and_where(Expr::col(Users::Email).eq(value)).to_owned();
+                query = query
+                    .and_where(Expr::col(Users::Email).eq(value))
+                    .to_owned();
             } else if let Some(value) = parse_scim_filter(f, "email") {
-                query = query.and_where(Expr::col(Users::Email).eq(value)).to_owned();
+                query = query
+                    .and_where(Expr::col(Users::Email).eq(value))
+                    .to_owned();
             } else if let Some(value) = parse_scim_filter(f, "externalId") {
                 query = query
                     .and_where(Expr::col(Users::ExternalId).eq(value))
@@ -316,9 +320,13 @@ pub async fn count_scim_users(pool: &Pool, filter: Option<&str>) -> Result<usize
 
         if let Some(f) = filter {
             if let Some(value) = parse_scim_filter(f, "userName") {
-                query = query.and_where(Expr::col(Users::Email).eq(value)).to_owned();
+                query = query
+                    .and_where(Expr::col(Users::Email).eq(value))
+                    .to_owned();
             } else if let Some(value) = parse_scim_filter(f, "email") {
-                query = query.and_where(Expr::col(Users::Email).eq(value)).to_owned();
+                query = query
+                    .and_where(Expr::col(Users::Email).eq(value))
+                    .to_owned();
             } else if let Some(value) = parse_scim_filter(f, "externalId") {
                 query = query
                     .and_where(Expr::col(Users::ExternalId).eq(value))
@@ -952,7 +960,11 @@ pub async fn replace_scim_group_members(
     }
 
     // Subsequent batches: each in its own transaction
-    for chunk in user_ids.get(DSQL_BATCH_SIZE..).unwrap_or(&[]).chunks(DSQL_BATCH_SIZE) {
+    for chunk in user_ids
+        .get(DSQL_BATCH_SIZE..)
+        .unwrap_or(&[])
+        .chunks(DSQL_BATCH_SIZE)
+    {
         let mut tx = pool.begin().await?;
 
         for user_id in chunk {

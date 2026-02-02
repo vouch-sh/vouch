@@ -2,8 +2,8 @@
 //! GitHub App installation database operations.
 
 use super::Pool;
-use super::compat::BuildSql;
 use super::schema::{GitHubCredentialEvents, GitHubInstallations};
+use super::types::BuildSql;
 use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_all, db_fetch_optional};
 use anyhow::Result;
@@ -141,9 +141,12 @@ pub async fn get_github_installation_by_org_and_account(
             ])
             .from(GitHubInstallations::Table)
             .and_where(Expr::col(GitHubInstallations::OrgId).eq(org_id))
-            .and_where(SimpleExpr::FunctionCall(
-                Func::lower(Expr::col(GitHubInstallations::GitHubAccountLogin)),
-            ).eq(github_account.to_lowercase()))
+            .and_where(
+                SimpleExpr::FunctionCall(Func::lower(Expr::col(
+                    GitHubInstallations::GitHubAccountLogin,
+                )))
+                .eq(github_account.to_lowercase()),
+            )
             .to_owned();
         query.build_sql(db_type)
     };

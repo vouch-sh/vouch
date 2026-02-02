@@ -5,8 +5,8 @@
 //! when creating organizations and users during the OIDC enrollment flow.
 
 use super::Pool;
-use super::compat::BuildSql;
 use super::schema::{Organizations, Users};
+use super::types::BuildSql;
 use super::types::DbTimestamp;
 use crate::{tx_execute, tx_fetch_one, tx_fetch_optional};
 use anyhow::Result;
@@ -116,11 +116,7 @@ pub async fn enroll_user_with_org(
                             Organizations::Domain,
                             Organizations::CreatedAt,
                         ])
-                        .values_panic([
-                            org_id.clone().into(),
-                            domain.into(),
-                            now.as_str().into(),
-                        ])
+                        .values_panic([org_id.clone().into(), domain.into(), now.as_str().into()])
                         .to_owned();
                     query.build_sql(db_type)
                 };
@@ -201,9 +197,7 @@ pub async fn enroll_user_with_org(
     let user: EnrolledUser = tx_fetch_one!(tx, sqlx::query_as(&fetch_user_sql))?;
 
     // Step 4: If this user became the admin, update org's created_by_user_id
-    if is_org_admin
-        && let Some(ref oid) = org_id
-    {
+    if is_org_admin && let Some(ref oid) = org_id {
         let update_org_sql = {
             let query = Query::update()
                 .table(Organizations::Table)

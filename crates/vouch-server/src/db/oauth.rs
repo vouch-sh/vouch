@@ -2,8 +2,8 @@
 //! OAuth Client Application database operations.
 
 use super::Pool;
-use super::compat::BuildSql;
 use super::schema::{OAuthClientSecrets, OAuthClients, OAuthUsageEvents};
+use super::types::BuildSql;
 use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute};
 use anyhow::Result;
@@ -821,9 +821,7 @@ pub async fn get_oauth_usage_stats(
                 .to_owned();
         }
 
-        query = query
-            .group_by_col(OAuthUsageEvents::EventType)
-            .to_owned();
+        query = query.group_by_col(OAuthUsageEvents::EventType).to_owned();
 
         query.build_sql(db_type)
     };

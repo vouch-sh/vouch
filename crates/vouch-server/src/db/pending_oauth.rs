@@ -5,8 +5,8 @@
 //! per RFC 6749 and RFC 9700 security best practices.
 
 use super::Pool;
-use super::compat::BuildSql;
 use super::schema::PendingOAuthAuthorizations;
+use super::types::BuildSql;
 use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_optional};
 use anyhow::Result;
