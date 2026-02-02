@@ -5,7 +5,7 @@
 //! This preserves existing configuration when adding/modifying settings.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use toml_edit::{Array, DocumentMut, Item, Value};
 
 /// Cargo config file parser and writer.
@@ -150,7 +150,7 @@ impl CargoConfig {
 
     /// Get the path to this config file.
     #[must_use]
-    pub fn path(&self) -> &PathBuf {
+    pub fn path(&self) -> &Path {
         &self.path
     }
 
@@ -181,25 +181,21 @@ impl CargoConfig {
     fn item_contains_vouch(item: &Item) -> bool {
         match item {
             Item::Value(Value::String(s)) => s.value().contains("vouch"),
-            Item::Value(Value::Array(arr)) => {
-                Self::array_contains_vouch(&Item::Value(Value::Array(arr.clone())))
-            }
+            Item::Value(Value::Array(arr)) => Self::value_array_contains_vouch(arr),
             _ => false,
         }
     }
 
     /// Check if a TOML array contains "vouch" in any element.
     fn array_contains_vouch(item: &Item) -> bool {
-        if let Some(arr) = item.as_array() {
-            for val in arr.iter() {
-                if let Some(s) = val.as_str() {
-                    if s.contains("vouch") {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+        item.as_array()
+            .is_some_and(|arr| Self::value_array_contains_vouch(arr))
+    }
+
+    /// Check if a TOML array value contains "vouch" in any element.
+    fn value_array_contains_vouch(arr: &Array) -> bool {
+        arr.iter()
+            .any(|val| val.as_str().is_some_and(|s| s.contains("vouch")))
     }
 }
 
