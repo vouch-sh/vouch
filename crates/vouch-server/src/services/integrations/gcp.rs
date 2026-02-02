@@ -89,16 +89,19 @@ impl<'a> GcpService<'a> {
     /// - `aud`: Workload Identity Pool provider resource name
     /// - `iss`: Vouch issuer URL
     /// - `hardware_aaguid`: FIDO2 authenticator AAGUID (for hardware key verification)
+    /// - `hd`: Google Workspace hosted domain (for domain-based access control)
     ///
     /// # Arguments
     /// * `user_email` - The authenticated user's email
     /// * `audience` - The Workload Identity Pool provider resource name
     /// * `authenticator_id` - The authenticator ID from the session (for AAGUID lookup)
+    /// * `hd` - The user's organization domain (Google Workspace hosted domain)
     pub async fn issue_token(
         &self,
         user_email: &str,
         audience: &str,
         authenticator_id: Option<&str>,
+        hd: Option<String>,
     ) -> GcpResult<GcpTokenResult> {
         // Validate audience format
         validate_gcp_audience(audience)?;
@@ -114,6 +117,7 @@ impl<'a> GcpService<'a> {
         let id_claims =
             OidcIdTokenClaimsBuilder::for_gcp(&self.config.base_url, user_email, audience)
                 .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
+                .hd(hd)
                 .valid_for_seconds(expires_in)
                 .build()
                 .map_err(|e| GcpError::ClaimsBuild(e.to_string()))?;

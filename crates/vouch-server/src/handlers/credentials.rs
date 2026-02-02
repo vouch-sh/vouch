@@ -213,10 +213,13 @@ pub async fn get_aws_token(
     // Validate session
     let (claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
 
+    // Get user's organization domain (hd claim) if they belong to an org
+    let hd = get_user_org_domain(&state, &claims.sub).await?;
+
     // Create AWS service and issue token
     let aws_service = AwsService::new(&state.db, &state.config, &state.oidc_key);
     let result = aws_service
-        .issue_token(&user_email, claims.authenticator_id.as_deref())
+        .issue_token(&user_email, claims.authenticator_id.as_deref(), hd)
         .await
         .map_err(|e| match e {
             AwsError::NoAuthenticator => {
@@ -275,6 +278,9 @@ pub async fn get_gcp_token(
     // Validate session
     let (claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
 
+    // Get user's organization domain (hd claim) if they belong to an org
+    let hd = get_user_org_domain(&state, &claims.sub).await?;
+
     // Create GCP service and issue token
     let gcp_service = GcpService::new(&state.db, &state.config, &state.oidc_key);
     let result = gcp_service
@@ -282,6 +288,7 @@ pub async fn get_gcp_token(
             &user_email,
             &query.audience,
             claims.authenticator_id.as_deref(),
+            hd,
         )
         .await
         .map_err(|e| match e {
@@ -343,6 +350,9 @@ pub async fn get_k8s_token(
     // Validate session
     let (claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
 
+    // Get user's organization domain (hd claim) if they belong to an org
+    let hd = get_user_org_domain(&state, &claims.sub).await?;
+
     // Create Kubernetes service and issue token
     let k8s_service = KubernetesService::new(&state.db, &state.config, &state.oidc_key);
     let result = k8s_service
@@ -350,6 +360,7 @@ pub async fn get_k8s_token(
             &user_email,
             &query.audience,
             claims.authenticator_id.as_deref(),
+            hd,
         )
         .await
         .map_err(|e| match e {
@@ -380,6 +391,48 @@ pub async fn get_k8s_token(
         id_token: result.id_token,
         expires_in: result.expires_in,
     }))
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Get the user's organization domain (hd claim) if they belong to an organization.
+///
+/// This looks up the user by ID, then fetches their organization's domain
+/// which is the Google Workspace hosted domain (hd claim) from their OIDC enrollment.
+async fn get_user_org_domain(
+    state: &AppState,
+    user_id: &str,
+) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
+    // Get user to find their org_id
+    let user = db::get_user_by_id(&state.db, user_id)
+        .await
+        .map_err(|e| {
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?;
+
+    // If user has an org, get the org's domain
+    if let Some(user) = user
+        && let Some(org_id) = user.org_id
+    {
+        let domain = db::get_organization_domain(&state.db, &org_id)
+            .await
+            .map_err(|e| {
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    &e.to_string(),
+                )
+            })?;
+        return Ok(domain);
+    }
+
+    Ok(None)
 }
 
 // ============================================================================

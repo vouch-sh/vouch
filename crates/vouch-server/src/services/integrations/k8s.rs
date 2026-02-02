@@ -94,16 +94,19 @@ impl<'a> KubernetesService<'a> {
     /// - `aud`: Cluster audience (matches `--oidc-client-id`)
     /// - `iss`: Vouch issuer URL
     /// - `hardware_aaguid`: FIDO2 authenticator AAGUID (for hardware key verification)
+    /// - `hd`: Google Workspace hosted domain (for domain-based access control)
     ///
     /// # Arguments
     /// * `user_email` - The authenticated user's email
     /// * `audience` - The Kubernetes cluster audience (matches `--oidc-client-id`)
     /// * `authenticator_id` - The authenticator ID from the session (for AAGUID lookup)
+    /// * `hd` - The user's organization domain (Google Workspace hosted domain)
     pub async fn issue_token(
         &self,
         user_email: &str,
         audience: &str,
         authenticator_id: Option<&str>,
+        hd: Option<String>,
     ) -> K8sResult<K8sTokenResult> {
         // Validate audience format
         validate_k8s_audience(audience)?;
@@ -119,6 +122,7 @@ impl<'a> KubernetesService<'a> {
         let id_claims =
             OidcIdTokenClaimsBuilder::for_k8s(&self.config.base_url, user_email, audience)
                 .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
+                .hd(hd)
                 .valid_for_seconds(expires_in)
                 .build()
                 .map_err(|e| K8sError::ClaimsBuild(e.to_string()))?;
