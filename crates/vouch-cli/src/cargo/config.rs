@@ -68,29 +68,6 @@ impl CargoConfig {
             .is_some_and(Self::item_contains_vouch)
     }
 
-    /// Check if vouch is configured anywhere (global or any registry).
-    #[must_use]
-    #[allow(dead_code)] // Useful utility, may be used in future
-    pub fn has_vouch_configured(&self) -> bool {
-        // Check global providers
-        if self.has_global_vouch() {
-            return true;
-        }
-
-        // Check all registries
-        if let Some(registries) = self.doc.get("registries").and_then(|r| r.as_table()) {
-            for (_name, config) in registries.iter() {
-                if let Some(provider) = config.get("credential-provider")
-                    && Self::item_contains_vouch(provider)
-                {
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
-
     /// Find the first registry that uses vouch.
     #[must_use]
     pub fn find_vouch_registry(&self) -> Option<String> {
@@ -109,34 +86,37 @@ impl CargoConfig {
     /// Set the global credential providers.
     ///
     /// This sets the `[registry].global-credential-providers` array.
-    #[allow(clippy::indexing_slicing)] // toml_edit indexing creates entries if missing
     pub fn set_global_provider(&mut self, command: &[&str]) {
         // Ensure [registry] section exists
-        if !self.doc.contains_key("registry") {
-            self.doc["registry"] = Item::Table(Table::new());
+        if self.doc.get("registry").is_none() {
+            self.doc.insert("registry", Item::Table(Table::new()));
         }
 
         let array = Self::command_to_array(command);
-        self.doc["registry"]["global-credential-providers"] = Item::Value(Value::Array(array));
+        if let Some(registry) = self.doc.get_mut("registry").and_then(|r| r.as_table_mut()) {
+            registry.insert("global-credential-providers", Item::Value(Value::Array(array)));
+        }
     }
 
     /// Set the credential provider for a specific registry.
     ///
     /// This sets `[registries.<name>].credential-provider`.
-    #[allow(clippy::indexing_slicing)] // toml_edit indexing creates entries if missing
     pub fn set_registry_provider(&mut self, registry: &str, command: &[&str]) {
         // Ensure [registries] section exists
-        if !self.doc.contains_key("registries") {
-            self.doc["registries"] = Item::Table(Table::new());
+        if self.doc.get("registries").is_none() {
+            self.doc.insert("registries", Item::Table(Table::new()));
         }
 
-        // Ensure [registries.<name>] section exists
-        if self.doc["registries"].get(registry).is_none() {
-            self.doc["registries"][registry] = Item::Table(Table::new());
+        // Ensure [registries.<name>] section exists and set credential-provider
+        if let Some(registries) = self.doc.get_mut("registries").and_then(|r| r.as_table_mut()) {
+            if registries.get(registry).is_none() {
+                registries.insert(registry, Item::Table(Table::new()));
+            }
+            if let Some(reg_table) = registries.get_mut(registry).and_then(|r| r.as_table_mut()) {
+                let array = Self::command_to_array(command);
+                reg_table.insert("credential-provider", Item::Value(Value::Array(array)));
+            }
         }
-
-        let array = Self::command_to_array(command);
-        self.doc["registries"][registry]["credential-provider"] = Item::Value(Value::Array(array));
     }
 
     /// Save the config to its file path.
@@ -221,7 +201,6 @@ mod tests {
         let file = create_temp_config("");
         let config = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
 
-        assert!(!config.has_vouch_configured());
         assert!(!config.has_global_vouch());
         assert!(config.find_vouch_registry().is_none());
     }
@@ -235,7 +214,6 @@ global-credential-providers = ["/usr/local/bin/vouch", "credential", "cargo", "-
         let file = create_temp_config(content);
         let config = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
 
-        assert!(config.has_vouch_configured());
         assert!(config.has_global_vouch());
     }
 
@@ -249,7 +227,6 @@ credential-provider = ["/usr/local/bin/vouch", "credential", "cargo", "--"]
         let file = create_temp_config(content);
         let config = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
 
-        assert!(config.has_vouch_configured());
         assert!(!config.has_global_vouch());
         assert!(config.has_registry_vouch("my-registry"));
         assert!(!config.has_registry_vouch("other-registry"));
@@ -271,8 +248,8 @@ index = "sparse+https://index.crates.io/"
         let file = create_temp_config(content);
         let config = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
 
-        assert!(!config.has_vouch_configured());
         assert!(!config.has_global_vouch());
+        assert!(config.find_vouch_registry().is_none());
     }
 
     #[test]
@@ -371,7 +348,8 @@ credential-provider = ["cargo:token"]
         let path = PathBuf::from("/tmp/nonexistent_cargo_config_test_12345/config.toml");
         let config = CargoConfig::load_from(path).unwrap();
 
-        assert!(!config.has_vouch_configured());
+        assert!(!config.has_global_vouch());
+        assert!(config.find_vouch_registry().is_none());
     }
 
     #[test]
@@ -389,7 +367,6 @@ credential-provider = ["/usr/local/bin/vouch", "credential", "cargo", "--"]
         let file = create_temp_config(content);
         let config = CargoConfig::load_from(file.path().to_path_buf()).unwrap();
 
-        assert!(config.has_vouch_configured());
         assert!(config.has_registry_vouch("registry-a"));
         assert!(!config.has_registry_vouch("registry-b"));
         assert!(config.has_registry_vouch("registry-c"));
