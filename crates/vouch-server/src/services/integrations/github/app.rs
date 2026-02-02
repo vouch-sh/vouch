@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! GitHub App integration for credential issuance.
+//! GitHub App API client.
 //!
-//! This module provides functionality to:
+//! This module provides the low-level GitHub API client functionality:
 //! - Authenticate as a GitHub App using RS256 JWTs
 //! - Exchange App JWTs for installation access tokens
 //! - Scope tokens to specific repositories and permissions
+//! - User OAuth token management (exchange, refresh)
+//! - GitHub API calls (user info, installations)
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;

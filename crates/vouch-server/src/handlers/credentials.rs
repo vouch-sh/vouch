@@ -3,7 +3,7 @@
 
 use crate::AppState;
 use crate::db::{self, GitHubCredentialEventParams};
-use crate::github_app::{GitHubInstallationId, minimal_git_permissions};
+use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
 use axum::extract::Query;
 use axum::{Json, extract::State, http::StatusCode};
 use axum_extra::TypedHeader;

@@ -29,9 +29,15 @@
 //! └─────────────────┘
 //! ```
 //!
-//! # Available Services
+//! # Module Organization
 //!
-//! - [`OidcService`] - OpenID Connect provider (RFC 6749, 7636, 8628, 8693, 9449)
+//! ## Protocols (standards we implement as a provider)
+//!
+//! - [`oidc`] - OpenID Connect provider (RFC 6749, 7636, 8628, 8693, 9449)
+//!
+//! ## Integrations (external systems we connect to)
+//!
+//! - [`integrations::github`] - GitHub App, OAuth, webhooks
 //!
 //! # Error Handling
 //!
@@ -39,18 +45,17 @@
 //! responses (OAuth, SCIM, or standard HTTP errors).
 
 pub mod error;
+pub mod integrations;
 pub mod oidc;
 
-// Service modules will be added here as they are implemented:
+// Protocol modules will be added here as they are implemented:
 // pub mod scim;
-// pub mod auth;
-// pub mod credentials;
-// pub mod applications;
-// pub mod enrollment;
-// pub mod github;
 
 pub use error::{
     OAuthErrorCode, OAuthErrorResponse, ScimErrorResponse, ServiceError, ServiceResult,
+};
+pub use integrations::github::{
+    GitHubApp, GitHubError, GitHubResult, GitHubService,
 };
 pub use oidc::{
     AuthCodeExchangeParams, AuthCodeExchangeResult, AuthenticatedClient, AuthorizationCodeParams,
