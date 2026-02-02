@@ -313,6 +313,11 @@ async fn main() -> Result<()> {
             get(handlers::github::github_connect_page),
         )
         .route("/github/callback", get(handlers::github::github_callback))
+        .route("/github/link", get(handlers::github::github_link_start))
+        .route(
+            "/github/reconnect",
+            post(handlers::github::github_reconnect),
+        )
         .route(
             "/github/success",
             get(handlers::github::github_success_page),

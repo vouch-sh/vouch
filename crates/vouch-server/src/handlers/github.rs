@@ -3,16 +3,22 @@
 //!
 //! Handles:
 //! - POST /api/webhooks/github - GitHub webhook events
-//! - GET /github/callback - Post-installation redirect
+//! - GET /github/callback - Post-installation redirect and OAuth callback
 //! - GET /github/connect - Connect GitHub page
+//! - GET /github/link - Start GitHub OAuth flow to link account
+//! - POST /github/reconnect - Reconnect an existing GitHub installation
 //! - GET /github/success - Success page after connection
 
 use crate::db::{self, GitHubCredentialEventParams};
-use crate::github_app::GitHubInstallationId;
+use crate::github_app::{
+    GitHubInstallationId, exchange_oauth_code, get_github_user, list_user_accessible_installations,
+    refresh_oauth_token,
+};
 use crate::handlers::common::{AuthContext, json_error};
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use aws_lc_rs::hmac;
+use axum::Form;
 use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
@@ -24,6 +30,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use vouch_common::ApiError;
@@ -50,6 +57,14 @@ pub struct GitHubConnectTemplate {
     pub connected_accounts: Vec<String>,
     /// Authentication context for header display.
     pub auth: AuthContext,
+    /// Whether the user has linked their GitHub account.
+    pub github_linked: bool,
+    /// GitHub username if linked.
+    pub github_login: Option<String>,
+    /// Unlinked installations the user can reconnect.
+    pub unlinked_installations: Vec<UnlinkedInstallation>,
+    /// Whether GitHub OAuth is configured (client_id + client_secret).
+    pub oauth_configured: bool,
 }
 
 impl_template_response!(GitHubConnectTemplate);
@@ -80,7 +95,17 @@ impl_template_response!(GitHubErrorTemplate);
 // State Token (for CSRF protection)
 // ============================================================================
 
-/// State token for GitHub installation callback.
+/// Type of GitHub state token flow.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum GitHubStateFlowType {
+    /// Installation flow - user is installing the GitHub App.
+    Install,
+    /// Link flow - user is linking their GitHub account via OAuth.
+    Link,
+}
+
+/// State token for GitHub installation and OAuth callbacks.
 #[derive(Debug, Serialize, Deserialize)]
 struct GitHubStateToken {
     /// Organization ID being connected.
@@ -93,11 +118,27 @@ struct GitHubStateToken {
     exp: i64,
     /// Random nonce for replay protection.
     nonce: String,
+    /// Flow type (install or link).
+    #[serde(default = "default_flow_type")]
+    flow_type: GitHubStateFlowType,
+}
+
+fn default_flow_type() -> GitHubStateFlowType {
+    GitHubStateFlowType::Install
 }
 
 impl GitHubStateToken {
-    /// Create a new state token (10-minute validity).
-    fn new(org_id: &str, user_id: &str) -> Self {
+    /// Create a new state token for installation flow (10-minute validity).
+    fn new_for_install(org_id: &str, user_id: &str) -> Self {
+        Self::new(org_id, user_id, GitHubStateFlowType::Install)
+    }
+
+    /// Create a new state token for OAuth link flow (10-minute validity).
+    fn new_for_link(org_id: &str, user_id: &str) -> Self {
+        Self::new(org_id, user_id, GitHubStateFlowType::Link)
+    }
+
+    fn new(org_id: &str, user_id: &str, flow_type: GitHubStateFlowType) -> Self {
         let now = Timestamp::now().as_second();
         let nonce = URL_SAFE_NO_PAD.encode(crate::handlers::common::generate_random_bytes(16));
         Self {
@@ -106,6 +147,7 @@ impl GitHubStateToken {
             iat: now,
             exp: now + 600, // 10 minutes
             nonce,
+            flow_type,
         }
     }
 
@@ -217,13 +259,15 @@ struct WebhookSender {
 /// Query parameters for GitHub callback.
 #[derive(Debug, Deserialize)]
 pub struct GitHubCallbackParams {
-    /// Installation ID from GitHub.
+    /// Installation ID from GitHub (present for installation callbacks).
     installation_id: Option<u64>,
     /// State token for CSRF protection.
     state: Option<String>,
     /// Setup action (only present during installation).
     #[allow(dead_code)]
     setup_action: Option<String>,
+    /// OAuth authorization code (present for OAuth callbacks).
+    code: Option<String>,
 }
 
 // ============================================================================
@@ -522,7 +566,7 @@ pub async fn github_connect_page(
 
     // Verify user has an organization
     let org_id = match &user.org_id {
-        Some(id) => id,
+        Some(id) => id.clone(),
         None => {
             return GitHubErrorTemplate {
                 title: "Organization Required".to_string(),
@@ -542,7 +586,7 @@ pub async fn github_connect_page(
     }
 
     // Get existing installations (for display, but allow adding more)
-    let existing_installations = db::get_github_installations_by_org(&state.db, org_id)
+    let existing_installations = db::get_github_installations_by_org(&state.db, &org_id)
         .await
         .unwrap_or_default();
     let connected_accounts: Vec<String> = existing_installations
@@ -550,8 +594,81 @@ pub async fn github_connect_page(
         .map(|i| i.github_account_login.clone())
         .collect();
 
-    // Generate state token
-    let state_token = GitHubStateToken::new(org_id, &user.id);
+    // Get all linked installation IDs to filter out from reconnect list
+    let linked_installation_ids: HashSet<i64> = db::get_all_linked_installation_ids(&state.db)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .collect();
+
+    // Check if user has linked GitHub account and fetch unlinked installations
+    let github_linked = user.github_login.is_some();
+    let oauth_configured = state.config.github_oauth_configured();
+
+    let unlinked_installations = if github_linked && oauth_configured {
+        // Try to get fresh access token using refresh token
+        match get_user_github_access_token(&state, &user.id).await {
+            Ok(Some(access_token)) => {
+                // Get HTTP client from GitHubApp (required for OAuth operations)
+                let http_client = match state.github_app.as_ref() {
+                    Some(app) => app.http_client(),
+                    None => {
+                        tracing::warn!("GitHub App not configured, cannot fetch installations");
+                        return GitHubConnectTemplate {
+                            org_name: state.config.get_org_display_name().to_string(),
+                            github_app_url: String::new(),
+                            error: Some("GitHub App not configured".to_string()),
+                            connected_accounts,
+                            auth: AuthContext {
+                                authenticated: true,
+                                user_id: Some(user.id.clone()),
+                                user_email: Some(user.email),
+                                has_org: user.org_id.is_some(),
+                                is_org_admin: user.is_org_admin,
+                            },
+                            github_linked,
+                            github_login: user.github_login.clone(),
+                            unlinked_installations: vec![],
+                            oauth_configured,
+                        }
+                        .into_response();
+                    }
+                };
+                // Fetch installations the user can access
+                match list_user_accessible_installations(http_client, &access_token).await {
+                    Ok(installations) => {
+                        // Filter to unlinked installations only
+                        installations
+                            .into_iter()
+                            .filter(|i| !linked_installation_ids.contains(&(i.id as i64)))
+                            .map(|i| UnlinkedInstallation {
+                                id: i.id,
+                                account_login: i.account.login,
+                                account_type: i.account.account_type,
+                            })
+                            .collect()
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to fetch user installations: {}", e);
+                        vec![]
+                    }
+                }
+            }
+            Ok(None) => {
+                tracing::debug!("No refresh token available for user");
+                vec![]
+            }
+            Err(e) => {
+                tracing::warn!("Failed to get access token: {}", e);
+                vec![]
+            }
+        }
+    } else {
+        vec![]
+    };
+
+    // Generate state token for installation flow
+    let state_token = GitHubStateToken::new_for_install(&org_id, &user.id);
     let encoded_state = match state_token.encode(state.config.jwt_secret_bytes()) {
         Ok(s) => s,
         Err(e) => {
@@ -595,14 +712,218 @@ pub async fn github_connect_page(
         error: None,
         connected_accounts,
         auth,
+        github_linked,
+        github_login: user.github_login.clone(),
+        unlinked_installations,
+        oauth_configured,
     }
     .into_response()
 }
 
-/// GET /github/callback - Handle post-installation redirect from GitHub.
+/// Helper to get a fresh GitHub access token for a user using their refresh token.
+async fn get_user_github_access_token(
+    state: &Arc<AppState>,
+    user_id: &str,
+) -> anyhow::Result<Option<String>> {
+    // Get the user's refresh token
+    let refresh_token = match db::get_user_github_refresh_token(&state.db, user_id).await? {
+        Some(token) => token,
+        None => return Ok(None),
+    };
+
+    // Get OAuth credentials
+    let client_id = state
+        .config
+        .github_app_client_id
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("GitHub App Client ID not configured"))?;
+    let client_secret = state
+        .config
+        .github_app_client_secret_exposed()
+        .ok_or_else(|| anyhow::anyhow!("GitHub App Client Secret not configured"))?;
+
+    // Get HTTP client from GitHubApp
+    let http_client = state
+        .github_app
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("GitHub App not configured"))?
+        .http_client();
+
+    // Refresh the token
+    let token_response =
+        refresh_oauth_token(http_client, client_id, client_secret, &refresh_token).await?;
+
+    // Update the refresh token if a new one was issued
+    if let Some(new_refresh_token) = &token_response.refresh_token
+        && let Ok(Some(user)) = db::get_user_by_id(&state.db, user_id).await
+        && let Some(github_id) = user.github_id
+        && let Some(github_login) = &user.github_login
+    {
+        let _ = db::update_user_github_identity(
+            &state.db,
+            user_id,
+            github_id,
+            github_login,
+            Some(new_refresh_token),
+        )
+        .await;
+    }
+
+    Ok(Some(token_response.access_token))
+}
+
+/// GET /github/callback - Handle both OAuth and installation callbacks from GitHub.
+///
+/// Distinguishes between:
+/// - OAuth callbacks: Have `code` parameter (user linking their GitHub account)
+/// - Installation callbacks: Have `installation_id` parameter (app installation)
 pub async fn github_callback(
     State(state): State<Arc<AppState>>,
     Query(params): Query<GitHubCallbackParams>,
+) -> Response {
+    // Detect callback type by presence of `code` parameter
+    if let Some(code) = &params.code {
+        return handle_oauth_callback(&state, code, params.state.as_deref()).await;
+    }
+
+    // Otherwise, handle as installation callback
+    handle_installation_callback(&state, &params).await
+}
+
+/// Handle OAuth callback - user linking their GitHub account.
+async fn handle_oauth_callback(
+    state: &Arc<AppState>,
+    code: &str,
+    state_param: Option<&str>,
+) -> Response {
+    // Verify state parameter
+    let state_token = match state_param {
+        Some(s) => s,
+        None => {
+            return GitHubErrorTemplate {
+                title: "Error".to_string(),
+                message: "Missing state parameter.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Decode and validate state token
+    let token = match GitHubStateToken::decode(state_token, state.config.jwt_secret_bytes()) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::warn!("Invalid state token: {}", e);
+            return GitHubErrorTemplate {
+                title: "Invalid State".to_string(),
+                message: "The state token is invalid or expired. Please try again.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Verify this is a link flow
+    if token.flow_type != GitHubStateFlowType::Link {
+        return GitHubErrorTemplate {
+            title: "Invalid Flow".to_string(),
+            message: "This callback is for a different flow type.".to_string(),
+        }
+        .into_response();
+    }
+
+    // Get OAuth credentials
+    let client_id = match &state.config.github_app_client_id {
+        Some(id) => id,
+        None => {
+            return GitHubErrorTemplate {
+                title: "Configuration Error".to_string(),
+                message: "GitHub App Client ID not configured.".to_string(),
+            }
+            .into_response();
+        }
+    };
+    let client_secret = match state.config.github_app_client_secret_exposed() {
+        Some(secret) => secret,
+        None => {
+            return GitHubErrorTemplate {
+                title: "Configuration Error".to_string(),
+                message: "GitHub App Client Secret not configured.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Get HTTP client from GitHubApp
+    let http_client = match state.github_app.as_ref() {
+        Some(app) => app.http_client(),
+        None => {
+            return GitHubErrorTemplate {
+                title: "Configuration Error".to_string(),
+                message: "GitHub App not configured.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Exchange code for tokens
+    let token_response = match exchange_oauth_code(http_client, client_id, client_secret, code)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to exchange OAuth code: {}", e);
+            return GitHubErrorTemplate {
+                title: "OAuth Error".to_string(),
+                message: "Failed to complete GitHub authentication. Please try again.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Get GitHub user info
+    let github_user = match get_github_user(http_client, &token_response.access_token).await {
+        Ok(u) => u,
+        Err(e) => {
+            tracing::error!("Failed to get GitHub user info: {}", e);
+            return GitHubErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to get GitHub user information.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Update user's GitHub identity
+    if let Err(e) = db::update_user_github_identity(
+        &state.db,
+        &token.user_id,
+        github_user.id as i64,
+        &github_user.login,
+        token_response.refresh_token.as_deref(),
+    )
+    .await
+    {
+        tracing::error!("Failed to update user GitHub identity: {}", e);
+        return GitHubErrorTemplate {
+            title: "Error".to_string(),
+            message: "Failed to save GitHub account link.".to_string(),
+        }
+        .into_response();
+    }
+
+    tracing::info!(
+        "User {} linked GitHub account: {}",
+        token.user_id,
+        github_user.login
+    );
+
+    // Redirect back to connect page where they can now see/reconnect installations
+    Redirect::to("/github/connect").into_response()
+}
+
+/// Handle installation callback - app installation flow.
+async fn handle_installation_callback(
+    state: &Arc<AppState>,
+    params: &GitHubCallbackParams,
 ) -> Response {
     // Verify required parameters
     let installation_id = match params.installation_id {
@@ -741,6 +1062,289 @@ pub async fn github_callback(
     Redirect::to(&format!(
         "/github/success?account={}",
         urlencoding::encode(&details.account.login)
+    ))
+    .into_response()
+}
+
+/// GET /github/link - Redirect user to GitHub OAuth to link their GitHub account.
+pub async fn github_link_start(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
+    // Verify OAuth is configured
+    let client_id = match &state.config.github_app_client_id {
+        Some(id) => id,
+        None => {
+            return GitHubErrorTemplate {
+                title: "Not Available".to_string(),
+                message: "GitHub OAuth is not configured on this server.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Extract session from cookie
+    let session = match crate::handlers::common::extract_session_from_cookie(&state, &jar).await {
+        Ok(s) => s,
+        Err(_) => {
+            return Redirect::to("/enroll/start").into_response();
+        }
+    };
+
+    // Get user
+    let user = match db::get_user_by_id(&state.db, &session.claims.sub).await {
+        Ok(Some(u)) => u,
+        _ => {
+            return GitHubErrorTemplate {
+                title: "Error".to_string(),
+                message: "User not found.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Verify user has an organization
+    let org_id = match &user.org_id {
+        Some(id) => id,
+        None => {
+            return GitHubErrorTemplate {
+                title: "Organization Required".to_string(),
+                message: "GitHub integration requires an organization account.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Generate state token for link flow
+    let state_token = GitHubStateToken::new_for_link(org_id, &user.id);
+    let encoded_state = match state_token.encode(state.config.jwt_secret_bytes()) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to encode state token: {}", e);
+            return GitHubErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to generate state token.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Build OAuth URL - using existing /github/callback endpoint
+    let redirect_uri = format!("{}/github/callback", state.config.verification_base_url);
+
+    let url = format!(
+        "https://github.com/login/oauth/authorize?client_id={}&redirect_uri={}&state={}",
+        urlencoding::encode(client_id),
+        urlencoding::encode(&redirect_uri),
+        urlencoding::encode(&encoded_state)
+    );
+
+    Redirect::to(&url).into_response()
+}
+
+/// Form data for reconnecting a GitHub installation.
+#[derive(Debug, Deserialize)]
+pub struct GitHubReconnectForm {
+    /// Installation ID to reconnect.
+    installation_id: u64,
+}
+
+/// POST /github/reconnect - Reconnect an existing GitHub installation.
+///
+/// This allows an org admin to link an existing GitHub installation (that they
+/// have access to via `/user/installations`) to their Vouch organization.
+pub async fn github_reconnect(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Form(form): Form<GitHubReconnectForm>,
+) -> Response {
+    // Verify GitHub App is configured
+    let github_app = match &state.github_app {
+        Some(app) => app,
+        None => {
+            return GitHubErrorTemplate {
+                title: "Not Available".to_string(),
+                message: "GitHub integration is not configured on this server.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Extract session from cookie
+    let session = match crate::handlers::common::extract_session_from_cookie(&state, &jar).await {
+        Ok(s) => s,
+        Err(_) => {
+            return Redirect::to("/enroll/start").into_response();
+        }
+    };
+
+    // Get user
+    let user = match db::get_user_by_id(&state.db, &session.claims.sub).await {
+        Ok(Some(u)) => u,
+        _ => {
+            return GitHubErrorTemplate {
+                title: "Error".to_string(),
+                message: "User not found.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Verify user has an organization and is admin
+    let org_id = match &user.org_id {
+        Some(id) if user.is_org_admin => id.clone(),
+        _ => {
+            return GitHubErrorTemplate {
+                title: "Not Authorized".to_string(),
+                message: "Only organization administrators can reconnect GitHub installations."
+                    .to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Verify user has linked their GitHub account
+    if user.github_login.is_none() {
+        return GitHubErrorTemplate {
+            title: "GitHub Account Required".to_string(),
+            message: "Please link your GitHub account first.".to_string(),
+        }
+        .into_response();
+    }
+
+    // Get fresh access token and verify user has access to this installation
+    let access_token = match get_user_github_access_token(&state, &user.id).await {
+        Ok(Some(token)) => token,
+        _ => {
+            return GitHubErrorTemplate {
+                title: "Authentication Error".to_string(),
+                message: "Failed to authenticate with GitHub. Please re-link your account."
+                    .to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Get HTTP client from GitHubApp
+    let http_client = github_app.http_client();
+
+    // Verify user actually has access to this installation
+    let user_installations =
+        match list_user_accessible_installations(http_client, &access_token).await {
+            Ok(installations) => installations,
+            Err(e) => {
+                tracing::error!("Failed to fetch user installations: {}", e);
+                return GitHubErrorTemplate {
+                    title: "Error".to_string(),
+                    message: "Failed to verify installation access.".to_string(),
+                }
+                .into_response();
+            }
+        };
+
+    // Check if the requested installation is in the user's accessible list
+    let installation = user_installations
+        .iter()
+        .find(|i| i.id == form.installation_id);
+
+    let installation = match installation {
+        Some(i) => i,
+        None => {
+            return GitHubErrorTemplate {
+                title: "Access Denied".to_string(),
+                message: "You do not have access to this GitHub installation.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Verify installation is not already linked
+    if let Ok(Some(_)) =
+        db::get_github_installation_by_installation_id(&state.db, form.installation_id as i64).await
+    {
+        return GitHubErrorTemplate {
+            title: "Already Connected".to_string(),
+            message: "This GitHub installation is already connected to an organization."
+                .to_string(),
+        }
+        .into_response();
+    }
+
+    // Fetch full installation details from GitHub App API
+    let details = match github_app
+        .get_installation_details(GitHubInstallationId(form.installation_id))
+        .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::error!("Failed to fetch installation details: {}", e);
+            return GitHubErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to fetch installation details from GitHub.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Serialize permissions to JSON
+    let permissions_json = serde_json::to_string(&details.permissions).unwrap_or_default();
+
+    // Store installation in database
+    match db::create_github_installation(
+        &state.db,
+        &org_id,
+        form.installation_id as i64,
+        &installation.account.login,
+        &installation.account.account_type,
+        &permissions_json,
+        &details.repository_selection,
+        Some(&user.id),
+    )
+    .await
+    {
+        Ok(_) => {
+            tracing::info!(
+                "GitHub installation reconnected: {} -> org {} by user {}",
+                installation.account.login,
+                org_id,
+                user.id
+            );
+        }
+        Err(e) => {
+            tracing::error!("Failed to store installation: {}", e);
+            return GitHubErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to save installation.".to_string(),
+            }
+            .into_response();
+        }
+    }
+
+    // Log audit event
+    if let Err(e) = db::log_github_credential_event(
+        &state.db,
+        GitHubCredentialEventParams {
+            event_type: "installation_reconnected",
+            user_id: &user.id,
+            user_email: &user.email,
+            org_id: Some(&org_id),
+            installation_id: Some(form.installation_id as i64),
+            session_id: None,
+            authenticator_id: None,
+            repositories: None,
+            permissions: Some(&permissions_json),
+            token_expires_at: None,
+            success: true,
+            error_code: None,
+            ip_address: None,
+            user_agent: None,
+        },
+    )
+    .await
+    {
+        tracing::warn!("Failed to log GitHub credential event: {e}");
+    }
+
+    Redirect::to(&format!(
+        "/github/success?account={}",
+        urlencoding::encode(&installation.account.login)
     ))
     .into_response()
 }

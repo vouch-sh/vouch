@@ -10,7 +10,7 @@ use super::schema::{
 use super::types::BuildSql;
 #[cfg(any(test, feature = "test-utils"))]
 use crate::{db_execute, db_fetch_one};
-use crate::{db_fetch_optional, tx_execute, tx_fetch_all};
+use crate::{db_execute as db_execute_prod, db_fetch_optional, tx_execute, tx_fetch_all};
 use anyhow::Result;
 #[cfg(any(test, feature = "test-utils"))]
 use jiff::Timestamp;
@@ -31,6 +31,13 @@ pub struct User {
     pub org_id: Option<String>,
     /// Whether this user is an admin of their organization.
     pub is_org_admin: bool,
+    /// GitHub user ID (for OAuth linking).
+    pub github_id: Option<i64>,
+    /// GitHub username (for OAuth linking).
+    pub github_login: Option<String>,
+    /// GitHub OAuth refresh token (for getting new access tokens).
+    #[allow(dead_code)]
+    pub github_refresh_token: Option<String>,
 }
 
 /// Create or get a user by email.
@@ -71,6 +78,9 @@ pub async fn upsert_user(pool: &Pool, email: &str, name: Option<&str>) -> Result
                 Users::Name,
                 Users::OrgId,
                 Users::IsOrgAdmin,
+                Users::GitHubId,
+                Users::GitHubLogin,
+                Users::GitHubRefreshToken,
             ])
             .from(Users::Table)
             .and_where(Expr::col(Users::Email).eq(email))
@@ -137,6 +147,9 @@ pub async fn upsert_user_with_org(
                 Users::Name,
                 Users::OrgId,
                 Users::IsOrgAdmin,
+                Users::GitHubId,
+                Users::GitHubLogin,
+                Users::GitHubRefreshToken,
             ])
             .from(Users::Table)
             .and_where(Expr::col(Users::Email).eq(email))
@@ -162,6 +175,9 @@ pub async fn get_user_by_email(pool: &Pool, email: &str) -> Result<Option<User>>
                 Users::Name,
                 Users::OrgId,
                 Users::IsOrgAdmin,
+                Users::GitHubId,
+                Users::GitHubLogin,
+                Users::GitHubRefreshToken,
             ])
             .from(Users::Table)
             .and_where(Expr::col(Users::Email).eq(email))
@@ -186,6 +202,9 @@ pub async fn get_user_by_id(pool: &Pool, user_id: &str) -> Result<Option<User>> 
                 Users::Name,
                 Users::OrgId,
                 Users::IsOrgAdmin,
+                Users::GitHubId,
+                Users::GitHubLogin,
+                Users::GitHubRefreshToken,
             ])
             .from(Users::Table)
             .and_where(Expr::col(Users::Id).eq(user_id))
@@ -358,4 +377,59 @@ pub async fn delete_user(pool: &Pool, user_id: &str) -> Result<()> {
 
     tx.commit().await?;
     Ok(())
+}
+
+/// Update a user's GitHub identity (after OAuth linking).
+///
+/// # Arguments
+/// * `pool` - Database connection pool
+/// * `user_id` - User ID to update
+/// * `github_id` - GitHub user ID
+/// * `github_login` - GitHub username
+/// * `refresh_token` - Optional OAuth refresh token for getting new access tokens
+pub async fn update_user_github_identity(
+    pool: &Pool,
+    user_id: &str,
+    github_id: i64,
+    github_login: &str,
+    refresh_token: Option<&str>,
+) -> Result<bool> {
+    let db_type = pool.db_type();
+
+    let sql = {
+        let mut query = Query::update()
+            .table(Users::Table)
+            .value(Users::GitHubId, github_id)
+            .value(Users::GitHubLogin, github_login)
+            .and_where(Expr::col(Users::Id).eq(user_id))
+            .to_owned();
+
+        if let Some(token) = refresh_token {
+            query = query.value(Users::GitHubRefreshToken, token).to_owned();
+        }
+
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute_prod!(pool, sqlx::query(&sql))?;
+
+    Ok(result.rows_affected() > 0)
+}
+
+/// Get a user's GitHub refresh token.
+pub async fn get_user_github_refresh_token(pool: &Pool, user_id: &str) -> Result<Option<String>> {
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .column(Users::GitHubRefreshToken)
+            .from(Users::Table)
+            .and_where(Expr::col(Users::Id).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let token = db_fetch_optional!(pool, sqlx::query_scalar::<_, Option<String>>(&sql))?;
+
+    Ok(token.flatten())
 }

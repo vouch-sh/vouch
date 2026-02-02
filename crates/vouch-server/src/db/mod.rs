@@ -38,7 +38,10 @@ pub use pool::{DatabaseType, Pool, Transaction};
 pub use error::{DbError, DbResult};
 
 // Re-export user types and functions
-pub use users::{User, delete_user, get_user_by_email, get_user_by_id};
+pub use users::{
+    User, delete_user, get_user_by_email, get_user_by_id, get_user_github_refresh_token,
+    update_user_github_identity,
+};
 
 // Re-export user test helpers (only available in tests)
 #[cfg(any(test, feature = "test-utils"))]

@@ -187,6 +187,15 @@ pub struct Args {
     /// GitHub webhook secret for verifying webhook signatures.
     #[arg(long, env = "VOUCH_GITHUB_WEBHOOK_SECRET")]
     pub github_webhook_secret: Option<String>,
+
+    /// GitHub App Client ID (for OAuth user authentication).
+    /// This is found in the GitHub App settings, different from App ID.
+    #[arg(long, env = "VOUCH_GITHUB_APP_CLIENT_ID")]
+    pub github_app_client_id: Option<String>,
+
+    /// GitHub App Client Secret (for OAuth user authentication).
+    #[arg(long, env = "VOUCH_GITHUB_APP_CLIENT_SECRET")]
+    pub github_app_client_secret: Option<String>,
 }
 
 // ============================================================================
@@ -263,6 +272,11 @@ pub struct ServerConfig {
     pub github_app_key: Option<SecretString>,
     /// GitHub webhook secret for verifying webhook signatures.
     pub github_webhook_secret: Option<SecretString>,
+    /// GitHub App Client ID (for OAuth user authentication).
+    /// This is found in the GitHub App settings, different from App ID.
+    pub github_app_client_id: Option<String>,
+    /// GitHub App Client Secret (for OAuth user authentication).
+    pub github_app_client_secret: Option<SecretString>,
 }
 
 impl ServerConfig {
@@ -344,6 +358,8 @@ impl ServerConfig {
             github_app_name: args.github_app_name,
             github_app_key: args.github_app_key.map(SecretString::from),
             github_webhook_secret: args.github_webhook_secret.map(SecretString::from),
+            github_app_client_id: args.github_app_client_id,
+            github_app_client_secret: args.github_app_client_secret.map(SecretString::from),
         })
     }
 
@@ -414,6 +430,20 @@ impl ServerConfig {
     #[must_use]
     pub fn github_webhook_secret_exposed(&self) -> Option<&str> {
         self.github_webhook_secret
+            .as_ref()
+            .map(|s| s.expose_secret())
+    }
+
+    /// Check if GitHub App OAuth is configured (client ID and secret present).
+    #[must_use]
+    pub fn github_oauth_configured(&self) -> bool {
+        self.github_app_client_id.is_some() && self.github_app_client_secret.is_some()
+    }
+
+    /// Get the GitHub App Client Secret (exposed) if configured.
+    #[must_use]
+    pub fn github_app_client_secret_exposed(&self) -> Option<&str> {
+        self.github_app_client_secret
             .as_ref()
             .map(|s| s.expose_secret())
     }

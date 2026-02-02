@@ -394,6 +394,9 @@ mod tests {
             name: Some("Test User".to_string()),
             org_id: org_id.map(String::from),
             is_org_admin: false,
+            github_id: None,
+            github_login: None,
+            github_refresh_token: None,
         }
     }
 

@@ -84,6 +84,8 @@ pub fn test_config() -> ServerConfig {
         github_app_name: None,
         github_app_key: None,
         github_webhook_secret: None,
+        github_app_client_id: None,
+        github_app_client_secret: None,
     }
 }
 

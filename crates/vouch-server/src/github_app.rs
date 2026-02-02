@@ -336,6 +336,15 @@ impl GitHubApp {
     pub fn app_id(&self) -> GitHubAppId {
         self.app_id
     }
+
+    /// Get a reference to the HTTP client.
+    ///
+    /// This client is configured with `vouch_common::http::server_client()`
+    /// timeouts (15s total, 5s connect).
+    #[must_use]
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.http_client
+    }
 }
 
 /// Minimal permissions for Git operations.
@@ -345,6 +354,247 @@ pub fn minimal_git_permissions() -> HashMap<String, String> {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
+}
+
+// ============================================================================
+// User OAuth Token APIs
+// ============================================================================
+
+/// Response from GET /user/installations (paginated).
+#[derive(Debug, Deserialize)]
+pub struct UserInstallationsResponse {
+    /// Total count of installations the user has access to.
+    #[allow(dead_code)]
+    pub total_count: u32,
+    /// List of installations.
+    pub installations: Vec<InstallationDetails>,
+}
+
+/// List installations accessible to a user (requires user OAuth access token).
+///
+/// This uses the user's OAuth token, not the App JWT. The API returns only
+/// installations the authenticated user has explicit permission to access.
+///
+/// # Arguments
+/// * `http_client` - HTTP client to use
+/// * `user_token` - GitHub user OAuth access token
+pub async fn list_user_accessible_installations(
+    http_client: &reqwest::Client,
+    user_token: &str,
+) -> Result<Vec<InstallationDetails>> {
+    let mut all_installations = Vec::new();
+    let mut page = 1;
+
+    loop {
+        let response = http_client
+            .get(format!(
+                "https://api.github.com/user/installations?per_page=100&page={page}"
+            ))
+            .header("Authorization", format!("Bearer {user_token}"))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .context("Failed to request user installations from GitHub")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!(
+                "GitHub API error ({}): {}",
+                status,
+                body.chars().take(200).collect::<String>()
+            );
+        }
+
+        let body: UserInstallationsResponse = response
+            .json()
+            .await
+            .context("Failed to parse user installations response")?;
+
+        let count = body.installations.len();
+        all_installations.extend(body.installations);
+
+        if count < 100 {
+            break;
+        }
+        page += 1;
+    }
+
+    Ok(all_installations)
+}
+
+/// GitHub user info from /user endpoint.
+#[derive(Debug, Deserialize)]
+pub struct GitHubUser {
+    /// GitHub user ID.
+    pub id: u64,
+    /// GitHub username (login).
+    pub login: String,
+    /// User's name.
+    pub name: Option<String>,
+    /// User's email (may be null if private).
+    pub email: Option<String>,
+}
+
+/// Get the authenticated user's info from GitHub.
+///
+/// # Arguments
+/// * `http_client` - HTTP client to use
+/// * `user_token` - GitHub user OAuth access token
+pub async fn get_github_user(
+    http_client: &reqwest::Client,
+    user_token: &str,
+) -> Result<GitHubUser> {
+    let response = http_client
+        .get("https://api.github.com/user")
+        .header("Authorization", format!("Bearer {user_token}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .context("Failed to request user info from GitHub")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!(
+            "GitHub API error ({}): {}",
+            status,
+            body.chars().take(200).collect::<String>()
+        );
+    }
+
+    response
+        .json::<GitHubUser>()
+        .await
+        .context("Failed to parse GitHub user response")
+}
+
+/// Response from GitHub OAuth token endpoint.
+#[derive(Debug, Deserialize)]
+pub struct GitHubOAuthTokenResponse {
+    /// Access token for API calls.
+    pub access_token: String,
+    /// Token type (usually "bearer").
+    #[allow(dead_code)]
+    pub token_type: String,
+    /// Granted scopes (space-separated).
+    #[allow(dead_code)]
+    pub scope: Option<String>,
+    /// Refresh token for getting new access tokens.
+    pub refresh_token: Option<String>,
+    /// Access token expiration in seconds (8 hours for GitHub Apps).
+    #[allow(dead_code)]
+    pub expires_in: Option<u64>,
+    /// Refresh token expiration in seconds (6 months for GitHub Apps).
+    #[allow(dead_code)]
+    pub refresh_token_expires_in: Option<u64>,
+}
+
+/// Exchange an OAuth authorization code for access and refresh tokens.
+///
+/// # Arguments
+/// * `http_client` - HTTP client to use
+/// * `client_id` - GitHub App Client ID
+/// * `client_secret` - GitHub App Client Secret
+/// * `code` - Authorization code from OAuth callback
+pub async fn exchange_oauth_code(
+    http_client: &reqwest::Client,
+    client_id: &str,
+    client_secret: &str,
+    code: &str,
+) -> Result<GitHubOAuthTokenResponse> {
+    let response = http_client
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .form(&[
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("code", code),
+        ])
+        .send()
+        .await
+        .context("Failed to exchange OAuth code with GitHub")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!(
+            "GitHub OAuth error ({}): {}",
+            status,
+            body.chars().take(200).collect::<String>()
+        );
+    }
+
+    // GitHub may return 200 with an error in the body
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse OAuth token response")?;
+
+    if let Some(error) = body.get("error").and_then(|e| e.as_str()) {
+        let description = body
+            .get("error_description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("Unknown error");
+        bail!("GitHub OAuth error: {} - {}", error, description);
+    }
+
+    serde_json::from_value(body).context("Failed to parse OAuth token response")
+}
+
+/// Refresh an access token using a refresh token.
+///
+/// # Arguments
+/// * `http_client` - HTTP client to use
+/// * `client_id` - GitHub App Client ID
+/// * `client_secret` - GitHub App Client Secret
+/// * `refresh_token` - Refresh token from previous OAuth flow
+pub async fn refresh_oauth_token(
+    http_client: &reqwest::Client,
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> Result<GitHubOAuthTokenResponse> {
+    let response = http_client
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .form(&[
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ])
+        .send()
+        .await
+        .context("Failed to refresh OAuth token with GitHub")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!(
+            "GitHub OAuth refresh error ({}): {}",
+            status,
+            body.chars().take(200).collect::<String>()
+        );
+    }
+
+    // GitHub may return 200 with an error in the body
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse OAuth refresh response")?;
+
+    if let Some(error) = body.get("error").and_then(|e| e.as_str()) {
+        let description = body
+            .get("error_description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("Unknown error");
+        bail!("GitHub OAuth refresh error: {} - {}", error, description);
+    }
+
+    serde_json::from_value(body).context("Failed to parse OAuth refresh response")
 }
 
 #[cfg(test)]

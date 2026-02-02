@@ -22,7 +22,10 @@ CREATE TABLE users (
     active INTEGER NOT NULL DEFAULT 1,
     external_id TEXT,
     org_id TEXT REFERENCES organizations(id),
-    is_org_admin INTEGER NOT NULL DEFAULT 0
+    is_org_admin INTEGER NOT NULL DEFAULT 0,
+    github_id INTEGER,
+    github_login TEXT,
+    github_refresh_token TEXT
 );
 
 CREATE INDEX idx_users_email ON users(email);

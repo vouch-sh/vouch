@@ -47,6 +47,8 @@ env:
     - VOUCH_GITHUB_APP_ID
     - VOUCH_GITHUB_APP_KEY
     - VOUCH_GITHUB_WEBHOOK_SECRET
+    - VOUCH_GITHUB_APP_CLIENT_ID
+    - VOUCH_GITHUB_APP_CLIENT_SECRET
 
 volumes:
   - "/opt/vouch/data:/data"

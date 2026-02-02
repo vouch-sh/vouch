@@ -29,6 +29,12 @@ pub enum Users {
     ExternalId,
     OrgId,
     IsOrgAdmin,
+    #[iden = "github_id"]
+    GitHubId,
+    #[iden = "github_login"]
+    GitHubLogin,
+    #[iden = "github_refresh_token"]
+    GitHubRefreshToken,
 }
 
 /// Authenticators (WebAuthn credentials) table.

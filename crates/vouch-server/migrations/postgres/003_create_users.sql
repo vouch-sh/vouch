@@ -9,5 +9,8 @@ CREATE TABLE users (
     active BOOLEAN NOT NULL DEFAULT TRUE,
     external_id TEXT,
     org_id TEXT,  -- references organizations(id)
-    is_org_admin BOOLEAN NOT NULL DEFAULT FALSE
+    is_org_admin BOOLEAN NOT NULL DEFAULT FALSE,
+    github_id BIGINT,
+    github_login TEXT,
+    github_refresh_token TEXT
 );
