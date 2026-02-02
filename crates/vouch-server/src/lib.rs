@@ -15,9 +15,6 @@ pub mod services;
 pub mod ssh_ca;
 pub mod webauthn_verify;
 
-// Re-export GitHub integration from services for backward compatibility
-pub use services::integrations::github as github_integration;
-
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
