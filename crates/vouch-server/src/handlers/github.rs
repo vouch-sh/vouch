@@ -13,8 +13,7 @@ use crate::db;
 use crate::handlers::common::{AuthContext, json_error};
 use crate::services::integrations::github::{
     ConnectInstallationParams, GitHubError, GitHubService, LinkAccountParams,
-    ReconnectInstallationParams, installations::validate_org_admin,
-    webhooks::WebhookEvent,
+    ReconnectInstallationParams, installations::validate_org_admin, webhooks::WebhookEvent,
 };
 use crate::{AppState, impl_template_response};
 use askama::Template;
@@ -251,9 +250,15 @@ pub async fn github_webhook(
             )
         })?;
 
-    service.verify_webhook_signature(signature, &body).map_err(|e| {
-        json_error(StatusCode::UNAUTHORIZED, "invalid_signature", &e.to_string())
-    })?;
+    service
+        .verify_webhook_signature(signature, &body)
+        .map_err(|e| {
+            json_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_signature",
+                &e.to_string(),
+            )
+        })?;
 
     // Get event type and handle
     let event_type = headers
@@ -347,7 +352,9 @@ pub async fn github_connect_page(
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to encode state token: {}", e);
-            return error_response(GitHubError::Internal("Failed to generate state token".to_string()));
+            return error_response(GitHubError::Internal(
+                "Failed to generate state token".to_string(),
+            ));
         }
     };
 
@@ -447,7 +454,7 @@ async fn handle_installation_callback(
     let installation_id = match params.installation_id {
         Some(id) => id,
         None => {
-            return error_response(GitHubError::Internal("Missing installation ID".to_string()))
+            return error_response(GitHubError::Internal("Missing installation ID".to_string()));
         }
     };
 
@@ -526,7 +533,9 @@ pub async fn github_link_start(State(state): State<Arc<AppState>>, jar: CookieJa
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to encode state token: {}", e);
-            return error_response(GitHubError::Internal("Failed to generate state token".to_string()));
+            return error_response(GitHubError::Internal(
+                "Failed to generate state token".to_string(),
+            ));
         }
     };
 

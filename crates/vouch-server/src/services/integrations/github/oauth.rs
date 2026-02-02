@@ -40,7 +40,10 @@ impl GitHubService<'_> {
     ///
     /// This exchanges the OAuth authorization code for tokens, fetches the
     /// GitHub user info, and stores the identity and refresh token.
-    pub async fn link_user_account(&self, params: LinkAccountParams<'_>) -> GitHubResult<LinkAccountResult> {
+    pub async fn link_user_account(
+        &self,
+        params: LinkAccountParams<'_>,
+    ) -> GitHubResult<LinkAccountResult> {
         let app = self.require_app()?;
         let client_id = self.oauth_client_id()?;
         let client_secret = self.oauth_client_secret()?;

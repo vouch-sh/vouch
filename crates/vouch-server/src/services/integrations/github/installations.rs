@@ -134,7 +134,9 @@ impl GitHubService<'_> {
             .get_user_access_token(&params.user.id)
             .await?
             .ok_or_else(|| {
-                GitHubError::Internal("Failed to get access token - please re-link your GitHub account".to_string())
+                GitHubError::Internal(
+                    "Failed to get access token - please re-link your GitHub account".to_string(),
+                )
             })?;
 
         // Verify user actually has access to this installation
@@ -238,13 +240,14 @@ impl GitHubService<'_> {
             .collect();
 
         // Fetch installations the user can access
-        let installations = match list_user_accessible_installations(app.http_client(), &access_token).await {
-            Ok(installations) => installations,
-            Err(e) => {
-                tracing::warn!("Failed to fetch user installations: {}", e);
-                return Ok(vec![]);
-            }
-        };
+        let installations =
+            match list_user_accessible_installations(app.http_client(), &access_token).await {
+                Ok(installations) => installations,
+                Err(e) => {
+                    tracing::warn!("Failed to fetch user installations: {}", e);
+                    return Ok(vec![]);
+                }
+            };
 
         // Filter to unlinked installations only
         let unlinked = installations

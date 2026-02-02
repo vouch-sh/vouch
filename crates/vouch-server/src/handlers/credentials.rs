@@ -219,11 +219,9 @@ pub async fn get_aws_token(
         .issue_token(&user_email, claims.authenticator_id.as_deref())
         .await
         .map_err(|e| match e {
-            AwsError::NoAuthenticator => json_error(
-                StatusCode::FORBIDDEN,
-                "no_authenticator",
-                &e.to_string(),
-            ),
+            AwsError::NoAuthenticator => {
+                json_error(StatusCode::FORBIDDEN, "no_authenticator", &e.to_string())
+            }
             AwsError::Database(ref err) => json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
@@ -287,16 +285,12 @@ pub async fn get_gcp_token(
         )
         .await
         .map_err(|e| match e {
-            GcpError::InvalidAudience(msg) => json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_audience",
-                msg,
-            ),
-            GcpError::NoAuthenticator => json_error(
-                StatusCode::FORBIDDEN,
-                "no_authenticator",
-                &e.to_string(),
-            ),
+            GcpError::InvalidAudience(msg) => {
+                json_error(StatusCode::BAD_REQUEST, "invalid_audience", msg)
+            }
+            GcpError::NoAuthenticator => {
+                json_error(StatusCode::FORBIDDEN, "no_authenticator", &e.to_string())
+            }
             GcpError::Database(ref err) => json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
@@ -359,16 +353,12 @@ pub async fn get_k8s_token(
         )
         .await
         .map_err(|e| match e {
-            K8sError::InvalidAudience(msg) => json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_audience",
-                msg,
-            ),
-            K8sError::NoAuthenticator => json_error(
-                StatusCode::FORBIDDEN,
-                "no_authenticator",
-                &e.to_string(),
-            ),
+            K8sError::InvalidAudience(msg) => {
+                json_error(StatusCode::BAD_REQUEST, "invalid_audience", msg)
+            }
+            K8sError::NoAuthenticator => {
+                json_error(StatusCode::FORBIDDEN, "no_authenticator", &e.to_string())
+            }
             K8sError::Database(ref err) => json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
@@ -681,4 +671,3 @@ pub async fn get_github_token(
         repositories,
     }))
 }
-
