@@ -3,6 +3,8 @@
 
 use crate::AppState;
 use crate::db::{self, GitHubCredentialEventParams};
+use crate::services::integrations::aws::{AwsError, AwsService};
+use crate::services::integrations::gcp::{GcpError, GcpService};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
 use axum::extract::Query;
 use axum::{Json, extract::State, http::StatusCode};
@@ -16,7 +18,8 @@ use std::sync::Arc;
 use vouch_common::{
     ApiError, AwsTokenResponse, GcpTokenResponse, GitHubStatusResponse, GitHubTokenRequest,
     GitHubTokenResponse, K8sTokenResponse, SshCaPublicKeyResponse, SshCertificateRequest,
-    SshCertificateResponse, oidc::OidcIdTokenClaimsBuilder,
+    SshCertificateResponse,
+    oidc::OidcIdTokenClaimsBuilder,  // Still used by K8s handler
 };
 
 use super::common::extract_session;
@@ -210,52 +213,37 @@ pub async fn get_aws_token(
     // Validate session
     let (claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
 
-    // Get authenticator info for AAGUID (required for cloud credentials)
-    let authenticator_id = claims.authenticator_id.as_ref().ok_or_else(|| {
-        json_error(
-            StatusCode::FORBIDDEN,
-            "no_authenticator",
-            "Session does not have a security key - please register one first",
-        )
-    })?;
-    let authenticator = db::get_authenticator_by_id(&state.db, authenticator_id)
+    // Create AWS service and issue token
+    let aws_service = AwsService::new(&state.db, &state.config, &state.oidc_key);
+    let result = aws_service
+        .issue_token(&user_email, claims.authenticator_id.as_deref())
         .await
-        .map_err(|e| {
-            json_error(
+        .map_err(|e| match e {
+            AwsError::NoAuthenticator => json_error(
+                StatusCode::FORBIDDEN,
+                "no_authenticator",
+                &e.to_string(),
+            ),
+            AwsError::Database(ref err) => json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
+                &err.to_string(),
+            ),
+            AwsError::ClaimsBuild(_) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "claims_error",
                 &e.to_string(),
-            )
+            ),
+            AwsError::TokenSign(_) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "token_error",
+                &e.to_string(),
+            ),
         })?;
 
-    // Token validity matches session duration
-    let expires_in = state.config.session_hours * 3600;
-
-    // Build OIDC claims using shared builder
-    // For AWS, the audience is the issuer URL (AWS matches against the OIDC provider)
-    let id_claims =
-        OidcIdTokenClaimsBuilder::for_aws(&state.config.verification_base_url, &user_email)
-            .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
-            .valid_for_seconds(expires_in)
-            .build()
-            .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, "claims_error", e))?;
-
-    // Sign the token with ES256 using the OIDC signing key
-    // AWS OIDC requires asymmetric signing (ES256) so it can verify
-    // the token using the public key from the JWKS endpoint
-    let id_token = state.oidc_key.sign_jwt(&id_claims).map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "token_error",
-            &format!("Failed to generate ID token: {e}"),
-        )
-    })?;
-
-    tracing::info!("Issued AWS OIDC token for {}", user_email);
-
     Ok(Json(AwsTokenResponse {
-        id_token,
-        expires_in,
+        id_token: result.id_token,
+        expires_in: result.expires_in,
     }))
 }
 
@@ -269,47 +257,6 @@ pub struct GcpTokenQuery {
     /// Workload Identity Pool provider audience URL.
     /// Format: //iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID
     pub audience: String,
-}
-
-/// Validate GCP audience format.
-///
-/// GCP Workload Identity Federation requires audiences in a specific format.
-/// This validation helps catch configuration errors early.
-fn validate_gcp_audience_format(audience: &str) -> Result<(), &'static str> {
-    if !audience.starts_with("//iam.googleapis.com/projects/") {
-        return Err("Invalid GCP audience format: must start with //iam.googleapis.com/projects/");
-    }
-
-    // Parse the audience to validate structure
-    let parts: Vec<&str> = audience.split('/').collect();
-    // Expected: ["", "", "iam.googleapis.com", "projects", PROJECT_NUMBER, "locations", "global", "workloadIdentityPools", POOL_ID, "providers", PROVIDER_ID]
-    if parts.len() < 11 {
-        return Err("Invalid GCP audience format: incomplete path");
-    }
-
-    // Validate project number is numeric
-    if let Some(project_num) = parts.get(4) {
-        if !project_num.chars().all(|c| c.is_ascii_digit()) {
-            return Err("Invalid GCP audience format: project number must be numeric");
-        }
-    } else {
-        return Err("Invalid GCP audience format: missing project number");
-    }
-
-    // Validate expected path components
-    if parts.get(5) != Some(&"locations") || parts.get(6) != Some(&"global") {
-        return Err("Invalid GCP audience format: expected /locations/global/");
-    }
-
-    if parts.get(7) != Some(&"workloadIdentityPools") {
-        return Err("Invalid GCP audience format: expected /workloadIdentityPools/");
-    }
-
-    if parts.get(9) != Some(&"providers") {
-        return Err("Invalid GCP audience format: expected /providers/");
-    }
-
-    Ok(())
 }
 
 /// Get an OIDC ID token for GCP Workload Identity Federation.
@@ -327,64 +274,49 @@ pub async fn get_gcp_token(
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     jar: CookieJar,
 ) -> Result<Json<GcpTokenResponse>, (StatusCode, Json<ApiError>)> {
-    // Validate audience format
-    validate_gcp_audience_format(&query.audience)
-        .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_audience", e))?;
-
     // Validate session
     let (claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
 
-    // Get authenticator info for AAGUID (required for cloud credentials)
-    let authenticator_id = claims.authenticator_id.as_ref().ok_or_else(|| {
-        json_error(
-            StatusCode::FORBIDDEN,
-            "no_authenticator",
-            "Session does not have a security key - please register one first",
+    // Create GCP service and issue token
+    let gcp_service = GcpService::new(&state.db, &state.config, &state.oidc_key);
+    let result = gcp_service
+        .issue_token(
+            &user_email,
+            &query.audience,
+            claims.authenticator_id.as_deref(),
         )
-    })?;
-    let authenticator = db::get_authenticator_by_id(&state.db, authenticator_id)
         .await
-        .map_err(|e| {
-            json_error(
+        .map_err(|e| match e {
+            GcpError::InvalidAudience(msg) => json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_audience",
+                msg,
+            ),
+            GcpError::NoAuthenticator => json_error(
+                StatusCode::FORBIDDEN,
+                "no_authenticator",
+                &e.to_string(),
+            ),
+            GcpError::Database(ref err) => json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
+                &err.to_string(),
+            ),
+            GcpError::ClaimsBuild(_) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "claims_error",
                 &e.to_string(),
-            )
+            ),
+            GcpError::TokenSign(_) => json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "token_error",
+                &e.to_string(),
+            ),
         })?;
 
-    // Token validity matches session duration
-    let expires_in = state.config.session_hours * 3600;
-
-    // Build OIDC claims using shared builder
-    // For GCP, the audience is the Workload Identity Pool provider resource name
-    let id_claims = OidcIdTokenClaimsBuilder::for_gcp(
-        &state.config.verification_base_url,
-        &user_email,
-        &query.audience,
-    )
-    .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
-    .valid_for_seconds(expires_in)
-    .build()
-    .map_err(|e| json_error(StatusCode::INTERNAL_SERVER_ERROR, "claims_error", e))?;
-
-    // Sign the token with ES256 using the OIDC signing key
-    let id_token = state.oidc_key.sign_jwt(&id_claims).map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "token_error",
-            &format!("Failed to generate ID token: {e}"),
-        )
-    })?;
-
-    tracing::info!(
-        "Issued GCP OIDC token: user={}, audience={}",
-        user_email,
-        query.audience
-    );
-
     Ok(Json(GcpTokenResponse {
-        id_token,
-        expires_in,
+        id_token: result.id_token,
+        expires_in: result.expires_in,
     }))
 }
 
