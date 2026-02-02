@@ -157,7 +157,7 @@ async fn handle_authorization_code_grant(
     };
 
     // Extract client credentials from headers or body
-    let owned_credentials = extract_client_credentials(
+    let credentials = extract_client_credentials(
         &headers,
         params.client_id.as_deref(),
         params.client_secret.as_deref(),
@@ -171,8 +171,8 @@ async fn handle_authorization_code_grant(
             Err(e) => return service_error_to_api_error(e).into_response(),
         };
 
-    // Convert owned credentials to service credentials
-    let credentials = owned_credentials.as_ref().map(|c| SvcClientCredentials {
+    // Convert to service-layer credentials
+    let svc_credentials = credentials.as_ref().map(|c| SvcClientCredentials {
         client_id: &c.client_id,
         client_secret: c.client_secret.as_deref(),
     });
@@ -181,7 +181,7 @@ async fn handle_authorization_code_grant(
     let exchange_params = AuthCodeExchangeParams {
         code,
         redirect_uri: params.redirect_uri.as_deref(),
-        credentials,
+        credentials: svc_credentials,
         code_verifier: params.code_verifier.as_deref(),
         dpop_proof,
     };
@@ -274,8 +274,8 @@ fn service_error_to_api_error(e: crate::services::ServiceError) -> (StatusCode, 
     }
 }
 
-/// Owned client credentials extracted from the request.
-struct OwnedClientCredentials {
+/// Client credentials extracted from the request.
+struct ClientCredentials {
     client_id: String,
     client_secret: Option<String>,
 }
@@ -288,7 +288,7 @@ fn extract_client_credentials(
     headers: &HeaderMap,
     client_id_param: Option<&str>,
     client_secret_param: Option<&str>,
-) -> Option<OwnedClientCredentials> {
+) -> Option<ClientCredentials> {
     // Try Authorization header first (client_secret_basic)
     if let Some(auth_header) = headers
         .get(header::AUTHORIZATION)
@@ -302,7 +302,7 @@ fn extract_client_credentials(
         {
             if let Ok(creds) = String::from_utf8(decoded) {
                 if let Some((id, secret)) = creds.split_once(':') {
-                    return Some(OwnedClientCredentials {
+                    return Some(ClientCredentials {
                         client_id: id.to_string(),
                         client_secret: Some(secret.to_string()),
                     });
@@ -312,7 +312,7 @@ fn extract_client_credentials(
     }
 
     // Fall back to request body parameters (client_secret_post)
-    client_id_param.map(|id| OwnedClientCredentials {
+    client_id_param.map(|id| ClientCredentials {
         client_id: id.to_string(),
         client_secret: client_secret_param.map(String::from),
     })
