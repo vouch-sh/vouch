@@ -26,7 +26,7 @@ To get the application URL:
 IMPORTANT: Before using Vouch, ensure you have configured:
   1. VOUCH_RP_ID - Your relying party identifier (e.g., your domain)
   2. VOUCH_RP_NAME - Human-readable name for your organization
-  3. VOUCH_VERIFICATION_URL - Public URL where Vouch is accessible
+  3. VOUCH_BASE_URL - Public URL where Vouch is accessible
   4. VOUCH_JWT_SECRET - A secure random secret for JWT signing
 
 For OIDC authentication (Google Sign-In), also configure:

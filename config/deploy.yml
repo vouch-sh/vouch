@@ -33,7 +33,7 @@ env:
     VOUCH_LISTEN_ADDR: "0.0.0.0:3000"
     VOUCH_RP_ID: "dev.vouch.sh"
     VOUCH_RP_NAME: "Vouch Dev"
-    VOUCH_VERIFICATION_URL: "https://dev.vouch.sh"
+    VOUCH_BASE_URL: "https://dev.vouch.sh"
     VOUCH_DATABASE_URL: "sqlite:/data/vouch.db?mode=rwc"
     VOUCH_SSH_CA_KEY_PATH: "/data/ssh_ca_key"
     RUST_LOG: "info,vouch_server=debug"

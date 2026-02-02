@@ -96,9 +96,9 @@ pub struct Args {
     #[arg(long, env = "VOUCH_OIDC_CLIENT_SECRET")]
     pub oidc_client_secret: Option<String>,
 
-    /// Base URL for device verification (defaults to https://{rp_id}).
-    #[arg(long, env = "VOUCH_VERIFICATION_URL")]
-    pub verification_url: Option<String>,
+    /// Base URL for this server (defaults to https://{rp_id}).
+    #[arg(long, env = "VOUCH_BASE_URL")]
+    pub base_url: Option<String>,
 
     /// Device code expiration in seconds.
     #[arg(long, env = "VOUCH_DEVICE_CODE_EXPIRES", default_value = "600")]
@@ -288,7 +288,7 @@ impl ServerConfig {
         }
 
         // Compute base URL (handles both production https and local http)
-        let base_url = args.verification_url.unwrap_or_else(|| {
+        let base_url = args.base_url.unwrap_or_else(|| {
             // For local development (localhost/127.0.0.1), use http with port
             if args.rp_id == "localhost" || args.rp_id == "127.0.0.1" {
                 // Extract port from listen_addr (e.g., "0.0.0.0:3000" -> "3000")

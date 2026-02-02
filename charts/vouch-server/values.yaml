@@ -90,7 +90,7 @@ env:
   # Set these for your deployment:
   # VOUCH_RP_ID: "vouch.example.com"
   # VOUCH_RP_NAME: "Vouch"
-  # VOUCH_VERIFICATION_URL: "https://vouch.example.com"
+  # VOUCH_BASE_URL: "https://vouch.example.com"
 
 # Secret environment variables
 # Reference an existing secret containing these keys:

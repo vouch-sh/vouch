@@ -111,7 +111,7 @@ VOUCH_OIDC_CLIENT_ID=<client-id>
 VOUCH_OIDC_CLIENT_SECRET=<client-secret>
 
 # Optional
-VOUCH_VERIFICATION_URL=https://vouch.example.com  # defaults to https://{rp_id}
+VOUCH_BASE_URL=https://vouch.example.com  # defaults to https://{rp_id}
 VOUCH_DEVICE_CODE_EXPIRES=600                      # seconds
 VOUCH_DEVICE_POLL_INTERVAL=5                       # seconds
 ```
@@ -121,7 +121,7 @@ VOUCH_DEVICE_POLL_INTERVAL=5                       # seconds
 # Terminal 1: Start server
 VOUCH_RP_ID=localhost \
 VOUCH_JWT_SECRET=test-secret-at-least-32-chars-long \
-VOUCH_VERIFICATION_URL=http://localhost:3000 \
+VOUCH_BASE_URL=http://localhost:3000 \
 cargo run --bin vouch-server
 
 # Terminal 2: Run enroll
