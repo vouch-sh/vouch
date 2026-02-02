@@ -16,7 +16,7 @@ use jsonwebtoken::{DecodingKey, Validation};
 use time::Duration;
 use vouch_common::{ApiError, extract_aaguid_from_attestation, validate_hardware_attestation};
 
-use super::auth::SessionClaims;
+use crate::services::auth::SessionClaims;
 
 // ============================================================================
 // Authentication Context for Templates

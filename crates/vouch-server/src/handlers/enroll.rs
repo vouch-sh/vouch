@@ -25,12 +25,12 @@ use std::sync::Arc;
 use uuid::Uuid;
 use vouch_common::{ApiError, BrowserRegisterCompleteRequest, BrowserRegisterStartResponse};
 
-use super::auth::SessionClaims;
 use super::common::AuthContext;
 use super::{
     create_session_cookie, extract_session_from_cookie, generate_random_bytes, hash_token,
     json_error, validate_registration_attestation,
 };
+use crate::services::auth::SessionClaims;
 
 // ============================================================================
 // COSE Key Serialization

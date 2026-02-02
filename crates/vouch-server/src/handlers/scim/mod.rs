@@ -24,7 +24,7 @@ use axum::{
 use crate::AppState;
 use crate::db;
 
-// Re-export types for backwards compatibility
+// Re-export types for convenience (used by tests via `use super::*`)
 pub use types::*;
 
 // Re-export handlers

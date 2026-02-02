@@ -9,8 +9,8 @@
 use crate::AppState;
 use crate::db::{self, Authenticator, OAuthClient, OAuthClientType, Session, User};
 use crate::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
-use crate::handlers::auth::SessionClaims;
 use crate::handlers::hash_token;
+use crate::services::auth::SessionClaims;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::rand as aws_rand;

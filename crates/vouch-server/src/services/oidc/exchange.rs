@@ -6,8 +6,8 @@
 
 use crate::AppState;
 use crate::db;
-use crate::handlers::auth::SessionClaims;
 use crate::handlers::hash_token;
+use crate::services::auth::SessionClaims;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::Timestamp;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, encode};

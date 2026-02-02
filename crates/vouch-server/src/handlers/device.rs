@@ -236,7 +236,7 @@ pub async fn device_token(
             })?;
 
             // Create JWT claims
-            let claims = crate::handlers::auth::SessionClaims {
+            let claims = crate::services::auth::SessionClaims {
                 sub: user_id.clone(),
                 email: user_email.clone(),
                 authenticator_id: Some(authenticator_id.clone()),

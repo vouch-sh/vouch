@@ -22,11 +22,11 @@
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::extractors::ClientInfo;
-use crate::handlers::auth::SessionClaims;
 use crate::handlers::common::{
     create_session_cookie, generate_challenge, get_auth_context, hash_token, json_error,
 };
 use crate::impl_template_response;
+use crate::services::auth::SessionClaims;
 use crate::webauthn_verify;
 use askama::Template;
 use axum::{

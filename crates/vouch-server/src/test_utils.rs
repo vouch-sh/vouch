@@ -383,7 +383,7 @@ pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: 
         .map(|t| t.as_second())
         .unwrap_or(now.as_second() + 28800);
 
-    let claims = crate::handlers::auth::SessionClaims {
+    let claims = crate::services::auth::SessionClaims {
         sub: user_id.to_string(),
         email: email.to_string(),
         authenticator_id: Some(auth_id.to_string()),
@@ -407,7 +407,7 @@ pub fn create_expired_token(state: &AppState, user_id: &str, email: &str, auth_i
 
     let now = Timestamp::now();
 
-    let claims = crate::handlers::auth::SessionClaims {
+    let claims = crate::services::auth::SessionClaims {
         sub: user_id.to_string(),
         email: email.to_string(),
         authenticator_id: Some(auth_id.to_string()),

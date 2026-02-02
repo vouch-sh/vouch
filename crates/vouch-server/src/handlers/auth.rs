@@ -5,8 +5,8 @@ use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::extractors::ClientInfo;
 use crate::services::auth::{
-    AuthenticatorLookupParams, CreateSessionParams, LoginAssertionParams, create_login_session,
-    lookup_and_verify_authenticator, verify_login_assertion,
+    AuthenticatorLookupParams, CreateSessionParams, LoginAssertionParams, SessionClaims,
+    create_login_session, lookup_and_verify_authenticator, verify_login_assertion,
 };
 use axum::{
     Json,
@@ -29,9 +29,6 @@ use vouch_common::{
     Raw, RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest,
     RegisterStartResponse, SessionStatus, fido2_types::Challenge,
 };
-
-// Re-export SessionClaims from the service layer for backwards compatibility
-pub use crate::services::auth::SessionClaims;
 
 use super::{
     clear_session_cookie, generate_challenge, hash_token, json_error,

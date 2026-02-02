@@ -7,9 +7,9 @@
 
 use crate::AppState;
 use crate::db;
-use crate::handlers::auth::SessionClaims;
 use crate::handlers::hash_token;
 use crate::services::ServiceResult;
+use crate::services::auth::SessionClaims;
 use jsonwebtoken::{DecodingKey, Validation};
 use serde::Serialize;
 use std::sync::Arc;
