@@ -51,7 +51,7 @@ pub async fn list_keys(
             KeyInfo {
                 id: a.id.clone(),
                 name: a.name,
-                created_at: a.created_at,
+                created_at: a.created_at.to_jiff().to_string(),
                 is_current_session: claims.authenticator_id.as_ref() == Some(&a.id),
                 device_model,
                 aaguid: a.aaguid,

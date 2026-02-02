@@ -1,2 +1,0 @@
--- Removed: admin sessions are no longer used.
--- Admin functionality now uses JWT Bearer tokens from regular FIDO2 sessions.

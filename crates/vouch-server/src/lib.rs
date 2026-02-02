@@ -27,12 +27,12 @@ pub use webauthn_verify::{CoseVerifier, RealCoseVerifier, VerificationResult, Ve
 #[cfg(any(test, feature = "test-utils"))]
 pub use webauthn_verify::TestCoseVerifier;
 
-use sqlx::SqlitePool;
+use db::Pool;
 
 /// Shared application state.
 pub struct AppState {
     /// Database connection pool.
-    pub db: SqlitePool,
+    pub db: Pool,
     /// Server configuration.
     pub config: ServerConfig,
     /// WebAuthn instance.

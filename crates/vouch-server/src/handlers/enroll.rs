@@ -157,15 +157,7 @@ pub async fn get_enrollment_session_from_cookie(
     };
 
     // Check if expired
-    // SQLite stores timestamps without timezone, so we append 'Z' to parse as UTC
-    let expires_with_tz = format!("{}Z", session.expires_at.replace(' ', "T"));
-    let expires: Timestamp = match expires_with_tz.parse() {
-        Ok(ts) => ts,
-        Err(e) => {
-            tracing::debug!("get_enrollment_session: failed to parse expiration: {}", e);
-            return None;
-        }
-    };
+    let expires = session.expires_at.to_jiff();
 
     if expires > Timestamp::now() {
         // Update last used timestamp
@@ -362,17 +354,7 @@ pub async fn device_verify_submit(
 
     // Check if expired
     let now = Timestamp::now();
-    let expires_at: Timestamp = match request.expires_at.parse() {
-        Ok(ts) => ts,
-        Err(_) => {
-            return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Invalid request state".to_string(),
-                back_url: None,
-            }
-            .into_response();
-        }
-    };
+    let expires_at = request.expires_at.to_jiff();
 
     if now > expires_at {
         return DeviceVerifyTemplate {
@@ -542,17 +524,7 @@ pub async fn oidc_callback(
 
     // Check if state expired
     let now = Timestamp::now();
-    let expires_at: Timestamp = match stored_state.expires_at.parse() {
-        Ok(ts) => ts,
-        Err(_) => {
-            return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Invalid state".to_string(),
-                back_url: None,
-            }
-            .into_response();
-        }
-    };
+    let expires_at = stored_state.expires_at.to_jiff();
 
     if now > expires_at {
         return ErrorTemplate {
@@ -704,42 +676,20 @@ pub async fn oidc_callback(
         }
     }
 
-    // Handle organization based on hosted domain
-    let (org_id, is_first_user) = if let Some(domain) = &claims.hd {
-        // Workspace user - get or create organization
-        match db::get_or_create_org_by_domain(&state.db, domain, None, None).await {
-            Ok((org, is_new)) => (Some(org.id), is_new),
-            Err(e) => {
-                tracing::error!("Failed to get/create organization: {}", e);
-                return ErrorTemplate {
-                    title: "Error".to_string(),
-                    message: "Failed to process organization".to_string(),
-                    back_url: None,
-                }
-                .into_response();
-            }
-        }
-    } else {
-        // Personal account (e.g., gmail.com) - no organization
-        (None, false)
-    };
-
-    // First user from a domain becomes the org admin
-    let is_org_admin = is_first_user && org_id.is_some();
-
-    // Create or get user with organization
-    let user = match db::upsert_user_with_org(
+    // Enroll user with organization in a single atomic transaction.
+    // This ensures that if org creation succeeds but user creation fails,
+    // the entire operation is rolled back to prevent orphaned state.
+    let enrollment = match db::enroll_user_with_org(
         &state.db,
         &claims.email,
         None,
-        org_id.as_deref(),
-        is_org_admin,
+        claims.hd.as_deref(),
     )
     .await
     {
-        Ok(u) => u,
+        Ok(e) => e,
         Err(e) => {
-            tracing::error!("Failed to create/get user: {}", e);
+            tracing::error!("Failed to enroll user: {}", e);
             return ErrorTemplate {
                 title: "Error".to_string(),
                 message: "Failed to create user".to_string(),
@@ -748,6 +698,8 @@ pub async fn oidc_callback(
             .into_response();
         }
     };
+
+    let user = enrollment.user;
 
     // Create session for this user (using session cookie instead of enrollment cookie)
     let now = Timestamp::now();

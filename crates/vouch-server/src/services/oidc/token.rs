@@ -331,7 +331,7 @@ pub async fn authenticate_client(
         .ok_or(ClientAuthError::InvalidClient)?;
 
     // Check if client is active
-    if !client.is_active() {
+    if !client.active {
         return Err(ClientAuthError::InvalidClient);
     }
 

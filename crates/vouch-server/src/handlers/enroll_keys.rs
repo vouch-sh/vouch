@@ -86,7 +86,7 @@ pub async fn list_keys(
             KeyInfo {
                 id: a.id,
                 name: a.name,
-                created_at: a.created_at,
+                created_at: a.created_at.to_jiff().to_string(),
                 is_current_session: is_current,
                 device_model,
                 aaguid: a.aaguid,

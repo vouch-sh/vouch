@@ -25,46 +25,78 @@ pub struct GitHubAppId(pub u64);
 #[derive(Debug, Clone, Copy)]
 pub struct GitHubInstallationId(pub u64);
 
-/// RSA private key in DER format, zeroized on drop.
+/// RSA private key in PKCS#1 DER format, zeroized on drop.
+///
+/// `jsonwebtoken::EncodingKey::from_rsa_der()` with the `aws_lc_rs` feature
+/// expects PKCS#1 DER format (RFC 8017), which is what GitHub provides for
+/// App private keys (`BEGIN RSA PRIVATE KEY`).
 #[derive(Clone)]
 pub struct RsaPrivateKeyDer(Zeroizing<Vec<u8>>);
 
 impl RsaPrivateKeyDer {
-    /// Parse RSA private key from PEM or base64-encoded DER format.
+    /// Parse RSA private key from PKCS#1 PEM or base64-encoded PKCS#1 PEM.
     ///
     /// Supports:
-    /// - Standard multi-line PEM format
-    /// - Base64-encoded DER (PKCS#8 format) - both standard and URL-safe base64
+    /// - PKCS#1 PEM format (`BEGIN RSA PRIVATE KEY`) - as provided by GitHub
+    /// - Base64-encoded PKCS#1 PEM (entire PEM base64 encoded for env vars)
     ///
-    /// Base64 DER is preferred for environment variables as it avoids newline handling issues.
+    /// For environment variables, base64 encode the entire PEM file:
+    /// ```bash
+    /// cat your-key.pem | base64 | tr -d '\n'
+    /// ```
     pub fn from_pem(pem_or_base64: &str) -> Result<Self> {
         let content = pem_or_base64.trim();
 
-        let der_bytes = if content.starts_with("-----BEGIN") {
-            // Standard PEM format
-            if !content.contains("PRIVATE KEY") {
-                anyhow::bail!("Invalid PEM format: not a private key");
-            }
-            Self::pem_to_der(content)?
-        } else {
-            // Assume base64-encoded DER (PKCS#8 format)
-            URL_SAFE_NO_PAD
-                .decode(content)
-                .or_else(|_| STANDARD.decode(content))
-                .context("Invalid base64 encoding for key")?
-        };
+        // Check if it's already PEM format
+        if content.starts_with("-----BEGIN") {
+            return Self::parse_pem(content);
+        }
 
+        // Try to decode as base64-encoded PEM
+        let decoded = URL_SAFE_NO_PAD
+            .decode(content)
+            .or_else(|_| STANDARD.decode(content))
+            .context("Invalid base64 encoding for key")?;
+
+        // Check if the decoded content is PEM
+        let pem_str = std::str::from_utf8(&decoded)
+            .context("Invalid UTF-8 in base64-decoded key (expected PEM)")?;
+
+        let trimmed = pem_str.trim().trim_start_matches('\u{feff}'); // Remove BOM if present
+        if !trimmed.starts_with("-----BEGIN") {
+            anyhow::bail!(
+                "Invalid key format: expected base64-encoded PEM starting with '-----BEGIN', \
+                 got {} bytes of non-PEM data",
+                decoded.len()
+            );
+        }
+
+        Self::parse_pem(trimmed)
+    }
+
+    /// Parse a PEM-formatted PKCS#1 key.
+    fn parse_pem(content: &str) -> Result<Self> {
+        if !content.contains("RSA PRIVATE KEY") {
+            anyhow::bail!(
+                "Invalid key format: expected PKCS#1 PEM ('BEGIN RSA PRIVATE KEY'), \
+                 not PKCS#8. GitHub App keys should be in PKCS#1 format."
+            );
+        }
+
+        let der_bytes = Self::pem_to_der(content)?;
+        tracing::debug!("Parsed PKCS#1 RSA key: {} DER bytes", der_bytes.len());
         Ok(Self(Zeroizing::new(der_bytes)))
     }
 
-    /// Get the DER bytes.
+    /// Get the PKCS#1 DER bytes.
     #[must_use]
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 
     /// Convert PEM to DER bytes.
-    fn pem_to_der(pem_content: &str) -> Result<Vec<u8>> {
+    #[cfg_attr(test, allow(dead_code))]
+    pub(crate) fn pem_to_der(pem_content: &str) -> Result<Vec<u8>> {
         let lines: Vec<&str> = pem_content.lines().collect();
         let mut base64_content = String::new();
         let mut in_content = false;
@@ -199,6 +231,25 @@ impl GitHubApp {
         let private_key = RsaPrivateKeyDer::from_pem(private_key_pem)
             .context("Failed to parse GitHub App private key")?;
 
+        // Verify the key can be used for signing
+        match aws_lc_rs::signature::RsaKeyPair::from_der(private_key.as_bytes()) {
+            Ok(key_pair) => {
+                tracing::info!(
+                    "GitHub App private key validated: {} bytes, modulus {} bits",
+                    private_key.as_bytes().len(),
+                    key_pair.public_modulus_len() * 8
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "GitHub App private key INVALID: {} bytes, error: {:?}",
+                    private_key.as_bytes().len(),
+                    e
+                );
+                anyhow::bail!("GitHub App private key failed validation: {e:?}");
+            }
+        }
+
         let http_client = vouch_common::http::server_client(&format!(
             "vouch-server/{}",
             env!("CARGO_PKG_VERSION")
@@ -228,6 +279,7 @@ impl GitHubApp {
             iss: self.app_id.0.to_string(),
         };
 
+        // Use from_rsa_der - our RsaPrivateKeyDer already converted PKCS#1 to PKCS#8
         let encoding_key = EncodingKey::from_rsa_der(self.private_key.as_bytes());
         let header = Header::new(Algorithm::RS256);
 
@@ -336,6 +388,15 @@ impl GitHubApp {
     pub fn app_id(&self) -> GitHubAppId {
         self.app_id
     }
+
+    /// Get a reference to the HTTP client.
+    ///
+    /// This client is configured with `vouch_common::http::server_client()`
+    /// timeouts (15s total, 5s connect).
+    #[must_use]
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.http_client
+    }
 }
 
 /// Minimal permissions for Git operations.
@@ -347,68 +408,347 @@ pub fn minimal_git_permissions() -> HashMap<String, String> {
         .collect()
 }
 
+// ============================================================================
+// User OAuth Token APIs
+// ============================================================================
+
+/// Response from GET /user/installations (paginated).
+#[derive(Debug, Deserialize)]
+pub struct UserInstallationsResponse {
+    /// Total count of installations the user has access to.
+    #[allow(dead_code)]
+    pub total_count: u32,
+    /// List of installations.
+    pub installations: Vec<InstallationDetails>,
+}
+
+/// List installations accessible to a user (requires user OAuth access token).
+///
+/// This uses the user's OAuth token, not the App JWT. The API returns only
+/// installations the authenticated user has explicit permission to access.
+///
+/// # Arguments
+/// * `http_client` - HTTP client to use
+/// * `user_token` - GitHub user OAuth access token
+pub async fn list_user_accessible_installations(
+    http_client: &reqwest::Client,
+    user_token: &str,
+) -> Result<Vec<InstallationDetails>> {
+    let mut all_installations = Vec::new();
+    let mut page = 1;
+
+    loop {
+        let response = http_client
+            .get(format!(
+                "https://api.github.com/user/installations?per_page=100&page={page}"
+            ))
+            .header("Authorization", format!("Bearer {user_token}"))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .send()
+            .await
+            .context("Failed to request user installations from GitHub")?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!(
+                "GitHub API error ({}): {}",
+                status,
+                body.chars().take(200).collect::<String>()
+            );
+        }
+
+        let body: UserInstallationsResponse = response
+            .json()
+            .await
+            .context("Failed to parse user installations response")?;
+
+        let count = body.installations.len();
+        all_installations.extend(body.installations);
+
+        if count < 100 {
+            break;
+        }
+        page += 1;
+    }
+
+    Ok(all_installations)
+}
+
+/// GitHub user info from /user endpoint.
+#[derive(Debug, Deserialize)]
+pub struct GitHubUser {
+    /// GitHub user ID.
+    pub id: u64,
+    /// GitHub username (login).
+    pub login: String,
+    /// User's name.
+    pub name: Option<String>,
+    /// User's email (may be null if private).
+    pub email: Option<String>,
+}
+
+/// Get the authenticated user's info from GitHub.
+///
+/// # Arguments
+/// * `http_client` - HTTP client to use
+/// * `user_token` - GitHub user OAuth access token
+pub async fn get_github_user(
+    http_client: &reqwest::Client,
+    user_token: &str,
+) -> Result<GitHubUser> {
+    let response = http_client
+        .get("https://api.github.com/user")
+        .header("Authorization", format!("Bearer {user_token}"))
+        .header("Accept", "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .context("Failed to request user info from GitHub")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!(
+            "GitHub API error ({}): {}",
+            status,
+            body.chars().take(200).collect::<String>()
+        );
+    }
+
+    response
+        .json::<GitHubUser>()
+        .await
+        .context("Failed to parse GitHub user response")
+}
+
+/// Response from GitHub OAuth token endpoint.
+#[derive(Debug, Deserialize)]
+pub struct GitHubOAuthTokenResponse {
+    /// Access token for API calls.
+    pub access_token: String,
+    /// Token type (usually "bearer").
+    #[allow(dead_code)]
+    pub token_type: String,
+    /// Granted scopes (space-separated).
+    #[allow(dead_code)]
+    pub scope: Option<String>,
+    /// Refresh token for getting new access tokens.
+    pub refresh_token: Option<String>,
+    /// Access token expiration in seconds (8 hours for GitHub Apps).
+    #[allow(dead_code)]
+    pub expires_in: Option<u64>,
+    /// Refresh token expiration in seconds (6 months for GitHub Apps).
+    #[allow(dead_code)]
+    pub refresh_token_expires_in: Option<u64>,
+}
+
+/// Exchange an OAuth authorization code for access and refresh tokens.
+///
+/// # Arguments
+/// * `http_client` - HTTP client to use
+/// * `client_id` - GitHub App Client ID
+/// * `client_secret` - GitHub App Client Secret
+/// * `code` - Authorization code from OAuth callback
+pub async fn exchange_oauth_code(
+    http_client: &reqwest::Client,
+    client_id: &str,
+    client_secret: &str,
+    code: &str,
+) -> Result<GitHubOAuthTokenResponse> {
+    let response = http_client
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .form(&[
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("code", code),
+        ])
+        .send()
+        .await
+        .context("Failed to exchange OAuth code with GitHub")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!(
+            "GitHub OAuth error ({}): {}",
+            status,
+            body.chars().take(200).collect::<String>()
+        );
+    }
+
+    // GitHub may return 200 with an error in the body
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse OAuth token response")?;
+
+    if let Some(error) = body.get("error").and_then(|e| e.as_str()) {
+        let description = body
+            .get("error_description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("Unknown error");
+        bail!("GitHub OAuth error: {} - {}", error, description);
+    }
+
+    serde_json::from_value(body).context("Failed to parse OAuth token response")
+}
+
+/// Refresh an access token using a refresh token.
+///
+/// # Arguments
+/// * `http_client` - HTTP client to use
+/// * `client_id` - GitHub App Client ID
+/// * `client_secret` - GitHub App Client Secret
+/// * `refresh_token` - Refresh token from previous OAuth flow
+pub async fn refresh_oauth_token(
+    http_client: &reqwest::Client,
+    client_id: &str,
+    client_secret: &str,
+    refresh_token: &str,
+) -> Result<GitHubOAuthTokenResponse> {
+    let response = http_client
+        .post("https://github.com/login/oauth/access_token")
+        .header("Accept", "application/json")
+        .form(&[
+            ("client_id", client_id),
+            ("client_secret", client_secret),
+            ("grant_type", "refresh_token"),
+            ("refresh_token", refresh_token),
+        ])
+        .send()
+        .await
+        .context("Failed to refresh OAuth token with GitHub")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        bail!(
+            "GitHub OAuth refresh error ({}): {}",
+            status,
+            body.chars().take(200).collect::<String>()
+        );
+    }
+
+    // GitHub may return 200 with an error in the body
+    let body: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse OAuth refresh response")?;
+
+    if let Some(error) = body.get("error").and_then(|e| e.as_str()) {
+        let description = body
+            .get("error_description")
+            .and_then(|d| d.as_str())
+            .unwrap_or("Unknown error");
+        bail!("GitHub OAuth refresh error: {} - {}", error, description);
+    }
+
+    serde_json::from_value(body).context("Failed to parse OAuth refresh response")
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
-    // Test RSA key in PKCS#8 PEM format (for testing only - not a real key)
-    const TEST_RSA_KEY_PEM: &str = r#"-----BEGIN PRIVATE KEY-----
-MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCr5iOT5WG57poj
-N6E7+N+jHNz2yGswtnRPb5fHmiGwxklhQugNEdSmBa4tpB5cv2kXe+bAbfJmQcA3
-VsWzu5anA1y/Mg7o7PtjKbp1FvdyYEKILk08g9HSfCAf9lyY/HQqkOaE16rHaJaX
-TfknSsZCkAr0J94zgZ3NemiugFy30AnGgUffi1nglrpHZws/Efpz8gCnzZ8yX2Tq
-OLTWnkMHChjoNbS9mT7er+3Sa4ke62ZcI06tmsf676HyXPiuJ0Pf626+yM46YxRf
-XTsAqXnNd8Vo/l0CytOpnaqd7T0I2sw/Qz0X/fpWQm6vDFHTLXm6bCKQzrGd/TbE
-U4Jr7o9rAgMBAAECggEAVKYFMhC8UZOaKqp7xu0Ur52IgCwMgNXwK6ffvaZ8XbEf
-NHp+i+USatkUPxx46SJG7Y4RgQQDYHCTZ4ze2VWQZ9kDhJFxfykn19qWG4++NYAK
-c0YduaWOHxEJvsOSMLHswINPSO5tBjpOId7/SOaM//0vr7CsPn/fBe73+qpyPf8v
-E3Fd80j7QlpjQYqjbi9kcZiPmYIFS9AcL7isSXCUXKBpl+edJyE9IJaywV2AwNuW
-RsamTKWN7bBK/G+hNMB+StOw2yvvBlicq4ro/Nrf/vw4/TDmBL3dgM5Y0bVZOvGz
-FHZswfoxkcfeH/D8Q8IVd3O1i6Zxp/JgUEJKBmN5JQKBgQDxbLUryIf6dtUkjLWp
-PJ39re34y+xPW8FiQ7GQtdJTY7vMWnrw21cUaSvG0TD6vhcR57dQGss1AXa+aqs3
-Gtg0SdxGnmEtQeqcOYdC8L86XK608vYVKA36tHv9BMwX0xIaxli240Bo5VbeZpfu
-KiPW9Fjb7NQNDG1RLYXIhbRzrQKBgQC2RuQI64ARBqSdXWRrIRwD9+QX1ZWziOJI
-8v9x0VCFSC3+DTTTRlnZoPWsxe5+s2tc2TA4Bp8ufgKC7kqwTrMRo1yv4zk142KS
-WPKrGXRzvYWuq6YPNjAXlz+L+NlZZz5LrIVH14TLkwKn3R6qZ2ffHpukiLsvTdar
-B9kgdukydwKBgQDnxtuwKxcQyGEcc9I7paxwTTj38J7wGUDxW9fu+//uewNiz0LU
-VV+mgsm6WD9Tmod/cxw0VWTdgIhFixbREn6axIYrbgYRcwUP8tL+2y5bk3tO0Sqb
-aRbyp6+ZW6+s98Cb3+xvuICvs+3QGmKmDeLWjUN58EYsONACbVfRCTwTCQKBgACO
-ZtPAJDvpEUeJqWzKRROeBgwskrBhko82bqEiSmSdu8YytB6Q8GVBoH5OfFPWqFU4
-NHV3T7UMnWVY5NF07Ab5wKaowtvvPbXEn7j18u0HfwjxbShOugbYZ1E+CSvErOP+
-OsnlVnpokHGCsz1B44dCyKbP5AJY8nbDJ155/mwxAoGBAOB1vd8iFiHAvimoPXq8
-PFasSYpbhRO5+RNId65dpC8QuUxoTTVdy+fgTphu+dDnfp6PxjvkMDE+F43HBI5E
-KmD1mcVkXceJ9PkbmHjk68+Rk2tHQpUIHS57JhGyStY4C27QO5YkBEufvivkHjN7
-yzgO9R097vzWd5EHWExte17q
------END PRIVATE KEY-----"#;
+    // Test RSA key in PKCS#1 PEM format (as provided by GitHub App)
+    const TEST_RSA_KEY_PKCS1_PEM: &str = r#"-----BEGIN RSA PRIVATE KEY-----
+MIIEpAIBAAKCAQEAq+Yjk+Vhue6aIzehO/jfoxzc9shrMLZ0T2+Xx5ohsMZJYULo
+DRHUpgWuLaQeXL9pF3vmwG3yZkHAN1bFs7uWpwNcvzIO6Oz7Yym6dRb3cmBCiC5N
+PIPR0nwgH/ZcmPx0KpDmhNeqx2iWl035J0rGQpAK9CfeM4GdzXporoBct9AJxoFH
+34tZ4Ja6R2cLPxH6c/IAp82fMl9k6ji01p5DBwoY6DW0vZk+3q/t0muJHutmXCNO
+rZrH+u+h8lz4ridD3+tuvsjOOmMUX107AKl5zXfFaP5dAsrTqZ2qne09CNrMP0M9
+F/36VkJurwxR0y15umwikM6xnf02xFOCa+6PawIDAQABAoIBAFSmBTIQvFGTmiqq
+e8btFK+diIAsDIDV8Cun372mfF2xHzR6fovlEmrZFD8ceOkiRu2OEYEEA2Bwk2eM
+3tlVkGfZA4SRcX8pJ9falhuPvjWACnNGHbmljh8RCb7DkjCx7MCDT0jubQY6TiHe
+/0jmjP/9L6+wrD5/3wXu9/qqcj3/LxNxXfNI+0JaY0GKo24vZHGYj5mCBUvQHC+4
+rElwlFygaZfnnSchPSCWssFdgMDblkbGpkylje2wSvxvoTTAfkrTsNsr7wZYnKuK
+6Pza3/78OP0w5gS93YDOWNG1WTrxsxR2bMH6MZHH3h/w/EPCFXdztYumcafyYFBC
+SgZjeSUCgYEA8Wy1K8iH+nbVJIy1qTyd/a3t+MvsT1vBYkOxkLXSU2O7zFp68NtX
+FGkrxtEw+r4XEee3UBrLNQF2vmqrNxrYNEncRp5hLUHqnDmHQvC/OlyutPL2FSgN
++rR7/QTMF9MSGsZYtuNAaOVW3maX7ioj1vRY2+zUDQxtUS2FyIW0c60CgYEAtkbk
+COuAEQaknV1kayEcA/fkF9WVs4jiSPL/cdFQhUgt/g0000ZZ2aD1rMXufrNrXNkw
+OAafLn4Cgu5KsE6zEaNcr+M5NeNikljyqxl0c72FrqumDzYwF5c/i/jZWWc+S6yF
+R9eEy5MCp90eqmdn3x6bpIi7L03WqwfZIHbpMncCgYEA58bbsCsXEMhhHHPSO6Ws
+cE049/Ce8BlA8VvX7vv/7nsDYs9C1FVfpoLJulg/U5qHf3McNFVk3YCIRYsW0RJ+
+msSGK24GEXMFD/LS/tsuW5N7TtEqm2kW8qevmVuvrPfAm9/sb7iAr7Pt0Bpipg3i
+1o1DefBGLDjQAm1X0Qk8EwkCgYAAjmbTwCQ76RFHialsykUTngYMLJKwYZKPNm6h
+IkpknbvGMrQekPBlQaB+TnxT1qhVODR1d0+1DJ1lWOTRdOwG+cCmqMLb7z21xJ+4
+9fLtB38I8W0oTroG2GdRPgkrxKzj/jrJ5VZ6aJBxgrM9QeOHQsimz+QCWPJ2wyde
+ef5sMQKBgQDgdb3fIhYhwL4pqD16vDxWrEmKW4UTufkTSHeuXaQvELlMaE01Xcvn
+4E6YbvnQ536ej8Y75DAxPheNxwSORCpg9ZnFZF3HifT5G5h45OvPkZNrR0KVCB0u
+eyYRskrWOAtu0DuWJARLn74r5B4ze8s4DvUdPe781neRB1hMbXte6g==
+-----END RSA PRIVATE KEY-----"#;
 
     #[test]
-    fn test_rsa_key_from_pem() {
-        let key = RsaPrivateKeyDer::from_pem(TEST_RSA_KEY_PEM).expect("Should parse PEM");
-        assert!(!key.as_bytes().is_empty());
-    }
-
-    #[test]
-    fn test_rsa_key_from_base64_der() {
-        // Extract DER bytes from PEM and encode as base64
-        let pem_key = RsaPrivateKeyDer::from_pem(TEST_RSA_KEY_PEM).expect("Should parse PEM");
-        let base64_der = STANDARD.encode(pem_key.as_bytes());
-
-        // Parse the base64-encoded DER
-        let key = RsaPrivateKeyDer::from_pem(&base64_der).expect("Should parse base64 DER");
-        assert_eq!(key.as_bytes(), pem_key.as_bytes());
-    }
-
-    #[test]
-    fn test_rsa_key_from_url_safe_base64_der() {
-        // Extract DER bytes from PEM and encode as URL-safe base64
-        let pem_key = RsaPrivateKeyDer::from_pem(TEST_RSA_KEY_PEM).expect("Should parse PEM");
-        let base64_der = URL_SAFE_NO_PAD.encode(pem_key.as_bytes());
-
-        // Parse the URL-safe base64-encoded DER
+    fn test_rsa_key_from_pkcs1_pem() {
+        // PKCS#1 format is what GitHub provides for App private keys
         let key =
-            RsaPrivateKeyDer::from_pem(&base64_der).expect("Should parse URL-safe base64 DER");
-        assert_eq!(key.as_bytes(), pem_key.as_bytes());
+            RsaPrivateKeyDer::from_pem(TEST_RSA_KEY_PKCS1_PEM).expect("Should parse PKCS#1 PEM");
+        assert!(!key.as_bytes().is_empty());
+
+        // The key should be usable with jsonwebtoken for signing
+        let encoding_key = jsonwebtoken::EncodingKey::from_rsa_der(key.as_bytes());
+
+        // Actually try to sign something
+        #[derive(serde::Serialize)]
+        struct TestClaims {
+            sub: String,
+            iat: i64,
+            exp: i64,
+        }
+        let claims = TestClaims {
+            sub: "test".to_string(),
+            iat: 1000000000,
+            exp: 1000000600,
+        };
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        let token = jsonwebtoken::encode(&header, &claims, &encoding_key)
+            .expect("Should be able to sign JWT with PKCS#1 key");
+        assert!(!token.is_empty());
+    }
+
+    #[test]
+    fn test_rsa_key_from_base64_encoded_pem() {
+        // This is the common format for environment variables - the entire PEM
+        // (including headers) is base64 encoded to avoid newline issues
+        let base64_pem = STANDARD.encode(TEST_RSA_KEY_PKCS1_PEM.as_bytes());
+
+        let key = RsaPrivateKeyDer::from_pem(&base64_pem).expect("Should parse base64-encoded PEM");
+        assert!(!key.as_bytes().is_empty());
+
+        // Verify it can sign
+        let encoding_key = jsonwebtoken::EncodingKey::from_rsa_der(key.as_bytes());
+        #[derive(serde::Serialize)]
+        struct TestClaims {
+            sub: String,
+        }
+        let claims = TestClaims {
+            sub: "test".to_string(),
+        };
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
+        let token = jsonwebtoken::encode(&header, &claims, &encoding_key)
+            .expect("Should be able to sign with base64-encoded PEM key");
+        assert!(!token.is_empty());
+    }
+
+    #[test]
+    #[allow(clippy::unreachable)]
+    fn test_rsa_key_rejects_pkcs8_pem() {
+        // Verify that PKCS#8 PEM format is rejected with a helpful error
+        let pkcs8_pem = "-----BEGIN PRIVATE KEY-----\nMIIEvg...\n-----END PRIVATE KEY-----";
+        let result = RsaPrivateKeyDer::from_pem(pkcs8_pem);
+        let Err(e) = result else {
+            unreachable!("Expected PKCS#8 PEM to be rejected");
+        };
+        let err = e.to_string();
+        assert!(
+            err.contains("PKCS#1") && err.contains("RSA PRIVATE KEY"),
+            "Error should mention PKCS#1 format: {err}"
+        );
     }
 
     #[test]

@@ -26,7 +26,7 @@ axum = { workspace = true }
 axum-extra = { version = "=0.12.5", default-features = false, features = ["cookie", "typed-header"] }
 headers = { version = "=0.4.1", default-features = false }
 time = { version = "=0.3.46", default-features = false }
-sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "derive", "macros"] }
+sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "migrate", "derive", "macros", "sqlite", "postgres", "tls-rustls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 ciborium = { workspace = true }
@@ -41,6 +41,7 @@ webauthn-rs = { version = "=0.5.4", default-features = false, features = ["dange
 webauthn-rs-proto = { version = "=0.5.4", default-features = false }
 jsonwebtoken = { version = "=10.3.0", default-features = false, features = ["aws_lc_rs"] }
 jiff = { workspace = true }
+jiff-sqlx = { version = "0.1", default-features = false, features = ["postgres", "sqlite"] }
 base64 = { workspace = true }
 hex = { workspace = true }
 url = { workspace = true }
@@ -55,6 +56,11 @@ askama = { version = "=0.15.4", default-features = false, features = ["derive", 
 tower-http = { version = "=0.6.8", default-features = false, features = ["cors", "fs"] }
 ssh-key = { workspace = true }
 tower = { workspace = true, optional = true }
+sea-query = { version = "=0.32.7", default-features = false, features = ["backend-sqlite", "backend-postgres", "derive"] }
+
+# AWS SDK for DSQL token generation and credential loading
+aws-config = { version = "=1.8.12", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "sso"] }
+aws-sdk-dsql = { version = "=1.49.0", default-features = false, features = ["rt-tokio"] }
 
 [dev-dependencies]
 tower = { workspace = true }

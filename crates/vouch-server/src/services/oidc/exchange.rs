@@ -196,7 +196,7 @@ pub async fn exchange_token(
                     .await
                     .unwrap_or_default();
 
-                if all_policies.iter().any(|p| p.enabled == 1) {
+                if all_policies.iter().any(|p| p.enabled) {
                     // Policies exist but none match - deny
                     return Err(ServiceError::oauth(
                         OAuthErrorCode::AccessDenied,

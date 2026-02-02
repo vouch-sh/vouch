@@ -290,8 +290,7 @@ async fn authenticate_scim(
 
     // Check expiration
     if let Some(expires_at) = &token_record.expires_at
-        && let Ok(exp) = expires_at.parse::<jiff::Timestamp>()
-        && exp < jiff::Timestamp::now()
+        && expires_at.to_jiff() < jiff::Timestamp::now()
     {
         return Err((
             StatusCode::UNAUTHORIZED,
@@ -927,8 +926,8 @@ fn db_user_to_scim(base_url: &str, user: db::ScimUserRecord) -> ScimUser {
         active: user.active,
         meta: Some(ScimMeta {
             resource_type: "User".to_string(),
-            created: user.created_at.clone(),
-            last_modified: Some(user.created_at),
+            created: user.created_at.to_jiff().to_string(),
+            last_modified: Some(user.created_at.to_jiff().to_string()),
             location: format!("{base_url}/scim/v2/Users/{}", user.id),
         }),
     }
@@ -1347,7 +1346,7 @@ pub async fn delete_group(
 
 /// Helper to get group members in SCIM format.
 async fn get_group_members_scim(
-    db: &sqlx::SqlitePool,
+    db: &crate::db::Pool,
     base_url: &str,
     group_id: &str,
 ) -> Vec<ScimGroupMember> {
@@ -1382,8 +1381,8 @@ fn db_group_to_scim(
         },
         meta: Some(ScimMeta {
             resource_type: "Group".to_string(),
-            created: group.created_at.clone(),
-            last_modified: Some(group.updated_at),
+            created: group.created_at.to_jiff().to_string(),
+            last_modified: Some(group.updated_at.to_jiff().to_string()),
             location: format!("{base_url}/scim/v2/Groups/{}", group.id),
         }),
     }

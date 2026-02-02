@@ -421,8 +421,8 @@ pub async fn browser_login_complete(
         verification_result.user_verified
     );
 
-    // Update counter in database
-    let new_counter = i64::from(verification_result.counter);
+    // Update counter in database (WebAuthn counter is u32, stored as i32)
+    let new_counter = verification_result.counter as i32;
     db::update_authenticator_counter(&state.db, &authenticator.id, new_counter)
         .await
         .map_err(|e| {

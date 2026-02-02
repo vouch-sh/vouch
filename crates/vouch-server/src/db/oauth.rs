@@ -1,9 +1,14 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! OAuth Client Application database operations.
 
+use super::Pool;
+use super::schema::{OAuthClientSecrets, OAuthClients, OAuthUsageEvents};
+use super::types::BuildSql;
+use super::types::DbTimestamp;
+use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute};
 use anyhow::Result;
 use jiff::Timestamp;
-use sqlx::SqlitePool;
+use sea_query::{Alias, Asterisk, Expr, Func, Order, Query};
 use uuid::Uuid;
 
 // ============================================================================
@@ -130,10 +135,10 @@ pub struct OAuthClient {
     pub description: Option<String>,
     pub application_type: String,
     pub redirect_uris: String,
-    pub active: i64,
-    pub created_at: String,
-    pub updated_at: String,
-    pub last_used_at: Option<String>,
+    pub active: bool,
+    pub created_at: DbTimestamp,
+    pub updated_at: DbTimestamp,
+    pub last_used_at: Option<DbTimestamp>,
     /// Access scope controlling who can use this application.
     pub access_scope: String,
     /// Organization ID for organization-scoped apps.
@@ -141,12 +146,6 @@ pub struct OAuthClient {
 }
 
 impl OAuthClient {
-    /// Check if this client is active.
-    #[must_use]
-    pub fn is_active(&self) -> bool {
-        self.active != 0
-    }
-
     /// Get the application type as enum.
     #[must_use]
     pub fn client_type(&self) -> Option<OAuthClientType> {
@@ -175,7 +174,7 @@ impl OAuthClient {
 /// Create a new OAuth client application.
 #[allow(clippy::too_many_arguments)]
 pub async fn create_oauth_client(
-    pool: &SqlitePool,
+    pool: &Pool,
     user_id: &str,
     name: &str,
     description: Option<&str>,
@@ -187,22 +186,43 @@ pub async fn create_oauth_client(
     let id = Uuid::now_v7().to_string();
     let client_id = Uuid::now_v7().to_string();
     let redirect_uris_json = serde_json::to_string(redirect_uris)?;
+    let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
-    sqlx::query(
-        "INSERT INTO oauth_clients (id, user_id, client_id, name, description, application_type, redirect_uris, access_scope, org_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(user_id)
-    .bind(&client_id)
-    .bind(name)
-    .bind(description)
-    .bind(application_type.as_str())
-    .bind(&redirect_uris_json)
-    .bind(access_scope.as_str())
-    .bind(org_id)
-    .execute(pool)
-    .await?;
+    let sql = {
+        let query = Query::insert()
+            .into_table(OAuthClients::Table)
+            .columns([
+                OAuthClients::Id,
+                OAuthClients::UserId,
+                OAuthClients::ClientId,
+                OAuthClients::Name,
+                OAuthClients::Description,
+                OAuthClients::ApplicationType,
+                OAuthClients::RedirectUris,
+                OAuthClients::AccessScope,
+                OAuthClients::OrgId,
+                OAuthClients::CreatedAt,
+                OAuthClients::UpdatedAt,
+            ])
+            .values_panic([
+                id.clone().into(),
+                user_id.into(),
+                client_id.clone().into(),
+                name.into(),
+                description.into(),
+                application_type.as_str().into(),
+                redirect_uris_json.into(),
+                access_scope.as_str().into(),
+                org_id.into(),
+                now.as_str().into(),
+                now.as_str().into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     let client = get_oauth_client_by_id(pool, &id)
         .await?
@@ -212,53 +232,108 @@ pub async fn create_oauth_client(
 }
 
 /// Get an OAuth client by internal ID.
-pub async fn get_oauth_client_by_id(pool: &SqlitePool, id: &str) -> Result<Option<OAuthClient>> {
-    let client = sqlx::query_as::<_, OAuthClient>(
-        "SELECT id, user_id, client_id, name, description, application_type, redirect_uris, active, created_at, updated_at, last_used_at, access_scope, org_id
-         FROM oauth_clients WHERE id = ?",
-    )
-    .bind(id)
-    .fetch_optional(pool)
-    .await?;
+pub async fn get_oauth_client_by_id(pool: &Pool, id: &str) -> Result<Option<OAuthClient>> {
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                OAuthClients::Id,
+                OAuthClients::UserId,
+                OAuthClients::ClientId,
+                OAuthClients::Name,
+                OAuthClients::Description,
+                OAuthClients::ApplicationType,
+                OAuthClients::RedirectUris,
+                OAuthClients::Active,
+                OAuthClients::CreatedAt,
+                OAuthClients::UpdatedAt,
+                OAuthClients::LastUsedAt,
+                OAuthClients::AccessScope,
+                OAuthClients::OrgId,
+            ])
+            .from(OAuthClients::Table)
+            .and_where(Expr::col(OAuthClients::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let client = db_fetch_optional!(pool, sqlx::query_as::<_, OAuthClient>(&sql))?;
 
     Ok(client)
 }
 
 /// Get an OAuth client by public client_id.
 pub async fn get_oauth_client_by_client_id(
-    pool: &SqlitePool,
+    pool: &Pool,
     client_id: &str,
 ) -> Result<Option<OAuthClient>> {
-    let client = sqlx::query_as::<_, OAuthClient>(
-        "SELECT id, user_id, client_id, name, description, application_type, redirect_uris, active, created_at, updated_at, last_used_at, access_scope, org_id
-         FROM oauth_clients WHERE client_id = ?",
-    )
-    .bind(client_id)
-    .fetch_optional(pool)
-    .await?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                OAuthClients::Id,
+                OAuthClients::UserId,
+                OAuthClients::ClientId,
+                OAuthClients::Name,
+                OAuthClients::Description,
+                OAuthClients::ApplicationType,
+                OAuthClients::RedirectUris,
+                OAuthClients::Active,
+                OAuthClients::CreatedAt,
+                OAuthClients::UpdatedAt,
+                OAuthClients::LastUsedAt,
+                OAuthClients::AccessScope,
+                OAuthClients::OrgId,
+            ])
+            .from(OAuthClients::Table)
+            .and_where(Expr::col(OAuthClients::ClientId).eq(client_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let client = db_fetch_optional!(pool, sqlx::query_as::<_, OAuthClient>(&sql))?;
 
     Ok(client)
 }
 
 /// Get all OAuth clients for a user.
-pub async fn get_oauth_clients_for_user(
-    pool: &SqlitePool,
-    user_id: &str,
-) -> Result<Vec<OAuthClient>> {
-    let clients = sqlx::query_as::<_, OAuthClient>(
-        "SELECT id, user_id, client_id, name, description, application_type, redirect_uris, active, created_at, updated_at, last_used_at, access_scope, org_id
-         FROM oauth_clients WHERE user_id = ? ORDER BY created_at DESC",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
+pub async fn get_oauth_clients_for_user(pool: &Pool, user_id: &str) -> Result<Vec<OAuthClient>> {
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                OAuthClients::Id,
+                OAuthClients::UserId,
+                OAuthClients::ClientId,
+                OAuthClients::Name,
+                OAuthClients::Description,
+                OAuthClients::ApplicationType,
+                OAuthClients::RedirectUris,
+                OAuthClients::Active,
+                OAuthClients::CreatedAt,
+                OAuthClients::UpdatedAt,
+                OAuthClients::LastUsedAt,
+                OAuthClients::AccessScope,
+                OAuthClients::OrgId,
+            ])
+            .from(OAuthClients::Table)
+            .and_where(Expr::col(OAuthClients::UserId).eq(user_id))
+            .order_by(OAuthClients::CreatedAt, Order::Desc)
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let clients = db_fetch_all!(pool, sqlx::query_as::<_, OAuthClient>(&sql))?;
 
     Ok(clients)
 }
 
 /// Update an OAuth client.
 pub async fn update_oauth_client(
-    pool: &SqlitePool,
+    pool: &Pool,
     id: &str,
     name: &str,
     description: Option<&str>,
@@ -267,74 +342,138 @@ pub async fn update_oauth_client(
     org_id: Option<&str>,
 ) -> Result<()> {
     let redirect_uris_json = serde_json::to_string(redirect_uris)?;
+    let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
-    if let Some(scope) = access_scope {
-        sqlx::query(
-            "UPDATE oauth_clients SET name = ?, description = ?, redirect_uris = ?, access_scope = ?, org_id = ?, updated_at = datetime('now')
-             WHERE id = ?",
-        )
-        .bind(name)
-        .bind(description)
-        .bind(&redirect_uris_json)
-        .bind(scope.as_str())
-        .bind(org_id)
-        .bind(id)
-        .execute(pool)
-        .await?;
-    } else {
-        sqlx::query(
-            "UPDATE oauth_clients SET name = ?, description = ?, redirect_uris = ?, updated_at = datetime('now')
-             WHERE id = ?",
-        )
-        .bind(name)
-        .bind(description)
-        .bind(&redirect_uris_json)
-        .bind(id)
-        .execute(pool)
-        .await?;
-    }
+    let sql = {
+        let mut query = Query::update()
+            .table(OAuthClients::Table)
+            .value(OAuthClients::Name, name)
+            .value(OAuthClients::Description, description)
+            .value(OAuthClients::RedirectUris, redirect_uris_json.as_str())
+            .value(OAuthClients::UpdatedAt, now.as_str())
+            .to_owned();
+
+        if let Some(scope) = access_scope {
+            query = query
+                .value(OAuthClients::AccessScope, scope.as_str())
+                .value(OAuthClients::OrgId, org_id)
+                .to_owned();
+        }
+
+        query = query
+            .and_where(Expr::col(OAuthClients::Id).eq(id))
+            .to_owned();
+
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
 
 /// Deactivate an OAuth client (soft delete).
 #[allow(dead_code)]
-pub async fn deactivate_oauth_client(pool: &SqlitePool, id: &str) -> Result<()> {
-    sqlx::query("UPDATE oauth_clients SET active = 0, updated_at = datetime('now') WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
+pub async fn deactivate_oauth_client(pool: &Pool, id: &str) -> Result<()> {
+    let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
+
+    let sql = {
+        let query = Query::update()
+            .table(OAuthClients::Table)
+            .value(OAuthClients::Active, false)
+            .value(OAuthClients::UpdatedAt, now.as_str())
+            .and_where(Expr::col(OAuthClients::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
 
 /// Reactivate an OAuth client.
 #[allow(dead_code)]
-pub async fn reactivate_oauth_client(pool: &SqlitePool, id: &str) -> Result<()> {
-    sqlx::query("UPDATE oauth_clients SET active = 1, updated_at = datetime('now') WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
+pub async fn reactivate_oauth_client(pool: &Pool, id: &str) -> Result<()> {
+    let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
+
+    let sql = {
+        let query = Query::update()
+            .table(OAuthClients::Table)
+            .value(OAuthClients::Active, true)
+            .value(OAuthClients::UpdatedAt, now.as_str())
+            .and_where(Expr::col(OAuthClients::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
 
 /// Delete an OAuth client permanently.
-pub async fn delete_oauth_client(pool: &SqlitePool, id: &str) -> Result<u64> {
-    let result = sqlx::query("DELETE FROM oauth_clients WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
+///
+/// Performs application-level cascade deletes for DSQL compatibility:
+/// 1. Delete usage events
+/// 2. Delete secrets
+/// 3. Delete the client
+pub async fn delete_oauth_client(pool: &Pool, id: &str) -> Result<u64> {
+    let mut tx = pool.begin().await?;
+    let db_type = tx.db_type();
 
+    // 1. Delete usage events
+    let sql1 = {
+        let query = Query::delete()
+            .from_table(OAuthUsageEvents::Table)
+            .and_where(Expr::col(OAuthUsageEvents::OAuthClientId).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql1))?;
+
+    // 2. Delete secrets
+    let sql2 = {
+        let query = Query::delete()
+            .from_table(OAuthClientSecrets::Table)
+            .and_where(Expr::col(OAuthClientSecrets::OAuthClientId).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql2))?;
+
+    // 3. Delete the client
+    let sql3 = {
+        let query = Query::delete()
+            .from_table(OAuthClients::Table)
+            .and_where(Expr::col(OAuthClients::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    let result = tx_execute!(tx, sqlx::query(&sql3))?;
+
+    tx.commit().await?;
     Ok(result.rows_affected())
 }
 
 /// Update last used timestamp for an OAuth client.
-pub async fn update_oauth_client_last_used(pool: &SqlitePool, id: &str) -> Result<()> {
-    sqlx::query("UPDATE oauth_clients SET last_used_at = datetime('now') WHERE id = ?")
-        .bind(id)
-        .execute(pool)
-        .await?;
+pub async fn update_oauth_client_last_used(pool: &Pool, id: &str) -> Result<()> {
+    let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
+
+    let sql = {
+        let query = Query::update()
+            .table(OAuthClients::Table)
+            .value(OAuthClients::LastUsedAt, now.as_str())
+            .and_where(Expr::col(OAuthClients::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
@@ -351,20 +490,20 @@ pub struct OAuthClientSecret {
     pub oauth_client_id: String,
     pub secret_hash: String,
     pub description: Option<String>,
-    pub created_at: String,
-    pub expires_at: Option<String>,
-    pub revoked_at: Option<String>,
+    pub created_at: DbTimestamp,
+    pub expires_at: Option<DbTimestamp>,
+    pub revoked_at: Option<DbTimestamp>,
 }
 
 impl OAuthClientSecret {
     /// Check if this secret is valid (not revoked and not expired).
     #[must_use]
-    pub fn is_valid(&self, now: &str) -> bool {
+    pub fn is_valid(&self, now: &Timestamp) -> bool {
         if self.revoked_at.is_some() {
             return false;
         }
         if let Some(expires) = &self.expires_at
-            && expires.as_str() < now
+            && expires.to_jiff() < *now
         {
             return false;
         }
@@ -375,91 +514,158 @@ impl OAuthClientSecret {
 /// Create a new client secret.
 /// Returns the secret record and the plaintext secret (only shown once).
 pub async fn create_oauth_client_secret(
-    pool: &SqlitePool,
+    pool: &Pool,
     oauth_client_id: &str,
     secret_hash: &str,
     description: Option<&str>,
     expires_at: Option<&str>,
 ) -> Result<OAuthClientSecret> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
-    sqlx::query(
-        "INSERT INTO oauth_client_secrets (id, oauth_client_id, secret_hash, description, expires_at)
-         VALUES (?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(oauth_client_id)
-    .bind(secret_hash)
-    .bind(description)
-    .bind(expires_at)
-    .execute(pool)
-    .await?;
+    let insert_sql = {
+        let query = Query::insert()
+            .into_table(OAuthClientSecrets::Table)
+            .columns([
+                OAuthClientSecrets::Id,
+                OAuthClientSecrets::OAuthClientId,
+                OAuthClientSecrets::SecretHash,
+                OAuthClientSecrets::Description,
+                OAuthClientSecrets::ExpiresAt,
+                OAuthClientSecrets::CreatedAt,
+            ])
+            .values_panic([
+                id.clone().into(),
+                oauth_client_id.into(),
+                secret_hash.into(),
+                description.into(),
+                expires_at.into(),
+                now.as_str().into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
 
-    let secret = sqlx::query_as::<_, OAuthClientSecret>(
-        "SELECT id, oauth_client_id, secret_hash, description, created_at, expires_at, revoked_at
-         FROM oauth_client_secrets WHERE id = ?",
-    )
-    .bind(&id)
-    .fetch_one(pool)
-    .await?;
+    db_execute!(pool, sqlx::query(&insert_sql))?;
+
+    let select_sql = {
+        let query = Query::select()
+            .columns([
+                OAuthClientSecrets::Id,
+                OAuthClientSecrets::OAuthClientId,
+                OAuthClientSecrets::SecretHash,
+                OAuthClientSecrets::Description,
+                OAuthClientSecrets::CreatedAt,
+                OAuthClientSecrets::ExpiresAt,
+                OAuthClientSecrets::RevokedAt,
+            ])
+            .from(OAuthClientSecrets::Table)
+            .and_where(Expr::col(OAuthClientSecrets::Id).eq(&id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let secret = db_fetch_one!(pool, sqlx::query_as::<_, OAuthClientSecret>(&select_sql))?;
 
     Ok(secret)
 }
 
 /// Get all secrets for an OAuth client.
 pub async fn get_oauth_client_secrets(
-    pool: &SqlitePool,
+    pool: &Pool,
     oauth_client_id: &str,
 ) -> Result<Vec<OAuthClientSecret>> {
-    let secrets = sqlx::query_as::<_, OAuthClientSecret>(
-        "SELECT id, oauth_client_id, secret_hash, description, created_at, expires_at, revoked_at
-         FROM oauth_client_secrets WHERE oauth_client_id = ? ORDER BY created_at DESC",
-    )
-    .bind(oauth_client_id)
-    .fetch_all(pool)
-    .await?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                OAuthClientSecrets::Id,
+                OAuthClientSecrets::OAuthClientId,
+                OAuthClientSecrets::SecretHash,
+                OAuthClientSecrets::Description,
+                OAuthClientSecrets::CreatedAt,
+                OAuthClientSecrets::ExpiresAt,
+                OAuthClientSecrets::RevokedAt,
+            ])
+            .from(OAuthClientSecrets::Table)
+            .and_where(Expr::col(OAuthClientSecrets::OAuthClientId).eq(oauth_client_id))
+            .order_by(OAuthClientSecrets::CreatedAt, Order::Desc)
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let secrets = db_fetch_all!(pool, sqlx::query_as::<_, OAuthClientSecret>(&sql))?;
 
     Ok(secrets)
 }
 
 /// Get a secret by its hash.
 pub async fn get_oauth_secret_by_hash(
-    pool: &SqlitePool,
+    pool: &Pool,
     secret_hash: &str,
 ) -> Result<Option<OAuthClientSecret>> {
-    let secret = sqlx::query_as::<_, OAuthClientSecret>(
-        "SELECT id, oauth_client_id, secret_hash, description, created_at, expires_at, revoked_at
-         FROM oauth_client_secrets WHERE secret_hash = ?",
-    )
-    .bind(secret_hash)
-    .fetch_optional(pool)
-    .await?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                OAuthClientSecrets::Id,
+                OAuthClientSecrets::OAuthClientId,
+                OAuthClientSecrets::SecretHash,
+                OAuthClientSecrets::Description,
+                OAuthClientSecrets::CreatedAt,
+                OAuthClientSecrets::ExpiresAt,
+                OAuthClientSecrets::RevokedAt,
+            ])
+            .from(OAuthClientSecrets::Table)
+            .and_where(Expr::col(OAuthClientSecrets::SecretHash).eq(secret_hash))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let secret = db_fetch_optional!(pool, sqlx::query_as::<_, OAuthClientSecret>(&sql))?;
 
     Ok(secret)
 }
 
 /// Revoke a client secret.
 #[allow(dead_code)]
-pub async fn revoke_oauth_client_secret(pool: &SqlitePool, secret_id: &str) -> Result<()> {
-    sqlx::query("UPDATE oauth_client_secrets SET revoked_at = datetime('now') WHERE id = ?")
-        .bind(secret_id)
-        .execute(pool)
-        .await?;
+pub async fn revoke_oauth_client_secret(pool: &Pool, secret_id: &str) -> Result<()> {
+    let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
+
+    let sql = {
+        let query = Query::update()
+            .table(OAuthClientSecrets::Table)
+            .value(OAuthClientSecrets::RevokedAt, now.as_str())
+            .and_where(Expr::col(OAuthClientSecrets::Id).eq(secret_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
 }
 
 /// Revoke all secrets for an OAuth client.
-pub async fn revoke_all_oauth_client_secrets(
-    pool: &SqlitePool,
-    oauth_client_id: &str,
-) -> Result<u64> {
-    let result = sqlx::query(
-        "UPDATE oauth_client_secrets SET revoked_at = datetime('now') WHERE oauth_client_id = ? AND revoked_at IS NULL",
-    )
-    .bind(oauth_client_id)
-    .execute(pool)
-    .await?;
+pub async fn revoke_all_oauth_client_secrets(pool: &Pool, oauth_client_id: &str) -> Result<u64> {
+    let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
+
+    let sql = {
+        let query = Query::update()
+            .table(OAuthClientSecrets::Table)
+            .value(OAuthClientSecrets::RevokedAt, now.as_str())
+            .and_where(Expr::col(OAuthClientSecrets::OAuthClientId).eq(oauth_client_id))
+            .and_where(Expr::col(OAuthClientSecrets::RevokedAt).is_null())
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected())
 }
@@ -479,7 +685,7 @@ pub struct OAuthUsageEvent {
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
     pub details: Option<String>,
-    pub created_at: String,
+    pub created_at: DbTimestamp,
 }
 
 /// OAuth usage event types.
@@ -509,7 +715,7 @@ impl OAuthEventType {
 
 /// Record an OAuth usage event.
 pub async fn record_oauth_event(
-    pool: &SqlitePool,
+    pool: &Pool,
     oauth_client_id: &str,
     event_type: OAuthEventType,
     user_id: Option<&str>,
@@ -518,20 +724,37 @@ pub async fn record_oauth_event(
     details: Option<&str>,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
-    sqlx::query(
-        "INSERT INTO oauth_usage_events (id, oauth_client_id, event_type, user_id, ip_address, user_agent, details)
-         VALUES (?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(oauth_client_id)
-    .bind(event_type.as_str())
-    .bind(user_id)
-    .bind(ip_address)
-    .bind(user_agent)
-    .bind(details)
-    .execute(pool)
-    .await?;
+    let sql = {
+        let query = Query::insert()
+            .into_table(OAuthUsageEvents::Table)
+            .columns([
+                OAuthUsageEvents::Id,
+                OAuthUsageEvents::OAuthClientId,
+                OAuthUsageEvents::EventType,
+                OAuthUsageEvents::UserId,
+                OAuthUsageEvents::IpAddress,
+                OAuthUsageEvents::UserAgent,
+                OAuthUsageEvents::Details,
+                OAuthUsageEvents::CreatedAt,
+            ])
+            .values_panic([
+                id.clone().into(),
+                oauth_client_id.into(),
+                event_type.as_str().into(),
+                user_id.into(),
+                ip_address.into(),
+                user_agent.into(),
+                details.into(),
+                now.as_str().into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(id)
 }
@@ -539,18 +762,33 @@ pub async fn record_oauth_event(
 /// Get usage events for an OAuth client.
 #[allow(dead_code)]
 pub async fn get_oauth_usage_events(
-    pool: &SqlitePool,
+    pool: &Pool,
     oauth_client_id: &str,
     limit: i64,
 ) -> Result<Vec<OAuthUsageEvent>> {
-    let events = sqlx::query_as::<_, OAuthUsageEvent>(
-        "SELECT id, oauth_client_id, event_type, user_id, ip_address, user_agent, details, created_at
-         FROM oauth_usage_events WHERE oauth_client_id = ? ORDER BY created_at DESC LIMIT ?",
-    )
-    .bind(oauth_client_id)
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([
+                OAuthUsageEvents::Id,
+                OAuthUsageEvents::OAuthClientId,
+                OAuthUsageEvents::EventType,
+                OAuthUsageEvents::UserId,
+                OAuthUsageEvents::IpAddress,
+                OAuthUsageEvents::UserAgent,
+                OAuthUsageEvents::Details,
+                OAuthUsageEvents::CreatedAt,
+            ])
+            .from(OAuthUsageEvents::Table)
+            .and_where(Expr::col(OAuthUsageEvents::OAuthClientId).eq(oauth_client_id))
+            .order_by(OAuthUsageEvents::CreatedAt, Order::Desc)
+            .limit(limit as u64)
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let events = db_fetch_all!(pool, sqlx::query_as::<_, OAuthUsageEvent>(&sql))?;
 
     Ok(events)
 }
@@ -563,40 +801,49 @@ pub struct OAuthUsageStats {
 }
 
 pub async fn get_oauth_usage_stats(
-    pool: &SqlitePool,
+    pool: &Pool,
     oauth_client_id: &str,
     since: Option<&str>,
 ) -> Result<Vec<OAuthUsageStats>> {
-    let stats = if let Some(since) = since {
-        sqlx::query_as::<_, OAuthUsageStats>(
-            "SELECT event_type, COUNT(*) as count FROM oauth_usage_events
-             WHERE oauth_client_id = ? AND created_at >= ?
-             GROUP BY event_type",
-        )
-        .bind(oauth_client_id)
-        .bind(since)
-        .fetch_all(pool)
-        .await?
-    } else {
-        sqlx::query_as::<_, OAuthUsageStats>(
-            "SELECT event_type, COUNT(*) as count FROM oauth_usage_events
-             WHERE oauth_client_id = ?
-             GROUP BY event_type",
-        )
-        .bind(oauth_client_id)
-        .fetch_all(pool)
-        .await?
+    let db_type = pool.db_type();
+
+    let sql = {
+        let mut query = Query::select()
+            .column(OAuthUsageEvents::EventType)
+            .expr_as(Func::count(Expr::col(Asterisk)), Alias::new("count"))
+            .from(OAuthUsageEvents::Table)
+            .and_where(Expr::col(OAuthUsageEvents::OAuthClientId).eq(oauth_client_id))
+            .to_owned();
+
+        if let Some(since) = since {
+            query = query
+                .and_where(Expr::col(OAuthUsageEvents::CreatedAt).gte(since))
+                .to_owned();
+        }
+
+        query = query.group_by_col(OAuthUsageEvents::EventType).to_owned();
+
+        query.build_sql(db_type)
     };
+
+    let stats = db_fetch_all!(pool, sqlx::query_as::<_, OAuthUsageStats>(&sql))?;
 
     Ok(stats)
 }
 
 /// Delete old usage events (for retention policy).
-pub async fn delete_old_oauth_usage_events(pool: &SqlitePool, before: &str) -> Result<u64> {
-    let result = sqlx::query("DELETE FROM oauth_usage_events WHERE created_at < ?")
-        .bind(before)
-        .execute(pool)
-        .await?;
+pub async fn delete_old_oauth_usage_events(pool: &Pool, before: &str) -> Result<u64> {
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(OAuthUsageEvents::Table)
+            .and_where(Expr::col(OAuthUsageEvents::CreatedAt).lt(before))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(result.rows_affected())
 }
@@ -604,7 +851,7 @@ pub async fn delete_old_oauth_usage_events(pool: &SqlitePool, before: &str) -> R
 /// Validate client credentials (client_id + client_secret).
 /// Returns the OAuth client if valid, None otherwise.
 pub async fn validate_oauth_client_credentials(
-    pool: &SqlitePool,
+    pool: &Pool,
     client_id: &str,
     secret_hash: &str,
 ) -> Result<Option<OAuthClient>> {
@@ -613,7 +860,7 @@ pub async fn validate_oauth_client_credentials(
         return Ok(None);
     };
 
-    if !client.is_active() {
+    if !client.active {
         return Ok(None);
     }
 
@@ -628,7 +875,7 @@ pub async fn validate_oauth_client_credentials(
     }
 
     // Check if secret is valid
-    let now = Timestamp::now().to_string();
+    let now = Timestamp::now();
     if !secret.is_valid(&now) {
         return Ok(None);
     }

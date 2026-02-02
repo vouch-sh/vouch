@@ -18,9 +18,10 @@ use axum::{
     routing::{delete, get, post},
 };
 use secrecy::SecretString;
-use sqlx::SqlitePool;
 use std::sync::Arc;
 use tower::ServiceExt;
+
+use crate::db::Pool;
 
 use crate::AppState;
 use crate::config::ServerConfig;
@@ -29,15 +30,22 @@ use crate::handlers;
 use crate::oidc_key::OidcSigningKey;
 
 /// Create an in-memory SQLite database with migrations for testing.
-pub async fn test_db() -> SqlitePool {
-    let pool = SqlitePool::connect("sqlite::memory:")
+pub async fn test_db() -> Pool {
+    let pool = Pool::connect("sqlite::memory:")
         .await
         .expect("Failed to create test database");
 
-    sqlx::migrate!("./migrations")
-        .run(&pool)
-        .await
-        .expect("Failed to run migrations");
+    // Run migrations based on database type
+    match &pool {
+        Pool::Sqlite(p) => sqlx::migrate!("./migrations/sqlite")
+            .run(p)
+            .await
+            .expect("Failed to run migrations"),
+        Pool::Postgres(p) => sqlx::migrate!("./migrations/postgres")
+            .run(p)
+            .await
+            .expect("Failed to run migrations"),
+    }
 
     pool
 }
@@ -76,6 +84,8 @@ pub fn test_config() -> ServerConfig {
         github_app_name: None,
         github_app_key: None,
         github_webhook_secret: None,
+        github_app_client_id: None,
+        github_app_client_secret: None,
     }
 }
 
@@ -414,14 +424,14 @@ pub fn create_expired_token(state: &AppState, user_id: &str, email: &str, auth_i
 }
 
 /// Create a test user in the database.
-pub async fn create_test_user(pool: &SqlitePool, email: &str) -> crate::db::User {
+pub async fn create_test_user(pool: &Pool, email: &str) -> crate::db::User {
     crate::db::upsert_user(pool, email, Some("Test User"))
         .await
         .expect("Failed to create test user")
 }
 
 /// Create a test organization in the database.
-pub async fn create_test_org(pool: &SqlitePool, domain: &str) -> crate::db::Organization {
+pub async fn create_test_org(pool: &Pool, domain: &str) -> crate::db::Organization {
     crate::db::create_organization(pool, domain, Some("Test Org"), None)
         .await
         .expect("Failed to create test org")
@@ -429,7 +439,7 @@ pub async fn create_test_org(pool: &SqlitePool, domain: &str) -> crate::db::Orga
 
 /// Create a test user with organization membership.
 pub async fn create_test_user_in_org(
-    pool: &SqlitePool,
+    pool: &Pool,
     email: &str,
     org_id: &str,
     is_admin: bool,
@@ -440,22 +450,18 @@ pub async fn create_test_user_in_org(
 }
 
 /// Create a test authenticator for a user.
-pub async fn create_test_authenticator(pool: &SqlitePool, user_id: &str) -> String {
-    let auth_id = uuid::Uuid::now_v7().to_string();
-    sqlx::query(
-        "INSERT INTO authenticators (id, user_id, name, credential_id, public_key, counter, created_at, user_handle) VALUES (?, ?, ?, ?, ?, 0, datetime('now'), ?)"
+pub async fn create_test_authenticator(pool: &Pool, user_id: &str) -> String {
+    crate::db::create_authenticator(
+        pool,
+        user_id,
+        "Test Key",
+        format!("test-cred-{}", uuid::Uuid::now_v7()).as_bytes(),
+        &[0u8; 32],
+        None,
+        Some(user_id.as_bytes()),
     )
-    .bind(&auth_id)
-    .bind(user_id)
-    .bind("Test Key")
-    .bind(format!("test-cred-{}", auth_id))
-    .bind(vec![0u8; 32])
-    .bind(user_id)
-    .execute(pool)
     .await
-    .expect("Failed to create authenticator");
-
-    auth_id
+    .expect("Failed to create authenticator")
 }
 
 /// Create a test session with token stored in the database.
@@ -495,7 +501,7 @@ pub async fn create_test_session(
 }
 
 /// Create a SCIM bearer token for testing.
-pub async fn create_test_scim_token(pool: &SqlitePool, description: &str) -> String {
+pub async fn create_test_scim_token(pool: &Pool, description: &str) -> String {
     use aws_lc_rs::digest::{self, SHA256};
     use aws_lc_rs::rand as aws_rand;
     use base64::Engine;

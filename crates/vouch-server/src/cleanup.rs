@@ -9,10 +9,9 @@
 //! - Old OAuth usage events
 //! - DPoP nonces and JTI cache
 
-use crate::db;
+use crate::db::{self, Pool};
 use crate::dpop::DpopState;
 use jiff::{Timestamp, ToSpan};
-use sqlx::SqlitePool;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
@@ -20,7 +19,7 @@ use tokio::task::JoinHandle;
 ///
 /// Returns a handle to the spawned task for graceful shutdown.
 pub fn start_cleanup_task(
-    db: SqlitePool,
+    db: Pool,
     dpop_state: Arc<DpopState>,
     interval_minutes: u64,
     auth_events_retention_days: i64,
@@ -52,7 +51,7 @@ pub fn start_cleanup_task(
 
 /// Run all cleanup tasks once.
 pub async fn run_cleanup(
-    db: &SqlitePool,
+    db: &Pool,
     dpop_state: &DpopState,
     auth_events_retention_days: i64,
     oauth_events_retention_days: i64,
