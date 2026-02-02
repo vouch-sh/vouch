@@ -58,32 +58,9 @@ impl OAuthGrantType {
             _ => None,
         }
     }
-
-    /// Get the string representation of this grant type.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::AuthorizationCode => "authorization_code",
-            Self::DeviceCode => "urn:ietf:params:oauth:grant-type:device_code",
-            Self::TokenExchange => "urn:ietf:params:oauth:grant-type:token-exchange",
-        }
-    }
-}
-
-/// Token request parameters.
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-pub struct TokenRequest {
-    pub grant_type: String,
-    pub code: Option<String>,
-    pub redirect_uri: Option<String>,
-    pub client_id: Option<String>,
-    pub client_secret: Option<String>,
-    pub code_verifier: Option<String>,
-    pub device_code: Option<String>,
 }
 
 /// Token response.
-#[allow(dead_code)]
 #[derive(Debug, Serialize)]
 pub struct TokenResponse {
     pub access_token: String,
@@ -93,9 +70,9 @@ pub struct TokenResponse {
     pub scope: Option<String>,
 }
 
-/// Unified token request that includes both authorization_code and device_code parameters.
+/// Token request for all grant types (authorization_code, device_code, token_exchange).
 #[derive(Debug, Deserialize)]
-pub struct UnifiedTokenRequest {
+pub struct TokenRequest {
     pub grant_type: String,
     #[serde(default)]
     pub code: Option<String>,
@@ -124,22 +101,6 @@ pub struct UnifiedTokenRequest {
     pub scope: Option<String>,
 }
 
-/// Token exchange request (RFC 8693).
-#[derive(Debug, Deserialize)]
-pub struct TokenExchangeRequest {
-    pub grant_type: String,
-    pub subject_token: String,
-    pub subject_token_type: String,
-    #[serde(default)]
-    pub actor_token: Option<String>,
-    #[serde(default)]
-    pub actor_token_type: Option<String>,
-    #[serde(default)]
-    pub audience: Option<String>,
-    #[serde(default)]
-    pub scope: Option<String>,
-}
-
 /// Token exchange response (RFC 8693).
 #[derive(Debug, Serialize)]
 pub struct TokenExchangeResponse {
@@ -157,7 +118,7 @@ pub struct TokenExchangeResponse {
 pub async fn token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    axum::Form(params): axum::Form<UnifiedTokenRequest>,
+    axum::Form(params): axum::Form<TokenRequest>,
 ) -> Response {
     let Some(grant_type) = OAuthGrantType::from_str(&params.grant_type) else {
         return (
@@ -182,7 +143,7 @@ pub async fn token(
 async fn handle_authorization_code_grant(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    params: UnifiedTokenRequest,
+    params: TokenRequest,
 ) -> Response {
     let code = match &params.code {
         Some(c) => c,
@@ -235,7 +196,7 @@ async fn handle_authorization_code_grant(
 /// Handle device code grant.
 async fn handle_device_code_grant(
     State(state): State<Arc<AppState>>,
-    params: UnifiedTokenRequest,
+    params: TokenRequest,
 ) -> Response {
     let device_req = vouch_common::DeviceTokenRequest {
         grant_type: params.grant_type,
@@ -250,7 +211,7 @@ async fn handle_device_code_grant(
 /// Handle token exchange grant (RFC 8693).
 async fn handle_token_exchange_grant(
     State(state): State<Arc<AppState>>,
-    params: UnifiedTokenRequest,
+    params: TokenRequest,
 ) -> Response {
     let exchange_params = TokenExchangeParams {
         subject_token: params.subject_token.as_deref().unwrap_or_default(),
