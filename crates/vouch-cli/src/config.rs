@@ -2,21 +2,24 @@
 //! Configuration and token storage for vouch CLI.
 
 use anyhow::{Context, Result};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
 /// CLI configuration stored in ~/.vouch/config.json
 ///
-/// Note: The token is stored as a plain string for serialization purposes.
 /// The config file is protected with 0600 permissions on Unix systems.
-/// In memory, the token is only exposed when needed for API calls.
+/// The token is wrapped in SecretString for:
+/// - Automatic zeroization when dropped
+/// - Protection against accidental logging/debug output
+/// - Explicit exposure required via `.expose_secret()`
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     /// Vouch server URL.
     server_url: Option<String>,
-    /// Current session token (JWT).
-    token: Option<String>,
+    /// Current session token (JWT), protected by SecretString.
+    token: Option<SecretString>,
 }
 
 impl Config {
@@ -77,9 +80,12 @@ impl Config {
     }
 
     /// Get the current session token.
+    ///
+    /// Returns the token wrapped in SecretString. Callers must explicitly
+    /// call `.expose_secret()` to access the underlying value.
     #[must_use]
-    pub fn token(&self) -> Option<&str> {
-        self.token.as_deref()
+    pub fn token(&self) -> Option<&SecretString> {
+        self.token.as_ref()
     }
 
     /// Save the server URL.
@@ -89,8 +95,10 @@ impl Config {
     }
 
     /// Save a new session token.
+    ///
+    /// The token is stored as a SecretString for secure handling.
     pub fn save_token(&mut self, token: &str) -> Result<()> {
-        self.token = Some(token.to_string());
+        self.token = Some(SecretString::from(token.to_string()));
         self.save()
     }
 

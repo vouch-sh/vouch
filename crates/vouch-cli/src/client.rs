@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
+use secrecy::ExposeSecret;
 use serde::{Serialize, de::DeserializeOwned};
 use vouch_common::ApiError;
 
@@ -96,7 +97,7 @@ impl VouchClient {
         let response = self
             .client
             .get(&url)
-            .header("Authorization", format!("Bearer {token}"))
+            .header("Authorization", format!("Bearer {}", token.expose_secret()))
             .send()
             .await
             .with_context(|| format!("failed to connect to {url}"))?;
@@ -120,7 +121,7 @@ impl VouchClient {
         let response = self
             .client
             .delete(&url)
-            .header("Authorization", format!("Bearer {token}"))
+            .header("Authorization", format!("Bearer {}", token.expose_secret()))
             .send()
             .await
             .with_context(|| format!("failed to connect to {url}"))?;
@@ -145,7 +146,7 @@ impl VouchClient {
         let response = self
             .client
             .post(&url)
-            .header("Authorization", format!("Bearer {token}"))
+            .header("Authorization", format!("Bearer {}", token.expose_secret()))
             .json(body)
             .send()
             .await
@@ -171,7 +172,7 @@ impl VouchClient {
         let response = self
             .client
             .patch(&url)
-            .header("Authorization", format!("Bearer {token}"))
+            .header("Authorization", format!("Bearer {}", token.expose_secret()))
             .json(body)
             .send()
             .await

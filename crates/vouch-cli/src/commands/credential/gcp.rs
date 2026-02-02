@@ -6,12 +6,16 @@
 
 use anyhow::{Context, Result};
 use jiff::Timestamp;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 use crate::client::VouchClient;
 
 /// GCP executable-sourced credential output format (success).
 /// See: https://google.aip.dev/auth/4117
+///
+/// The `id_token` is wrapped in SecretString for secure memory handling.
+/// It is automatically serialized to plain JSON for GCP tools.
 #[derive(Debug, Serialize)]
 struct ExecutableSuccessResponse {
     /// Schema version (always 1).
@@ -21,7 +25,7 @@ struct ExecutableSuccessResponse {
     /// Token type identifier.
     token_type: String,
     /// The OIDC ID token.
-    id_token: String,
+    id_token: SecretString,
     /// Expiration time as Unix timestamp.
     expiration_time: i64,
 }
@@ -41,9 +45,11 @@ struct ExecutableErrorResponse {
 }
 
 /// Response from Vouch GCP token endpoint.
+///
+/// The `id_token` is wrapped in SecretString for secure memory handling.
 #[derive(Debug, Deserialize)]
 struct GcpTokenResponse {
-    id_token: String,
+    id_token: SecretString,
     expires_in: u64,
 }
 

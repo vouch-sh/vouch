@@ -20,7 +20,7 @@
 //! Or use `vouch setup docker --configure` to set this up automatically.
 
 use anyhow::{Context, Result};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
@@ -31,11 +31,14 @@ use crate::config::Config;
 
 /// Docker credential helper output format.
 /// See: https://docs.docker.com/engine/reference/commandline/login/#credential-helper-protocol
+///
+/// The `secret` field is wrapped in SecretString for secure memory handling.
+/// It is automatically serialized to plain JSON when sent to Docker.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct DockerCredential {
     username: String,
-    secret: String,
+    secret: SecretString,
 }
 
 /// Registry type detected from the server URL.
@@ -62,17 +65,21 @@ pub enum RegistryType {
 }
 
 /// Response from Vouch GCP token endpoint.
+///
+/// The `id_token` is wrapped in SecretString for secure memory handling.
 #[derive(Debug, Deserialize)]
 struct GcpTokenResponse {
-    id_token: String,
+    id_token: SecretString,
     #[allow(dead_code)]
     expires_in: u64,
 }
 
 /// Response from Vouch GitHub token endpoint.
+///
+/// The `token` is wrapped in SecretString for secure memory handling.
 #[derive(Debug, Deserialize)]
 struct GitHubTokenResponse {
-    token: String,
+    token: SecretString,
 }
 
 /// GitHub token request.
@@ -83,9 +90,11 @@ struct GitHubTokenRequest {
 }
 
 /// Response from Vouch AWS token endpoint.
+///
+/// The `id_token` is wrapped in SecretString for secure memory handling.
 #[derive(Debug, Deserialize)]
 struct AwsOidcTokenResponse {
-    id_token: String,
+    id_token: SecretString,
 }
 
 /// Run the Docker credential helper.
@@ -267,7 +276,7 @@ async fn get_ecr_credential(
     let sts_response = assume_role_with_web_identity(
         &role_arn,
         "vouch-docker",
-        &token_response.id_token,
+        token_response.id_token.expose_secret(),
         region,
         domain_suffix,
     )
@@ -293,12 +302,14 @@ async fn get_ecr_credential(
 }
 
 /// Get ECR authorization token using AWS credentials.
+///
+/// Returns the password wrapped in SecretString for secure memory handling.
 async fn get_ecr_authorization_token(
     region: &str,
     domain_suffix: &str,
     registry_url: &str,
     creds: &StsCredentials,
-) -> Result<String> {
+) -> Result<SecretString> {
     // Extract account ID from registry URL
     let account_id = registry_url
         .split('.')
@@ -395,7 +406,7 @@ async fn get_ecr_authorization_token(
         .context("no authorization data in ECR response")?;
 
     // Decode base64 to get "AWS:password"
-    let decoded = base64_decode(&auth_data.authorization_token)
+    let decoded = base64_decode(auth_data.authorization_token.expose_secret())
         .context("failed to decode ECR authorization token")?;
     let decoded_str =
         String::from_utf8(decoded).context("ECR authorization token is not valid UTF-8")?;
@@ -406,7 +417,7 @@ async fn get_ecr_authorization_token(
         .map(|(_, p)| p.to_string())
         .unwrap_or(decoded_str);
 
-    Ok(password)
+    Ok(SecretString::from(password))
 }
 
 /// ECR GetAuthorizationToken response.
@@ -416,10 +427,13 @@ struct EcrAuthorizationResponse {
     authorization_data: Vec<EcrAuthorizationData>,
 }
 
+/// ECR authorization data containing the base64-encoded credentials.
+///
+/// The `authorization_token` is wrapped in SecretString for secure memory handling.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EcrAuthorizationData {
-    authorization_token: String,
+    authorization_token: SecretString,
 }
 
 /// Format timestamp for AWS X-Amz-Date header.

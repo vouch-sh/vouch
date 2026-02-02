@@ -5,6 +5,7 @@
 //! For first-time enrollment, use `vouch enroll` instead.
 
 use anyhow::{Context, Result};
+use secrecy::ExposeSecret;
 use vouch_common::{
     RegisterCompleteRequest, RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
 };
@@ -35,7 +36,7 @@ pub async fn run(server: &str, name: Option<&str>) -> Result<()> {
     let start_resp: RegisterStartResponse = client
         .raw_client()
         .post(format!("{}/v1/auth/register/start", client.base_url()))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {}", token.expose_secret()))
         .json(&RegisterStartRequest {
             name: name.to_string(),
         })
@@ -79,7 +80,7 @@ pub async fn run(server: &str, name: Option<&str>) -> Result<()> {
         &start_resp.challenge,
         start_resp.user_id.as_bytes(),
         &start_resp.user_name,
-        &pin,
+        pin.expose_secret(),
     )?;
 
     // Step 5: Complete registration with server (authenticated)
@@ -87,7 +88,7 @@ pub async fn run(server: &str, name: Option<&str>) -> Result<()> {
     let complete_resp: RegisterCompleteResponse = client
         .raw_client()
         .post(format!("{}/v1/auth/register/complete", client.base_url()))
-        .header("Authorization", format!("Bearer {token}"))
+        .header("Authorization", format!("Bearer {}", token.expose_secret()))
         .json(&RegisterCompleteRequest {
             state: start_resp.state,
             credential_id: result.credential_id,

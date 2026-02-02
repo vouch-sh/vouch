@@ -16,6 +16,7 @@
 //!   credential-provider = ["vouch", "credential", "cargo", "--"]
 
 use anyhow::{Context, Result};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
@@ -214,9 +215,9 @@ async fn handle_get(registry: &RegistryInfo) -> Result<()> {
         }
     };
 
-    // Get the session token
+    // Get the session token (expose for protocol output)
     let token = match config.token() {
-        Some(t) => t.to_string(),
+        Some(t) => t.expose_secret().to_string(),
         None => {
             return send_error(
                 "not-found",

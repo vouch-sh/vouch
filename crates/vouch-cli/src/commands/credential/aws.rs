@@ -4,7 +4,7 @@
 //! Obtains temporary AWS credentials using Vouch session and STS.
 
 use anyhow::{Context, Result};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 
 use crate::aws::sts::{
@@ -15,20 +15,25 @@ use crate::client::VouchClient;
 
 /// AWS credential process output format.
 /// See: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html
+///
+/// Secret fields are wrapped in SecretString for secure memory handling.
+/// They are automatically serialized to plain JSON for the credential process.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "PascalCase")]
 struct CredentialProcessOutput {
     version: u32,
     access_key_id: String,
-    secret_access_key: String,
-    session_token: String,
+    secret_access_key: SecretString,
+    session_token: SecretString,
     expiration: String,
 }
 
 /// Response from Vouch OIDC token endpoint.
+///
+/// The `id_token` is wrapped in SecretString for secure memory handling.
 #[derive(Debug, Deserialize)]
 struct OidcTokenResponse {
-    id_token: String,
+    id_token: SecretString,
 }
 
 /// Run the AWS credential command.
@@ -56,7 +61,7 @@ pub async fn run(server: &str, role_arn: &str, session_name: Option<&str>) -> Re
     let sts_response = assume_role_with_web_identity(
         role_arn,
         session,
-        &token_response.id_token,
+        token_response.id_token.expose_secret(),
         region,
         domain_suffix,
     )
@@ -70,8 +75,8 @@ pub async fn run(server: &str, role_arn: &str, session_name: Option<&str>) -> Re
     let output = CredentialProcessOutput {
         version: 1,
         access_key_id: creds.access_key_id.clone(),
-        secret_access_key: creds.secret_access_key.expose_secret().to_string(),
-        session_token: creds.session_token.expose_secret().to_string(),
+        secret_access_key: creds.secret_access_key.clone(),
+        session_token: creds.session_token.clone(),
         expiration: creds.expiration.clone(),
     };
 

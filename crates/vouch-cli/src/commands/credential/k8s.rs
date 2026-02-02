@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use jiff::Timestamp;
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 
 use crate::client::VouchClient;
@@ -24,19 +25,24 @@ struct ExecCredential {
 }
 
 /// Status portion of ExecCredential containing the actual token.
+///
+/// The `token` is wrapped in SecretString for secure memory handling.
+/// It is automatically serialized to plain JSON for kubectl.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ExecCredentialStatus {
     /// The bearer token to use for authentication.
-    token: String,
+    token: SecretString,
     /// RFC 3339 timestamp when the token expires.
     expiration_timestamp: String,
 }
 
 /// Response from Vouch K8s token endpoint.
+///
+/// The `id_token` is wrapped in SecretString for secure memory handling.
 #[derive(Debug, Deserialize)]
 struct K8sTokenResponse {
-    id_token: String,
+    id_token: SecretString,
     expires_in: u64,
 }
 
