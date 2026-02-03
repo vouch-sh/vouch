@@ -1,8 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Cargo integration status checking.
+//! Cargo integration utilities and status checking.
+
+mod config;
+
+pub use config::CargoConfig;
 
 use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
-use crate::cargo::CargoConfig;
 
 /// Cargo integration checker.
 pub struct CargoIntegration;

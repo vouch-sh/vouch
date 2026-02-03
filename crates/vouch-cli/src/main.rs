@@ -5,8 +5,6 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-mod aws;
-mod cargo;
 mod client;
 mod commands;
 mod config;

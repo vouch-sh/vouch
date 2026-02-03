@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 
-use crate::cargo::CargoConfig;
+use crate::integrations::cargo::CargoConfig;
 
 /// Run the Cargo setup command.
 ///

@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 
-use crate::aws::{AwsConfig, AwsProfile};
+use crate::integrations::aws::{AwsConfig, AwsProfile};
 use crate::utils::ensure_secure_dir;
 
 /// Get the AWS config directory (~/.aws).
