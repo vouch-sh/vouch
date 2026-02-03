@@ -2,7 +2,7 @@
 //! Configuration and token storage for vouch CLI.
 
 use anyhow::{Context, Result};
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -10,7 +10,8 @@ use std::path::PathBuf;
 /// CLI configuration stored in ~/.vouch/config.json
 ///
 /// The config file is protected with 0600 permissions on Unix systems.
-/// The token is wrapped in SecretString for:
+/// The token field stores the raw string for serialization, but the public
+/// API wraps it in SecretString for secure memory handling:
 /// - Automatic zeroization when dropped
 /// - Protection against accidental logging/debug output
 /// - Explicit exposure required via `.expose_secret()`
@@ -18,8 +19,9 @@ use std::path::PathBuf;
 pub struct Config {
     /// Vouch server URL.
     server_url: Option<String>,
-    /// Current session token (JWT), protected by SecretString.
-    token: Option<SecretString>,
+    /// Current session token (JWT).
+    /// Note: Stored as String for serde, but exposed as SecretString via API.
+    token: Option<String>,
 }
 
 impl Config {
@@ -81,11 +83,11 @@ impl Config {
 
     /// Get the current session token.
     ///
-    /// Returns the token wrapped in SecretString. Callers must explicitly
-    /// call `.expose_secret()` to access the underlying value.
+    /// Returns the token wrapped in SecretString for secure memory handling.
+    /// Callers must explicitly call `.expose_secret()` to access the underlying value.
     #[must_use]
-    pub fn token(&self) -> Option<&SecretString> {
-        self.token.as_ref()
+    pub fn token(&self) -> Option<SecretString> {
+        self.token.as_ref().map(|t| SecretString::from(t.clone()))
     }
 
     /// Save the server URL.
@@ -95,10 +97,8 @@ impl Config {
     }
 
     /// Save a new session token.
-    ///
-    /// The token is stored as a SecretString for secure handling.
     pub fn save_token(&mut self, token: &str) -> Result<()> {
-        self.token = Some(SecretString::from(token.to_string()));
+        self.token = Some(token.to_string());
         self.save()
     }
 
