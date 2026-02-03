@@ -7,11 +7,11 @@ use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
+use crate::client::VouchClient;
 use crate::integrations::aws::sts::{
     assume_role_with_web_identity, extract_partition_from_role_arn,
     get_default_region_for_partition, get_domain_suffix_for_partition,
 };
-use crate::client::VouchClient;
 
 /// AWS credential process output format.
 /// See: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html

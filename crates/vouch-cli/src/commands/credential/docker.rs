@@ -24,10 +24,10 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
-use crate::integrations::aws::sts::{assume_role_with_web_identity, StsCredentials};
-use crate::integrations::aws::{extract_role_from_credential_process, AwsConfig};
 use crate::client::VouchClient;
 use crate::config::Config;
+use crate::integrations::aws::sts::{StsCredentials, assume_role_with_web_identity};
+use crate::integrations::aws::{AwsConfig, extract_role_from_credential_process};
 
 /// Docker credential helper output format.
 /// See: https://docs.docker.com/engine/reference/commandline/login/#credential-helper-protocol
