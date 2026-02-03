@@ -114,7 +114,7 @@ mod tests {
             api_version: "client.authentication.k8s.io/v1".to_string(),
             kind: "ExecCredential".to_string(),
             status: ExecCredentialStatus {
-                token: "test-token-123".to_string(),
+                token: SecretString::from("test-token-123".to_string()),
                 expiration_timestamp: "2026-01-30T12:00:00Z".to_string(),
             },
         };
@@ -140,7 +140,7 @@ mod tests {
             api_version: "client.authentication.k8s.io/v1".to_string(),
             kind: "ExecCredential".to_string(),
             status: ExecCredentialStatus {
-                token: "eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.test".to_string(),
+                token: SecretString::from("eyJhbGciOiJFUzI1NiIsInR5cCI6IkpXVCJ9.test".to_string()),
                 expiration_timestamp: "2026-01-30T20:00:00Z".to_string(),
             },
         };
