@@ -88,6 +88,28 @@ pub async fn create_organization(
     Ok(org)
 }
 
+/// Get an organization's domain by ID.
+///
+/// Returns the domain (hd claim) for the organization, or None if not found.
+pub async fn get_organization_domain(pool: &Pool, org_id: &str) -> Result<Option<String>> {
+    use crate::db_fetch_optional;
+
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .column(Organizations::Domain)
+            .from(Organizations::Table)
+            .and_where(Expr::col(Organizations::Id).eq(org_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let domain = db_fetch_optional!(pool, sqlx::query_scalar::<_, String>(&sql))?;
+
+    Ok(domain)
+}
+
 /// Delete an organization and all associated data.
 ///
 /// Performs application-level cascade deletes for DSQL compatibility:

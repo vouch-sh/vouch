@@ -95,14 +95,17 @@ impl<'a> AwsService<'a> {
     /// - `aud`: Vouch issuer URL (AWS matches against the OIDC provider)
     /// - `iss`: Vouch issuer URL
     /// - `hardware_aaguid`: FIDO2 authenticator AAGUID (for hardware key verification)
+    /// - `hd`: Google Workspace hosted domain (for domain-based access control)
     ///
     /// # Arguments
     /// * `user_email` - The authenticated user's email
     /// * `authenticator_id` - The authenticator ID from the session (for AAGUID lookup)
+    /// * `hd` - The user's organization domain (Google Workspace hosted domain)
     pub async fn issue_token(
         &self,
         user_email: &str,
         authenticator_id: Option<&str>,
+        hd: Option<String>,
     ) -> AwsResult<AwsTokenResult> {
         // Get authenticator info for AAGUID
         let authenticator = self.get_authenticator(authenticator_id).await?;
@@ -114,6 +117,7 @@ impl<'a> AwsService<'a> {
         // For AWS, the audience is the issuer URL (AWS matches against the OIDC provider)
         let id_claims = OidcIdTokenClaimsBuilder::for_aws(&self.config.base_url, user_email)
             .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
+            .hd(hd)
             .valid_for_seconds(expires_in)
             .build()
             .map_err(|e| AwsError::ClaimsBuild(e.to_string()))?;

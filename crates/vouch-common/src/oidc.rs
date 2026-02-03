@@ -26,6 +26,11 @@ pub struct OidcIdTokenClaims {
     /// Hardware AAGUID (YubiKey model identifier).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hardware_aaguid: Option<String>,
+    /// Google Workspace hosted domain (e.g., "acme.com").
+    /// Only present for users from Google Workspace organizations.
+    /// Can be used in AWS IAM trust policy conditions to restrict access by domain.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hd: Option<String>,
 }
 
 /// Builder for constructing OIDC ID token claims.
@@ -35,6 +40,7 @@ pub struct OidcIdTokenClaimsBuilder {
     audience: Option<String>,
     email: Option<String>,
     hardware_aaguid: Option<String>,
+    hd: Option<String>,
     valid_for_seconds: u64,
 }
 
@@ -48,6 +54,7 @@ impl OidcIdTokenClaimsBuilder {
             audience: None,
             email: None,
             hardware_aaguid: None,
+            hd: None,
             valid_for_seconds: 28800, // 8 hours default
         }
     }
@@ -126,6 +133,17 @@ impl OidcIdTokenClaimsBuilder {
         self
     }
 
+    /// Set the Google Workspace hosted domain (e.g., "acme.com").
+    ///
+    /// This is the `hd` claim from Google's OIDC tokens, indicating the user's
+    /// Google Workspace domain. Can be used in AWS IAM trust policy conditions
+    /// to restrict access to users from specific domains.
+    #[must_use]
+    pub fn hd(mut self, hd: Option<String>) -> Self {
+        self.hd = hd;
+        self
+    }
+
     /// Set the token validity period in seconds.
     #[must_use]
     pub fn valid_for_seconds(mut self, seconds: u64) -> Self {
@@ -152,6 +170,7 @@ impl OidcIdTokenClaimsBuilder {
             email_verified: true,
             hardware_verified: true,
             hardware_aaguid: self.hardware_aaguid,
+            hd: self.hd,
         })
     }
 }

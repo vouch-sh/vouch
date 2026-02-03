@@ -58,7 +58,7 @@ pub use authenticators::{
 };
 
 // Re-export organization types and functions
-pub use organizations::Organization;
+pub use organizations::{Organization, get_organization_domain};
 
 // Re-export organization test helpers (only available in tests)
 #[cfg(any(test, feature = "test-utils"))]
