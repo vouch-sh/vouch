@@ -406,15 +406,13 @@ async fn get_user_org_domain(
     user_id: &str,
 ) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
     // Get user to find their org_id
-    let user = db::get_user_by_id(&state.db, user_id)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?;
+    let user = db::get_user_by_id(&state.db, user_id).await.map_err(|e| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            &e.to_string(),
+        )
+    })?;
 
     // If user has an org, get the org's domain
     if let Some(user) = user
