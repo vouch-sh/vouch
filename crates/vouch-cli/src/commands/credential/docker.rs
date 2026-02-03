@@ -24,8 +24,8 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
-use crate::aws::sts::{StsCredentials, assume_role_with_web_identity};
-use crate::aws::{AwsConfig, extract_role_from_credential_process};
+use crate::integrations::aws::sts::{assume_role_with_web_identity, StsCredentials};
+use crate::integrations::aws::{extract_role_from_credential_process, AwsConfig};
 use crate::client::VouchClient;
 use crate::config::Config;
 
