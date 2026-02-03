@@ -26,6 +26,7 @@ use ctap_hid_fido2::fidokey::get_info::InfoOption;
 use ctap_hid_fido2::fidokey::make_credential::{Attestation, MakeCredentialArgsBuilder};
 use ctap_hid_fido2::public_key_credential_user_entity::PublicKeyCredentialUserEntity;
 use ctap_hid_fido2::verifier;
+use secrecy::{ExposeSecret, SecretString};
 
 // Type-safe FIDO2 types (Phase 3)
 use vouch_common::encoding::Raw;
@@ -409,9 +410,12 @@ impl YubiKey {
 }
 
 /// Prompt for `YubiKey` PIN securely (no echo).
-pub fn prompt_pin() -> Result<String> {
+///
+/// Returns the PIN wrapped in `SecretString` for memory protection.
+pub fn prompt_pin() -> Result<SecretString> {
     eprint!("YubiKey PIN: ");
-    rpassword::read_password().context("failed to read PIN")
+    let pin = rpassword::read_password().context("failed to read PIN")?;
+    Ok(SecretString::from(pin))
 }
 
 /// Translate FIDO2/CTAP2 errors into user-friendly messages.
@@ -481,7 +485,9 @@ fn translate_fido2_error(err: anyhow::Error, operation: &str) -> anyhow::Error {
 /// Validates PIN requirements:
 /// - Minimum 8 characters (Vouch security requirement)
 /// - Maximum 63 characters (FIDO2 limit)
-pub fn prompt_new_pin() -> Result<String> {
+///
+/// Returns the PIN wrapped in `SecretString` for memory protection.
+pub fn prompt_new_pin() -> Result<SecretString> {
     use std::io::{Write, stderr};
 
     loop {
@@ -509,14 +515,14 @@ pub fn prompt_new_pin() -> Result<String> {
             continue;
         }
 
-        return Ok(pin);
+        return Ok(SecretString::from(pin));
     }
 }
 
 /// Check if a PIN is set on the YubiKey, and if not, guide the user through setup.
 ///
-/// Returns the PIN (either existing or newly set).
-pub fn ensure_pin_configured(key: &YubiKey) -> Result<String> {
+/// Returns the PIN wrapped in `SecretString` (either existing or newly set).
+pub fn ensure_pin_configured(key: &YubiKey) -> Result<SecretString> {
     if key.is_pin_set()? {
         // PIN is already set, just prompt for it
         return prompt_pin();
@@ -533,7 +539,7 @@ pub fn ensure_pin_configured(key: &YubiKey) -> Result<String> {
     let pin = prompt_new_pin()?;
 
     print!("Setting PIN... ");
-    key.set_new_pin(&pin)?;
+    key.set_new_pin(pin.expose_secret())?;
     println!("done!");
     println!();
 
@@ -890,6 +896,7 @@ fn build_none_attestation_object(auth_data: &[u8]) -> Result<Vec<u8>> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[cfg(feature = "test-utils")]

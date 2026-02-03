@@ -2,6 +2,7 @@
 //! Login command - authenticate with your `YubiKey`.
 
 use anyhow::{Context, Result};
+use secrecy::ExposeSecret;
 #[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError};
 use vouch_common::{
@@ -42,7 +43,11 @@ pub async fn run(server: &str) -> Result<()> {
 
     // Step 4: Perform FIDO2 authentication using discoverable credential
     println!("\nTouch your YubiKey...");
-    let result = key.authenticate(&start_resp.rp_id, &start_resp.challenge, &pin)?;
+    let result = key.authenticate(
+        &start_resp.rp_id,
+        &start_resp.challenge,
+        pin.expose_secret(),
+    )?;
 
     // Step 5: Complete authentication with server
     let complete_resp: LoginCompleteResponse = client
@@ -71,6 +76,7 @@ pub async fn run(server: &str) -> Result<()> {
     // Also save to config as fallback
     let mut config = Config::load()?;
     config.save_token(&complete_resp.token)?;
+    config.save_email(&complete_resp.email)?;
 
     // Step 7: Write cookie file for CLI tools
     if let Err(e) = write_session_cookie(server, &complete_resp) {

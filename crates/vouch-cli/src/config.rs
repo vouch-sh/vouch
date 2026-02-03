@@ -2,21 +2,45 @@
 //! Configuration and token storage for vouch CLI.
 
 use anyhow::{Context, Result};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
 /// CLI configuration stored in ~/.vouch/config.json
 ///
-/// Note: The token is stored as a plain string for serialization purposes.
+/// Note: The token is stored as a plain string in the file for serialization purposes.
 /// The config file is protected with 0600 permissions on Unix systems.
-/// In memory, the token is only exposed when needed for API calls.
-#[derive(Debug, Default, Serialize, Deserialize)]
+/// In memory, the token is wrapped in `SecretString` for protection and automatic
+/// zeroing on drop.
+#[derive(Default)]
 pub struct Config {
     /// Vouch server URL.
     server_url: Option<String>,
-    /// Current session token (JWT).
+    /// Current session token (JWT), protected in memory.
+    token: Option<SecretString>,
+    /// User's email address (for session naming).
+    email: Option<String>,
+}
+
+/// Intermediate type for serialization/deserialization.
+/// `SecretString` doesn't implement Serialize/Deserialize, so we use this.
+/// Implements `ZeroizeOnDrop` to clear sensitive data from memory.
+#[derive(Debug, Default, Serialize, Deserialize, zeroize::ZeroizeOnDrop)]
+struct ConfigFile {
+    server_url: Option<String>,
     token: Option<String>,
+    email: Option<String>,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("server_url", &self.server_url)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("email", &self.email)
+            .finish()
+    }
 }
 
 impl Config {
@@ -27,8 +51,9 @@ impl Config {
         if path.exists() {
             let content = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read config from {}", path.display()))?;
-            serde_json::from_str(&content)
-                .with_context(|| format!("failed to parse config from {}", path.display()))
+            let config_file: ConfigFile = serde_json::from_str(&content)
+                .with_context(|| format!("failed to parse config from {}", path.display()))?;
+            Ok(Self::from(config_file))
         } else {
             Ok(Self::default())
         }
@@ -45,7 +70,9 @@ impl Config {
             })?;
         }
 
-        let content = serde_json::to_string_pretty(self).context("failed to serialize config")?;
+        let config_file = ConfigFile::from(self);
+        let content =
+            serde_json::to_string_pretty(&config_file).context("failed to serialize config")?;
 
         // Write with restrictive permissions (0600)
         #[cfg(unix)]
@@ -77,9 +104,12 @@ impl Config {
     }
 
     /// Get the current session token.
+    ///
+    /// Returns a reference to the `SecretString`. Use `.expose_secret()` to access
+    /// the underlying string only when necessary (e.g., building HTTP headers).
     #[must_use]
-    pub fn token(&self) -> Option<&str> {
-        self.token.as_deref()
+    pub fn token(&self) -> Option<&SecretString> {
+        self.token.as_ref()
     }
 
     /// Save the server URL.
@@ -90,7 +120,7 @@ impl Config {
 
     /// Save a new session token.
     pub fn save_token(&mut self, token: &str) -> Result<()> {
-        self.token = Some(token.to_string());
+        self.token = Some(SecretString::from(token.to_string()));
         self.save()
     }
 
@@ -100,9 +130,50 @@ impl Config {
         self.save()
     }
 
+    /// Get the user's email address.
+    #[must_use]
+    pub fn email(&self) -> Option<&str> {
+        self.email.as_deref()
+    }
+
+    /// Save the user's email address.
+    pub fn save_email(&mut self, email: &str) -> Result<()> {
+        self.email = Some(email.to_string());
+        self.save()
+    }
+
+    /// Clear the user's email address.
+    pub fn clear_email(&mut self) -> Result<()> {
+        self.email = None;
+        self.save()
+    }
+
     /// Get the path to the config file.
     fn config_path() -> Result<PathBuf> {
         let home = dirs::home_dir().context("could not determine home directory")?;
         Ok(home.join(".vouch").join("config.json"))
+    }
+}
+
+impl From<ConfigFile> for Config {
+    fn from(mut file: ConfigFile) -> Self {
+        // Use std::mem::take to move values out while leaving defaults behind.
+        // This works with ZeroizeOnDrop because the struct will still be dropped
+        // but with default (empty) values that will be zeroed.
+        Self {
+            server_url: std::mem::take(&mut file.server_url),
+            token: std::mem::take(&mut file.token).map(SecretString::from),
+            email: std::mem::take(&mut file.email),
+        }
+    }
+}
+
+impl From<&Config> for ConfigFile {
+    fn from(config: &Config) -> Self {
+        Self {
+            server_url: config.server_url.clone(),
+            token: config.token.as_ref().map(|s| s.expose_secret().to_string()),
+            email: config.email.clone(),
+        }
     }
 }

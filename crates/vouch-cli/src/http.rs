@@ -6,6 +6,7 @@
 //! instead of making real network requests.
 
 use anyhow::{Context, Result, bail};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
 use vouch_common::ApiError;
 
@@ -176,13 +177,13 @@ pub trait HttpClientExt: HttpClient {
         &self,
         url: &str,
         body: &Req,
-        token: &str,
+        token: &SecretString,
     ) -> impl std::future::Future<Output = Result<Resp>> + Send
     where
         Req: Serialize + Sync,
         Resp: DeserializeOwned,
     {
-        let auth = format!("Bearer {token}");
+        let auth = format!("Bearer {}", token.expose_secret());
         async move {
             let json = serde_json::to_vec(body).context("failed to serialize request")?;
             let response = self
@@ -202,12 +203,12 @@ pub trait HttpClientExt: HttpClient {
     fn get_json_authenticated<Resp>(
         &self,
         url: &str,
-        token: &str,
+        token: &SecretString,
     ) -> impl std::future::Future<Output = Result<Resp>> + Send
     where
         Resp: DeserializeOwned,
     {
-        let auth = format!("Bearer {token}");
+        let auth = format!("Bearer {}", token.expose_secret());
         async move {
             let response = self.request("GET", url, None, None, Some(&auth)).await?;
             handle_response(response)

@@ -24,7 +24,7 @@ struct ExecCredential {
 }
 
 /// Status portion of ExecCredential containing the actual token.
-#[derive(Debug, Serialize)]
+#[derive(Serialize, zeroize::ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase")]
 struct ExecCredentialStatus {
     /// The bearer token to use for authentication.
@@ -33,11 +33,29 @@ struct ExecCredentialStatus {
     expiration_timestamp: String,
 }
 
+impl std::fmt::Debug for ExecCredentialStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecCredentialStatus")
+            .field("token", &"[REDACTED]")
+            .field("expiration_timestamp", &self.expiration_timestamp)
+            .finish()
+    }
+}
+
 /// Response from Vouch K8s token endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
 struct K8sTokenResponse {
     id_token: String,
     expires_in: u64,
+}
+
+impl std::fmt::Debug for K8sTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("K8sTokenResponse")
+            .field("id_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// Run the Kubernetes credential command.
@@ -90,7 +108,7 @@ async fn get_k8s_token(server: &str, audience: &str) -> Result<ExecCredential> {
         api_version: "client.authentication.k8s.io/v1".to_string(),
         kind: "ExecCredential".to_string(),
         status: ExecCredentialStatus {
-            token: token_response.id_token,
+            token: token_response.id_token.clone(),
             expiration_timestamp: expiration.to_string(),
         },
     })

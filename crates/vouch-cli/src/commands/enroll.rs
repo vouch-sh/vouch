@@ -6,13 +6,31 @@ use std::io::{Write, stdout};
 #[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError};
 use vouch_common::{
-    DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse, OAuthError,
-    SessionCookie, write_cookie,
+    DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, OAuthError, SessionCookie,
+    write_cookie,
 };
 
 use crate::client::VouchClient;
 use crate::commands::credential;
 use crate::config::Config;
+
+/// Response from device token endpoint.
+#[derive(serde::Deserialize, zeroize::ZeroizeOnDrop)]
+struct DeviceTokenResponse {
+    access_token: String,
+    expires_in: u64,
+    email: String,
+}
+
+impl std::fmt::Debug for DeviceTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceTokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .field("email", &self.email)
+            .finish()
+    }
+}
 
 /// Run the enroll command.
 pub async fn run(server: &str) -> Result<()> {
@@ -56,10 +74,11 @@ pub async fn run(server: &str) -> Result<()> {
     // Step 3: Poll for token
     let token_response = poll_for_token(&client, &device_response).await?;
 
-    // Step 4: Save server URL and token
+    // Step 4: Save server URL, token, and email
     let mut config = Config::load()?;
     config.save_server_url(server)?;
     config.save_token(&token_response.access_token)?;
+    config.save_email(&token_response.email)?;
 
     // Step 5: Compute expiration timestamp from expires_in
     let expires_at = jiff::Timestamp::now()

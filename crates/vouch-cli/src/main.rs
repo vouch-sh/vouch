@@ -10,6 +10,7 @@ mod commands;
 mod config;
 mod fido2;
 mod integrations;
+mod session;
 mod utils;
 
 /// Check if invoked as docker-credential-vouch and handle accordingly.
