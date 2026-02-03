@@ -64,7 +64,11 @@ pub fn run(args: DiagArgs) -> Result<()> {
     // Get PIN
     println!();
     eprint!("YubiKey PIN: ");
-    let pin = rpassword::read_password().context("failed to read PIN")?;
+    let pin_raw = rpassword::read_password().context("failed to read PIN")?;
+    // Note: In diag mode, we keep this as a plain String for simplicity since
+    // this is a debugging tool that immediately uses and discards the PIN.
+    // In production code (fido2.rs), we use SecretString.
+    let pin = pin_raw;
 
     // Test parameters
     let rp_id = "diag.test.local";

@@ -28,14 +28,24 @@ use crate::client::VouchClient;
 use crate::config::Config;
 use crate::integrations::aws::sts::{StsCredentials, assume_role_with_web_identity};
 use crate::integrations::aws::{AwsConfig, extract_role_from_credential_process};
+use crate::session::get_user_email;
 
 /// Docker credential helper output format.
 /// See: https://docs.docker.com/engine/reference/commandline/login/#credential-helper-protocol
-#[derive(Debug, Serialize)]
+#[derive(Serialize, zeroize::ZeroizeOnDrop)]
 #[serde(rename_all = "PascalCase")]
 struct DockerCredential {
     username: String,
     secret: String,
+}
+
+impl std::fmt::Debug for DockerCredential {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DockerCredential")
+            .field("username", &self.username)
+            .field("secret", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Registry type detected from the server URL.
@@ -62,17 +72,34 @@ pub enum RegistryType {
 }
 
 /// Response from Vouch GCP token endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
 struct GcpTokenResponse {
     id_token: String,
     #[allow(dead_code)]
     expires_in: u64,
 }
 
+impl std::fmt::Debug for GcpTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GcpTokenResponse")
+            .field("id_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
+}
+
 /// Response from Vouch GitHub token endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
 struct GitHubTokenResponse {
     token: String,
+}
+
+impl std::fmt::Debug for GitHubTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubTokenResponse")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// GitHub token request.
@@ -83,9 +110,17 @@ struct GitHubTokenRequest {
 }
 
 /// Response from Vouch AWS token endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
 struct AwsOidcTokenResponse {
     id_token: String,
+}
+
+impl std::fmt::Debug for AwsOidcTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwsOidcTokenResponse")
+            .field("id_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Run the Docker credential helper.
@@ -264,9 +299,12 @@ async fn get_ecr_credential(
     })?;
 
     // Call STS AssumeRoleWithWebIdentity using the shared module
+    // Use email as session name for CloudTrail visibility
+    let email = get_user_email(server).await;
+    let session = email.as_deref().unwrap_or("vouch-docker");
     let sts_response = assume_role_with_web_identity(
         &role_arn,
-        "vouch-docker",
+        session,
         &token_response.id_token,
         region,
         domain_suffix,
@@ -416,10 +454,18 @@ struct EcrAuthorizationResponse {
     authorization_data: Vec<EcrAuthorizationData>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
 #[serde(rename_all = "camelCase")]
 struct EcrAuthorizationData {
     authorization_token: String,
+}
+
+impl std::fmt::Debug for EcrAuthorizationData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EcrAuthorizationData")
+            .field("authorization_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Format timestamp for AWS X-Amz-Date header.
@@ -526,7 +572,7 @@ async fn get_gcp_credential(server: &str) -> Result<DockerCredential> {
     // with "oauth2accesstoken" as the username
     Ok(DockerCredential {
         username: "oauth2accesstoken".to_string(),
-        secret: token_response.id_token,
+        secret: token_response.id_token.clone(),
     })
 }
 
@@ -547,7 +593,7 @@ async fn get_ghcr_credential(server: &str) -> Result<DockerCredential> {
 
     Ok(DockerCredential {
         username: "x-access-token".to_string(),
-        secret: response.token,
+        secret: response.token.clone(),
     })
 }
 

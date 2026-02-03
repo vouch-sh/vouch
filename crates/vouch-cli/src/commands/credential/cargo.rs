@@ -16,6 +16,7 @@
 //!   credential-provider = ["vouch", "credential", "cargo", "--"]
 
 use anyhow::{Context, Result};
+use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
@@ -105,7 +106,7 @@ enum Operation {
 }
 
 /// Login options from Cargo.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
 struct LoginOptions {
     /// Token provided by user (if any).
     /// We don't use this - vouch manages its own authentication.
@@ -117,8 +118,17 @@ struct LoginOptions {
     login_url: Option<String>,
 }
 
+impl std::fmt::Debug for LoginOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LoginOptions")
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("login_url", &self.login_url)
+            .finish()
+    }
+}
+
 /// Response from credential provider to Cargo.
-#[derive(Debug, Serialize)]
+#[derive(Serialize, zeroize::ZeroizeOnDrop)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum CredentialResponse {
     /// Successful get response.
@@ -126,9 +136,11 @@ enum CredentialResponse {
         /// The authentication token.
         token: String,
         /// Cache control for the token.
+        #[zeroize(skip)]
         cache: CacheControl,
         /// Whether the token is independent of the operation.
         #[serde(rename = "operation-independent")]
+        #[zeroize(skip)]
         operation_independent: bool,
     },
     /// Successful login response.
@@ -137,6 +149,25 @@ enum CredentialResponse {
     Login,
     /// Successful logout response.
     Logout,
+}
+
+impl std::fmt::Debug for CredentialResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Get {
+                cache,
+                operation_independent,
+                ..
+            } => f
+                .debug_struct("CredentialResponse::Get")
+                .field("token", &"[REDACTED]")
+                .field("cache", cache)
+                .field("operation_independent", operation_independent)
+                .finish(),
+            Self::Login => f.debug_struct("CredentialResponse::Login").finish(),
+            Self::Logout => f.debug_struct("CredentialResponse::Logout").finish(),
+        }
+    }
 }
 
 /// Cache control for tokens.
@@ -216,7 +247,7 @@ async fn handle_get(registry: &RegistryInfo) -> Result<()> {
 
     // Get the session token
     let token = match config.token() {
-        Some(t) => t.to_string(),
+        Some(t) => t,
         None => {
             return send_error(
                 "not-found",
@@ -229,12 +260,14 @@ async fn handle_get(registry: &RegistryInfo) -> Result<()> {
     };
 
     // Calculate expiration from JWT if possible, otherwise use session cache
-    let cache = parse_jwt_expiration(&token).map_or(CacheControl::Session, |exp| {
+    let token_str = token.expose_secret();
+    let cache = parse_jwt_expiration(token_str).map_or(CacheControl::Session, |exp| {
         CacheControl::Expires { expiration: exp }
     });
 
     let response = CredentialResponse::Get {
-        token,
+        // Token is exposed here because Cargo requires it in the JSON output
+        token: token_str.to_string(),
         cache,
         // Token works for any operation (read, publish, yank, etc.)
         operation_independent: true,

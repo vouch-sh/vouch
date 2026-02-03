@@ -12,7 +12,7 @@ use crate::client::VouchClient;
 
 /// GCP executable-sourced credential output format (success).
 /// See: https://google.aip.dev/auth/4117
-#[derive(Debug, Serialize)]
+#[derive(Serialize, zeroize::ZeroizeOnDrop)]
 struct ExecutableSuccessResponse {
     /// Schema version (always 1).
     version: u32,
@@ -24,6 +24,18 @@ struct ExecutableSuccessResponse {
     id_token: String,
     /// Expiration time as Unix timestamp.
     expiration_time: i64,
+}
+
+impl std::fmt::Debug for ExecutableSuccessResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecutableSuccessResponse")
+            .field("version", &self.version)
+            .field("success", &self.success)
+            .field("token_type", &self.token_type)
+            .field("id_token", &"[REDACTED]")
+            .field("expiration_time", &self.expiration_time)
+            .finish()
+    }
 }
 
 /// GCP executable-sourced credential output format (failure).
@@ -41,10 +53,19 @@ struct ExecutableErrorResponse {
 }
 
 /// Response from Vouch GCP token endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
 struct GcpTokenResponse {
     id_token: String,
     expires_in: u64,
+}
+
+impl std::fmt::Debug for GcpTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GcpTokenResponse")
+            .field("id_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .finish()
+    }
 }
 
 /// Run the GCP credential command.
@@ -105,7 +126,7 @@ async fn get_gcp_token(server: &str, audience: &str) -> Result<ExecutableSuccess
         version: 1,
         success: true,
         token_type: "urn:ietf:params:oauth:token-type:id_token".to_string(),
-        id_token: token_response.id_token,
+        id_token: token_response.id_token.clone(),
         expiration_time,
     })
 }
