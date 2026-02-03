@@ -125,9 +125,17 @@
                             <td class="py-2 pr-4">Signing Algorithm</td>
                             <td class="py-2"><code class="text-vouch-accent">ES256</code> (<a href="https://www.rfc-editor.org/rfc/rfc7518#section-3.4" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">ECDSA P-256</a>)</td>
                         </tr>
-                        <tr>
+                        <tr class="border-b border-vouch-border">
                             <td class="py-2 pr-4">Scopes</td>
                             <td class="py-2"><code class="text-vouch-accent">openid email profile</code></td>
+                        </tr>
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4">Device Authorization Endpoint</td>
+                            <td class="py-2"><code class="text-vouch-accent">{{ provider_url }}/oauth/device</code></td>
+                        </tr>
+                        <tr>
+                            <td class="py-2 pr-4">Device Verification URL</td>
+                            <td class="py-2"><code class="text-vouch-accent">{{ provider_url }}/device</code></td>
                         </tr>
                     </tbody>
                 </table>
@@ -1123,6 +1131,334 @@ checkAuth();</pre>
             </div>
         </div>
 
+        <!-- Native & CLI Applications -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Native & CLI Applications</h2>
+            <p class="text-gray-400 text-sm mb-4">
+                For CLI tools, native desktop/mobile apps, and headless servers where browser redirects aren't practical.
+                Uses the <a href="https://www.rfc-editor.org/rfc/rfc8628" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">Device Authorization Grant (RFC 8628)</a>.
+                Register your app as type <code class="text-vouch-accent">native</code> (public client).
+            </p>
+
+            <div class="mb-4 p-3 bg-vouch-bg rounded border border-vouch-border">
+                <p class="text-gray-400 text-sm">
+                    <strong class="text-gray-300">When to use:</strong> CLI tools, terminal applications, native desktop/mobile apps without easy redirect handling,
+                    headless servers, and automation scripts that need user authentication.
+                </p>
+            </div>
+
+            <!-- How it works -->
+            <h3 class="text-md font-semibold text-gray-300 mb-3">How It Works</h3>
+            <ol class="list-decimal list-inside text-gray-400 text-sm space-y-2 ml-2 mb-6">
+                <li>Your app requests a device code from <code class="text-vouch-accent">POST /oauth/device</code></li>
+                <li>Your app displays the <code class="text-vouch-accent">user_code</code> and <code class="text-vouch-accent">verification_uri</code> to the user</li>
+                <li>User visits <code class="text-vouch-accent">/device</code> in their browser, enters the code, and authenticates with their YubiKey</li>
+                <li>Your app polls <code class="text-vouch-accent">POST /oauth/token</code> with the <code class="text-vouch-accent">device_code</code> until authorized</li>
+                <li>Your app receives the access token</li>
+            </ol>
+
+            <!-- Native Tabs -->
+            <div class="flex flex-wrap gap-2 mb-4">
+                <button class="tab tab-active" onclick="showNativeTab('python')">Python</button>
+                <button class="tab" onclick="showNativeTab('node')">Node.js</button>
+                <button class="tab" onclick="showNativeTab('rust')">Rust</button>
+            </div>
+
+            <!-- Python -->
+            <div id="native-python-tab" class="tab-content">
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># device_flow.py
+import requests
+import time
+
+CLIENT_ID = 'YOUR_CLIENT_ID'
+
+# Step 1: Request device code
+response = requests.post(
+    '{{ provider_url }}/oauth/device',
+    data={
+        'client_id': CLIENT_ID,
+        'scope': 'openid email profile'
+    }
+)
+device_data = response.json()
+
+# Step 2: Display to user
+print(f"\nTo sign in, visit: {device_data['verification_uri']}")
+print(f"Enter code: {device_data['user_code']}\n")
+
+# Step 3: Poll for token
+interval = device_data.get('interval', 5)
+while True:
+    time.sleep(interval)
+
+    token_response = requests.post(
+        '{{ provider_url }}/oauth/token',
+        data={
+            'grant_type': 'urn:ietf:params:oauth:grant-type:device_code',
+            'device_code': device_data['device_code'],
+            'client_id': CLIENT_ID
+        }
+    )
+
+    if token_response.status_code == 200:
+        tokens = token_response.json()
+        print(f"Authenticated! Access token: {tokens['access_token'][:20]}...")
+        break
+
+    error = token_response.json().get('error')
+    if error == 'authorization_pending':
+        continue  # User hasn't completed auth yet
+    elif error == 'slow_down':
+        interval += 5  # Increase polling interval
+    elif error == 'expired_token':
+        print("Device code expired. Please try again.")
+        break
+    elif error == 'access_denied':
+        print("Access denied by user.")
+        break
+    else:
+        print(f"Error: {token_response.json()}")
+        break</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Node.js -->
+            <div id="native-node-tab" class="tab-content hidden">
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">// deviceFlow.js
+const CLIENT_ID = 'YOUR_CLIENT_ID';
+
+async function deviceFlow() {
+  // Step 1: Request device code
+  const deviceResponse = await fetch('{{ provider_url }}/oauth/device', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: CLIENT_ID,
+      scope: 'openid email profile'
+    })
+  });
+  const deviceData = await deviceResponse.json();
+
+  // Step 2: Display to user
+  console.log(`\nTo sign in, visit: ${deviceData.verification_uri}`);
+  console.log(`Enter code: ${deviceData.user_code}\n`);
+
+  // Step 3: Poll for token
+  let interval = (deviceData.interval || 5) * 1000;
+
+  while (true) {
+    await new Promise(resolve => setTimeout(resolve, interval));
+
+    const tokenResponse = await fetch('{{ provider_url }}/oauth/token', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
+        device_code: deviceData.device_code,
+        client_id: CLIENT_ID
+      })
+    });
+
+    if (tokenResponse.ok) {
+      const tokens = await tokenResponse.json();
+      console.log(`Authenticated! Access token: ${tokens.access_token.slice(0, 20)}...`);
+      return tokens;
+    }
+
+    const error = (await tokenResponse.json()).error;
+    switch (error) {
+      case 'authorization_pending':
+        continue;
+      case 'slow_down':
+        interval += 5000;
+        continue;
+      case 'expired_token':
+        throw new Error('Device code expired');
+      case 'access_denied':
+        throw new Error('Access denied by user');
+      default:
+        throw new Error(`Unexpected error: ${error}`);
+    }
+  }
+}
+
+deviceFlow().catch(console.error);</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Rust -->
+            <div id="native-rust-tab" class="tab-content hidden">
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">// device_flow.rs
+use reqwest::Client;
+use serde::Deserialize;
+use std::time::Duration;
+
+const CLIENT_ID: &str = "YOUR_CLIENT_ID";
+
+#[derive(Deserialize)]
+struct DeviceResponse {
+    device_code: String,
+    user_code: String,
+    verification_uri: String,
+    expires_in: u64,
+    interval: Option&lt;u64&gt;,
+}
+
+#[derive(Deserialize)]
+struct TokenResponse {
+    access_token: String,
+    token_type: String,
+    expires_in: u64,
+}
+
+#[derive(Deserialize)]
+struct ErrorResponse {
+    error: String,
+}
+
+async fn device_flow() -&gt; Result&lt;TokenResponse, Box&lt;dyn std::error::Error&gt;&gt; {
+    let client = Client::new();
+
+    // Step 1: Request device code
+    let device_response: DeviceResponse = client
+        .post("{{ provider_url }}/oauth/device")
+        .form(&[
+            ("client_id", CLIENT_ID),
+            ("scope", "openid email profile"),
+        ])
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    // Step 2: Display to user
+    println!("\nTo sign in, visit: {}", device_response.verification_uri);
+    println!("Enter code: {}\n", device_response.user_code);
+
+    // Step 3: Poll for token
+    let mut interval = Duration::from_secs(device_response.interval.unwrap_or(5));
+
+    loop {
+        tokio::time::sleep(interval).await;
+
+        let response = client
+            .post("{{ provider_url }}/oauth/token")
+            .form(&[
+                ("grant_type", "urn:ietf:params:oauth:grant-type:device_code"),
+                ("device_code", &device_response.device_code),
+                ("client_id", CLIENT_ID),
+            ])
+            .send()
+            .await?;
+
+        if response.status().is_success() {
+            let tokens: TokenResponse = response.json().await?;
+            println!("Authenticated! Access token: {}...", &tokens.access_token[..20]);
+            return Ok(tokens);
+        }
+
+        let error: ErrorResponse = response.json().await?;
+        match error.error.as_str() {
+            "authorization_pending" => continue,
+            "slow_down" => {
+                interval += Duration::from_secs(5);
+                continue;
+            }
+            "expired_token" => return Err("Device code expired".into()),
+            "access_denied" => return Err("Access denied by user".into()),
+            e => return Err(format!("Unexpected error: {}", e).into()),
+        }
+    }
+}
+
+#[tokio::main]
+async fn main() {
+    if let Err(e) = device_flow().await {
+        eprintln!("Error: {}", e);
+    }
+}</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Response Reference -->
+            <h3 class="text-md font-semibold text-gray-300 mt-6 mb-3">Device Authorization Response</h3>
+            <div class="overflow-x-auto mb-4">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="border-b border-vouch-border">
+                            <th class="text-left py-2 pr-4 text-gray-300 font-medium">Field</th>
+                            <th class="text-left py-2 pr-4 text-gray-300 font-medium">Type</th>
+                            <th class="text-left py-2 text-gray-300 font-medium">Description</th>
+                        </tr>
+                    </thead>
+                    <tbody class="text-gray-400">
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4"><code class="text-vouch-accent">device_code</code></td>
+                            <td class="py-2 pr-4">string</td>
+                            <td class="py-2">Secret code for polling (do not display to user)</td>
+                        </tr>
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4"><code class="text-vouch-accent">user_code</code></td>
+                            <td class="py-2 pr-4">string</td>
+                            <td class="py-2">Human-readable code to display (format: <code class="text-vouch-accent">XXXX-XXXX</code>)</td>
+                        </tr>
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4"><code class="text-vouch-accent">verification_uri</code></td>
+                            <td class="py-2 pr-4">string</td>
+                            <td class="py-2">URL for user to visit in their browser</td>
+                        </tr>
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4"><code class="text-vouch-accent">expires_in</code></td>
+                            <td class="py-2 pr-4">number</td>
+                            <td class="py-2">Seconds until codes expire (default: 600)</td>
+                        </tr>
+                        <tr>
+                            <td class="py-2 pr-4"><code class="text-vouch-accent">interval</code></td>
+                            <td class="py-2 pr-4">number</td>
+                            <td class="py-2">Minimum polling interval in seconds (default: 5)</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <!-- Error Handling -->
+            <h3 class="text-md font-semibold text-gray-300 mb-3">Polling Errors</h3>
+            <div class="overflow-x-auto">
+                <table class="w-full text-sm">
+                    <thead>
+                        <tr class="border-b border-vouch-border">
+                            <th class="text-left py-2 pr-4 text-gray-300 font-medium">Error</th>
+                            <th class="text-left py-2 text-gray-300 font-medium">Action</th>
+                        </tr>
+                    </thead>
+                    <tbody class="text-gray-400">
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4"><code class="text-vouch-accent">authorization_pending</code></td>
+                            <td class="py-2">User hasn't completed authentication yet. Keep polling.</td>
+                        </tr>
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4"><code class="text-vouch-accent">slow_down</code></td>
+                            <td class="py-2">Polling too fast. Increase interval by 5 seconds.</td>
+                        </tr>
+                        <tr class="border-b border-vouch-border">
+                            <td class="py-2 pr-4"><code class="text-vouch-accent">expired_token</code></td>
+                            <td class="py-2">Device code expired. Start the flow over.</td>
+                        </tr>
+                        <tr>
+                            <td class="py-2 pr-4"><code class="text-vouch-accent">access_denied</code></td>
+                            <td class="py-2">User denied the authorization request.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- Vouch-Specific Claims -->
         <div class="mb-8">
             <h2 class="text-lg font-semibold text-gray-200 mb-4">Vouch-Specific Claims</h2>
@@ -1436,6 +1772,20 @@ async fn aggregate_data(
             el.classList.add('hidden');
         });
         document.getElementById('m2m-' + lang + '-tab').classList.remove('hidden');
+    }
+
+    function showNativeTab(lang) {
+        // Update tab buttons
+        document.querySelectorAll('[onclick^="showNativeTab"]').forEach(el => {
+            el.classList.remove('tab-active');
+        });
+        event.target.classList.add('tab-active');
+
+        // Update tab content
+        document.querySelectorAll('[id^="native-"][id$="-tab"]').forEach(el => {
+            el.classList.add('hidden');
+        });
+        document.getElementById('native-' + lang + '-tab').classList.remove('hidden');
     }
 
     function copyCode(button) {
