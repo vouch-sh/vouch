@@ -1,0 +1,468 @@
+name: Build AMI
+
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g., v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+
+jobs:
+  build-ami:
+    name: Build AMI (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            ec2_arch: x86_64
+            instance_type: m5.xlarge
+          - arch: aarch64
+            ec2_arch: arm64
+            instance_type: m6g.xlarge
+    outputs:
+      ami_id_x86_64: ${{ steps.register.outputs.ami_id_x86_64 }}
+      ami_id_aarch64: ${{ steps.register.outputs.ami_id_aarch64 }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Get version
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Download server RPM from release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          ARCH="${{ matrix.arch }}"
+          gh release download "${{ steps.version.outputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "vouch-server-${VERSION}-1.${ARCH}.rpm" \
+            --dir packaging/ami/
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get latest AL2023 AMI
+        id: ami
+        run: |
+          AMI_ID=$(aws ssm get-parameter \
+            --name "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-${{ matrix.arch }}" \
+            --query 'Parameter.Value' \
+            --output text)
+          echo "base_ami=${AMI_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Create build script
+        run: |
+          cat > /tmp/build-script.sh << 'BUILDSCRIPT'
+          #!/bin/bash
+          set -ex
+
+          # Install build dependencies
+          sudo dnf install -y \
+            python3-pip \
+            qemu-img \
+            xfsprogs \
+            e2fsprogs \
+            dosfstools \
+            squashfs-tools \
+            erofs-utils \
+            veritysetup \
+            cryptsetup \
+            dracut \
+            systemd-boot \
+            tar \
+            gzip \
+            git \
+            jq \
+            curl
+
+          # Install KIWI-NG
+          sudo pip3 install kiwi kiwi-boxed-plugin
+
+          # Install coldsnap for EBS snapshot upload
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          source ~/.cargo/env
+          cargo install coldsnap --locked
+
+          # Create build directory
+          mkdir -p /tmp/vouch-build
+          cd /tmp/vouch-build
+
+          # Extract uploaded files
+          tar xzf /tmp/ami-files.tar.gz
+
+          # Update version in appliance.kiwi
+          sed -i "s/<version>.*<\/version>/<version>${VERSION}<\/version>/" appliance.kiwi
+
+          # Create local repo for vouch-server RPM
+          mkdir -p /tmp/local-repo
+          cp *.rpm /tmp/local-repo/
+          createrepo_c /tmp/local-repo/
+
+          # Add local repo to KIWI config (insert before closing </image>)
+          sed -i '/<\/image>/i \
+              <repository priority="1" sourcetype="baseurl">\
+                  <source path="file:///tmp/local-repo"/>\
+              </repository>' appliance.kiwi
+
+          # Build the image
+          sudo kiwi-ng --color-output system build \
+            --description /tmp/vouch-build \
+            --target-dir /tmp/image \
+            --allow-existing-root
+
+          # Find the raw image
+          RAW_IMAGE=$(find /tmp/image -name "*.raw" | head -1)
+
+          if [ -z "$RAW_IMAGE" ]; then
+            echo "ERROR: No raw image found"
+            exit 1
+          fi
+
+          echo "Built image: $RAW_IMAGE"
+
+          # Upload to EBS snapshot using coldsnap
+          SNAPSHOT_ID=$(~/.cargo/bin/coldsnap upload "$RAW_IMAGE" \
+            --region "${AWS_REGION}" \
+            --wait)
+
+          echo "Created snapshot: $SNAPSHOT_ID"
+          echo "$SNAPSHOT_ID" > /tmp/snapshot-id.txt
+          BUILDSCRIPT
+          chmod +x /tmp/build-script.sh
+
+      - name: Package AMI files for upload
+        run: |
+          cd packaging/ami
+          tar czf /tmp/ami-files.tar.gz .
+
+      - name: Launch build instance
+        id: instance
+        run: |
+          # Create user data script
+          cat > /tmp/user-data.sh << 'EOF'
+          #!/bin/bash
+          # Signal that instance is ready
+          touch /tmp/instance-ready
+          EOF
+
+          # Launch AL2023 instance
+          INSTANCE_ID=$(aws ec2 run-instances \
+            --image-id "${{ steps.ami.outputs.base_ami }}" \
+            --instance-type "${{ matrix.instance_type }}" \
+            --iam-instance-profile Name=VouchAMIBuilder \
+            --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":30,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=vouch-ami-builder-${{ matrix.arch }}}]' \
+            --user-data file:///tmp/user-data.sh \
+            --query 'Instances[0].InstanceId' \
+            --output text)
+
+          echo "instance_id=${INSTANCE_ID}" >> "$GITHUB_OUTPUT"
+          echo "Launched instance: ${INSTANCE_ID}"
+
+          # Wait for instance to be running
+          aws ec2 wait instance-running --instance-ids "${INSTANCE_ID}"
+          echo "Instance is running"
+
+          # Wait for SSM to be available (with timeout)
+          for i in {1..30}; do
+            STATUS=$(aws ssm describe-instance-information \
+              --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
+              --query 'InstanceInformationList[0].PingStatus' \
+              --output text 2>/dev/null || echo "")
+            if [ "$STATUS" = "Online" ]; then
+              echo "SSM agent is online"
+              break
+            fi
+            echo "Waiting for SSM agent... (attempt $i/30)"
+            sleep 10
+          done
+
+      - name: Upload files to instance
+        run: |
+          # Upload AMI files via S3 (SSM doesn't support large file transfers)
+          BUCKET="vouch-ami-build-${RANDOM}"
+          aws s3 mb "s3://${BUCKET}" --region "${{ env.AWS_REGION }}"
+          aws s3 cp /tmp/ami-files.tar.gz "s3://${BUCKET}/ami-files.tar.gz"
+          aws s3 cp /tmp/build-script.sh "s3://${BUCKET}/build-script.sh"
+
+          echo "bucket=${BUCKET}" >> "$GITHUB_ENV"
+
+          # Download files on instance via SSM
+          aws ssm send-command \
+            --instance-ids "${{ steps.instance.outputs.instance_id }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[
+              'aws s3 cp s3://${BUCKET}/ami-files.tar.gz /tmp/ami-files.tar.gz',
+              'aws s3 cp s3://${BUCKET}/build-script.sh /tmp/build-script.sh',
+              'chmod +x /tmp/build-script.sh'
+            ]" \
+            --output-s3-bucket-name "${BUCKET}" \
+            --output-s3-key-prefix "ssm-output" \
+            --query 'Command.CommandId' \
+            --output text > /tmp/download-cmd-id.txt
+
+          # Wait for download command to complete
+          aws ssm wait command-executed \
+            --command-id "$(cat /tmp/download-cmd-id.txt)" \
+            --instance-id "${{ steps.instance.outputs.instance_id }}" || true
+
+      - name: Run build on instance
+        id: build
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          # Run the build script via SSM
+          COMMAND_ID=$(aws ssm send-command \
+            --instance-ids "${{ steps.instance.outputs.instance_id }}" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[
+              'export VERSION=${VERSION}',
+              'export AWS_REGION=${{ env.AWS_REGION }}',
+              '/tmp/build-script.sh 2>&1 | tee /tmp/build.log',
+              'aws s3 cp /tmp/snapshot-id.txt s3://${{ env.bucket }}/snapshot-id.txt',
+              'aws s3 cp /tmp/build.log s3://${{ env.bucket }}/build.log'
+            ]" \
+            --timeout-seconds 3600 \
+            --output-s3-bucket-name "${{ env.bucket }}" \
+            --output-s3-key-prefix "ssm-build" \
+            --query 'Command.CommandId' \
+            --output text)
+
+          echo "command_id=${COMMAND_ID}" >> "$GITHUB_OUTPUT"
+          echo "Started build command: ${COMMAND_ID}"
+
+          # Wait for build to complete (with polling)
+          for i in {1..120}; do
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "${COMMAND_ID}" \
+              --instance-id "${{ steps.instance.outputs.instance_id }}" \
+              --query 'Status' \
+              --output text 2>/dev/null || echo "Pending")
+
+            echo "Build status: ${STATUS} (check $i/120)"
+
+            if [ "$STATUS" = "Success" ]; then
+              echo "Build completed successfully"
+              break
+            elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ] || [ "$STATUS" = "TimedOut" ]; then
+              echo "Build failed with status: ${STATUS}"
+              # Download and show build log
+              aws s3 cp "s3://${{ env.bucket }}/build.log" /tmp/build.log || true
+              cat /tmp/build.log || true
+              exit 1
+            fi
+
+            sleep 30
+          done
+
+          # Download snapshot ID
+          aws s3 cp "s3://${{ env.bucket }}/snapshot-id.txt" /tmp/snapshot-id.txt
+          SNAPSHOT_ID=$(cat /tmp/snapshot-id.txt)
+          echo "snapshot_id=${SNAPSHOT_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Register AMI
+        id: register
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SNAPSHOT_ID="${{ steps.build.outputs.snapshot_id }}"
+
+          # Wait for snapshot to be available
+          echo "Waiting for snapshot ${SNAPSHOT_ID} to be available..."
+          aws ec2 wait snapshot-completed --snapshot-ids "${SNAPSHOT_ID}"
+
+          # Register the AMI
+          AMI_ID=$(aws ec2 register-image \
+            --name "vouch-server-${VERSION}-${{ matrix.arch }}" \
+            --description "Vouch Server ${VERSION} - Attestable AMI with dm-verity" \
+            --virtualization-type hvm \
+            --boot-mode uefi \
+            --architecture "${{ matrix.ec2_arch }}" \
+            --root-device-name /dev/xvda \
+            --block-device-mappings "DeviceName=/dev/xvda,Ebs={SnapshotId=${SNAPSHOT_ID},VolumeType=gp3,DeleteOnTermination=true}" \
+            --tpm-support v2.0 \
+            --ena-support \
+            --query 'ImageId' \
+            --output text)
+
+          echo "ami_id=${AMI_ID}" >> "$GITHUB_OUTPUT"
+          echo "ami_id_${{ matrix.arch }}=${AMI_ID}" >> "$GITHUB_OUTPUT"
+          echo "Registered AMI: ${AMI_ID}"
+
+          # Tag the AMI
+          aws ec2 create-tags --resources "${AMI_ID}" --tags \
+            "Key=Name,Value=vouch-server-${VERSION}" \
+            "Key=Version,Value=${VERSION}" \
+            "Key=Architecture,Value=${{ matrix.arch }}" \
+            "Key=BuildDate,Value=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            "Key=Repository,Value=${{ github.repository }}" \
+            "Key=Commit,Value=${{ github.sha }}"
+
+          # Tag the snapshot
+          aws ec2 create-tags --resources "${SNAPSHOT_ID}" --tags \
+            "Key=Name,Value=vouch-server-${VERSION}-${{ matrix.arch }}" \
+            "Key=Version,Value=${VERSION}"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          # Terminate build instance
+          if [ -n "${{ steps.instance.outputs.instance_id }}" ]; then
+            aws ec2 terminate-instances \
+              --instance-ids "${{ steps.instance.outputs.instance_id }}" || true
+          fi
+
+          # Delete S3 bucket
+          if [ -n "${{ env.bucket }}" ]; then
+            aws s3 rb "s3://${{ env.bucket }}" --force || true
+          fi
+
+  copy-ami:
+    name: Copy AMI to us-west-2
+    runs-on: ubuntu-latest
+    needs: build-ami
+    strategy:
+      matrix:
+        arch: [x86_64, aarch64]
+
+    steps:
+      - name: Get version
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (us-east-1)
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Get source AMI ID
+        id: source
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          AMI_ID=$(aws ec2 describe-images \
+            --filters "Name=name,Values=vouch-server-${VERSION}-${{ matrix.arch }}" \
+            --query 'Images[0].ImageId' \
+            --output text)
+          echo "ami_id=${AMI_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials (us-west-2)
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
+          aws-region: us-west-2
+
+      - name: Copy AMI to us-west-2
+        id: copy
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          SOURCE_AMI="${{ steps.source.outputs.ami_id }}"
+
+          # Copy the AMI
+          COPIED_AMI=$(aws ec2 copy-image \
+            --source-region us-east-1 \
+            --source-image-id "${SOURCE_AMI}" \
+            --name "vouch-server-${VERSION}-${{ matrix.arch }}" \
+            --description "Vouch Server ${VERSION} - Attestable AMI with dm-verity" \
+            --query 'ImageId' \
+            --output text)
+
+          echo "ami_id=${COPIED_AMI}" >> "$GITHUB_OUTPUT"
+          echo "Copied AMI to us-west-2: ${COPIED_AMI}"
+
+          # Wait for the copy to complete
+          aws ec2 wait image-available --image-ids "${COPIED_AMI}"
+
+          # Tag the copied AMI
+          aws ec2 create-tags --resources "${COPIED_AMI}" --tags \
+            "Key=Name,Value=vouch-server-${VERSION}" \
+            "Key=Version,Value=${VERSION}" \
+            "Key=Architecture,Value=${{ matrix.arch }}" \
+            "Key=CopiedFrom,Value=us-east-1"
+
+  summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [build-ami, copy-ami]
+    if: always()
+
+    steps:
+      - name: Get version
+        id: version
+        run: |
+          TAG="${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_AMI_BUILDER_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Generate summary
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+
+          echo "## Vouch Server AMI Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Version:** ${VERSION}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### AMI IDs" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Region | Architecture | AMI ID |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|--------------|--------|" >> $GITHUB_STEP_SUMMARY
+
+          for region in us-east-1 us-west-2; do
+            for arch in x86_64 aarch64; do
+              AMI_ID=$(aws ec2 describe-images \
+                --region "${region}" \
+                --filters "Name=name,Values=vouch-server-${VERSION}-${arch}" \
+                --query 'Images[0].ImageId' \
+                --output text 2>/dev/null || echo "N/A")
+              echo "| ${region} | ${arch} | \`${AMI_ID}\` |" >> $GITHUB_STEP_SUMMARY
+            done
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Features" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- dm-verity filesystem protection" >> $GITHUB_STEP_SUMMARY
+          echo "- TPM 2.0 attestation support" >> $GITHUB_STEP_SUMMARY
+          echo "- No SSH or interactive access" >> $GITHUB_STEP_SUMMARY
+          echo "- Configuration via AWS Secrets Manager" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Usage" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# Launch instance with configuration" >> $GITHUB_STEP_SUMMARY
+          echo "aws ec2 run-instances \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --image-id <AMI_ID> \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --instance-type t3.medium \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --metadata-options 'HttpTokens=required,InstanceMetadataTags=enabled' \\" >> $GITHUB_STEP_SUMMARY
+          echo "  --tag-specifications 'ResourceType=instance,Tags=[{Key=VouchSecretName,Value=vouch-server/config}]'" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY

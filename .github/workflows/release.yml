@@ -486,6 +486,9 @@ jobs:
           tar xzf "vouch-v${VERSION}-${TARGET}.tar.gz"
           cp "vouch-v${VERSION}-${TARGET}/vouch" .
           cp "vouch-v${VERSION}-${TARGET}/vouch-agent" .
+          # Extract server binary
+          tar xzf "vouch-server-v${VERSION}-${TARGET}.tar.gz"
+          cp "vouch-server-v${VERSION}-${TARGET}/vouch-server" .
 
       - name: Install nfpm
         run: |
@@ -506,6 +509,13 @@ jobs:
           VERSION="${{ steps.version.outputs.version }}" \
           ARCH="${{ matrix.nfpm_arch }}" \
           nfpm package --config ../packaging/nfpm.yaml --packager rpm
+
+      - name: Build Server RPM package
+        working-directory: artifacts
+        run: |
+          VERSION="${{ steps.version.outputs.version }}" \
+          ARCH="${{ matrix.nfpm_arch }}" \
+          nfpm package --config ../packaging/nfpm-server.yaml --packager rpm
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
