@@ -56,8 +56,6 @@
         <package name="gzip"/>
         <package name="tar"/>
         <package name="binutils"/>
-        <package name="jq"/>
-        <package name="curl"/>
         <!-- Memory management -->
         <package name="zram-generator"/>
         <package name="zram-generator-defaults"/>

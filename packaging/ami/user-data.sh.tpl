@@ -26,7 +26,7 @@ cleanup() {
     aws s3 cp /var/log/user-data.log "s3://${S3_BUCKET}/${S3_PREFIX}/build.log" || true
 
     # Signal completion by uploading status file
-    if [ $exit_code -eq 0 ]; then
+    if [ "$exit_code" -eq 0 ]; then
         echo "SUCCESS" > /tmp/build-status.txt
     else
         echo "FAILED" > /tmp/build-status.txt
@@ -42,12 +42,6 @@ dnf install -y -q \
     python3-poetry-core qemu-img veritysetup erofs-utils \
     cargo aws-nitro-tpm-tools
 echo "Build dependencies installed"
-
-# Install coldsnap for EBS snapshot upload
-echo "=== Installing coldsnap ==="
-cargo install --locked --quiet coldsnap
-export PATH="/root/.cargo/bin:$PATH"
-echo "Coldsnap installed: $(which coldsnap)"
 
 # Download and extract AMI build files
 echo "=== Downloading AMI build files ==="
@@ -85,6 +79,12 @@ fi
 
 echo "Built image: $RAW_IMAGE"
 ls -lh "$RAW_IMAGE"
+
+# Install coldsnap for EBS snapshot upload (after image build to fail fast)
+echo "=== Installing coldsnap ==="
+cargo install --locked --quiet coldsnap
+export PATH="/root/.cargo/bin:$PATH"
+echo "Coldsnap installed: $(which coldsnap)"
 
 # Upload to EBS snapshot using coldsnap
 echo "=== Uploading image to EBS snapshot ==="
