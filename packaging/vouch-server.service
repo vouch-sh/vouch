@@ -1,0 +1,23 @@
+[Unit]
+Description=Vouch identity server
+Documentation=https://github.com/vouch-sh/vouch
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=vouch
+Group=vouch
+EnvironmentFile=-/etc/vouch-server/env
+EnvironmentFile=-/run/vouch-server/env
+ExecStart=/usr/bin/vouch-server
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/vouch-server
+
+[Install]
+WantedBy=multi-user.target

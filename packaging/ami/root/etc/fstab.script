@@ -1,0 +1,2 @@
+#!/bin/bash
+sed -i 's|/boot/efi vfat defaults|/boot/efi vfat ro,nosuid,nodev,noexec,noatime|g' /etc/fstab

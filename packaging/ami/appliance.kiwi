@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<image schemaversion="7.5" name="vouch-server-attestable">
+    <description type="system">
+        <author>Vouch</author>
+        <contact>hello@vouch.sh</contact>
+        <specification>Vouch Server Attestable AMI (Amazon Linux 2023)</specification>
+        <license>BUSL-1.1</license>
+    </description>
+    <preferences>
+        <version>1.0.0</version>
+        <packagemanager>dnf</packagemanager>
+        <locale>en_US</locale>
+        <keytable>us</keytable>
+        <timezone>UTC</timezone>
+        <rpm-check-signatures>true</rpm-check-signatures>
+        <type
+            image="oem"
+            filesystem="xfs"
+            kernelcmdline="console=ttyS0 rd.shell=0 systemd.getty_auto=false rd.kiwi.verity_options=panic-on-corruption"
+            firmware="uefi"
+            overlayroot="true"
+            overlayroot_write_partition="false"
+            overlayroot_readonly_filesystem="erofs"
+            overlayroot_readonly_partsize="2048"
+            erofscompression="lz4hc,level=12"
+            eficsm="false"
+            verity_blocks="all"
+            bootpartition="false"
+            efipartsize="200"
+            editbootinstall="edit_boot_install.sh">
+            <oemconfig>
+                <oem-resize>false</oem-resize>
+            </oemconfig>
+            <bootloader name="systemd_boot" timeout="0"/>
+            <initrd action="setup">
+                <dracut uefi="true"/>
+            </initrd>
+            <size unit="G">4</size>
+        </type>
+    </preferences>
+
+    <repository priority="2" package_gpgcheck="true" sourcetype="mirrorlist" customize="add-gpg-key.sh">
+        <source path="https://cdn.amazonlinux.com/al2023/core/mirrors/latest/$basearch/mirror.list"/>
+    </repository>
+
+    <!-- Vouch package repository -->
+    <repository priority="1" package_gpgcheck="true" sourcetype="baseurl" customize="add-vouch-gpg-key.sh">
+        <source path="https://packages.vouch.sh/rpm/$basearch/"/>
+    </repository>
+
+    <packages type="image">
+        <namedCollection name="core"/>
+        <namedCollection name="ami-minimal"/>
+        <!-- Base system utilities -->
+        <package name="pciutils"/>
+        <package name="gzip"/>
+        <package name="tar"/>
+        <package name="binutils"/>
+        <package name="jq"/>
+        <package name="curl"/>
+        <!-- Memory management -->
+        <package name="zram-generator"/>
+        <package name="zram-generator-defaults"/>
+        <!-- Required for attestation and dm-verity -->
+        <package name="veritysetup"/>
+        <package name="systemd-boot"/>
+        <package name="cryptsetup"/>
+        <package name="dracut-kiwi-verity"/>
+        <package name="dracut-kiwi-overlay"/>
+        <package name="aws-nitro-tpm-tools"/>
+        <!-- Networking -->
+        <package name="systemd-resolved"/>
+        <package name="amazon-chrony-config"/>
+        <!-- AWS integration -->
+        <package name="awscli"/>
+        <!-- Vouch Server (from packages.vouch.sh) -->
+        <package name="vouch-server"/>
+        <!-- Don't install these packages -->
+        <ignore name="ec2-hibinit-agent"/>
+        <ignore name="grubby"/>
+        <ignore name="grub2-pc-modules"/>
+        <ignore name="grub2-tools"/>
+        <ignore name="grub2-efi-aa64-ec2"/>
+        <ignore name="grub2-efi-aa64"/>
+        <ignore name="grub2-efi-aa64-modules"/>
+        <ignore name="grub2-efi-x64-ec2"/>
+        <ignore name="grub2-efi-x64"/>
+        <ignore name="grub2-efi-x64-modules"/>
+        <ignore name="firewalld"/>
+        <ignore name="amazon-linux-repo-s3"/>
+        <ignore name="amazon-linux-repo-cdn"/>
+        <!-- Remove operator access by not installing these packages -->
+        <ignore name="openssh-server"/>
+        <ignore name="amazon-ssm-agent"/>
+        <ignore name="cloud-init"/>
+        <ignore name="cloud-init-cfg-ec2"/>
+        <ignore name="update-motd"/>
+        <ignore name="ec2-instance-connect"/>
+    </packages>
+    <packages type="bootstrap">
+        <package name="system-release"/>
+        <package name="dnf"/>
+        <!-- Ignoring these packages forces the use of the minimal versions -->
+        <ignore name="libcurl"/>
+        <ignore name="curl"/>
+        <ignore name="gnupg2"/>
+    </packages>
+</image>

@@ -1,0 +1,26 @@
+name: vouch-server
+arch: "${ARCH}"
+platform: linux
+version: "${VERSION}"
+maintainer: "Vouch <hello@vouch.sh>"
+description: "Vouch identity server - hardware-backed authentication"
+vendor: "Vouch"
+homepage: "https://github.com/vouch-sh/vouch"
+license: "BUSL-1.1"
+
+overrides:
+  rpm:
+    depends:
+      - systemd
+
+contents:
+  - src: ./vouch-server
+    dst: /usr/bin/vouch-server
+    file_info:
+      mode: 0755
+  - src: ../packaging/vouch-server.service
+    dst: /usr/lib/systemd/system/vouch-server.service
+    type: config
+
+scripts:
+  postinstall: ../packaging/postinstall-server.sh
