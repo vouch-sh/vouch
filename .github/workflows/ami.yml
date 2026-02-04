@@ -19,10 +19,77 @@ env:
   AWS_REGION: us-east-1
 
 jobs:
+  prepare:
+    name: Prepare build files
+    runs-on: ubuntu-latest
+    if: github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch'
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      s3_prefix: ${{ steps.s3.outputs.s3_prefix }}
+
+    steps:
+      - name: Determine tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ github.event.inputs.tag }}"
+          else
+            # For workflow_run, get the tag from the release workflow's ref
+            # The Release workflow only runs on tag pushes, so head_branch is the tag
+            TAG="${{ github.event.workflow_run.head_branch }}"
+          fi
+
+          # Validate tag format (must be vX.Y.Z or vX.Y.Z-suffix)
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "ERROR: Invalid tag format '${TAG}'. Must be a semantic version tag (e.g., v1.0.0 or v1.0.0-beta.1)"
+            exit 1
+          fi
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          fetch-depth: 1
+
+      - name: Verify tag exists
+        id: version
+        run: |
+          TAG="${{ steps.tag.outputs.tag }}"
+
+          # Verify this is actually a tag in the repository
+          if ! git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "ERROR: '${TAG}' is not a valid tag in this repository"
+            exit 1
+          fi
+
+          VERSION="${TAG#v}"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Building AMI for tag ${TAG} (version ${VERSION})"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: prepare-ami-build
+          mask-aws-account-id: true
+
+      - name: Set S3 paths
+        id: s3
+        run: |
+          echo "s3_prefix=ami-builds/${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload AMI files to S3
+        run: |
+          tar -czf /tmp/ami-files.tar.gz -C packaging/ami .
+          aws s3 cp /tmp/ami-files.tar.gz "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ steps.s3.outputs.s3_prefix }}/ami-files.tar.gz"
+
   build-ami:
     name: Build AMI (${{ matrix.arch }})
     runs-on: ubuntu-latest
-    if: github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch'
+    needs: prepare
     strategy:
       fail-fast: false
       matrix:
@@ -38,32 +105,13 @@ jobs:
       ami_id_aarch64: ${{ steps.register.outputs.ami_id_aarch64 }}
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Get version
-        id: version
-        run: |
-          TAG="${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-
-      - name: Download server RPM from release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          ARCH="${{ matrix.arch }}"
-          gh release download "${{ steps.version.outputs.tag }}" \
-            --repo "${{ github.repository }}" \
-            --pattern "vouch-server-${VERSION}-1.${ARCH}.rpm" \
-            --dir packaging/ami/
-
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
           role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
+          role-session-name: build-ami-${{ matrix.arch }}
+          mask-aws-account-id: true
 
       - name: Get latest AL2023 AMI
         id: ami
@@ -73,91 +121,6 @@ jobs:
             --query 'Parameter.Value' \
             --output text)
           echo "base_ami=${AMI_ID}" >> "$GITHUB_OUTPUT"
-
-      - name: Create build script
-        run: |
-          cat > /tmp/build-script.sh << 'BUILDSCRIPT'
-          #!/bin/bash
-          set -ex
-
-          # Install build dependencies
-          sudo dnf install -y \
-            python3-pip \
-            qemu-img \
-            xfsprogs \
-            e2fsprogs \
-            dosfstools \
-            squashfs-tools \
-            erofs-utils \
-            veritysetup \
-            cryptsetup \
-            dracut \
-            systemd-boot \
-            tar \
-            gzip \
-            git \
-            jq \
-            curl
-
-          # Install KIWI-NG
-          sudo pip3 install kiwi kiwi-boxed-plugin
-
-          # Install coldsnap for EBS snapshot upload
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-          source ~/.cargo/env
-          cargo install coldsnap --locked
-
-          # Create build directory
-          mkdir -p /tmp/vouch-build
-          cd /tmp/vouch-build
-
-          # Extract uploaded files
-          tar xzf /tmp/ami-files.tar.gz
-
-          # Update version in appliance.kiwi
-          sed -i "s/<version>.*<\/version>/<version>${VERSION}<\/version>/" appliance.kiwi
-
-          # Create local repo for vouch-server RPM
-          mkdir -p /tmp/local-repo
-          cp *.rpm /tmp/local-repo/
-          createrepo_c /tmp/local-repo/
-
-          # Add local repo to KIWI config (insert before closing </image>)
-          sed -i '/<\/image>/i \
-              <repository priority="1" sourcetype="baseurl">\
-                  <source path="file:///tmp/local-repo"/>\
-              </repository>' appliance.kiwi
-
-          # Build the image
-          sudo kiwi-ng --color-output system build \
-            --description /tmp/vouch-build \
-            --target-dir /tmp/image \
-            --allow-existing-root
-
-          # Find the raw image
-          RAW_IMAGE=$(find /tmp/image -name "*.raw" | head -1)
-
-          if [ -z "$RAW_IMAGE" ]; then
-            echo "ERROR: No raw image found"
-            exit 1
-          fi
-
-          echo "Built image: $RAW_IMAGE"
-
-          # Upload to EBS snapshot using coldsnap
-          SNAPSHOT_ID=$(~/.cargo/bin/coldsnap upload "$RAW_IMAGE" \
-            --region "${AWS_REGION}" \
-            --wait)
-
-          echo "Created snapshot: $SNAPSHOT_ID"
-          echo "$SNAPSHOT_ID" > /tmp/snapshot-id.txt
-          BUILDSCRIPT
-          chmod +x /tmp/build-script.sh
-
-      - name: Package AMI files for upload
-        run: |
-          cd packaging/ami
-          tar czf /tmp/ami-files.tar.gz .
 
       - name: Launch build instance
         id: instance
@@ -201,54 +164,83 @@ jobs:
             sleep 10
           done
 
-      - name: Upload files to instance
-        run: |
-          # Upload AMI files via S3 (SSM doesn't support large file transfers)
-          BUCKET="vouch-ami-build-${RANDOM}"
-          aws s3 mb "s3://${BUCKET}" --region "${{ env.AWS_REGION }}"
-          aws s3 cp /tmp/ami-files.tar.gz "s3://${BUCKET}/ami-files.tar.gz"
-          aws s3 cp /tmp/build-script.sh "s3://${BUCKET}/build-script.sh"
-
-          echo "bucket=${BUCKET}" >> "$GITHUB_ENV"
-
-          # Download files on instance via SSM
-          aws ssm send-command \
-            --instance-ids "${{ steps.instance.outputs.instance_id }}" \
-            --document-name "AWS-RunShellScript" \
-            --parameters "commands=[
-              'aws s3 cp s3://${BUCKET}/ami-files.tar.gz /tmp/ami-files.tar.gz',
-              'aws s3 cp s3://${BUCKET}/build-script.sh /tmp/build-script.sh',
-              'chmod +x /tmp/build-script.sh'
-            ]" \
-            --output-s3-bucket-name "${BUCKET}" \
-            --output-s3-key-prefix "ssm-output" \
-            --query 'Command.CommandId' \
-            --output text > /tmp/download-cmd-id.txt
-
-          # Wait for download command to complete
-          aws ssm wait command-executed \
-            --command-id "$(cat /tmp/download-cmd-id.txt)" \
-            --instance-id "${{ steps.instance.outputs.instance_id }}" || true
-
       - name: Run build on instance
         id: build
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
+          S3_PREFIX="${{ needs.prepare.outputs.s3_prefix }}"
 
-          # Run the build script via SSM
+          # Create build script that will run on the instance
+          # Following: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/build-sample-ami.html
+          cat > /tmp/build-script.sh << 'BUILDSCRIPT'
+          #!/bin/bash
+          set -ex
+
+          # Install build dependencies (per AWS docs)
+          sudo dnf install -y \
+            kiwi-cli python3-kiwi kiwi-systemdeps-core \
+            python3-poetry-core qemu-img veritysetup erofs-utils \
+            cargo aws-nitro-tpm-tools
+
+          # Install coldsnap for EBS snapshot upload
+          cargo install --locked coldsnap
+          export PATH="$HOME/.cargo/bin:$PATH"
+
+          # Extract AMI build files (downloaded by SSM commands before this script runs)
+          mkdir -p /tmp/ami-build
+          tar -xzf /tmp/ami-files.tar.gz -C /tmp/ami-build
+          cd /tmp/ami-build
+
+          # Update version in appliance.kiwi
+          sed -i "s/<version>.*<\/version>/<version>${VERSION}<\/version>/" appliance.kiwi
+
+          # Build the image (vouch-server RPM pulled from packages.vouch.sh)
+          sudo kiwi-ng --color-output system build \
+            --description /tmp/ami-build \
+            --target-dir /tmp/image \
+            --allow-existing-root
+
+          # Find the raw image
+          RAW_IMAGE=$(find /tmp/image -name "*.raw" | head -1)
+
+          if [ -z "$RAW_IMAGE" ]; then
+            echo "ERROR: No raw image found"
+            exit 1
+          fi
+
+          echo "Built image: $RAW_IMAGE"
+
+          # Upload to EBS snapshot using coldsnap
+          SNAPSHOT_ID=$(coldsnap upload "$RAW_IMAGE" --region "${AWS_REGION}" --wait)
+
+          echo "Created snapshot: $SNAPSHOT_ID"
+          echo "$SNAPSHOT_ID" > /tmp/snapshot-id.txt
+
+          # Upload snapshot ID to S3
+          aws s3 cp /tmp/snapshot-id.txt "s3://${S3_BUCKET}/${S3_PREFIX}/snapshot-id.txt"
+          BUILDSCRIPT
+
+          # Upload build script to S3
+          aws s3 cp /tmp/build-script.sh "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/${{ matrix.arch }}/build-script.sh"
+
+          # Run the build via SSM
           COMMAND_ID=$(aws ssm send-command \
             --instance-ids "${{ steps.instance.outputs.instance_id }}" \
             --document-name "AWS-RunShellScript" \
             --parameters "commands=[
               'export VERSION=${VERSION}',
               'export AWS_REGION=${{ env.AWS_REGION }}',
+              'export S3_BUCKET=${{ vars.AMI_BUILD_BUCKET }}',
+              'export S3_PREFIX=${S3_PREFIX}/${{ matrix.arch }}',
+              'aws s3 cp s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/ami-files.tar.gz /tmp/ami-files.tar.gz',
+              'aws s3 cp s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/${{ matrix.arch }}/build-script.sh /tmp/build-script.sh',
+              'chmod +x /tmp/build-script.sh',
               '/tmp/build-script.sh 2>&1 | tee /tmp/build.log',
-              'aws s3 cp /tmp/snapshot-id.txt s3://${{ env.bucket }}/snapshot-id.txt',
-              'aws s3 cp /tmp/build.log s3://${{ env.bucket }}/build.log'
+              'aws s3 cp /tmp/build.log s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/${{ matrix.arch }}/build.log'
             ]" \
             --timeout-seconds 3600 \
-            --output-s3-bucket-name "${{ env.bucket }}" \
-            --output-s3-key-prefix "ssm-build" \
+            --output-s3-bucket-name "${{ vars.AMI_BUILD_BUCKET }}" \
+            --output-s3-key-prefix "${S3_PREFIX}/${{ matrix.arch }}/ssm-output" \
             --query 'Command.CommandId' \
             --output text)
 
@@ -271,7 +263,7 @@ jobs:
             elif [ "$STATUS" = "Failed" ] || [ "$STATUS" = "Cancelled" ] || [ "$STATUS" = "TimedOut" ]; then
               echo "Build failed with status: ${STATUS}"
               # Download and show build log
-              aws s3 cp "s3://${{ env.bucket }}/build.log" /tmp/build.log || true
+              aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/${{ matrix.arch }}/build.log" /tmp/build.log || true
               cat /tmp/build.log || true
               exit 1
             fi
@@ -280,14 +272,33 @@ jobs:
           done
 
           # Download snapshot ID
-          aws s3 cp "s3://${{ env.bucket }}/snapshot-id.txt" /tmp/snapshot-id.txt
+          aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/${{ matrix.arch }}/snapshot-id.txt" /tmp/snapshot-id.txt
           SNAPSHOT_ID=$(cat /tmp/snapshot-id.txt)
           echo "snapshot_id=${SNAPSHOT_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Check for existing AMI (immutability)
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          AMI_NAME="vouch-server-${VERSION}-${{ matrix.arch }}"
+
+          # Check if an AMI with this name already exists
+          EXISTING_AMI=$(aws ec2 describe-images \
+            --filters "Name=name,Values=${AMI_NAME}" \
+            --query 'Images[0].ImageId' \
+            --output text 2>/dev/null || echo "None")
+
+          if [ "$EXISTING_AMI" != "None" ] && [ -n "$EXISTING_AMI" ]; then
+            echo "ERROR: AMI '${AMI_NAME}' already exists (${EXISTING_AMI})"
+            echo "AMI builds are immutable. To rebuild, first deregister the existing AMI."
+            exit 1
+          fi
+
+          echo "No existing AMI found with name '${AMI_NAME}', proceeding with registration"
 
       - name: Register AMI
         id: register
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
           SNAPSHOT_ID="${{ steps.build.outputs.snapshot_id }}"
 
           # Wait for snapshot to be available
@@ -335,56 +346,66 @@ jobs:
               --instance-ids "${{ steps.instance.outputs.instance_id }}" || true
           fi
 
-          # Delete S3 bucket
-          if [ -n "${{ env.bucket }}" ]; then
-            aws s3 rb "s3://${{ env.bucket }}" --force || true
-          fi
+          # Delete build artifacts from S3 (arch-specific directory)
+          aws s3 rm "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}/" --recursive || true
 
   copy-ami:
     name: Copy AMI to us-west-2
     runs-on: ubuntu-latest
-    needs: build-ami
+    needs: [prepare, build-ami]
     strategy:
       matrix:
         arch: [x86_64, aarch64]
 
     steps:
-      - name: Get version
-        id: version
-        run: |
-          TAG="${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-
-      - name: Configure AWS credentials (us-east-1)
+      - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
           role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
           aws-region: us-east-1
+          role-session-name: copy-ami-${{ matrix.arch }}
+          mask-aws-account-id: true
+
+      - name: Check for existing AMI in us-west-2 (immutability)
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          AMI_NAME="vouch-server-${VERSION}-${{ matrix.arch }}"
+
+          # Check if an AMI with this name already exists in us-west-2
+          EXISTING_AMI=$(aws ec2 describe-images \
+            --region us-west-2 \
+            --filters "Name=name,Values=${AMI_NAME}" \
+            --query 'Images[0].ImageId' \
+            --output text 2>/dev/null || echo "None")
+
+          if [ "$EXISTING_AMI" != "None" ] && [ -n "$EXISTING_AMI" ]; then
+            echo "ERROR: AMI '${AMI_NAME}' already exists in us-west-2 (${EXISTING_AMI})"
+            echo "AMI builds are immutable. To rebuild, first deregister the existing AMI."
+            exit 1
+          fi
+
+          echo "No existing AMI found with name '${AMI_NAME}' in us-west-2, proceeding with copy"
 
       - name: Get source AMI ID
         id: source
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
           AMI_ID=$(aws ec2 describe-images \
+            --region us-east-1 \
             --filters "Name=name,Values=vouch-server-${VERSION}-${{ matrix.arch }}" \
             --query 'Images[0].ImageId' \
             --output text)
           echo "ami_id=${AMI_ID}" >> "$GITHUB_OUTPUT"
 
-      - name: Configure AWS credentials (us-west-2)
-        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
-        with:
-          role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
-          aws-region: us-west-2
-
       - name: Copy AMI to us-west-2
         id: copy
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
           SOURCE_AMI="${{ steps.source.outputs.ami_id }}"
 
           # Copy the AMI
           COPIED_AMI=$(aws ec2 copy-image \
+            --region us-west-2 \
             --source-region us-east-1 \
             --source-image-id "${SOURCE_AMI}" \
             --name "vouch-server-${VERSION}-${{ matrix.arch }}" \
@@ -396,10 +417,10 @@ jobs:
           echo "Copied AMI to us-west-2: ${COPIED_AMI}"
 
           # Wait for the copy to complete
-          aws ec2 wait image-available --image-ids "${COPIED_AMI}"
+          aws ec2 wait image-available --region us-west-2 --image-ids "${COPIED_AMI}"
 
           # Tag the copied AMI
-          aws ec2 create-tags --resources "${COPIED_AMI}" --tags \
+          aws ec2 create-tags --region us-west-2 --resources "${COPIED_AMI}" --tags \
             "Key=Name,Value=vouch-server-${VERSION}" \
             "Key=Version,Value=${VERSION}" \
             "Key=Architecture,Value=${{ matrix.arch }}" \
@@ -408,25 +429,20 @@ jobs:
   summary:
     name: Build Summary
     runs-on: ubuntu-latest
-    needs: [build-ami, copy-ami]
+    needs: [prepare, build-ami, copy-ami]
     if: always()
 
     steps:
-      - name: Get version
-        id: version
-        run: |
-          TAG="${{ github.event.inputs.tag || github.event.workflow_run.head_branch }}"
-          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
-
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
-          role-to-assume: ${{ secrets.AWS_AMI_BUILDER_ROLE_ARN }}
+          role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
           aws-region: us-east-1
+          role-session-name: ami-summary
 
       - name: Generate summary
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
 
           echo "## Vouch Server AMI Build Summary" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -466,3 +482,8 @@ jobs:
           echo "  --metadata-options 'HttpTokens=required,InstanceMetadataTags=enabled' \\" >> $GITHUB_STEP_SUMMARY
           echo "  --tag-specifications 'ResourceType=instance,Tags=[{Key=VouchSecretName,Value=vouch-server/config}]'" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup shared S3 files
+        run: |
+          # Delete the shared ami-files.tar.gz uploaded by prepare job
+          aws s3 rm "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ needs.prepare.outputs.s3_prefix }}/ami-files.tar.gz" || true

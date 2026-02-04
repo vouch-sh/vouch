@@ -43,6 +43,11 @@
         <source path="https://cdn.amazonlinux.com/al2023/core/mirrors/latest/$basearch/mirror.list"/>
     </repository>
 
+    <!-- Vouch package repository -->
+    <repository priority="1" package_gpgcheck="true" sourcetype="baseurl" customize="add-vouch-gpg-key.sh">
+        <source path="https://packages.vouch.sh/rpm/$basearch/"/>
+    </repository>
+
     <packages type="image">
         <namedCollection name="core"/>
         <namedCollection name="ami-minimal"/>
@@ -68,7 +73,7 @@
         <package name="amazon-chrony-config"/>
         <!-- AWS integration -->
         <package name="awscli"/>
-        <!-- Vouch Server (local RPM from build) -->
+        <!-- Vouch Server (from packages.vouch.sh) -->
         <package name="vouch-server"/>
         <!-- Don't install these packages -->
         <ignore name="ec2-hibinit-agent"/>
