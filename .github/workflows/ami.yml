@@ -266,14 +266,11 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          # Terminate build instance
+          # Terminate build instance (S3 artifacts cleaned by lifecycle policy)
           if [ -n "${{ steps.instance.outputs.instance_id }}" ]; then
             aws ec2 terminate-instances \
               --instance-ids "${{ steps.instance.outputs.instance_id }}" || true
           fi
-
-          # Delete build artifacts from S3 (arch-specific directory)
-          aws s3 rm "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}/" --recursive || true
 
   copy-ami:
     name: Copy AMI to us-west-2
@@ -408,8 +405,3 @@ jobs:
           echo "  --metadata-options 'HttpTokens=required,InstanceMetadataTags=enabled' \\" >> $GITHUB_STEP_SUMMARY
           echo "  --tag-specifications 'ResourceType=instance,Tags=[{Key=VouchSecretName,Value=vouch-server/config}]'" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY
-
-      - name: Cleanup shared S3 files
-        run: |
-          # Delete the shared files uploaded by prepare job
-          aws s3 rm "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ needs.prepare.outputs.s3_prefix }}/ami-files.tar.gz" || true
