@@ -69,8 +69,8 @@
         <!-- Networking -->
         <package name="systemd-resolved"/>
         <package name="amazon-chrony-config"/>
-        <!-- AWS integration -->
-        <package name="awscli"/>
+        <!-- AWS integration (v2 has no curl dependency) -->
+        <package name="awscli-2"/>
         <!-- Vouch Server (from packages.vouch.sh) -->
         <package name="vouch-server"/>
         <!-- Don't install these packages -->
@@ -98,7 +98,9 @@
     <packages type="bootstrap">
         <package name="system-release"/>
         <package name="dnf"/>
-        <!-- Use minimal gnupg for smaller image -->
+        <!-- Use minimal versions for smaller image (matches ami-minimal group) -->
+        <ignore name="libcurl"/>
+        <ignore name="curl"/>
         <ignore name="gnupg2"/>
     </packages>
 </image>

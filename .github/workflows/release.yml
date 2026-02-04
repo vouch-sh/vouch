@@ -496,6 +496,17 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y nfpm
 
+      - name: Import GPG key for RPM signing
+        run: |
+          echo "${{ secrets.GPG_PRIVATE_KEY }}" | gpg --batch --import
+          # Export the key ID for nfpm
+          GPG_KEY_ID=$(gpg --list-secret-keys --keyid-format LONG | grep sec | head -1 | awk '{print $2}' | cut -d'/' -f2)
+          echo "GPG_KEY_ID=${GPG_KEY_ID}" >> "$GITHUB_ENV"
+          # Export key to file for nfpm
+          gpg --batch --yes --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" \
+            --export-secret-keys --armor > /tmp/gpg-key.asc
+          echo "GPG_KEY_FILE=/tmp/gpg-key.asc" >> "$GITHUB_ENV"
+
       - name: Build DEB package
         working-directory: artifacts
         run: |
@@ -505,17 +516,29 @@ jobs:
 
       - name: Build RPM package
         working-directory: artifacts
+        env:
+          NFPM_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           VERSION="${{ steps.version.outputs.version }}" \
           ARCH="${{ matrix.nfpm_arch }}" \
+          GPG_KEY_FILE="${{ env.GPG_KEY_FILE }}" \
+          GPG_KEY_ID="${{ env.GPG_KEY_ID }}" \
           nfpm package --config ../packaging/nfpm.yaml --packager rpm
 
       - name: Build Server RPM package
         working-directory: artifacts
+        env:
+          NFPM_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: |
           VERSION="${{ steps.version.outputs.version }}" \
           ARCH="${{ matrix.nfpm_arch }}" \
+          GPG_KEY_FILE="${{ env.GPG_KEY_FILE }}" \
+          GPG_KEY_ID="${{ env.GPG_KEY_ID }}" \
           nfpm package --config ../packaging/nfpm-server.yaml --packager rpm
+
+      - name: Cleanup GPG key
+        if: always()
+        run: rm -f /tmp/gpg-key.asc
 
       - name: Upload package artifacts
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
