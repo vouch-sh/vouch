@@ -76,6 +76,7 @@
         <!-- Don't install these packages -->
         <!-- Keep curl-minimal instead of full curl (pulled by awscli) -->
         <ignore name="curl"/>
+        <ignore name="libcurl"/>
         <ignore name="ec2-hibinit-agent"/>
         <ignore name="grubby"/>
         <ignore name="grub2-pc-modules"/>
