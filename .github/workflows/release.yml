@@ -504,8 +504,11 @@ jobs:
           echo "GPG_KEY_ID=${GPG_KEY_ID}" >> "$GITHUB_ENV"
           # Export key to file for nfpm
           gpg --batch --yes --pinentry-mode loopback --passphrase "${{ secrets.GPG_PASSPHRASE }}" \
-            --export-secret-keys --armor > /tmp/gpg-key.asc
+            --export-secret-keys --armor "${GPG_KEY_ID}" > /tmp/gpg-key.asc
           echo "GPG_KEY_FILE=/tmp/gpg-key.asc" >> "$GITHUB_ENV"
+          # Verify the key file was created
+          echo "Key file size: $(wc -c < /tmp/gpg-key.asc) bytes"
+          head -1 /tmp/gpg-key.asc
 
       - name: Build DEB package
         working-directory: artifacts
@@ -517,24 +520,30 @@ jobs:
       - name: Build RPM package
         working-directory: artifacts
         env:
-          NFPM_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          NFPM_RPM_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_KEY_FILE: ${{ env.GPG_KEY_FILE }}
+          GPG_KEY_ID: ${{ env.GPG_KEY_ID }}
         run: |
+          echo "Signing with key ID: ${GPG_KEY_ID}"
+          echo "Key file exists: $(test -f ${GPG_KEY_FILE} && echo yes || echo no)"
           VERSION="${{ steps.version.outputs.version }}" \
           ARCH="${{ matrix.nfpm_arch }}" \
-          GPG_KEY_FILE="${{ env.GPG_KEY_FILE }}" \
-          GPG_KEY_ID="${{ env.GPG_KEY_ID }}" \
           nfpm package --config ../packaging/nfpm.yaml --packager rpm
+          # Verify signature
+          rpm -qpi vouch-*.rpm | grep -i signature || echo "WARNING: Package not signed!"
 
       - name: Build Server RPM package
         working-directory: artifacts
         env:
-          NFPM_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          NFPM_RPM_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+          GPG_KEY_FILE: ${{ env.GPG_KEY_FILE }}
+          GPG_KEY_ID: ${{ env.GPG_KEY_ID }}
         run: |
           VERSION="${{ steps.version.outputs.version }}" \
           ARCH="${{ matrix.nfpm_arch }}" \
-          GPG_KEY_FILE="${{ env.GPG_KEY_FILE }}" \
-          GPG_KEY_ID="${{ env.GPG_KEY_ID }}" \
           nfpm package --config ../packaging/nfpm-server.yaml --packager rpm
+          # Verify signature
+          rpm -qpi vouch-server-*.rpm | grep -i signature || echo "WARNING: Package not signed!"
 
       - name: Cleanup GPG key
         if: always()
