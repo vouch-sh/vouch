@@ -136,6 +136,7 @@ jobs:
           INSTANCE_ID=$(aws ec2 run-instances \
             --image-id "${{ steps.ami.outputs.base_ami }}" \
             --instance-type "${{ matrix.instance_type }}" \
+            --subnet-id "${{ vars.AMI_BUILD_SUBNET_ID }}" \
             --iam-instance-profile Name=VouchAMIBuilder \
             --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":30,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
             --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=vouch-ami-builder-${{ matrix.arch }}}]' \

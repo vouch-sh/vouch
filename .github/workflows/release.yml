@@ -213,7 +213,7 @@ jobs:
 
       - name: Install GNU tar (macOS)
         if: runner.os == 'macOS'
-        run: brew install gnu-tar
+        run: brew list gnu-tar &>/dev/null || brew install gnu-tar
 
       - name: Setup Rust toolchain
         run: |
