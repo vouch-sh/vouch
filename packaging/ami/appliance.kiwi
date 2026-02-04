@@ -69,9 +69,7 @@
         <!-- Networking -->
         <package name="systemd-resolved"/>
         <package name="amazon-chrony-config"/>
-        <!-- AWS integration (use minimal curl to avoid conflicts) -->
-        <package name="curl-minimal"/>
-        <package name="libcurl-minimal"/>
+        <!-- AWS integration -->
         <package name="awscli"/>
         <!-- Vouch Server (from packages.vouch.sh) -->
         <package name="vouch-server"/>
@@ -100,9 +98,7 @@
     <packages type="bootstrap">
         <package name="system-release"/>
         <package name="dnf"/>
-        <!-- Ignoring these packages forces the use of the minimal versions -->
-        <ignore name="libcurl"/>
-        <ignore name="curl"/>
+        <!-- Use minimal gnupg for smaller image -->
         <ignore name="gnupg2"/>
     </packages>
 </image>
