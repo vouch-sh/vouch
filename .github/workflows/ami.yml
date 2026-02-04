@@ -117,7 +117,7 @@ jobs:
         id: ami
         run: |
           AMI_ID=$(aws ssm get-parameter \
-            --name "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-${{ matrix.arch }}" \
+            --name "/aws/service/ami-amazon-linux-latest/al2023-ami-minimal-kernel-6.12-${{ matrix.ec2_arch }}" \
             --query 'Parameter.Value' \
             --output text)
           echo "base_ami=${AMI_ID}" >> "$GITHUB_OUTPUT"
