@@ -59,8 +59,8 @@ tower = { workspace = true, optional = true }
 sea-query = { version = "=0.32.7", default-features = false, features = ["backend-sqlite", "backend-postgres", "derive"] }
 
 # AWS SDK for DSQL token generation and credential loading
-aws-config = { version = "=1.8.12", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "sso"] }
-aws-sdk-dsql = { version = "=1.49.0", default-features = false, features = ["rt-tokio"] }
+aws-config = { version = "=1.8.13", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "sso"] }
+aws-sdk-dsql = { version = "=1.50.0", default-features = false, features = ["rt-tokio"] }
 
 [dev-dependencies]
 tower = { workspace = true }
