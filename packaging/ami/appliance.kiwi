@@ -43,8 +43,8 @@
         <source path="https://cdn.amazonlinux.com/al2023/core/mirrors/latest/$basearch/mirror.list"/>
     </repository>
 
-    <!-- Vouch package repository (TODO: enable gpgcheck after releasing signed packages) -->
-    <repository priority="1" package_gpgcheck="false" sourcetype="baseurl">
+    <!-- Vouch package repository -->
+    <repository priority="1" package_gpgcheck="true" sourcetype="baseurl" customize="add-vouch-gpg-key.sh">
         <source path="https://packages.vouch.sh/rpm/$basearch/"/>
     </repository>
 
