@@ -85,7 +85,6 @@ jobs:
         run: |
           tar -czf /tmp/ami-files.tar.gz -C packaging/ami .
           aws s3 cp /tmp/ami-files.tar.gz "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ steps.s3.outputs.s3_prefix }}/ami-files.tar.gz"
-          aws s3 cp packaging/ami/build-ami.sh "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ steps.s3.outputs.s3_prefix }}/build-ami.sh"
 
   build-ami:
     name: Build AMI (${{ matrix.arch }})
@@ -414,4 +413,3 @@ jobs:
         run: |
           # Delete the shared files uploaded by prepare job
           aws s3 rm "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ needs.prepare.outputs.s3_prefix }}/ami-files.tar.gz" || true
-          aws s3 rm "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ needs.prepare.outputs.s3_prefix }}/build-ami.sh" || true
