@@ -85,6 +85,7 @@ jobs:
         run: |
           tar -czf /tmp/ami-files.tar.gz -C packaging/ami .
           aws s3 cp /tmp/ami-files.tar.gz "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ steps.s3.outputs.s3_prefix }}/ami-files.tar.gz"
+          aws s3 cp packaging/ami/build-ami.sh "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ steps.s3.outputs.s3_prefix }}/build-ami.sh"
 
   build-ami:
     name: Build AMI (${{ matrix.arch }})
@@ -103,6 +104,12 @@ jobs:
       ami_id_arm64: ${{ steps.register.outputs.ami_id_arm64 }}
 
     steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          sparse-checkout: packaging/ami
+          sparse-checkout-cone-mode: false
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
         with:
@@ -123,14 +130,15 @@ jobs:
       - name: Launch build instance
         id: instance
         run: |
-          # Create user data script
-          cat > /tmp/user-data.sh << 'EOF'
-          #!/bin/bash
-          # Signal that instance is ready
-          touch /tmp/instance-ready
-          EOF
+          # Generate user-data from template
+          export VERSION="${{ needs.prepare.outputs.version }}"
+          export AWS_REGION="${{ env.AWS_REGION }}"
+          export S3_BUCKET="${{ vars.AMI_BUILD_BUCKET }}"
+          export S3_PREFIX="${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}"
+          export S3_PARENT_PREFIX="${{ needs.prepare.outputs.s3_prefix }}"
+          envsubst < packaging/ami/user-data.sh.tpl > /tmp/user-data.sh
 
-          # Launch AL2023 instance
+          # Launch AL2023 instance with user-data
           INSTANCE_ID=$(aws ec2 run-instances \
             --image-id "${{ steps.ami.outputs.base_ami }}" \
             --instance-type "${{ matrix.instance_type }}" \
@@ -147,158 +155,51 @@ jobs:
 
           # Wait for instance to be running
           aws ec2 wait instance-running --instance-ids "${INSTANCE_ID}"
-          echo "Instance is running"
+          echo "Instance is running, build started via user-data"
 
-          # Wait for SSM to be available (with timeout)
-          for i in {1..30}; do
-            STATUS=$(aws ssm describe-instance-information \
-              --filters "Key=InstanceIds,Values=${INSTANCE_ID}" \
-              --query 'InstanceInformationList[0].PingStatus' \
-              --output text 2>/dev/null || echo "")
-            if [ "$STATUS" = "Online" ]; then
-              echo "SSM agent is online"
-              break
-            fi
-            echo "Waiting for SSM agent... (attempt $i/30)"
-            sleep 10
-          done
-
-      - name: Run build on instance
+      - name: Wait for build to complete
         id: build
         run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          S3_PREFIX="${{ needs.prepare.outputs.s3_prefix }}"
+          S3_PREFIX="${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}"
 
-          # Create build script that will run on the instance
-          # Following: https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/build-sample-ami.html
-          cat > /tmp/build-script.sh << 'BUILDSCRIPT'
-          #!/bin/bash
-          set -ex
+          echo "Waiting for build to complete (polling S3 for status)..."
 
-          # Install build dependencies (per AWS docs)
-          sudo dnf install -y \
-            kiwi-cli python3-kiwi kiwi-systemdeps-core \
-            python3-poetry-core qemu-img veritysetup erofs-utils \
-            cargo aws-nitro-tpm-tools
-
-          # Install coldsnap for EBS snapshot upload
-          cargo install --locked coldsnap
-          export PATH="$HOME/.cargo/bin:$PATH"
-
-          # Extract AMI build files (downloaded by SSM commands before this script runs)
-          mkdir -p /tmp/ami-build
-          tar -xzf /tmp/ami-files.tar.gz -C /tmp/ami-build
-          cd /tmp/ami-build
-
-          # Update version in appliance.kiwi
-          sed -i "s/<version>.*<\/version>/<version>${VERSION}<\/version>/" appliance.kiwi
-
-          # Build the image (vouch-server RPM pulled from packages.vouch.sh)
-          sudo kiwi-ng --color-output system build \
-            --description /tmp/ami-build \
-            --target-dir /tmp/image \
-            --allow-existing-root
-
-          # Find the raw image
-          RAW_IMAGE=$(find /tmp/image -name "*.raw" | head -1)
-
-          if [ -z "$RAW_IMAGE" ]; then
-            echo "ERROR: No raw image found"
-            exit 1
-          fi
-
-          echo "Built image: $RAW_IMAGE"
-
-          # Upload to EBS snapshot using coldsnap
-          SNAPSHOT_ID=$(coldsnap upload "$RAW_IMAGE" --region "${AWS_REGION}" --wait)
-
-          echo "Created snapshot: $SNAPSHOT_ID"
-          echo "$SNAPSHOT_ID" > /tmp/snapshot-id.txt
-
-          # Upload snapshot ID to S3
-          aws s3 cp /tmp/snapshot-id.txt "s3://${S3_BUCKET}/${S3_PREFIX}/snapshot-id.txt"
-          BUILDSCRIPT
-
-          # Upload build script to S3
-          aws s3 cp /tmp/build-script.sh "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/${{ matrix.arch }}/build-script.sh"
-
-          # Run the build via SSM
-          COMMAND_ID=$(aws ssm send-command \
-            --instance-ids "${{ steps.instance.outputs.instance_id }}" \
-            --document-name "AWS-RunShellScript" \
-            --parameters "commands=[
-              'export VERSION=${VERSION}',
-              'export AWS_REGION=${{ env.AWS_REGION }}',
-              'export S3_BUCKET=${{ vars.AMI_BUILD_BUCKET }}',
-              'export S3_PREFIX=${S3_PREFIX}/${{ matrix.arch }}',
-              'aws s3 cp s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/ami-files.tar.gz /tmp/ami-files.tar.gz',
-              'aws s3 cp s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/${{ matrix.arch }}/build-script.sh /tmp/build-script.sh',
-              'chmod +x /tmp/build-script.sh',
-              'bash -c \"set -o pipefail; /tmp/build-script.sh 2>&1 | tee /tmp/build.log\"',
-              'aws s3 cp /tmp/build.log s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/${{ matrix.arch }}/build.log'
-            ]" \
-            --timeout-seconds 3600 \
-            --output-s3-bucket-name "${{ vars.AMI_BUILD_BUCKET }}" \
-            --output-s3-key-prefix "${S3_PREFIX}/${{ matrix.arch }}/ssm-output" \
-            --query 'Command.CommandId' \
-            --output text)
-
-          echo "command_id=${COMMAND_ID}" >> "$GITHUB_OUTPUT"
-          echo "Started build command: ${COMMAND_ID}"
-
-          # Wait for build to complete (max 1 hour)
-          # Each waiter call is ~100 seconds (20 attempts * 5s), so 36 loops = ~1 hour
-          echo "Waiting for build to complete..."
-          for attempt in {1..36}; do
-            # Each waiter call waits up to ~5 minutes (60 attempts * 5 seconds)
-            if aws ssm wait command-executed \
-                --command-id "${COMMAND_ID}" \
-                --instance-id "${{ steps.instance.outputs.instance_id }}" 2>/dev/null; then
-              echo "Command completed"
+          # Poll for build-status.txt (max 1 hour)
+          for attempt in {1..120}; do
+            if aws s3 ls "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/build-status.txt" >/dev/null 2>&1; then
+              echo "Build status file found"
               break
             fi
 
-            # Check if still in progress or actually failed
-            STATUS=$(aws ssm get-command-invocation \
-              --command-id "${COMMAND_ID}" \
-              --instance-id "${{ steps.instance.outputs.instance_id }}" \
-              --query 'Status' \
-              --output text 2>/dev/null || echo "Pending")
-
-            if [ "$STATUS" != "InProgress" ] && [ "$STATUS" != "Pending" ]; then
-              echo "Command reached terminal state: ${STATUS}"
-              break
+            if [ $attempt -eq 120 ]; then
+              echo "Build timed out after 1 hour"
+              # Try to get logs anyway
+              aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/build.log" /tmp/build.log 2>/dev/null && cat /tmp/build.log || true
+              exit 1
             fi
 
-            echo "Build still in progress (attempt $attempt/36)..."
+            echo "Build in progress (attempt $attempt/120)..."
+            sleep 30
           done
 
-          # Check final status and get output
-          INVOCATION=$(aws ssm get-command-invocation \
-            --command-id "${COMMAND_ID}" \
-            --instance-id "${{ steps.instance.outputs.instance_id }}" \
-            --output json)
-
-          STATUS=$(echo "$INVOCATION" | jq -r '.Status')
+          # Download and check status
+          aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/build-status.txt" /tmp/build-status.txt
+          STATUS=$(cat /tmp/build-status.txt)
           echo "Build status: ${STATUS}"
 
-          # Show command output (truncated to ~24KB by SSM, but useful for debugging)
-          echo "=== SSM Command Output ==="
-          echo "$INVOCATION" | jq -r '.StandardOutputContent // "No stdout"' | tail -100
-          echo "=== SSM Command Errors ==="
-          echo "$INVOCATION" | jq -r '.StandardErrorContent // "No stderr"' | tail -50
+          # Always download and show the build log
+          echo "=== Build Log ==="
+          aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/build.log" /tmp/build.log 2>/dev/null && cat /tmp/build.log || echo "No build log found"
 
-          if [ "$STATUS" != "Success" ]; then
-            echo "Build failed with status: ${STATUS}"
-            # Also try to download build log from S3
-            aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/${{ matrix.arch }}/build.log" /tmp/build.log 2>/dev/null && cat /tmp/build.log || true
+          if [ "$STATUS" != "SUCCESS" ]; then
+            echo "Build failed"
             exit 1
           fi
 
           echo "Build completed successfully"
 
           # Download snapshot ID
-          aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/${{ matrix.arch }}/snapshot-id.txt" /tmp/snapshot-id.txt
+          aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/snapshot-id.txt" /tmp/snapshot-id.txt
           SNAPSHOT_ID=$(cat /tmp/snapshot-id.txt)
           echo "snapshot_id=${SNAPSHOT_ID}" >> "$GITHUB_OUTPUT"
 
@@ -511,5 +412,6 @@ jobs:
 
       - name: Cleanup shared S3 files
         run: |
-          # Delete the shared ami-files.tar.gz uploaded by prepare job
+          # Delete the shared files uploaded by prepare job
           aws s3 rm "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ needs.prepare.outputs.s3_prefix }}/ami-files.tar.gz" || true
+          aws s3 rm "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ needs.prepare.outputs.s3_prefix }}/build-ami.sh" || true
