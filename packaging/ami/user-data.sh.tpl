@@ -40,7 +40,7 @@ echo "=== Installing build dependencies ==="
 dnf install -y -q \
     kiwi-cli python3-kiwi kiwi-systemdeps-core \
     python3-poetry-core qemu-img veritysetup erofs-utils \
-    cargo aws-nitro-tpm-tools
+    aws-nitro-tpm-tools
 echo "Build dependencies installed"
 
 # Download and extract AMI build files
@@ -82,9 +82,11 @@ ls -lh "$RAW_IMAGE"
 
 # Install coldsnap for EBS snapshot upload (after image build to fail fast)
 echo "=== Installing coldsnap ==="
-cargo install --locked --quiet coldsnap
-export PATH="/root/.cargo/bin:$PATH"
-echo "Coldsnap installed: $(which coldsnap)"
+COLDSNAP_VERSION="v0.9.1"
+ARCH=$(uname -m)
+curl -sL "https://github.com/jplock/coldsnap/releases/download/${COLDSNAP_VERSION}/coldsnap-${COLDSNAP_VERSION}-${ARCH}-unknown-linux-musl.tar.gz" | tar -xzf - -C /usr/local/bin
+chmod +x /usr/local/bin/coldsnap
+echo "Coldsnap installed: $(coldsnap --version)"
 
 # Upload to EBS snapshot using coldsnap
 echo "=== Uploading image to EBS snapshot ==="
