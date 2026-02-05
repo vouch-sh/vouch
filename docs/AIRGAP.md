@@ -162,12 +162,14 @@ Vouch requires several cryptographic keys for different purposes. All key genera
 | Key | Type | Format | Required | Purpose |
 |-----|------|--------|----------|---------|
 | JWT Secret | Symmetric | UTF-8 (32+ chars) | **Yes** | Sign OAuth tokens and sessions |
-| SSH CA Key | Ed25519 | OpenSSH PEM | Optional | Sign SSH certificates |
-| OIDC Signing Key | P-256 ECDSA | PKCS#8 PEM | Optional* | Sign OIDC ID tokens |
-| TLS Certificate | RSA/EC | PEM | Optional | HTTPS encryption |
-| TLS Private Key | RSA/EC | PEM | Optional | HTTPS encryption |
+| SSH CA Key | Ed25519 | Base64-encoded OpenSSH PEM | Optional | Sign SSH certificates |
+| OIDC Signing Key | P-256 ECDSA | Base64-encoded PKCS#8 PEM | Optional* | Sign OIDC ID tokens |
+| TLS Certificate | RSA/EC | Base64-encoded PEM | Optional | HTTPS encryption |
+| TLS Private Key | RSA/EC | Base64-encoded PEM | Optional | HTTPS encryption |
 
 *Auto-generates ephemeral key if not provided (not recommended for production).
+
+> **Note:** All PEM-formatted keys and certificates must be base64-encoded when passed via environment variables. This ensures proper handling of newlines and special characters.
 
 #### JWT Secret Generation (Required)
 
@@ -207,12 +209,12 @@ ssh-keygen -l -f ssh_ca_key
 cat ssh_ca_key.pub
 ```
 
-**Environment variable format:**
+**Environment variable format (base64-encoded):**
 ```bash
-# Option 1: Provide key content directly (preferred for containers)
-export VOUCH_SSH_CA_KEY="$(cat ssh_ca_key)"
+# Option 1: Provide base64-encoded key content (preferred for containers)
+export VOUCH_SSH_CA_KEY="$(base64 -i ssh_ca_key | tr -d '\n')"
 
-# Option 2: Provide path to key file
+# Option 2: Provide path to key file (file contains raw PEM, not base64)
 export VOUCH_SSH_CA_KEY_PATH="/secrets/ssh_ca_key"
 ```
 
@@ -241,10 +243,10 @@ openssl ec -in oidc_signing_key.pem -text -noout 2>/dev/null | head -3
 openssl ec -in oidc_signing_key.pem -pubout -out oidc_signing_key.pub
 ```
 
-**Environment variable format:**
+**Environment variable format (base64-encoded):**
 ```bash
-# Provide PEM content directly
-export VOUCH_OIDC_SIGNING_KEY="$(cat oidc_signing_key.pem)"
+# Provide base64-encoded PEM content
+export VOUCH_OIDC_SIGNING_KEY="$(base64 -i oidc_signing_key.pem | tr -d '\n')"
 ```
 
 #### TLS Certificate Generation
@@ -301,6 +303,45 @@ For high-availability deployments, PostgreSQL is supported:
 export VOUCH_DATABASE_URL="postgres://user:password@db.internal:5432/vouch"
 ```
 
+### Aurora DSQL Multi-Region Configuration
+
+For multi-region or multi-AZ Aurora DSQL deployments, use `dsql_endpoints` in the S3 configuration to map locations to connection strings.
+
+**AZ-specific routing** (recommended for lowest latency):
+
+```json
+{
+  "dsql_endpoints": {
+    "us-east-1a": "postgres://vouch@abc123.dsql.us-east-1.on.aws/postgres",
+    "us-east-1b": "postgres://vouch@abc123.dsql.us-east-1.on.aws/postgres",
+    "us-west-2a": "postgres://vouch@xyz789.dsql.us-west-2.on.aws/postgres",
+    "us-west-2b": "postgres://vouch@xyz789.dsql.us-west-2.on.aws/postgres"
+  }
+}
+```
+
+**Region-based routing** (simpler configuration):
+
+```json
+{
+  "dsql_endpoints": {
+    "us-east-1": "postgres://vouch@abc123.dsql.us-east-1.on.aws/postgres",
+    "us-west-2": "postgres://vouch@xyz789.dsql.us-west-2.on.aws/postgres"
+  }
+}
+```
+
+**Lookup priority:**
+1. `AWS_AZ` (e.g., `us-east-1a`) - for AZ-specific endpoint routing
+2. `AWS_REGION` / `AWS_DEFAULT_REGION` (e.g., `us-east-1`) - fallback for regional endpoints
+
+On EC2, both `AWS_AZ` and `AWS_REGION` are automatically set by `vouch-fetch-config.sh` from instance metadata.
+
+**Requirements:**
+- `AWS_AZ` or `AWS_REGION` environment variable must be set (automatic on EC2 via vouch-fetch-config.sh)
+- IAM role must have `dsql:DbConnect` permission for the database user
+- `dsql_endpoints` takes priority over `database_url` when both are present
+
 **Database migrations run automatically on server startup.**
 
 ### Step 6: Configure Vouch Server
@@ -340,27 +381,30 @@ VOUCH_BASE_URL=https://auth.internal
 
 # -----------------------------------------------------------------------------
 # TLS Configuration (base64-encoded PEM)
+# Generate with: base64 -i cert.pem | tr -d '\n'
 # -----------------------------------------------------------------------------
 
 VOUCH_TLS_CERT=<base64-encoded-certificate>
 VOUCH_TLS_KEY=<base64-encoded-private-key>
 
 # -----------------------------------------------------------------------------
-# SSH CA Configuration
+# SSH CA Configuration (base64-encoded PEM)
+# Generate with: base64 -i ssh_ca_key | tr -d '\n'
 # -----------------------------------------------------------------------------
 
-# SSH CA private key (PEM content, takes precedence over path)
-VOUCH_SSH_CA_KEY=<ssh-ca-private-key-pem>
+# SSH CA private key (base64-encoded PEM, takes precedence over path)
+VOUCH_SSH_CA_KEY=<base64-encoded-ssh-ca-private-key>
 
-# Or use a file path instead:
+# Or use a file path instead (file contains raw PEM, not base64):
 # VOUCH_SSH_CA_KEY_PATH=/secrets/ssh_ca_key
 
 # -----------------------------------------------------------------------------
 # OIDC Provider Configuration (for GCP Workload Identity Federation)
+# Generate with: base64 -i oidc_signing_key.pem | tr -d '\n'
 # -----------------------------------------------------------------------------
 
-# Vouch acts as an OIDC provider - this key signs the ID tokens
-VOUCH_OIDC_SIGNING_KEY=<oidc-signing-key-pem>
+# Vouch acts as an OIDC provider - this key signs the ID tokens (base64-encoded PEM)
+VOUCH_OIDC_SIGNING_KEY=<base64-encoded-oidc-signing-key>
 
 # -----------------------------------------------------------------------------
 # External Identity Provider (Optional)
@@ -427,11 +471,11 @@ chmod 600 /etc/vouch/vouch.env
 | `VOUCH_LISTEN_ADDR` | No | `0.0.0.0:3000` | Server bind address |
 | `VOUCH_BASE_URL` | No | `https://{rp_id}` | External URL |
 | `VOUCH_SESSION_HOURS` | No | `8` | Session duration |
-| `VOUCH_SSH_CA_KEY` | No | - | SSH CA key (PEM content) |
-| `VOUCH_SSH_CA_KEY_PATH` | No | `./ssh_ca_key` | SSH CA key file path |
-| `VOUCH_OIDC_SIGNING_KEY` | No | auto-generate | OIDC token signing key |
-| `VOUCH_TLS_CERT` | No | - | TLS cert (base64 PEM) |
-| `VOUCH_TLS_KEY` | No | - | TLS key (base64 PEM) |
+| `VOUCH_SSH_CA_KEY` | No | - | SSH CA key (base64-encoded PEM) |
+| `VOUCH_SSH_CA_KEY_PATH` | No | `./ssh_ca_key` | SSH CA key file path (raw PEM) |
+| `VOUCH_OIDC_SIGNING_KEY` | No | auto-generate | OIDC token signing key (base64-encoded PEM) |
+| `VOUCH_TLS_CERT` | No | - | TLS cert (base64-encoded PEM) |
+| `VOUCH_TLS_KEY` | No | - | TLS key (base64-encoded PEM) |
 | `VOUCH_ALLOWED_DOMAINS` | No | - | Allowed email domains |
 | `VOUCH_DPOP_ENABLED` | No | `true` | Enable DPoP support |
 | `VOUCH_CLEANUP_INTERVAL` | No | `15` | Cleanup interval (minutes) |

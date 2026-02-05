@@ -5,9 +5,11 @@ set -e
 TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
     -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
 
-# Get region from instance metadata
+# Get region and availability zone from instance metadata
 REGION=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" \
     http://169.254.169.254/latest/meta-data/placement/region)
+AZ=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" \
+    http://169.254.169.254/latest/meta-data/placement/availability-zone)
 
 # Get parameter name from instance tags via IMDS (default: /vouch-server/config)
 # Requires instance launched with: --metadata-options "InstanceMetadataTags=enabled"
@@ -29,8 +31,13 @@ aws ssm get-parameter \
     --query Parameter.Value \
     --output text > /run/vouch-server/env
 
+# Append AWS_REGION and AWS_AZ to the env file
+# These are used by vouch-server for DSQL endpoint resolution
+echo "AWS_REGION=$REGION" >> /run/vouch-server/env
+echo "AWS_AZ=$AZ" >> /run/vouch-server/env
+
 # Secure the env file
 chmod 600 /run/vouch-server/env
 chown vouch:vouch /run/vouch-server/env
 
-echo "Configuration loaded from Parameter Store: $PARAM_NAME"
+echo "Configuration loaded from Parameter Store: $PARAM_NAME (region: $REGION, az: $AZ)"

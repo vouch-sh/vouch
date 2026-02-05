@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Server configuration.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use secrecy::{ExposeSecret, SecretString};
+use std::collections::HashMap;
 
 use crate::db::{self, Pool};
 
@@ -509,3 +510,41 @@ impl ServerConfig {
         Ok(())
     }
 }
+
+/// Resolve DSQL endpoint from AZ or region map.
+///
+/// Lookup priority:
+/// 1. `AWS_AZ` (e.g., "us-east-1a") - for AZ-specific endpoint routing
+/// 2. `AWS_REGION` / `AWS_DEFAULT_REGION` (e.g., "us-east-1") - fallback for regional endpoints
+///
+/// Returns an error if no environment variable is set or if the location is not in the map.
+pub fn resolve_dsql_endpoints(endpoints: &HashMap<String, String>) -> Result<String> {
+    // Try AZ first (e.g., "us-east-1a")
+    if let Ok(az) = std::env::var("AWS_AZ") {
+        if let Some(url) = endpoints.get(&az) {
+            tracing::debug!("Resolved DSQL endpoint using AWS_AZ={}", az);
+            return Ok(url.clone());
+        }
+        // AZ not in map, fall through to region lookup
+        tracing::debug!(
+            "AWS_AZ={} not found in dsql_endpoints, trying region fallback",
+            az
+        );
+    }
+
+    // Fall back to region (e.g., "us-east-1")
+    let region = std::env::var("AWS_REGION")
+        .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+        .context("Neither AWS_AZ nor AWS_REGION is set - required for dsql_endpoints lookup")?;
+
+    let url = endpoints.get(&region).with_context(|| {
+        format!(
+            "Location '{}' not found in dsql_endpoints. Available: {:?}",
+            region,
+            endpoints.keys().collect::<Vec<_>>()
+        )
+    })?;
+
+    Ok(url.clone())
+}
+

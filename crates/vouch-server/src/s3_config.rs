@@ -25,6 +25,7 @@ use aws_sdk_s3::Client as S3Client;
 use axum_server::tls_rustls::RustlsConfig;
 use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
@@ -111,6 +112,9 @@ pub struct S3Config {
     pub base_url: Option<String>,
     /// Database URL.
     pub database_url: Option<String>,
+    /// Regional DSQL endpoints. Maps AWS region to full connection string.
+    /// Example: { "us-east-1": "postgres://vouch@abc123.dsql.us-east-1.on.aws/postgres" }
+    pub dsql_endpoints: Option<HashMap<String, String>>,
     /// JWT signing secret.
     pub jwt_secret: Option<String>,
     /// Session duration in hours.
@@ -348,17 +352,54 @@ async fn apply_config_update(
 impl ServerConfig {
     /// Merge S3 configuration into this config.
     ///
-    /// S3 values override existing values where present.
-    ///
     /// # Arguments
     /// * `s3` - The S3 configuration to merge
-    /// * `is_runtime_update` - If true, security-sensitive fields are blocked from update
+    /// * `is_runtime_update` - If true, only TLS config can be updated
     ///
-    /// # Security
-    /// When `is_runtime_update` is true, the following fields are blocked:
-    /// - `jwt_secret` - Would invalidate all sessions and enable token forgery
-    /// - `database_url` - Connection pool is immutable after startup
+    /// # Runtime Updates
+    /// Only TLS certificates can be updated at runtime (for hot-reload).
+    /// All other configuration changes require a server restart.
     pub fn merge_s3_config(&mut self, s3: &S3Config, is_runtime_update: bool) {
+        // Runtime updates: ONLY allow TLS changes
+        if is_runtime_update {
+            if let Some(tls) = &s3.tls {
+                if let Some(v) = &tls.cert {
+                    self.tls_cert = Some(v.clone());
+                }
+                if let Some(v) = &tls.key {
+                    self.tls_key = Some(SecretString::from(v.clone()));
+                }
+            }
+            // All other fields are ignored at runtime
+            return;
+        }
+
+        // Initial startup: apply all config
+
+        // Database URL - priority: dsql_endpoints > database_url
+        if let Some(endpoints) = &s3.dsql_endpoints {
+            match crate::config::resolve_dsql_endpoints(endpoints) {
+                Ok(resolved) => {
+                    // Log which location was used (AZ or region)
+                    let location = std::env::var("AWS_AZ")
+                        .or_else(|_| std::env::var("AWS_REGION"))
+                        .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+                        .unwrap_or_else(|_| "unknown".into());
+                    tracing::info!("Using dsql_endpoints for location {}", location);
+                    self.database_url = resolved;
+                }
+                Err(e) => {
+                    tracing::error!("Failed to resolve dsql_endpoints: {e}");
+                    // Fall through to database_url if present
+                    if let Some(v) = &s3.database_url {
+                        self.database_url = v.clone();
+                    }
+                }
+            }
+        } else if let Some(v) = &s3.database_url {
+            self.database_url = v.clone();
+        }
+
         // Core settings
         if let Some(v) = &s3.listen_addr {
             self.listen_addr = v.clone();
@@ -372,27 +413,9 @@ impl ServerConfig {
         if let Some(v) = &s3.base_url {
             self.base_url = v.clone();
         }
-
-        // Security-sensitive fields - blocked at runtime
-        if let Some(v) = &s3.database_url {
-            if is_runtime_update {
-                tracing::warn!(
-                    "Ignoring database_url change from S3 config - requires server restart"
-                );
-            } else {
-                self.database_url = v.clone();
-            }
-        }
         if let Some(v) = &s3.jwt_secret {
-            if is_runtime_update {
-                tracing::warn!(
-                    "Ignoring jwt_secret change from S3 config - requires server restart for security"
-                );
-            } else {
-                self.jwt_secret = SecretString::from(v.clone());
-            }
+            self.jwt_secret = SecretString::from(v.clone());
         }
-
         if let Some(v) = s3.session_hours {
             self.session_hours = v;
         }
@@ -624,65 +647,53 @@ mod tests {
     }
 
     #[test]
-    fn test_merge_s3_config_runtime_blocks_sensitive_fields() {
-        use secrecy::ExposeSecret;
-
+    fn test_merge_s3_config_runtime_only_allows_tls() {
         let mut config = crate::test_utils::test_config();
-        let original_jwt_secret = config.jwt_secret.expose_secret().to_string();
-        let original_database_url = config.database_url.clone();
+        let original_rp_id = config.rp_id.clone();
+        let original_session_hours = config.session_hours;
 
         let s3 = S3Config {
-            jwt_secret: Some("attacker_controlled_secret_that_is_long_enough".to_string()),
-            database_url: Some("postgres://attacker:pass@evil.com/db".to_string()),
-            session_hours: Some(24), // This should still work
+            rp_id: Some("new.example.com".to_string()),
+            session_hours: Some(24),
+            tls: Some(S3TlsConfig {
+                cert: Some("new_cert".to_string()),
+                key: Some("new_key".to_string()),
+            }),
             ..Default::default()
         };
 
-        // Runtime update should block sensitive fields
+        // Runtime update - only TLS should change
         config.merge_s3_config(&s3, true);
 
-        // Sensitive fields should be unchanged
-        assert_eq!(
-            config.jwt_secret.expose_secret(),
-            &original_jwt_secret,
-            "jwt_secret should be blocked at runtime"
-        );
-        assert_eq!(
-            config.database_url, original_database_url,
-            "database_url should be blocked at runtime"
-        );
+        // rp_id and session_hours should be UNCHANGED
+        assert_eq!(config.rp_id, original_rp_id);
+        assert_eq!(config.session_hours, original_session_hours);
 
-        // Non-sensitive fields should still update
-        assert_eq!(
-            config.session_hours, 24,
-            "session_hours should update at runtime"
-        );
+        // TLS should be updated
+        assert_eq!(config.tls_cert, Some("new_cert".to_string()));
+        assert!(config.tls_key.is_some());
     }
 
     #[test]
-    fn test_merge_s3_config_startup_allows_sensitive_fields() {
-        use secrecy::ExposeSecret;
-
+    fn test_merge_s3_config_startup_allows_all() {
         let mut config = crate::test_utils::test_config();
 
         let s3 = S3Config {
-            jwt_secret: Some("new_jwt_secret_that_is_long_enough_for_test".to_string()),
-            database_url: Some("postgres://new:pass@new.com/db".to_string()),
+            rp_id: Some("new.example.com".to_string()),
+            session_hours: Some(24),
+            tls: Some(S3TlsConfig {
+                cert: Some("new_cert".to_string()),
+                key: Some("new_key".to_string()),
+            }),
             ..Default::default()
         };
 
-        // Initial merge should allow all fields
+        // Startup (not runtime) - all fields should update
         config.merge_s3_config(&s3, false);
 
-        assert_eq!(
-            config.jwt_secret.expose_secret(),
-            "new_jwt_secret_that_is_long_enough_for_test",
-            "jwt_secret should be allowed at startup"
-        );
-        assert_eq!(
-            config.database_url, "postgres://new:pass@new.com/db",
-            "database_url should be allowed at startup"
-        );
+        assert_eq!(config.rp_id, "new.example.com");
+        assert_eq!(config.session_hours, 24);
+        assert_eq!(config.tls_cert, Some("new_cert".to_string()));
     }
 
     #[test]
@@ -712,6 +723,32 @@ mod tests {
         assert_eq!(
             config.allowed_domains,
             Some(vec!["example.com".to_string(), "test.com".to_string()])
+        );
+    }
+
+    #[test]
+    fn test_s3_config_dsql_endpoints_deserialization() {
+        let json = r#"{
+            "version": 1,
+            "dsql_endpoints": {
+                "us-east-1": "postgres://vouch@abc123.dsql.us-east-1.on.aws/postgres",
+                "us-west-2": "postgres://vouch@xyz789.dsql.us-west-2.on.aws/postgres"
+            },
+            "rp_id": "vouch.example.com"
+        }"#;
+
+        let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
+
+        assert!(config.dsql_endpoints.is_some());
+        let endpoints = config.dsql_endpoints.unwrap();
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(
+            endpoints.get("us-east-1"),
+            Some(&"postgres://vouch@abc123.dsql.us-east-1.on.aws/postgres".to_string())
+        );
+        assert_eq!(
+            endpoints.get("us-west-2"),
+            Some(&"postgres://vouch@xyz789.dsql.us-west-2.on.aws/postgres".to_string())
         );
     }
 }
