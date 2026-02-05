@@ -34,4 +34,4 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-proptest = { version = "=1.9.0", default-features = false, features = ["std"] }
+proptest = { version = "=1.10.0", default-features = false, features = ["std"] }

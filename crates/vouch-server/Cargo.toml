@@ -25,7 +25,7 @@ tokio = { workspace = true }
 axum = { workspace = true }
 axum-extra = { version = "=0.12.5", default-features = false, features = ["cookie", "typed-header"] }
 headers = { version = "=0.4.1", default-features = false }
-time = { version = "=0.3.46", default-features = false }
+time = { version = "=0.3.47", default-features = false }
 sqlx = { version = "=0.8.6", default-features = false, features = ["runtime-tokio", "migrate", "derive", "macros", "sqlite", "postgres", "tls-rustls"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -64,7 +64,7 @@ aws-sdk-dsql = { version = "=1.50.0", default-features = false, features = ["rt-
 aws-sdk-s3 = { version = "=1.122.0", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "rustls"] }
 
 # Lock-free atomic config updates
-arc-swap = "1.7"
+arc-swap = { version = "=1.8.1", default-features = false }
 
 # Optional TLS termination
 axum-server = { version = "=0.8.0", default-features = false, features = ["tls-rustls"] }
