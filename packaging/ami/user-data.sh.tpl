@@ -86,11 +86,11 @@ COLDSNAP_VERSION="v0.9.1"
 ARCH=$(uname -m)
 curl -sL "https://github.com/jplock/coldsnap/releases/download/${COLDSNAP_VERSION}/coldsnap-${COLDSNAP_VERSION}-${ARCH}-unknown-linux-musl.tar.gz" | tar -xzf - -C /usr/local/bin
 chmod +x /usr/local/bin/coldsnap
-echo "Coldsnap installed: $(coldsnap --version)"
+echo "Coldsnap installed: $(which coldsnap)"
 
 # Upload to EBS snapshot using coldsnap
 echo "=== Uploading image to EBS snapshot ==="
-SNAPSHOT_ID=$(coldsnap upload "$RAW_IMAGE" --region "${AWS_REGION}" --wait)
+SNAPSHOT_ID=$(coldsnap --region "${AWS_REGION}" upload "$RAW_IMAGE" --wait)
 echo "=== Coldsnap upload completed ==="
 
 echo "Created snapshot: $SNAPSHOT_ID"
