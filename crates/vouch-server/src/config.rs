@@ -196,6 +196,34 @@ pub struct Args {
     /// GitHub App Client Secret (for OAuth user authentication).
     #[arg(long, env = "VOUCH_GITHUB_APP_CLIENT_SECRET")]
     pub github_app_client_secret: Option<String>,
+
+    /// TLS certificate (base64-encoded PEM). If not set, HTTP is used.
+    #[arg(long, env = "VOUCH_TLS_CERT")]
+    pub tls_cert: Option<String>,
+
+    /// TLS private key (base64-encoded PEM). Required if VOUCH_TLS_CERT is set.
+    #[arg(long, env = "VOUCH_TLS_KEY")]
+    pub tls_key: Option<String>,
+
+    /// S3 bucket for configuration file. If set, config is loaded from S3.
+    #[arg(long, env = "VOUCH_S3_CONFIG_BUCKET")]
+    pub s3_config_bucket: Option<String>,
+
+    /// S3 key for configuration file.
+    #[arg(
+        long,
+        env = "VOUCH_S3_CONFIG_KEY",
+        default_value = "config/vouch-server.json"
+    )]
+    pub s3_config_key: String,
+
+    /// S3 region (optional, uses default credential chain region if not set).
+    #[arg(long, env = "VOUCH_S3_CONFIG_REGION")]
+    pub s3_config_region: Option<String>,
+
+    /// S3 config polling interval in seconds.
+    #[arg(long, env = "VOUCH_S3_CONFIG_POLL_INTERVAL", default_value = "60")]
+    pub s3_config_poll_interval: u64,
 }
 
 // ============================================================================
@@ -277,6 +305,18 @@ pub struct ServerConfig {
     pub github_app_client_id: Option<String>,
     /// GitHub App Client Secret (for OAuth user authentication).
     pub github_app_client_secret: Option<SecretString>,
+    /// TLS certificate (base64-encoded PEM format).
+    pub tls_cert: Option<String>,
+    /// TLS private key (base64-encoded PEM format).
+    pub tls_key: Option<SecretString>,
+    /// S3 config bucket (if configured).
+    pub s3_config_bucket: Option<String>,
+    /// S3 config key.
+    pub s3_config_key: String,
+    /// S3 config region.
+    pub s3_config_region: Option<String>,
+    /// S3 config poll interval in seconds.
+    pub s3_config_poll_interval: u64,
 }
 
 impl ServerConfig {
@@ -360,6 +400,12 @@ impl ServerConfig {
             github_webhook_secret: args.github_webhook_secret.map(SecretString::from),
             github_app_client_id: args.github_app_client_id,
             github_app_client_secret: args.github_app_client_secret.map(SecretString::from),
+            tls_cert: args.tls_cert,
+            tls_key: args.tls_key.map(SecretString::from),
+            s3_config_bucket: args.s3_config_bucket,
+            s3_config_key: args.s3_config_key,
+            s3_config_region: args.s3_config_region,
+            s3_config_poll_interval: args.s3_config_poll_interval,
         })
     }
 
@@ -446,5 +492,11 @@ impl ServerConfig {
         self.github_app_client_secret
             .as_ref()
             .map(|s| s.expose_secret())
+    }
+
+    /// Check if TLS is configured (both cert and key present).
+    #[must_use]
+    pub fn tls_configured(&self) -> bool {
+        self.tls_cert.is_some() && self.tls_key.is_some()
     }
 }

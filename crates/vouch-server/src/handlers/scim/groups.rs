@@ -51,7 +51,7 @@ pub async fn list_groups(
         Err(_) => groups.len(),
     };
 
-    let base_url = &state.config.base_url;
+    let base_url = &state.config().base_url;
     let mut resources = Vec::new();
     for g in groups {
         let members = get_group_members_scim(&state.db, base_url, &g.id).await;
@@ -142,7 +142,7 @@ pub async fn create_group(
         tracing::warn!("Failed to record SCIM audit: {e}");
     }
 
-    let base_url = &state.config.base_url;
+    let base_url = &state.config().base_url;
     let members = get_group_members_scim(&state.db, base_url, &db_group.id).await;
     let scim_group = db_group_to_scim(base_url, db_group, members);
 
@@ -179,7 +179,7 @@ pub async fn get_group(
         }
     };
 
-    let base_url = &state.config.base_url;
+    let base_url = &state.config().base_url;
     let members = get_group_members_scim(&state.db, base_url, &group.id).await;
     Json(db_group_to_scim(base_url, group, members)).into_response()
 }
@@ -334,7 +334,7 @@ pub async fn patch_group(
         }
     };
 
-    let base_url = &state.config.base_url;
+    let base_url = &state.config().base_url;
     let members = get_group_members_scim(&state.db, base_url, &updated.id).await;
     Json(db_group_to_scim(base_url, updated, members)).into_response()
 }

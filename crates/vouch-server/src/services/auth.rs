@@ -185,7 +185,7 @@ pub async fn create_login_session(
     params: CreateSessionParams<'_>,
 ) -> ServiceResult<CreateSessionResult> {
     let now = Timestamp::now();
-    let session_hours = i64::try_from(state.config.session_hours)
+    let session_hours = i64::try_from(state.config().session_hours)
         .map_err(|_| ServiceError::Internal("Invalid session hours".to_string()))?;
     let duration = Span::new().hours(session_hours);
     let expires = now
@@ -203,7 +203,7 @@ pub async fn create_login_session(
     let token = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
     .map_err(|e| ServiceError::Internal(format!("Token encoding failed: {e}")))?;
 

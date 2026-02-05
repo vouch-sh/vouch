@@ -171,7 +171,7 @@ pub async fn docs_index_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsIndexTemplate {
-        org_name: state.config.get_org_display_name().to_string(),
+        org_name: state.config().get_org_display_name().to_string(),
         auth,
     }
 }
@@ -184,9 +184,9 @@ pub async fn aws_setup_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsAwsTemplate {
-        provider_url: state.config.base_url.clone(),
-        rp_id: state.config.rp_id.clone(),
-        org_name: state.config.get_org_display_name().to_string(),
+        provider_url: state.config().base_url.clone(),
+        rp_id: state.config().rp_id.clone(),
+        org_name: state.config().get_org_display_name().to_string(),
         auth,
     }
 }
@@ -199,9 +199,9 @@ pub async fn gcp_setup_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsGcpTemplate {
-        provider_url: state.config.base_url.clone(),
-        rp_id: state.config.rp_id.clone(),
-        org_name: state.config.get_org_display_name().to_string(),
+        provider_url: state.config().base_url.clone(),
+        rp_id: state.config().rp_id.clone(),
+        org_name: state.config().get_org_display_name().to_string(),
         auth,
     }
 }
@@ -214,9 +214,9 @@ pub async fn github_setup_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsGithubTemplate {
-        org_name: state.config.get_org_display_name().to_string(),
+        org_name: state.config().get_org_display_name().to_string(),
         github_configured: state.github_app.is_some(),
-        server_url: state.config.base_url.clone(),
+        server_url: state.config().base_url.clone(),
         auth,
     }
 }
@@ -229,8 +229,8 @@ pub async fn getting_started_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsGettingStartedTemplate {
-        org_name: state.config.get_org_display_name().to_string(),
-        server_url: state.config.base_url.clone(),
+        org_name: state.config().get_org_display_name().to_string(),
+        server_url: state.config().base_url.clone(),
         auth,
     }
 }
@@ -243,8 +243,8 @@ pub async fn applications_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsApplicationsTemplate {
-        provider_url: state.config.base_url.clone(),
-        org_name: state.config.get_org_display_name().to_string(),
+        provider_url: state.config().base_url.clone(),
+        org_name: state.config().get_org_display_name().to_string(),
         auth,
     }
 }
@@ -254,8 +254,8 @@ pub async fn applications_page(
 pub async fn ssh_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsSshTemplate {
-        provider_url: state.config.base_url.clone(),
-        org_name: state.config.get_org_display_name().to_string(),
+        provider_url: state.config().base_url.clone(),
+        org_name: state.config().get_org_display_name().to_string(),
         auth,
     }
 }
@@ -268,8 +268,8 @@ pub async fn kubernetes_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsKubernetesTemplate {
-        provider_url: state.config.base_url.clone(),
-        org_name: state.config.get_org_display_name().to_string(),
+        provider_url: state.config().base_url.clone(),
+        org_name: state.config().get_org_display_name().to_string(),
         auth,
     }
 }
@@ -279,8 +279,8 @@ pub async fn kubernetes_page(
 pub async fn scim_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsScimTemplate {
-        provider_url: state.config.base_url.clone(),
-        org_name: state.config.get_org_display_name().to_string(),
+        provider_url: state.config().base_url.clone(),
+        org_name: state.config().get_org_display_name().to_string(),
         auth,
     }
 }
@@ -290,7 +290,7 @@ pub async fn scim_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> im
 pub async fn docker_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsDockerTemplate {
-        org_name: state.config.get_org_display_name().to_string(),
+        org_name: state.config().get_org_display_name().to_string(),
         auth,
     }
 }
@@ -300,7 +300,7 @@ pub async fn docker_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> 
 pub async fn cargo_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsCargoTemplate {
-        org_name: state.config.get_org_display_name().to_string(),
+        org_name: state.config().get_org_display_name().to_string(),
         auth,
     }
 }

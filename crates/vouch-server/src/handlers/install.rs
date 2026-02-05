@@ -29,16 +29,16 @@ impl_template_response!(InstallTemplate);
 pub async fn install_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
 
-    let has_downloads = state.config.cli_download_macos.is_some()
-        || state.config.cli_download_linux.is_some()
-        || state.config.cli_download_windows.is_some();
+    let has_downloads = state.config().cli_download_macos.is_some()
+        || state.config().cli_download_linux.is_some()
+        || state.config().cli_download_windows.is_some();
 
     InstallTemplate {
         has_downloads,
-        download_macos: state.config.cli_download_macos.clone(),
-        download_linux: state.config.cli_download_linux.clone(),
-        download_windows: state.config.cli_download_windows.clone(),
-        server_url: state.config.base_url.clone(),
+        download_macos: state.config().cli_download_macos.clone(),
+        download_linux: state.config().cli_download_linux.clone(),
+        download_windows: state.config().cli_download_windows.clone(),
+        server_url: state.config().base_url.clone(),
         auth,
     }
 }

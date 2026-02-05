@@ -123,7 +123,7 @@ pub async fn exchange_token(
     // Decode and validate the subject token
     let subject_claims = jsonwebtoken::decode::<SessionClaims>(
         params.subject_token,
-        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
         &Validation::default(),
     )
     .map_err(|_| {
@@ -161,7 +161,7 @@ pub async fn exchange_token(
         // Decode actor token
         let actor_claims = jsonwebtoken::decode::<SessionClaims>(
             actor_token,
-            &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
+            &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
             &Validation::default(),
         )
         .map_err(|_| ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid actor token"))?;
@@ -216,7 +216,7 @@ pub async fn exchange_token(
 
     // Generate the exchanged token
     let now = Timestamp::now();
-    let default_expires_in = state.config.session_hours * 3600;
+    let default_expires_in = state.config().session_hours * 3600;
 
     // Apply policy TTL limit if specified
     let expires_in = match max_ttl_override {
@@ -230,7 +230,7 @@ pub async fn exchange_token(
 
     let exchanged_claims = ExchangedTokenClaims {
         sub: subject_claims.email.clone(),
-        iss: state.config.base_url.clone(),
+        iss: state.config().base_url.clone(),
         aud: params.audience.map(String::from),
         exp,
         iat: now.as_second(),
@@ -242,7 +242,7 @@ pub async fn exchange_token(
     let exchanged_token = encode(
         &Header::default(),
         &exchanged_claims,
-        &EncodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
     .map_err(|e| ServiceError::Internal(format!("Failed to generate token: {e}")))?;
 

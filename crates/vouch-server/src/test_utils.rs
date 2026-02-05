@@ -11,6 +11,7 @@
     clippy::indexing_slicing
 )]
 
+use arc_swap::ArcSwap;
 use axum::{
     Router,
     body::Body,
@@ -86,6 +87,12 @@ pub fn test_config() -> ServerConfig {
         github_webhook_secret: None,
         github_app_client_id: None,
         github_app_client_secret: None,
+        tls_cert: None,
+        tls_key: None,
+        s3_config_bucket: None,
+        s3_config_key: "config/vouch-server.json".to_string(),
+        s3_config_region: None,
+        s3_config_poll_interval: 60,
     }
 }
 
@@ -106,7 +113,7 @@ pub async fn test_app_state() -> Arc<AppState> {
 
     Arc::new(AppState {
         db: pool,
-        config,
+        config: Arc::new(ArcSwap::from_pointee(config)),
         webauthn,
         ssh_ca: None,
         dpop: DpopState::new(),
@@ -394,7 +401,7 @@ pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: 
     encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
     .expect("Failed to encode test token")
 }
@@ -418,7 +425,7 @@ pub fn create_expired_token(state: &AppState, user_id: &str, email: &str, auth_i
     encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
     .expect("Failed to encode test token")
 }

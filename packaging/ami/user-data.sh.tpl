@@ -67,6 +67,15 @@ kiwi-ng --color-output system build \
     --allow-existing-root
 echo "=== kiwi-ng build completed ==="
 
+# Upload PCR measurements to S3
+echo "=== Uploading PCR measurements to S3 ==="
+if [ -f /tmp/image/pcr_measurements.json ]; then
+    aws s3 cp /tmp/image/pcr_measurements.json "s3://${S3_BUCKET}/${S3_PREFIX}/pcr_measurements.json"
+    echo "PCR measurements uploaded"
+else
+    echo "WARNING: pcr_measurements.json not found"
+fi
+
 # Find the raw image
 echo "=== Looking for raw image ==="
 ls -la /tmp/image/

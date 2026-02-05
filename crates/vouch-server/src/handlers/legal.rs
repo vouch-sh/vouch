@@ -35,7 +35,7 @@ impl_template_response!(TermsTemplate);
 pub async fn privacy_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     PrivacyTemplate {
-        org_name: state.config.get_org_display_name().to_string(),
+        org_name: state.config().get_org_display_name().to_string(),
         auth,
     }
 }
@@ -45,7 +45,7 @@ pub async fn privacy_page(State(state): State<Arc<AppState>>, jar: CookieJar) ->
 pub async fn terms_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     TermsTemplate {
-        org_name: state.config.get_org_display_name().to_string(),
+        org_name: state.config().get_org_display_name().to_string(),
         auth,
     }
 }

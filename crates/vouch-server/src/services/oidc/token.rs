@@ -219,7 +219,7 @@ pub async fn exchange_authorization_code(
 
     // Generate access token (opaque token)
     let access_token = generate_access_token();
-    let expires_in = state.config.session_hours * 3600;
+    let expires_in = state.config().session_hours * 3600;
 
     // Generate ID token
     let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
@@ -422,7 +422,7 @@ fn generate_id_token(
     });
 
     let claims = IdTokenClaims {
-        iss: state.config.base_url.clone(),
+        iss: state.config().base_url.clone(),
         sub: email.to_string(), // Use email as subject
         aud: client_id.to_string(),
         exp,
@@ -461,7 +461,7 @@ pub async fn validate_dpop_if_present(
     uri: &str,
 ) -> ServiceResult<Option<ValidatedDpopProof>> {
     // Check if DPoP is enabled
-    if !state.config.dpop_enabled {
+    if !state.config().dpop_enabled {
         return Ok(None);
     }
 
@@ -471,7 +471,7 @@ pub async fn validate_dpop_if_present(
     };
 
     // Construct the full URI for validation
-    let full_uri = format!("{}{}", state.config.base_url, uri);
+    let full_uri = format!("{}{}", state.config().base_url, uri);
 
     // Validate the DPoP proof
     match dpop::validate_dpop_proof(
@@ -479,8 +479,8 @@ pub async fn validate_dpop_if_present(
         method,
         &full_uri,
         &state.dpop,
-        state.config.dpop_max_age_seconds,
-        state.config.dpop_nonce_required,
+        state.config().dpop_max_age_seconds,
+        state.config().dpop_nonce_required,
     )
     .await
     {
@@ -518,7 +518,7 @@ pub async fn validate_session_token(
     // Try to decode as a JWT session token
     let claims = match jsonwebtoken::decode::<SessionClaims>(
         token,
-        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
         &Validation::default(),
     ) {
         Ok(data) => data.claims,

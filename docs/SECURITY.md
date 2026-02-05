@@ -357,6 +357,62 @@ Audit logs are:
 - SIEM export (planned) (Splunk, Datadog, etc.) — see [ROADMAP.md](ROADMAP.md)
 - Certificate transparency logging (planned)
 
+## S3 Configuration Security
+
+When using S3-based configuration, additional security considerations apply.
+
+### S3 Bucket Requirements
+
+| Requirement | Rationale |
+|-------------|-----------|
+| **Server-Side Encryption** | Config contains secrets (JWT secret, OIDC credentials, private keys) |
+| **Block Public Access** | Config should never be publicly accessible |
+| **IAM Least Privilege** | Server needs only `s3:GetObject` and `s3:HeadObject` |
+| **Versioning** | Enables rollback and audit trail |
+| **Access Logging** | Detect unauthorized access attempts |
+
+**Recommended S3 Bucket Policy:**
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {"AWS": "arn:aws:iam::ACCOUNT:role/vouch-server"},
+      "Action": ["s3:GetObject", "s3:HeadObject"],
+      "Resource": "arn:aws:s3:::my-bucket/config/vouch-server.json"
+    }
+  ]
+}
+```
+
+### Protected Configuration Fields
+
+Certain security-sensitive fields cannot be changed via S3 config updates at runtime:
+
+| Field | Protection | Rationale |
+|-------|------------|-----------|
+| `jwt_secret` | Blocked at runtime | Changing would invalidate all sessions; security impact of hot-swap |
+| `database_url` | Blocked at runtime | Connection pool cannot be safely changed |
+
+When these fields change in S3, the server logs a warning and ignores the change. A server restart is required to apply changes to protected fields.
+
+### S3 Polling Security
+
+- **ETag-based polling** — HEAD request checks for changes before full GET
+- **Fail-open on polling errors** — If S3 becomes unreachable during operation, server continues with current config
+- **Fail-fast on startup** — If S3 is unreachable at startup when configured, server fails to start
+- **No caching of stale config** — Config is only updated when successfully fetched and parsed
+
+### Base64 Encoding for Keys
+
+All private keys and certificates in S3 config must be base64-encoded:
+- Standard base64 or URL-safe base64 accepted
+- Prevents JSON parsing issues with PEM format
+- Decoded and validated before use
+
+---
+
 ## Session Storage Security
 
 Vouch stores session tokens in multiple locations with appropriate security controls:

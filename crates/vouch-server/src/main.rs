@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Vouch identity server.
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use axum::{
     Router,
     routing::{delete, get, patch, post},
@@ -15,7 +16,7 @@ use tracing_subscriber::EnvFilter;
 use vouch_server::{
     AppState, cleanup, config,
     db::{Pool, dsql::is_dsql_endpoint, migrations::run_dsql_migrations},
-    handlers,
+    handlers, s3_config,
     services::{
         integrations::github::GitHubApp,
         oidc::{OidcSigningKey, dpop},
@@ -36,6 +37,47 @@ async fn main() -> Result<()> {
     // Parse command-line arguments and environment variables
     let args = config::Args::parse();
     let mut config = config::ServerConfig::from_args(args)?;
+
+    // Load S3 config if configured (BEFORE database connection)
+    let (s3_client, s3_source, initial_etag) = if let Some(bucket) = &config.s3_config_bucket {
+        tracing::info!(
+            "Loading configuration from S3: s3://{}/{}",
+            bucket,
+            config.s3_config_key
+        );
+
+        let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(
+                config
+                    .s3_config_region
+                    .as_ref()
+                    .map(|r| aws_config::Region::new(r.clone())),
+            )
+            .load()
+            .await;
+
+        let s3_client = aws_sdk_s3::Client::new(&sdk_config);
+        let source = s3_config::S3ConfigSource {
+            bucket: bucket.clone(),
+            key: config.s3_config_key.clone(),
+            region: config.s3_config_region.clone(),
+            poll_interval_seconds: config.s3_config_poll_interval,
+        };
+
+        // Fetch initial config - fail fast if unreachable
+        let (s3_cfg, etag) = s3_config::fetch_s3_config(&s3_client, &source)
+            .await
+            .context("Failed to fetch S3 configuration")?;
+
+        // Merge S3 config (S3 wins over env vars)
+        config.merge_s3_config(&s3_cfg, false); // Initial merge - all fields allowed
+        tracing::info!("S3 configuration loaded (etag: {})", etag);
+
+        (Some(s3_client), Some(source), Some(etag))
+    } else {
+        (None, None, None)
+    };
+
     tracing::info!("Starting vouch-server on {}", config.listen_addr);
 
     // Connect to database
@@ -122,10 +164,13 @@ async fn main() -> Result<()> {
     // Create DPoP state
     let dpop_state = Arc::new(dpop::DpopState::new());
 
+    // Wrap config in ArcSwap for dynamic updates
+    let config_swap = Arc::new(ArcSwap::from_pointee(config.clone()));
+
     // Create shared state
     let state = Arc::new(AppState {
         db: db.clone(),
-        config: config.clone(),
+        config: config_swap.clone(),
         webauthn,
         ssh_ca,
         dpop: dpop::DpopState::new(),
@@ -150,6 +195,9 @@ async fn main() -> Result<()> {
         tracing::info!("Background cleanup task disabled");
         None
     };
+
+    // S3 config polling task handle (set up after TLS config is created if needed)
+    let mut s3_poll_handle: Option<tokio::task::JoinHandle<()>> = None;
 
     // Build router
     let app = Router::new()
@@ -430,14 +478,115 @@ async fn main() -> Result<()> {
         .with_state(state);
 
     // Start server with graceful shutdown
-    let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
-    tracing::info!("Listening on {}", config.listen_addr);
+    if config.tls_configured() {
+        let tls_config = vouch_server::tls::build_tls_config(&config).await?;
+        let addr: std::net::SocketAddr = config
+            .listen_addr
+            .parse()
+            .context("Invalid listen address")?;
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+        tracing::info!("Listening on https://{} (TLS enabled)", addr);
+        tracing::info!("Send SIGHUP to reload TLS certificates");
+
+        // Start S3 config polling task if configured (with TLS config for hot reload)
+        if let (Some(client), Some(source), Some(etag)) =
+            (s3_client.clone(), s3_source.clone(), initial_etag.clone())
+        {
+            tracing::info!(
+                "Starting S3 config polling task (interval: {}s)",
+                source.poll_interval_seconds
+            );
+            s3_poll_handle = Some(s3_config::start_s3_config_task(
+                client,
+                source,
+                config_swap.clone(),
+                Some(tls_config.clone()),
+                etag,
+            ));
+        }
+
+        // Clone for SIGHUP handler - read from current config (not env vars)
+        let tls_config_for_reload = tls_config.clone();
+        let config_for_sighup = config_swap.clone();
+
+        // Spawn SIGHUP handler for certificate hot reload
+        #[cfg(unix)]
+        tokio::spawn(async move {
+            let Ok(mut sighup) =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+            else {
+                tracing::warn!("Failed to register SIGHUP handler, TLS hot reload disabled");
+                return;
+            };
+
+            loop {
+                sighup.recv().await;
+                tracing::info!("Received SIGHUP, reloading TLS certificates...");
+
+                // Read from current config (supports both env vars and S3 config)
+                let cfg = config_for_sighup.load();
+                match (&cfg.tls_cert, &cfg.tls_key) {
+                    (Some(cert), Some(key)) => {
+                        match vouch_server::tls::reload_tls_from_config(
+                            &tls_config_for_reload,
+                            cert,
+                            key,
+                        )
+                        .await
+                        {
+                            Ok(()) => tracing::info!("TLS certificates reloaded successfully"),
+                            Err(e) => tracing::error!("Failed to reload TLS certificates: {e:#}"),
+                        }
+                    }
+                    _ => tracing::warn!("TLS not configured, nothing to reload"),
+                }
+            }
+        });
+
+        // Create handle for graceful shutdown
+        let handle = axum_server::Handle::new();
+        let handle_for_shutdown = handle.clone();
+
+        // Spawn shutdown handler
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            // 30 second grace period for connections to complete
+            handle_for_shutdown.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
+        });
+
+        axum_server::bind_rustls(addr, tls_config)
+            .handle(handle)
+            .serve(app.into_make_service())
+            .await?;
+    } else {
+        // Start S3 config polling task if configured (no TLS)
+        if let (Some(client), Some(source), Some(etag)) = (s3_client, s3_source, initial_etag) {
+            tracing::info!(
+                "Starting S3 config polling task (interval: {}s)",
+                source.poll_interval_seconds
+            );
+            s3_poll_handle = Some(s3_config::start_s3_config_task(
+                client,
+                source,
+                config_swap,
+                None, // No TLS config to reload
+                etag,
+            ));
+        }
+
+        let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
+        tracing::info!("Listening on http://{}", config.listen_addr);
+
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await?;
+    }
 
     // Clean up background tasks
+    if let Some(handle) = s3_poll_handle {
+        tracing::info!("Shutting down S3 config polling task");
+        handle.abort();
+    }
     if let Some(handle) = cleanup_handle {
         tracing::info!("Shutting down cleanup task");
         handle.abort();

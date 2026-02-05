@@ -25,7 +25,7 @@ impl_template_response!(AboutTemplate);
 pub async fn about_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     AboutTemplate {
-        org_name: state.config.get_org_display_name().to_string(),
+        org_name: state.config().get_org_display_name().to_string(),
         auth,
     }
 }

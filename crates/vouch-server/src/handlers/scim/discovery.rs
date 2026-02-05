@@ -12,7 +12,7 @@ use crate::AppState;
 
 /// GET /scim/v2/ServiceProviderConfig
 pub async fn service_provider_config(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let base_url = &state.config.base_url;
+    let base_url = &state.config().base_url;
 
     Json(ScimServiceProviderConfig {
         schemas: vec!["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig".to_string()],
@@ -128,7 +128,7 @@ pub async fn schemas() -> impl IntoResponse {
 
 /// GET /scim/v2/ResourceTypes
 pub async fn resource_types(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let base_url = &state.config.base_url;
+    let base_url = &state.config().base_url;
 
     Json(ScimListResponse {
         schemas: vec!["urn:ietf:params:scim:api:messages:2.0:ListResponse".to_string()],
