@@ -371,10 +371,21 @@ VOUCH_DATABASE_URL=sqlite:/data/vouch.db?mode=rwc
 
 # -----------------------------------------------------------------------------
 # Network Configuration
+#
+# Development (no TLS):
+#   Server listens on VOUCH_LISTEN_ADDR (default: 0.0.0.0:3000)
+#
+# Production (TLS enabled):
+#   Server automatically listens on port 443 (HTTPS) and port 80 (HTTP redirect)
+#   VOUCH_LISTEN_ADDR is ignored when TLS is configured
+#   HTTP requests on port 80 are 308 redirected to HTTPS on port 443
+#   The /health endpoint is accessible on HTTP (for load balancer health checks)
+#   Host header is validated against rp_id to prevent injection attacks
+#   Requires CAP_NET_BIND_SERVICE capability (handled by packaging scripts)
 # -----------------------------------------------------------------------------
 
-# Listen address (internal only)
-VOUCH_LISTEN_ADDR=0.0.0.0:443
+# Listen address (used only when TLS is NOT configured)
+VOUCH_LISTEN_ADDR=0.0.0.0:3000
 
 # Base URL (how clients reach the server)
 VOUCH_BASE_URL=https://auth.internal

@@ -10,6 +10,7 @@ use axum::{
 use clap::Parser;
 use std::sync::Arc;
 use tokio::signal;
+use tokio_util::sync::CancellationToken;
 use tower_http::{cors::CorsLayer, services::ServeDir};
 use tracing_subscriber::EnvFilter;
 
@@ -478,18 +479,36 @@ async fn main() -> Result<()> {
             }),
         )
         .layer(build_cors_layer(&config))
-        .with_state(state);
+        .with_state(state.clone());
 
     // Start server with graceful shutdown
     if config.tls_configured() {
         let tls_config = vouch_server::tls::build_tls_config(&config).await?;
-        let addr: std::net::SocketAddr = config
-            .listen_addr
-            .parse()
-            .context("Invalid listen address")?;
 
-        tracing::info!("Listening on https://{} (TLS enabled)", addr);
+        // TLS mode: always listen on 443 (HTTPS) and 80 (HTTP redirect)
+        let https_addr: std::net::SocketAddr = "0.0.0.0:443"
+            .parse()
+            .context("Invalid HTTPS listen address")?;
+        let http_addr: std::net::SocketAddr = "0.0.0.0:80"
+            .parse()
+            .context("Invalid HTTP listen address")?;
+
+        tracing::info!(
+            "TLS enabled - listening on https://{} and http://{} (redirect)",
+            https_addr,
+            http_addr
+        );
         tracing::info!("Send SIGHUP to reload TLS certificates");
+
+        // Create shared cancellation token for coordinated shutdown
+        let shutdown_token = CancellationToken::new();
+
+        // Spawn shutdown signal handler that cancels the token
+        let shutdown_token_for_signal = shutdown_token.clone();
+        tokio::spawn(async move {
+            shutdown_signal().await;
+            shutdown_token_for_signal.cancel();
+        });
 
         // Start S3 config polling task if configured (with TLS config for hot reload)
         if let (Some(client), Some(source), Some(etag)) =
@@ -546,21 +565,54 @@ async fn main() -> Result<()> {
             }
         });
 
-        // Create handle for graceful shutdown
+        // Create handle for graceful shutdown of HTTPS server
         let handle = axum_server::Handle::new();
         let handle_for_shutdown = handle.clone();
 
-        // Spawn shutdown handler
+        // Spawn HTTPS shutdown handler (uses cancellation token)
+        let token_for_https = shutdown_token.clone();
         tokio::spawn(async move {
-            shutdown_signal().await;
-            // 30 second grace period for connections to complete
+            token_for_https.cancelled().await;
+            tracing::info!("Initiating graceful shutdown (30s timeout)");
             handle_for_shutdown.graceful_shutdown(Some(std::time::Duration::from_secs(30)));
         });
 
-        axum_server::bind_rustls(addr, tls_config)
+        // Build HTTP redirect router (with state for Host validation)
+        let redirect_app = vouch_server::build_redirect_router(state.clone());
+
+        // Spawn HTTP redirect server (port 80) - best effort, not fatal if fails
+        let token_for_http = shutdown_token.clone();
+        let http_handle = tokio::spawn(async move {
+            match tokio::net::TcpListener::bind(http_addr).await {
+                Ok(listener) => {
+                    tracing::info!("HTTP redirect server listening on {}", http_addr);
+                    if let Err(e) = axum::serve(listener, redirect_app)
+                        .with_graceful_shutdown(token_for_http.cancelled_owned())
+                        .await
+                    {
+                        tracing::error!("HTTP redirect server error: {e}");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Could not bind HTTP redirect on {}: {e} (continuing without redirect)",
+                        http_addr
+                    );
+                    tracing::warn!(
+                        "Hint: Ports below 1024 require CAP_NET_BIND_SERVICE capability"
+                    );
+                }
+            }
+        });
+
+        // Run HTTPS server (port 443) - this blocks until shutdown
+        axum_server::bind_rustls(https_addr, tls_config)
             .handle(handle)
             .serve(app.into_make_service())
             .await?;
+
+        // Wait for HTTP redirect server to finish
+        let _ = http_handle.await;
     } else {
         // Start S3 config polling task if configured (no TLS)
         if let (Some(client), Some(source), Some(etag)) = (s3_client, s3_source, initial_etag) {

@@ -86,6 +86,27 @@ pub enum Pool {
 }
 
 impl Pool {
+    /// Create a new in-memory SQLite pool for testing.
+    ///
+    /// This creates a minimal pool without running migrations,
+    /// suitable for tests that don't need database access.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the in-memory pool creation fails (should never happen).
+    #[cfg(any(test, feature = "test-utils"))]
+    #[must_use]
+    #[allow(clippy::expect_used)]
+    pub fn new_test() -> Self {
+        // Create a synchronous in-memory pool
+        // Note: This is intentionally synchronous for test setup convenience
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("sqlite::memory:")
+            .expect("Failed to create test SQLite pool");
+        Self::Sqlite(pool)
+    }
+
     /// Connect to a database using the URL scheme to determine the backend.
     ///
     /// # Arguments

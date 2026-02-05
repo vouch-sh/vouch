@@ -66,6 +66,9 @@ aws-sdk-s3 = { version = "=1.122.0", default-features = false, features = ["rt-t
 # Lock-free atomic config updates
 arc-swap = { version = "=1.8.1", default-features = false }
 
+# Async utilities for coordinated shutdown (CancellationToken)
+tokio-util = { version = "=0.7.18", default-features = false }
+
 # Optional TLS termination
 axum-server = { version = "=0.8.0", default-features = false, features = ["tls-rustls"] }
 rustls-pemfile = { version = "=2.2.0", default-features = false, features = ["std"] }
