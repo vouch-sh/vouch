@@ -135,7 +135,7 @@ jobs:
           export S3_BUCKET="${{ vars.AMI_BUILD_BUCKET }}"
           export S3_PREFIX="${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}"
           export S3_PARENT_PREFIX="${{ needs.prepare.outputs.s3_prefix }}"
-          envsubst < packaging/ami/user-data.sh.tpl > /tmp/user-data.sh
+          envsubst '$VERSION $AWS_REGION $S3_BUCKET $S3_PREFIX $S3_PARENT_PREFIX' < packaging/ami/user-data.sh.tpl > /tmp/user-data.sh
 
           # Launch AL2023 instance with user-data
           INSTANCE_ID=$(aws ec2 run-instances \
