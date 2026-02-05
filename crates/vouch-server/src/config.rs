@@ -547,4 +547,3 @@ pub fn resolve_dsql_endpoints(endpoints: &HashMap<String, String>) -> Result<Str
 
     Ok(url.clone())
 }
-
