@@ -60,9 +60,9 @@ checksum = "5192cca8006f1fd4f7237516f40fa183bb07f8fbdfedaa0036de5ea9b0b45e78"
 
 [[package]]
 name = "anyhow"
-version = "1.0.100"
+version = "1.0.101"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a23eb6b1614318a8071c9b2521f36b424b2c83db5eb3a0fead4a6c0809af6e61"
+checksum = "5f0e0fee31ef5ed1ba1316088939cea399010ed7731dba877ed44aeb407a75ea"
 
 [[package]]
 name = "arc-swap"
@@ -4654,7 +4654,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.2.2"
+version = "2026.2.3"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -4677,7 +4677,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.2.2"
+version = "2026.2.3"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4718,7 +4718,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.2.2"
+version = "2026.2.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4737,7 +4737,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.2.2"
+version = "2026.2.3"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4786,7 +4786,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.2.2"
+version = "2026.2.3"
 dependencies = [
  "anyhow",
  "aws-lc-rs",

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.2.2"
+version = "2026.2.3"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.93"
@@ -59,7 +59,7 @@ axum = { version = "=0.8.8", default-features = false, features = ["json", "toki
 
 # Error handling
 thiserror = { version = "=2.0.18", default-features = false }
-anyhow = { version = "=1.0.100", default-features = false, features = ["std"] }
+anyhow = { version = "=1.0.101", default-features = false, features = ["std"] }
 
 # Logging
 tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
