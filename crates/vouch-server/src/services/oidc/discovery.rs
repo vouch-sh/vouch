@@ -75,7 +75,7 @@ pub struct JwksResponse {
 /// The OIDC discovery document with all endpoints and capabilities advertised.
 #[must_use]
 pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument {
-    let base_url = &state.config.base_url;
+    let base_url = &state.config().base_url;
 
     OidcDiscoveryDocument {
         issuer: base_url.clone(),
@@ -118,7 +118,7 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "hardware_aaguid".to_string(),
         ],
         code_challenge_methods_supported: vec!["S256".to_string(), "plain".to_string()],
-        dpop_signing_alg_values_supported: if state.config.dpop_enabled {
+        dpop_signing_alg_values_supported: if state.config().dpop_enabled {
             Some(vec![
                 "ES256".to_string(),
                 "RS256".to_string(),

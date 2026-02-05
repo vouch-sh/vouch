@@ -162,7 +162,7 @@ pub async fn login_page(
     LoginTemplate {
         pending_auth: query.pending_auth,
         client_name,
-        rp_id: state.config.rp_id.clone(),
+        rp_id: state.config().rp_id.clone(),
         auth,
     }
     .into_response()
@@ -178,7 +178,7 @@ pub async fn browser_login_start(
     Json(req): Json<BrowserLoginStartRequest>,
 ) -> Result<Json<BrowserLoginStartResponse>, (StatusCode, Json<ApiError>)> {
     // Validate Origin header for CSRF protection (RFC 9700)
-    validate_origin(&headers, &state.config.base_url)?;
+    validate_origin(&headers, &state.config().base_url)?;
 
     tracing::info!("Browser login start (discoverable credential flow)");
 
@@ -199,14 +199,14 @@ pub async fn browser_login_start(
     // Create state token
     let auth_state = BrowserAuthenticationState {
         challenge: challenge.clone(),
-        rp_id: state.config.rp_id.clone(),
+        rp_id: state.config().rp_id.clone(),
         created_at: now.as_second(),
         exp,
         pending_auth: req.pending_auth,
     };
 
     let state_token = auth_state
-        .encode(state.config.jwt_secret.expose_secret())
+        .encode(state.config().jwt_secret.expose_secret())
         .map_err(|e| {
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -217,7 +217,7 @@ pub async fn browser_login_start(
 
     Ok(Json(BrowserLoginStartResponse {
         challenge: URL_SAFE_NO_PAD.encode(&challenge),
-        rp_id: state.config.rp_id.clone(),
+        rp_id: state.config().rp_id.clone(),
         state: state_token,
         timeout: 300_000, // 5 minutes in milliseconds
         user_verification: "required".to_string(),
@@ -235,7 +235,7 @@ pub async fn browser_login_complete(
     Json(req): Json<BrowserLoginCompleteRequest>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
     // Validate Origin header for CSRF protection (RFC 9700)
-    validate_origin(&headers, &state.config.base_url)?;
+    validate_origin(&headers, &state.config().base_url)?;
 
     tracing::info!("Browser login complete (discoverable credential flow)");
 
@@ -244,7 +244,7 @@ pub async fn browser_login_complete(
 
     // Decode state
     let auth_state =
-        BrowserAuthenticationState::decode(&req.state, state.config.jwt_secret.expose_secret())
+        BrowserAuthenticationState::decode(&req.state, state.config().jwt_secret.expose_secret())
             .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
 
     // Check expiration
@@ -435,7 +435,7 @@ pub async fn browser_login_complete(
 
     // Generate session token
     let now = Timestamp::now();
-    let session_hours = i64::try_from(state.config.session_hours).map_err(|_| {
+    let session_hours = i64::try_from(state.config().session_hours).map_err(|_| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "time_error",
@@ -462,7 +462,7 @@ pub async fn browser_login_complete(
     let token = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
     .map_err(|e| {
         json_error(

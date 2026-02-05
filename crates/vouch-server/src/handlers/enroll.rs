@@ -372,7 +372,7 @@ pub async fn device_verify_submit(
     }
 
     // Check if OIDC is configured
-    if !state.config.oidc_configured() {
+    if !state.config().oidc_configured() {
         // No OIDC configured - go directly to WebAuthn registration
         // Generate state token for WebAuthn
         let oidc_state = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
@@ -402,22 +402,15 @@ pub async fn device_verify_submit(
         return EnrollWebauthnTemplate {
             email: "new user".to_string(),
             state: oidc_state,
-            rp_id: state.config.rp_id.clone(),
+            rp_id: state.config().rp_id.clone(),
         }
         .into_response();
     }
 
     // OIDC configured - redirect to OIDC provider
-    let oidc_issuer = state
-        .config
-        .oidc_issuer_url
-        .as_ref()
-        .map_or("", String::as_str);
-    let client_id = state
-        .config
-        .oidc_client_id
-        .as_ref()
-        .map_or("", String::as_str);
+    let config = state.config();
+    let oidc_issuer = config.oidc_issuer_url.as_ref().map_or("", String::as_str);
+    let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
 
     // Generate state and nonce
     let oidc_state = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
@@ -445,7 +438,7 @@ pub async fn device_verify_submit(
     }
 
     // Build redirect URL
-    let redirect_uri = format!("{}/oauth/callback", state.config.base_url);
+    let redirect_uri = format!("{}/oauth/callback", state.config().base_url);
     let auth_url = format!(
         "{}/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email&state={}&nonce={}&prompt=login",
         oidc_issuer,
@@ -536,18 +529,11 @@ pub async fn oidc_callback(
     }
 
     // Exchange code for tokens
-    let oidc_issuer = state
-        .config
-        .oidc_issuer_url
-        .as_ref()
-        .map_or("", String::as_str);
-    let client_id = state
-        .config
-        .oidc_client_id
-        .as_ref()
-        .map_or("", String::as_str);
-    let client_secret = state.config.oidc_client_secret_exposed().unwrap_or("");
-    let redirect_uri = format!("{}/oauth/callback", state.config.base_url);
+    let config = state.config();
+    let oidc_issuer = config.oidc_issuer_url.as_ref().map_or("", String::as_str);
+    let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
+    let client_secret = config.oidc_client_secret_exposed().unwrap_or("");
+    let redirect_uri = format!("{}/oauth/callback", config.base_url);
 
     let token_url = format!(
         "{}/token",
@@ -659,7 +645,7 @@ pub async fn oidc_callback(
     }
 
     // Check domain restriction
-    if let Some(domains) = &state.config.allowed_domains {
+    if let Some(domains) = &state.config().allowed_domains {
         let email_domain = claims.email.split('@').nth(1).unwrap_or("");
         if !domains.iter().any(|d| d.eq_ignore_ascii_case(email_domain)) {
             let allowed_list = domains.join(", ");
@@ -703,7 +689,7 @@ pub async fn oidc_callback(
 
     // Create session for this user (using session cookie instead of enrollment cookie)
     let now = Timestamp::now();
-    let session_hours = i64::try_from(state.config.session_hours).unwrap_or(8);
+    let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
     let duration = Span::new().hours(session_hours);
     let expires = match now.checked_add(duration) {
         Ok(e) => e,
@@ -735,7 +721,7 @@ pub async fn oidc_callback(
     let token = match encode(
         &Header::default(),
         &session_claims,
-        &EncodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     ) {
         Ok(t) => t,
         Err(e) => {
@@ -837,7 +823,7 @@ pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar
                 is_org_admin,
             };
             EnrollKeysTemplate {
-                rp_id: state.config.rp_id.clone(),
+                rp_id: state.config().rp_id.clone(),
                 auth,
             }
             .into_response()
@@ -945,7 +931,7 @@ pub async fn browser_register_start(
     };
 
     let state_token = reg_state
-        .encode(state.config.jwt_secret.expose_secret())
+        .encode(state.config().jwt_secret.expose_secret())
         .map_err(|e| {
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -961,8 +947,8 @@ pub async fn browser_register_start(
 
     Ok(Json(BrowserRegisterStartResponse {
         challenge,
-        rp_id: state.config.rp_id.clone(),
-        rp_name: state.config.rp_name.clone(),
+        rp_id: state.config().rp_id.clone(),
+        rp_name: state.config().rp_name.clone(),
         user_id: URL_SAFE_NO_PAD.encode(user_id.as_bytes()),
         user_email: user_email.clone(),
         user_display_name: user_email,
@@ -985,7 +971,7 @@ pub async fn browser_register_complete(
 
     // Decode state containing webauthn verification state
     let reg_state =
-        BrowserRegistrationState::decode(&req.state, state.config.jwt_secret.expose_secret())
+        BrowserRegistrationState::decode(&req.state, state.config().jwt_secret.expose_secret())
             .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
 
     // Decode credential data from base64url
@@ -1149,7 +1135,7 @@ pub async fn browser_register_complete(
 
     // Create a session for the browser so the user stays logged in
     let now = Timestamp::now();
-    let session_hours = i64::try_from(state.config.session_hours).map_err(|_| {
+    let session_hours = i64::try_from(state.config().session_hours).map_err(|_| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "time_error",
@@ -1176,7 +1162,7 @@ pub async fn browser_register_complete(
     let token = encode(
         &Header::default(),
         &claims,
-        &EncodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
     .map_err(|e| {
         json_error(
@@ -1239,7 +1225,7 @@ const DIRECT_ENROLL_PREFIX: &str = "DIRECT-";
 /// After successful enrollment, the user can download the CLI and login.
 pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response {
     // Check if OIDC is configured
-    if !state.config.oidc_configured() {
+    if !state.config().oidc_configured() {
         return ErrorTemplate {
             title: "Not Configured".to_string(),
             message: "Identity provider is not configured. Please contact your administrator."
@@ -1290,16 +1276,9 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
     };
 
     // Build OIDC authorization URL
-    let oidc_issuer = state
-        .config
-        .oidc_issuer_url
-        .as_ref()
-        .map_or("", String::as_str);
-    let client_id = state
-        .config
-        .oidc_client_id
-        .as_ref()
-        .map_or("", String::as_str);
+    let config = state.config();
+    let oidc_issuer = config.oidc_issuer_url.as_ref().map_or("", String::as_str);
+    let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
 
     // Generate state and nonce
     let oidc_state = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
@@ -1328,7 +1307,7 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
 
     // Build authorization URL
     // Google's OIDC authorization endpoint is /o/oauth2/v2/auth (not /authorize)
-    let redirect_uri = format!("{}/oauth/callback", state.config.base_url);
+    let redirect_uri = format!("{}/oauth/callback", state.config().base_url);
     let auth_url = format!(
         "{}/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email&state={}&nonce={}&prompt=login",
         oidc_issuer,

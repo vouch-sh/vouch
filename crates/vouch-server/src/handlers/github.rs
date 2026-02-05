@@ -220,9 +220,12 @@ fn error_response(error: GitHubError) -> Response {
     .into_response()
 }
 
-/// Create a GitHubService from AppState.
-fn github_service(state: &AppState) -> GitHubService<'_> {
-    GitHubService::new(&state.db, &state.config, state.github_app.as_ref())
+/// Create a GitHubService from AppState components.
+fn github_service<'a>(
+    state: &'a AppState,
+    config: &'a crate::config::ServerConfig,
+) -> GitHubService<'a> {
+    GitHubService::new(&state.db, config, state.github_app.as_ref())
 }
 
 // ============================================================================
@@ -235,7 +238,8 @@ pub async fn github_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let service = github_service(&state);
+    let config = state.config();
+    let service = github_service(&state, &config);
 
     // Extract and verify signature
     let signature = headers
@@ -300,7 +304,8 @@ pub async fn github_connect_page(
         return Redirect::to(&callback_url).into_response();
     }
 
-    let service = github_service(&state);
+    let config = state.config();
+    let service = github_service(&state, &config);
 
     // Verify GitHub App is configured
     if !service.is_configured() {
@@ -348,7 +353,7 @@ pub async fn github_connect_page(
 
     // Generate state token for installation flow
     let state_token = GitHubStateToken::new_for_install(org_id, &user.id);
-    let encoded_state = match state_token.encode(state.config.jwt_secret_bytes()) {
+    let encoded_state = match state_token.encode(state.config().jwt_secret_bytes()) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to encode state token: {}", e);
@@ -373,7 +378,7 @@ pub async fn github_connect_page(
     };
 
     GitHubConnectTemplate {
-        org_name: state.config.get_org_display_name().to_string(),
+        org_name: state.config().get_org_display_name().to_string(),
         github_app_url,
         error: None,
         connected_accounts,
@@ -417,7 +422,7 @@ async fn handle_oauth_callback(
     };
 
     // Decode and validate state token
-    let token = match GitHubStateToken::decode(state_token, state.config.jwt_secret_bytes()) {
+    let token = match GitHubStateToken::decode(state_token, state.config().jwt_secret_bytes()) {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("Invalid state token: {}", e);
@@ -430,7 +435,8 @@ async fn handle_oauth_callback(
         return error_response(GitHubError::WrongFlowType);
     }
 
-    let service = github_service(state);
+    let config = state.config();
+    let service = github_service(state, &config);
 
     // Link the account
     match service
@@ -464,7 +470,7 @@ async fn handle_installation_callback(
     };
 
     // Decode and validate state token
-    let token = match GitHubStateToken::decode(state_token, state.config.jwt_secret_bytes()) {
+    let token = match GitHubStateToken::decode(state_token, state.config().jwt_secret_bytes()) {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("Invalid state token: {}", e);
@@ -478,7 +484,8 @@ async fn handle_installation_callback(
         _ => return error_response(GitHubError::UserNotFound),
     };
 
-    let service = github_service(state);
+    let config = state.config();
+    let service = github_service(state, &config);
 
     // Connect the installation
     match service
@@ -500,7 +507,8 @@ async fn handle_installation_callback(
 
 /// GET /github/link - Redirect user to GitHub OAuth to link their GitHub account.
 pub async fn github_link_start(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
-    let service = github_service(&state);
+    let config = state.config();
+    let service = github_service(&state, &config);
 
     // Verify OAuth is configured
     if !service.is_oauth_configured() {
@@ -529,7 +537,7 @@ pub async fn github_link_start(State(state): State<Arc<AppState>>, jar: CookieJa
 
     // Generate state token for link flow
     let state_token = GitHubStateToken::new_for_link(org_id, &user.id);
-    let encoded_state = match state_token.encode(state.config.jwt_secret_bytes()) {
+    let encoded_state = match state_token.encode(state.config().jwt_secret_bytes()) {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to encode state token: {}", e);
@@ -555,7 +563,8 @@ pub async fn github_reconnect(
     jar: CookieJar,
     Form(form): Form<GitHubReconnectForm>,
 ) -> Response {
-    let service = github_service(&state);
+    let config = state.config();
+    let service = github_service(&state, &config);
 
     // Verify GitHub App is configured
     if !service.is_configured() {
@@ -609,7 +618,7 @@ pub async fn github_success_page(
     let auth = crate::handlers::common::get_auth_context(&state, &jar).await;
 
     GitHubSuccessTemplate {
-        org_name: state.config.get_org_display_name().to_string(),
+        org_name: state.config().get_org_display_name().to_string(),
         github_account: params.account.unwrap_or_else(|| "GitHub".to_string()),
         auth,
     }

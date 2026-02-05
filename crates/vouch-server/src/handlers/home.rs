@@ -34,17 +34,17 @@ impl_template_response!(HomeTemplate);
 pub async fn home_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
 
-    let has_downloads = state.config.cli_download_macos.is_some()
-        || state.config.cli_download_linux.is_some()
-        || state.config.cli_download_windows.is_some();
+    let has_downloads = state.config().cli_download_macos.is_some()
+        || state.config().cli_download_linux.is_some()
+        || state.config().cli_download_windows.is_some();
 
     HomeTemplate {
-        server_url: state.config.base_url.clone(),
-        org_name: state.config.get_org_display_name().to_string(),
+        server_url: state.config().base_url.clone(),
+        org_name: state.config().get_org_display_name().to_string(),
         has_downloads,
-        download_macos: state.config.cli_download_macos.clone(),
-        download_linux: state.config.cli_download_linux.clone(),
-        download_windows: state.config.cli_download_windows.clone(),
+        download_macos: state.config().cli_download_macos.clone(),
+        download_linux: state.config().cli_download_linux.clone(),
+        download_windows: state.config().cli_download_windows.clone(),
         auth,
     }
 }

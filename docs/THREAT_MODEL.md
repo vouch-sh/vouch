@@ -2,8 +2,8 @@
 
 This document provides a comprehensive threat model for Vouch, following the [AWS Threat Composer](https://github.com/awslabs/threat-composer) methodology. It identifies potential threats, documents assumptions, and maps mitigations to ensure the security of the hardware-backed authentication system.
 
-**Last Updated**: 2026-01-31
-**Version**: 1.0
+**Last Updated**: 2026-02-04
+**Version**: 1.1
 **Status**: Active
 
 ## Table of Contents
@@ -481,6 +481,29 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 ---
 
+### Configuration Threats
+
+#### T-11a: S3 Configuration Bucket Compromise
+
+**Threat Statement**: A **sophisticated attacker** with **compromised AWS credentials or S3 bucket access** can **modify the S3 configuration file** which leads to **potential credential theft via malicious OIDC config or TLS certificates**, negatively impacting **authentication integrity and confidentiality**.
+
+**Likelihood**: Low
+**Impact**: High
+**Risk**: Medium
+
+**Mitigations**:
+| ID | Mitigation | Status |
+|----|------------|--------|
+| M-41a | Protected fields (jwt_secret, database_url) cannot be changed at runtime | Implemented |
+| M-41b | S3 bucket encryption required (SSE-S3 or SSE-KMS) | Documentation |
+| M-41c | IAM least-privilege (only GetObject, HeadObject) | Documentation |
+| M-41d | S3 bucket versioning for rollback and audit | Documentation |
+| M-41e | S3 access logging for unauthorized access detection | Documentation |
+| M-41f | Block public access on S3 bucket | Documentation |
+| M-41g | Configuration validation before applying changes | Implemented |
+
+---
+
 ### Supply Chain Threats
 
 #### T-12: Compromised CLI Binary
@@ -717,11 +740,11 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 | Status | Count | Mitigations |
 |--------|-------|-------------|
-| **Implemented** | 76 | M-01 through M-89 (most) |
+| **Implemented** | 79 | M-01 through M-89 (most), M-41a, M-41g |
 | **Planned** | 10 | M-02, M-30, M-32, M-33, M-48a, M-52, M-64, M-70, M-71, M-80 |
 | **Hardware** | 2 | M-09, M-10 (YubiKey enforced) |
 | **Deployment** | 1 | M-88 (infrastructure dependent) |
-| **Documentation** | 1 | M-16 (user guidance) |
+| **Documentation** | 6 | M-16, M-41b, M-41c, M-41d, M-41e, M-41f (user guidance) |
 
 ### By Control Category
 
@@ -730,6 +753,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 | **Authentication** | M-01 through M-16 |
 | **Session Management** | M-17 through M-28 |
 | **Server Security** | M-29 through M-41 |
+| **Configuration Security** | M-41a through M-41g |
 | **Supply Chain** | M-42 through M-54 |
 | **Credential Issuance** | M-55 through M-61 |
 | **Network Security** | M-62 through M-67 |
@@ -812,4 +836,5 @@ Despite comprehensive mitigations, the following residual risks remain:
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 1.1 | 2026-02-04 | Vouch Security Team | Added S3 configuration threat (T-11a) and mitigations |
 | 1.0 | 2026-01-31 | Vouch Security Team | Initial threat model |

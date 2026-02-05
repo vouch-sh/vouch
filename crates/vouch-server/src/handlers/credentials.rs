@@ -50,7 +50,7 @@ pub async fn issue_ssh_certificate(
     })?;
 
     // Certificate validity matches session duration
-    let valid_seconds = state.config.session_hours * 3600;
+    let valid_seconds = state.config().session_hours * 3600;
 
     // Sign the certificate
     let signed = ssh_ca
@@ -217,7 +217,8 @@ pub async fn get_aws_token(
     let hd = get_user_org_domain(&state, &claims.sub).await?;
 
     // Create AWS service and issue token
-    let aws_service = AwsService::new(&state.db, &state.config, &state.oidc_key);
+    let config = state.config();
+    let aws_service = AwsService::new(&state.db, &config, &state.oidc_key);
     let result = aws_service
         .issue_token(&user_email, claims.authenticator_id.as_deref(), hd)
         .await
@@ -282,7 +283,8 @@ pub async fn get_gcp_token(
     let hd = get_user_org_domain(&state, &claims.sub).await?;
 
     // Create GCP service and issue token
-    let gcp_service = GcpService::new(&state.db, &state.config, &state.oidc_key);
+    let config = state.config();
+    let gcp_service = GcpService::new(&state.db, &config, &state.oidc_key);
     let result = gcp_service
         .issue_token(
             &user_email,
@@ -354,7 +356,8 @@ pub async fn get_k8s_token(
     let hd = get_user_org_domain(&state, &claims.sub).await?;
 
     // Create Kubernetes service and issue token
-    let k8s_service = KubernetesService::new(&state.db, &state.config, &state.oidc_key);
+    let config = state.config();
+    let k8s_service = KubernetesService::new(&state.db, &config, &state.oidc_key);
     let result = k8s_service
         .issue_token(
             &user_email,

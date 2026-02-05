@@ -122,7 +122,7 @@ pub async fn authorize(
                 "unsupported_response_type",
                 "Only 'code' response type is supported",
                 params.state.as_deref(),
-                &state.config.base_url,
+                &state.config().base_url,
             );
         }
     };
@@ -137,7 +137,7 @@ pub async fn authorize(
                     "invalid_client",
                     "Unknown client_id",
                     validated.state.as_deref(),
-                    &state.config.base_url,
+                    &state.config().base_url,
                 );
             }
             Err(_) => {
@@ -146,7 +146,7 @@ pub async fn authorize(
                     "server_error",
                     "Database error",
                     validated.state.as_deref(),
-                    &state.config.base_url,
+                    &state.config().base_url,
                 );
             }
         };
@@ -216,7 +216,7 @@ pub async fn authorize(
                     // RFC 9207: Authorization Server Issuer Identification
                     redirect_url.push_str(&format!(
                         "&iss={}",
-                        urlencoding::encode(&state.config.base_url)
+                        urlencoding::encode(&state.config().base_url)
                     ));
                     Redirect::to(&redirect_url).into_response()
                 }
@@ -225,7 +225,7 @@ pub async fn authorize(
                     "server_error",
                     "Failed to generate authorization code",
                     validated.state.as_deref(),
-                    &state.config.base_url,
+                    &state.config().base_url,
                 ),
             }
         }
@@ -259,7 +259,7 @@ pub async fn authorize(
                         "server_error",
                         "Failed to initiate login",
                         validated.state.as_deref(),
-                        &state.config.base_url,
+                        &state.config().base_url,
                     )
                 }
             }
@@ -303,7 +303,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                 "invalid_client",
                 "Unknown client_id",
                 pending.state.as_deref(),
-                &state.config.base_url,
+                &state.config().base_url,
             );
         }
         Err(_) => {
@@ -312,7 +312,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                 "server_error",
                 "Database error",
                 pending.state.as_deref(),
-                &state.config.base_url,
+                &state.config().base_url,
             );
         }
     };
@@ -364,7 +364,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                     // RFC 9207: Authorization Server Issuer Identification
                     redirect_url.push_str(&format!(
                         "&iss={}",
-                        urlencoding::encode(&state.config.base_url)
+                        urlencoding::encode(&state.config().base_url)
                     ));
                     Redirect::to(&redirect_url).into_response()
                 }
@@ -373,7 +373,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                     "server_error",
                     "Failed to generate authorization code",
                     pending.state.as_deref(),
-                    &state.config.base_url,
+                    &state.config().base_url,
                 ),
             }
         }

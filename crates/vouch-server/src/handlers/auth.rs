@@ -175,11 +175,11 @@ pub async fn register_start(
         user_name: user.email.clone(),
         device_name: req.name,
         challenge: challenge.clone(),
-        rp_id: state.config.rp_id.clone(),
+        rp_id: state.config().rp_id.clone(),
     };
 
     let state_token = reg_state
-        .encode(state.config.jwt_secret.expose_secret())
+        .encode(state.config().jwt_secret.expose_secret())
         .map_err(|e| {
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -190,8 +190,8 @@ pub async fn register_start(
 
     Ok(Json(RegisterStartResponse {
         challenge,
-        rp_id: state.config.rp_id.clone(),
-        rp_name: state.config.rp_name.clone(),
+        rp_id: state.config().rp_id.clone(),
+        rp_name: state.config().rp_name.clone(),
         user_id,
         user_name: user.email,
         algorithms: vec![-7], // ES256
@@ -208,8 +208,9 @@ pub async fn register_complete(
     tracing::info!("Registration complete");
 
     // Decode state
-    let reg_state = RegistrationState::decode(&req.state, state.config.jwt_secret.expose_secret())
-        .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
+    let reg_state =
+        RegistrationState::decode(&req.state, state.config().jwt_secret.expose_secret())
+            .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
 
     // For now, we do basic validation and trust the CLI's local verification
     // In production, use webauthn-rs to verify the attestation
@@ -304,11 +305,11 @@ pub async fn login_start(
     let challenge: Challenge<Raw> = challenge.into();
     let auth_state = AuthenticationState {
         challenge: challenge.clone(),
-        rp_id: state.config.rp_id.clone(),
+        rp_id: state.config().rp_id.clone(),
     };
 
     let state_token = auth_state
-        .encode(state.config.jwt_secret.expose_secret())
+        .encode(state.config().jwt_secret.expose_secret())
         .map_err(|e| {
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -319,7 +320,7 @@ pub async fn login_start(
 
     Ok(Json(LoginStartResponse {
         challenge,
-        rp_id: state.config.rp_id.clone(),
+        rp_id: state.config().rp_id.clone(),
         state: state_token,
     }))
 }
@@ -339,7 +340,7 @@ pub async fn login_complete(
 
     // Decode state (only contains challenge and rp_id)
     let auth_state =
-        AuthenticationState::decode(&req.state, state.config.jwt_secret.expose_secret())
+        AuthenticationState::decode(&req.state, state.config().jwt_secret.expose_secret())
             .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
 
     // Parse user_handle as UUID to identify the user
@@ -537,7 +538,7 @@ pub async fn status(
     // Validate token
     let claims = match decode::<SessionClaims>(
         token,
-        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
         &Validation::default(),
     ) {
         Ok(data) => data.claims,

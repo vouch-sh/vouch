@@ -51,7 +51,7 @@ pub async fn list_users(
         Err(_) => users.len(),
     };
 
-    let base_url = &state.config.base_url;
+    let base_url = &state.config().base_url;
     let resources: Vec<ScimUser> = users
         .into_iter()
         .map(|u| db_user_to_scim(base_url, u))
@@ -160,7 +160,7 @@ pub async fn create_user(
         tracing::warn!("Failed to record SCIM audit: {e}");
     }
 
-    let base_url = &state.config.base_url;
+    let base_url = &state.config().base_url;
     let scim_user = db_user_to_scim(base_url, db_user);
 
     (StatusCode::CREATED, Json(scim_user)).into_response()
@@ -196,7 +196,7 @@ pub async fn get_user(
         }
     };
 
-    let base_url = &state.config.base_url;
+    let base_url = &state.config().base_url;
     Json(db_user_to_scim(base_url, user)).into_response()
 }
 
@@ -379,7 +379,7 @@ pub async fn patch_user(
         }
     };
 
-    let base_url = &state.config.base_url;
+    let base_url = &state.config().base_url;
     Json(db_user_to_scim(base_url, updated)).into_response()
 }
 

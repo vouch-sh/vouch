@@ -177,7 +177,7 @@ async fn extract_session_from_header(
     // Validate JWT
     let claims = jsonwebtoken::decode::<SessionClaims>(
         token,
-        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
         &Validation::default(),
     )
     .map_err(|_| {
@@ -240,7 +240,7 @@ pub async fn extract_session_from_cookie(
     // Validate JWT
     let claims = jsonwebtoken::decode::<SessionClaims>(
         token,
-        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
         &Validation::default(),
     )
     .map_err(|_| {

@@ -96,7 +96,7 @@ pub async fn introspect_token(
     // Try to decode the token as a JWT
     let claims = match jsonwebtoken::decode::<SessionClaims>(
         token,
-        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
         &Validation::default(),
     ) {
         Ok(data) => data.claims,
@@ -127,7 +127,7 @@ pub async fn introspect_token(
         iat: Some(claims.iat),
         sub: Some(claims.email),
         aud: None,
-        iss: Some(state.config.base_url.clone()),
+        iss: Some(state.config().base_url.clone()),
     })
 }
 
@@ -151,7 +151,7 @@ pub async fn revoke_token(
     // Try to decode the token as a JWT to get session info
     let email = if let Ok(data) = jsonwebtoken::decode::<SessionClaims>(
         token,
-        &DecodingKey::from_secret(state.config.jwt_secret_bytes()),
+        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
         &Validation::default(),
     ) {
         // Hash the token and delete the session

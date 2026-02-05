@@ -85,7 +85,7 @@ pub async fn device_code(
 
     // Calculate expiration
     let now = Timestamp::now();
-    let expires_seconds = i64::try_from(state.config.device_code_expires_seconds).unwrap_or(600);
+    let expires_seconds = i64::try_from(state.config().device_code_expires_seconds).unwrap_or(600);
     let duration = Span::new().seconds(expires_seconds);
     let expires_at = now.checked_add(duration).map_err(|_| {
         json_error(
@@ -95,7 +95,7 @@ pub async fn device_code(
         )
     })?;
 
-    let interval_seconds = i64::try_from(state.config.device_poll_interval_seconds).unwrap_or(5);
+    let interval_seconds = i64::try_from(state.config().device_poll_interval_seconds).unwrap_or(5);
 
     // Store in database
     db::create_device_auth_request(
@@ -115,7 +115,7 @@ pub async fn device_code(
     })?;
 
     // Build verification URL
-    let verification_uri = format!("{}/device", state.config.base_url);
+    let verification_uri = format!("{}/device", state.config().base_url);
 
     tracing::info!("Created device auth request, user_code: {}", user_code);
 
@@ -123,8 +123,8 @@ pub async fn device_code(
         device_code,
         user_code,
         verification_uri,
-        expires_in: state.config.device_code_expires_seconds,
-        interval: state.config.device_poll_interval_seconds,
+        expires_in: state.config().device_code_expires_seconds,
+        interval: state.config().device_poll_interval_seconds,
     }))
 }
 
@@ -226,7 +226,7 @@ pub async fn device_token(
             })?;
 
             // Generate session token (reuse the auth module's session creation logic)
-            let session_hours = i64::try_from(state.config.session_hours).unwrap_or(8);
+            let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
             let duration = Span::new().hours(session_hours);
             let session_expires = now.checked_add(duration).map_err(|_| {
                 oauth_error(
@@ -247,7 +247,7 @@ pub async fn device_token(
             let token = jsonwebtoken::encode(
                 &jsonwebtoken::Header::default(),
                 &claims,
-                &jsonwebtoken::EncodingKey::from_secret(state.config.jwt_secret_bytes()),
+                &jsonwebtoken::EncodingKey::from_secret(state.config().jwt_secret_bytes()),
             )
             .map_err(|_| {
                 oauth_error(
@@ -278,7 +278,7 @@ pub async fn device_token(
             })?;
 
             let expires_in = u64::try_from(session_expires.as_second() - now.as_second())
-                .unwrap_or(state.config.session_hours * 3600);
+                .unwrap_or(state.config().session_hours * 3600);
 
             tracing::info!("Device authorization complete for: {}", user_email);
 

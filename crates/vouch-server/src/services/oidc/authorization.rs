@@ -247,7 +247,7 @@ pub fn issue_authorization_code(
     };
 
     auth_code
-        .encode(state.config.jwt_secret.expose_secret())
+        .encode(state.config().jwt_secret.expose_secret())
         .map_err(|e| {
             tracing::error!("Failed to encode authorization code: {}", e);
             ServiceError::Internal("Failed to generate authorization code".to_string())
@@ -269,7 +269,7 @@ pub fn decode_authorization_code(
     state: &Arc<AppState>,
     code: &str,
 ) -> ServiceResult<AuthorizationCode> {
-    let auth_code = AuthorizationCode::decode(code, state.config.jwt_secret.expose_secret())
+    let auth_code = AuthorizationCode::decode(code, state.config().jwt_secret.expose_secret())
         .map_err(|_| {
             ServiceError::oauth(
                 OAuthErrorCode::InvalidGrant,
