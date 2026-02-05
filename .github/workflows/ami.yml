@@ -349,10 +349,73 @@ jobs:
             "Key=Architecture,Value=${{ matrix.arch }}" \
             "Key=CopiedFrom,Value=us-east-1"
 
+  update-ssm-parameters:
+    name: Update SSM Parameters
+    runs-on: ubuntu-latest
+    needs: [prepare, copy-ami]
+    if: always() && needs.copy-ami.result == 'success'
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@61815dcd50bd041e203e49132bacad1fd04d2708 # v5.1.1
+        with:
+          role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
+          aws-region: us-east-1
+          role-session-name: update-ssm-parameters
+          mask-aws-account-id: true
+
+      - name: Update SSM parameters for latest AMI IDs
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+          for region in us-east-1 us-west-2; do
+            for arch in x86_64 arm64; do
+              # Get the AMI ID for this region/arch
+              AMI_ID=$(aws ec2 describe-images \
+                --region "${region}" \
+                --filters "Name=name,Values=vouch-server-${VERSION}-${arch}" \
+                --query 'Images[0].ImageId' \
+                --output text)
+
+              if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "None" ]; then
+                echo "::error::Could not find AMI for ${region}/${arch}"
+                exit 1
+              fi
+
+              PARAM_NAME="/vouch-server/ami/${arch}/latest"
+              DESCRIPTION="Vouch Server ${VERSION} AMI for ${arch} (built ${BUILD_DATE})"
+
+              echo "Updating ${PARAM_NAME} in ${region} = ${AMI_ID}"
+
+              # Put parameter in the target region (creates or updates)
+              aws ssm put-parameter \
+                --region "${region}" \
+                --name "${PARAM_NAME}" \
+                --value "${AMI_ID}" \
+                --type String \
+                --overwrite \
+                --description "${DESCRIPTION}"
+
+              # Tag the parameter with metadata
+              aws ssm add-tags-to-resource \
+                --region "${region}" \
+                --resource-type Parameter \
+                --resource-id "${PARAM_NAME}" \
+                --tags \
+                  "Key=Version,Value=${VERSION}" \
+                  "Key=BuildDate,Value=${BUILD_DATE}" \
+                  "Key=Repository,Value=${{ github.repository }}" \
+                  "Key=Commit,Value=${{ github.sha }}"
+
+              echo "Updated ${PARAM_NAME} in ${region} to ${AMI_ID}"
+            done
+          done
+
   summary:
     name: Build Summary
     runs-on: ubuntu-latest
-    needs: [prepare, build-ami, copy-ami]
+    needs: [prepare, build-ami, copy-ami, update-ssm-parameters]
     if: always()
 
     steps:
@@ -404,4 +467,20 @@ jobs:
           echo "  --instance-type t3.medium \\" >> $GITHUB_STEP_SUMMARY
           echo "  --metadata-options 'HttpTokens=required,InstanceMetadataTags=enabled' \\" >> $GITHUB_STEP_SUMMARY
           echo "  --tag-specifications 'ResourceType=instance,Tags=[{Key=VouchSecretName,Value=vouch-server/config}]'" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### SSM Parameter Store" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Latest AMI IDs are published to SSM Parameter Store in each region:" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Parameter | Description |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----------|-------------|" >> $GITHUB_STEP_SUMMARY
+          echo "| \`/vouch-server/ami/x86_64/latest\` | Latest x86_64 AMI ID |" >> $GITHUB_STEP_SUMMARY
+          echo "| \`/vouch-server/ami/arm64/latest\` | Latest arm64 AMI ID |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "# Query latest AMI in your region" >> $GITHUB_STEP_SUMMARY
+          echo 'AMI_ID=$(aws ssm get-parameter \' >> $GITHUB_STEP_SUMMARY
+          echo '  --name "/vouch-server/ami/x86_64/latest" \' >> $GITHUB_STEP_SUMMARY
+          echo "  --query 'Parameter.Value' --output text)" >> $GITHUB_STEP_SUMMARY
           echo '```' >> $GITHUB_STEP_SUMMARY

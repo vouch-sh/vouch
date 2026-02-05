@@ -69,7 +69,7 @@ pub struct Args {
     pub database_url: String,
 
     /// Relying Party ID (domain, e.g., "vouch.sh").
-    #[arg(long, env = "VOUCH_RP_ID")]
+    #[arg(long, env = "VOUCH_RP_ID", default_value = "localhost")]
     pub rp_id: String,
 
     /// Relying Party name for display.
@@ -77,7 +77,7 @@ pub struct Args {
     pub rp_name: String,
 
     /// JWT signing secret (must be at least 32 characters).
-    #[arg(long, env = "VOUCH_JWT_SECRET")]
+    #[arg(long, env = "VOUCH_JWT_SECRET", default_value = "")]
     pub jwt_secret: String,
 
     /// Session duration in hours.
@@ -322,10 +322,8 @@ pub struct ServerConfig {
 impl ServerConfig {
     /// Create configuration from parsed command-line arguments.
     pub fn from_args(args: Args) -> Result<Self> {
-        // Validate JWT secret length
-        if args.jwt_secret.len() < 32 {
-            anyhow::bail!("JWT secret must be at least 32 characters");
-        }
+        // Note: Validation of rp_id and jwt_secret is deferred to validate()
+        // to allow these values to come from S3 config.
 
         // Compute base URL (handles both production https and local http)
         let base_url = args.base_url.unwrap_or_else(|| {
@@ -498,5 +496,16 @@ impl ServerConfig {
     #[must_use]
     pub fn tls_configured(&self) -> bool {
         self.tls_cert.is_some() && self.tls_key.is_some()
+    }
+
+    /// Validate that all required configuration is present.
+    /// Call this after all config sources (env, S3) have been merged.
+    pub fn validate(&self) -> Result<()> {
+        if self.jwt_secret.expose_secret().len() < 32 {
+            anyhow::bail!(
+                "VOUCH_JWT_SECRET must be at least 32 characters (set via env var or S3 config)"
+            );
+        }
+        Ok(())
     }
 }

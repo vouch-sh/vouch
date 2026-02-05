@@ -151,102 +151,381 @@ docker load < images/vouch-server-1.0.0.tar
 docker images | grep vouch-server
 ```
 
-### Step 4: Initialize SSH Certificate Authority
+### Step 4: Secure Key Generation
 
 **This is a critical security operation. Follow your organization's key ceremony procedures.**
 
+Vouch requires several cryptographic keys for different purposes. All key generation should be performed on a trusted, air-gapped workstation.
+
+#### Key Overview
+
+| Key | Type | Format | Required | Purpose |
+|-----|------|--------|----------|---------|
+| JWT Secret | Symmetric | UTF-8 (32+ chars) | **Yes** | Sign OAuth tokens and sessions |
+| SSH CA Key | Ed25519 | OpenSSH PEM | Optional | Sign SSH certificates |
+| OIDC Signing Key | P-256 ECDSA | PKCS#8 PEM | Optional* | Sign OIDC ID tokens |
+| TLS Certificate | RSA/EC | PEM | Optional | HTTPS encryption |
+| TLS Private Key | RSA/EC | PEM | Optional | HTTPS encryption |
+
+*Auto-generates ephemeral key if not provided (not recommended for production).
+
+#### JWT Secret Generation (Required)
+
+The JWT secret is used to sign all OAuth tokens and session cookies. It must be at least 32 characters.
+
 ```bash
-# Generate SSH CA key
-./scripts/init-ca.sh
+# Generate cryptographically secure 64-character secret
+openssl rand -base64 48
 
-# This will:
-# 1. Generate Ed25519 CA key pair
-# 2. Store private key securely (HSM or encrypted file)
-# 3. Export public key for distribution to SSH servers
+# Alternative using /dev/urandom
+head -c 48 /dev/urandom | base64
+
+# Store securely - this will be VOUCH_JWT_SECRET
 ```
 
-CA key storage options:
-- **HSM** (recommended for high-security)
-- **Encrypted file** with split knowledge (two administrators)
-- **YubiKey PIV** (for smaller deployments)
+**Security Notes:**
+- Use a minimum of 32 characters (48+ recommended)
+- Never reuse secrets across environments
+- Rotate periodically (requires re-authentication of all users)
 
-### Step 5: Configure Vouch Server
+#### SSH CA Key Generation (Ed25519)
+
+The SSH CA signs user SSH certificates. If not provided, SSH certificate issuance will be disabled.
 
 ```bash
-# Generate configuration
-./scripts/generate-config.sh
+# Generate Ed25519 SSH CA key pair (no passphrase for automated use)
+ssh-keygen -t ed25519 -f ssh_ca_key -N "" -C "vouch-ca@auth.internal"
 
-# Edit config/vouch-server.toml
+# Set restrictive permissions
+chmod 600 ssh_ca_key
+
+# Verify key type and fingerprint
+ssh-keygen -l -f ssh_ca_key
+# Output: 256 SHA256:xxxx vouch-ca@auth.internal (ED25519)
+
+# View public key (for distribution to SSH servers)
+cat ssh_ca_key.pub
 ```
 
-Key air-gap settings:
-```toml
-[server]
-mode = "airgap"
-bind_address = "0.0.0.0:443"
-tls_cert = "/certs/server.crt"
-tls_key = "/certs/server.key"
+**Environment variable format:**
+```bash
+# Option 1: Provide key content directly (preferred for containers)
+export VOUCH_SSH_CA_KEY="$(cat ssh_ca_key)"
 
-[rp]
-id = "auth.internal"
-name = "Vouch (Air-Gapped)"
-
-[ssh_ca]
-# Built-in SSH CA configuration
-private_key_path = "/secrets/ssh-ca-key"
-public_key_path = "/etc/vouch/ssh-ca.pub"
-
-[database]
-path = "/data/vouch.db"  # SQLite database
-
-[identity]
-# Internal identity provider (no Google Workspace)
-provider = "local"
-# Or configure internal LDAP/AD
-# provider = "ldap"
-# ldap_url = "ldaps://ldap.internal:636"
-
-[session]
-duration_hours = 8
-
-[audit]
-# Local storage only
-storage = "database"
-retention_days = 730  # 2 years
-
-[time]
-# Allow clock skew for isolated networks
-allowed_skew_seconds = 300
+# Option 2: Provide path to key file
+export VOUCH_SSH_CA_KEY_PATH="/secrets/ssh_ca_key"
 ```
 
-### Step 6: Deploy Services
+**Key Storage Options:**
+- **HSM** (recommended for high-security) — Store in hardware security module
+- **Encrypted file** with split knowledge — Two administrators hold partial keys
+- **YubiKey PIV** (for smaller deployments) — Store on hardware token
+
+#### OIDC Signing Key Generation (P-256 ECDSA)
+
+The OIDC signing key signs ID tokens using ES256 algorithm. If not provided, an ephemeral key is generated on each server restart (not recommended for production as it invalidates all existing tokens).
+
+```bash
+# Generate P-256 EC private key in PKCS#8 format
+openssl ecparam -name prime256v1 -genkey -noout | \
+  openssl pkcs8 -topk8 -nocrypt -out oidc_signing_key.pem
+
+# Set restrictive permissions
+chmod 600 oidc_signing_key.pem
+
+# Verify key type
+openssl ec -in oidc_signing_key.pem -text -noout 2>/dev/null | head -3
+# Output should include: Private-Key: (256 bit, prime256v1)
+
+# Extract public key (for debugging/verification)
+openssl ec -in oidc_signing_key.pem -pubout -out oidc_signing_key.pub
+```
+
+**Environment variable format:**
+```bash
+# Provide PEM content directly
+export VOUCH_OIDC_SIGNING_KEY="$(cat oidc_signing_key.pem)"
+```
+
+#### TLS Certificate Generation
+
+For production, use certificates signed by your internal CA. For testing, self-signed certificates can be used.
+
+```bash
+# Generate EC private key and self-signed certificate
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+  -keyout tls_key.pem -out tls_cert.pem -days 365 -nodes \
+  -subj "/CN=auth.internal" \
+  -addext "subjectAltName=DNS:auth.internal,DNS:localhost"
+
+# Set restrictive permissions
+chmod 600 tls_key.pem
+
+# Verify certificate
+openssl x509 -in tls_cert.pem -text -noout | head -15
+```
+
+**Environment variable format (base64-encoded):**
+```bash
+# Base64 encode for environment variables
+export VOUCH_TLS_CERT="$(base64 -i tls_cert.pem | tr -d '\n')"
+export VOUCH_TLS_KEY="$(base64 -i tls_key.pem | tr -d '\n')"
+```
+
+#### Key Security Best Practices
+
+1. **File Permissions**: Always use `chmod 600` for private keys
+2. **Never Commit Keys**: Add `*.pem`, `*_key`, `*.key` to `.gitignore`
+3. **Audit Key Access**: Log all access to key material
+4. **Backup Securely**: Store encrypted backups in separate secure location
+5. **Document Fingerprints**: Record key fingerprints in secure documentation
+6. **Key Rotation**: Plan for periodic rotation (SSH CA annually, JWT secret quarterly)
+
+### Step 5: Database Setup
+
+Vouch uses SQLite by default, which is suitable for single-node deployments. The database is created automatically on first startup.
+
+```bash
+# SQLite (default, single-node)
+export VOUCH_DATABASE_URL="sqlite:/data/vouch.db?mode=rwc"
+
+# Create data directory with appropriate permissions
+mkdir -p /data
+chmod 700 /data
+```
+
+For high-availability deployments, PostgreSQL is supported:
+
+```bash
+# PostgreSQL (multi-node)
+export VOUCH_DATABASE_URL="postgres://user:password@db.internal:5432/vouch"
+```
+
+**Database migrations run automatically on server startup.**
+
+### Step 6: Configure Vouch Server
+
+Vouch is configured entirely through environment variables. Create a secure environment file:
+
+```bash
+# Create environment file (chmod 600 after editing)
+cat > /etc/vouch/vouch.env << 'EOF'
+# =============================================================================
+# Vouch Server Configuration - Air-Gapped Environment
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Required Configuration
+# -----------------------------------------------------------------------------
+
+# JWT signing secret (minimum 32 characters)
+VOUCH_JWT_SECRET=<your-64-character-secret-here>
+
+# Relying Party configuration
+VOUCH_RP_ID=auth.internal
+VOUCH_RP_NAME=Vouch (Air-Gapped)
+
+# Database
+VOUCH_DATABASE_URL=sqlite:/data/vouch.db?mode=rwc
+
+# -----------------------------------------------------------------------------
+# Network Configuration
+# -----------------------------------------------------------------------------
+
+# Listen address (internal only)
+VOUCH_LISTEN_ADDR=0.0.0.0:443
+
+# Base URL (how clients reach the server)
+VOUCH_BASE_URL=https://auth.internal
+
+# -----------------------------------------------------------------------------
+# TLS Configuration (base64-encoded PEM)
+# -----------------------------------------------------------------------------
+
+VOUCH_TLS_CERT=<base64-encoded-certificate>
+VOUCH_TLS_KEY=<base64-encoded-private-key>
+
+# -----------------------------------------------------------------------------
+# SSH CA Configuration
+# -----------------------------------------------------------------------------
+
+# SSH CA private key (PEM content, takes precedence over path)
+VOUCH_SSH_CA_KEY=<ssh-ca-private-key-pem>
+
+# Or use a file path instead:
+# VOUCH_SSH_CA_KEY_PATH=/secrets/ssh_ca_key
+
+# -----------------------------------------------------------------------------
+# OIDC Provider Configuration (for GCP Workload Identity Federation)
+# -----------------------------------------------------------------------------
+
+# Vouch acts as an OIDC provider - this key signs the ID tokens
+VOUCH_OIDC_SIGNING_KEY=<oidc-signing-key-pem>
+
+# -----------------------------------------------------------------------------
+# External Identity Provider (Optional)
+# For enrollment via external IdP like Okta, Azure AD
+# -----------------------------------------------------------------------------
+
+# VOUCH_OIDC_ISSUER=https://idp.internal
+# VOUCH_OIDC_CLIENT_ID=vouch-client
+# VOUCH_OIDC_CLIENT_SECRET=<client-secret>
+
+# -----------------------------------------------------------------------------
+# Session Configuration
+# -----------------------------------------------------------------------------
+
+# Session duration (default: 8 hours)
+VOUCH_SESSION_HOURS=8
+
+# Device code settings (for CLI enrollment)
+VOUCH_DEVICE_CODE_EXPIRES=600
+VOUCH_DEVICE_POLL_INTERVAL=5
+
+# -----------------------------------------------------------------------------
+# Security Configuration
+# -----------------------------------------------------------------------------
+
+# Allowed email domains for enrollment (comma-separated)
+VOUCH_ALLOWED_DOMAINS=internal,company.local
+
+# DPoP (Demonstrating Proof of Possession)
+VOUCH_DPOP_ENABLED=true
+VOUCH_DPOP_NONCE_REQUIRED=false
+VOUCH_DPOP_MAX_AGE=300
+
+# -----------------------------------------------------------------------------
+# Audit and Retention
+# -----------------------------------------------------------------------------
+
+# Cleanup interval (minutes, 0 to disable)
+VOUCH_CLEANUP_INTERVAL=15
+
+# Event retention (days)
+VOUCH_AUTH_EVENTS_RETENTION_DAYS=730
+VOUCH_OAUTH_EVENTS_RETENTION_DAYS=90
+
+# -----------------------------------------------------------------------------
+# Branding (Optional)
+# -----------------------------------------------------------------------------
+
+VOUCH_ORG_NAME=Your Organization
+EOF
+
+# Secure the environment file
+chmod 600 /etc/vouch/vouch.env
+```
+
+### Environment Variables Reference
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `VOUCH_JWT_SECRET` | **Yes** | - | Session signing (min 32 chars) |
+| `VOUCH_RP_ID` | **Yes** | `localhost` | Relying party domain |
+| `VOUCH_RP_NAME` | No | `Vouch` | Display name |
+| `VOUCH_DATABASE_URL` | **Yes** | `sqlite:vouch.db?mode=rwc` | Database connection |
+| `VOUCH_LISTEN_ADDR` | No | `0.0.0.0:3000` | Server bind address |
+| `VOUCH_BASE_URL` | No | `https://{rp_id}` | External URL |
+| `VOUCH_SESSION_HOURS` | No | `8` | Session duration |
+| `VOUCH_SSH_CA_KEY` | No | - | SSH CA key (PEM content) |
+| `VOUCH_SSH_CA_KEY_PATH` | No | `./ssh_ca_key` | SSH CA key file path |
+| `VOUCH_OIDC_SIGNING_KEY` | No | auto-generate | OIDC token signing key |
+| `VOUCH_TLS_CERT` | No | - | TLS cert (base64 PEM) |
+| `VOUCH_TLS_KEY` | No | - | TLS key (base64 PEM) |
+| `VOUCH_ALLOWED_DOMAINS` | No | - | Allowed email domains |
+| `VOUCH_DPOP_ENABLED` | No | `true` | Enable DPoP support |
+| `VOUCH_CLEANUP_INTERVAL` | No | `15` | Cleanup interval (minutes) |
+| `VOUCH_AUTH_EVENTS_RETENTION_DAYS` | No | `90` | Auth event retention |
+
+### Step 7: Deploy Services
+
+Create a docker-compose file for deployment:
+
+```yaml
+# docker-compose.yml
+services:
+  vouch-server:
+    image: vouch-server:1.0.0
+    container_name: vouch-server
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    volumes:
+      - vouch-data:/data
+      - /etc/vouch/secrets:/secrets:ro
+    env_file:
+      - /etc/vouch/vouch.env
+    environment:
+      # Override or add environment variables here
+      VOUCH_DATABASE_URL: sqlite:/data/vouch.db?mode=rwc
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:443/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  vouch-data:
+```
+
+Deploy and verify:
 
 ```bash
 # Start services
 docker-compose up -d
 
-# Verify health
+# Verify container is running
 docker-compose ps
+
+# Check logs for startup errors
+docker-compose logs -f vouch-server
+
+# Verify health endpoint
 curl -k https://auth.internal/health
+# Expected: {"status":"healthy"}
+
+# Verify SSH CA is loaded (if configured)
+curl -k https://auth.internal/.well-known/ssh-ca.pub
+# Expected: ssh-ed25519 AAAA... vouch-ca@auth.internal
 ```
 
-### Step 7: Distribute CA Public Key
+### Step 8: Distribute CA Public Key
 
-The SSH CA public key must be trusted by all SSH servers:
+The SSH CA public key must be trusted by all SSH servers in the air-gapped environment:
 
 ```bash
-# Export CA public key
+# Export CA public key from running container
 docker exec vouch-server cat /etc/vouch/ssh-ca.pub > vouch-ca.pub
+
+# Or fetch via API
+curl -k https://auth.internal/.well-known/ssh-ca.pub > vouch-ca.pub
 
 # Copy to all SSH servers
 scp vouch-ca.pub root@server:/etc/ssh/vouch-ca.pub
 
-# Configure SSH server
+# Configure SSH server to trust the CA
 echo "TrustedUserCAKeys /etc/ssh/vouch-ca.pub" >> /etc/ssh/sshd_config
+
+# Optionally, configure authorized principals
+echo "AuthorizedPrincipalsFile /etc/ssh/auth_principals/%u" >> /etc/ssh/sshd_config
+
+# Restart SSH daemon
 systemctl restart sshd
 ```
 
-### Step 8: Configure CLI for Air-Gap
+**AuthorizedPrincipals Setup (Optional but Recommended):**
+
+```bash
+# Create principals directory
+mkdir -p /etc/ssh/auth_principals
+
+# For each user, create a file with allowed principals
+# Vouch issues certificates with two principals: email and username
+echo "john@company.internal" > /etc/ssh/auth_principals/john
+echo "john" >> /etc/ssh/auth_principals/john
+```
+
+### Step 9: Configure CLI for Air-Gap
 
 ```bash
 # ~/.vouch/config.json
@@ -262,7 +541,7 @@ export VOUCH_SERVER=https://auth.internal
 export VOUCH_CA_CERT=/etc/vouch/root-ca.crt
 ```
 
-### Step 9: Enroll Users
+### Step 10: Enroll Users
 
 > **Note:** Air-gap-specific enrollment commands (`vouch enroll --airgap`, `vouch admin user create`) are planned but not yet implemented. Currently, enrollment requires browser access to the Vouch server's web UI.
 

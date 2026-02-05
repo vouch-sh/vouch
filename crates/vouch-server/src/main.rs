@@ -109,6 +109,9 @@ async fn main() -> Result<()> {
     config.load_from_db(&db).await?;
     tracing::info!("Configuration loaded from database");
 
+    // Validate config after all sources merged (env, S3, database)
+    config.validate()?;
+
     // Build WebAuthn instance
     // Use base_url as origin (handles localhost with http and port correctly)
     let rp_origin = url::Url::parse(&config.base_url)?;

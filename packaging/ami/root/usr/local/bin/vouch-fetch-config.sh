@@ -9,28 +9,28 @@ TOKEN=$(curl -sX PUT "http://169.254.169.254/latest/api/token" \
 REGION=$(curl -sH "X-aws-ec2-metadata-token: $TOKEN" \
     http://169.254.169.254/latest/meta-data/placement/region)
 
-# Get secret name from instance tags via IMDS (default: vouch-server/config)
+# Get parameter name from instance tags via IMDS (default: /vouch-server/config)
 # Requires instance launched with: --metadata-options "InstanceMetadataTags=enabled"
-SECRET_NAME=$(curl -sfH "X-aws-ec2-metadata-token: $TOKEN" \
-    http://169.254.169.254/latest/meta-data/tags/instance/VouchSecretName 2>/dev/null || echo "")
+PARAM_NAME=$(curl -sfH "X-aws-ec2-metadata-token: $TOKEN" \
+    http://169.254.169.254/latest/meta-data/tags/instance/VouchConfigParameter 2>/dev/null || echo "")
 
-if [ -z "$SECRET_NAME" ]; then
-    SECRET_NAME="vouch-server/config"
+if [ -z "$PARAM_NAME" ]; then
+    PARAM_NAME="/vouch-server/config"
 fi
 
 # Create runtime directory
 mkdir -p /run/vouch-server
 
-# Fetch secrets and write env file
-# The secret should contain KEY=value pairs, one per line
-aws secretsmanager get-secret-value \
+# Fetch parameter and write directly to env file
+# Parameter value should be KEY=VALUE pairs, one per line
+aws ssm get-parameter \
     --region "$REGION" \
-    --secret-id "$SECRET_NAME" \
-    --query SecretString \
+    --name "$PARAM_NAME" \
+    --query Parameter.Value \
     --output text > /run/vouch-server/env
 
 # Secure the env file
 chmod 600 /run/vouch-server/env
 chown vouch:vouch /run/vouch-server/env
 
-echo "Configuration loaded from Secrets Manager: $SECRET_NAME"
+echo "Configuration loaded from Parameter Store: $PARAM_NAME"

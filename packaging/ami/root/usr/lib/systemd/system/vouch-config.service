@@ -1,5 +1,5 @@
 [Unit]
-Description=Fetch Vouch Server configuration from Secrets Manager
+Description=Fetch Vouch Server configuration from Parameter Store
 After=network-online.target
 Wants=network-online.target
 
