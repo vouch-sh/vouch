@@ -332,62 +332,35 @@ pub async fn browser_login_complete(
         });
     };
 
-    // Get the authenticator by credential_id
-    let authenticator = db::get_authenticator_by_credential_id(&state.db, &credential_id)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
-        .ok_or_else(|| {
-            log_failure(&user_id.to_string(), None, "credential_not_found");
-            // Return generic error to prevent credential enumeration
-            json_error(
-                StatusCode::UNAUTHORIZED,
-                "auth_failed",
-                "Authentication failed",
-            )
-        })?;
-
-    // Verify authenticator belongs to this user (from user_handle)
-    if authenticator.user_id != user_id.to_string() {
-        log_failure(
-            &user_id.to_string(),
-            Some(&authenticator.id),
-            "user_mismatch",
-        );
-        return Err(json_error(
+    // Look up authenticator and verify ownership (single JOIN query)
+    use crate::services::auth::{AuthenticatorLookupParams, lookup_and_verify_authenticator};
+    let lookup_result = lookup_and_verify_authenticator(
+        &state,
+        AuthenticatorLookupParams {
+            credential_id: &credential_id,
+            user_id,
+        },
+    )
+    .await
+    .map_err(|e| {
+        let reason = match &e {
+            crate::services::ServiceError::NotFound(entity) => {
+                format!("{entity}_not_found")
+            }
+            crate::services::ServiceError::Forbidden(_) => "user_mismatch".to_string(),
+            _ => "lookup_error".to_string(),
+        };
+        log_failure(&user_id.to_string(), None, &reason);
+        // Return generic error to prevent credential enumeration
+        json_error(
             StatusCode::UNAUTHORIZED,
             "auth_failed",
             "Authentication failed",
-        ));
-    }
+        )
+    })?;
 
-    // Get user for email
-    let user = db::get_user_by_id(&state.db, &user_id.to_string())
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
-        .ok_or_else(|| {
-            log_failure(
-                &user_id.to_string(),
-                Some(&authenticator.id),
-                "user_not_found",
-            );
-            json_error(
-                StatusCode::UNAUTHORIZED,
-                "auth_failed",
-                "Authentication failed",
-            )
-        })?;
+    let authenticator = lookup_result.authenticator;
+    let user = lookup_result.user;
 
     // Server-side WebAuthn signature verification
     let expected_origin = format!("https://{}", auth_state.rp_id);
@@ -490,7 +463,7 @@ pub async fn browser_login_complete(
         )
     })?;
 
-    // Log successful login event
+    // Log successful login event (fire-and-forget, consistent with failure path)
     let auth_event_params = AuthEventParams {
         user_id: user.id.clone(),
         event_type: AuthEventType::LoginSuccess,
@@ -504,9 +477,12 @@ pub async fn browser_login_complete(
         success: true,
         failure_reason: None,
     };
-    if let Err(e) = db::insert_auth_event(&state.db, &auth_event_params).await {
-        tracing::warn!("Failed to log auth event: {}", e);
-    }
+    let db = state.db.clone();
+    tokio::spawn(async move {
+        if let Err(e) = db::insert_auth_event(&db, &auth_event_params).await {
+            tracing::warn!("Failed to log auth event: {}", e);
+        }
+    });
 
     tracing::info!("Browser login successful for user: {}", user.email);
 

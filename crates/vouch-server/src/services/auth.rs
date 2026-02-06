@@ -39,6 +39,9 @@ pub struct AuthenticatorLookupResult {
 
 /// Look up an authenticator and verify it belongs to the specified user.
 ///
+/// Uses a single JOIN query to fetch both the authenticator and user,
+/// eliminating a sequential DB round-trip.
+///
 /// # Errors
 ///
 /// Returns `ServiceError::NotFound` if the credential or user is not found.
@@ -47,22 +50,18 @@ pub async fn lookup_and_verify_authenticator(
     state: &AppState,
     params: AuthenticatorLookupParams<'_>,
 ) -> ServiceResult<AuthenticatorLookupResult> {
-    // Get the authenticator by credential_id
-    let authenticator = db::get_authenticator_by_credential_id(&state.db, params.credential_id)
+    // Get the authenticator and user in a single JOIN query
+    let row = db::get_authenticator_with_user_by_credential_id(&state.db, params.credential_id)
         .await
         .map_err(|e| ServiceError::Internal(e.to_string()))?
         .ok_or(ServiceError::NotFound("credential"))?;
+
+    let (authenticator, user) = row.into_parts();
 
     // Verify authenticator belongs to this user (from user_handle)
     if authenticator.user_id != params.user_id.to_string() {
         return Err(ServiceError::Forbidden("user_mismatch"));
     }
-
-    // Get user for email and other info
-    let user = db::get_user_by_id(&state.db, &params.user_id.to_string())
-        .await
-        .map_err(|e| ServiceError::Internal(e.to_string()))?
-        .ok_or(ServiceError::NotFound("user"))?;
 
     Ok(AuthenticatorLookupResult {
         authenticator,

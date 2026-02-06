@@ -18,13 +18,7 @@ use crate::fido2::{self, YubiKey};
 /// Run the login command.
 /// Uses discoverable credentials - the YubiKey identifies the user.
 pub async fn run(server: &str) -> Result<()> {
-    // Check for existing valid session and warn
-    if let Some(remaining_secs) = check_existing_session(server).await {
-        let remaining = jiff::SignedDuration::from_mins((remaining_secs / 60) as i64);
-        println!("Already logged in (expires in {remaining:#}). Re-authenticating...\n");
-    } else {
-        println!("Logging in...\n");
-    }
+    println!("Logging in...\n");
 
     // Step 1: Wait for YubiKey to be inserted
     let key = YubiKey::wait_for_device()?;
@@ -66,23 +60,32 @@ pub async fn run(server: &str) -> Result<()> {
         .await
         .context("failed to complete login")?;
 
-    // Step 6: Store session in agent (if running) and config
-    // Use email from response (server identifies user from user_handle)
-    #[cfg(unix)]
-    let agent_stored = store_session_in_agent(&complete_resp.email, &complete_resp, server).await;
-    #[cfg(not(unix))]
-    let agent_stored = false;
-
-    // Also save to config as fallback
+    // Step 6: Store session in config, agent, and cookie file
+    // Config save is fast local I/O, do it first
     let mut config = Config::load()?;
-    config.save_server_url(server)?;
-    config.save_token(&complete_resp.token)?;
-    config.save_email(&complete_resp.email)?;
+    config.set_server_url(server);
+    config.set_token(&complete_resp.token);
+    config.set_email(&complete_resp.email);
+    config.save()?;
 
-    // Step 7: Write cookie file for CLI tools
-    if let Err(e) = write_session_cookie(server, &complete_resp) {
-        tracing::debug!("Failed to write cookie file: {e}");
-    }
+    // Agent IPC and cookie write are independent — run concurrently
+    let (agent_stored, _) = tokio::join!(
+        async {
+            #[cfg(unix)]
+            {
+                store_session_in_agent(&complete_resp.email, &complete_resp, server).await
+            }
+            #[cfg(not(unix))]
+            {
+                false
+            }
+        },
+        async {
+            if let Err(e) = write_session_cookie(server, &complete_resp) {
+                tracing::debug!("Failed to write cookie file: {e}");
+            }
+        },
+    );
 
     println!("Login successful as {}!", complete_resp.email);
     println!(
@@ -171,32 +174,4 @@ fn format_expiry(expires_at: &str) -> String {
     let datetime = ts.strftime("%Y-%m-%d %H:%M UTC");
 
     format!("in {remaining:#} ({datetime})")
-}
-
-/// Check if there's an existing valid session.
-///
-/// Returns `Some(seconds_remaining)` if a valid session exists, `None` otherwise.
-/// This is best-effort - failures are silently ignored.
-async fn check_existing_session(server: &str) -> Option<u64> {
-    // Try agent first (Unix only)
-    #[cfg(unix)]
-    if let Ok(mut agent) = AgentClient::connect().await
-        && let Ok(session) = agent.get_session().await
-    {
-        return Some(session.expires_in_seconds);
-    }
-
-    // Fall back to server check
-    let config = Config::load().ok()?;
-    config.token()?;
-    let client = VouchClient::new(server).ok()?;
-    let status = client
-        .get_authenticated::<vouch_common::SessionStatus>("/v1/auth/status")
-        .await
-        .ok()?;
-    if status.authenticated {
-        status.expires_in_seconds
-    } else {
-        None
-    }
 }

@@ -112,12 +112,22 @@ fn print_expiry(expires_in: u64) {
 }
 
 /// Print all integration statuses.
+///
+/// Starts the GitHub HTTP request early so network latency overlaps with
+/// local integration checks.
 async fn print_all_integrations(server: &str) {
+    // Start GitHub check early (network call)
+    let github = GitHubIntegration::new(server);
+    let github_future = github.check_and_print();
+
+    // Print local integrations while GitHub check runs
     print_integration_status(&SshIntegration::new());
     print_integration_status(&AwsIntegration::new());
     print_integration_status(&GcpIntegration::new());
     print_integration_status(&K8sIntegration::new());
     print_integration_status(&DockerIntegration::new());
     print_integration_status(&CargoIntegration::new());
-    GitHubIntegration::new(server).check_and_print().await;
+
+    // Now await the GitHub result
+    github_future.await;
 }

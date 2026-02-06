@@ -112,15 +112,25 @@ impl Config {
         self.token.as_ref()
     }
 
+    /// Set the server URL (in memory only, call `save()` to persist).
+    pub fn set_server_url(&mut self, url: &str) {
+        self.server_url = Some(url.to_string());
+    }
+
     /// Save the server URL.
     pub fn save_server_url(&mut self, url: &str) -> Result<()> {
-        self.server_url = Some(url.to_string());
+        self.set_server_url(url);
         self.save()
+    }
+
+    /// Set a new session token (in memory only, call `save()` to persist).
+    pub fn set_token(&mut self, token: &str) {
+        self.token = Some(SecretString::from(token.to_string()));
     }
 
     /// Save a new session token.
     pub fn save_token(&mut self, token: &str) -> Result<()> {
-        self.token = Some(SecretString::from(token.to_string()));
+        self.set_token(token);
         self.save()
     }
 
@@ -136,9 +146,14 @@ impl Config {
         self.email.as_deref()
     }
 
+    /// Set the user's email address (in memory only, call `save()` to persist).
+    pub fn set_email(&mut self, email: &str) {
+        self.email = Some(email.to_string());
+    }
+
     /// Save the user's email address.
     pub fn save_email(&mut self, email: &str) -> Result<()> {
-        self.email = Some(email.to_string());
+        self.set_email(email);
         self.save()
     }
 
