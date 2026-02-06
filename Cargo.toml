@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.2.6"
+version = "2026.2.7"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.93"
@@ -75,7 +75,7 @@ uuid = { version = "=1.20.0", default-features = false, features = ["v7", "serde
 dirs = { version = "=6.0.0", default-features = false }
 
 # TLS
-rustls = { version = "=0.23.36", default-features = false, features = ["aws-lc-rs", "std", "tls12"] }
+rustls = { version = "=0.23.36", default-features = false, features = ["aws-lc-rs", "std", "tls12", "prefer-post-quantum"] }
 
 # Crypto
 aws-lc-rs = { version = "=1.15.4", default-features = false }

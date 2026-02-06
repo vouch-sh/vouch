@@ -66,9 +66,6 @@ rust-project.json
 # Kamal secrets (contains credentials)
 .kamal/secrets
 
-# TailwindCSS generated output
-crates/vouch-server/static/css/output.css
-
 .env
 ssh_ca_key*
 .claude/skills

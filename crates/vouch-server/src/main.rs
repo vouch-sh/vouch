@@ -11,13 +11,20 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use axum::{
     Router,
+    extract::Path,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
+    serve::ListenerExt,
 };
+use axum_server::accept::NoDelayAcceptor;
 use clap::Parser;
+use rust_embed::Embed;
 use std::sync::Arc;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
-use tower_http::{cors::CorsLayer, services::ServeDir};
+use tower_http::cors::CorsLayer;
+use tower_http::set_header::SetResponseHeaderLayer;
 use tracing_subscriber::EnvFilter;
 
 use vouch_server::{
@@ -30,6 +37,20 @@ use vouch_server::{
     },
     ssh_ca,
 };
+
+#[derive(Embed)]
+#[folder = "static/"]
+struct Assets;
+
+async fn static_handler(Path(path): Path<String>) -> Response {
+    match Assets::get(&path) {
+        Some(content) => {
+            let mime = mime_guess::from_path(&path).first_or_octet_stream();
+            ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
+        }
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -215,36 +236,11 @@ async fn main() -> Result<()> {
     // S3 config polling task handle (set up after TLS config is created if needed)
     let mut s3_poll_handle: Option<tokio::task::JoinHandle<()>> = None;
 
-    // Build router
-    let app = Router::new()
-        // Landing page with smart routing
-        .route("/", get(handlers::home::home_page))
-        .route("/install", get(handlers::install::install_page))
-        .route("/health", get(|| async { "ok" }))
-        // Legal pages
-        .route("/about", get(handlers::about::about_page))
-        .route("/privacy", get(handlers::legal::privacy_page))
-        .route("/terms", get(handlers::legal::terms_page))
-        // Documentation pages
-        .route("/docs", get(handlers::docs::docs_index_page))
-        .route(
-            "/docs/getting-started",
-            get(handlers::docs::getting_started_page),
-        )
-        .route("/docs/aws", get(handlers::docs::aws_setup_page))
-        .route("/docs/gcp", get(handlers::docs::gcp_setup_page))
-        .route("/docs/ssh", get(handlers::docs::ssh_page))
-        .route("/docs/kubernetes", get(handlers::docs::kubernetes_page))
-        .route("/docs/github", get(handlers::docs::github_setup_page))
-        .route("/docs/docker", get(handlers::docs::docker_page))
-        .route("/docs/applications", get(handlers::docs::applications_page))
-        .route("/docs/scim", get(handlers::docs::scim_page))
-        .route("/docs/cargo", get(handlers::docs::cargo_page))
-        // Integrations page
-        .route(
-            "/integrations",
-            get(handlers::integrations::integrations_page),
-        )
+    // Build router from two groups with separate CORS policies:
+    // - API routes: permissive CORS (Access-Control-Allow-Origin: *) for OIDC/SCIM integration
+    // - UI routes: restrictive same-origin CORS (or configured via VOUCH_CORS_ORIGINS)
+
+    let api_routes = Router::new()
         // OIDC Provider endpoints
         .route(
             "/.well-known/openid-configuration",
@@ -255,6 +251,9 @@ async fn main() -> Result<()> {
         .route("/oauth/userinfo", get(handlers::oidc::userinfo))
         .route("/oauth/revoke", post(handlers::oidc::revoke))
         .route("/oauth/introspect", post(handlers::oidc::introspect))
+        .route("/oauth/device", post(handlers::device::device_code))
+        .route("/oauth/token", post(handlers::oidc::token))
+        .route("/oauth/callback", get(handlers::enroll::oidc_callback))
         // Legacy auth endpoints
         .route(
             "/v1/auth/register/start",
@@ -270,42 +269,6 @@ async fn main() -> Result<()> {
             post(handlers::auth::login_complete),
         )
         .route("/v1/auth/status", get(handlers::auth::status))
-        // Device Authorization Grant (RFC 8628)
-        .route("/oauth/device", post(handlers::device::device_code))
-        // Unified token endpoint (handles both authorization_code and device_code grants)
-        .route("/oauth/token", post(handlers::oidc::token))
-        // Browser-based WebAuthn login (RFC 6749, RFC 9207, RFC 9700)
-        .route("/login", get(handlers::browser_login::login_page))
-        .route(
-            "/login/webauthn/start",
-            post(handlers::browser_login::browser_login_start),
-        )
-        .route(
-            "/login/webauthn/complete",
-            post(handlers::browser_login::browser_login_complete),
-        )
-        // Browser-based enrollment
-        .route("/device", get(handlers::enroll::device_verify_page))
-        .route("/device", post(handlers::enroll::device_verify_submit))
-        .route("/oauth/callback", get(handlers::enroll::oidc_callback))
-        // Direct enrollment (browser-only, no CLI required)
-        .route("/enroll/start", get(handlers::enroll::direct_enroll_start))
-        .route(
-            "/enroll/webauthn/start",
-            post(handlers::enroll::browser_register_start),
-        )
-        .route(
-            "/enroll/webauthn/complete",
-            post(handlers::enroll::browser_register_complete),
-        )
-        // Key management during enrollment (uses cookie for auth)
-        .route("/enroll/keys", get(handlers::enroll::enroll_keys_page))
-        .route("/logout", post(handlers::auth::logout))
-        .route("/enroll/keys/api", get(handlers::enroll_keys::list_keys))
-        .route(
-            "/enroll/keys/{id}",
-            patch(handlers::enroll_keys::rename_key).delete(handlers::enroll_keys::delete_key),
-        )
         // Key management (authenticated API)
         .route("/v1/keys", get(handlers::keys::list_keys))
         .route(
@@ -363,35 +326,6 @@ async fn main() -> Result<()> {
                 .put(handlers::integrations::set_aws_integration)
                 .delete(handlers::integrations::delete_aws_integration),
         )
-        // GCP browser-based configuration
-        .route(
-            "/gcp/configure",
-            get(handlers::integrations::gcp_configure_page)
-                .post(handlers::integrations::gcp_configure_submit),
-        )
-        .route(
-            "/gcp/configure/delete",
-            post(handlers::integrations::gcp_configure_delete),
-        )
-        // GitHub App installation
-        .route(
-            "/api/webhooks/github",
-            post(handlers::github::github_webhook),
-        )
-        .route(
-            "/github/connect",
-            get(handlers::github::github_connect_page),
-        )
-        .route("/github/callback", get(handlers::github::github_callback))
-        .route("/github/link", get(handlers::github::github_link_start))
-        .route(
-            "/github/reconnect",
-            post(handlers::github::github_reconnect),
-        )
-        .route(
-            "/github/success",
-            get(handlers::github::github_success_page),
-        )
         // Org admin API (JSON, JWT Bearer auth)
         .route(
             "/api/v1/org/auth-events",
@@ -404,6 +338,31 @@ async fn main() -> Result<()> {
         .route(
             "/api/v1/org/scim-tokens/{id}",
             delete(handlers::admin::delete_scim_token),
+        )
+        // GitHub webhook API
+        .route(
+            "/api/webhooks/github",
+            post(handlers::github::github_webhook),
+        )
+        // Applications API (JSON)
+        .route(
+            "/api/v1/applications",
+            get(handlers::applications::list_applications_api)
+                .post(handlers::applications::create_application_api),
+        )
+        .route(
+            "/api/v1/applications/{id}",
+            get(handlers::applications::get_application_api)
+                .patch(handlers::applications::update_application_api)
+                .delete(handlers::applications::delete_application_api),
+        )
+        .route(
+            "/api/v1/applications/{id}/rotate",
+            post(handlers::applications::rotate_secret_api),
+        )
+        .route(
+            "/api/v1/applications/{id}/revoke",
+            post(handlers::applications::revoke_tokens_api),
         )
         // SCIM 2.0 endpoints (RFC 7643/7644)
         .route(
@@ -435,7 +394,94 @@ async fn main() -> Result<()> {
                 .patch(handlers::scim::patch_group)
                 .delete(handlers::scim::delete_group),
         )
-        // OAuth Application Registration Portal (Phase 7)
+        .layer(build_api_cors_layer());
+
+    let ui_routes = Router::new()
+        // Landing page with smart routing
+        .route("/", get(handlers::home::home_page))
+        .route("/install", get(handlers::install::install_page))
+        .route("/health", get(|| async { "ok" }))
+        // Legal pages
+        .route("/about", get(handlers::about::about_page))
+        .route("/privacy", get(handlers::legal::privacy_page))
+        .route("/terms", get(handlers::legal::terms_page))
+        // Documentation pages
+        .route("/docs", get(handlers::docs::docs_index_page))
+        .route(
+            "/docs/getting-started",
+            get(handlers::docs::getting_started_page),
+        )
+        .route("/docs/aws", get(handlers::docs::aws_setup_page))
+        .route("/docs/gcp", get(handlers::docs::gcp_setup_page))
+        .route("/docs/ssh", get(handlers::docs::ssh_page))
+        .route("/docs/kubernetes", get(handlers::docs::kubernetes_page))
+        .route("/docs/github", get(handlers::docs::github_setup_page))
+        .route("/docs/docker", get(handlers::docs::docker_page))
+        .route("/docs/applications", get(handlers::docs::applications_page))
+        .route("/docs/scim", get(handlers::docs::scim_page))
+        .route("/docs/cargo", get(handlers::docs::cargo_page))
+        // Integrations page
+        .route(
+            "/integrations",
+            get(handlers::integrations::integrations_page),
+        )
+        // Browser-based WebAuthn login (RFC 6749, RFC 9207, RFC 9700)
+        .route("/login", get(handlers::browser_login::login_page))
+        .route(
+            "/login/webauthn/start",
+            post(handlers::browser_login::browser_login_start),
+        )
+        .route(
+            "/login/webauthn/complete",
+            post(handlers::browser_login::browser_login_complete),
+        )
+        // Browser-based enrollment
+        .route("/device", get(handlers::enroll::device_verify_page))
+        .route("/device", post(handlers::enroll::device_verify_submit))
+        // Direct enrollment (browser-only, no CLI required)
+        .route("/enroll/start", get(handlers::enroll::direct_enroll_start))
+        .route(
+            "/enroll/webauthn/start",
+            post(handlers::enroll::browser_register_start),
+        )
+        .route(
+            "/enroll/webauthn/complete",
+            post(handlers::enroll::browser_register_complete),
+        )
+        // Key management during enrollment (uses cookie for auth)
+        .route("/enroll/keys", get(handlers::enroll::enroll_keys_page))
+        .route("/logout", post(handlers::auth::logout))
+        .route("/enroll/keys/api", get(handlers::enroll_keys::list_keys))
+        .route(
+            "/enroll/keys/{id}",
+            patch(handlers::enroll_keys::rename_key).delete(handlers::enroll_keys::delete_key),
+        )
+        // GCP browser-based configuration
+        .route(
+            "/gcp/configure",
+            get(handlers::integrations::gcp_configure_page)
+                .post(handlers::integrations::gcp_configure_submit),
+        )
+        .route(
+            "/gcp/configure/delete",
+            post(handlers::integrations::gcp_configure_delete),
+        )
+        // GitHub App installation
+        .route(
+            "/github/connect",
+            get(handlers::github::github_connect_page),
+        )
+        .route("/github/callback", get(handlers::github::github_callback))
+        .route("/github/link", get(handlers::github::github_link_start))
+        .route(
+            "/github/reconnect",
+            post(handlers::github::github_reconnect),
+        )
+        .route(
+            "/github/success",
+            get(handlers::github::github_success_page),
+        )
+        // OAuth Application Registration Portal
         .route(
             "/applications",
             get(handlers::applications::list_applications_page),
@@ -458,40 +504,11 @@ async fn main() -> Result<()> {
             "/applications/{id}/rotate",
             post(handlers::applications::rotate_secret_form),
         )
-        // Applications API (JSON)
-        .route(
-            "/api/v1/applications",
-            get(handlers::applications::list_applications_api)
-                .post(handlers::applications::create_application_api),
-        )
-        .route(
-            "/api/v1/applications/{id}",
-            get(handlers::applications::get_application_api)
-                .patch(handlers::applications::update_application_api)
-                .delete(handlers::applications::delete_application_api),
-        )
-        .route(
-            "/api/v1/applications/{id}/rotate",
-            post(handlers::applications::rotate_secret_api),
-        )
-        .route(
-            "/api/v1/applications/{id}/revoke",
-            post(handlers::applications::revoke_tokens_api),
-        )
-        // Static file serving for CSS, JS, and assets
-        // Use /static in Docker, fall back to static for local development
-        .nest_service(
-            "/static",
-            ServeDir::new(if std::path::Path::new("/static").exists() {
-                "/static"
-            } else if std::path::Path::new("crates/vouch-server/static").exists() {
-                "crates/vouch-server/static"
-            } else {
-                "static"
-            }),
-        )
-        .layer(build_cors_layer(&config))
-        .with_state(state.clone());
+        // Static file serving for CSS, JS, and assets (embedded in binary via rust-embed)
+        .route("/static/{*path}", get(static_handler))
+        .layer(build_ui_cors_layer(&config));
+
+    let app = apply_security_layers(api_routes.merge(ui_routes), &config).with_state(state.clone());
 
     // Start server with graceful shutdown
     if config.tls_configured() {
@@ -598,6 +615,13 @@ async fn main() -> Result<()> {
             match tokio::net::TcpListener::bind(http_addr).await {
                 Ok(listener) => {
                     tracing::info!("HTTP redirect server listening on {}", http_addr);
+                    let listener = listener.tap_io(|tcp| {
+                        if let Err(err) = tcp.set_nodelay(true) {
+                            tracing::trace!(
+                                "failed to set TCP_NODELAY on incoming connection: {err:#}"
+                            );
+                        }
+                    });
                     if let Err(e) = axum::serve(listener, redirect_app)
                         .with_graceful_shutdown(token_for_http.cancelled_owned())
                         .await
@@ -619,6 +643,7 @@ async fn main() -> Result<()> {
 
         // Run HTTPS server (port 443) - this blocks until shutdown
         axum_server::bind_rustls(https_addr, tls_config)
+            .map(|acceptor| acceptor.acceptor(NoDelayAcceptor::new()))
             .handle(handle)
             .serve(app.into_make_service())
             .await?;
@@ -644,6 +669,11 @@ async fn main() -> Result<()> {
         let listener = tokio::net::TcpListener::bind(&config.listen_addr).await?;
         tracing::info!("Listening on http://{}", config.listen_addr);
 
+        let listener = listener.tap_io(|tcp| {
+            if let Err(err) = tcp.set_nodelay(true) {
+                tracing::trace!("failed to set TCP_NODELAY on incoming connection: {err:#}");
+            }
+        });
         axum::serve(listener, app)
             .with_graceful_shutdown(shutdown_signal())
             .await?;
@@ -667,23 +697,38 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-/// Build CORS layer based on configuration.
-fn build_cors_layer(config: &config::ServerConfig) -> CorsLayer {
+/// Build permissive CORS layer for API endpoints (OIDC, SCIM, v1, api).
+///
+/// These endpoints authenticate via tokens in request bodies or Authorization headers,
+/// never cookies — so `Access-Control-Allow-Origin: *` without credentials is safe and
+/// allows any OIDC relying party to integrate without configuration.
+fn build_api_cors_layer() -> CorsLayer {
+    use axum::http::{Method, header};
+
+    CorsLayer::new()
+        .allow_origin(tower_http::cors::Any)
+        .allow_methods([
+            Method::GET,
+            Method::POST,
+            Method::PUT,
+            Method::PATCH,
+            Method::DELETE,
+            Method::OPTIONS,
+        ])
+        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+        .max_age(std::time::Duration::from_secs(3600))
+}
+
+/// Build restrictive CORS layer for UI routes (login, enroll, applications, etc.).
+///
+/// These routes use cookie-based sessions and should not be accessible cross-origin
+/// by default. `VOUCH_CORS_ORIGINS` can override this for advanced use cases.
+fn build_ui_cors_layer(config: &config::ServerConfig) -> CorsLayer {
     use axum::http::{Method, header};
 
     match &config.cors_origins {
-        None => {
-            // No CORS configured - use restrictive defaults
-            CorsLayer::new()
-        }
-        Some(origins) if origins.iter().any(|o| o == "*") => {
-            // Allow all origins (not recommended for production)
-            tracing::warn!("CORS configured to allow all origins - not recommended for production");
-            CorsLayer::permissive()
-        }
-        Some(origins) => {
-            // Allow specific origins
-            tracing::info!("CORS configured for origins: {:?}", origins);
+        Some(origins) if !origins.is_empty() => {
+            tracing::info!("UI CORS configured for origins: {:?}", origins);
             let parsed_origins: Vec<_> = origins.iter().filter_map(|o| o.parse().ok()).collect();
 
             CorsLayer::new()
@@ -705,6 +750,61 @@ fn build_cors_layer(config: &config::ServerConfig) -> CorsLayer {
                 .allow_credentials(true)
                 .max_age(std::time::Duration::from_secs(3600))
         }
+        _ => {
+            // No CORS configured — restrictive same-origin defaults
+            CorsLayer::new()
+        }
+    }
+}
+
+/// Apply security response headers globally to the router.
+///
+/// Sets X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy,
+/// Cross-Origin-Opener-Policy, Content-Security-Policy, and HSTS (when TLS is configured).
+fn apply_security_layers(
+    router: Router<Arc<AppState>>,
+    config: &config::ServerConfig,
+) -> Router<Arc<AppState>> {
+    use axum::http::{HeaderName, HeaderValue};
+
+    let router = router
+        .layer(SetResponseHeaderLayer::overriding(
+            header::X_FRAME_OPTIONS,
+            HeaderValue::from_static("DENY"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static(
+                "camera=(), microphone=(), geolocation=(), payment=()",
+            ),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("cross-origin-opener-policy"),
+            HeaderValue::from_static("same-origin"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static(
+                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+            ),
+        ));
+
+    // HSTS only when TLS is configured
+    if config.tls_configured() {
+        router.layer(SetResponseHeaderLayer::overriding(
+            header::STRICT_TRANSPORT_SECURITY,
+            HeaderValue::from_static("max-age=63072000; includeSubDomains"),
+        ))
+    } else {
+        router
     }
 }
 
