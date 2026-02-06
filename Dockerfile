@@ -32,15 +32,15 @@ RUN apt-get update && apt-get install -y curl \
     && chmod +x "${BINARY}" \
     && mv "${BINARY}" tailwindcss
 
-# Copy files needed for CSS build
+# Copy existing static assets (images, webmanifest) first, then CSS build files
+COPY crates/vouch-server/static crates/vouch-server/static
 COPY crates/vouch-server/tailwind.config.js crates/vouch-server/
 COPY crates/vouch-server/styles crates/vouch-server/styles
 COPY crates/vouch-server/templates crates/vouch-server/templates
 COPY crates/vouch-server/src crates/vouch-server/src
 
 # Build minified CSS
-RUN mkdir -p crates/vouch-server/static/css \
-    && cd crates/vouch-server \
+RUN cd crates/vouch-server \
     && /app/tailwindcss -i styles/input.css -o static/css/output.css --minify
 
 # Rust build stage - using musl for static binary
@@ -70,6 +70,9 @@ COPY crates/vouch-server/src crates/vouch-server/src
 COPY crates/vouch-server/migrations crates/vouch-server/migrations
 COPY crates/vouch-server/templates crates/vouch-server/templates
 
+# Copy built static assets (needed at compile time for rust-embed)
+COPY --from=css-builder /app/crates/vouch-server/static crates/vouch-server/static
+
 # Touch files with deterministic timestamp to ensure rebuild
 RUN touch -d "@${SOURCE_DATE_EPOCH}" crates/vouch-common/src/lib.rs crates/vouch-server/src/main.rs
 
@@ -89,11 +92,8 @@ WORKDIR /
 
 LABEL org.opencontainers.image.source=https://github.com/vouch-sh/vouch
 
-# Copy the binary
+# Copy the binary (static assets are embedded via rust-embed)
 COPY --from=builder /app/target/release/vouch-server /vouch-server
-
-# Copy built static assets (CSS)
-COPY --from=css-builder --chown=nonroot:nonroot /app/crates/vouch-server/static /static
 
 # Create data directory with correct ownership
 COPY --from=builder --chown=nonroot:nonroot /data /data

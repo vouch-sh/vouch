@@ -2054,12 +2054,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "http-range-header"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
-
-[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3389,6 +3383,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "rust-embed"
+version = "8.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04113cb9355a377d83f06ef1f0a45b8ab8cd7d8b1288160717d66df5c7988d27"
+dependencies = [
+ "axum",
+ "mime_guess",
+ "rust-embed-impl",
+ "rust-embed-utils",
+ "tokio",
+ "walkdir",
+]
+
+[[package]]
+name = "rust-embed-impl"
+version = "8.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "da0902e4c7c8e997159ab384e6d0fc91c221375f6894346ae107f47dd0f3ccaa"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "rust-embed-utils",
+ "syn",
+ "walkdir",
+]
+
+[[package]]
+name = "rust-embed-utils"
+version = "8.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bcdef0be6fe7f6fa333b1073c949729274b05f123a0ad7efcb8efd878e5c3b1"
+dependencies = [
+ "mime_guess",
+ "sha2",
+ "walkdir",
+]
+
+[[package]]
 name = "rust-ini"
 version = "0.21.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4446,24 +4478,14 @@ checksum = "d4e6559d53cc268e5031cd8429d05415bc4cb4aefc4aa5d6cc35fbf5b924a1f8"
 dependencies = [
  "bitflags",
  "bytes",
- "futures-core",
  "futures-util",
  "http 1.4.0",
  "http-body 1.0.1",
- "http-body-util",
- "http-range-header",
- "httpdate",
  "iri-string",
- "mime",
- "mime_guess",
- "percent-encoding",
  "pin-project-lite",
- "tokio",
- "tokio-util",
  "tower",
  "tower-layer",
  "tower-service",
- "tracing",
 ]
 
 [[package]]
@@ -4673,7 +4695,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.2.6"
+version = "2026.2.7"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -4696,7 +4718,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.2.6"
+version = "2026.2.7"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4737,7 +4759,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.2.6"
+version = "2026.2.7"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4756,7 +4778,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.2.6"
+version = "2026.2.7"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4779,7 +4801,9 @@ dependencies = [
  "jiff-sqlx",
  "jsonwebtoken",
  "mimalloc",
+ "mime_guess",
  "reqwest",
+ "rust-embed",
  "rustls 0.23.36",
  "rustls-pemfile",
  "sea-query",
@@ -4808,7 +4832,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.2.6"
+version = "2026.2.7"
 dependencies = [
  "anyhow",
  "aws-lc-rs",

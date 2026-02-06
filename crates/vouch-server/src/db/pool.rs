@@ -199,17 +199,25 @@ impl Pool {
 
         // Create pool with appropriate lifetime settings for DSQL:
         // - max_lifetime: 55 min (DSQL terminates connections after 60 min)
-        // - idle_timeout: 10 min (close unused connections to allow token refresh)
+        // - idle_timeout: 5 min (close idle connections sooner to avoid stale connections)
         // - acquire_timeout: 30 sec (prevent indefinite waits)
-        // - min_connections: 1 (keep one warm connection for lower latency)
-        // - test_before_acquire: true (validate connections; DSQL may close idle ones)
+        // - min_connections: 2 (keep warm connections for lower latency after idle)
+        // - before_acquire: only ping connections idle >30s (avoids round-trip on active conns)
         let pool = PgPoolOptions::new()
             .max_connections(10)
-            .min_connections(1)
+            .min_connections(2)
             .max_lifetime(Duration::from_secs(55 * 60))
-            .idle_timeout(Duration::from_secs(10 * 60))
+            .idle_timeout(Duration::from_secs(5 * 60))
             .acquire_timeout(Duration::from_secs(30))
-            .test_before_acquire(true)
+            .test_before_acquire(false)
+            .before_acquire(|conn, meta| {
+                Box::pin(async move {
+                    if meta.idle_for.as_secs() > 30 {
+                        sqlx::Connection::ping(conn).await?;
+                    }
+                    Ok(true)
+                })
+            })
             .connect_with(connect_options)
             .await
             .context("failed to connect to DSQL cluster")?;
