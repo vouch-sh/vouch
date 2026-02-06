@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Vouch identity server.
 
+// Avoid musl's default allocator due to lackluster performance
+// https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use axum::{
