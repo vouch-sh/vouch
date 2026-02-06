@@ -2,11 +2,10 @@
 //! Enrollment handlers for browser-based device authorization flow.
 
 use crate::AppState;
-use crate::db::{self, AuthEventParams, AuthEventType, EnrollmentSession};
+use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::extractors::ClientInfo;
 use crate::impl_template_response;
 use askama::Template;
-use aws_lc_rs::digest::{self, SHA256};
 use axum::{
     Form, Json,
     body::Body,
@@ -120,55 +119,6 @@ fn cose_key_to_cbor(
     })?;
 
     Ok(buf)
-}
-
-// ============================================================================
-// Enrollment Session Cookie Management (legacy, for CLI backward compatibility)
-// ============================================================================
-
-/// Get enrollment session from cookie jar.
-/// Returns the session if valid, None otherwise.
-pub async fn get_enrollment_session_from_cookie(
-    state: &AppState,
-    jar: &CookieJar,
-) -> Option<EnrollmentSession> {
-    let cookie = jar.get("vouch_enroll")?;
-    let value = cookie.value();
-
-    tracing::debug!("get_enrollment_session: found vouch_enroll cookie");
-
-    // Hash the token to look up session
-    let token_hash = hex::encode(digest::digest(&SHA256, value.as_bytes()));
-
-    // Look up session
-    let session = match db::get_enrollment_session_by_token_hash(&state.db, &token_hash).await {
-        Ok(Some(s)) => {
-            tracing::debug!("get_enrollment_session: found session in database");
-            s
-        }
-        Ok(None) => {
-            tracing::debug!("get_enrollment_session: session not found in database");
-            return None;
-        }
-        Err(e) => {
-            tracing::debug!("get_enrollment_session: database error: {}", e);
-            return None;
-        }
-    };
-
-    // Check if expired
-    let expires = session.expires_at.to_jiff();
-
-    if expires > Timestamp::now() {
-        // Update last used timestamp
-        if let Err(e) = db::touch_enrollment_session(&state.db, &session.id).await {
-            tracing::warn!("Failed to touch enrollment session: {e}");
-        }
-        Some(session)
-    } else {
-        tracing::debug!("get_enrollment_session: session expired");
-        None
-    }
 }
 
 // ============================================================================
@@ -760,25 +710,40 @@ pub async fn oidc_callback(
         .into_response();
     }
 
-    // Also store the device_auth_id association for CLI polling (if this came from device auth flow)
-    // This is needed so the CLI can poll for completion
-    if !stored_state.device_auth_id.is_empty()
-        && !stored_state.device_auth_id.starts_with("DIRECT-")
-    {
-        // Store device auth ID in enrollment session for backward compatibility with CLI polling
-        // The CLI will poll the device auth endpoint to get the session
-        if let Err(e) = db::create_enrollment_session(
-            &state.db,
-            &user.id,
-            &claims.email,
-            &token_hash,
-            Some(&stored_state.device_auth_id),
-            &expires.to_string(),
-        )
-        .await
-        {
-            tracing::warn!("Failed to create enrollment session for CLI: {}", e);
-            // Continue anyway - browser flow will still work
+    // Handle CLI-initiated device auth flow
+    let is_cli_flow = !stored_state.device_auth_id.is_empty()
+        && !stored_state.device_auth_id.starts_with("DIRECT-");
+
+    if is_cli_flow {
+        if let Some(ref auth_id) = authenticator_id {
+            // User already has a registered key — authorize the device auth
+            // immediately so the CLI stops polling.
+            if let Err(e) = db::authorize_device_auth(
+                &state.db,
+                &stored_state.device_auth_id,
+                &user.id,
+                &claims.email,
+                auth_id,
+            )
+            .await
+            {
+                tracing::warn!("Failed to authorize device auth: {}", e);
+            }
+        } else {
+            // No key yet — store the device_auth_id in an enrollment session
+            // so browser_register_complete can authorize it after WebAuthn registration.
+            if let Err(e) = db::create_enrollment_session(
+                &state.db,
+                &user.id,
+                &claims.email,
+                &token_hash,
+                Some(&stored_state.device_auth_id),
+                &expires.to_string(),
+            )
+            .await
+            {
+                tracing::warn!("Failed to create enrollment session for CLI: {}", e);
+            }
         }
     }
 
@@ -872,12 +837,21 @@ pub async fn browser_register_start(
 
     let user_email = session.claims.email.clone();
 
-    // Get device_auth_id from enrollment session if available (for CLI polling)
-    // This is only relevant for CLI-initiated flows
-    let device_auth_id = get_enrollment_session_from_cookie(&state, &jar)
-        .await
-        .and_then(|es| es.device_auth_id)
-        .unwrap_or_default();
+    // Get device_auth_id from enrollment session if available (for CLI polling).
+    // Look up by vouch_session token hash, since oidc_callback stores the
+    // enrollment session keyed to the same token.
+    let device_auth_id = match jar.get("vouch_session").map(|c| c.value()) {
+        Some(token) => {
+            let token_hash = hash_token(token);
+            db::get_enrollment_session_by_token_hash(&state.db, &token_hash)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|es| es.device_auth_id)
+                .unwrap_or_default()
+        }
+        None => String::new(),
+    };
 
     // Get any existing credentials for this user to exclude them
     let existing_auths = db::get_authenticators_for_user(&state.db, &session.claims.sub)
@@ -1113,7 +1087,7 @@ pub async fn browser_register_complete(
         )
     })?;
 
-    // Log enrollment event
+    // Log enrollment event (fire-and-forget)
     let auth_event_params = AuthEventParams {
         user_id: reg_state.user_id.to_string(),
         event_type: AuthEventType::Enrollment,
@@ -1127,9 +1101,12 @@ pub async fn browser_register_complete(
         success: true,
         failure_reason: None,
     };
-    if let Err(e) = db::insert_auth_event(&state.db, &auth_event_params).await {
-        tracing::warn!("Failed to log enrollment event: {}", e);
-    }
+    let db = state.db.clone();
+    tokio::spawn(async move {
+        if let Err(e) = db::insert_auth_event(&db, &auth_event_params).await {
+            tracing::warn!("Failed to log enrollment event: {}", e);
+        }
+    });
 
     tracing::info!(
         "Enrollment complete for: {} with {} (AAGUID: {})",

@@ -2,13 +2,14 @@
 //! Authenticator (WebAuthn credential) database operations.
 
 use super::Pool;
-use super::schema::{Authenticators, DeviceAuthRequests, Sessions};
+use super::schema::{Authenticators, DeviceAuthRequests, Sessions, Users};
 use super::types::BuildSql;
 use super::types::DbTimestamp;
+use super::users::User;
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute};
 use anyhow::Result;
 use jiff::Timestamp;
-use sea_query::{Expr, Query};
+use sea_query::{Expr, JoinType, Query};
 use uuid::Uuid;
 
 /// Authenticator (credential) record.
@@ -135,6 +136,135 @@ pub async fn get_authenticator_by_credential_id(
     let authenticator = db_fetch_optional!(pool, sqlx::query_as::<_, Authenticator>(&sql))?;
 
     Ok(authenticator)
+}
+
+/// Result of a JOIN query between authenticators and users.
+#[derive(Debug, sqlx::FromRow)]
+pub struct AuthenticatorWithUser {
+    // Authenticator fields
+    pub id: String,
+    pub user_id: String,
+    pub name: String,
+    pub credential_id: Vec<u8>,
+    pub public_key: Vec<u8>,
+    pub counter: i32,
+    pub created_at: DbTimestamp,
+    pub aaguid: Option<String>,
+    pub user_handle: Option<Vec<u8>>,
+    // User fields (aliased to avoid column name collisions)
+    #[sqlx(rename = "u_id")]
+    pub u_id: String,
+    #[sqlx(rename = "u_email")]
+    pub u_email: String,
+    #[sqlx(rename = "u_name")]
+    pub u_name: Option<String>,
+    #[sqlx(rename = "u_org_id")]
+    pub u_org_id: Option<String>,
+    #[sqlx(rename = "u_is_org_admin")]
+    pub u_is_org_admin: bool,
+    #[sqlx(rename = "u_github_id")]
+    pub u_github_id: Option<i64>,
+    #[sqlx(rename = "u_github_login")]
+    pub u_github_login: Option<String>,
+    #[sqlx(rename = "u_github_refresh_token")]
+    pub u_github_refresh_token: Option<String>,
+}
+
+impl AuthenticatorWithUser {
+    /// Split into separate `Authenticator` and `User` structs.
+    pub fn into_parts(self) -> (Authenticator, User) {
+        let authenticator = Authenticator {
+            id: self.id,
+            user_id: self.user_id,
+            name: self.name,
+            credential_id: self.credential_id,
+            public_key: self.public_key,
+            counter: self.counter,
+            created_at: self.created_at,
+            aaguid: self.aaguid,
+            user_handle: self.user_handle,
+        };
+        let user = User {
+            id: self.u_id,
+            email: self.u_email,
+            name: self.u_name,
+            org_id: self.u_org_id,
+            is_org_admin: self.u_is_org_admin,
+            github_id: self.u_github_id,
+            github_login: self.u_github_login,
+            github_refresh_token: self.u_github_refresh_token,
+        };
+        (authenticator, user)
+    }
+}
+
+/// Get an authenticator and its owning user by credential ID in a single query.
+pub async fn get_authenticator_with_user_by_credential_id(
+    pool: &Pool,
+    credential_id: &[u8],
+) -> Result<Option<AuthenticatorWithUser>> {
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .column((Authenticators::Table, Authenticators::Id))
+            .column((Authenticators::Table, Authenticators::UserId))
+            .column((Authenticators::Table, Authenticators::Name))
+            .column((Authenticators::Table, Authenticators::CredentialId))
+            .column((Authenticators::Table, Authenticators::PublicKey))
+            .column((Authenticators::Table, Authenticators::Counter))
+            .column((Authenticators::Table, Authenticators::CreatedAt))
+            .column((Authenticators::Table, Authenticators::Aaguid))
+            .column((Authenticators::Table, Authenticators::UserHandle))
+            .expr_as(
+                Expr::col((Users::Table, Users::Id)),
+                sea_query::Alias::new("u_id"),
+            )
+            .expr_as(
+                Expr::col((Users::Table, Users::Email)),
+                sea_query::Alias::new("u_email"),
+            )
+            .expr_as(
+                Expr::col((Users::Table, Users::Name)),
+                sea_query::Alias::new("u_name"),
+            )
+            .expr_as(
+                Expr::col((Users::Table, Users::OrgId)),
+                sea_query::Alias::new("u_org_id"),
+            )
+            .expr_as(
+                Expr::col((Users::Table, Users::IsOrgAdmin)),
+                sea_query::Alias::new("u_is_org_admin"),
+            )
+            .expr_as(
+                Expr::col((Users::Table, Users::GitHubId)),
+                sea_query::Alias::new("u_github_id"),
+            )
+            .expr_as(
+                Expr::col((Users::Table, Users::GitHubLogin)),
+                sea_query::Alias::new("u_github_login"),
+            )
+            .expr_as(
+                Expr::col((Users::Table, Users::GitHubRefreshToken)),
+                sea_query::Alias::new("u_github_refresh_token"),
+            )
+            .from(Authenticators::Table)
+            .join(
+                JoinType::InnerJoin,
+                Users::Table,
+                Expr::col((Authenticators::Table, Authenticators::UserId))
+                    .equals((Users::Table, Users::Id)),
+            )
+            .and_where(
+                Expr::col((Authenticators::Table, Authenticators::CredentialId)).eq(credential_id),
+            )
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let row = db_fetch_optional!(pool, sqlx::query_as::<_, AuthenticatorWithUser>(&sql))?;
+
+    Ok(row)
 }
 
 /// Get an authenticator by ID.

@@ -453,7 +453,7 @@ pub async fn login_complete(
     .await
     .map_err(service_error_to_handler_error)?;
 
-    // Log successful login event
+    // Log successful login event (fire-and-forget, consistent with failure path)
     let auth_event_params = AuthEventParams {
         user_id: user.id.clone(),
         event_type: AuthEventType::LoginSuccess,
@@ -467,9 +467,12 @@ pub async fn login_complete(
         success: true,
         failure_reason: None,
     };
-    if let Err(e) = db::insert_auth_event(&state.db, &auth_event_params).await {
-        tracing::warn!("Failed to log auth event: {}", e);
-    }
+    let db = state.db.clone();
+    tokio::spawn(async move {
+        if let Err(e) = db::insert_auth_event(&db, &auth_event_params).await {
+            tracing::warn!("Failed to log auth event: {}", e);
+        }
+    });
 
     tracing::info!("Login successful for user: {}", user.email);
 
