@@ -75,6 +75,7 @@ pub async fn run(server: &str) -> Result<()> {
 
     // Also save to config as fallback
     let mut config = Config::load()?;
+    config.save_server_url(server)?;
     config.save_token(&complete_resp.token)?;
     config.save_email(&complete_resp.email)?;
 
