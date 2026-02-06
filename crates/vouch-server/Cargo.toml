@@ -69,6 +69,9 @@ arc-swap = { version = "=1.8.1", default-features = false }
 # Async utilities for coordinated shutdown (CancellationToken)
 tokio-util = { version = "=0.7.18", default-features = false }
 
+# Use mimalloc for musl builds (avoids mallocng performance issues)
+mimalloc = { version = "=0.1.48", default-features = false, features = ["secure"] }
+
 # Optional TLS termination
 axum-server = { version = "=0.8.0", default-features = false, features = ["tls-rustls"] }
 rustls-pemfile = { version = "=2.2.0", default-features = false, features = ["std"] }

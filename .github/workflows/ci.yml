@@ -16,16 +16,14 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Setup Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup component add rustfmt
+        run: rustup show
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          prefix-key: "v1"
+          prefix-key: "v2"
           shared-key: "fmt"
           cache-targets: false
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --all --check
 
   clippy:
@@ -36,15 +34,14 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libudev-dev
       - name: Setup Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
-          rustup component add clippy
+        run: rustup show
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          prefix-key: "v1"
-          shared-key: "debug-${{ runner.os }}"
+          prefix-key: "v2"
+          shared-key: "clippy-${{ runner.os }}"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
@@ -72,14 +69,14 @@ jobs:
         if: matrix.install-deps != ''
         run: ${{ matrix.install-deps }}
       - name: Setup Rust toolchain
-        run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+        run: rustup show
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          prefix-key: "v1"
+          prefix-key: "v2"
           shared-key: "debug-${{ runner.os }}"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cache-on-failure: true
       - name: Run tests
         run: cargo test ${{ matrix.cargo-args }}
 
@@ -122,14 +119,14 @@ jobs:
         run: ${{ matrix.install }}
       - name: Setup Rust toolchain
         run: |
-          rustup toolchain install stable --profile minimal
-          rustup default stable
+          rustup show
           rustup target add ${{ matrix.target }}
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          prefix-key: "v1"
+          prefix-key: "v2"
           shared-key: "release-${{ matrix.target }}"
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
 
