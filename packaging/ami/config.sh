@@ -29,10 +29,17 @@ chmod 750 /var/lib/vouch-server
 chmod +x /usr/local/bin/vouch-fetch-config.sh
 
 #======================================
+# Create log directories
+#======================================
+mkdir -p /var/log/vouch-server /var/log/vouch-config
+chown vouch:vouch /var/log/vouch-server
+
+#======================================
 # Enable services
 #======================================
 systemctl enable vouch-config.service
 systemctl enable vouch-server.service
+systemctl enable amazon-cloudwatch-agent.service
 
 #======================================
 # Disable unnecessary services

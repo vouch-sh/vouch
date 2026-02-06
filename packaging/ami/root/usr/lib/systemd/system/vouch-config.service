@@ -2,11 +2,14 @@
 Description=Fetch Vouch Server configuration from Parameter Store
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/vouch-fetch-config.sh
 RemainAfterExit=yes
+StandardOutput=append:/var/log/vouch-config/output.log
+StandardError=append:/var/log/vouch-config/output.log
 
 [Install]
 WantedBy=multi-user.target

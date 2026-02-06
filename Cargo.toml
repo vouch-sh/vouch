@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.2.7"
+version = "2026.2.8"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.93"
@@ -52,7 +52,7 @@ ciborium = { version = "=0.2.2", default-features = false }
 libc = { version = "=0.2.180", default-features = false }
 
 # HTTP client (CLI and Server for OIDC)
-reqwest = { version = "=0.13.1", default-features = false, features = ["json", "rustls", "form"] }
+reqwest = { version = "=0.13.2", default-features = false, features = ["json", "rustls", "form"] }
 
 # HTTP server
 axum = { version = "=0.8.8", default-features = false, features = ["json", "tokio", "http1", "form", "query"] }

@@ -645,7 +645,12 @@ pub async fn oidc_callback(
     }
 
     // Check domain restriction
-    if let Some(domains) = &state.config().allowed_domains {
+    if let Some(domains) = state
+        .config()
+        .allowed_domains
+        .as_ref()
+        .filter(|d| !d.is_empty())
+    {
         let email_domain = claims.email.split('@').nth(1).unwrap_or("");
         if !domains.iter().any(|d| d.eq_ignore_ascii_case(email_domain)) {
             let allowed_list = domains.join(", ");

@@ -3,6 +3,7 @@ Description=Vouch identity server
 Documentation=https://github.com/vouch-sh/vouch
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple
@@ -11,8 +12,8 @@ Group=vouch
 EnvironmentFile=-/etc/vouch-server/env
 EnvironmentFile=-/run/vouch-server/env
 ExecStart=/usr/bin/vouch-server
-Restart=on-failure
-RestartSec=5
+Restart=always
+RestartSec=30
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

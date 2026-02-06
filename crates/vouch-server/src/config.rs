@@ -340,7 +340,10 @@ impl ServerConfig {
         });
 
         // Parse allowed domains
-        let allowed_domains = args.allowed_domains.map(|s| parse_comma_list(&s));
+        let allowed_domains = args
+            .allowed_domains
+            .map(|s| parse_comma_list(&s))
+            .filter(|v| !v.is_empty());
 
         // Parse DPoP booleans
         let dpop_enabled = args
@@ -412,7 +415,12 @@ impl ServerConfig {
     pub async fn load_from_db(&mut self, pool: &Pool) -> Result<()> {
         // Allowed domains (DB overrides env vars)
         if let Some(domains) = db::get_config(pool, config_keys::ALLOWED_DOMAINS).await? {
-            self.allowed_domains = Some(parse_comma_list(&domains));
+            let parsed = parse_comma_list(&domains);
+            if parsed.is_empty() {
+                self.allowed_domains = None;
+            } else {
+                self.allowed_domains = Some(parsed);
+            }
         }
 
         // Branding (DB overrides env vars)
