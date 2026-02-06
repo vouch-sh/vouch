@@ -38,11 +38,9 @@
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
+use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
-use super::dsql::{
-    extract_region_from_endpoint, generate_dsql_token, is_dsql_endpoint, load_sdk_config,
-};
+use super::dsql::{DsqlEndpoint, generate_dsql_token, load_sdk_config};
 
 /// Database type enum for runtime SQL dialect selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -135,11 +133,9 @@ impl Pool {
                 Ok(Self::Sqlite(pool))
             }
             DatabaseType::Postgres => {
-                let parsed = url::Url::parse(url).context("failed to parse PostgreSQL URL")?;
-                let host = parsed.host_str().unwrap_or("");
-
-                if is_dsql_endpoint(host) {
-                    Self::connect_dsql(host, parsed.username()).await
+                if let Some(dsql) = DsqlEndpoint::from_url(url)? {
+                    let parsed = url::Url::parse(url).context("failed to parse PostgreSQL URL")?;
+                    Self::connect_dsql(&dsql, parsed.username()).await
                 } else {
                     let pool = sqlx::PgPool::connect(url).await?;
                     Ok(Self::Postgres(pool))
@@ -158,15 +154,10 @@ impl Pool {
     ///
     /// # Arguments
     ///
-    /// * `endpoint` - DSQL cluster endpoint hostname
+    /// * `dsql` - Parsed DSQL endpoint (direct or VPC)
     /// * `user` - Database username (typically "admin" for admin access)
-    async fn connect_dsql(endpoint: &str, user: &str) -> Result<Self> {
-        // Determine the AWS region from the endpoint or environment
-        let region = extract_region_from_endpoint(endpoint)
-            .map(String::from)
-            .or_else(|| std::env::var("AWS_REGION").ok())
-            .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok())
-            .context("cannot determine AWS region from DSQL endpoint or environment")?;
+    async fn connect_dsql(dsql: &DsqlEndpoint, user: &str) -> Result<Self> {
+        let region = dsql.region().to_string();
 
         // Use provided user or default to "admin"
         let user = if user.is_empty() {
@@ -177,26 +168,34 @@ impl Pool {
         let is_admin = user == "admin";
 
         tracing::info!(
-            endpoint = endpoint,
+            connect_host = dsql.connect_hostname(),
+            token_host = dsql.token_hostname(),
             region = region,
             user = user,
+            cluster_id = dsql.cluster_id(),
             "connecting to Aurora DSQL with IAM authentication"
         );
 
         // Load AWS SDK config (handles all credential sources)
         let sdk_config = load_sdk_config(Some(&region)).await;
 
-        // Generate initial authentication token
-        let token = generate_dsql_token(&sdk_config, endpoint, &region, is_admin).await?;
+        // Generate initial authentication token (against the token hostname)
+        let token =
+            generate_dsql_token(&sdk_config, dsql.token_hostname(), &region, is_admin).await?;
 
-        // Build connection options with SSL required for DSQL
-        let connect_options = PgConnectOptions::new()
-            .host(endpoint)
+        // Build connection options with appropriate SSL mode
+        let mut connect_options = PgConnectOptions::new()
+            .host(dsql.connect_hostname())
             .port(5432)
             .database("postgres")
             .username(&user)
             .password(&token)
-            .ssl_mode(PgSslMode::VerifyFull);
+            .ssl_mode(dsql.ssl_mode());
+
+        // Set amzn-cluster-id option for VPC endpoints
+        if let Some(opt) = dsql.pg_options() {
+            connect_options = connect_options.options([opt]);
+        }
 
         // Create pool with appropriate lifetime settings for DSQL:
         // - max_lifetime: 55 min (DSQL terminates connections after 60 min)
@@ -216,7 +215,7 @@ impl Pool {
             .context("failed to connect to DSQL cluster")?;
 
         // Spawn background task to refresh tokens before they expire
-        spawn_token_refresh(pool.clone(), endpoint.to_string(), region, user, is_admin);
+        spawn_token_refresh(pool.clone(), dsql.clone(), user, is_admin);
 
         Ok(Self::Postgres(pool))
     }
@@ -459,16 +458,11 @@ macro_rules! tx_fetch_optional {
 /// When a token refresh fails, the task logs a warning but continues running.
 /// Existing connections remain valid until they're closed or the connection
 /// lifetime limit (60 minutes) is reached.
-fn spawn_token_refresh(
-    pool: sqlx::PgPool,
-    endpoint: String,
-    region: String,
-    user: String,
-    is_admin: bool,
-) {
+fn spawn_token_refresh(pool: sqlx::PgPool, dsql: DsqlEndpoint, user: String, is_admin: bool) {
     tokio::spawn(async move {
         // Refresh every 10 minutes (tokens expire after 15 min by default)
         let refresh_interval = Duration::from_secs(10 * 60);
+        let region = dsql.region().to_string();
 
         loop {
             tokio::time::sleep(refresh_interval).await;
@@ -482,16 +476,20 @@ fn spawn_token_refresh(
             // Reload AWS credentials (in case they've been rotated)
             let sdk_config = load_sdk_config(Some(&region)).await;
 
-            match generate_dsql_token(&sdk_config, &endpoint, &region, is_admin).await {
+            match generate_dsql_token(&sdk_config, dsql.token_hostname(), &region, is_admin).await {
                 Ok(new_token) => {
                     // Update the pool's connect options with the new token
-                    let new_options = PgConnectOptions::new()
-                        .host(&endpoint)
+                    let mut new_options = PgConnectOptions::new()
+                        .host(dsql.connect_hostname())
                         .port(5432)
                         .database("postgres")
                         .username(&user)
                         .password(&new_token)
-                        .ssl_mode(PgSslMode::VerifyFull);
+                        .ssl_mode(dsql.ssl_mode());
+
+                    if let Some(opt) = dsql.pg_options() {
+                        new_options = new_options.options([opt]);
+                    }
 
                     pool.set_connect_options(new_options);
                     tracing::debug!("DSQL authentication token refreshed successfully");

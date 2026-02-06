@@ -22,7 +22,7 @@ use tracing_subscriber::EnvFilter;
 
 use vouch_server::{
     AppState, cleanup, config,
-    db::{Pool, dsql::is_dsql_endpoint, migrations::run_dsql_migrations},
+    db::{Pool, dsql::DsqlEndpoint, migrations::run_dsql_migrations},
     handlers, s3_config,
     services::{
         integrations::github::GitHubApp,
@@ -33,6 +33,12 @@ use vouch_server::{
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Install the aws-lc-rs crypto provider for rustls before any TLS usage.
+    // Required by rustls 0.23+ which no longer auto-selects a provider.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("failed to install rustls CryptoProvider"))?;
+
     // Load .env file if present (before anything else so env vars are available)
     dotenvy::dotenv().ok();
 
@@ -97,10 +103,10 @@ async fn main() -> Result<()> {
         Pool::Sqlite(pool) => sqlx::migrate!("./migrations/sqlite").run(pool).await?,
         Pool::Postgres(pool) => {
             // Check if this is a DSQL endpoint
-            let is_dsql = url::Url::parse(&config.database_url)
+            let is_dsql = DsqlEndpoint::from_url(&config.database_url)
                 .ok()
-                .and_then(|url| url.host_str().map(is_dsql_endpoint))
-                .unwrap_or(false);
+                .and_then(|ep| ep)
+                .is_some();
 
             if is_dsql {
                 tracing::info!("DSQL detected, using DSQL-compatible migration runner");
