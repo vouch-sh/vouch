@@ -6,6 +6,7 @@ StartLimitIntervalSec=0
 
 [Service]
 Type=oneshot
+Environment=AWS_USE_DUALSTACK_ENDPOINT=true
 ExecStart=/usr/local/bin/vouch-fetch-config.sh
 RemainAfterExit=yes
 StandardOutput=append:/var/log/vouch-config/output.log
