@@ -517,12 +517,10 @@ async fn main() -> Result<()> {
         let tls_config = vouch_server::tls::build_tls_config(&config).await?;
 
         // TLS mode: always listen on 443 (HTTPS) and 80 (HTTP redirect)
-        let https_addr: std::net::SocketAddr = "0.0.0.0:443"
-            .parse()
-            .context("Invalid HTTPS listen address")?;
-        let http_addr: std::net::SocketAddr = "0.0.0.0:80"
-            .parse()
-            .context("Invalid HTTP listen address")?;
+        let https_addr: std::net::SocketAddr =
+            "[::]:443".parse().context("Invalid HTTPS listen address")?;
+        let http_addr: std::net::SocketAddr =
+            "[::]:80".parse().context("Invalid HTTP listen address")?;
 
         tracing::info!(
             "TLS enabled - listening on https://{} and http://{} (redirect)",
