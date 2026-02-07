@@ -24,6 +24,7 @@ use vouch_common::{
 
 use super::common::extract_session;
 use super::{extract_session_with_email, json_error};
+use crate::redact_email;
 
 /// Issue an SSH certificate for the authenticated user.
 ///
@@ -56,7 +57,11 @@ pub async fn issue_ssh_certificate(
     let signed = ssh_ca
         .sign_certificate(&request.public_key, &user_email, valid_seconds)
         .map_err(|e| {
-            tracing::warn!("Failed to sign SSH certificate for {}: {}", user_email, e);
+            tracing::warn!(
+                "Failed to sign SSH certificate for {}: {}",
+                redact_email(&user_email),
+                e
+            );
             json_error(
                 StatusCode::BAD_REQUEST,
                 "signing_failed",
@@ -66,7 +71,7 @@ pub async fn issue_ssh_certificate(
 
     tracing::info!(
         "Issued SSH certificate for {} with principals {:?}, serial {}",
-        user_email,
+        redact_email(&user_email),
         signed.principals,
         signed.serial
     );
@@ -651,7 +656,7 @@ pub async fn get_github_token(
         .map_err(|e| {
             tracing::warn!(
                 "Failed to get GitHub token for {} (org {}): {}",
-                user.email,
+                redact_email(&user.email),
                 org_id,
                 e
             );
@@ -707,7 +712,7 @@ pub async fn get_github_token(
 
     tracing::info!(
         "Issued GitHub token for {} (org {}, installation {})",
-        user.email,
+        redact_email(&user.email),
         org_id,
         installation.installation_id
     );

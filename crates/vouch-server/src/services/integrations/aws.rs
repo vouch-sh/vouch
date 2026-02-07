@@ -32,6 +32,7 @@
 
 use crate::config::ServerConfig;
 use crate::db::{self, Authenticator, Pool};
+use crate::redact_email;
 use crate::services::oidc::OidcSigningKey;
 use vouch_common::oidc::OidcIdTokenClaimsBuilder;
 
@@ -128,7 +129,7 @@ impl<'a> AwsService<'a> {
             .sign_jwt(&id_claims)
             .map_err(|e| AwsError::TokenSign(e.to_string()))?;
 
-        tracing::info!("Issued AWS OIDC token for {}", user_email);
+        tracing::info!("Issued AWS OIDC token for {}", redact_email(user_email));
 
         Ok(AwsTokenResult {
             id_token,

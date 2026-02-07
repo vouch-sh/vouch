@@ -22,6 +22,7 @@
 
 use crate::config::ServerConfig;
 use crate::db::{self, Authenticator, Pool};
+use crate::redact_email;
 use crate::services::oidc::OidcSigningKey;
 use vouch_common::oidc::OidcIdTokenClaimsBuilder;
 
@@ -130,7 +131,7 @@ impl<'a> GcpService<'a> {
 
         tracing::info!(
             "Issued GCP OIDC token: user={}, audience={}",
-            user_email,
+            redact_email(user_email),
             audience
         );
 

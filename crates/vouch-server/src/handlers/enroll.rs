@@ -29,6 +29,7 @@ use super::{
     create_session_cookie, extract_session_from_cookie, generate_random_bytes, hash_token,
     json_error, validate_registration_attestation,
 };
+use crate::redact_email;
 use crate::services::auth::SessionClaims;
 
 // ============================================================================
@@ -752,7 +753,7 @@ pub async fn oidc_callback(
         tracing::warn!("Failed to delete OIDC state: {e}");
     }
 
-    tracing::info!("Session created for user: {}", claims.email);
+    tracing::info!("Session created for user: {}", redact_email(&claims.email));
     tracing::debug!("Setting vouch_session cookie and redirecting to /enroll/keys");
 
     // Create session cookie and redirect to keys page
@@ -777,7 +778,7 @@ pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar
         Ok(session) => {
             tracing::debug!(
                 "enroll_keys_page: found valid session for {}",
-                session.claims.email
+                redact_email(&session.claims.email)
             );
             // Look up user to check org membership
             let (has_org, is_org_admin) =
@@ -866,7 +867,7 @@ pub async fn browser_register_start(
 
     tracing::info!(
         "browser_register_start: user {} has {} existing credentials",
-        session.claims.email,
+        redact_email(&session.claims.email),
         existing_auths.len()
     );
 
@@ -1110,7 +1111,7 @@ pub async fn browser_register_complete(
 
     tracing::info!(
         "Enrollment complete for: {} with {} (AAGUID: {})",
-        reg_state.user_email,
+        redact_email(&reg_state.user_email),
         validated.device_name,
         validated.aaguid.as_deref().unwrap_or("unknown")
     );

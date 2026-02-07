@@ -16,6 +16,7 @@ use super::types::{
 };
 use crate::AppState;
 use crate::db;
+use crate::redact_email;
 
 /// GET /scim/v2/Users
 pub async fn list_users(
@@ -419,7 +420,7 @@ pub async fn delete_user(
     tracing::info!(
         "Deleting user {} ({}) via SCIM, invalidating sessions and revoking SSH certificates",
         id,
-        user.email
+        redact_email(&user.email)
     );
     if let Err(e) = db::delete_sessions_for_user(&state.db, &id).await {
         tracing::error!("Failed to delete sessions: {e}");

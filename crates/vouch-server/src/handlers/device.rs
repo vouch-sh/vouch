@@ -16,6 +16,7 @@ use vouch_common::{
 };
 
 use super::json_error;
+use crate::redact_email;
 
 /// Characters used for user code generation (no ambiguous characters).
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
@@ -280,7 +281,10 @@ pub async fn device_token(
             let expires_in = u64::try_from(session_expires.as_second() - now.as_second())
                 .unwrap_or(state.config().session_hours * 3600);
 
-            tracing::info!("Device authorization complete for: {}", user_email);
+            tracing::info!(
+                "Device authorization complete for: {}",
+                redact_email(&user_email)
+            );
 
             Ok(Json(DeviceTokenResponse {
                 access_token: token,

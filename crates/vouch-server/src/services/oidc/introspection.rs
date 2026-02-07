@@ -8,6 +8,7 @@
 use crate::AppState;
 use crate::db;
 use crate::handlers::hash_token;
+use crate::redact_email;
 use crate::services::ServiceResult;
 use crate::services::auth::SessionClaims;
 use jsonwebtoken::{DecodingKey, Validation};
@@ -159,7 +160,10 @@ pub async fn revoke_token(
         match db::delete_session_by_token_hash(&state.db, &token_hash).await {
             Ok(deleted) => {
                 if deleted {
-                    tracing::info!("Token revoked for user: {}", data.claims.email);
+                    tracing::info!(
+                        "Token revoked for user: {}",
+                        redact_email(&data.claims.email)
+                    );
                     return RevocationResult {
                         revoked: true,
                         user_email: Some(data.claims.email),
