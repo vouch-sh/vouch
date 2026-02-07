@@ -25,8 +25,8 @@ use crate::extractors::ClientInfo;
 use crate::handlers::common::{
     create_session_cookie, generate_challenge, get_auth_context, hash_token, json_error,
 };
-use crate::redact_email;
 use crate::impl_template_response;
+use crate::redact_email;
 use crate::services::auth::SessionClaims;
 use crate::webauthn_verify;
 use askama::Template;
@@ -485,7 +485,10 @@ pub async fn browser_login_complete(
         }
     });
 
-    tracing::info!("Browser login successful for user: {}", redact_email(&user.email));
+    tracing::info!(
+        "Browser login successful for user: {}",
+        redact_email(&user.email)
+    );
 
     // Create session cookie
     let cookie = create_session_cookie(&token, session_hours * 3600);

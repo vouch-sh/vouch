@@ -57,7 +57,11 @@ pub async fn issue_ssh_certificate(
     let signed = ssh_ca
         .sign_certificate(&request.public_key, &user_email, valid_seconds)
         .map_err(|e| {
-            tracing::warn!("Failed to sign SSH certificate for {}: {}", redact_email(&user_email), e);
+            tracing::warn!(
+                "Failed to sign SSH certificate for {}: {}",
+                redact_email(&user_email),
+                e
+            );
             json_error(
                 StatusCode::BAD_REQUEST,
                 "signing_failed",

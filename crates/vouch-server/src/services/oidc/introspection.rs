@@ -160,7 +160,10 @@ pub async fn revoke_token(
         match db::delete_session_by_token_hash(&state.db, &token_hash).await {
             Ok(deleted) => {
                 if deleted {
-                    tracing::info!("Token revoked for user: {}", redact_email(&data.claims.email));
+                    tracing::info!(
+                        "Token revoked for user: {}",
+                        redact_email(&data.claims.email)
+                    );
                     return RevocationResult {
                         revoked: true,
                         user_email: Some(data.claims.email),

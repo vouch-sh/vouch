@@ -281,7 +281,10 @@ pub async fn device_token(
             let expires_in = u64::try_from(session_expires.as_second() - now.as_second())
                 .unwrap_or(state.config().session_hours * 3600);
 
-            tracing::info!("Device authorization complete for: {}", redact_email(&user_email));
+            tracing::info!(
+                "Device authorization complete for: {}",
+                redact_email(&user_email)
+            );
 
             Ok(Json(DeviceTokenResponse {
                 access_token: token,
