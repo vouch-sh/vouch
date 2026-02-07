@@ -121,7 +121,7 @@ The dev compose file includes a mock Vouch server:
 docker-compose -f docker-compose.dev.yml up -d
 
 # Point CLI at mock server
-export VOUCH_SERVER_URL=http://localhost:3080
+export VOUCH_SERVER_URL=http://localhost:3000
 
 # Now vouch commands hit the mock server
 cargo run --bin vouch -- register
