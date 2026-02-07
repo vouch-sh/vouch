@@ -34,6 +34,7 @@ use super::{
     clear_session_cookie, generate_challenge, hash_token, json_error,
     validate_registration_attestation,
 };
+use crate::redact_email;
 
 // ============================================================================
 // Registration State (stored temporarily)
@@ -133,7 +134,7 @@ pub async fn register_start(
 
     tracing::info!(
         "Registration start for authenticated user: {} (adding key: {})",
-        user_email,
+        redact_email(user_email),
         req.name
     );
 
@@ -421,7 +422,7 @@ pub async fn login_complete(
 
     tracing::info!(
         "WebAuthn assertion verified for user {}: counter={}, uv={}",
-        user.email,
+        redact_email(&user.email),
         assertion_result.new_counter,
         assertion_result.user_verified
     );
@@ -474,7 +475,7 @@ pub async fn login_complete(
         }
     });
 
-    tracing::info!("Login successful for user: {}", user.email);
+    tracing::info!("Login successful for user: {}", redact_email(&user.email));
 
     Ok(Json(LoginCompleteResponse {
         token: session_result.token,

@@ -7,6 +7,7 @@
 use crate::AppState;
 use crate::db;
 use crate::handlers::hash_token;
+use crate::redact_email;
 use crate::services::auth::SessionClaims;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::Timestamp;
@@ -185,7 +186,7 @@ pub async fn exchange_token(
                 tracing::debug!(
                     "Token exchange allowed by policy '{}' for {} -> {:?}",
                     p.name,
-                    subject_claims.email,
+                    redact_email(&subject_claims.email),
                     params.audience
                 );
                 p.max_ttl_seconds
@@ -265,7 +266,7 @@ pub async fn exchange_token(
 
     tracing::info!(
         "Token exchanged for user {} (audience: {:?})",
-        subject_claims.email,
+        redact_email(&subject_claims.email),
         params.audience
     );
 

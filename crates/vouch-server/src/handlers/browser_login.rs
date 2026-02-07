@@ -25,6 +25,7 @@ use crate::extractors::ClientInfo;
 use crate::handlers::common::{
     create_session_cookie, generate_challenge, get_auth_context, hash_token, json_error,
 };
+use crate::redact_email;
 use crate::impl_template_response;
 use crate::services::auth::SessionClaims;
 use crate::webauthn_verify;
@@ -389,7 +390,7 @@ pub async fn browser_login_complete(
 
     tracing::info!(
         "Browser WebAuthn assertion verified for user {}: counter={}, uv={}",
-        user.email,
+        redact_email(&user.email),
         verification_result.counter,
         verification_result.user_verified
     );
@@ -484,7 +485,7 @@ pub async fn browser_login_complete(
         }
     });
 
-    tracing::info!("Browser login successful for user: {}", user.email);
+    tracing::info!("Browser login successful for user: {}", redact_email(&user.email));
 
     // Create session cookie
     let cookie = create_session_cookie(&token, session_hours * 3600);

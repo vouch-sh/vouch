@@ -38,6 +38,30 @@ use axum::{
 use db::Pool;
 use std::sync::Arc;
 
+/// Redact an email address for safe logging.
+///
+/// Preserves the first character of the local part and the full domain
+/// (since domain is not PII), but hides the rest of the username.
+///
+/// # Examples
+/// - `"john.doe@example.com"` → `"j***@example.com"`
+/// - `"a@example.com"` → `"a***@example.com"`
+/// - `"not-an-email"` → `"n***"`
+#[must_use]
+pub fn redact_email(email: &str) -> String {
+    match email.split_once('@') {
+        Some((local, domain)) => {
+            let first_char = local.chars().next().unwrap_or('*');
+            format!("{first_char}***@{domain}")
+        }
+        None => {
+            // Not a valid email, redact anyway
+            let first_char = email.chars().next().unwrap_or('*');
+            format!("{first_char}***")
+        }
+    }
+}
+
 /// Shared application state.
 pub struct AppState {
     /// Database connection pool.
@@ -286,5 +310,35 @@ mod redirect_tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::PERMANENT_REDIRECT);
+    }
+}
+
+#[cfg(test)]
+mod redact_tests {
+    use super::*;
+
+    #[test]
+    fn test_redact_standard_email() {
+        assert_eq!(redact_email("john.doe@example.com"), "j***@example.com");
+    }
+
+    #[test]
+    fn test_redact_single_char_local() {
+        assert_eq!(redact_email("a@example.com"), "a***@example.com");
+    }
+
+    #[test]
+    fn test_redact_preserves_domain() {
+        assert_eq!(redact_email("user@acme.corp.co"), "u***@acme.corp.co");
+    }
+
+    #[test]
+    fn test_redact_no_at_sign() {
+        assert_eq!(redact_email("notanemail"), "n***");
+    }
+
+    #[test]
+    fn test_redact_empty_string() {
+        assert_eq!(redact_email(""), "****");
     }
 }

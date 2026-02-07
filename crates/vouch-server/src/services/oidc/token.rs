@@ -10,6 +10,7 @@ use super::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
 use crate::AppState;
 use crate::db::{self, Authenticator, OAuthClient, OAuthClientType, Session, User};
 use crate::handlers::hash_token;
+use crate::redact_email;
 use crate::services::auth::SessionClaims;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use aws_lc_rs::digest::{self, SHA256};
@@ -264,7 +265,7 @@ pub async fn exchange_authorization_code(
     if let Some(ref proof) = params.dpop_proof {
         tracing::info!(
             "Issued DPoP-bound token for user {} with jkt={}",
-            auth_code.email,
+            redact_email(&auth_code.email),
             proof.jkt
         );
     }
