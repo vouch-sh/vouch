@@ -57,8 +57,8 @@ fn parse_bool_default_false(s: &str) -> bool {
 #[derive(Parser)]
 #[command(name = "vouch-server", about = "Vouch identity server")]
 pub struct Args {
-    /// Address to listen on (e.g., "0.0.0.0:3000").
-    #[arg(long, env = "VOUCH_LISTEN_ADDR", default_value = "0.0.0.0:3000")]
+    /// Address to listen on (e.g., "[::]:3000").
+    #[arg(long, env = "VOUCH_LISTEN_ADDR", default_value = "[::]:3000")]
     pub listen_addr: String,
 
     /// SQLite database URL (e.g., "sqlite:vouch.db").
@@ -234,7 +234,7 @@ pub struct Args {
 /// Server configuration loaded from command-line arguments and environment variables.
 #[derive(Clone)]
 pub struct ServerConfig {
-    /// Address to listen on (e.g., "0.0.0.0:3000").
+    /// Address to listen on (e.g., "[::]:3000").
     pub listen_addr: String,
     /// `SQLite` database URL (e.g., "sqlite:vouch.db").
     pub database_url: String,
@@ -330,7 +330,7 @@ impl ServerConfig {
         let base_url = args.base_url.unwrap_or_else(|| {
             // For local development (localhost/127.0.0.1), use http with port
             if args.rp_id == "localhost" || args.rp_id == "127.0.0.1" {
-                // Extract port from listen_addr (e.g., "0.0.0.0:3000" -> "3000")
+                // Extract port from listen_addr (e.g., "[::]:3000" -> "3000")
                 let port = args.listen_addr.rsplit(':').next().unwrap_or("3000");
                 format!("http://{}:{}", args.rp_id, port)
             } else {
