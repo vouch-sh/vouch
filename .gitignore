@@ -70,3 +70,4 @@ rust-project.json
 ssh_ca_key*
 .claude/skills
 .mcp.json
+scripts/*
