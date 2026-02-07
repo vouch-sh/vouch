@@ -277,19 +277,21 @@ output "role_arn" {
                 <!-- Domain-based access control tip -->
                 <div class="mt-4 p-3 bg-vouch-bg rounded border border-vouch-border">
                     <p class="text-gray-400 text-sm">
-                        <strong class="text-gray-300">Tip:</strong> Restrict access by Google Workspace domain with the <code class="text-vouch-accent">hd</code> (hosted domain) claim:
+                        <strong class="text-gray-300">Tip:</strong> Restrict access by email domain using <code class="text-vouch-accent">StringLike</code> on the <code class="text-vouch-accent">sub</code> claim:
                     </p>
                     <div class="code-block mt-2 text-xs">
                         <pre class="whitespace-pre-wrap">"Condition": {
   "StringEquals": {
-    "{{ rp_id }}:aud": "{{ provider_url }}",
-    "{{ rp_id }}:hd": "acme.com"
+    "{{ rp_id }}:aud": "{{ provider_url }}"
+  },
+  "StringLike": {
+    "{{ rp_id }}:sub": "*@acme.com"
   }
 }</pre>
                     </div>
                     <p class="text-gray-500 text-xs mt-2">
-                        The <code>hd</code> claim is only present for users who sign in with a Google Workspace account.
-                        Personal Gmail accounts do not have an <code>hd</code> claim.
+                        AWS only supports <code>aud</code> and <code>sub</code> as condition keys for custom OIDC providers.
+                        Custom claims like <code>hd</code> are not available in IAM policy conditions.
                     </p>
                 </div>
             </div>

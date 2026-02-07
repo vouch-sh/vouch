@@ -78,8 +78,14 @@ impl AwsConfig {
     /// Find the first profile that uses vouch for credential_process.
     #[must_use]
     pub fn find_vouch_profile(&self) -> Option<AwsProfile> {
+        self.find_all_vouch_profiles().into_iter().next()
+    }
+
+    /// Find all profiles that use vouch for credential_process.
+    #[must_use]
+    pub fn find_all_vouch_profiles(&self) -> Vec<AwsProfile> {
+        let mut profiles = Vec::new();
         for (section_name, props) in &self.ini {
-            // Skip sections that are not profiles
             let Some(section_str) = section_name else {
                 continue;
             };
@@ -90,14 +96,44 @@ impl AwsConfig {
             if let Some(cp) = props.get("credential_process")
                 && cp.contains("vouch")
             {
-                return Some(AwsProfile {
+                profiles.push(AwsProfile {
                     name: profile_name,
                     credential_process: Some(cp.to_string()),
                     region: props.get("region").map(|s| s.to_string()),
                 });
             }
         }
-        None
+        profiles
+    }
+
+    /// Find an existing vouch profile that targets a specific role ARN.
+    #[must_use]
+    pub fn find_vouch_profile_for_role(&self, role_arn: &str) -> Option<AwsProfile> {
+        self.find_all_vouch_profiles().into_iter().find(|p| {
+            p.credential_process
+                .as_deref()
+                .and_then(extract_role_from_credential_process)
+                .as_deref()
+                == Some(role_arn)
+        })
+    }
+
+    /// Get the next available vouch profile name.
+    ///
+    /// Returns "vouch" if it doesn't exist, otherwise "vouch-2", "vouch-3", etc.
+    #[must_use]
+    pub fn next_vouch_profile_name(&self) -> String {
+        if !self.profile_exists("vouch") {
+            return "vouch".to_string();
+        }
+        let mut n = 2u32;
+        loop {
+            let candidate = format!("vouch-{n}");
+            if !self.profile_exists(&candidate) {
+                return candidate;
+            }
+            n = n.saturating_add(1);
+        }
     }
 
     /// Set or update a profile in the config.
@@ -553,5 +589,108 @@ credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
             .find_vouch_profile()
             .expect("should find vouch profile");
         assert_eq!(profile.name, "vouch");
+    }
+
+    #[test]
+    fn test_find_all_vouch_profiles() {
+        let content = r#"
+[profile regular]
+aws_access_key_id = AKIAIOSFODNN7EXAMPLE
+
+[profile vouch]
+credential_process = vouch credential aws --role arn:aws:iam::111:role/Prod
+
+[profile vouch-2]
+credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        let profiles = config.find_all_vouch_profiles();
+        assert_eq!(profiles.len(), 2);
+        let names: Vec<&str> = profiles.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"vouch"));
+        assert!(names.contains(&"vouch-2"));
+    }
+
+    #[test]
+    fn test_find_all_vouch_profiles_empty() {
+        let content = r#"
+[profile regular]
+aws_access_key_id = AKIAIOSFODNN7EXAMPLE
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        assert!(config.find_all_vouch_profiles().is_empty());
+    }
+
+    #[test]
+    fn test_find_vouch_profile_for_role_found() {
+        let content = r#"
+[profile vouch]
+credential_process = vouch credential aws --role arn:aws:iam::111:role/Prod
+
+[profile vouch-2]
+credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        let found = config
+            .find_vouch_profile_for_role("arn:aws:iam::222:role/Staging")
+            .expect("should find profile for role");
+        assert_eq!(found.name, "vouch-2");
+    }
+
+    #[test]
+    fn test_find_vouch_profile_for_role_not_found() {
+        let content = r#"
+[profile vouch]
+credential_process = vouch credential aws --role arn:aws:iam::111:role/Prod
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        assert!(
+            config
+                .find_vouch_profile_for_role("arn:aws:iam::999:role/Other")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_next_vouch_profile_name_empty() {
+        let file = create_temp_config("");
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        assert_eq!(config.next_vouch_profile_name(), "vouch");
+    }
+
+    #[test]
+    fn test_next_vouch_profile_name_vouch_exists() {
+        let content = r#"
+[profile vouch]
+credential_process = vouch credential aws --role arn:aws:iam::111:role/Prod
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        assert_eq!(config.next_vouch_profile_name(), "vouch-2");
+    }
+
+    #[test]
+    fn test_next_vouch_profile_name_vouch_and_vouch2_exist() {
+        let content = r#"
+[profile vouch]
+credential_process = vouch credential aws --role arn:aws:iam::111:role/Prod
+
+[profile vouch-2]
+credential_process = vouch credential aws --role arn:aws:iam::222:role/Staging
+"#;
+        let file = create_temp_config(content);
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        assert_eq!(config.next_vouch_profile_name(), "vouch-3");
     }
 }

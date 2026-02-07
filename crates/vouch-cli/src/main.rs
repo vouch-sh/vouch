@@ -214,9 +214,6 @@ enum SetupCommands {
         /// AWS IAM role ARN to assume.
         #[arg(long)]
         role: String,
-        /// Add the profile to ~/.aws/config.
-        #[arg(long)]
-        add_profile: bool,
     },
     /// Configure GCP to use Vouch credentials via Workload Identity Federation.
     ///
@@ -384,11 +381,9 @@ async fn main() -> Result<()> {
             CredentialCommands::Cargo { .. } => commands::credential::cargo::run().await,
         },
         Commands::Setup { command } => match command {
-            SetupCommands::Aws {
-                profile,
-                role,
-                add_profile,
-            } => commands::setup::aws::run(profile.as_deref(), &role, add_profile).await,
+            SetupCommands::Aws { profile, role } => {
+                commands::setup::aws::run(profile.as_deref(), &role).await
+            }
             SetupCommands::Gcp {
                 profile,
                 project_number,

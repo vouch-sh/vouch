@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result, bail};
 use base64::Engine;
-use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::STANDARD;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
@@ -47,33 +47,8 @@ impl RsaPrivateKeyDer {
     /// cat your-key.pem | base64 | tr -d '\n'
     /// ```
     pub fn from_pem(pem_or_base64: &str) -> Result<Self> {
-        let content = pem_or_base64.trim();
-
-        // Check if it's already PEM format
-        if content.starts_with("-----BEGIN") {
-            return Self::parse_pem(content);
-        }
-
-        // Try to decode as base64-encoded PEM
-        let decoded = URL_SAFE_NO_PAD
-            .decode(content)
-            .or_else(|_| STANDARD.decode(content))
-            .context("Invalid base64 encoding for key")?;
-
-        // Check if the decoded content is PEM
-        let pem_str = std::str::from_utf8(&decoded)
-            .context("Invalid UTF-8 in base64-decoded key (expected PEM)")?;
-
-        let trimmed = pem_str.trim().trim_start_matches('\u{feff}'); // Remove BOM if present
-        if !trimmed.starts_with("-----BEGIN") {
-            anyhow::bail!(
-                "Invalid key format: expected base64-encoded PEM starting with '-----BEGIN', \
-                 got {} bytes of non-PEM data",
-                decoded.len()
-            );
-        }
-
-        Self::parse_pem(trimmed)
+        let pem = crate::pem::decode_base64_pem(pem_or_base64).context("Invalid key format")?;
+        Self::parse_pem(&pem)
     }
 
     /// Parse a PEM-formatted PKCS#1 key.

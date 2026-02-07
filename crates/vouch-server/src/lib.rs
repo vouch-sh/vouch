@@ -9,6 +9,7 @@ pub mod config;
 pub mod db;
 pub mod extractors;
 pub mod handlers;
+pub mod pem;
 pub mod s3_config;
 pub mod services;
 pub mod ssh_ca;
