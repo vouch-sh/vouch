@@ -819,7 +819,9 @@ async fn shutdown_signal() {
     #[cfg(unix)]
     let terminate = async {
         match signal::unix::signal(signal::unix::SignalKind::terminate()) {
-            Ok(mut s) => { s.recv().await; }
+            Ok(mut s) => {
+                s.recv().await;
+            }
             Err(_) => std::future::pending().await,
         }
     };

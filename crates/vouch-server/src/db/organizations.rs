@@ -224,4 +224,3 @@ pub async fn delete_organization(pool: &Pool, org_id: &str) -> Result<bool> {
     tx.commit().await?;
     Ok(result.rows_affected() > 0)
 }
-
