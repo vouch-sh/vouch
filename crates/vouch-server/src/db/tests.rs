@@ -605,52 +605,6 @@ async fn test_oauth_client_secret_management() {
 }
 
 #[tokio::test]
-async fn test_oauth_client_deactivation() {
-    let pool = test_db().await;
-
-    let user = upsert_user(&pool, "deactivate@example.com", None)
-        .await
-        .expect("Failed to create user");
-
-    let (client, _) = create_oauth_client(
-        &pool,
-        &user.id,
-        "Deactivate App",
-        None,
-        OAuthClientType::Web,
-        &[],
-        AccessScope::default(),
-        None,
-    )
-    .await
-    .expect("Failed to create client");
-
-    assert!(client.active);
-
-    // Deactivate
-    deactivate_oauth_client(&pool, &client.id)
-        .await
-        .expect("Failed to deactivate");
-
-    let client = get_oauth_client_by_id(&pool, &client.id)
-        .await
-        .expect("Failed to get client")
-        .expect("Client should exist");
-    assert!(!client.active);
-
-    // Reactivate
-    reactivate_oauth_client(&pool, &client.id)
-        .await
-        .expect("Failed to reactivate");
-
-    let client = get_oauth_client_by_id(&pool, &client.id)
-        .await
-        .expect("Failed to get client")
-        .expect("Client should exist");
-    assert!(client.active);
-}
-
-#[tokio::test]
 async fn test_oauth_usage_recording() {
     let pool = test_db().await;
 

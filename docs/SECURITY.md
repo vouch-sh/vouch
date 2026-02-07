@@ -6,7 +6,7 @@ This document describes Vouch's security architecture, threat model, and inciden
 
 Vouch is designed around three core principles:
 
-1. **Hardware-bound only** — YubiKey 5 series required; no platform passkeys (Touch ID, Windows Hello)
+1. **Hardware-bound only** — Hardware FIDO2 authenticators required; no platform passkeys (Touch ID, Windows Hello)
 2. **Minimize credential lifetime** — Short-lived credentials (8 hours max) limit blast radius of compromise
 3. **Audit everything** — Every credential issuance is logged with provenance
 
@@ -22,17 +22,17 @@ Vouch is designed around three core principles:
 |--------|------------|
 | **Credential theft** | Short-lived credentials expire before attackers can use them |
 | **MFA fatigue attacks** | No push notifications; physical touch required |
-| **Phishing** | YubiKey's origin binding prevents credential use on wrong domains |
-| **Malware on workstation** | Private keys never leave the YubiKey |
+| **Phishing** | Hardware authenticator origin binding prevents credential use on wrong domains |
+| **Malware on workstation** | Private keys never leave the hardware authenticator |
 | **Insider threats** | Audit trail with cryptographic attestation |
 | **Credential stuffing** | No passwords to stuff |
-| **Synced passkey extraction** | Hardware-bound only policy prevents syncable credentials |
+| **Synced passkey extraction** | Hardware-bound only policy prevents syncable credentials; attestation format validation rejects software passkeys |
 
 ### What Vouch Does NOT Protect Against
 
 | Threat | Why | Mitigation | Monitoring |
 |--------|-----|------------|------------|
-| **Physical YubiKey theft + known PIN** | Attacker has both factors | Use biometric YubiKey (Bio series), rotate PIN | Audit logs, anomaly detection for unusual access patterns |
+| **Physical authenticator theft + known PIN** | Attacker has both factors | Use biometric authenticator (e.g., YubiKey Bio series), rotate PIN | Audit logs, anomaly detection for unusual access patterns |
 | **Compromised Vouch server** | Server issues credentials | Self-host for high-security, air-gapped deployment (planned) | Server integrity monitoring, audit log analysis |
 | **Malware stealing session after login** | Session token in memory | 8-hour session lifetime, endpoint protection | EDR solutions, anomalous session usage patterns |
 | **Supply chain attacks on CLI** | Compromised binary | Reproducible builds, code signing, open source auditing | Security researcher engagement, build provenance verification |
@@ -45,7 +45,7 @@ Vouch is designed around three core principles:
 
 #### Sophisticated Attacker
 - **Capabilities**: Targeted phishing, malware, network interception
-- **Vouch defense**: Hardware attestation, hardware-bound only policy, audit logging
+- **Vouch defense**: Hardware attestation (format validation), hardware-bound only policy, audit logging
 
 #### Nation-State
 - **Capabilities**: Zero-days, supply chain compromise, physical access
@@ -58,7 +58,7 @@ Vouch is designed around three core principles:
 | **Internet ↔ Server** | Public network to Vouch server | TLS 1.3, certificate validation |
 | **Server ↔ Workstation** | Server to user machine | TLS 1.3, JWT validation |
 | **CLI ↔ Agent** | User commands to daemon | Unix socket permissions (0700) |
-| **Agent ↔ YubiKey** | Software to hardware | CTAP2 protocol, PIN verification |
+| **Agent ↔ Hardware Authenticator** | Software to hardware | CTAP2 protocol, PIN verification |
 
 ### Security Assumptions
 
@@ -66,11 +66,11 @@ Vouch's security model relies on the following assumptions. If any assumption is
 
 | ID | Assumption | Rationale | If Violated |
 |----|------------|-----------|-------------|
-| **A-01** | **Hardware Authenticator Integrity**: YubiKey 5 series devices correctly implement FIDO2/CTAP2 and protect private keys from extraction | Yubico has undergone independent security audits. The secure element prevents key extraction even with physical access. | Attackers could clone YubiKey credentials, defeating hardware-bound authentication |
+| **A-01** | **Hardware Authenticator Integrity**: Hardware FIDO2 authenticators correctly implement FIDO2/CTAP2 and protect private keys from extraction | Leading hardware authenticator vendors (Yubico, etc.) have undergone independent security audits. Secure elements prevent key extraction even with physical access. | Attackers could clone authenticator credentials, defeating hardware-bound authentication |
 | **A-02** | **TLS Implementation Correctness**: The TLS 1.3 implementation (rustls) correctly encrypts communications and validates certificates | rustls is a well-audited, memory-safe TLS implementation with no OpenSSL dependencies | Network attackers could intercept or modify communications between components |
-| **A-03** | **Cryptographic Primitive Security**: Ed25519, AES-GCM, and Argon2id provide their claimed security properties | These are widely reviewed, standardized algorithms implemented by aws-lc-rs (FIPS-validated) | Signature forgery, token decryption, or password hash reversal could occur |
+| **A-03** | **Cryptographic Primitive Security**: Ed25519 and SHA-256 provide their claimed security properties; TLS ciphers (AES-GCM, ChaCha20-Poly1305) are handled by rustls | These are widely reviewed, standardized algorithms implemented by aws-lc-rs (FIPS-validated) | Signature forgery, token hash reversal, or TLS decryption could occur |
 | **A-04** | **Operating System Isolation**: The operating system provides process isolation and file permission enforcement | Unix socket permissions (0700) and file permissions (0600) are enforced by the kernel | Malicious processes could access agent sockets or credential files |
-| **A-05** | **User PIN Confidentiality**: Users protect their YubiKey PIN and do not share it | PIN is verified on-device and never transmitted to servers | PIN + physical YubiKey access enables impersonation |
+| **A-05** | **User PIN Confidentiality**: Users protect their hardware authenticator PIN and do not share it | PIN is verified on-device and never transmitted to servers | PIN + physical authenticator access enables impersonation |
 | **A-06** | **Server Infrastructure Security**: The Vouch server runs on secure, patched infrastructure with appropriate access controls | Server-side vulnerabilities are outside application scope but critical to overall security | Database access, CA key theft, or session injection could occur |
 | **A-07** | **External IdP Trustworthiness**: External identity providers (Google Workspace, Entra ID) correctly verify user identities | These are enterprise-grade identity providers with their own security models | Unauthorized users could enroll by compromising external IdP accounts |
 | **A-08** | **Clock Synchronization**: All systems maintain reasonably accurate time (within minutes) | JWT expiration and certificate validity depend on timestamp comparison | Expired tokens could be accepted or valid tokens rejected |
@@ -88,8 +88,8 @@ Vouch's security model relies on the following assumptions. If any assumption is
 |  |                  |  |                  |  |                 |  |
 |  | * Ed25519        |  | * PIN required   |  | * Hardware-     |  |
 |  | * Discoverable   |  | * UV flag set    |  |   bound only    |  |
-|  |   credential     |  | * No platform    |  | * AAGUID check  |  |
-|  | * RP binding     |  |   passkeys       |  | * YubiKey 5     |  |
+|  |   credential     |  | * No platform    |  | * Format check  |  |
+|  | * RP binding     |  |   passkeys       |  |   (packed/u2f)  |  |
 |  +------------------+  +------------------+  +-----------------+  |
 +------------------------------------------------------------------+
 ```
@@ -120,7 +120,7 @@ let options = PublicKeyCredentialCreationOptions {
 - `authenticatorAttachment: cross-platform` — Rejects platform passkeys (Touch ID, Windows Hello)
 - `residentKey: required` — Enables discoverable credential for email-less login
 - `userVerification: required` — Ensures PIN or biometric, not just presence
-- `attestation: direct` — Allows verifying authenticator is YubiKey 5 series
+- `attestation: direct` — Allows verifying authenticator attestation format (packed/fido-u2f)
 
 ### PIN Requirements
 
@@ -128,7 +128,7 @@ Vouch enforces PIN requirements on all FIDO2 operations:
 
 **Minimum PIN Length:** 8 characters (enforced by CLI)
 
-**Native PIN Setup:** If a YubiKey doesn't have a PIN configured, the CLI (`vouch login`, `vouch register`) will detect this and guide the user through setting one up. No external tools required.
+**Native PIN Setup:** If a hardware authenticator doesn't have a PIN configured, the CLI (`vouch login`, `vouch register`) will detect this and guide the user through setting one up. No external tools required.
 
 ```
 $ vouch login
@@ -154,28 +154,26 @@ Touch your YubiKey...
 
 ### Hardware-Bound Enforcement
 
-Vouch validates that authenticators are hardware-bound:
+Vouch validates that authenticators are hardware-bound by checking the attestation format during enrollment:
 
 ```rust
-// Server validates attestation during enrollment
-fn validate_attestation(attestation: &AttestationObject) -> Result<(), Error> {
-    // Check AAGUID against allowlist of YubiKey 5 series
-    let allowed_aaguids = [
-        "2fc0579f-8113-47ea-b116-bb5a8db9202a",  // YubiKey 5 NFC
-        "c5ef55ff-ad9a-4b9f-b580-adebafe026d0",  // YubiKey 5Ci
-        "fa2b99dc-9e39-4257-8f92-4a30d23c4118",  // YubiKey 5 Nano
-        // ... other YubiKey 5 series AAGUIDs
-    ];
+// Server validates attestation format during enrollment
+fn validate_hardware_attestation(attestation: &[u8]) -> AttestationValidation {
+    let fmt = extract_attestation_format(attestation);
 
-    if !allowed_aaguids.contains(&attestation.aaguid) {
-        return Err(Error::UnsupportedAuthenticator(
-            "Only YubiKey 5 series authenticators are supported"
-        ));
+    if fmt.is_hardware() {          // packed, fido-u2f
+        AttestationValidation::Valid(fmt)
+    } else if fmt.is_software() {   // none (software passkeys like 1Password)
+        AttestationValidation::SoftwarePasskey
+    } else if fmt.is_platform() {   // tpm, apple, android-key, android-safetynet
+        AttestationValidation::PlatformAuthenticator
+    } else {
+        AttestationValidation::Unknown(fmt.to_string())
     }
-
-    Ok(())
 }
 ```
+
+The AAGUID (Authenticator Attestation GUID) is extracted and stored for device identification purposes (e.g., displaying "YubiKey 5 NFC" in the key list), but is not used as an allowlist filter. Any hardware FIDO2 authenticator with `packed` or `fido-u2f` attestation format is accepted.
 
 ### Discoverable Credentials
 
@@ -187,26 +185,27 @@ async fn login() -> Result<Session> {
     // 1. Get challenge from server (no user identifier)
     let challenge = server.get_challenge().await?;
 
-    // 2. Query YubiKey for discoverable credentials for this RP
-    let assertion = yubikey.get_assertion_with_discoverable(
-        "vouch.sh",     // RP ID
+    // 2. Query authenticator for discoverable credentials for this RP
+    let assertion = authenticator.get_assertion(
+        &rp_id,         // RP ID
         &challenge,
-        None,           // No allowed_credentials - discover from device
-        Some(&pin),     // PIN required
+        &pin,            // PIN required
     )?;
+    // No credential_id filter = discoverable mode
 
-    // 3. Server looks up user by credential_id
+    // 3. Server looks up user by user_handle from assertion
     let session = server.complete_login(
         assertion.credential_id,
         assertion.authenticator_data,
         assertion.signature,
+        assertion.user_handle,  // User identified by authenticator
     ).await?;
 
     Ok(session)
 }
 ```
 
-**Security benefit**: The YubiKey identifies the user, not user-provided input. Eliminates username enumeration.
+**Security benefit**: The hardware authenticator identifies the user via `user_handle`, not user-provided input. Eliminates username enumeration.
 
 ### Enrollment Security (RFC 8628)
 
@@ -229,11 +228,11 @@ Nonce:         32 random bytes, prevents token replay
 - OIDC state parameter prevents authorization code injection
 - Nonce in ID token prevents replay attacks
 
-**Rate Limiting** (planned):
+**Rate Limiting:**
 ```
-POST /oauth/device/code    10 requests/minute per IP
-POST /oauth/token          1 request/5 seconds per device_code
-POST /device               5 attempts/code (then code is invalidated)
+POST /oauth/token          1 request/5 seconds per device_code (implemented, slow_down response)
+POST /oauth/device/code    10 requests/minute per IP (planned)
+POST /device               5 attempts/code (then code is invalidated) (planned)
 ```
 
 ### Key Registration Security
@@ -291,14 +290,12 @@ Certificate:
     Type: user certificate
     Public key: ssh-ed25519
     Signing CA: vouch-ca (built-in Ed25519)
-    Key ID: user@example.com
+    Key ID: user@example.com@vouch.example.com
     Serial: 1705234567
     Valid: 2024-01-14T10:00:00 to 2024-01-14T18:00:00 (8 hours)
     Principals: user@example.com, user
     Critical Options: (none)
-    Extensions:
-        permit-pty
-        permit-user-rc
+    Extensions: (none)
 ```
 
 **AWS Credentials:**
@@ -354,7 +351,7 @@ Every credential issuance generates an audit log entry:
 Audit logs are:
 - Immutable (append-only database storage); tamper detection (planned)
 - Retained for compliance period (configurable, default 2 years)
-- SIEM export (planned) (Splunk, Datadog, etc.) — see [ROADMAP.md](ROADMAP.md)
+- SIEM export (planned)
 - Certificate transparency logging (planned)
 
 ## S3 Configuration Security
@@ -388,14 +385,15 @@ When using S3-based configuration, additional security considerations apply.
 
 ### Protected Configuration Fields
 
-Certain security-sensitive fields cannot be changed via S3 config updates at runtime:
+Only TLS certificates can be updated via S3 at runtime (for hot-reload). All other fields are silently ignored during runtime S3 polling:
 
 | Field | Protection | Rationale |
 |-------|------------|-----------|
 | `jwt_secret` | Blocked at runtime | Changing would invalidate all sessions; security impact of hot-swap |
 | `database_url` | Blocked at runtime | Connection pool cannot be safely changed |
+| All other fields | Blocked at runtime | Only TLS cert/key changes are applied during polling |
 
-When these fields change in S3, the server logs a warning and ignores the change. A server restart is required to apply changes to protected fields.
+A server restart is required to apply changes to any non-TLS configuration fields.
 
 ### S3 Polling Security
 
@@ -444,7 +442,7 @@ vouch.example.com	FALSE	/	TRUE	1737849600	vouch_session	<jwt-token>
 - Restrictive permissions prevent unauthorized access
 - Token hash (not plaintext) is stored server-side for revocation
 
-### Config File (`~/.config/vouch/config.json`)
+### Config File (`~/.vouch/config.json`)
 
 Fallback storage when agent is not running:
 
@@ -473,34 +471,27 @@ When a user is de-provisioned via SCIM (e.g., employee leaves the organization):
 | Action | Timing | Effect |
 |--------|--------|--------|
 | Active sessions invalidated | Immediate | All current sessions for the user are terminated |
-| Refresh tokens revoked | Immediate | No new access tokens can be issued |
-| Enrolled authenticators disabled | Immediate | YubiKey credentials cannot be used for login |
-| User record marked inactive | Immediate | User cannot re-enroll or authenticate |
-| Audit event logged | Immediate | De-provisioning recorded with source IdP info |
+| SSH certificates revoked | Immediate | All issued SSH certificates are marked as revoked |
+| Enrolled authenticators deleted | Immediate | All registered credentials are removed (cascade) |
+| User record deleted | Immediate | User cannot re-enroll or authenticate |
+| Audit event logged | Immediate | De-provisioning recorded with SCIM token info |
 
 **Key principle**: De-provisioning is immediate and complete. When someone leaves via SCIM, they lose all Vouch access instantly — no waiting for session expiration.
 
 ```rust
-// SCIM de-provision handling
-async fn handle_scim_delete_user(user_id: &str, scim_request: &ScimRequest) -> Result<()> {
+// SCIM de-provision handling (DELETE /scim/v2/Users/:id)
+async fn delete_user(user_id: &str) -> Result<()> {
     // 1. Invalidate all active sessions immediately
-    session_store.revoke_all_for_user(user_id).await?;
+    db::delete_sessions_for_user(&db, user_id).await?;
 
-    // 2. Revoke all refresh tokens
-    token_store.revoke_all_refresh_tokens(user_id).await?;
+    // 2. Revoke all SSH certificates for this user
+    db::revoke_all_ssh_certificates_for_user(&db, user_id, Some("User deleted via SCIM"), Some("scim")).await?;
 
-    // 3. Disable all enrolled authenticators
-    authenticator_store.disable_all_for_user(user_id).await?;
+    // 3. Delete user (cascades to authenticators)
+    db::delete_user(&db, user_id).await?;
 
-    // 4. Mark user as inactive
-    user_store.deactivate(user_id).await?;
-
-    // 5. Log audit event
-    audit_log.record(AuditEvent::ScimUserDeprovisioned {
-        user_id,
-        source_idp: scim_request.source_idp(),
-        timestamp: Timestamp::now(),
-    }).await?;
+    // 4. Log audit event
+    db::insert_scim_audit(&db, "delete", "User", user_id, Some(&token_id), Some(&details)).await?;
 
     Ok(())
 }
@@ -526,7 +517,7 @@ curl -X DELETE https://vouch.example.com/scim/v2/Users/usr_abc123 \
 ```
 
 **Token Security**:
-- Tokens are hashed (Argon2id) before storage
+- Tokens are hashed (SHA-256) before storage
 - Shown once at creation, never retrievable after
 - Bound to specific IdP and IP allowlist (optional)
 - Minimum 256 bits of entropy
@@ -535,45 +526,25 @@ curl -X DELETE https://vouch.example.com/scim/v2/Users/usr_abc123 \
 
 All SCIM operations are logged for compliance and security monitoring:
 
-| Event | Logged Data |
-|-------|-------------|
-| `scim_user_created` | user_id, email, source_idp, scim_external_id, timestamp |
-| `scim_user_updated` | user_id, changed_fields, source_idp, timestamp |
-| `scim_user_deprovisioned` | user_id, email, source_idp, sessions_revoked_count, timestamp |
-| `scim_group_updated` | group_id, members_added, members_removed, source_idp, timestamp |
-| `scim_auth_failed` | source_ip, reason, attempted_operation, timestamp |
-
-**Log Entry Example (De-provisioning)**:
-```json
-{
-  "timestamp": "2024-01-14T10:32:15.123Z",
-  "event_type": "scim_user_deprovisioned",
-  "user": {
-    "id": "usr_abc123",
-    "email": "former.employee@company.com"
-  },
-  "source": {
-    "idp": "okta",
-    "scim_external_id": "00u1a2b3c4d5e6f7g8"
-  },
-  "effects": {
-    "sessions_revoked": 3,
-    "refresh_tokens_revoked": 2,
-    "authenticators_disabled": 1
-  }
-}
-```
+| Operation | Resource Type | Logged Data |
+|-----------|--------------|-------------|
+| `create` | `User` | resource_id, email, scim_token_id, timestamp |
+| `update` | `User` | resource_id, scim_token_id, timestamp |
+| `delete` | `User` | resource_id, email, scim_token_id, timestamp |
+| `create` | `Group` | resource_id, display_name, scim_token_id, timestamp |
+| `update` | `Group` | resource_id, scim_token_id, timestamp |
+| `delete` | `Group` | resource_id, scim_token_id, timestamp |
 
 ### SCIM vs Manual Enrollment
 
 | Aspect | SCIM Provisioning | Manual Enrollment |
 |--------|-------------------|-------------------|
 | User record creation | IdP pushes user info | User initiates enrollment |
-| Hardware enrollment | Still requires physical YubiKey | Requires physical YubiKey |
-| De-provisioning | Immediate via IdP | Manual admin action |
-| Group membership | Synced from IdP | Managed in Vouch |
+| Hardware enrollment | Still requires physical hardware key | Requires physical hardware key |
+| De-provisioning | Immediate via IdP (user deleted, sessions invalidated, certs revoked) | Manual admin action |
+| Group membership | Synced from IdP | Not available outside SCIM |
 
-**Note**: SCIM pre-provisioning creates a user record, but they still cannot authenticate until they physically enroll a YubiKey. The security model remains: no credential without hardware.
+**Note**: SCIM pre-provisioning creates a user record, but they still cannot authenticate until they physically enroll a hardware FIDO2 authenticator. The security model remains: no credential without hardware.
 
 ## Client Credential Security
 
@@ -585,30 +556,15 @@ Client secrets are **never stored in plaintext**:
 
 ```rust
 // Client secret handling
-fn store_client_secret(secret: &str) -> StoredCredential {
-    // Generate random salt
-    let salt = generate_salt(16);
-
-    // Hash with Argon2id (memory-hard, resistant to GPU attacks)
-    let hash = argon2id::hash(
-        secret.as_bytes(),
-        &salt,
-        &Argon2Params {
-            memory_cost: 65536,  // 64 MB
-            time_cost: 3,
-            parallelism: 4,
-        }
-    );
-
-    StoredCredential { hash, salt }
+fn hash_secret(secret: &str) -> String {
+    hex::encode(digest::digest(&SHA256, secret.as_bytes()))
 }
 ```
 
 **Storage Properties:**
 | Property | Value |
 |----------|-------|
-| Algorithm | Argon2id |
-| Salt | 16 bytes, unique per secret |
+| Algorithm | SHA-256 |
 | Plaintext stored | Never |
 | Reversible | No |
 
@@ -629,20 +585,16 @@ let secret = SecretString::new(base64url_encode(random_bytes(32)));
 
 ### Secret Rotation
 
-Client secrets can be rotated with a grace period:
+Client secrets can be rotated via the portal or API:
 
 ```
 1. User requests rotation via portal or API
-2. New secret generated and returned
-3. Old secret remains valid for 24 hours (configurable)
-4. After grace period, old secret is invalidated
-5. Audit log records rotation event
+2. New secret generated and returned (shown once)
+3. All old secrets are immediately revoked
+4. Audit log records rotation event
 ```
 
-**Grace Period Rationale:**
-- Allows zero-downtime secret rotation
-- Applications can update configuration before old secret expires
-- Prevents lockouts from configuration timing issues
+**Note:** Rotation is immediate — old secrets are revoked as soon as the new secret is created. Applications must update their configuration before rotating.
 
 ### Scope Restrictions
 
@@ -670,7 +622,7 @@ All client credential operations are logged:
 |-------|-------------|
 | `client_created` | client_id, owner, allowed_scopes, created_at |
 | `client_updated` | client_id, changed_fields, updated_by, updated_at |
-| `secret_rotated` | client_id, rotated_by, grace_period_ends, rotated_at |
+| `secret_rotated` | client_id, rotated_by, rotated_at |
 | `client_revoked` | client_id, revoked_by, tokens_invalidated_count, revoked_at |
 | `client_deleted` | client_id, deleted_by, deleted_at |
 | `token_issued` | client_id, user_id (if applicable), scopes, expires_at |
@@ -690,7 +642,6 @@ All client credential operations are logged:
     "email": "developer@company.com"
   },
   "details": {
-    "grace_period_ends": "2024-01-15T10:32:15.123Z",
     "reason": "scheduled_rotation"
   }
 }
@@ -704,13 +655,11 @@ Tokens issued to OAuth clients follow security best practices:
 - Short-lived (default: 1 hour, max: 8 hours)
 - JWT format with standard claims
 - Bound to client_id and user (if applicable)
-- Include `hardware_verified` claim when backed by YubiKey session
+- Include `hardware_verified` claim when backed by hardware authenticator session
 
 **Refresh Tokens:**
-- Not issued for public clients (native, SPA)
-- Rotation on use (new refresh token issued, old invalidated)
-- Absolute lifetime: 30 days
-- Revoked on logout or security event
+- Not issued in the standard OIDC token exchange flow
+- GitHub OAuth refresh tokens are stored per-user for refreshing GitHub access tokens
 
 ### Revocation
 
@@ -738,8 +687,8 @@ Vouch is written in Rust, providing:
 For sensitive data handling:
 
 ```rust
-use secrecy::{ExposeSecret, SecretString, SecretVec};
-use zeroize::Zeroize;
+use secrecy::{ExposeSecret, SecretString};
+use zeroize::ZeroizeOnDrop;
 
 // Session tokens wrapped in SecretString
 let session_token: SecretString = fetch_session_token()?;
@@ -747,10 +696,13 @@ let session_token: SecretString = fetch_session_token()?;
 // Automatically zeroized when dropped
 // Debug output shows "[REDACTED]"
 
-// Explicit zeroization for extra-sensitive data
-let mut pin: SecretVec<u8> = SecretVec::new(read_pin()?);
-// ... use pin ...
-pin.zeroize();  // Explicit clear (also happens on drop)
+// Credential structures use ZeroizeOnDrop derive macro
+#[derive(Serialize, zeroize::ZeroizeOnDrop)]
+struct CredentialProcessOutput {
+    access_key_id: String,
+    secret_access_key: String,  // Zeroized on drop
+    session_token: String,      // Zeroized on drop
+}
 ```
 
 ## Supply Chain Security
@@ -778,10 +730,10 @@ rustls = "0.23"
 # Reproducible builds
 cargo build --release --locked
 
-# Dependency audit
-cargo audit
+# CI runs dependency-review-action on PRs
+# CI runs Trivy vulnerability scanning on container images
 
-# Dependency review
+# Dependency review (planned)
 cargo vet
 ```
 
@@ -852,14 +804,14 @@ If you can rebuild the exact same binary from source, you can trust that the rel
 
 Despite comprehensive mitigations, the following residual risks remain and have been accepted:
 
-### RR-01: Physical YubiKey Theft with PIN Knowledge
+### RR-01: Physical Authenticator Theft with PIN Knowledge
 
-**Risk**: If an attacker obtains both physical possession of a YubiKey and knowledge of the PIN, they can authenticate as the user.
+**Risk**: If an attacker obtains both physical possession of a hardware authenticator and knowledge of the PIN, they can authenticate as the user.
 
 | Aspect | Detail |
 |--------|--------|
 | **Residual Impact** | Medium |
-| **Acceptance Rationale** | This requires two independent factors to be compromised. The 8-hour session limit bounds the impact. Biometric YubiKeys (Bio series) can eliminate the PIN knowledge factor. |
+| **Acceptance Rationale** | This requires two independent factors to be compromised. The 8-hour session limit bounds the impact. Biometric authenticators (e.g., YubiKey Bio series) can eliminate the PIN knowledge factor. |
 | **Monitoring** | Audit logs track all authentication events. Anomaly detection can flag unusual access patterns. |
 
 ### RR-02: Compromised Vouch Server
@@ -978,9 +930,9 @@ chmod 600 ~/.vouch/config.json
 ykman fido info
 ```
 
-### YubiKey Configuration
+### Authenticator Configuration
 
-Vouch requires a minimum 8-character PIN. If your YubiKey doesn't have a PIN configured,
+Vouch requires a minimum 8-character PIN. If your hardware authenticator doesn't have a PIN configured,
 `vouch login` or `vouch register` will guide you through setting one up.
 
 ```bash

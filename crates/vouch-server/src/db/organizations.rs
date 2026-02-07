@@ -3,8 +3,8 @@
 
 use super::Pool;
 use super::schema::{
-    CloudIntegrations, GitHubCredentialEvents, GitHubInstallations, Organizations, ScimAuditLog,
-    ScimTokens, Users,
+    CloudIntegrations, GitHubCredentialEvents, GitHubInstallations, OAuthClients, Organizations,
+    ScimAuditLog, ScimTokens, Users,
 };
 use super::types::BuildSql;
 use super::types::DbTimestamp;
@@ -117,9 +117,9 @@ pub async fn get_organization_domain(pool: &Pool, org_id: &str) -> Result<Option
 /// 2. Delete GitHub installations
 /// 3. Delete SCIM tokens (with audit log SET NULL)
 /// 4. SET NULL for github_credential_events.org_id (preserve audit trail)
-/// 5. SET NULL for users.org_id (users are not deleted, just unlinked)
-/// 6. Delete the organization
-#[allow(dead_code)]
+/// 5. Unlink OAuth clients (SET NULL org_id, downgrade access_scope to personal)
+/// 6. SET NULL for users.org_id (users are not deleted, just unlinked)
+/// 7. Delete the organization
 pub async fn delete_organization(pool: &Pool, org_id: &str) -> Result<bool> {
     let mut tx = pool.begin().await?;
     let db_type = tx.db_type();
@@ -187,8 +187,20 @@ pub async fn delete_organization(pool: &Pool, org_id: &str) -> Result<bool> {
     };
     tx_execute!(tx, sqlx::query(&sql4))?;
 
-    // 5. SET NULL for users.org_id (unlink users from org, don't delete them)
+    // 5. Unlink OAuth clients (SET NULL org_id, downgrade scope to personal)
     let sql5 = {
+        let query = Query::update()
+            .table(OAuthClients::Table)
+            .value(OAuthClients::OrgId, Option::<String>::None)
+            .value(OAuthClients::AccessScope, "personal")
+            .and_where(Expr::col(OAuthClients::OrgId).eq(org_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+    tx_execute!(tx, sqlx::query(&sql5))?;
+
+    // 6. SET NULL for users.org_id (unlink users from org, don't delete them)
+    let sql6 = {
         let query = Query::update()
             .table(Users::Table)
             .value(Users::OrgId, Option::<String>::None)
@@ -197,17 +209,17 @@ pub async fn delete_organization(pool: &Pool, org_id: &str) -> Result<bool> {
             .to_owned();
         query.build_sql(db_type)
     };
-    tx_execute!(tx, sqlx::query(&sql5))?;
+    tx_execute!(tx, sqlx::query(&sql6))?;
 
-    // 6. Delete the organization
-    let sql6 = {
+    // 7. Delete the organization
+    let sql7 = {
         let query = Query::delete()
             .from_table(Organizations::Table)
             .and_where(Expr::col(Organizations::Id).eq(org_id))
             .to_owned();
         query.build_sql(db_type)
     };
-    let result = tx_execute!(tx, sqlx::query(&sql6))?;
+    let result = tx_execute!(tx, sqlx::query(&sql7))?;
 
     tx.commit().await?;
     Ok(result.rows_affected() > 0)

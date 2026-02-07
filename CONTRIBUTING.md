@@ -20,29 +20,21 @@ Be respectful and constructive. We're building security software — thoughtful 
 
 ### Prerequisites
 
-- **Rust** 1.75+ (install via [rustup](https://rustup.rs/))
-- **YubiKey 5 series** for testing FIDO2 flows
-- **Docker** for running the test server
-- **PostgreSQL** 15+ (or use Docker)
+- **Rust** 1.93+ (install via [rustup](https://rustup.rs/), pinned in `rust-toolchain.toml`)
+- **YubiKey 5 series** for testing FIDO2 flows (use a dedicated test key, not your primary)
+- **Docker** for building and running the server image
+- **TailwindCSS CLI** for CSS compilation (`make css-build`)
 
 ### Clone and Build
 
 ```bash
-# Clone the repository
 git clone https://github.com/vouch-sh/vouch.git
 cd vouch
 
-# Build all crates
-cargo build
-
-# Run tests
-cargo test
-
-# Run clippy
-cargo clippy --all-targets --all-features -- -D warnings
-
-# Format code
-cargo fmt
+make build                # Build release binary (includes CSS)
+make test                 # Run unit tests
+make lint                 # Run clippy
+make fmt                  # Format code
 ```
 
 ### Project Structure
@@ -50,49 +42,54 @@ cargo fmt
 ```
 vouch/
 ├── Cargo.toml              # Workspace root
+├── Makefile                # Build, test, run, deploy targets
 ├── crates/
-│   ├── vouch-cli/          # CLI binary
-│   │   ├── src/
-│   │   │   ├── main.rs
-│   │   │   ├── commands/   # CLI command implementations
-│   │   │   └── ...
-│   │   └── Cargo.toml
-│   │
-│   ├── vouch-agent/        # Background daemon
-│   │   ├── src/
-│   │   │   ├── main.rs
-│   │   │   ├── session.rs  # Session management
-│   │   │   ├── ipc.rs      # Unix socket IPC
-│   │   │   └── ...
-│   │   └── Cargo.toml
-│   │
-│   └── vouch-common/       # Shared types and utilities
-│       ├── src/
-│       │   ├── lib.rs
-│       │   ├── types.rs    # Credential, Session, etc.
-│       │   ├── fido2.rs    # FIDO2 helpers
-│       │   └── ...
-│       └── Cargo.toml
-│
-├── docs/                   # Documentation
-├── tests/                  # Integration tests
-└── scripts/                # Development scripts
+│   ├── vouch-cli/          # CLI binary (commands/, integrations/)
+│   ├── vouch-agent/        # Background daemon (Unix socket IPC)
+│   │   └── src/
+│   │       ├── state.rs    # Session state management
+│   │       ├── socket.rs   # Unix socket handling
+│   │       ├── protocol.rs # JSON-RPC 2.0 protocol
+│   │       ├── wire.rs     # Wire format serialization
+│   │       └── ssh_agent/  # SSH agent protocol
+│   ├── vouch-common/       # Shared types and utilities
+│   │   └── src/
+│   │       ├── api.rs      # API types (Credential, Session, etc.)
+│   │       ├── fido2_types.rs # FIDO2 type definitions
+│   │       └── contracts.rs   # Shared contracts
+│   ├── vouch-server/       # Auth server (BUSL-1.1)
+│   │   ├── src/handlers/   # HTTP route handlers
+│   │   ├── src/db/         # Database layer (sqlx)
+│   │   ├── migrations/     # sqlite/ and postgres/
+│   │   └── templates/      # Askama HTML templates
+│   └── vouch-tests/        # Integration + property-based tests
+│       └── tests/
+│           ├── integration.rs
+│           ├── golden_files.rs
+│           └── proptest.rs
+├── docs/                   # Architecture, security, deployment guides
+└── packaging/              # AMI and post-install scripts
 ```
 
 ### Running Locally
 
 ```bash
-# Start test infrastructure
-docker-compose -f docker-compose.dev.yml up -d
+make run                   # CLI with RUST_LOG=debug
+make run-server            # Server (loads .env, builds CSS first)
+make run-agent             # Agent daemon in foreground with debug logging
 
-# Run the CLI
+# Or directly:
 cargo run --bin vouch -- --help
-
-# Run the agent
-cargo run --bin vouch-agent
-
-# Run with debug logging
 RUST_LOG=debug cargo run --bin vouch -- login
+```
+
+A `.env` file at the repo root is loaded by the Makefile. See `.env` for required server environment variables (`VOUCH_RP_ID`, `VOUCH_RP_NAME`, `VOUCH_JWT_SECRET`, etc.).
+
+### Running the Server in Docker
+
+```bash
+make docker-build
+make docker-run            # Runs on localhost:3000 with dev defaults
 ```
 
 ### Testing with YubiKey
@@ -100,31 +97,14 @@ RUST_LOG=debug cargo run --bin vouch -- login
 For FIDO2 testing, you'll need a physical YubiKey:
 
 ```bash
-# Check YubiKey is detected
-cargo run --bin vouch -- yubikey info
+# Check system and YubiKey status
+cargo run --bin vouch -- doctor
 
 # Run FIDO2 integration tests (requires YubiKey)
 cargo test --features yubikey-tests -- --ignored
 
 # Reset YubiKey FIDO2 app (warning: destructive)
 ykman fido reset
-```
-
-**Note**: Don't use your primary YubiKey for development. Use a dedicated test key.
-
-### Test Server
-
-The dev compose file includes a mock Vouch server:
-
-```bash
-# Start mock server
-docker-compose -f docker-compose.dev.yml up -d
-
-# Point CLI at mock server
-export VOUCH_SERVER_URL=http://localhost:8080
-
-# Now vouch commands hit the mock server
-cargo run --bin vouch -- register
 ```
 
 ## Code Style
@@ -166,35 +146,29 @@ pub fn authenticate(credential: &Credential) -> Result<Session, AuthError> { ...
 ### Formatting
 
 ```bash
-# Format all code
-cargo fmt
-
-# Check formatting (CI will fail if this fails)
-cargo fmt -- --check
+make fmt                  # cargo fmt --all
+cargo fmt -- --check      # CI check (will fail if unformatted)
 ```
+
+Configuration is in `.rustfmt.toml`: edition 2024, max width 100, Unix newlines.
 
 ### Linting
 
 ```bash
-# Run clippy with strict settings
-cargo clippy --all-targets --all-features -- -D warnings
-
-# Common clippy allows (document why if used):
-#[allow(clippy::too_many_arguments)]  // Builder pattern would be overkill here
+make lint   # cargo clippy --all-targets --all-features -- -D warnings
 ```
+
+The workspace enforces strict no-panic lints (see `Cargo.toml`). In production code, `unwrap()`, `expect()`, `panic!()`, `todo!()`, and `[]` indexing are **denied**. Use `?` for error propagation and `.get()` for indexing. The `vouch-tests` crate overrides these for test code.
 
 ### Dependencies
 
-Add dependencies sparingly:
+Add dependencies sparingly — each is attack surface. All workspace dependencies are pinned to exact versions with minimal features in the root `Cargo.toml`.
 
-```toml
-# Good: Well-maintained, security-audited
-ctap-hid-fido2 = "3"    # Pure Rust FIDO2
-keyring = "3"            # Platform credential storage
-
-# Avoid: Unmaintained, too many transitive deps
-some-kitchen-sink-crate = "0.1"
-```
+Preferred crates:
+- `jiff` for time (not `chrono`)
+- `aws-lc-rs` for crypto (not `ring`)
+- `reqwest` + `rustls` (avoid OpenSSL)
+- `askama` for HTML templates
 
 Before adding a dependency:
 1. Check maintenance status
@@ -212,24 +186,16 @@ Before adding a dependency:
 
 ### Commit Messages
 
-Follow [Conventional Commits](https://www.conventionalcommits.org/):
+Write clear, concise commit messages. Use a short summary line followed by an optional body explaining the "why":
 
 ```
-feat(cli): add vouch status command
+Add vouch status command
 
 Show current session state including expiration time
 and active delegations.
 
 Closes #42
 ```
-
-Types:
-- `feat`: New feature
-- `fix`: Bug fix
-- `docs`: Documentation only
-- `refactor`: Code change that neither fixes a bug nor adds a feature
-- `test`: Adding or updating tests
-- `chore`: Build process or auxiliary tool changes
 
 ### Pull Request Process
 
@@ -264,71 +230,25 @@ Types:
 - [ ] All tests pass
 - [ ] New code has tests
 - [ ] Documentation updated
-- [ ] Commit messages follow convention
+- [ ] Commit messages are clear and descriptive
 - [ ] No unrelated changes included
 
 ## Testing
 
-### Unit Tests
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_session_expiration() {
-        let session = Session::new(Duration::hours(8));
-        assert!(!session.is_expired());
-        
-        // Simulate time passing
-        let expired = session.with_created_at(Utc::now() - Duration::hours(9));
-        assert!(expired.is_expired());
-    }
-}
-```
-
-### Integration Tests
-
-```rust
-// tests/integration/ssh_test.rs
-
-#[test]
-#[ignore]  // Requires YubiKey
-fn test_ssh_certificate_flow() {
-    // Setup
-    let server = TestServer::start();
-    let yubikey = TestYubikey::new();
-    
-    // Register
-    let result = vouch_cli::register(&server, &yubikey);
-    assert!(result.is_ok());
-    
-    // Login
-    let session = vouch_cli::login(&server, &yubikey).unwrap();
-    assert!(!session.is_expired());
-    
-    // Get SSH cert
-    let cert = vouch_cli::get_ssh_cert(&server, &session).unwrap();
-    assert!(cert.is_valid());
-}
-```
-
 ### Running Tests
 
 ```bash
-# All tests
-cargo test
+make test                  # Unit tests (all crates)
+make test-integration      # Integration + property-based tests
 
-# Specific test
-cargo test test_session_expiration
+# Specific test with output
+cargo test test_session_expiration -- --nocapture
 
-# With output
-cargo test -- --nocapture
-
-# Integration tests (require setup)
-cargo test --test integration -- --ignored
+# FIDO2 tests (requires physical YubiKey)
+cargo test --features yubikey-tests -- --ignored
 ```
+
+Integration tests live in `crates/vouch-tests/tests/` and include property-based tests via `proptest`.
 
 ## Security Considerations
 

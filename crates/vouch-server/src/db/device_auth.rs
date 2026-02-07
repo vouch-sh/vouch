@@ -47,7 +47,7 @@ pub struct DeviceAuthRequest {
     pub user_email: Option<String>,
     pub authenticator_id: Option<String>,
     pub expires_at: DbTimestamp,
-    pub interval_seconds: i64,
+    pub interval_seconds: i32,
     pub last_poll_at: Option<DbTimestamp>,
 }
 
@@ -75,7 +75,7 @@ pub async fn create_device_auth_request(
     device_code_hash: &str,
     user_code: &str,
     expires_at: &str,
-    interval_seconds: i64,
+    interval_seconds: i32,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
     let now = Timestamp::now().to_string();
@@ -253,7 +253,7 @@ pub async fn deny_device_auth(pool: &Pool, id: &str) -> Result<()> {
 pub async fn update_device_auth_poll_time(
     pool: &Pool,
     id: &str,
-    interval_seconds: i64,
+    interval_seconds: i32,
 ) -> Result<bool> {
     let now = Timestamp::now();
     let now_str = now.to_string();
@@ -268,7 +268,7 @@ pub async fn update_device_auth_poll_time(
     if let Some(last_poll) = &request.last_poll_at {
         let last_poll_ts = last_poll.to_jiff();
         let elapsed = now.as_second() - last_poll_ts.as_second();
-        if elapsed < interval_seconds {
+        if elapsed < i64::from(interval_seconds) {
             return Ok(false);
         }
     }
