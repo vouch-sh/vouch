@@ -31,9 +31,8 @@ aws ssm get-parameter \
     --query Parameter.Value \
     --output text > /run/vouch-server/env
 
-# Append AWS_REGION and AWS_AZ to the env file
+# Append AWS_AZ to the env file
 # These are used by vouch-server for DSQL endpoint resolution
-echo "AWS_REGION=$REGION" >> /run/vouch-server/env
 echo "AWS_AZ=$AZ" >> /run/vouch-server/env
 
 # Secure the env file
