@@ -157,6 +157,9 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
 
     info!("Agent starting");
 
+    // Set up SIGTERM handler before select!
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
+
     // Run both servers
     let result = tokio::select! {
         result = server.run() => {
@@ -192,6 +195,15 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
                     warn!("Failed to listen for Ctrl+C: {e}");
                 }
             }
+            ExitCode::SUCCESS
+        }
+        Some(()) = async {
+            match &mut sigterm {
+                Ok(s) => s.recv().await,
+                Err(_) => std::future::pending().await,
+            }
+        } => {
+            info!("Received SIGTERM, shutting down...");
             ExitCode::SUCCESS
         }
     };

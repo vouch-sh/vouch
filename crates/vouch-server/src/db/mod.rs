@@ -59,7 +59,7 @@ pub use authenticators::{
 };
 
 // Re-export organization types and functions
-pub use organizations::{Organization, get_organization_domain};
+pub use organizations::{Organization, delete_organization, get_organization_domain};
 
 // Re-export organization test helpers (only available in tests)
 #[cfg(any(test, feature = "test-utils"))]
@@ -99,13 +99,9 @@ pub use oauth::{
     create_oauth_client, create_oauth_client_secret, delete_oauth_client,
     delete_old_oauth_usage_events, get_oauth_client_by_client_id, get_oauth_client_by_id,
     get_oauth_client_secrets, get_oauth_clients_for_user, get_oauth_usage_stats,
-    record_oauth_event, revoke_all_oauth_client_secrets, revoke_oauth_client_secret,
-    update_oauth_client, update_oauth_client_last_used, validate_oauth_client_credentials,
+    record_oauth_event, revoke_all_oauth_client_secrets, update_oauth_client,
+    update_oauth_client_last_used, validate_oauth_client_credentials,
 };
-
-// Re-export OAuth test helpers (only available in tests)
-#[cfg(test)]
-pub use oauth::{deactivate_oauth_client, reactivate_oauth_client};
 
 // Re-export credentials types and functions
 pub use credentials::{

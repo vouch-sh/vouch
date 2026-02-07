@@ -1,6 +1,6 @@
 # Architecture
 
-Vouch is a **hardware-backed authentication system** that issues short-lived credentials after verifying human presence via FIDO2 hardware keys (YubiKey 5 series only).
+Vouch is a **hardware-backed authentication system** that issues short-lived credentials after verifying human presence via hardware FIDO2 keys.
 
 ## Product Vision
 
@@ -19,8 +19,8 @@ $ git push origin main    # Just works
 
 ## Design Principles
 
-1. **Hardware-bound only** — YubiKey 5 series required, no platform passkeys (Touch ID, Windows Hello)
-2. **Presence is mandatory** — No credential issuance without YubiKey touch + PIN
+1. **Hardware-bound only** — Hardware FIDO2 authenticators required, no platform passkeys (Touch ID, Windows Hello)
+2. **Presence is mandatory** — No credential issuance without authenticator touch + PIN
 3. **Credentials are ephemeral** — 8-hour maximum lifetime, no persistent secrets
 4. **Tools stay native** — Configure standard credential providers, don't wrap commands
 5. **Browser enrollment, CLI login** — One-time browser setup, daily use is CLI-only
@@ -29,12 +29,12 @@ $ git push origin main    # Just works
 
 | Factor | How Vouch Delivers |
 |--------|-------------------|
-| **Something you HAVE** | YubiKey (hardware-bound, not syncable) |
+| **Something you HAVE** | Hardware FIDO2 key (hardware-bound, not syncable) |
 | **Something you KNOW** | PIN (verified on-device, never transmitted) |
 | **Presence proof** | Physical touch sensor |
 | **Time-bound** | 8-hour sessions, no long-lived secrets |
 
-**Policy**: Hardware-bound authenticators only (YubiKey 5 series). No platform passkeys, no Touch ID/Windows Hello. This is the differentiator.
+**Policy**: Hardware-bound FIDO2 authenticators only. No platform passkeys, no Touch ID/Windows Hello. This is the differentiator.
 
 ## System Overview
 
@@ -83,9 +83,13 @@ $ git push origin main    # Just works
  |  |  * Sessions    |  |  * User certs  |  | * AWS federat. |  |  tokens | |
  |  +----------------+  +----------------+  +----------------+  +---------+ |
  |                                                                           |
- |  Policy: Hardware-bound authenticators only (YubiKey 5 series)           |
+ |  Policy: Hardware-bound FIDO2 authenticators only                       |
  +---------------------------------------------------------------------------+
 ```
+
+## Vouch Cloud
+
+Vouch Cloud is the managed deployment at [https://us.vouch.sh](https://us.vouch.sh). It runs on Amazon EC2 instances with [NitroTPM attestation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/nitrotpm-attestation.html), providing cryptographic proof that the server runs on genuine AWS hardware. This removes the need to trust the operator with access to the underlying compute environment.
 
 ## Core Components
 
@@ -191,11 +195,13 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 **Standards Compliance:**
 - OAuth 2.0 (RFC 6749)
 - OpenID Connect Core 1.0
+- OAuth 2.0 Authorization Server Metadata (RFC 8414)
 - OAuth 2.0 Device Authorization Grant (RFC 8628)
 - Proof Key for Code Exchange (PKCE, RFC 7636)
 - OAuth 2.0 Token Revocation (RFC 7009)
 - OAuth 2.0 Token Introspection (RFC 7662)
 - OAuth 2.0 Token Exchange (RFC 8693)
+- OAuth 2.0 Authorization Server Issuer Identification (RFC 9207)
 - SCIM 2.0 (RFC 7643/7644)
 - DPoP (RFC 9449) — Demonstrating Proof of Possession
 - OAuth 2.0 Security Best Current Practice (RFC 9700) — followed
@@ -272,7 +278,7 @@ Vouch integrates with GitHub via a shared GitHub App to provide short-lived Git 
 
 #### External Identity Provider Integration
 
-Vouch uses external identity providers (IdPs) to verify user identity during enrollment. This links a trusted corporate identity to a hardware-bound YubiKey credential.
+Vouch uses external identity providers (IdPs) to verify user identity during enrollment. This links a trusted corporate identity to a hardware-bound FIDO2 credential.
 
 **Purpose:**
 - Verify the user is a member of your organization during enrollment
@@ -329,7 +335,7 @@ Web Portal → My Applications → Register New Application
 
 **Registration Workflow:**
 
-1. **Authenticate** — User logs into Vouch (with YubiKey)
+1. **Authenticate** — User logs into Vouch (with hardware key)
 2. **Navigate** — Go to "My Applications" section
 3. **Register** — Click "Register New Application"
 4. **Configure** — Provide application details:
@@ -355,7 +361,7 @@ Web Portal → My Applications → Register New Application
 
 Registered applications can be managed via the portal:
 - **View** — See application details and usage statistics
-- **Rotate** — Generate new client_secret (old secret remains valid for 24 hours)
+- **Rotate** — Generate new client_secret (old secret immediately revoked)
 - **Revoke** — Immediately invalidate all tokens for an application
 - **Delete** — Remove the application registration entirely
 
@@ -376,7 +382,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 ### Enrollment (One-Time, Browser Required)
 
-Links OIDC identity (Google Workspace, Okta, Azure AD) to YubiKey passkey using RFC 8628 Device Authorization Grant:
+Links OIDC identity (Google Workspace, Okta, Azure AD) to hardware FIDO2 passkey using RFC 8628 Device Authorization Grant:
 
 ```
 +--------+     +-----------+     +--------------+     +--------------+     +----------+
@@ -435,11 +441,11 @@ Links OIDC identity (Google Workspace, Okta, Azure AD) to YubiKey passkey using 
 
 **Server stores:** credential_id <-> user@company.com (from OIDC provider)
 
-**Key insight**: The passkey is created as a *discoverable credential* (resident key) on the YubiKey, so subsequent logins don't require the user to provide their email.
+**Key insight**: The passkey is created as a *discoverable credential* (resident key) on the hardware authenticator, so subsequent logins don't require the user to provide their email.
 
 ### Daily Login (CLI Only, No Browser)
 
-Uses discoverable credential from YubiKey:
+Uses discoverable credential from the hardware authenticator:
 
 ```
 +--------+     +-----------+     +--------------+     +----------+
@@ -481,9 +487,9 @@ Uses discoverable credential from YubiKey:
     |<---------------|                  |                  |
 ```
 
-**Key insight**: The YubiKey's discoverable credential (passkey) identifies the user. No email needed for daily login.
+**Key insight**: The authenticator's discoverable credential (passkey) identifies the user. No email needed for daily login.
 
-**PIN Setup**: If the YubiKey doesn't have a PIN configured, `vouch login` and `vouch register` will detect this and guide the user through setting one up. Vouch requires a minimum 8-character PIN for security.
+**PIN Setup**: If the hardware authenticator doesn't have a PIN configured, `vouch login` and `vouch register` will detect this and guide the user through setting one up. Vouch requires a minimum 8-character PIN for security.
 
 ### Adding Additional Keys (CLI, Requires Login)
 
@@ -890,28 +896,25 @@ base64 -i cert.pem | tr -d '\n'
 | Field | Hot-Reloadable | Notes |
 |-------|----------------|-------|
 | `tls.cert`, `tls.key` | Yes | Automatic reload on change |
-| `session_hours` | Yes | Affects new sessions only |
-| `cors_origins` | Yes | |
-| `allowed_domains` | Yes | |
-| `dpop.*` | Yes | |
-| `jwt_secret` | **No** | Security-sensitive, requires restart |
-| `database_url` | **No** | Connection pool cannot be changed |
-| `listen_addr` | **No** | Socket binding cannot change |
-| `rp_id`, `rp_name` | **No** | WebAuthn identity must be stable |
+| All other fields | **No** | Requires server restart |
 
-Changes to non-hot-reloadable fields in S3 are logged as warnings and ignored until server restart.
+Non-hot-reloadable fields include: `jwt_secret`, `database_url`, `listen_addr`, `rp_id`, `rp_name`, `session_hours`, `cors_origins`, `allowed_domains`, `dpop.*`, OIDC settings, GitHub App settings, SSH CA key, and OIDC signing key.
+
+Changes to non-hot-reloadable fields in S3 are silently ignored. A server restart is required to apply them.
 
 ### TLS Certificate Hot-Reload
 
 Vouch supports automatic TLS certificate reloading without dropping connections:
 
 1. **Via S3 polling** — Update `tls.cert` and `tls.key` in S3 config; server detects change via ETag and reloads
-2. **Via SIGHUP** — Send `SIGHUP` to the server process for manual reload
+2. **Via SIGHUP** — Send `SIGHUP` to the server process to reload TLS certificates
 
 ```bash
-# Manual reload (Unix only)
+# Manual TLS certificate reload (Unix only)
 kill -SIGHUP $(pgrep vouch-server)
 ```
+
+**Note:** SIGHUP only reloads TLS certificates. It does not reload any other configuration fields.
 
 ---
 
@@ -936,7 +939,7 @@ kill -SIGHUP $(pgrep vouch-server)
 | Framework | Axum | Modern async, tower middleware |
 | Templates | Askama | Compile-time checked, type-safe HTML |
 | Styling | TailwindCSS | Utility-first, self-hosted (no CDN) |
-| Database | SQLite (MVP) / PostgreSQL | Simple to start, scales later |
+| Database | SQLite / PostgreSQL / Aurora DSQL | Simple to start, scales later |
 | SSH CA | Ed25519 (built-in) | No external dependencies |
 | JWT | jsonwebtoken | Standard, well-audited |
 
@@ -959,7 +962,7 @@ The vouch-agent daemon stores the active session in memory, accessible via Unix 
 When the agent is not running, sessions are stored in the config file:
 
 ```
-~/.config/vouch/config.json
+~/.vouch/config.json
 ```
 
 **Format:** JSON with `token` field containing the JWT session token
@@ -992,7 +995,7 @@ vouch.example.com	FALSE	/	TRUE	1737849600	vouch_session	<token>
 3. **Hardware-bound only** — Platform passkeys explicitly disallowed
 4. **Discoverable credentials** — User identified by credential_id, not email
 5. **Audit trail** — Every credential issuance logged with session attestation
-6. **Compromise recovery** — Revoke YubiKey registration, all sessions invalidated
+6. **Compromise recovery** — Revoke authenticator registration, all sessions invalidated
 
 ## Differences from Amazon Midway
 
@@ -1001,7 +1004,7 @@ Vouch is inspired by Amazon's internal Midway system but differs in several ways
 | Aspect | Midway (Amazon Internal) | Vouch |
 |--------|-------------------------|-------|
 | Deployment | Internal only | SaaS + self-hosted |
-| Hardware | Amazon-issued Yubikeys | BYOD YubiKey 5 series |
+| Hardware | Amazon-issued Yubikeys | BYOD hardware FIDO2 keys |
 | Login | Email required | Discoverable credential (no email) |
 | CA | External PKI | Built-in Ed25519 CA |
 | IdP | Internal | Google Workspace (extensible) |
@@ -1017,7 +1020,7 @@ Vouch is inspired by Amazon's internal Midway system but differs in several ways
 | **Purpose** | "Make your app enterprise-ready" | "Secure internal access with hardware auth" |
 | **IdP Role** | Integrates with customer's IdP | IS the IdP |
 | **Direction** | Your app → customer's Okta/Entra | Your employees → Vouch → your apps |
-| **Hardware Focus** | None specific | YubiKey required |
+| **Hardware Focus** | None specific | Hardware FIDO2 key required |
 
 **Summary**: Not competitors. WorkOS helps SaaS companies add SSO/SCIM to sell to enterprises. Vouch IS the enterprise authentication system.
 
@@ -1032,7 +1035,7 @@ Vouch is inspired by Amazon's internal Midway system but differs in several ways
 | **Authentication** | Integrates with IdPs | IS the IdP |
 | **Where it runs** | AWS-hosted (network layer) | Self-hosted or cloud |
 | **Access Model** | Per-request evaluation | Session + short-lived credentials |
-| **Device Trust** | Via MDM integration | Via YubiKey hardware |
+| **Device Trust** | Via MDM integration | Via hardware FIDO2 key |
 | **VPN** | Replaces VPN | Complements/replaces VPN |
 
 **Summary**: Complementary, not competitive. AWS Verified Access needs an IdP to authenticate users — Vouch can be that IdP. Different layers: Vouch = identity layer, AWS VA = access layer.
@@ -1048,7 +1051,7 @@ Vouch is inspired by Amazon's internal Midway system but differs in several ways
 | 8-hour sessions | Yes | Configurable | N/A |
 | Self-hosted | Yes | No | N/A |
 
-**Core differentiator**: Most identity systems allow platform passkeys (Touch ID, Windows Hello), TOTP/SMS, and push notifications. Vouch requires YubiKey 5 series only — hardware-bound, non-extractable, presence required.
+**Core differentiator**: Most identity systems allow platform passkeys (Touch ID, Windows Hello), TOTP/SMS, and push notifications. Vouch requires hardware FIDO2 keys only — hardware-bound, non-extractable, presence required.
 
 ### Positioning Summary
 
@@ -1056,7 +1059,7 @@ Vouch is inspired by Amazon's internal Midway system but differs in several ways
                     Hardware Required
                           │
           Vouch ◄─────────┼─────────► Platform Passkeys
-     (YubiKey only)       │          (Touch ID, Windows Hello)
+   (hardware keys only)   │          (Touch ID, Windows Hello)
                           │
     Amazon Midway         │          Most IdPs
     (internal only)       │          (Okta, Auth0, etc.)

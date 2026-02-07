@@ -65,7 +65,9 @@ async fn main() -> Result<()> {
 
     // Initialize logging
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env())
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
         .init();
 
     // Parse command-line arguments and environment variables
@@ -816,11 +818,10 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
-        signal::unix::signal(signal::unix::SignalKind::terminate())
-            .ok()
-            .map(|mut s| async move { s.recv().await });
-        // If signal setup fails, just wait forever
-        std::future::pending::<()>().await
+        match signal::unix::signal(signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => { s.recv().await; }
+            Err(_) => std::future::pending().await,
+        }
     };
 
     #[cfg(not(unix))]

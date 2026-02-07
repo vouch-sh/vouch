@@ -145,7 +145,7 @@ pub async fn list_auth_events(
             client_os: e.client_os,
             client_arch: e.client_arch,
             client_version: e.client_version,
-            success: e.success != 0,
+            success: e.success,
             failure_reason: e.failure_reason,
             created_at: e.created_at.to_jiff().to_string(),
         })

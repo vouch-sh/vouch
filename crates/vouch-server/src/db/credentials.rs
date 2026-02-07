@@ -131,7 +131,7 @@ pub struct DelegationPolicy {
     pub grantor_pattern: String,
     pub grantee_pattern: String,
     pub allowed_scopes: Option<String>,
-    pub max_ttl_seconds: Option<i64>,
+    pub max_ttl_seconds: Option<i32>,
     pub enabled: bool,
     pub created_at: DbTimestamp,
     pub updated_at: DbTimestamp,
@@ -211,52 +211,6 @@ fn pattern_matches(pattern: &str, value: &str) -> bool {
 
     // Exact match
     pattern.eq_ignore_ascii_case(value)
-}
-
-/// Create a delegation policy.
-#[allow(dead_code)]
-pub async fn create_delegation_policy(
-    pool: &Pool,
-    name: &str,
-    grantor_pattern: &str,
-    grantee_pattern: &str,
-    allowed_scopes: Option<&str>,
-    max_ttl_seconds: Option<i64>,
-) -> Result<String> {
-    let id = Uuid::now_v7().to_string();
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
-
-    let sql = {
-        let query = Query::insert()
-            .into_table(DelegationPolicies::Table)
-            .columns([
-                DelegationPolicies::Id,
-                DelegationPolicies::Name,
-                DelegationPolicies::GrantorPattern,
-                DelegationPolicies::GranteePattern,
-                DelegationPolicies::AllowedScopes,
-                DelegationPolicies::MaxTtlSeconds,
-                DelegationPolicies::CreatedAt,
-                DelegationPolicies::UpdatedAt,
-            ])
-            .values_panic([
-                id.clone().into(),
-                name.into(),
-                grantor_pattern.into(),
-                grantee_pattern.into(),
-                allowed_scopes.into(),
-                max_ttl_seconds.into(),
-                now.as_str().into(),
-                now.as_str().into(),
-            ])
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(id)
 }
 
 /// Get all delegation policies.

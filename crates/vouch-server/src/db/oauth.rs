@@ -373,48 +373,6 @@ pub async fn update_oauth_client(
     Ok(())
 }
 
-/// Deactivate an OAuth client (soft delete).
-#[allow(dead_code)]
-pub async fn deactivate_oauth_client(pool: &Pool, id: &str) -> Result<()> {
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
-
-    let sql = {
-        let query = Query::update()
-            .table(OAuthClients::Table)
-            .value(OAuthClients::Active, false)
-            .value(OAuthClients::UpdatedAt, now.as_str())
-            .and_where(Expr::col(OAuthClients::Id).eq(id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(())
-}
-
-/// Reactivate an OAuth client.
-#[allow(dead_code)]
-pub async fn reactivate_oauth_client(pool: &Pool, id: &str) -> Result<()> {
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
-
-    let sql = {
-        let query = Query::update()
-            .table(OAuthClients::Table)
-            .value(OAuthClients::Active, true)
-            .value(OAuthClients::UpdatedAt, now.as_str())
-            .and_where(Expr::col(OAuthClients::Id).eq(id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(())
-}
-
 /// Delete an OAuth client permanently.
 ///
 /// Performs application-level cascade deletes for DSQL compatibility:
@@ -630,26 +588,6 @@ pub async fn get_oauth_secret_by_hash(
     Ok(secret)
 }
 
-/// Revoke a client secret.
-#[allow(dead_code)]
-pub async fn revoke_oauth_client_secret(pool: &Pool, secret_id: &str) -> Result<()> {
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
-
-    let sql = {
-        let query = Query::update()
-            .table(OAuthClientSecrets::Table)
-            .value(OAuthClientSecrets::RevokedAt, now.as_str())
-            .and_where(Expr::col(OAuthClientSecrets::Id).eq(secret_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(())
-}
-
 /// Revoke all secrets for an OAuth client.
 pub async fn revoke_all_oauth_client_secrets(pool: &Pool, oauth_client_id: &str) -> Result<u64> {
     let db_type = pool.db_type();
@@ -674,23 +612,8 @@ pub async fn revoke_all_oauth_client_secrets(pool: &Pool, oauth_client_id: &str)
 // OAuth Usage Events
 // ============================================================================
 
-/// OAuth usage event record.
-#[derive(Debug, sqlx::FromRow)]
-#[allow(dead_code)]
-pub struct OAuthUsageEvent {
-    pub id: String,
-    pub oauth_client_id: String,
-    pub event_type: String,
-    pub user_id: Option<String>,
-    pub ip_address: Option<String>,
-    pub user_agent: Option<String>,
-    pub details: Option<String>,
-    pub created_at: DbTimestamp,
-}
-
 /// OAuth usage event types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
 pub enum OAuthEventType {
     TokenIssued,
     TokenRefreshed,
@@ -757,40 +680,6 @@ pub async fn record_oauth_event(
     db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(id)
-}
-
-/// Get usage events for an OAuth client.
-#[allow(dead_code)]
-pub async fn get_oauth_usage_events(
-    pool: &Pool,
-    oauth_client_id: &str,
-    limit: i64,
-) -> Result<Vec<OAuthUsageEvent>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .columns([
-                OAuthUsageEvents::Id,
-                OAuthUsageEvents::OAuthClientId,
-                OAuthUsageEvents::EventType,
-                OAuthUsageEvents::UserId,
-                OAuthUsageEvents::IpAddress,
-                OAuthUsageEvents::UserAgent,
-                OAuthUsageEvents::Details,
-                OAuthUsageEvents::CreatedAt,
-            ])
-            .from(OAuthUsageEvents::Table)
-            .and_where(Expr::col(OAuthUsageEvents::OAuthClientId).eq(oauth_client_id))
-            .order_by(OAuthUsageEvents::CreatedAt, Order::Desc)
-            .limit(limit as u64)
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let events = db_fetch_all!(pool, sqlx::query_as::<_, OAuthUsageEvent>(&sql))?;
-
-    Ok(events)
 }
 
 /// Get usage statistics for an OAuth client.

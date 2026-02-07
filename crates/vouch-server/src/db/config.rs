@@ -47,28 +47,6 @@ pub async fn get_config(pool: &Pool, key: &str) -> Result<Option<String>> {
     Ok(row.map(|r| r.value))
 }
 
-/// Get all config values.
-#[allow(dead_code)]
-pub async fn get_all_config(pool: &Pool) -> Result<Vec<ServerConfigRow>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .columns([
-                ServerConfig::Key,
-                ServerConfig::Value,
-                ServerConfig::UpdatedAt,
-            ])
-            .from(ServerConfig::Table)
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let rows = db_fetch_all!(pool, sqlx::query_as::<_, ServerConfigRow>(&sql))?;
-
-    Ok(rows)
-}
-
 /// Set a config value.
 pub async fn set_config(pool: &Pool, key: &str, value: &str) -> Result<()> {
     let db_type = pool.db_type();
@@ -90,24 +68,6 @@ pub async fn set_config(pool: &Pool, key: &str, value: &str) -> Result<()> {
                     .update_columns([ServerConfig::Value, ServerConfig::UpdatedAt])
                     .to_owned(),
             )
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(())
-}
-
-/// Delete a config value.
-#[allow(dead_code)]
-pub async fn delete_config(pool: &Pool, key: &str) -> Result<()> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::delete()
-            .from_table(ServerConfig::Table)
-            .and_where(Expr::col(ServerConfig::Key).eq(key))
             .to_owned();
         query.build_sql(db_type)
     };
@@ -171,7 +131,7 @@ pub struct AuthEvent {
     pub client_os: Option<String>,
     pub client_arch: Option<String>,
     pub client_version: Option<String>,
-    pub success: i64,
+    pub success: bool,
     pub failure_reason: Option<String>,
     pub created_at: DbTimestamp,
 }
@@ -228,7 +188,7 @@ pub async fn insert_auth_event(pool: &Pool, params: &AuthEventParams) -> Result<
                 params.client_os.clone().into(),
                 params.client_arch.clone().into(),
                 params.client_version.clone().into(),
-                i64::from(params.success).into(),
+                params.success.into(),
                 params.failure_reason.clone().into(),
                 now.as_str().into(),
             ])

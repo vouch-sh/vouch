@@ -20,10 +20,10 @@ Be respectful and constructive. We're building security software — thoughtful 
 
 ### Prerequisites
 
-- **Rust** 1.75+ (install via [rustup](https://rustup.rs/))
+- **Rust** 1.93+ (install via [rustup](https://rustup.rs/))
 - **YubiKey 5 series** for testing FIDO2 flows
 - **Docker** for running the test server
-- **PostgreSQL** 15+ (or use Docker)
+- **PostgreSQL** 17+ (or use Docker)
 
 ### Clone and Build
 
@@ -121,7 +121,7 @@ The dev compose file includes a mock Vouch server:
 docker-compose -f docker-compose.dev.yml up -d
 
 # Point CLI at mock server
-export VOUCH_SERVER_URL=http://localhost:8080
+export VOUCH_SERVER_URL=http://localhost:3080
 
 # Now vouch commands hit the mock server
 cargo run --bin vouch -- register

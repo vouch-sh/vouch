@@ -95,7 +95,7 @@ pub async fn device_code(
         )
     })?;
 
-    let interval_seconds = i64::try_from(state.config().device_poll_interval_seconds).unwrap_or(5);
+    let interval_seconds = i32::try_from(state.config().device_poll_interval_seconds).unwrap_or(5);
 
     // Store in database
     db::create_device_auth_request(

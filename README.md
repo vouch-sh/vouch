@@ -146,20 +146,7 @@ Vouch consists of:
 | `vouch-agent` | Background daemon, session management | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
 | Vouch Server | OIDC provider, certificate authority | [BSL 1.1](crates/vouch-server/LICENSE) (converts to Apache-2.0) |
 
-The CLI is fully open source for security auditing. The server source is available under the Business Source License 1.1, which converts to Apache-2.0 after two years. The server is available as:
-- **Vouch Cloud** — Managed SaaS
-- **Vouch Enterprise** — Self-hosted, including air-gapped deployments
-
-## Enterprise Features
-
-Available in Vouch Enterprise:
-
-- **Air-gapped deployment** — Fully offline operation with on-premises CA
-- **SCIM provisioning** — Sync users from Okta, Azure AD, Google Workspace
-- **Audit logging** — Export to Splunk, Datadog, or your SIEM
-- **Custom CA integration** — Use your existing PKI
-- **SOC 2 Type II** — Compliance documentation available
-- **Priority support** — SLA-backed response times
+The CLI is fully open source for security auditing. The server source is available under the Business Source License 1.1, which converts to Apache-2.0 after two years.
 
 ## Security
 
@@ -179,7 +166,6 @@ See [SECURITY.md](docs/SECURITY.md) for our threat model and responsible disclos
 - [Security Model](docs/SECURITY.md) — Threat model and controls
 - [Air-Gap Deployment](docs/AIRGAP.md) — On-premises installation guide
 - [Agent Delegation](docs/DELEGATION.md) — AI assistant credential management
-- [Roadmap](docs/ROADMAP.md) — Development milestones
 
 ## Contributing
 

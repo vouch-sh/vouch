@@ -25,7 +25,7 @@ This document provides a comprehensive threat model for Vouch, following the [AW
 
 ### Overview
 
-Vouch is a hardware-backed authentication system that issues short-lived credentials after FIDO2 verification with a YubiKey. The core security principle is: **no credential issuance without human presence proof**.
+Vouch is a hardware-backed authentication system that issues short-lived credentials after FIDO2 verification with a hardware authenticator. The core security principle is: **no credential issuance without human presence proof**.
 
 ### Scope
 
@@ -37,7 +37,7 @@ This threat model covers:
 - **Integration Points** — SSH, AWS, GCP, Kubernetes, and GitHub credential flows
 
 Out of scope:
-- Physical security of YubiKey devices (covered by Yubico's security model)
+- Physical security of hardware authenticator devices (covered by vendor security models)
 - Network infrastructure (firewalls, load balancers)
 - Operating system security on user workstations
 - External identity providers (Google Workspace, Microsoft Entra ID)
@@ -83,7 +83,7 @@ Out of scope:
 │  │  └─────────────┘  └─────────────┘  └─────────────┘  └─────────────┘     │   │
 │  │                                                                          │   │
 │  │  ┌─────────────────────────────────────────────────────────────────┐    │   │
-│  │  │                    Database (SQLite/PostgreSQL)                  │    │   │
+│  │  │              Database (SQLite/PostgreSQL/Aurora DSQL)            │    │   │
 │  │  │  • Users  • Authenticators  • Sessions  • Audit Logs            │    │   │
 │  │  └─────────────────────────────────────────────────────────────────┘    │   │
 │  └─────────────────────────────────────────────────────────────────────────┘   │
@@ -125,7 +125,7 @@ Out of scope:
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                         TRUST BOUNDARY: Hardware                                │
 │  ┌─────────────────────────────────────────────────────────────────────────┐   │
-│  │                         YubiKey 5 Series                                 │   │
+│  │                    Hardware FIDO2 Authenticator                           │   │
 │  │                                                                          │   │
 │  │  • Private keys (non-exportable)     • PIN verification (on-device)     │   │
 │  │  • Discoverable credentials          • Touch sensor (presence proof)     │   │
@@ -144,7 +144,7 @@ Out of scope:
 | **Server ↔ Database** | Application to data store | Parameterized queries, encryption at rest |
 | **Server ↔ Workstation** | Server to user machine | TLS 1.3, JWT validation |
 | **CLI ↔ Agent** | User commands to daemon | Unix socket permissions (0700) |
-| **Agent ↔ YubiKey** | Software to hardware | CTAP2 protocol, PIN verification |
+| **Agent ↔ Hardware Authenticator** | Software to hardware | CTAP2 protocol, PIN verification |
 | **Workstation ↔ External Services** | Local machine to AWS/GCP/GitHub | TLS 1.3, short-lived tokens |
 
 ---
@@ -155,7 +155,7 @@ Out of scope:
 
 | Asset | Description | CIA Priority |
 |-------|-------------|--------------|
-| **YubiKey Private Keys** | Non-exportable FIDO2 keys | C > I > A |
+| **Authenticator Private Keys** | Non-exportable FIDO2 keys | C > I > A |
 | **Session Tokens (JWT)** | 8-hour authentication tokens | C > I > A |
 | **SSH CA Private Key** | Ed25519 key for signing certificates | C > I > A |
 | **User Credentials** | Temporary AWS/GCP/GitHub tokens | C > I > A |
@@ -208,11 +208,11 @@ Out of scope:
 
 ### A-01: Hardware Authenticator Integrity
 
-**Statement**: YubiKey 5 series devices correctly implement FIDO2/CTAP2 and protect private keys from extraction.
+**Statement**: Hardware FIDO2 authenticators correctly implement FIDO2/CTAP2 and protect private keys from extraction.
 
-**Rationale**: Yubico has undergone independent security audits. The secure element prevents key extraction even with physical access.
+**Rationale**: Leading hardware authenticator vendors (Yubico, etc.) have undergone independent security audits. Secure elements prevent key extraction even with physical access.
 
-**If violated**: Attackers could clone YubiKey credentials, defeating hardware-bound authentication.
+**If violated**: Attackers could clone authenticator credentials, defeating hardware-bound authentication.
 
 ### A-02: TLS Implementation Correctness
 
@@ -224,11 +224,11 @@ Out of scope:
 
 ### A-03: Cryptographic Primitive Security
 
-**Statement**: Ed25519, AES-GCM, and Argon2id provide their claimed security properties.
+**Statement**: Ed25519 and SHA-256 provide their claimed security properties; TLS ciphers (AES-GCM, ChaCha20-Poly1305) are handled by rustls.
 
 **Rationale**: These are widely reviewed, standardized algorithms implemented by aws-lc-rs (FIPS-validated).
 
-**If violated**: Signature forgery, token decryption, or password hash reversal could occur.
+**If violated**: Signature forgery, token hash reversal, or TLS decryption could occur.
 
 ### A-04: Operating System Isolation
 
@@ -240,11 +240,11 @@ Out of scope:
 
 ### A-05: User PIN Confidentiality
 
-**Statement**: Users protect their YubiKey PIN and do not share it.
+**Statement**: Users protect their hardware authenticator PIN and do not share it.
 
 **Rationale**: PIN is verified on-device and never transmitted to servers.
 
-**If violated**: PIN + physical YubiKey access enables impersonation.
+**If violated**: PIN + physical authenticator access enables impersonation.
 
 ### A-06: Server Infrastructure Security
 
@@ -295,7 +295,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 |----|------------|--------|
 | M-01 | No passwords in authentication flow | Implemented |
 | M-02 | Rate limiting on authentication endpoints | Planned |
-| M-03 | Account lockout after failed PIN attempts (YubiKey enforced) | Implemented |
+| M-03 | Account lockout after failed PIN attempts (hardware authenticator enforced) | Implemented |
 
 ---
 
@@ -328,13 +328,13 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 | ID | Mitigation | Status |
 |----|------------|--------|
 | M-07 | No push notifications in authentication flow | Implemented |
-| M-08 | Physical touch required on YubiKey | Implemented |
+| M-08 | Physical touch required on hardware authenticator | Implemented |
 
 ---
 
 #### T-04: PIN Brute Force
 
-**Threat Statement**: A **sophisticated attacker** with **physical access to a stolen YubiKey** can **attempt to brute force the PIN** which leads to **YubiKey lockout after 8 attempts**, negatively impacting **authenticator availability (device unusable)**.
+**Threat Statement**: A **sophisticated attacker** with **physical access to a stolen hardware authenticator** can **attempt to brute force the PIN** which leads to **authenticator lockout after 8 attempts**, negatively impacting **authenticator availability (device unusable)**.
 
 **Likelihood**: Low
 **Impact**: Medium (locked device)
@@ -343,15 +343,15 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-09 | YubiKey enforces 8-attempt lockout | Hardware |
+| M-09 | Hardware authenticator enforces 8-attempt lockout | Hardware |
 | M-10 | Minimum 8-character PIN requirement | Implemented |
 | M-11 | PIN never transmitted to server | Implemented |
 
 ---
 
-#### T-05: Stolen YubiKey with Known PIN
+#### T-05: Stolen Authenticator with Known PIN
 
-**Threat Statement**: A **sophisticated attacker** with **physical possession of a YubiKey AND knowledge of the PIN** can **authenticate as the legitimate user** which leads to **unauthorized session creation and credential issuance**, negatively impacting **confidentiality of protected resources**.
+**Threat Statement**: A **sophisticated attacker** with **physical possession of a hardware authenticator AND knowledge of the PIN** can **authenticate as the legitimate user** which leads to **unauthorized session creation and credential issuance**, negatively impacting **confidentiality of protected resources**.
 
 **Likelihood**: Low
 **Impact**: High
@@ -364,7 +364,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 | M-13 | Self-service key revocation via `vouch keys remove` | Implemented |
 | M-14 | Audit logging of all authentications | Implemented |
 | M-15 | SCIM de-provisioning for immediate access revocation | Implemented |
-| M-16 | Recommend biometric YubiKey (Bio series) for high-security | Documentation |
+| M-16 | Recommend biometric authenticator (e.g., YubiKey Bio series) for high-security | Documentation |
 
 ---
 
@@ -456,8 +456,8 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-34 | All database queries use parameterized statements | Implemented |
-| M-35 | SQLx compile-time query validation | Implemented |
+| M-34 | All database queries use parameterized statements (sea_query builders) | Implemented |
+| M-35 | SQLx runtime query execution with sea_query AST builders (no string concatenation) | Implemented |
 | M-36 | Input validation on all API endpoints | Implemented |
 
 ---
@@ -473,7 +473,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-37 | SCIM tokens hashed with Argon2id (not stored plaintext) | Implemented |
+| M-37 | SCIM tokens hashed with SHA-256 (not stored plaintext) | Implemented |
 | M-38 | Separate SCIM token per IdP integration | Implemented |
 | M-39 | SCIM operations logged with source IdP info | Implemented |
 | M-40 | Optional IP allowlist for SCIM endpoints | Implemented |
@@ -654,7 +654,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 |----|------------|--------|
 | M-73 | Device code alone cannot complete enrollment | Implemented |
 | M-74 | OIDC authentication required in browser | Implemented |
-| M-75 | WebAuthn registration required with physical YubiKey | Implemented |
+| M-75 | WebAuthn registration required with physical hardware authenticator | Implemented |
 
 ---
 
@@ -662,7 +662,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 #### T-20: Unauthorized Key Registration
 
-**Threat Statement**: A **sophisticated attacker** with **no existing authentication** can **register a malicious YubiKey to a user account** which leads to **no success due to session requirement**, negatively impacting **nothing (attack fails)**.
+**Threat Statement**: A **sophisticated attacker** with **no existing authentication** can **register a malicious hardware authenticator to a user account** which leads to **no success due to session requirement**, negatively impacting **nothing (attack fails)**.
 
 **Likelihood**: Medium (attempt)
 **Impact**: None
@@ -710,7 +710,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 |----|------------|--------|
 | M-83 | `authenticatorAttachment: cross-platform` enforced | Implemented |
 | M-84 | AAGUID map for device identification (display only) | Implemented |
-| M-85 | Attestation format validation (reject TPM, AndroidKey, Apple) | Implemented |
+| M-85 | Attestation format validation (reject `none`, TPM, AndroidKey, Apple; accept only `packed`, `fido-u2f`) | Implemented |
 | M-86 | User verification (PIN) required for all authenticators | Implemented |
 
 ---
@@ -728,7 +728,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-87 | Rate limiting on all endpoints | Implemented |
+| M-87 | Rate limiting on authentication endpoints (`slow_down` for device polling; per-IP limits planned) | Partial |
 | M-88 | DDoS protection via infrastructure (cloud provider) | Deployment |
 | M-89 | Self-hosted option for critical environments | Implemented |
 
@@ -740,9 +740,10 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 | Status | Count | Mitigations |
 |--------|-------|-------------|
-| **Implemented** | 79 | M-01 through M-89 (most), M-41a, M-41g |
+| **Implemented** | 78 | M-01 through M-89 (most), M-41a, M-41g |
+| **Partial** | 1 | M-87 (slow_down implemented; per-IP rate limits planned) |
 | **Planned** | 10 | M-02, M-30, M-32, M-33, M-48a, M-52, M-64, M-70, M-71, M-80 |
-| **Hardware** | 2 | M-09, M-10 (YubiKey enforced) |
+| **Hardware** | 2 | M-09, M-10 (authenticator enforced) |
 | **Deployment** | 1 | M-88 (infrastructure dependent) |
 | **Documentation** | 6 | M-16, M-41b, M-41c, M-41d, M-41e, M-41f (user guidance) |
 
@@ -767,12 +768,12 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 Despite comprehensive mitigations, the following residual risks remain:
 
-### RR-01: Physical YubiKey Theft with PIN Knowledge
+### RR-01: Physical Authenticator Theft with PIN Knowledge
 
-**Risk**: If an attacker obtains both physical possession of a YubiKey and knowledge of the PIN, they can authenticate as the user.
+**Risk**: If an attacker obtains both physical possession of a hardware authenticator and knowledge of the PIN, they can authenticate as the user.
 
 **Residual Impact**: Medium
-**Acceptance Rationale**: This requires two independent factors to be compromised. The 8-hour session limit bounds the impact. Biometric YubiKeys (Bio series) can eliminate the PIN knowledge factor.
+**Acceptance Rationale**: This requires two independent factors to be compromised. The 8-hour session limit bounds the impact. Biometric authenticators (e.g., YubiKey Bio series) can eliminate the PIN knowledge factor.
 
 **Monitoring**: Audit logs track all authentication events. Anomaly detection can flag unusual access patterns.
 
@@ -828,7 +829,6 @@ Despite comprehensive mitigations, the following residual risks remain:
 
 - [Vouch Security Model](SECURITY.md)
 - [Vouch Architecture](ARCHITECTURE.md)
-- [Vouch Roadmap](ROADMAP.md)
 
 ---
 

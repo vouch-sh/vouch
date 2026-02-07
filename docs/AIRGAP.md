@@ -1,6 +1,6 @@
 # Air-Gapped Deployment Guide
 
-> **Status: Planned** — This document describes the planned air-gapped deployment architecture for Vouch Enterprise. The features described here are under development (see [ROADMAP.md](ROADMAP.md), v0.8). The core components (SSH CA, FIDO2 authentication) exist today, but the packaging, automation scripts, and air-gap-specific commands are not yet implemented.
+> **Status: Planned** — This document describes the air-gapped deployment architecture for Vouch. Server and CLI packages are available from [packages.vouch.sh](https://packages.vouch.sh), and the core components (SSH CA, FIDO2 authentication) exist today. However, air-gap-specific CLI commands (e.g., `vouch enroll --airgap`) and automation scripts are not yet implemented (see [ROADMAP.md](ROADMAP.md), v0.8).
 
 This guide covers deploying Vouch in environments with no internet connectivity, such as defense contractors, government agencies, financial services, and critical infrastructure.
 
@@ -65,7 +65,7 @@ Vouch's built-in SSH CA and local-first architecture make it well-suited for the
 +---------------------------------------------------------------------------+
 |                          CONNECTED ENVIRONMENT                             |
 |                                                                            |
-|  * Signed software bundles                                                 |
+|  * Signed software packages (from packages.vouch.sh)                      |
 |  * CA certificate updates                                                  |
 |  * (Optional) Audit log export                                             |
 +---------------------------------------------------------------------------+
@@ -80,75 +80,96 @@ Vouch's built-in SSH CA and local-first architecture make it well-suited for the
 - USB drives for sneakernet transfers
 
 ### Software (Pre-downloaded)
-- Vouch Server container images
-- vouch CLI binaries (all platforms)
-- CA initialization scripts
+- Vouch Server packages (RPM/DEB from [packages.vouch.sh](https://packages.vouch.sh))
+- vouch CLI packages (RPM/DEB from [packages.vouch.sh](https://packages.vouch.sh))
+- Container images and/or Helm charts (for Kubernetes deployments)
 
 ## Installation
 
-### Step 1: Prepare Offline Bundle
+### Step 1: Download Packages for Offline Transfer
 
-On a connected machine, download all required components:
+On a connected machine, download the required packages from `packages.vouch.sh`:
 
 ```bash
-# Download Vouch release bundle
-curl -LO https://releases.vouch.sh/enterprise/vouch-enterprise-1.0.0-airgap.tar.gz
-curl -LO https://releases.vouch.sh/enterprise/vouch-enterprise-1.0.0-airgap.tar.gz.sig
+# Import Vouch GPG signing key
+curl -fsSL https://packages.vouch.sh/gpg/vouch.asc | gpg --import
 
-# Verify signature
-gpg --verify vouch-enterprise-1.0.0-airgap.tar.gz.sig
+# Download server RPM
+curl -LO https://packages.vouch.sh/rpm/x86_64/vouch-server-1.0.0-1.x86_64.rpm
 
-# Extract
-tar xzf vouch-enterprise-1.0.0-airgap.tar.gz
+# Download CLI RPM (for each workstation architecture)
+curl -LO https://packages.vouch.sh/rpm/x86_64/vouch-1.0.0-1.x86_64.rpm
+curl -LO https://packages.vouch.sh/rpm/aarch64/vouch-1.0.0-1.aarch64.rpm
+
+# For Debian/Ubuntu workstations
+curl -LO https://packages.vouch.sh/apt/vouch_1.0.0_amd64.deb
+curl -LO https://packages.vouch.sh/apt/vouch_1.0.0_arm64.deb
 ```
 
-Bundle contents:
-```
-vouch-enterprise-1.0.0-airgap/
-├── images/
-│   └── vouch-server-1.0.0.tar       # Docker image (includes built-in CA + SQLite)
-├── cli/
-│   ├── vouch-1.0.0-darwin-arm64.tar.gz
-│   ├── vouch-1.0.0-darwin-amd64.tar.gz
-│   ├── vouch-1.0.0-linux-amd64.tar.gz
-│   └── vouch-1.0.0-windows-amd64.zip
-├── scripts/
-│   ├── init-ca.sh
-│   ├── verify-bundle.sh
-│   └── generate-config.sh
-├── config/
-│   ├── docker-compose.yml
-│   └── vouch-server.toml.template
-├── SHA256SUMS
-├── SHA256SUMS.sig
-└── INSTALL.md
+For container-based or Kubernetes deployments, also download:
+
+```bash
+# Pull and save container image
+docker pull ghcr.io/vouch-sh/vouch:1.0.0
+docker save ghcr.io/vouch-sh/vouch:1.0.0 -o vouch-server-1.0.0.tar
+
+# Download Helm chart (for Kubernetes)
+helm pull oci://ghcr.io/vouch-sh/charts/vouch-server --version 0.1.0
 ```
 
-Transfer to air-gapped environment via approved media.
+Generate checksums for verification after transfer:
 
-### Step 2: Verify Bundle Integrity
+```bash
+sha256sum vouch-server-*.rpm vouch-*.rpm vouch-*.deb vouch-server-*.tar > SHA256SUMS
+gpg --detach-sign SHA256SUMS
+```
+
+Transfer all files to the air-gapped environment via approved media.
+
+### Step 2: Verify Package Integrity
 
 On the air-gapped network:
 
 ```bash
-# Import Vouch release signing key (transferred separately, verified out-of-band)
+# Import Vouch GPG signing key (transferred separately, verified out-of-band)
 gpg --import vouch-release-key.pub
 
-# Verify signatures
+# Verify checksums
 gpg --verify SHA256SUMS.sig SHA256SUMS
 sha256sum -c SHA256SUMS
 
-echo "Bundle verified"
+# Verify RPM signatures
+rpm -K vouch-server-1.0.0-1.x86_64.rpm
+rpm -K vouch-1.0.0-1.x86_64.rpm
 ```
 
-### Step 3: Load Container Images
+### Step 3: Install Packages
+
+**RPM-based installation (recommended for bare metal/VM):**
 
 ```bash
-# Load images into local Docker registry
-docker load < images/vouch-server-1.0.0.tar
+# Install server
+rpm -ivh vouch-server-1.0.0-1.x86_64.rpm
 
-# Verify images loaded
-docker images | grep vouch-server
+# Install CLI on workstations
+rpm -ivh vouch-1.0.0-1.x86_64.rpm
+```
+
+**DEB-based installation:**
+
+```bash
+# Install CLI on Debian/Ubuntu workstations
+dpkg -i vouch_1.0.0_amd64.deb
+```
+
+**Container-based installation:**
+
+```bash
+# Load container image into local Docker registry
+docker load < vouch-server-1.0.0.tar
+
+# Verify image loaded
+docker images | grep vouch
 ```
 
 ### Step 4: Secure Key Generation
@@ -296,51 +317,12 @@ mkdir -p /data
 chmod 700 /data
 ```
 
-For high-availability deployments, PostgreSQL is supported:
+For high-availability deployments, a local PostgreSQL instance is supported:
 
 ```bash
-# PostgreSQL (multi-node)
+# PostgreSQL (multi-node, must be reachable on the internal network)
 export VOUCH_DATABASE_URL="postgres://user:password@db.internal:5432/vouch"
 ```
-
-### Aurora DSQL Multi-Region Configuration
-
-For multi-region or multi-AZ Aurora DSQL deployments, use `dsql_endpoints` in the S3 configuration to map locations to connection strings.
-
-**AZ-specific routing** (recommended for lowest latency):
-
-```json
-{
-  "dsql_endpoints": {
-    "us-east-1a": "postgres://vouch@abc123.dsql.us-east-1.on.aws/postgres",
-    "us-east-1b": "postgres://vouch@abc123.dsql.us-east-1.on.aws/postgres",
-    "us-west-2a": "postgres://vouch@xyz789.dsql.us-west-2.on.aws/postgres",
-    "us-west-2b": "postgres://vouch@xyz789.dsql.us-west-2.on.aws/postgres"
-  }
-}
-```
-
-**Region-based routing** (simpler configuration):
-
-```json
-{
-  "dsql_endpoints": {
-    "us-east-1": "postgres://vouch@abc123.dsql.us-east-1.on.aws/postgres",
-    "us-west-2": "postgres://vouch@xyz789.dsql.us-west-2.on.aws/postgres"
-  }
-}
-```
-
-**Lookup priority:**
-1. `AWS_AZ` (e.g., `us-east-1a`) - for AZ-specific endpoint routing
-2. `AWS_REGION` / `AWS_DEFAULT_REGION` (e.g., `us-east-1`) - fallback for regional endpoints
-
-On EC2, both `AWS_AZ` and `AWS_REGION` are automatically set by `vouch-fetch-config.sh` from instance metadata.
-
-**Requirements:**
-- `AWS_AZ` or `AWS_REGION` environment variable must be set (automatic on EC2 via vouch-fetch-config.sh)
-- IAM role must have `dsql:DbConnect` permission for the database user
-- `dsql_endpoints` takes priority over `database_url` when both are present
 
 **Database migrations run automatically on server startup.**
 
@@ -494,13 +476,34 @@ chmod 600 /etc/vouch/vouch.env
 
 ### Step 7: Deploy Services
 
-Create a docker-compose file for deployment:
+There are several options for deploying the Vouch server.
+
+#### Option A: Systemd Service (RPM Install)
+
+If you installed via RPM, the `vouch-server` systemd service is configured automatically:
+
+```bash
+# Configure environment
+cp /etc/vouch/vouch.env /etc/vouch/vouch.env.local
+# Edit /etc/vouch/vouch.env.local with your settings
+
+# Start and enable the service
+systemctl enable --now vouch-server
+
+# Check status
+systemctl status vouch-server
+
+# View logs
+journalctl -u vouch-server -f
+```
+
+#### Option B: Docker Compose
 
 ```yaml
 # docker-compose.yml
 services:
   vouch-server:
-    image: vouch-server:1.0.0
+    image: ghcr.io/vouch-sh/vouch:1.0.0
     container_name: vouch-server
     restart: unless-stopped
     ports:
@@ -523,8 +526,6 @@ volumes:
   vouch-data:
 ```
 
-Deploy and verify:
-
 ```bash
 # Start services
 docker-compose up -d
@@ -534,7 +535,29 @@ docker-compose ps
 
 # Check logs for startup errors
 docker-compose logs -f vouch-server
+```
 
+#### Option C: Helm Chart (Kubernetes)
+
+A Helm chart is available for Kubernetes deployments. After transferring the chart archive to the air-gapped environment:
+
+```bash
+# Install from the downloaded chart archive
+helm install vouch-server vouch-server-0.1.0.tgz \
+  --namespace vouch \
+  --create-namespace \
+  --set image.repository=vouch-server \
+  --set image.tag=1.0.0 \
+  --values my-values.yaml
+```
+
+See the chart's `values.yaml` for all configurable options including secrets, ingress, and persistent storage.
+
+#### Verify Deployment
+
+Regardless of deployment method:
+
+```bash
 # Verify health endpoint
 curl -k https://auth.internal/health
 # Expected: {"status":"healthy"}
@@ -549,10 +572,7 @@ curl -k https://auth.internal/.well-known/ssh-ca.pub
 The SSH CA public key must be trusted by all SSH servers in the air-gapped environment:
 
 ```bash
-# Export CA public key from running container
-docker exec vouch-server cat /etc/vouch/ssh-ca.pub > vouch-ca.pub
-
-# Or fetch via API
+# Fetch CA public key via API
 curl -k https://auth.internal/.well-known/ssh-ca.pub > vouch-ca.pub
 
 # Copy to all SSH servers
@@ -598,54 +618,35 @@ export VOUCH_CA_CERT=/etc/vouch/root-ca.crt
 
 ### Step 10: Enroll Users
 
-> **Note:** Air-gap-specific enrollment commands (`vouch enroll --airgap`, `vouch admin user create`) are planned but not yet implemented. Currently, enrollment requires browser access to the Vouch server's web UI.
+Users enroll via the Vouch server's web interface at `https://auth.internal`. Each user navigates to the enrollment page in a browser on the internal network, authenticates via the configured identity provider (or direct registration if no external IdP is configured), and registers their YubiKey through the browser's WebAuthn prompt.
 
-In air-gapped mode, enrollment will be done locally:
-
-```bash
-# Admin creates user account (planned)
-vouch admin user create --email user@internal --name "User Name"
-
-# User enrolls their YubiKey (planned CLI-only air-gap mode)
-vouch enroll --airgap
-# Touch your YubiKey...
-# Enter PIN: ****
-# Enrolled as user@internal
-```
-
-For current deployments, users enroll via the Vouch server's web interface at `https://auth.internal`.
+> **Note:** Air-gap-specific CLI enrollment commands (e.g., `vouch enroll --airgap`) are planned but not yet implemented. Currently, enrollment requires browser access to the Vouch server's web UI.
 
 ## YubiKey Provisioning
 
-> **Note:** The provisioning commands below (`--export-pubkey`, `admin credential import`, `--airgap`) are planned but not yet implemented.
+In an air-gapped environment, YubiKey provisioning is done entirely on the internal network through the Vouch server's web UI.
 
-### Option A: Pre-Provisioned Keys (Recommended)
+### Provisioning Workflow
 
-Keys provisioned in connected environment, public keys transferred:
+1. **Administrator** creates a user account via the Vouch server web interface
+2. **User** navigates to `https://auth.internal` on their workstation browser
+3. **User** inserts their YubiKey and completes the WebAuthn registration flow
+4. **User** sets a PIN on their YubiKey if one is not already configured (minimum 8 characters)
+5. The credential is registered and the user can begin authenticating
 
-1. **Connected environment:**
-```bash
-# Generate resident credential on YubiKey (planned)
-vouch enroll --export-pubkey > user-pubkey.json
-```
+### YubiKey Requirements
 
-2. **Transfer pubkey via sneakernet**
+- YubiKey 5 series with firmware 5.2+
+- FIDO2/WebAuthn support enabled
+- PIN configured (minimum 8 characters)
 
-3. **Air-gapped environment:**
-```bash
-# Admin imports public key (planned)
-vouch admin credential import --user user@internal < user-pubkey.json
-```
+### Spare Key Strategy
 
-### Option B: Fully Air-Gapped Provisioning
+Each user should register at least two YubiKeys (primary and backup). If a YubiKey is lost or damaged:
 
-```bash
-# User inserts YubiKey (planned)
-# Registration happens entirely on internal network
-vouch enroll --airgap
-
-# Creates credential locally, sends public key to internal server
-```
+1. User reports lost key to administrator
+2. Administrator revokes the lost key's credential via the web UI
+3. User registers their backup YubiKey
 
 ## Time Synchronization
 
@@ -688,44 +689,67 @@ allowed_skew_seconds = 600  # 10 minutes
 
 ### Update Procedure
 
-1. **Download update bundle** (connected environment)
+1. **Download updated packages** (connected environment)
 ```bash
-curl -LO https://releases.vouch.sh/enterprise/vouch-enterprise-1.1.0-airgap.tar.gz
-curl -LO https://releases.vouch.sh/enterprise/vouch-enterprise-1.1.0-airgap.tar.gz.sig
+# Download latest packages from packages.vouch.sh
+curl -LO https://packages.vouch.sh/rpm/x86_64/vouch-server-1.1.0-1.x86_64.rpm
+curl -LO https://packages.vouch.sh/rpm/x86_64/vouch-1.1.0-1.x86_64.rpm
+
+# For container deployments
+docker pull ghcr.io/vouch-sh/vouch:1.1.0
+docker save ghcr.io/vouch-sh/vouch:1.1.0 -o vouch-server-1.1.0.tar
 ```
 
 2. **Verify signatures** (connected environment)
 ```bash
-gpg --verify vouch-enterprise-1.1.0-airgap.tar.gz.sig
+rpm -K vouch-server-1.1.0-1.x86_64.rpm
+rpm -K vouch-1.1.0-1.x86_64.rpm
 ```
 
 3. **Transfer via approved media** (sneakernet)
 
 4. **Verify again** (air-gapped environment)
 ```bash
-gpg --verify vouch-enterprise-1.1.0-airgap.tar.gz.sig
+rpm -K vouch-server-1.1.0-1.x86_64.rpm
 sha256sum -c SHA256SUMS
 ```
 
 5. **Apply update**
-```bash
-./scripts/upgrade.sh
 
-# This will:
-# - Stop services
-# - Backup database
-# - Load new images
-# - Run migrations
-# - Start services
-# - Verify health
+For RPM installations:
+```bash
+# Backup database before upgrade
+cp /data/vouch.db /data/vouch.db.backup.$(date +%Y%m%d)
+
+# Upgrade package (migrations run automatically on next startup)
+rpm -Uvh vouch-server-1.1.0-1.x86_64.rpm
+
+# Restart service
+systemctl restart vouch-server
+
+# Verify health
+curl -k https://auth.internal/health
+```
+
+For container deployments:
+```bash
+docker load < vouch-server-1.1.0.tar
+# Update docker-compose.yml image tag, then:
+docker-compose up -d
 ```
 
 ### Rollback
 
+For RPM installations:
 ```bash
-./scripts/rollback.sh
+# Restore database backup
+cp /data/vouch.db.backup.YYYYMMDD /data/vouch.db
 
-# Restores previous version from backup
+# Downgrade package
+rpm -Uvh --oldpackage vouch-server-1.0.0-1.x86_64.rpm
+
+# Restart service
+systemctl restart vouch-server
 ```
 
 ## Audit Log Export
@@ -760,10 +784,10 @@ syslog_protocol = "udp"
 DATE=$(date +%Y%m%d)
 OUTPUT_DIR=/mnt/export
 
-# Export audit logs
-vouch admin audit export \
-  --since "7 days ago" \
-  --format json \
+# Export audit logs from SQLite directly
+sqlite3 /data/vouch.db \
+  ".mode json" \
+  "SELECT * FROM auth_events WHERE created_at >= datetime('now', '-7 days');" \
   > $OUTPUT_DIR/audit-$DATE.json
 
 # Encrypt for transport
@@ -794,24 +818,28 @@ Transfer encrypted exports via approved media to connected compliance systems.
 
 ### Recovery Procedure
 
-1. **Restore from backup**
+1. **Stop the service**
 ```bash
-./scripts/restore.sh --backup-date 2024-01-14
+systemctl stop vouch-server
 ```
 
-2. **Verify CA integrity**
+2. **Restore database from backup**
 ```bash
-./scripts/verify-ca.sh
+cp /data/vouch.db.backup.YYYYMMDD /data/vouch.db
+chown vouch:vouch /data/vouch.db
 ```
 
 3. **Re-sync time**
 ```bash
-./scripts/sync-time.sh
+# Verify NTP synchronization
+timedatectl status
+chronyc tracking  # or ntpq -p
 ```
 
-4. **Validate all services**
+4. **Start and validate**
 ```bash
-./scripts/health-check.sh
+systemctl start vouch-server
+curl -k https://auth.internal/health
 ```
 
 ### CA Key Recovery
@@ -882,7 +910,10 @@ ping auth.internal
 # Verify TLS
 openssl s_client -connect auth.internal:443 -CAfile /etc/vouch/root-ca.crt
 
-# Check server logs
+# Check server logs (systemd)
+journalctl -u vouch-server --since "1 hour ago"
+
+# Check server logs (Docker)
 docker-compose logs vouch-server
 ```
 
