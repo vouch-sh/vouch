@@ -54,6 +54,8 @@ pub struct IntegrationsTemplate {
     pub gcp_configured: bool,
     /// GCP configuration details (for display).
     pub gcp_config: Option<GcpIntegrationConfig>,
+    /// Whether the SSH CA is configured on the server.
+    pub ssh_ca_configured: bool,
 }
 
 impl_template_response!(IntegrationsTemplate);
@@ -102,6 +104,9 @@ pub async fn integrations_page(State(state): State<Arc<AppState>>, jar: CookieJa
     // Check if GitHub App is configured on the server
     let github_configured = state.github_app.is_some();
 
+    // Check if SSH CA is configured on the server
+    let ssh_ca_configured = state.ssh_ca.is_some();
+
     // Get connected GitHub accounts and GCP config status if user has an org
     let (github_accounts, gcp_configured, gcp_config) = if auth.has_org {
         // We need to get the user's org_id to fetch installations
@@ -142,6 +147,7 @@ pub async fn integrations_page(State(state): State<Arc<AppState>>, jar: CookieJa
         github_accounts,
         gcp_configured,
         gcp_config,
+        ssh_ca_configured,
     }
     .into_response()
 }
