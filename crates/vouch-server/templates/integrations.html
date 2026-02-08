@@ -168,10 +168,10 @@
             </div>
 
             {# SSH Integration (Per-user) #}
-            <div class="card{% if !ssh_ca_configured %} opacity-50{% endif %}"{% if !ssh_ca_configured %} style="order:99"{% endif %}>
+            <div class="card{% if ssh_ca_public_key.is_none() %} opacity-50{% endif %}"{% if ssh_ca_public_key.is_none() %} style="order:99"{% endif %}>
                 <div class="flex items-center gap-2 mb-1">
                     {# SSH/Terminal logo #}
-                    <svg class="w-6 h-6 {% if ssh_ca_configured %}text-green-400{% else %}text-gray-600{% endif %} flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                    <svg class="w-6 h-6 {% if ssh_ca_public_key.is_some() %}text-green-400{% else %}text-gray-600{% endif %} flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M6.75 7.5l3 2.25-3 2.25m4.5 0h3m-9 8.25h13.5A2.25 2.25 0 0021 18V6a2.25 2.25 0 00-2.25-2.25H5.25A2.25 2.25 0 003 6v12a2.25 2.25 0 002.25 2.25z" />
                     </svg>
                     <h2 class="text-lg font-semibold text-gray-200">SSH Certificates</h2>
@@ -179,28 +179,24 @@
                 </div>
                 <p class="text-gray-400 text-sm mb-4">Get short-lived SSH certificates signed by Vouch's CA.</p>
 
-                {% if !ssh_ca_configured %}
-                <div class="bg-yellow-900/20 border border-yellow-700/30 rounded-lg p-3">
-                    <p class="text-sm text-yellow-300">SSH CA not configured on this server.</p>
-                    {% if auth.is_org_admin %}
-                    <p class="text-xs text-yellow-300/60 mt-1">Set <code class="bg-yellow-900/30 px-1 rounded">VOUCH_SSH_CA_KEY</code> or <code class="bg-yellow-900/30 px-1 rounded">VOUCH_SSH_CA_KEY_PATH</code> to enable.</p>
-                    {% endif %}
-                </div>
-                {% else %}
+                {% if let Some(pub_key) = ssh_ca_public_key %}
                 <div class="bg-vouch-surface rounded-lg p-3 space-y-2">
                     <div>
                         <p class="text-xs text-gray-500 mb-1">Get a certificate:</p>
                         <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs">vouch credential ssh</code>
                     </div>
-                    {% if let Some(pub_key) = ssh_ca_public_key %}
                     <div>
                         <p class="text-xs text-gray-500 mb-1">CA public key (add to <code class="bg-vouch-bg px-1 rounded">/etc/ssh/ca.pub</code> on your servers):</p>
                         <div class="relative group">
                             <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs break-all" style="user-select:all">{{ pub_key }}</code>
                         </div>
                     </div>
-                    {% else %}
-                    <p class="text-xs text-gray-500">Configure servers to trust Vouch's CA in <code class="bg-vouch-bg px-1 rounded">/etc/ssh/ca.pub</code></p>
+                </div>
+                {% else %}
+                <div class="bg-yellow-900/20 border border-yellow-700/30 rounded-lg p-3">
+                    <p class="text-sm text-yellow-300">SSH CA not configured on this server.</p>
+                    {% if auth.is_org_admin %}
+                    <p class="text-xs text-yellow-300/60 mt-1">Set <code class="bg-yellow-900/30 px-1 rounded">VOUCH_SSH_CA_KEY</code> or <code class="bg-yellow-900/30 px-1 rounded">VOUCH_SSH_CA_KEY_PATH</code> to enable.</p>
                     {% endif %}
                 </div>
                 {% endif %}
