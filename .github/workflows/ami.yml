@@ -86,6 +86,16 @@ jobs:
           tar -czf /tmp/ami-files.tar.gz -C packaging/ami .
           aws s3 cp /tmp/ami-files.tar.gz "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ steps.s3.outputs.s3_prefix }}/ami-files.tar.gz"
 
+      - name: Upload Secure Boot DB key to S3
+        env:
+          SECUREBOOT_DB_KEY: ${{ secrets.SECUREBOOT_DB_KEY }}
+        run: |
+          SB_PREFIX="${{ steps.s3.outputs.s3_prefix }}/secureboot"
+          printf '%s' "$SECUREBOOT_DB_KEY" > /tmp/DB.key
+          aws s3 cp /tmp/DB.key "s3://${{ vars.AMI_BUILD_BUCKET }}/${SB_PREFIX}/DB.key"
+          aws s3 cp packaging/ami/secureboot/DB.crt "s3://${{ vars.AMI_BUILD_BUCKET }}/${SB_PREFIX}/DB.crt"
+          shred -u /tmp/DB.key 2>/dev/null || rm -f /tmp/DB.key
+
   build-ami:
     name: Build AMI (${{ matrix.arch }})
     runs-on: ubuntu-latest
@@ -135,7 +145,8 @@ jobs:
           export S3_BUCKET="${{ vars.AMI_BUILD_BUCKET }}"
           export S3_PREFIX="${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}"
           export S3_PARENT_PREFIX="${{ needs.prepare.outputs.s3_prefix }}"
-          envsubst '$VERSION $AWS_REGION $S3_BUCKET $S3_PREFIX $S3_PARENT_PREFIX' < packaging/ami/user-data.sh.tpl > /tmp/user-data.sh
+          export SB_KEY_S3_PATH="s3://${{ vars.AMI_BUILD_BUCKET }}/${{ needs.prepare.outputs.s3_prefix }}/secureboot"
+          envsubst '$VERSION $AWS_REGION $S3_BUCKET $S3_PREFIX $S3_PARENT_PREFIX $SB_KEY_S3_PATH' < packaging/ami/user-data.sh.tpl > /tmp/user-data.sh
 
           # Launch AL2023 instance with user-data
           INSTANCE_ID=$(aws ec2 run-instances \
@@ -231,19 +242,37 @@ jobs:
           echo "Waiting for snapshot ${SNAPSHOT_ID} to be available..."
           aws ec2 wait snapshot-completed --snapshot-ids "${SNAPSHOT_ID}"
 
+          # Load UEFI variable store with Secure Boot keys
+          UEFI_DATA=""
+          UEFI_VARS_FILE="packaging/ami/secureboot/uefi-vars.b64"
+          if [ -f "$UEFI_VARS_FILE" ]; then
+            UEFI_DATA=$(cat "$UEFI_VARS_FILE")
+            echo "Loaded UEFI variable store for Secure Boot"
+          else
+            echo "WARNING: No UEFI variable store found at ${UEFI_VARS_FILE}"
+          fi
+
+          # Build register-image command
+          REGISTER_ARGS=(
+            --name "vouch-server-${VERSION}-${{ matrix.arch }}"
+            --description "Vouch Server ${VERSION} - Attestable AMI with dm-verity and Secure Boot"
+            --virtualization-type hvm
+            --boot-mode uefi
+            --architecture "${{ matrix.arch }}"
+            --root-device-name /dev/xvda
+            --block-device-mappings "DeviceName=/dev/xvda,Ebs={SnapshotId=${SNAPSHOT_ID},VolumeType=gp3,DeleteOnTermination=true}"
+            --tpm-support v2.0
+            --ena-support
+            --query 'ImageId'
+            --output text
+          )
+
+          if [ -n "$UEFI_DATA" ]; then
+            REGISTER_ARGS+=(--uefi-data "$UEFI_DATA")
+          fi
+
           # Register the AMI
-          AMI_ID=$(aws ec2 register-image \
-            --name "vouch-server-${VERSION}-${{ matrix.arch }}" \
-            --description "Vouch Server ${VERSION} - Attestable AMI with dm-verity" \
-            --virtualization-type hvm \
-            --boot-mode uefi \
-            --architecture "${{ matrix.arch }}" \
-            --root-device-name /dev/xvda \
-            --block-device-mappings "DeviceName=/dev/xvda,Ebs={SnapshotId=${SNAPSHOT_ID},VolumeType=gp3,DeleteOnTermination=true}" \
-            --tpm-support v2.0 \
-            --ena-support \
-            --query 'ImageId' \
-            --output text)
+          AMI_ID=$(aws ec2 register-image "${REGISTER_ARGS[@]}")
 
           echo "ami_id=${AMI_ID}" >> "$GITHUB_OUTPUT"
           echo "ami_id_${{ matrix.arch }}=${AMI_ID}" >> "$GITHUB_OUTPUT"
@@ -262,6 +291,45 @@ jobs:
           aws ec2 create-tags --resources "${SNAPSHOT_ID}" --tags \
             "Key=Name,Value=vouch-server-${VERSION}-${{ matrix.arch }}" \
             "Key=Version,Value=${VERSION}"
+
+      - name: Tag AMI with PCR measurements
+        run: |
+          S3_PREFIX="${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}"
+          AMI_ID="${{ steps.register.outputs.ami_id }}"
+
+          # Download PCR measurements
+          if aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/pcr_measurements.json" /tmp/pcr_measurements.json 2>/dev/null; then
+            echo "PCR measurements downloaded"
+            cat /tmp/pcr_measurements.json
+
+            # Parse PCR values and tag the AMI
+            PCR4=$(python3 -c "import json; d=json.load(open('/tmp/pcr_measurements.json')); print(d.get('PCR4', ''))")
+            PCR7=$(python3 -c "import json; d=json.load(open('/tmp/pcr_measurements.json')); print(d.get('PCR7', ''))")
+            PCR12=$(python3 -c "import json; d=json.load(open('/tmp/pcr_measurements.json')); print(d.get('PCR12', ''))")
+
+            TAG_ARGS=()
+            if [ -n "$PCR4" ]; then
+              TAG_ARGS+=("Key=PCR4,Value=${PCR4}")
+              echo "PCR4: ${PCR4}"
+            fi
+            if [ -n "$PCR7" ]; then
+              TAG_ARGS+=("Key=PCR7,Value=${PCR7}")
+              echo "PCR7: ${PCR7}"
+            fi
+            if [ -n "$PCR12" ]; then
+              TAG_ARGS+=("Key=PCR12,Value=${PCR12}")
+              echo "PCR12: ${PCR12}"
+            fi
+
+            if [ ${#TAG_ARGS[@]} -gt 0 ]; then
+              aws ec2 create-tags --resources "${AMI_ID}" --tags "${TAG_ARGS[@]}"
+              echo "PCR tags applied to AMI ${AMI_ID}"
+            else
+              echo "WARNING: No PCR values found in measurements file"
+            fi
+          else
+            echo "WARNING: Could not download PCR measurements from S3"
+          fi
 
       - name: Cleanup
         if: always()
@@ -348,6 +416,20 @@ jobs:
             "Key=Version,Value=${VERSION}" \
             "Key=Architecture,Value=${{ matrix.arch }}" \
             "Key=CopiedFrom,Value=us-east-1"
+
+          # Propagate PCR tags from source AMI
+          for PCR_TAG in PCR4 PCR7 PCR12; do
+            PCR_VALUE=$(aws ec2 describe-tags \
+              --region us-east-1 \
+              --filters "Name=resource-id,Values=${SOURCE_AMI}" "Name=key,Values=${PCR_TAG}" \
+              --query 'Tags[0].Value' \
+              --output text 2>/dev/null || echo "None")
+            if [ "$PCR_VALUE" != "None" ] && [ -n "$PCR_VALUE" ]; then
+              aws ec2 create-tags --region us-west-2 --resources "${COPIED_AMI}" --tags \
+                "Key=${PCR_TAG},Value=${PCR_VALUE}"
+              echo "Propagated ${PCR_TAG} tag to us-west-2"
+            fi
+          done
 
   update-ssm-parameters:
     name: Update SSM Parameters
@@ -451,10 +533,41 @@ jobs:
           done
 
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### PCR Measurements" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Architecture | PCR4 (Boot Binary) | PCR7 (Secure Boot Policy) | PCR12 (Kernel Cmdline) |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------------|--------------------|--------------------------|-----------------------|" >> $GITHUB_STEP_SUMMARY
+
+          for arch in x86_64 arm64; do
+            AMI_ID=$(aws ec2 describe-images \
+              --region us-east-1 \
+              --filters "Name=name,Values=vouch-server-${VERSION}-${arch}" \
+              --query 'Images[0].ImageId' \
+              --output text 2>/dev/null || echo "")
+
+            if [ -n "$AMI_ID" ] && [ "$AMI_ID" != "None" ]; then
+              PCR4="N/A"; PCR7="N/A"; PCR12="N/A"
+              for PCR_TAG in PCR4 PCR7 PCR12; do
+                PCR_VALUE=$(aws ec2 describe-tags \
+                  --region us-east-1 \
+                  --filters "Name=resource-id,Values=${AMI_ID}" "Name=key,Values=${PCR_TAG}" \
+                  --query 'Tags[0].Value' \
+                  --output text 2>/dev/null || echo "N/A")
+                if [ "$PCR_VALUE" = "None" ]; then PCR_VALUE="N/A"; fi
+                eval "${PCR_TAG}=\${PCR_VALUE}"
+              done
+              echo "| ${arch} | \`${PCR4:0:16}...\` | \`${PCR7:0:16}...\` | \`${PCR12:0:16}...\` |" >> $GITHUB_STEP_SUMMARY
+            else
+              echo "| ${arch} | N/A | N/A | N/A |" >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+
+          echo "" >> $GITHUB_STEP_SUMMARY
           echo "### Features" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- UEFI Secure Boot with custom key hierarchy" >> $GITHUB_STEP_SUMMARY
           echo "- dm-verity filesystem protection" >> $GITHUB_STEP_SUMMARY
-          echo "- TPM 2.0 attestation support" >> $GITHUB_STEP_SUMMARY
+          echo "- TPM 2.0 attestation support (PCR4, PCR7, PCR12)" >> $GITHUB_STEP_SUMMARY
           echo "- No SSH or interactive access" >> $GITHUB_STEP_SUMMARY
           echo "- Configuration via AWS Secrets Manager" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
