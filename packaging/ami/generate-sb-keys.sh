@@ -35,8 +35,7 @@
 #     DB.key, DB.crt         - Signature Database Key (DB.key is secret)
 #     PK.esl, KEK.esl, DB.esl - EFI Signature Lists
 #     PK.auth, KEK.auth, DB.auth - Signed auth variables
-#     uefi-vars.bin          - Raw UEFI variable store binary
-#     uefi-vars.b64          - Base64-encoded variable store
+#     uefi-vars.b64          - Base64-encoded UEFI variable store (AWS format)
 #
 # After running:
 #   1. Store PK.key and KEK.key in 1Password
@@ -183,10 +182,7 @@ uefivars -i none -o aws \
     -P "${OUTPUT_DIR}/PK.auth" \
     -K "${OUTPUT_DIR}/KEK.auth" \
     -b "${OUTPUT_DIR}/DB.auth" \
-    -O "${OUTPUT_DIR}/uefi-vars.bin"
-
-# Base64 encode for --uefi-data parameter
-base64 -w0 "${OUTPUT_DIR}/uefi-vars.bin" > "${OUTPUT_DIR}/uefi-vars.b64"
+    -O "${OUTPUT_DIR}/uefi-vars.b64"
 
 echo ""
 
