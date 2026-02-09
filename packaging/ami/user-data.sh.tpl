@@ -9,6 +9,7 @@ export VERSION="${VERSION}"
 export AWS_REGION="${AWS_REGION}"
 export S3_BUCKET="${S3_BUCKET}"
 export S3_PREFIX="${S3_PREFIX}"
+export SB_KEY_S3_PATH="${SB_KEY_S3_PATH}"
 
 echo "=== AMI Build Script Started ==="
 echo "Instance ID: $(ec2-metadata -i | cut -d' ' -f2)"
@@ -16,6 +17,7 @@ echo "Region: ${AWS_REGION}"
 echo "Version: ${VERSION}"
 echo "S3 Bucket: ${S3_BUCKET}"
 echo "S3 Prefix: ${S3_PREFIX}"
+echo "SB Key S3 Path: ${SB_KEY_S3_PATH:-(not set)}"
 
 # Function to upload logs and signal completion
 cleanup() {
@@ -40,7 +42,7 @@ echo "=== Installing build dependencies ==="
 dnf install -y -q \
     kiwi-cli python3-kiwi kiwi-systemdeps-core \
     python3-poetry-core qemu-img veritysetup erofs-utils \
-    aws-nitro-tpm-tools
+    aws-nitro-tpm-tools sbsigntools
 echo "Build dependencies installed"
 
 # Download and extract AMI build files
@@ -54,6 +56,19 @@ cd /tmp/ami-build
 echo "=== Updating version to ${VERSION} ==="
 sed -i "s/<version>.*<\/version>/<version>${VERSION}<\/version>/" appliance.kiwi
 
+# Download Secure Boot signing key from S3 (if configured)
+if [ -n "${SB_KEY_S3_PATH}" ]; then
+    echo "=== Downloading Secure Boot DB key ==="
+    aws s3 cp "${SB_KEY_S3_PATH}/DB.key" /tmp/ami-build/DB.key
+    aws s3 cp "${SB_KEY_S3_PATH}/DB.crt" /tmp/ami-build/DB.crt
+    chmod 600 /tmp/ami-build/DB.key
+    export DB_KEY="/tmp/ami-build/DB.key"
+    export DB_CRT="/tmp/ami-build/DB.crt"
+    echo "Secure Boot DB key downloaded"
+else
+    echo "WARNING: SB_KEY_S3_PATH not set, UKI will not be signed"
+fi
+
 # Show build configuration
 echo "=== Build configuration ==="
 ls -la /tmp/ami-build/
@@ -66,6 +81,14 @@ kiwi-ng --color-output system build \
     --target-dir /tmp/image \
     --allow-existing-root
 echo "=== kiwi-ng build completed ==="
+
+# Securely delete Secure Boot signing key
+if [ -f /tmp/ami-build/DB.key ]; then
+    echo "=== Securely deleting Secure Boot DB key ==="
+    shred -u /tmp/ami-build/DB.key 2>/dev/null || rm -f /tmp/ami-build/DB.key
+    rm -f /tmp/ami-build/DB.crt
+    echo "Secure Boot DB key deleted"
+fi
 
 # Upload PCR measurements to S3
 echo "=== Uploading PCR measurements to S3 ==="
