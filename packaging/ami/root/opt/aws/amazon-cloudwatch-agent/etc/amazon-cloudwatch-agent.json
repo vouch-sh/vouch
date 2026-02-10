@@ -1,7 +1,8 @@
 {
   "agent": {
     "run_as_user": "cwagent",
-    "logfile": ""
+    "logfile": "",
+    "use_dualstack_endpoint": true
   },
   "metrics": {
     "namespace": "VouchServer",
