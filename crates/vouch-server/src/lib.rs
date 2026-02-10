@@ -7,6 +7,7 @@
 pub mod cleanup;
 pub mod config;
 pub mod db;
+pub mod encrypt_config;
 pub mod extractors;
 pub mod handlers;
 pub mod pem;
@@ -14,6 +15,7 @@ pub mod s3_config;
 pub mod services;
 pub mod ssh_ca;
 pub mod tls;
+pub mod tpm_decrypt;
 pub mod webauthn_verify;
 
 #[cfg(any(test, feature = "test-utils"))]

@@ -21,9 +21,13 @@ use sqlx::PgPool;
 ///    b. Records completion in `_sqlx_migrations` (separate transaction)
 ///
 /// This approach works around DSQL's restriction on mixing DDL and DML.
-pub async fn run_dsql_migrations(pool: &PgPool) -> Result<()> {
+/// Result of running migrations: (newly_applied, total).
+pub type MigrationResult = (usize, usize);
+
+pub async fn run_dsql_migrations(pool: &PgPool) -> Result<MigrationResult> {
     // Get the embedded migrations
     let migrator = sqlx::migrate!("./migrations/postgres");
+    let total = migrator.iter().count();
 
     // Ensure _sqlx_migrations table exists
     create_migrations_table(pool).await?;
@@ -36,6 +40,8 @@ pub async fn run_dsql_migrations(pool: &PgPool) -> Result<()> {
             .context("failed to query applied migrations")?;
 
     let applied_set: std::collections::HashSet<i64> = applied.into_iter().collect();
+
+    let mut newly_applied: usize = 0;
 
     // Run each pending migration
     for migration in migrator.iter() {
@@ -75,9 +81,11 @@ pub async fn run_dsql_migrations(pool: &PgPool) -> Result<()> {
             elapsed_ms = elapsed.as_millis(),
             "migration complete"
         );
+
+        newly_applied += 1;
     }
 
-    Ok(())
+    Ok((newly_applied, total))
 }
 
 /// Create the _sqlx_migrations table if it doesn't exist.

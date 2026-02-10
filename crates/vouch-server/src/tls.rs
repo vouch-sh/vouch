@@ -77,15 +77,36 @@ fn load_cert_and_key(config: &ServerConfig) -> Result<(Vec<u8>, Vec<u8>)> {
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("TLS private key not configured"))?;
 
+    let cert_was_base64 = !cert_pem.trim().starts_with("-----BEGIN");
     let cert_bytes = crate::pem::decode_base64_pem(cert_pem)
         .context("Failed to decode TLS certificate")?
         .into_bytes();
+
+    let key_was_base64 = !key_secret.expose_secret().trim().starts_with("-----BEGIN");
     let key_bytes = crate::pem::decode_base64_pem(key_secret.expose_secret())
         .context("Failed to decode TLS private key")?
         .into_bytes();
 
     validate_pem(&cert_bytes, "CERTIFICATE").context("Invalid TLS certificate format")?;
     validate_pem(&key_bytes, "PRIVATE KEY").context("Invalid TLS private key format")?;
+
+    let cert_source = if cert_was_base64 {
+        "base64-encoded PEM"
+    } else {
+        "PEM"
+    };
+    let key_source = if key_was_base64 {
+        "base64-encoded PEM"
+    } else {
+        "PEM"
+    };
+    tracing::info!(
+        "TLS certificate loaded ({}, {} bytes), private key loaded ({}, {} bytes)",
+        cert_source,
+        cert_bytes.len(),
+        key_source,
+        key_bytes.len(),
+    );
 
     Ok((cert_bytes, key_bytes))
 }

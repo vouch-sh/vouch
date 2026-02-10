@@ -34,7 +34,7 @@ run: ## Run the vouch CLI locally
 	RUST_LOG=debug $(CARGO) run --bin vouch -- ${ARGS}
 
 run-server: css-build ## Run the vouch server locally (loads .env if present)
-	$(CARGO) run --bin vouch-server
+	$(CARGO) run --bin vouch-server -- ${ARGS}
 
 run-agent:
 	RUST_LOG=debug $(CARGO) run --bin vouch-agent -- --verbose --foreground

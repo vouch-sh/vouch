@@ -21,15 +21,17 @@
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
+use aws_sdk_kms::Client as KmsClient;
 use aws_sdk_s3::Client as S3Client;
 use axum_server::tls_rustls::RustlsConfig;
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 use crate::config::ServerConfig;
+use crate::tpm_decrypt;
 
 /// S3 configuration source settings.
 #[derive(Debug, Clone)]
@@ -45,7 +47,7 @@ pub struct S3ConfigSource {
 }
 
 /// Nested TLS configuration from S3.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct S3TlsConfig {
     /// Base64-encoded PEM certificate.
     pub cert: Option<String>,
@@ -179,13 +181,8 @@ pub struct S3Config {
     pub device_poll_interval_seconds: Option<u64>,
 }
 
-/// Fetch configuration from S3.
-///
-/// Returns the parsed config and the ETag for change detection.
-pub async fn fetch_s3_config(
-    client: &S3Client,
-    source: &S3ConfigSource,
-) -> Result<(S3Config, String)> {
+/// Fetch raw bytes and ETag from S3.
+async fn fetch_s3_raw(client: &S3Client, source: &S3ConfigSource) -> Result<(Vec<u8>, String)> {
     let response = client
         .get_object()
         .bucket(&source.bucket)
@@ -207,10 +204,81 @@ pub async fn fetch_s3_config(
         .await
         .context("Failed to read S3 config body")?;
 
-    let config: S3Config =
-        serde_json::from_slice(&body.into_bytes()).context("Failed to parse S3 config JSON")?;
+    Ok((body.into_bytes().to_vec(), etag))
+}
 
-    Ok((config, etag))
+/// Fetch configuration from S3.
+///
+/// If the S3 object is an encrypted envelope (contains `kms_key_id`), decrypts it
+/// using NitroTPM-attested KMS before parsing. The `tls` and `version` fields from
+/// the envelope wrapper are merged into the resulting `S3Config`.
+///
+/// If the S3 object is plain JSON (no `kms_key_id`), parses it directly (backwards
+/// compatible with existing configs).
+///
+/// # Arguments
+/// * `s3_client` - S3 client for fetching the config object
+/// * `source` - S3 bucket/key/region configuration
+/// * `kms_client` - Optional KMS client; required only when the config is an encrypted envelope
+///
+/// Returns the parsed config and the ETag for change detection.
+pub async fn fetch_s3_config(
+    s3_client: &S3Client,
+    source: &S3ConfigSource,
+    kms_client: Option<&KmsClient>,
+) -> Result<(S3Config, String)> {
+    let (raw_bytes, etag) = fetch_s3_raw(s3_client, source).await?;
+
+    if tpm_decrypt::is_encrypted_envelope(&raw_bytes) {
+        tracing::info!("S3 config format: encrypted envelope (KMS + NitroTPM attestation)");
+
+        let kms = kms_client.ok_or_else(|| {
+            anyhow::anyhow!(
+                "S3 config is an encrypted envelope but no KMS client is available. \
+                 This should not happen when running on AWS."
+            )
+        })?;
+
+        // Parse the envelope wrapper
+        let envelope: tpm_decrypt::EncryptedEnvelope =
+            serde_json::from_slice(&raw_bytes).context("Failed to parse encrypted envelope")?;
+
+        tracing::info!(
+            "Envelope version: {}, KMS key: {}, TLS in wrapper: {}",
+            envelope.version,
+            envelope.kms_key_id,
+            envelope.tls.is_some()
+        );
+
+        // Extract wrapper fields (TLS and version) before decryption
+        let wrapper_tls = envelope.tls.clone();
+        let wrapper_version = envelope.version;
+
+        // Decrypt the inner config via attested KMS call
+        let plaintext = tpm_decrypt::decrypt_envelope(kms, &envelope).await?;
+
+        // Parse the decrypted JSON as S3Config
+        let mut config: S3Config =
+            serde_json::from_slice(&plaintext).context("Failed to parse decrypted S3 config")?;
+
+        // Merge wrapper fields into the config
+        // TLS from wrapper takes precedence (allows hot-reload without decryption)
+        if wrapper_tls.is_some() {
+            config.tls = wrapper_tls;
+        }
+        // Version from wrapper (envelope version, not inner config version)
+        if config.version.is_none() {
+            config.version = Some(wrapper_version);
+        }
+
+        tracing::info!("S3 config decrypted and parsed successfully");
+        Ok((config, etag))
+    } else {
+        tracing::info!("S3 config format: plain JSON");
+        let config: S3Config =
+            serde_json::from_slice(&raw_bytes).context("Failed to parse S3 config JSON")?;
+        Ok((config, etag))
+    }
 }
 
 /// Check if configuration has changed using HEAD request.
@@ -249,8 +317,11 @@ pub async fn check_config_changed(
 /// 1. Polls S3 every `poll_interval_seconds` using HEAD requests
 /// 2. Re-fetches config only when ETag changes
 /// 3. Automatically reloads TLS certificates when they change
+///
+/// For encrypted envelope configs, runtime updates only read TLS from the
+/// plaintext wrapper — no KMS decryption is needed for hot-reload.
 pub fn start_s3_config_task(
-    client: S3Client,
+    s3_client: S3Client,
     source: S3ConfigSource,
     config: Arc<ArcSwap<ServerConfig>>,
     tls_config: Option<RustlsConfig>,
@@ -264,7 +335,7 @@ pub fn start_s3_config_task(
             tokio::time::sleep(interval).await;
 
             // HEAD request to check ETag
-            match check_config_changed(&client, &source, &current_etag).await {
+            match check_config_changed(&s3_client, &source, &current_etag).await {
                 Ok(None) => {
                     tracing::trace!("S3 config unchanged (etag: {})", current_etag);
                 }
@@ -275,8 +346,10 @@ pub fn start_s3_config_task(
                         new_etag
                     );
 
-                    // Fetch full config
-                    match fetch_s3_config(&client, &source).await {
+                    // For runtime updates, only TLS can change. If the config is
+                    // an encrypted envelope, TLS is in the plaintext wrapper — we
+                    // don't need to decrypt. Fetch raw bytes and handle both cases.
+                    match fetch_runtime_config(&s3_client, &source).await {
                         Ok((s3_cfg, etag)) => {
                             if let Err(e) = apply_config_update(&config, &tls_config, s3_cfg).await
                             {
@@ -298,6 +371,40 @@ pub fn start_s3_config_task(
             }
         }
     })
+}
+
+/// Fetch S3 config for runtime updates (polling).
+///
+/// For encrypted envelopes, only extracts the plaintext wrapper fields (TLS, version)
+/// without performing KMS decryption. For plain JSON, parses the full config.
+///
+/// Since `apply_config_update` only applies TLS changes at runtime, this is sufficient.
+async fn fetch_runtime_config(
+    s3_client: &S3Client,
+    source: &S3ConfigSource,
+) -> Result<(S3Config, String)> {
+    let (raw_bytes, etag) = fetch_s3_raw(s3_client, source).await?;
+
+    if tpm_decrypt::is_encrypted_envelope(&raw_bytes) {
+        // Encrypted envelope — extract only the wrapper fields (no decryption needed).
+        // Only TLS changes are applied at runtime, and TLS lives in the wrapper.
+        let envelope: tpm_decrypt::EncryptedEnvelope = serde_json::from_slice(&raw_bytes)
+            .context("Failed to parse encrypted envelope during polling")?;
+
+        let config = S3Config {
+            version: Some(envelope.version),
+            tls: envelope.tls,
+            ..S3Config::default()
+        };
+
+        tracing::debug!("Encrypted envelope: extracted wrapper TLS for runtime update");
+        Ok((config, etag))
+    } else {
+        // Plain JSON — parse full config (unchanged behavior)
+        let config: S3Config =
+            serde_json::from_slice(&raw_bytes).context("Failed to parse S3 config JSON")?;
+        Ok((config, etag))
+    }
 }
 
 /// Apply S3 configuration update to the running server.
