@@ -179,9 +179,9 @@ echo ""
 echo "=== Generating UEFI variable store ==="
 
 uefivars -i none -o aws \
-    -P "${OUTPUT_DIR}/PK.auth" \
-    -K "${OUTPUT_DIR}/KEK.auth" \
-    -b "${OUTPUT_DIR}/DB.auth" \
+    -P "${OUTPUT_DIR}/PK.esl" \
+    -K "${OUTPUT_DIR}/KEK.esl" \
+    -b "${OUTPUT_DIR}/DB.esl" \
     -O "${OUTPUT_DIR}/uefi-vars.b64"
 
 echo ""
