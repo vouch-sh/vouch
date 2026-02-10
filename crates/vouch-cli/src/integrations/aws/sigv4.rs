@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! AWS Signature Version 4 utilities.
 //!
-//! Shared SigV4 helper functions used by the ECR Docker credential helper
-//! and the CodeCommit git credential helper.
+//! Shared SigV4 helper functions used by ECR, CodeArtifact, CodeCommit,
+//! and other AWS JSON-RPC style API calls.
 
+use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use zeroize::Zeroizing;
+
+use super::sts::StsCredentials;
 
 /// Format timestamp for AWS `X-Amz-Date` header (`YYYYMMDDTHHMMSSZ`).
 #[must_use]
@@ -66,6 +69,96 @@ pub fn derive_signing_key(
     let k_region = Zeroizing::new(hmac_sha256(&k_date, region.as_bytes()));
     let k_service = Zeroizing::new(hmac_sha256(&k_region, service.as_bytes()));
     Zeroizing::new(hmac_sha256(&k_service, b"aws4_request"))
+}
+
+/// Send a SigV4-signed JSON-RPC style POST request to an AWS service.
+///
+/// Many AWS services (ECR, CodeArtifact, etc.) use the same pattern:
+/// - `POST /` with `Content-Type: application/x-amz-json-1.1`
+/// - `X-Amz-Target` header to specify the operation
+/// - SigV4 signature over the request
+///
+/// This function handles the signing and HTTP call, returning the raw
+/// response body on success.
+///
+/// # Arguments
+/// * `endpoint` - Full URL (e.g., `https://api.ecr.us-east-1.amazonaws.com`)
+/// * `service` - AWS service name for signing (e.g., `ecr`, `codeartifact`)
+/// * `target` - `X-Amz-Target` value (e.g., `AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken`)
+/// * `region` - AWS region
+/// * `creds` - Temporary AWS credentials from STS
+/// * `body` - JSON request body
+pub async fn sign_and_send_json_rpc(
+    endpoint: &str,
+    service: &str,
+    target: &str,
+    region: &str,
+    creds: &StsCredentials,
+    body: &serde_json::Value,
+) -> Result<String> {
+    let http_client =
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
+
+    // Extract host from endpoint URL
+    let host = endpoint
+        .strip_prefix("https://")
+        .unwrap_or(endpoint)
+        .trim_end_matches('/');
+
+    let body_str = body.to_string();
+    let now = jiff::Timestamp::now();
+    let amz_date = format_amz_date(now);
+    let date_stamp = format_date_stamp(now);
+
+    let payload_hash = sha256_hex(body_str.as_bytes());
+
+    let canonical_headers = format!(
+        "content-type:application/x-amz-json-1.1\nhost:{host}\nx-amz-date:{amz_date}\nx-amz-security-token:{}\nx-amz-target:{target}\n",
+        creds.session_token.expose_secret()
+    );
+    let signed_headers = "content-type;host;x-amz-date;x-amz-security-token;x-amz-target";
+
+    let canonical_request =
+        format!("POST\n/\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
+
+    let algorithm = "AWS4-HMAC-SHA256";
+    let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
+    let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
+
+    let string_to_sign =
+        format!("{algorithm}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
+
+    let k_signing = derive_signing_key(&creds.secret_access_key, &date_stamp, region, service);
+    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
+
+    let authorization = format!(
+        "{algorithm} Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
+        creds.access_key_id
+    );
+
+    let response = http_client
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header("X-Amz-Date", &amz_date)
+        .header("X-Amz-Security-Token", creds.session_token.expose_secret())
+        .header("X-Amz-Target", target)
+        .header("Authorization", &authorization)
+        .body(body_str)
+        .send()
+        .await
+        .context("failed to send AWS API request")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let response_body = response.text().await.unwrap_or_default();
+        anyhow::bail!("{service} returned error {status}: {response_body}");
+    }
+
+    response
+        .text()
+        .await
+        .context("failed to read AWS API response body")
 }
 
 #[cfg(test)]

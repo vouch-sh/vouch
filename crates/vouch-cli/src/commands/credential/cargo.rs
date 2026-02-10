@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
 use crate::config::Config;
+use crate::integrations::aws::codeartifact;
 
 /// Protocol version supported by this credential provider.
 const PROTOCOL_VERSION: u32 = 1;
@@ -237,6 +238,12 @@ pub async fn run() -> Result<()> {
 
 /// Handle "get" action - return authentication token.
 async fn handle_get(registry: &RegistryInfo) -> Result<()> {
+    // Check if this is a CodeArtifact registry URL
+    if let Some(ca_registry) = codeartifact::parse_codeartifact_url(&registry.index_url) {
+        return handle_get_codeartifact(&ca_registry).await;
+    }
+
+    // Standard Vouch token flow for non-CodeArtifact registries
     // Load Vouch config
     let config = match Config::load() {
         Ok(c) => c,
@@ -270,6 +277,61 @@ async fn handle_get(registry: &RegistryInfo) -> Result<()> {
         token: token_str.to_string(),
         cache,
         // Token works for any operation (read, publish, yank, etc.)
+        operation_independent: true,
+    };
+
+    send_message(&response)
+}
+
+/// Handle "get" for a CodeArtifact registry.
+///
+/// Uses the Vouch → STS → CodeArtifact flow to obtain a bearer token
+/// that Cargo can use for the CodeArtifact Cargo registry.
+async fn handle_get_codeartifact(
+    registry: &codeartifact::CodeArtifactRegistry,
+) -> Result<()> {
+    // Load Vouch config to get server URL
+    let config = match Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            return send_error("not-found", Some(format!("failed to load config: {e}")));
+        }
+    };
+
+    let server = match config.server_url() {
+        Some(s) => s.to_string(),
+        None => {
+            return send_error(
+                "not-found",
+                Some("not configured - run 'vouch enroll' first".to_string()),
+            );
+        }
+    };
+
+    // Use the shared CodeArtifact credential flow
+    let result = match super::codeartifact::get_token(
+        &server,
+        &registry.domain,
+        &registry.domain_owner,
+        &registry.region,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return send_error(
+                "not-found",
+                Some(format!("CodeArtifact authentication failed: {e}")),
+            );
+        }
+    };
+
+    let response = CredentialResponse::Get {
+        // Token is exposed here because Cargo requires it in the JSON output
+        token: result.authorization_token.expose_secret().to_string(),
+        cache: CacheControl::Expires {
+            expiration: result.expiration,
+        },
         operation_independent: true,
     };
 

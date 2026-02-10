@@ -6,6 +6,7 @@ mod config;
 pub use config::CargoConfig;
 
 use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
+use crate::integrations::aws::codeartifact;
 
 /// Cargo integration checker.
 pub struct CargoIntegration;
@@ -47,10 +48,28 @@ impl IntegrationCheck for CargoIntegration {
         }
 
         if let Some(registry) = config.find_vouch_registry() {
-            return IntegrationState::Configured(ConfiguredDetails {
-                summary: format!("registry: {registry}"),
-                details: vec![],
-            });
+            let index_url = config.get_registry_index(&registry);
+            let ca_parsed = index_url
+                .as_deref()
+                .and_then(codeartifact::parse_codeartifact_url);
+
+            let details = ca_parsed
+                .as_ref()
+                .map(|ca| {
+                    vec![(
+                        "CodeArtifact".to_string(),
+                        format!("{}/{}", ca.domain, ca.region),
+                    )]
+                })
+                .unwrap_or_default();
+
+            let summary = if ca_parsed.is_some() {
+                format!("CodeArtifact registry: {registry}")
+            } else {
+                format!("registry: {registry}")
+            };
+
+            return IntegrationState::Configured(ConfiguredDetails { summary, details });
         }
 
         IntegrationState::NotConfigured {

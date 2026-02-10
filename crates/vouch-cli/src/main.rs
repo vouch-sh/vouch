@@ -180,6 +180,18 @@ enum CredentialCommands {
         #[arg(long = "cargo-plugin", hide = true)]
         _cargo_plugin: bool,
     },
+    /// Obtain a CodeArtifact authorization token.
+    Codeartifact {
+        /// CodeArtifact domain name.
+        #[arg(long)]
+        domain: String,
+        /// AWS account ID that owns the domain.
+        #[arg(long)]
+        domain_owner: String,
+        /// AWS region (default: us-east-1).
+        #[arg(long, default_value = "us-east-1")]
+        region: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -253,6 +265,24 @@ enum SetupCommands {
         /// Automatically configure git (otherwise just show instructions).
         #[arg(long)]
         configure: bool,
+    },
+    /// Configure a package manager for AWS CodeArtifact.
+    Codeartifact {
+        /// Package manager to configure (cargo, pip, npm).
+        #[arg(long)]
+        tool: crate::commands::setup::codeartifact::Tool,
+        /// CodeArtifact domain name.
+        #[arg(long)]
+        domain: String,
+        /// AWS account ID that owns the domain.
+        #[arg(long)]
+        domain_owner: String,
+        /// AWS region (default: us-east-1).
+        #[arg(long, default_value = "us-east-1")]
+        region: String,
+        /// CodeArtifact repository name.
+        #[arg(long)]
+        repository: String,
     },
 }
 
@@ -331,6 +361,14 @@ async fn main() -> Result<()> {
                 commands::credential::docker::run(&operation).await
             }
             CredentialCommands::Cargo { .. } => commands::credential::cargo::run().await,
+            CredentialCommands::Codeartifact {
+                domain,
+                domain_owner,
+                region,
+            } => {
+                commands::credential::codeartifact::run(&server, &domain, &domain_owner, &region)
+                    .await
+            }
         },
         Commands::Setup { command } => match command {
             SetupCommands::Aws { profile, role } => {
@@ -371,6 +409,23 @@ async fn main() -> Result<()> {
             } => {
                 commands::setup::codecommit::run(region.as_deref(), profile.as_deref(), configure)
                     .await
+            }
+            SetupCommands::Codeartifact {
+                tool,
+                domain,
+                domain_owner,
+                region,
+                repository,
+            } => {
+                commands::setup::codeartifact::run(
+                    &server,
+                    tool,
+                    &domain,
+                    &domain_owner,
+                    &region,
+                    &repository,
+                )
+                .await
             }
         },
         Commands::Completions(args) => {

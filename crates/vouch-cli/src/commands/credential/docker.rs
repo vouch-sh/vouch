@@ -18,18 +18,15 @@
 //! Or use `vouch setup docker --configure` to set this up automatically.
 
 use anyhow::{Context, Result};
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
 use crate::client::VouchClient;
+use crate::commands::credential::aws::{OidcTokenResponse, build_session_tags, decode_jwt_payload};
 use crate::config::Config;
-use crate::integrations::aws::sigv4::{
-    derive_signing_key, format_amz_date, format_date_stamp, hmac_sha256, sha256_hex,
-};
-use crate::commands::credential::aws::{build_session_tags, decode_jwt_payload};
+use crate::integrations::aws::get_local_aws_role;
+use crate::integrations::aws::sigv4::sign_and_send_json_rpc;
 use crate::integrations::aws::sts::{StsCredentials, assume_role_with_web_identity};
-use crate::integrations::aws::{AwsConfig, extract_role_from_credential_process};
 use crate::session::get_user_email;
 
 /// Docker credential helper output format.
@@ -85,20 +82,6 @@ impl std::fmt::Debug for GitHubTokenResponse {
 struct GitHubTokenRequest {
     owner: Option<String>,
     repositories: Option<Vec<String>>,
-}
-
-/// Response from Vouch AWS token endpoint.
-#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
-struct AwsOidcTokenResponse {
-    id_token: String,
-}
-
-impl std::fmt::Debug for AwsOidcTokenResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AwsOidcTokenResponse")
-            .field("id_token", &"[REDACTED]")
-            .finish()
-    }
 }
 
 /// Run the Docker credential helper.
@@ -225,15 +208,6 @@ async fn get_credential() -> Result<()> {
     Ok(())
 }
 
-/// Try to read the AWS role ARN from the local ~/.aws/config file.
-///
-/// Finds the first vouch profile and extracts the role ARN from its credential_process.
-fn get_local_aws_role() -> Option<String> {
-    let config = AwsConfig::load().ok()?;
-    let profile = config.find_vouch_profile()?;
-    extract_role_from_credential_process(&profile.credential_process?)
-}
-
 /// Get credentials for AWS ECR.
 async fn get_ecr_credential(
     server: &str,
@@ -244,7 +218,7 @@ async fn get_ecr_credential(
     let client = VouchClient::new(server)?;
 
     // First, get OIDC token from Vouch server
-    let token_response: AwsOidcTokenResponse = client
+    let token_response: OidcTokenResponse = client
         .get_authenticated("/v1/credentials/aws/token")
         .await
         .context("failed to get OIDC token from Vouch server")?;
@@ -308,81 +282,26 @@ async fn get_ecr_authorization_token(
         .next()
         .context("invalid ECR registry URL")?;
 
-    // Build the ECR GetAuthorizationToken request
-    // This requires AWS Signature Version 4 signing
-    // Use the domain suffix from registry detection for the appropriate partition
     let ecr_endpoint = format!("https://api.ecr.{region}.{domain_suffix}");
 
-    // We need to sign the request with AWS SigV4
-    let http_client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
-
-    // ECR uses JSON-RPC style API
     let request_body = serde_json::json!({
         "registryIds": [account_id]
     });
 
-    let now = jiff::Timestamp::now();
-    let amz_date = format_amz_date(now);
-    let date_stamp = format_date_stamp(now);
+    let response_body = sign_and_send_json_rpc(
+        &ecr_endpoint,
+        "ecr",
+        "AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken",
+        region,
+        creds,
+        &request_body,
+    )
+    .await
+    .context("failed to call ECR GetAuthorizationToken")?;
 
-    // Create canonical request for signing
-    // Use ExposeSecret to access the sensitive credential values
-    let host = format!("api.ecr.{region}.{domain_suffix}");
-    let payload_hash = sha256_hex(request_body.to_string().as_bytes());
-
-    let canonical_headers = format!(
-        "content-type:application/x-amz-json-1.1\nhost:{host}\nx-amz-date:{amz_date}\nx-amz-security-token:{}\nx-amz-target:AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken\n",
-        creds.session_token.expose_secret()
-    );
-    let signed_headers = "content-type;host;x-amz-date;x-amz-security-token;x-amz-target";
-
-    let canonical_request =
-        format!("POST\n/\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
-
-    let algorithm = "AWS4-HMAC-SHA256";
-    let credential_scope = format!("{date_stamp}/{region}/ecr/aws4_request");
-    let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
-
-    let string_to_sign =
-        format!("{algorithm}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
-
-    // Derive signing key using the shared SigV4 utility
-    let k_signing = derive_signing_key(&creds.secret_access_key, &date_stamp, region, "ecr");
-
-    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
-
-    let authorization = format!(
-        "{algorithm} Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
-        creds.access_key_id
-    );
-
-    let response = http_client
-        .post(&ecr_endpoint)
-        .header("Content-Type", "application/x-amz-json-1.1")
-        .header("X-Amz-Date", &amz_date)
-        .header("X-Amz-Security-Token", creds.session_token.expose_secret())
-        .header(
-            "X-Amz-Target",
-            "AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken",
-        )
-        .header("Authorization", &authorization)
-        .body(request_body.to_string())
-        .send()
-        .await
-        .context("failed to call ECR")?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("ECR returned error {status}: {body}");
-    }
-
-    let ecr_response: EcrAuthorizationResponse = response
-        .json()
-        .await
-        .context("failed to parse ECR response")?;
+    let ecr_response: EcrAuthorizationResponse =
+        serde_json::from_str(&response_body)
+            .context("failed to parse ECR response")?;
 
     // The authorization token is base64(username:password)
     // We need to extract just the password part

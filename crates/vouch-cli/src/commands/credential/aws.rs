@@ -41,9 +41,12 @@ impl std::fmt::Debug for CredentialProcessOutput {
 }
 
 /// Response from Vouch OIDC token endpoint.
+///
+/// Shared by all credential commands that exchange a Vouch session for an
+/// AWS OIDC ID token (`aws`, `codeartifact`, `docker`).
 #[derive(Deserialize, zeroize::ZeroizeOnDrop)]
-struct OidcTokenResponse {
-    id_token: String,
+pub(crate) struct OidcTokenResponse {
+    pub(crate) id_token: String,
 }
 
 impl std::fmt::Debug for OidcTokenResponse {
