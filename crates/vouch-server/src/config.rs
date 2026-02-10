@@ -412,7 +412,11 @@ impl ServerConfig {
     }
 
     /// Load additional configuration from database (overrides env vars where set).
-    pub async fn load_from_db(&mut self, pool: &Pool) -> Result<()> {
+    ///
+    /// Returns the list of config keys that were found in the database.
+    pub async fn load_from_db(&mut self, pool: &Pool) -> Result<Vec<&'static str>> {
+        let mut loaded = Vec::new();
+
         // Allowed domains (DB overrides env vars)
         if let Some(domains) = db::get_config(pool, config_keys::ALLOWED_DOMAINS).await? {
             let parsed = parse_comma_list(&domains);
@@ -420,24 +424,29 @@ impl ServerConfig {
                 self.allowed_domains = None;
             } else {
                 self.allowed_domains = Some(parsed);
+                loaded.push(config_keys::ALLOWED_DOMAINS);
             }
         }
 
         // Branding (DB overrides env vars)
         if let Some(org_name) = db::get_config(pool, config_keys::ORG_NAME).await? {
             self.org_name = Some(org_name);
+            loaded.push(config_keys::ORG_NAME);
         }
         if let Some(url) = db::get_config(pool, config_keys::CLI_DOWNLOAD_MACOS).await? {
             self.cli_download_macos = Some(url);
+            loaded.push(config_keys::CLI_DOWNLOAD_MACOS);
         }
         if let Some(url) = db::get_config(pool, config_keys::CLI_DOWNLOAD_LINUX).await? {
             self.cli_download_linux = Some(url);
+            loaded.push(config_keys::CLI_DOWNLOAD_LINUX);
         }
         if let Some(url) = db::get_config(pool, config_keys::CLI_DOWNLOAD_WINDOWS).await? {
             self.cli_download_windows = Some(url);
+            loaded.push(config_keys::CLI_DOWNLOAD_WINDOWS);
         }
 
-        Ok(())
+        Ok(loaded)
     }
 
     /// Check if OIDC is configured (all required fields present).

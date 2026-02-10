@@ -341,12 +341,14 @@ jobs:
           fi
 
   copy-ami:
-    name: Copy AMI to us-west-2
+    name: Copy AMI (${{ matrix.arch }} to ${{ matrix.region }})
     runs-on: ubuntu-latest
     needs: [prepare, build-ami]
     strategy:
+      fail-fast: false
       matrix:
         arch: [x86_64, arm64]
+        region: [us-west-2]
 
     steps:
       - name: Configure AWS credentials
@@ -354,28 +356,28 @@ jobs:
         with:
           role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
           aws-region: us-east-1
-          role-session-name: copy-ami-${{ matrix.arch }}
+          role-session-name: copy-ami-${{ matrix.arch }}-${{ matrix.region }}
           mask-aws-account-id: true
 
-      - name: Check for existing AMI in us-west-2 (immutability)
+      - name: Check for existing AMI in ${{ matrix.region }} (immutability)
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
           AMI_NAME="vouch-server-${VERSION}-${{ matrix.arch }}"
 
-          # Check if an AMI with this name already exists in us-west-2
+          # Check if an AMI with this name already exists in target region
           EXISTING_AMI=$(aws ec2 describe-images \
-            --region us-west-2 \
+            --region ${{ matrix.region }} \
             --filters "Name=name,Values=${AMI_NAME}" \
             --query 'Images[0].ImageId' \
             --output text 2>/dev/null || echo "None")
 
           if [ "$EXISTING_AMI" != "None" ] && [ -n "$EXISTING_AMI" ]; then
-            echo "ERROR: AMI '${AMI_NAME}' already exists in us-west-2 (${EXISTING_AMI})"
+            echo "ERROR: AMI '${AMI_NAME}' already exists in ${{ matrix.region }} (${EXISTING_AMI})"
             echo "AMI builds are immutable. To rebuild, first deregister the existing AMI."
             exit 1
           fi
 
-          echo "No existing AMI found with name '${AMI_NAME}' in us-west-2, proceeding with copy"
+          echo "No existing AMI found with name '${AMI_NAME}' in ${{ matrix.region }}, proceeding with copy"
 
       - name: Get source AMI ID
         id: source
@@ -388,7 +390,7 @@ jobs:
             --output text)
           echo "ami_id=${AMI_ID}" >> "$GITHUB_OUTPUT"
 
-      - name: Copy AMI to us-west-2
+      - name: Copy AMI to ${{ matrix.region }}
         id: copy
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
@@ -396,7 +398,7 @@ jobs:
 
           # Copy the AMI
           COPIED_AMI=$(aws ec2 copy-image \
-            --region us-west-2 \
+            --region ${{ matrix.region }} \
             --source-region us-east-1 \
             --source-image-id "${SOURCE_AMI}" \
             --name "vouch-server-${VERSION}-${{ matrix.arch }}" \
@@ -405,13 +407,13 @@ jobs:
             --output text)
 
           echo "ami_id=${COPIED_AMI}" >> "$GITHUB_OUTPUT"
-          echo "Copied AMI to us-west-2: ${COPIED_AMI}"
+          echo "Copied AMI to ${{ matrix.region }}: ${COPIED_AMI}"
 
           # Wait for the copy to complete
-          aws ec2 wait image-available --region us-west-2 --image-ids "${COPIED_AMI}"
+          aws ec2 wait image-available --region ${{ matrix.region }} --image-ids "${COPIED_AMI}"
 
           # Tag the copied AMI
-          aws ec2 create-tags --region us-west-2 --resources "${COPIED_AMI}" --tags \
+          aws ec2 create-tags --region ${{ matrix.region }} --resources "${COPIED_AMI}" --tags \
             "Key=Name,Value=vouch-server-${VERSION}" \
             "Key=Version,Value=${VERSION}" \
             "Key=Architecture,Value=${{ matrix.arch }}" \
@@ -425,9 +427,9 @@ jobs:
               --query 'Tags[0].Value' \
               --output text 2>/dev/null || echo "None")
             if [ "$PCR_VALUE" != "None" ] && [ -n "$PCR_VALUE" ]; then
-              aws ec2 create-tags --region us-west-2 --resources "${COPIED_AMI}" --tags \
+              aws ec2 create-tags --region ${{ matrix.region }} --resources "${COPIED_AMI}" --tags \
                 "Key=${PCR_TAG},Value=${PCR_VALUE}"
-              echo "Propagated ${PCR_TAG} tag to us-west-2"
+              echo "Propagated ${PCR_TAG} tag to ${{ matrix.region }}"
             fi
           done
 

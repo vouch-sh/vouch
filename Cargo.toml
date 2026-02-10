@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.2.14"
+version = "2026.2.15"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.93"
@@ -49,7 +49,7 @@ serde_json = { version = "=1.0.149", default-features = false, features = ["std"
 ciborium = { version = "=0.2.2", default-features = false }
 
 # Unix system calls (daemon support)
-libc = { version = "=0.2.180", default-features = false }
+libc = { version = "=0.2.181", default-features = false }
 
 # HTTP client (CLI and Server for OIDC)
 reqwest = { version = "=0.13.2", default-features = false, features = ["json", "rustls", "form"] }

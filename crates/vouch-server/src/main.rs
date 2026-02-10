@@ -30,13 +30,34 @@ use tracing_subscriber::EnvFilter;
 use vouch_server::{
     AppState, cleanup, config,
     db::{Pool, dsql::DsqlEndpoint, migrations::run_dsql_migrations},
-    handlers, s3_config,
+    encrypt_config, handlers, s3_config,
     services::{
         integrations::github::GitHubApp,
         oidc::{OidcSigningKey, dpop},
     },
-    ssh_ca,
+    ssh_ca, tpm_decrypt,
 };
+
+// ============================================================================
+// Subcommand Dispatch
+// ============================================================================
+
+/// Top-level CLI with subcommands.
+#[derive(Parser)]
+#[command(name = "vouch-server", about = "Vouch identity server")]
+struct Cli {
+    #[command(subcommand)]
+    command: Commands,
+}
+
+#[derive(clap::Subcommand)]
+#[allow(clippy::large_enum_variant)]
+enum Commands {
+    /// Start the identity server.
+    Serve(config::Args),
+    /// Encrypt a plain S3Config JSON into a KMS-encrypted envelope.
+    EncryptConfig(encrypt_config::EncryptConfigArgs),
+}
 
 #[derive(Embed)]
 #[folder = "static/"]
@@ -63,21 +84,51 @@ async fn main() -> Result<()> {
     // Load .env file if present (before anything else so env vars are available)
     dotenvy::dotenv().ok();
 
-    // Initialize logging
+    // Two-pass CLI parse for backwards compatibility:
+    // If the first argument is a known subcommand or help flag, parse with Cli struct
+    // (so subcommands appear in --help). Otherwise, parse with config::Args directly
+    // (legacy: `vouch-server --listen-addr ...`).
+    let first_arg = std::env::args().nth(1).unwrap_or_default();
+    match first_arg.as_str() {
+        "serve" | "encrypt-config" | "help" | "--help" | "-h" => {
+            let cli = Cli::parse();
+            match cli.command {
+                Commands::Serve(args) => run_server(args).await,
+                Commands::EncryptConfig(args) => {
+                    // encrypt-config logs to stderr so stdout is pure JSON
+                    tracing_subscriber::fmt()
+                        .with_writer(std::io::stderr)
+                        .with_env_filter(
+                            EnvFilter::try_from_default_env()
+                                .unwrap_or_else(|_| EnvFilter::new("info")),
+                        )
+                        .init();
+                    encrypt_config::run(args).await
+                }
+            }
+        }
+        _ => {
+            // Legacy mode: no subcommand, parse as direct server args
+            let args = config::Args::parse();
+            run_server(args).await
+        }
+    }
+}
+
+async fn run_server(args: config::Args) -> Result<()> {
+    // Initialize logging (only for serve mode; encrypt-config inits its own)
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
 
-    // Parse command-line arguments and environment variables
-    let args = config::Args::parse();
     let mut config = config::ServerConfig::from_args(args)?;
 
     // Load S3 config if configured (BEFORE database connection)
     let (s3_client, s3_source, initial_etag) = if let Some(bucket) = &config.s3_config_bucket {
         tracing::info!(
-            "Loading configuration from S3: s3://{}/{}",
+            "Configuration source: S3 (s3://{}/{})",
             bucket,
             config.s3_config_key
         );
@@ -93,6 +144,11 @@ async fn main() -> Result<()> {
             .await;
 
         let s3_client = aws_sdk_s3::Client::new(&sdk_config);
+
+        // Create KMS client for envelope decryption (only used if config is encrypted).
+        // Uses the same SDK config (region, credentials) as S3.
+        let kms_client = aws_sdk_kms::Client::new(&sdk_config);
+
         let source = s3_config::S3ConfigSource {
             bucket: bucket.clone(),
             key: config.s3_config_key.clone(),
@@ -100,17 +156,20 @@ async fn main() -> Result<()> {
             poll_interval_seconds: config.s3_config_poll_interval,
         };
 
-        // Fetch initial config - fail fast if unreachable
-        let (s3_cfg, etag) = s3_config::fetch_s3_config(&s3_client, &source)
+        // Fetch initial config - fail fast if unreachable.
+        // If the S3 object is an encrypted envelope, this will use NitroTPM
+        // attestation + KMS to decrypt the config secrets.
+        let (s3_cfg, etag) = s3_config::fetch_s3_config(&s3_client, &source, Some(&kms_client))
             .await
             .context("Failed to fetch S3 configuration")?;
 
         // Merge S3 config (S3 wins over env vars)
         config.merge_s3_config(&s3_cfg, false); // Initial merge - all fields allowed
-        tracing::info!("S3 configuration loaded (etag: {})", etag);
+        tracing::info!("S3 configuration merged (etag: {etag})");
 
         (Some(s3_client), Some(source), Some(etag))
     } else {
+        tracing::info!("Configuration source: environment variables");
         (None, None, None)
     };
 
@@ -118,12 +177,28 @@ async fn main() -> Result<()> {
 
     // Connect to database
     let db = Pool::connect(&config.database_url).await?;
-    tracing::info!("Connected to {:?} database", db.db_type());
+    tracing::info!(
+        "Connected to {:?} database: {}",
+        db.db_type(),
+        redact_database_url(&config.database_url),
+    );
 
     // Run migrations based on database type
     // Note: DSQL requires a custom migration runner due to DDL/DML transaction restrictions
-    match &db {
-        Pool::Sqlite(pool) => sqlx::migrate!("./migrations/sqlite").run(pool).await?,
+    let (migrations_applied, migrations_total) = match &db {
+        Pool::Sqlite(pool) => {
+            let migrator = sqlx::migrate!("./migrations/sqlite");
+            let total = migrator.iter().count();
+            let before: i64 = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations")
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
+            migrator.run(pool).await?;
+            let after: i64 = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations")
+                .fetch_one(pool)
+                .await?;
+            ((after - before) as usize, total)
+        }
         Pool::Postgres(pool) => {
             // Check if this is a DSQL endpoint
             let is_dsql = DsqlEndpoint::from_url(&config.database_url)
@@ -133,20 +208,49 @@ async fn main() -> Result<()> {
 
             if is_dsql {
                 tracing::info!("DSQL detected, using DSQL-compatible migration runner");
-                run_dsql_migrations(pool).await?;
+                run_dsql_migrations(pool).await?
             } else {
-                sqlx::migrate!("./migrations/postgres").run(pool).await?;
+                let migrator = sqlx::migrate!("./migrations/postgres");
+                let total = migrator.iter().count();
+                let before: i64 =
+                    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations")
+                        .fetch_one(pool)
+                        .await
+                        .unwrap_or(0);
+                migrator.run(pool).await?;
+                let after: i64 =
+                    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM _sqlx_migrations")
+                        .fetch_one(pool)
+                        .await?;
+                ((after - before) as usize, total)
             }
         }
+    };
+    if migrations_applied > 0 {
+        tracing::info!(
+            "Database migrations complete: {migrations_applied} applied ({migrations_total} total)"
+        );
+    } else {
+        tracing::info!("Database migrations up to date ({migrations_total} total)");
     }
-    tracing::info!("Database migrations complete");
 
-    // Load configuration from database (overrides env vars where set)
-    config.load_from_db(&db).await?;
-    tracing::info!("Configuration loaded from database");
+    // Load additional settings from database (allowed_domains, org_name, download URLs)
+    let db_settings = config.load_from_db(&db).await?;
+    if db_settings.is_empty() {
+        tracing::info!("No database settings configured");
+    } else {
+        tracing::info!("Loaded database settings: {}", db_settings.join(", "));
+    }
 
     // Validate config after all sources merged (env, S3, database)
     config.validate()?;
+    tracing::info!(
+        "Configuration validated: rp_id={}, base_url={}, tls={}, NitroTPM={}",
+        config.rp_id,
+        config.base_url,
+        config.tls_configured(),
+        crate::tpm_decrypt::is_nitro_tpm_available(),
+    );
 
     // Build WebAuthn instance
     // Use base_url as origin (handles localhost with http and port correctly)
@@ -182,18 +286,11 @@ async fn main() -> Result<()> {
 
     // Initialize OIDC signing key (ES256 for AWS and OIDC ID tokens)
     let oidc_key = OidcSigningKey::load_or_generate(config.oidc_signing_key.as_deref())?;
-    tracing::info!("OIDC signing key initialized: {}", oidc_key.key_id());
 
     // Initialize GitHub App if configured
     let github_app = match GitHubApp::load(&config) {
-        Ok(Some(app)) => {
-            tracing::info!("GitHub App initialized: app_id={}", app.app_id().0);
-            Some(Arc::new(app))
-        }
-        Ok(None) => {
-            tracing::info!("GitHub App not configured");
-            None
-        }
+        Ok(Some(app)) => Some(Arc::new(app)),
+        Ok(None) => None,
         Err(e) => {
             tracing::warn!("Failed to initialize GitHub App: {e}");
             None
@@ -805,6 +902,30 @@ fn apply_security_layers(
         ))
     } else {
         router
+    }
+}
+
+/// Redact the password from a database URL for safe logging.
+///
+/// - `postgres://user:secret@host/db` → `postgres://user:***@host/db`
+/// - `sqlite:path.db` → `sqlite:path.db` (no password to redact)
+fn redact_database_url(url: &str) -> String {
+    // SQLite URLs use "sqlite:" prefix and never contain passwords
+    if url.starts_with("sqlite:") {
+        return url.to_string();
+    }
+
+    // Try to parse as a standard URL (postgres://, postgresql://)
+    match url::Url::parse(url) {
+        Ok(mut parsed) => {
+            if parsed.password().is_some() {
+                // url::Url::set_password returns Result<(), ()>
+                let _ = parsed.set_password(Some("***"));
+            }
+            parsed.to_string()
+        }
+        // If parsing fails, return the URL with a generic redaction
+        Err(_) => url.to_string(),
     }
 }
 

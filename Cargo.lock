@@ -332,6 +332,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "aws-sdk-kms"
+version = "1.99.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa37c3e267142899d18cb1617258c93ed7a78873e9adff0221838b0e621188be"
+dependencies = [
+ "aws-credential-types",
+ "aws-runtime",
+ "aws-smithy-async",
+ "aws-smithy-http",
+ "aws-smithy-json",
+ "aws-smithy-observability",
+ "aws-smithy-runtime",
+ "aws-smithy-runtime-api",
+ "aws-smithy-types",
+ "aws-types",
+ "bytes",
+ "fastrand",
+ "http 0.2.12",
+ "http 1.4.0",
+ "regex-lite",
+ "tracing",
+]
+
+[[package]]
 name = "aws-sdk-s3"
 version = "1.122.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2464,9 +2488,9 @@ dependencies = [
 
 [[package]]
 name = "libc"
-version = "0.2.180"
+version = "0.2.181"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bcc35a38544a891a5f7c865aca548a982ccb3b8650a5b06d0fd33a10283c56fc"
+checksum = "459427e2af2b9c839b132acb702a1c654d95e10f8c326bfc2ad11310e458b1c5"
 
 [[package]]
 name = "libm"
@@ -4708,7 +4732,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.2.14"
+version = "2026.2.15"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -4731,7 +4755,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.2.14"
+version = "2026.2.15"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4772,7 +4796,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.2.14"
+version = "2026.2.15"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4791,7 +4815,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.2.14"
+version = "2026.2.15"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4799,7 +4823,9 @@ dependencies = [
  "aws-config",
  "aws-lc-rs",
  "aws-sdk-dsql",
+ "aws-sdk-kms",
  "aws-sdk-s3",
+ "aws-smithy-types",
  "axum",
  "axum-extra",
  "axum-server",
@@ -4826,6 +4852,7 @@ dependencies = [
  "sqlx",
  "ssh-key",
  "subtle",
+ "tempfile",
  "thiserror 2.0.18",
  "time",
  "tokio",
@@ -4845,7 +4872,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.2.14"
+version = "2026.2.15"
 dependencies = [
  "anyhow",
  "aws-lc-rs",

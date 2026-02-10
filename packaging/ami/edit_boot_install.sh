@@ -121,25 +121,31 @@ if [ -f "$efi_mount/EFI/Linux/kiwi.efi" ]; then
     UKI_PATH="$efi_mount/EFI/BOOT/$EFI_BINARY"
 
     if objcopy -O binary -j .cmdline "$UKI_PATH" "$CMDLINE_BIN" 2>/dev/null; then
-        # SHA-256 hash of the command line content
-        CMDLINE_HASH=$(sha256sum "$CMDLINE_BIN" | cut -d' ' -f1)
-        echo "INFO: Kernel command line SHA-256: $CMDLINE_HASH"
+        # SHA-384 hash of the command line content (matches NitroTPM PCR bank)
+        CMDLINE_HASH=$(sha384sum "$CMDLINE_BIN" | cut -d' ' -f1)
+        echo "INFO: Kernel command line SHA-384: $CMDLINE_HASH"
 
-        # Simulate PCR extend: SHA-256(32_zero_bytes || cmdline_hash)
-        # Initial PCR state is 32 zero bytes (SHA-256 bank)
-        ZERO_PCR="0000000000000000000000000000000000000000000000000000000000000000"
-        PCR12=$(printf '%s%s' "$ZERO_PCR" "$CMDLINE_HASH" | xxd -r -p | sha256sum | cut -d' ' -f1)
+        # Simulate PCR extend: SHA-384(48_zero_bytes || cmdline_hash)
+        # Initial PCR state is 48 zero bytes (SHA-384 bank)
+        ZERO_PCR="000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+        PCR12=$(printf '%s%s' "$ZERO_PCR" "$CMDLINE_HASH" | xxd -r -p | sha384sum | cut -d' ' -f1)
         echo "INFO: PCR12 value: $PCR12"
 
-        # Merge PCR12 into the measurements JSON
+        # Merge PCR12 into the measurements JSON and flatten nested values
+        # nitro-tpm-pcr-compute nests PCR values under "Measurements",
+        # but the workflow reads from the top level.
         python3 -c "
-import json, sys
+import json
 with open('$pcr_values_file', 'r') as f:
     data = json.load(f)
+measurements = data.get('Measurements', {})
+for key in ('PCR4', 'PCR7'):
+    if key in measurements and key not in data:
+        data[key] = measurements[key]
 data['PCR12'] = '$PCR12'
 with open('$pcr_values_file', 'w') as f:
     json.dump(data, f, indent=2)
-print('SUCCESS: PCR12 merged into', '$pcr_values_file')
+print('SUCCESS: PCR values merged into', '$pcr_values_file')
 "
     else
         echo "WARNING: Could not extract .cmdline section from UKI, skipping PCR12"
