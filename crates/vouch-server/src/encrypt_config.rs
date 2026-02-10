@@ -22,7 +22,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Args;
 use zeroize::Zeroizing;
 
-use crate::s3_config::{S3Config, S3TlsConfig};
+use crate::s3_config::{S3AcmeConfig, S3Config, S3TlsConfig};
 use crate::tpm_decrypt::{EncryptedEnvelope, aes_256_gcm_encrypt};
 
 /// Encrypt a plain S3Config JSON into a KMS-encrypted envelope.
@@ -95,8 +95,9 @@ pub async fn run(args: EncryptConfigArgs) -> Result<()> {
 
     tracing::info!("Config parsed successfully");
 
-    // 2. Extract wrapper fields (tls, version) that live outside the encrypted payload
+    // 2. Extract wrapper fields (tls, _acme, version) that live outside the encrypted payload
     let wrapper_tls: Option<S3TlsConfig> = config.tls.clone();
+    let wrapper_acme: Option<S3AcmeConfig> = config.acme.clone();
     let wrapper_version: u32 = config.version.unwrap_or(1);
 
     // 3. Remove tls and version from the inner JSON so they only appear in the wrapper
@@ -104,13 +105,14 @@ pub async fn run(args: EncryptConfigArgs) -> Result<()> {
         serde_json::from_slice(&config_bytes).context("Failed to parse config as JSON value")?;
     if let Some(obj) = inner_value.as_object_mut() {
         obj.remove("tls");
+        obj.remove("_acme");
         obj.remove("version");
     }
     let inner_json =
         serde_json::to_vec(&inner_value).context("Failed to re-serialize inner config")?;
 
     tracing::info!(
-        "Inner config: {} bytes (tls and version moved to wrapper)",
+        "Inner config: {} bytes (tls, _acme, and version moved to wrapper)",
         inner_json.len()
     );
 
@@ -163,6 +165,7 @@ pub async fn run(args: EncryptConfigArgs) -> Result<()> {
         encrypted_data,
         version: wrapper_version,
         tls: wrapper_tls,
+        acme: wrapper_acme,
     };
 
     // 8. Serialize as pretty JSON to stdout

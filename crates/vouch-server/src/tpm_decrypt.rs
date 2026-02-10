@@ -62,6 +62,10 @@ pub struct EncryptedEnvelope {
 
     /// TLS config (promoted to wrapper for hot-reload without decryption).
     pub tls: Option<super::s3_config::S3TlsConfig>,
+
+    /// ACME config (promoted to wrapper for external certificate renewal processes).
+    #[serde(rename = "_acme", default, skip_serializing_if = "Option::is_none")]
+    pub acme: Option<super::s3_config::S3AcmeConfig>,
 }
 
 // Custom Debug that redacts ciphertext fields to prevent accidental log exposure.
@@ -73,6 +77,7 @@ impl std::fmt::Debug for EncryptedEnvelope {
             .field("encrypted_data", &"[REDACTED]")
             .field("version", &self.version)
             .field("tls", &self.tls)
+            .field("acme", &self.acme)
             .finish()
     }
 }
@@ -819,6 +824,10 @@ mod tests {
             "tls": {
                 "cert": "base64cert",
                 "key": "base64key"
+            },
+            "_acme": {
+                "account_key": "acme-secret-key",
+                "email": "admin@example.com"
             }
         }"#;
 
@@ -828,6 +837,10 @@ mod tests {
         assert!(envelope.tls.is_some());
         let tls = envelope.tls.unwrap();
         assert_eq!(tls.cert, Some("base64cert".to_string()));
+        assert!(envelope.acme.is_some());
+        let acme = envelope.acme.unwrap();
+        assert_eq!(acme.account_key, "acme-secret-key");
+        assert_eq!(acme.email, "admin@example.com");
     }
 
     #[test]
@@ -842,6 +855,7 @@ mod tests {
         assert_eq!(envelope.kms_key_id, "mrk-abc");
         assert_eq!(envelope.version, 1); // default
         assert!(envelope.tls.is_none());
+        assert!(envelope.acme.is_none());
     }
 
     #[test]
@@ -1115,6 +1129,10 @@ mod tests {
                 cert: Some("test-cert".to_string()),
                 key: Some("test-key".to_string()),
             }),
+            acme: Some(crate::s3_config::S3AcmeConfig {
+                account_key: "acme-secret".to_string(),
+                email: "acme@example.com".to_string(),
+            }),
         };
 
         // Serialize to JSON
@@ -1126,12 +1144,17 @@ mod tests {
         assert!(json.contains("encrypted_data"));
         assert!(json.contains("\"version\": 1"));
         assert!(json.contains("test-cert"));
+        assert!(json.contains("_acme"));
+        assert!(json.contains("acme@example.com"));
 
         // Deserialize back
         let parsed: EncryptedEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.kms_key_id, "mrk-test1234");
         assert_eq!(parsed.version, 1);
         assert!(parsed.tls.is_some());
+        assert!(parsed.acme.is_some());
+        let acme = parsed.acme.as_ref().unwrap();
+        assert_eq!(acme.email, "acme@example.com");
 
         // Decrypt
         let decoded_key = BASE64.decode(&parsed.encrypted_data_key).unwrap();
@@ -1139,6 +1162,48 @@ mod tests {
         let decrypted = aes_256_gcm_decrypt(&decoded_key, &decoded_data).unwrap();
 
         assert_eq!(&**decrypted, sample_config);
+    }
+
+    /// Verify `skip_serializing_if` omits `_acme` when `None`.
+    #[test]
+    fn test_envelope_serialization_omits_acme_when_none() {
+        let envelope = EncryptedEnvelope {
+            kms_key_id: "mrk-test".to_string(),
+            encrypted_data_key: "a2V5".to_string(),
+            encrypted_data: "ZGF0YQ==".to_string(),
+            version: 1,
+            tls: None,
+            acme: None,
+        };
+
+        let json = serde_json::to_string(&envelope).unwrap();
+        assert!(
+            !json.contains("_acme"),
+            "JSON should not contain _acme when None"
+        );
+    }
+
+    /// Verify `S3AcmeConfig` Debug impl redacts `account_key`.
+    #[test]
+    fn test_s3_acme_config_debug_redacts_account_key() {
+        let acme = crate::s3_config::S3AcmeConfig {
+            account_key: "super-secret-key-material".to_string(),
+            email: "admin@example.com".to_string(),
+        };
+
+        let debug_output = format!("{acme:?}");
+        assert!(
+            debug_output.contains("[REDACTED]"),
+            "Debug output should contain [REDACTED]"
+        );
+        assert!(
+            !debug_output.contains("super-secret-key-material"),
+            "Debug output should not contain the actual account key"
+        );
+        assert!(
+            debug_output.contains("admin@example.com"),
+            "Debug output should contain the email"
+        );
     }
 
     /// End-to-end CMS EnvelopedData parsing + decryption with a hand-crafted structure.

@@ -55,6 +55,29 @@ pub struct S3TlsConfig {
     pub key: Option<String>,
 }
 
+/// Nested ACME (Let's Encrypt) configuration from S3.
+///
+/// This is promoted to the envelope wrapper (alongside `tls` and `version`)
+/// so that external ACME certificate renewal processes can read it directly
+/// from the S3 object without KMS decryption.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct S3AcmeConfig {
+    /// ACME account private key (PEM or base64-encoded).
+    pub account_key: String,
+    /// ACME account email address.
+    pub email: String,
+}
+
+// Custom Debug that redacts account_key to prevent accidental log exposure.
+impl std::fmt::Debug for S3AcmeConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3AcmeConfig")
+            .field("account_key", &"[REDACTED]")
+            .field("email", &self.email)
+            .finish()
+    }
+}
+
 /// Nested OIDC configuration from S3.
 #[derive(Debug, Deserialize, Default)]
 pub struct S3OidcConfig {
@@ -129,6 +152,11 @@ pub struct S3Config {
     // TLS configuration
     /// Nested TLS config.
     pub tls: Option<S3TlsConfig>,
+
+    // ACME configuration (promoted to envelope wrapper for external access)
+    /// Nested ACME config.
+    #[serde(rename = "_acme")]
+    pub acme: Option<S3AcmeConfig>,
 
     // Domain restrictions
     /// Allowed email domains for enrollment.
@@ -250,8 +278,9 @@ pub async fn fetch_s3_config(
             envelope.tls.is_some()
         );
 
-        // Extract wrapper fields (TLS and version) before decryption
+        // Extract wrapper fields (TLS, ACME, and version) before decryption
         let wrapper_tls = envelope.tls.clone();
+        let wrapper_acme = envelope.acme.clone();
         let wrapper_version = envelope.version;
 
         // Decrypt the inner config via attested KMS call
@@ -265,6 +294,10 @@ pub async fn fetch_s3_config(
         // TLS from wrapper takes precedence (allows hot-reload without decryption)
         if wrapper_tls.is_some() {
             config.tls = wrapper_tls;
+        }
+        // ACME from wrapper (for external certificate renewal processes)
+        if wrapper_acme.is_some() {
+            config.acme = wrapper_acme;
         }
         // Version from wrapper (envelope version, not inner config version)
         if config.version.is_none() {
@@ -394,6 +427,7 @@ async fn fetch_runtime_config(
         let config = S3Config {
             version: Some(envelope.version),
             tls: envelope.tls,
+            acme: envelope.acme,
             ..S3Config::default()
         };
 
@@ -831,6 +865,27 @@ mod tests {
             config.allowed_domains,
             Some(vec!["example.com".to_string(), "test.com".to_string()])
         );
+    }
+
+    #[test]
+    fn test_s3_config_deserialization_with_acme() {
+        let json = r#"{
+            "version": 1,
+            "rp_id": "vouch.example.com",
+            "_acme": {
+                "account_key": "secret-acme-key",
+                "email": "admin@example.com"
+            }
+        }"#;
+
+        let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
+
+        assert_eq!(config.version, Some(1));
+        assert_eq!(config.rp_id, Some("vouch.example.com".to_string()));
+        assert!(config.acme.is_some());
+        let acme = config.acme.unwrap();
+        assert_eq!(acme.account_key, "secret-acme-key");
+        assert_eq!(acme.email, "admin@example.com");
     }
 
     #[test]
