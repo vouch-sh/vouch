@@ -4,8 +4,8 @@
 //! Obtains temporary AWS credentials using Vouch session and STS.
 
 use anyhow::{Context, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 
@@ -158,8 +158,8 @@ pub async fn run(server: &str, role_arn: &str, session_name: Option<&str>) -> Re
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     /// Build a minimal JWT (header.payload.signature) from a JSON payload.
     fn make_jwt(payload: &serde_json::Value) -> String {
@@ -182,9 +182,15 @@ mod tests {
         });
         let token = make_jwt(&claims);
         let decoded = decode_jwt_payload(&token).expect("valid JWT");
-        assert_eq!(decoded.get("email").unwrap().as_str().unwrap(), "alice@example.com");
+        assert_eq!(
+            decoded.get("email").unwrap().as_str().unwrap(),
+            "alice@example.com"
+        );
         assert_eq!(decoded.get("hd").unwrap().as_str().unwrap(), "example.com");
-        assert_eq!(decoded.get("sub").unwrap().as_str().unwrap(), "alice@example.com");
+        assert_eq!(
+            decoded.get("sub").unwrap().as_str().unwrap(),
+            "alice@example.com"
+        );
     }
 
     #[test]
@@ -212,7 +218,10 @@ mod tests {
         });
         let tags = build_session_tags(&claims);
         assert_eq!(tags.len(), 2);
-        assert_eq!(tags[0], ("email".to_string(), "alice@example.com".to_string()));
+        assert_eq!(
+            tags[0],
+            ("email".to_string(), "alice@example.com".to_string())
+        );
         assert_eq!(tags[1], ("domain".to_string(), "example.com".to_string()));
     }
 
@@ -223,7 +232,10 @@ mod tests {
         });
         let tags = build_session_tags(&claims);
         assert_eq!(tags.len(), 1);
-        assert_eq!(tags[0], ("email".to_string(), "alice@personal.com".to_string()));
+        assert_eq!(
+            tags[0],
+            ("email".to_string(), "alice@personal.com".to_string())
+        );
     }
 
     #[test]

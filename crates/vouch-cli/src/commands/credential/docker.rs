@@ -300,8 +300,7 @@ async fn get_ecr_authorization_token(
     .context("failed to call ECR GetAuthorizationToken")?;
 
     let ecr_response: EcrAuthorizationResponse =
-        serde_json::from_str(&response_body)
-            .context("failed to parse ECR response")?;
+        serde_json::from_str(&response_body).context("failed to parse ECR response")?;
 
     // The authorization token is base64(username:password)
     // We need to extract just the password part

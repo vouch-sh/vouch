@@ -20,8 +20,7 @@ use crate::integrations::aws::codeartifact::{
 };
 use crate::integrations::aws::get_local_aws_role;
 use crate::integrations::aws::sts::{
-    assume_role_with_web_identity, extract_partition_from_role_arn,
-    get_domain_suffix_for_partition,
+    assume_role_with_web_identity, extract_partition_from_role_arn, get_domain_suffix_for_partition,
 };
 use crate::session::get_user_email;
 

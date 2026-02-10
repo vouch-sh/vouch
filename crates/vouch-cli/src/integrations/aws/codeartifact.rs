@@ -140,8 +140,7 @@ pub async fn get_authorization_token(
     .context("failed to call CodeArtifact GetAuthorizationToken")?;
 
     let mut ca_response: GetAuthorizationTokenResponse =
-        serde_json::from_str(&response_body)
-            .context("failed to parse CodeArtifact response")?;
+        serde_json::from_str(&response_body).context("failed to parse CodeArtifact response")?;
 
     #[allow(clippy::cast_possible_truncation)]
     let expiration = ca_response.expiration as i64;
@@ -223,7 +222,8 @@ mod tests {
 
     #[test]
     fn test_parse_codeartifact_url_npm_path() {
-        let url = "https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/my-repo/";
+        let url =
+            "https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/my-repo/";
         let result = parse_codeartifact_url(url).expect("should parse");
         assert_eq!(result.domain, "my-domain");
         assert_eq!(result.domain_owner, "123456789012");
@@ -249,12 +249,14 @@ mod tests {
         // Missing domain owner
         assert!(parse_codeartifact_url(".d.codeartifact.us-east-1.amazonaws.com").is_none());
         // Missing domain
-        assert!(parse_codeartifact_url("-123456789012.d.codeartifact.us-east-1.amazonaws.com").is_none());
+        assert!(
+            parse_codeartifact_url("-123456789012.d.codeartifact.us-east-1.amazonaws.com")
+                .is_none()
+        );
     }
 
     #[test]
     fn test_parse_codeartifact_url_empty() {
         assert!(parse_codeartifact_url("").is_none());
     }
-
 }

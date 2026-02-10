@@ -287,9 +287,7 @@ async fn handle_get(registry: &RegistryInfo) -> Result<()> {
 ///
 /// Uses the Vouch → STS → CodeArtifact flow to obtain a bearer token
 /// that Cargo can use for the CodeArtifact Cargo registry.
-async fn handle_get_codeartifact(
-    registry: &codeartifact::CodeArtifactRegistry,
-) -> Result<()> {
+async fn handle_get_codeartifact(registry: &codeartifact::CodeArtifactRegistry) -> Result<()> {
     // Load Vouch config to get server URL
     let config = match Config::load() {
         Ok(c) => c,

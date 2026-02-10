@@ -51,12 +51,9 @@ pub async fn run(
     // to support China, GovCloud, and other partitions.
     let partition = get_local_aws_role()
         .and_then(|role| extract_partition_from_role_arn(&role).map(String::from));
-    let domain_suffix =
-        get_domain_suffix_for_partition(partition.as_deref().unwrap_or("aws"));
+    let domain_suffix = get_domain_suffix_for_partition(partition.as_deref().unwrap_or("aws"));
 
-    let ca_host = format!(
-        "{domain}-{domain_owner}.d.codeartifact.{region}.{domain_suffix}"
-    );
+    let ca_host = format!("{domain}-{domain_owner}.d.codeartifact.{region}.{domain_suffix}");
 
     match tool {
         Tool::Cargo => setup_cargo(&ca_host, repository),
@@ -87,20 +84,14 @@ fn setup_cargo(ca_host: &str, repository: &str) -> Result<()> {
     println!("  cargo build --registry {}", registry_name);
     println!("  cargo publish --registry {}", registry_name);
     println!();
-    println!(
-        "Cargo will automatically call Vouch to obtain a fresh CodeArtifact"
-    );
+    println!("Cargo will automatically call Vouch to obtain a fresh CodeArtifact");
     println!("token each time it needs to authenticate.");
 
     Ok(())
 }
 
 /// Configure Cargo registry in ~/.cargo/config.toml.
-fn configure_cargo_registry(
-    registry_name: &str,
-    index_url: &str,
-    vouch_path: &str,
-) -> Result<()> {
+fn configure_cargo_registry(registry_name: &str, index_url: &str, vouch_path: &str) -> Result<()> {
     let config_path = CargoConfig::default_path()?;
     let mut config = CargoConfig::load_from(config_path.clone())
         .unwrap_or_else(|_| CargoConfig::empty(config_path));
@@ -115,14 +106,14 @@ fn configure_cargo_registry(
     }
 
     // Set the credential provider and index URL for this registry
-    config.set_registry_provider(
-        registry_name,
-        &[vouch_path, "credential", "cargo", "--"],
-    );
+    config.set_registry_provider(registry_name, &[vouch_path, "credential", "cargo", "--"]);
     config.set_registry_index(registry_name, index_url);
 
     config.save()?;
-    println!("Cargo configured for CodeArtifact registry '{}'", registry_name);
+    println!(
+        "Cargo configured for CodeArtifact registry '{}'",
+        registry_name
+    );
     println!("Configuration written to: {}", config.path().display());
 
     Ok(())
@@ -228,7 +219,11 @@ async fn setup_npm(
 
     let registry_url = format!("https://{ca_host}/npm/{repository}/");
 
-    write_npmrc(ca_host, repository, result.authorization_token.expose_secret())?;
+    write_npmrc(
+        ca_host,
+        repository,
+        result.authorization_token.expose_secret(),
+    )?;
 
     println!();
     println!("Registry URL: {}", registry_url);

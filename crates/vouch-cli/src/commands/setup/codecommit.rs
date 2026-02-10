@@ -59,9 +59,7 @@ pub async fn run(region: Option<&str>, profile: Option<&str>, configure: bool) -
     // Build the helper command using the AWS CLI's built-in credential helper.
     // The `!` prefix tells git this is a shell command, not an executable name.
     // `$@` passes through the git credential operation (get/store/erase).
-    let helper_command = format!(
-        "!aws --profile {profile_name} codecommit credential-helper $@"
-    );
+    let helper_command = format!("!aws --profile {profile_name} codecommit credential-helper $@");
 
     // Determine the credential pattern(s)
     let patterns = if let Some(r) = region {
@@ -174,13 +172,10 @@ fn check_aws_config(profile: Option<&str>) -> Result<(String, Option<String>)> {
 
 /// Verify the AWS CLI is installed and accessible.
 fn check_aws_cli_installed() -> Result<()> {
-    let output = Command::new("aws")
-        .arg("--version")
-        .output()
-        .context(
-            "AWS CLI not found. Install it from https://aws.amazon.com/cli/\n\
+    let output = Command::new("aws").arg("--version").output().context(
+        "AWS CLI not found. Install it from https://aws.amazon.com/cli/\n\
              The AWS CLI is required for CodeCommit credential generation.",
-        )?;
+    )?;
 
     if !output.status.success() {
         anyhow::bail!(

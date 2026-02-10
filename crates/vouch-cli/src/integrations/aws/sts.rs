@@ -68,7 +68,10 @@ pub async fn assume_role_with_web_identity(
     let sts_url = format!("https://sts.{region}.{domain_suffix}/");
 
     let mut form_params: Vec<(String, String)> = vec![
-        ("Action".to_string(), "AssumeRoleWithWebIdentity".to_string()),
+        (
+            "Action".to_string(),
+            "AssumeRoleWithWebIdentity".to_string(),
+        ),
         ("Version".to_string(), "2011-06-15".to_string()),
         ("RoleArn".to_string(), role_arn.to_string()),
         ("RoleSessionName".to_string(), role_session_name.to_string()),
@@ -330,16 +333,25 @@ mod tests {
         let tags = vec![("email".to_string(), "alice@example.com".to_string())];
         append_tag_form_params(&mut params, &tags);
         assert_eq!(params.len(), 2);
-        assert_eq!(params[0], ("Tags.member.1.Key".to_string(), "email".to_string()));
+        assert_eq!(
+            params[0],
+            ("Tags.member.1.Key".to_string(), "email".to_string())
+        );
         assert_eq!(
             params[1],
-            ("Tags.member.1.Value".to_string(), "alice@example.com".to_string())
+            (
+                "Tags.member.1.Value".to_string(),
+                "alice@example.com".to_string()
+            )
         );
     }
 
     #[test]
     fn test_append_tag_form_params_multiple_tags() {
-        let mut params = vec![("Action".to_string(), "AssumeRoleWithWebIdentity".to_string())];
+        let mut params = vec![(
+            "Action".to_string(),
+            "AssumeRoleWithWebIdentity".to_string(),
+        )];
         let tags = vec![
             ("email".to_string(), "alice@example.com".to_string()),
             ("domain".to_string(), "example.com".to_string()),
@@ -347,12 +359,21 @@ mod tests {
         append_tag_form_params(&mut params, &tags);
         // Original param + 2 tags * 2 params each = 5 total
         assert_eq!(params.len(), 5);
-        assert_eq!(params[1], ("Tags.member.1.Key".to_string(), "email".to_string()));
+        assert_eq!(
+            params[1],
+            ("Tags.member.1.Key".to_string(), "email".to_string())
+        );
         assert_eq!(
             params[2],
-            ("Tags.member.1.Value".to_string(), "alice@example.com".to_string())
+            (
+                "Tags.member.1.Value".to_string(),
+                "alice@example.com".to_string()
+            )
         );
-        assert_eq!(params[3], ("Tags.member.2.Key".to_string(), "domain".to_string()));
+        assert_eq!(
+            params[3],
+            ("Tags.member.2.Key".to_string(), "domain".to_string())
+        );
         assert_eq!(
             params[4],
             ("Tags.member.2.Value".to_string(), "example.com".to_string())
