@@ -51,8 +51,8 @@ $ git push origin main    # Just works
  |  |  * vouch status                                                    |  |
  |  |  * vouch logout                                                    |  |
  |  |  * vouch keys        (interactive menu, or list|remove|rename)     |  |
- |  |  * vouch credential ssh|aws|gcp|github|k8s|cargo                    |  |
- |  |  * vouch setup ssh|aws|gcp|github|k8s|cargo                        |  |
+ |  |  * vouch credential ssh|aws|github|docker|cargo|codeartifact        |  |
+ |  |  * vouch setup ssh|aws|github|docker|cargo|eks|codeartifact|codecommit |  |
  |  |  * vouch doctor     (diagnostic checks)                            |  |
  |  |  * vouch completions (shell completions)                           |  |
  |  +---------------------------------------------------------------------+  |
@@ -631,61 +631,7 @@ How it works:
 5. Credentials expire in 1 hour, auto-refresh within session
 ```
 
-### GCP Integration
-
-```
-~/.config/gcloud/vouch-credentials.json:
-  {
-    "type": "external_account",
-    "audience": "//iam.googleapis.com/projects/PROJECT/locations/global/workloadIdentityPools/POOL/providers/PROVIDER",
-    "subject_token_type": "urn:ietf:params:oauth:token-type:id_token",
-    "token_url": "https://sts.googleapis.com/v1/token",
-    "credential_source": {
-      "executable": {
-        "command": "vouch credential gcp --audience AUDIENCE"
-      }
-    }
-  }
-
-How it works:
-1. GCP SDK/CLI calls vouch credential gcp via executable credential source
-2. vouch exchanges session token for OIDC ID token from server
-3. vouch returns token in AIP-4117 external account format
-4. GCP SDK exchanges token with STS for Google access token
-5. If service_account_impersonation_url is set, SDK impersonates the service account
-```
-
-**`vouch setup gcp` creates:**
-- Credential configuration file at `~/.config/gcloud/vouch-credentials.json`
-- Cache directory at `~/.cache/vouch/` for token caching
-- Outputs instructions for setting `GOOGLE_APPLICATION_CREDENTIALS`
-
-**Server-side configuration:**
-- Organization admins configure GCP settings via `/v1/integrations/gcp` API
-- Settings include: project_number, pool_id, provider_id, optional service_account
-- CLI fetches configuration from server when no CLI args provided
-
-**GCP Workload Identity Federation setup:**
-```bash
-# 1. Create Workload Identity Pool
-gcloud iam workload-identity-pools create vouch-pool \
-  --location=global \
-  --display-name="Vouch Pool"
-
-# 2. Create OIDC Provider
-gcloud iam workload-identity-pools providers create-oidc vouch-provider \
-  --location=global \
-  --workload-identity-pool=vouch-pool \
-  --issuer-uri="https://vouch.example.com" \
-  --attribute-mapping="google.subject=assertion.sub,attribute.email=assertion.email"
-
-# 3. Grant service account impersonation
-gcloud iam service-accounts add-iam-policy-binding SA@PROJECT.iam.gserviceaccount.com \
-  --role=roles/iam.workloadIdentityUser \
-  --member="principalSet://iam.googleapis.com/projects/PROJECT_NUM/locations/global/workloadIdentityPools/vouch-pool/attribute.email/user@example.com"
-```
-
-### Kubernetes Integration
+### EKS Integration
 
 ```
 ~/.kube/config:
@@ -693,45 +639,41 @@ gcloud iam service-accounts add-iam-policy-binding SA@PROJECT.iam.gserviceaccoun
   - name: vouch-my-cluster
     user:
       exec:
-        apiVersion: client.authentication.k8s.io/v1
-        command: vouch
-        args: ["credential", "k8s", "--audience", "my-cluster"]
-        interactiveMode: Never
+        apiVersion: client.authentication.k8s.io/v1beta1
+        command: aws
+        args: ["eks", "get-token", "--cluster-name", "my-cluster"]
+        env:
+        - name: AWS_PROFILE
+          value: vouch-my-cluster
 
 How it works:
-1. kubectl calls vouch credential k8s via exec credential plugin
-2. vouch exchanges session token for OIDC ID token from server
-3. vouch returns token in ExecCredential format
-4. kubectl presents token to Kubernetes API server
-5. API server validates token against Vouch's JWKS endpoint
-6. Username extracted from email claim for RBAC
+1. kubectl calls aws eks get-token via exec credential plugin
+2. AWS CLI uses credential_process to call vouch credential aws
+3. vouch exchanges session token for OIDC token, calls STS AssumeRoleWithWebIdentity
+4. AWS CLI uses the temporary credentials to get an EKS bearer token
+5. kubectl presents token to EKS API server
+6. EKS validates via IAM and Access Entries for RBAC
 ```
 
-**`vouch setup k8s` creates:**
-- Exec credential configuration in `~/.kube/config`
-- New user and context pointing to the Vouch credential plugin
-- Instructions for cluster OIDC configuration
+**`vouch setup eks` creates:**
+- AWS profile in `~/.aws/config` with `credential_process` pointing to vouch
+- Kubeconfig user and context configured to use `aws eks get-token`
+- No cluster-side OIDC configuration needed — uses IAM-based auth via EKS Access Entries
 
-**Kubernetes cluster configuration:**
-- API server must be configured with Vouch as OIDC provider
-- Supports self-managed, EKS, GKE, and AKS clusters
-
-**Self-managed Kubernetes:**
+**EKS Access Entries setup:**
 ```bash
-# kube-apiserver flags
---oidc-issuer-url=https://vouch.example.com
---oidc-client-id=my-cluster
---oidc-username-claim=email
---oidc-username-prefix=-
-```
-
-**Amazon EKS:**
-```bash
-aws eks associate-identity-provider-config \
+# Grant IAM role access to the EKS cluster
+aws eks create-access-entry \
   --cluster-name my-cluster \
-  --oidc \
-  --identity-provider-config-name vouch \
-  --identity-provider-config issuerUrl=https://vouch.example.com,clientId=my-cluster,usernameClaim=email
+  --principal-arn arn:aws:iam::123456789:role/vouch-developer \
+  --type STANDARD
+
+# Associate an access policy
+aws eks associate-access-policy \
+  --cluster-name my-cluster \
+  --principal-arn arn:aws:iam::123456789:role/vouch-developer \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope type=cluster
 ```
 
 ### GitHub Integration
@@ -789,6 +731,87 @@ vouch setup cargo --registry my-private-registry --configure
 # Then use Cargo normally
 cargo publish --registry my-private-registry
 cargo build  # fetches from private registries automatically
+```
+
+### Docker Integration
+
+```
+~/.docker/config.json:
+  {
+    "credHelpers": {
+      "123456789.dkr.ecr.us-east-1.amazonaws.com": "vouch"
+    }
+  }
+
+How it works:
+1. Docker calls vouch as a credential helper (docker-credential-vouch)
+2. vouch exchanges session token for AWS credentials via credential_process
+3. vouch calls ECR GetAuthorizationToken with AWS credentials
+4. Returns Docker credentials (username/password) for the ECR registry
+5. Credentials auto-refresh within the session
+```
+
+**`vouch setup docker` creates:**
+- Docker credential helper configuration in `~/.docker/config.json`
+- Maps ECR registry hosts to the vouch credential helper
+
+### CodeArtifact Integration
+
+```
+~/.aws/config:
+  [profile vouch-codeartifact]
+    credential_process = vouch credential aws --role arn:aws:iam::123456789:role/developer
+
+How it works:
+1. vouch credential codeartifact calls vouch credential aws to get temporary AWS credentials
+2. Uses those credentials to call CodeArtifact GetAuthorizationToken
+3. Returns an authorization token for the CodeArtifact domain
+4. Token is used by package managers (npm, pip, cargo, maven) for registry auth
+```
+
+**`vouch setup codeartifact` creates:**
+- Package manager configuration pointing to the CodeArtifact repository
+- Credential provider configuration that chains through `vouch credential aws`
+
+**Usage:**
+```bash
+# Configure npm for CodeArtifact
+vouch setup codeartifact --domain my-domain --repository my-repo --tool npm
+
+# Configure pip for CodeArtifact
+vouch setup codeartifact --domain my-domain --repository my-repo --tool pip
+
+# Then use package managers normally
+npm install my-private-package
+pip install my-private-package
+```
+
+### CodeCommit Integration
+
+```
+~/.gitconfig:
+  [credential "https://git-codecommit.us-east-1.amazonaws.com"]
+    helper = vouch credential codecommit
+
+How it works:
+1. Git calls vouch as a credential helper for CodeCommit HTTPS URLs
+2. vouch exchanges session token for AWS credentials via credential_process
+3. Uses AWS credentials to generate CodeCommit Git credentials
+4. Returns username/password for HTTPS Git authentication
+```
+
+**`vouch setup codecommit` creates:**
+- Git credential helper configuration in `~/.gitconfig` for CodeCommit URLs
+- Chains through `vouch credential aws` for IAM authentication
+
+**Usage:**
+```bash
+# Configure git for CodeCommit
+vouch setup codecommit --region us-east-1
+
+# Then use git normally
+git clone https://git-codecommit.us-east-1.amazonaws.com/v1/repos/my-repo
+git push origin main
 ```
 
 ## Data Model

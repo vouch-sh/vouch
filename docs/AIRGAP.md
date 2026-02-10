@@ -392,7 +392,7 @@ VOUCH_SSH_CA_KEY=<base64-encoded-ssh-ca-private-key>
 # VOUCH_SSH_CA_KEY_PATH=/secrets/ssh_ca_key
 
 # -----------------------------------------------------------------------------
-# OIDC Provider Configuration (for GCP Workload Identity Federation)
+# OIDC Provider Configuration
 # Generate with: base64 -i oidc_signing_key.pem | tr -d '\n'
 # -----------------------------------------------------------------------------
 

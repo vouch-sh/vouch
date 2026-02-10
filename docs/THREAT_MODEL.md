@@ -34,7 +34,7 @@ This threat model covers:
 - **vouch CLI** — User-facing command-line tool for authentication and credential management
 - **vouch-agent** — Background daemon managing sessions, SSH certificates, and credential caching
 - **Vouch Server** — Authentication backend with OIDC provider, SSH CA, and credential issuance
-- **Integration Points** — SSH, AWS, GCP, Kubernetes, and GitHub credential flows
+- **Integration Points** — SSH, AWS, EKS, GitHub, Docker, Cargo, CodeArtifact, and CodeCommit credential flows
 
 Out of scope:
 - Physical security of hardware authenticator devices (covered by vendor security models)
@@ -61,15 +61,15 @@ Out of scope:
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                                                                                 │
 │                              External Services                                  │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐        │
-│  │ Google/Entra │  │   AWS STS    │  │   GCP STS    │  │   GitHub     │        │
-│  │    OIDC      │  │              │  │              │  │   API        │        │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘        │
-│         │                 │                 │                 │                │
-└─────────┼─────────────────┼─────────────────┼─────────────────┼────────────────┘
-          │                 │                 │                 │
-          │ HTTPS/TLS 1.3   │                 │                 │
-          ▼                 ▼                 ▼                 ▼
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                         │
+│  │ Google/Entra │  │   AWS STS    │  │   GitHub     │                         │
+│  │    OIDC      │  │   / EKS     │  │   API        │                         │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘                         │
+│         │                 │                 │                                 │
+└─────────┼─────────────────┼─────────────────┼─────────────────────────────────┘
+          │                 │                 │
+          │ HTTPS/TLS 1.3   │                 │
+          ▼                 ▼                 ▼
 ┌─────────────────────────────────────────────────────────────────────────────────┐
 │                         TRUST BOUNDARY: Vouch Server                            │
 │  ┌─────────────────────────────────────────────────────────────────────────┐   │
@@ -145,7 +145,7 @@ Out of scope:
 | **Server ↔ Workstation** | Server to user machine | TLS 1.3, JWT validation |
 | **CLI ↔ Agent** | User commands to daemon | Unix socket permissions (0700) |
 | **Agent ↔ Hardware Authenticator** | Software to hardware | CTAP2 protocol, PIN verification |
-| **Workstation ↔ External Services** | Local machine to AWS/GCP/GitHub | TLS 1.3, short-lived tokens |
+| **Workstation ↔ External Services** | Local machine to AWS/GitHub | TLS 1.3, short-lived tokens |
 
 ---
 
@@ -158,7 +158,7 @@ Out of scope:
 | **Authenticator Private Keys** | Non-exportable FIDO2 keys | C > I > A |
 | **Session Tokens (JWT)** | 8-hour authentication tokens | C > I > A |
 | **SSH CA Private Key** | Ed25519 key for signing certificates | C > I > A |
-| **User Credentials** | Temporary AWS/GCP/GitHub tokens | C > I > A |
+| **User Credentials** | Temporary AWS/GitHub tokens | C > I > A |
 | **Audit Logs** | Credential issuance records | I > A > C |
 
 ### Supporting Assets
@@ -579,8 +579,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 |----|------------|--------|
 | M-58 | SSH principals derived from verified email only | Implemented |
 | M-59 | AWS roles require IAM trust policy | Implemented |
-| M-60 | GCP uses Workload Identity with attribute mapping | Implemented |
-| M-61 | OAuth scopes validated against client registration | Implemented |
+| M-60 | OAuth scopes validated against client registration | Implemented |
 
 ---
 

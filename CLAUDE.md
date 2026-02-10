@@ -22,7 +22,7 @@ vouch/
 
 **Agent IPC:** The CLI communicates with the agent daemon over a Unix socket (`~/.vouch/agent.sock`) using JSON-RPC 2.0 with 4-byte length-prefixed messages.
 
-**Database:** vouch-server uses SQLite (dev) and PostgreSQL (prod) via sqlx. Migrations live in `crates/vouch-server/migrations/{sqlite,postgres}/`.
+**Database:** vouch-server uses SQLite (dev), PostgreSQL (prod), and Aurora DSQL via sqlx with a `Pool` enum abstraction (`db/pool.rs`) that dispatches at runtime based on the `DATABASE_URL` scheme. Query building uses `sea-query` for dynamic SQL. DSQL endpoints (hostname contains `.dsql.` and ends `.on.aws`) auto-generate IAM auth tokens. Migrations live in `crates/vouch-server/migrations/{sqlite,postgres}/`. Domain modules are in `crates/vouch-server/src/db/` (users, sessions, authenticators, oauth, scim, etc.).
 
 **Key flows:**
 1. `vouch enroll` → Browser OIDC → WebAuthn in browser → CLI receives session token (first key)
@@ -32,6 +32,19 @@ vouch/
 5. `vouch credential aws` → exchange session for AWS temporary credentials
 6. `vouch setup eks` → configure kubeconfig for EKS (chains through `vouch credential aws` → `aws eks get-token`)
 7. Native tools (ssh, aws, kubectl) call vouch helpers transparently via `credential_process`
+
+## Server Architecture
+
+The server has two distinct route groups sharing `AppState`:
+
+- **API routes** (`/v1/`, `/oauth/`, `/scim/`, `/api/v1/`) — JSON responses, JWT Bearer auth. Includes OIDC endpoints, credential issuance, SCIM provisioning, GitHub webhooks, and admin APIs.
+- **UI routes** (`/`, `/login`, `/enroll/*`, `/docs/*`, `/applications/*`) — HTML via Askama templates, cookie-based sessions. Static assets embedded via `rust-embed`.
+
+When TLS is configured, a separate HTTP→HTTPS redirect router runs on port 80 (308 redirects, except `/health`).
+
+**AppState** holds: `Pool` (db), `ArcSwap<ServerConfig>` (lock-free config reload), `Webauthn`, optional `SshCa`, optional `GitHubApp`, `DpopState`, and `OidcSigningKey`.
+
+**Services layer** (`crates/vouch-server/src/services/`): Business logic called by handlers — `oidc/` (authorization, token issuance, DPoP, discovery, JWKS, token exchange), `integrations/` (AWS, GitHub App/OAuth/webhooks), `auth.rs` (WebAuthn verification).
 
 ## Build & Development Commands
 
@@ -63,7 +76,7 @@ make docker-build
 make docker-run
 ```
 
-**Toolchain:** Rust 1.93.0, edition 2024 (pinned in `rust-toolchain.toml`). Max line width 100 chars (`.rustfmt.toml`).
+**Toolchain:** Rust 1.93.0, edition 2024 (pinned in `rust-toolchain.toml`). Max line width 100 chars (`.rustfmt.toml`). Release profile uses `lto = true`, `codegen-units = 1`, `opt-level = "z"`, `panic = "abort"`, `strip = true`.
 
 ## Code Conventions
 
@@ -73,6 +86,7 @@ The workspace enforces panic-free code via clippy lints in `Cargo.toml`. These a
 - `unwrap_used`, `expect_used`, `panic`, `unreachable`, `todo`, `unimplemented` — use `?` and proper error handling
 - `indexing_slicing` — use `.get()` instead of `[]`
 - `unwrap_in_result`, `panic_in_result_fn`, `get_unwrap` — no panics in Result-returning functions
+- `exit` — no `std::process::exit()` calls; return errors instead
 - `unsafe_code` — denied at the Rust lint level
 
 The `vouch-tests` crate overrides these to allow unwrap/expect/panic in test code.
@@ -99,7 +113,7 @@ pub fn authenticate(...) -> Result<...>
 
 ### Dependencies
 
-Add sparingly. Prefer:
+All dependencies are declared at workspace level in the root `Cargo.toml` under `[workspace.dependencies]` with exact versions and minimal features. Crates reference them with `dep.workspace = true`. Add sparingly. Prefer:
 - `ctap-hid-fido2` for FIDO2 (pure Rust)
 - `keyring` for credential storage
 - `reqwest` + `rustls` (avoid OpenSSL)
@@ -223,12 +237,19 @@ cargo test --features yubikey-tests -- --ignored
 | Need | Location |
 |------|----------|
 | CLI commands | `crates/vouch-cli/src/commands/` |
-| Agent IPC | `crates/vouch-agent/src/` |
+| Credential helpers | `crates/vouch-cli/src/commands/credential/` |
+| Setup commands | `crates/vouch-cli/src/commands/setup/` |
+| Agent IPC | `crates/vouch-agent/src/` (client.rs, server.rs, protocol.rs, wire.rs) |
+| SSH agent protocol | `crates/vouch-agent/src/ssh_agent/` |
 | API types | `crates/vouch-common/src/api.rs` |
+| FIDO2 types | `crates/vouch-common/src/fido2_types.rs` |
 | Server handlers | `crates/vouch-server/src/handlers/` |
+| Server services | `crates/vouch-server/src/services/` (oidc/, integrations/) |
 | SSH CA | `crates/vouch-server/src/ssh_ca.rs` |
-| Database | `crates/vouch-server/src/db.rs` |
+| Database modules | `crates/vouch-server/src/db/` (pool.rs, users.rs, sessions.rs, etc.) |
 | HTML templates | `crates/vouch-server/templates/` |
+| CSS source | `crates/vouch-server/styles/input.css` |
+| Static assets | `crates/vouch-server/static/` (embedded via rust-embed) |
 | Integration tests | `crates/vouch-tests/tests/` |
 | DB migrations | `crates/vouch-server/migrations/{sqlite,postgres}/` |
 

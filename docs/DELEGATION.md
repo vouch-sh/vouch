@@ -348,9 +348,8 @@ The following services will be added after the GitHub implementation is validate
 
 - **SSH**: `ssh:prod.example.com`, `ssh:*.staging.example.com`
 - **AWS**: `aws:arn:aws:iam::123456789:role/developer`, `aws:s3:my-bucket:read`
-- **GCP**: via Workload Identity Federation
 
-Each requires careful mapping from Vouch's scope syntax to the service's native permission model. AWS IAM policies, SSH certificate principals, and GCP OAuth scopes are fundamentally different systems.
+Each requires careful mapping from Vouch's scope syntax to the service's native permission model. AWS IAM policies and SSH certificate principals are fundamentally different systems.
 
 ## Delegation Lifecycle
 
@@ -682,7 +681,7 @@ A: The delegation token is portable. The agent can use it from anywhere, subject
 A: 1Password stores and retrieves existing credentials (a vault). Vouch mints fresh, ephemeral credentials on demand (an authority). When 1Password gives an agent a stored API key, that key may be long-lived and fully privileged. When Vouch gives an agent a GitHub token, that token was just created, scoped to specific permissions, and expires in an hour. Vouch also requires hardware presence proof (YubiKey touch) to authorize delegation -- 1Password relies on its platform and admin configuration.
 
 **Q: Why not use a secrets vault for agents?**
-A: Vaults are the right tool for storing secrets that must persist (database passwords, API keys for services that don't support short-lived tokens). But for services that support short-lived, scoped credentials -- GitHub, AWS, SSH, GCP -- minting fresh credentials is strictly better. Nothing is stored, nothing persists, and scope is enforced at issuance rather than at access.
+A: Vaults are the right tool for storing secrets that must persist (database passwords, API keys for services that don't support short-lived tokens). But for services that support short-lived, scoped credentials -- GitHub, AWS, SSH -- minting fresh credentials is strictly better. Nothing is stored, nothing persists, and scope is enforced at issuance rather than at access.
 
 **Q: Why CIBA instead of OAuth device code flow?**
 A: Device code flow (RFC 8628) requires the human to navigate to a URL and enter a code -- it was designed for TVs and IoT devices. CIBA pushes the notification to the human's device directly, which is a better UX when vouch-agent is already running. CIBA also supports `binding_message` for displaying request context, and the approval can happen without a browser.
