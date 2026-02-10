@@ -37,22 +37,6 @@ pub struct DocsAwsTemplate {
 
 impl_template_response!(DocsAwsTemplate);
 
-/// GCP setup documentation page template.
-#[derive(Template)]
-#[template(path = "docs/gcp.html")]
-pub struct DocsGcpTemplate {
-    /// The OIDC provider URL (base_url).
-    pub provider_url: String,
-    /// The RP ID (domain) for the OIDC provider.
-    pub rp_id: String,
-    /// Organization name for branding.
-    pub org_name: String,
-    /// Authentication context for header display.
-    pub auth: AuthContext,
-}
-
-impl_template_response!(DocsGcpTemplate);
-
 /// GitHub setup documentation page template.
 #[derive(Template)]
 #[template(path = "docs/github.html")]
@@ -184,21 +168,6 @@ pub async fn aws_setup_page(
 ) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsAwsTemplate {
-        provider_url: state.config().base_url.clone(),
-        rp_id: state.config().rp_id.clone(),
-        org_name: state.config().get_org_display_name().to_string(),
-        auth,
-    }
-}
-
-/// GCP setup documentation page.
-/// GET /docs/gcp
-pub async fn gcp_setup_page(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-) -> impl IntoResponse {
-    let auth = get_auth_context(&state, &jar).await;
-    DocsGcpTemplate {
         provider_url: state.config().base_url.clone(),
         rp_id: state.config().rp_id.clone(),
         org_name: state.config().get_org_display_name().to_string(),

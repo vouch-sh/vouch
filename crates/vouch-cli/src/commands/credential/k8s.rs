@@ -67,7 +67,7 @@ impl std::fmt::Debug for K8sTokenResponse {
 /// kubectl will then use this token to authenticate with the Kubernetes API server.
 pub async fn run(server: &str, audience: &str) -> Result<()> {
     // Try to get the token, converting any errors to stderr messages
-    // Note: Unlike GCP, kubectl reads errors from stderr, not stdout
+    // Note: kubectl reads errors from stderr, not stdout
     match get_k8s_token(server, audience).await {
         Ok(response) => {
             let json = serde_json::to_string(&response).context("failed to serialize response")?;

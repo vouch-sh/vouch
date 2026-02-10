@@ -596,7 +596,7 @@ pub async fn delete_expired_ssh_revocations(pool: &Pool) -> Result<u64> {
 }
 
 // ============================================================================
-// Cloud Provider Integrations (GCP, AWS)
+// Cloud Provider Integrations (AWS)
 // ============================================================================
 
 /// Cloud provider integration configuration record.

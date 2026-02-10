@@ -88,85 +88,6 @@
                 </div>
             </div>
 
-            {# GCP Integration (Org-wide config, per-user setup) #}
-            <div class="card">
-                <div class="flex items-center gap-2 mb-1">
-                    {# GCP logo #}
-                    <svg class="w-6 h-6 text-blue-400 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M12.19 2.38a9.344 9.344 0 0 0-9.234 6.893c.053-.02-.055.013 0 0-3.875 2.551-3.922 8.11-.247 10.941l.006-.007-.007.03a6.717 6.717 0 0 0 4.077 1.356h5.173l.03.03h5.192c6.687.053 9.376-8.605 3.835-12.35a9.365 9.365 0 0 0-8.825-6.893zM8.073 19.215a4.413 4.413 0 0 1-2.553-8.151l-.006.006.162-.094.164-.092c.268-.139.558-.242.857-.31l.068-.013-.003.002a3.68 3.68 0 0 1 .74-.077h.007a3.68 3.68 0 0 1 2.593 1.098 3.68 3.68 0 0 1 1.034 3.341 3.68 3.68 0 0 1-3.063 2.29zM12 17.09a2.816 2.816 0 0 0 .262-.012l-.006.001h5.062a2.797 2.797 0 0 0 2.794-2.78 2.797 2.797 0 0 0-2.78-2.813l-.019-.001h-.075a3.47 3.47 0 0 0-.348.017l.013-.001a5.923 5.923 0 0 0-5.18-3.046h-.02a5.941 5.941 0 0 0-5.603 3.972l-.012.039a5.863 5.863 0 0 0-.203 1.53v.013a2.81 2.81 0 0 0 2.809 2.794z"/>
-                    </svg>
-                    <h2 class="text-lg font-semibold text-gray-200">Google Cloud</h2>
-                    {% if auth.has_org %}
-                    <span class="text-xs bg-vouch-surface text-gray-400 px-2 py-0.5 rounded">Org config</span>
-                    {% else %}
-                    <span class="text-xs bg-vouch-surface text-gray-400 px-2 py-0.5 rounded">Per-user</span>
-                    {% endif %}
-                </div>
-                <p class="text-gray-400 text-sm mb-4">Get temporary GCP credentials via Workload Identity Federation.</p>
-
-                {% if gcp_configured %}
-                <div class="space-y-3">
-                    <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-2">
-                            <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
-                            </svg>
-                            <span class="text-sm text-green-400">Configured</span>
-                        </div>
-                        {% if auth.is_org_admin %}
-                        <a href="/gcp/configure" class="btn-secondary text-sm">Edit</a>
-                        {% endif %}
-                    </div>
-                    {% if let Some(config) = gcp_config %}
-                    <div class="bg-vouch-surface rounded-lg p-2 text-xs text-gray-400 space-y-0.5">
-                        <div><span class="text-gray-500">Project:</span> {{ config.project_number }}</div>
-                        <div><span class="text-gray-500">Pool:</span> {{ config.pool_id }}</div>
-                        <div><span class="text-gray-500">Provider:</span> {{ config.provider_id }}</div>
-                    </div>
-                    {% endif %}
-                    <div class="bg-vouch-surface rounded-lg p-3">
-                        <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs mb-2">vouch setup gcp --configure</code>
-                        <a href="/docs/gcp" class="text-sm text-vouch-accent hover:text-vouch-accent-hover inline-flex items-center gap-1">
-                            Setup guide
-                            <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
-                            </svg>
-                        </a>
-                    </div>
-                </div>
-                {% elif auth.has_org && !gcp_configured %}
-                <div class="space-y-3">
-                    <div class="bg-yellow-900/20 border border-yellow-700/30 rounded-lg p-3 flex items-center justify-between">
-                        <p class="text-sm text-yellow-300">Not configured</p>
-                        {% if auth.is_org_admin %}
-                        <a href="/gcp/configure" class="btn-primary text-sm whitespace-nowrap ml-3">Configure</a>
-                        {% endif %}
-                    </div>
-                    <div class="bg-vouch-surface rounded-lg p-3">
-                        <p class="text-xs text-gray-500 mb-2">Or configure manually:</p>
-                        <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs mb-2">vouch setup gcp --project-number PROJECT --pool-id POOL --provider-id PROVIDER</code>
-                        <a href="/docs/gcp" class="text-sm text-vouch-accent hover:text-vouch-accent-hover inline-flex items-center gap-1">
-                            Setup guide
-                            <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
-                            </svg>
-                        </a>
-                    </div>
-                </div>
-                {% else %}
-                <div class="bg-vouch-surface rounded-lg p-3">
-                    <p class="text-sm text-gray-400 mb-2">Configure via the CLI:</p>
-                    <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs mb-2">vouch setup gcp --project-number PROJECT --pool-id POOL --provider-id PROVIDER</code>
-                    <a href="/docs/gcp" class="text-sm text-vouch-accent hover:text-vouch-accent-hover inline-flex items-center gap-1">
-                        Setup guide
-                        <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
-                        </svg>
-                    </a>
-                </div>
-                {% endif %}
-            </div>
-
             {# SSH Integration (Per-user) #}
             <div class="card{% if ssh_ca_public_key.is_none() %} opacity-50{% endif %}"{% if ssh_ca_public_key.is_none() %} style="order:99"{% endif %}>
                 <div class="flex items-center gap-2 mb-1">
@@ -236,7 +157,7 @@
                     <h2 class="text-lg font-semibold text-gray-200">Docker Registries</h2>
                     <span class="text-xs bg-vouch-surface text-gray-400 px-2 py-0.5 rounded">Per-user</span>
                 </div>
-                <p class="text-gray-400 text-sm mb-4">Authenticate to AWS ECR, GCP, and GitHub container registries.</p>
+                <p class="text-gray-400 text-sm mb-4">Authenticate to AWS ECR and GitHub container registries.</p>
 
                 <div class="bg-vouch-surface rounded-lg p-3">
                     <p class="text-sm text-gray-400 mb-2">Configure via the CLI:</p>

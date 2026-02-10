@@ -6,12 +6,11 @@
 //! - A trait-based system for checking configuration status
 //!
 //! Each integration is organized as a submodule containing both utilities
-//! and status checking (AWS, Cargo, GCP, GitHub, K8s, SSH, Docker).
+//! and status checking (AWS, Cargo, GitHub, K8s, SSH, Docker).
 
 pub mod aws;
 pub mod cargo;
 pub mod docker;
-pub mod gcp;
 pub mod github;
 pub mod k8s;
 pub mod ssh;
@@ -19,7 +18,6 @@ pub mod ssh;
 pub use aws::AwsIntegration;
 pub use cargo::CargoIntegration;
 pub use docker::DockerIntegration;
-pub use gcp::GcpIntegration;
 pub use github::GitHubIntegration;
 pub use k8s::K8sIntegration;
 pub use ssh::SshIntegration;

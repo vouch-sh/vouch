@@ -4,7 +4,6 @@
 //! This module implements a Docker credential helper that provides authentication
 //! for container registries using Vouch. It supports:
 //! - AWS ECR (Elastic Container Registry)
-//! - GCP Artifact Registry and GCR (Google Container Registry)
 //! - GitHub Container Registry (ghcr.io)
 //!
 //! Usage: Configure Docker to use this helper:
@@ -12,7 +11,6 @@
 //!   {
 //!     "credHelpers": {
 //!       "123456789012.dkr.ecr.us-east-1.amazonaws.com": "vouch",
-//!       "gcr.io": "vouch",
 //!       "ghcr.io": "vouch"
 //!     }
 //!   }
@@ -58,34 +56,10 @@ pub enum RegistryType {
         /// Domain suffix (e.g., "amazonaws.com", "amazonaws.cn", "amazonaws.eu")
         domain_suffix: String,
     },
-    /// Google Container Registry (gcr.io)
-    Gcr,
-    /// Google Artifact Registry (*-docker.pkg.dev)
-    GarDocker {
-        region: String,
-        project: Option<String>,
-    },
     /// GitHub Container Registry (ghcr.io)
     Ghcr,
     /// Unknown registry type
     Unknown,
-}
-
-/// Response from Vouch GCP token endpoint.
-#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
-struct GcpTokenResponse {
-    id_token: String,
-    #[allow(dead_code)]
-    expires_in: u64,
-}
-
-impl std::fmt::Debug for GcpTokenResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GcpTokenResponse")
-            .field("id_token", &"[REDACTED]")
-            .field("expires_in", &self.expires_in)
-            .finish()
-    }
 }
 
 /// Response from Vouch GitHub token endpoint.
@@ -197,24 +171,6 @@ pub fn detect_registry_type(server_url: &str) -> RegistryType {
         return RegistryType::Ghcr;
     }
 
-    // Google Container Registry: gcr.io, us.gcr.io, eu.gcr.io, asia.gcr.io
-    if url == "gcr.io"
-        || url == "us.gcr.io"
-        || url == "eu.gcr.io"
-        || url == "asia.gcr.io"
-        || url.ends_with(".gcr.io")
-    {
-        return RegistryType::Gcr;
-    }
-
-    // Google Artifact Registry: us-docker.pkg.dev, europe-docker.pkg.dev, etc.
-    if let Some(region) = url.strip_suffix("-docker.pkg.dev") {
-        return RegistryType::GarDocker {
-            region: region.to_string(),
-            project: None,
-        };
-    }
-
     RegistryType::Unknown
 }
 
@@ -248,7 +204,6 @@ async fn get_credential() -> Result<()> {
             domain_suffix,
             ..
         } => get_ecr_credential(server, &region, &domain_suffix, &server_url).await?,
-        RegistryType::Gcr | RegistryType::GarDocker { .. } => get_gcp_credential(server).await?,
         RegistryType::Ghcr => get_ghcr_credential(server).await?,
         RegistryType::Unknown => {
             eprintln!("vouch: unknown registry type for URL: {}", server_url);
@@ -509,73 +464,6 @@ fn base64_decode(input: &str) -> Result<Vec<u8>> {
         .context("invalid base64")
 }
 
-/// GCP external account credential configuration (partial, for reading audience).
-#[derive(Debug, Deserialize)]
-struct GcpExternalAccountConfig {
-    audience: Option<String>,
-}
-
-/// Try to read the GCP audience from local config files.
-///
-/// Looks for vouch credential files in ~/.config/gcloud/vouch-credentials*.json
-fn get_local_gcp_audience() -> Option<String> {
-    let home = dirs::home_dir()?;
-    let gcloud_dir = home.join(".config/gcloud");
-
-    if !gcloud_dir.exists() {
-        return None;
-    }
-
-    // Look for vouch credential files
-    let entries = std::fs::read_dir(&gcloud_dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let filename = path.file_name()?.to_string_lossy();
-
-        // Match vouch-credentials.json or vouch-credentials-*.json
-        if filename.starts_with("vouch-credentials")
-            && filename.ends_with(".json")
-            && let Ok(content) = std::fs::read_to_string(&path)
-            && let Ok(config) = serde_json::from_str::<GcpExternalAccountConfig>(&content)
-            && let Some(audience) = config.audience
-        {
-            return Some(audience);
-        }
-    }
-
-    None
-}
-
-/// Get credentials for GCP (GCR and Artifact Registry).
-async fn get_gcp_credential(server: &str) -> Result<DockerCredential> {
-    let client = VouchClient::new(server)?;
-
-    // Get GCP audience from local config (created by 'vouch setup gcp --configure')
-    let audience = get_local_gcp_audience().ok_or_else(|| {
-        anyhow::anyhow!(
-            "GCP not configured. Run 'vouch setup gcp --configure' to set up GCP Workload Identity Federation"
-        )
-    })?;
-
-    // URL-encode the audience parameter
-    let encoded_audience: String =
-        url::form_urlencoded::byte_serialize(audience.as_bytes()).collect();
-    let path = format!("/v1/credentials/gcp/token?audience={encoded_audience}");
-
-    // Get OIDC token from Vouch server
-    let token_response: GcpTokenResponse = client
-        .get_authenticated(&path)
-        .await
-        .context("failed to get GCP OIDC token")?;
-
-    // For GCP registries, we use the OIDC token directly as the password
-    // with "oauth2accesstoken" as the username
-    Ok(DockerCredential {
-        username: "oauth2accesstoken".to_string(),
-        secret: token_response.id_token.clone(),
-    })
-}
-
 /// Get credentials for GitHub Container Registry.
 async fn get_ghcr_credential(server: &str) -> Result<DockerCredential> {
     let client = VouchClient::new(server)?;
@@ -696,32 +584,6 @@ mod tests {
     #[test]
     fn test_detect_ghcr() {
         assert_eq!(detect_registry_type("ghcr.io"), RegistryType::Ghcr);
-    }
-
-    #[test]
-    fn test_detect_gcr() {
-        assert_eq!(detect_registry_type("gcr.io"), RegistryType::Gcr);
-        assert_eq!(detect_registry_type("us.gcr.io"), RegistryType::Gcr);
-        assert_eq!(detect_registry_type("eu.gcr.io"), RegistryType::Gcr);
-        assert_eq!(detect_registry_type("asia.gcr.io"), RegistryType::Gcr);
-    }
-
-    #[test]
-    fn test_detect_gar() {
-        assert_eq!(
-            detect_registry_type("us-docker.pkg.dev"),
-            RegistryType::GarDocker {
-                region: "us".to_string(),
-                project: None,
-            }
-        );
-        assert_eq!(
-            detect_registry_type("europe-docker.pkg.dev"),
-            RegistryType::GarDocker {
-                region: "europe".to_string(),
-                project: None,
-            }
-        );
     }
 
     #[test]

@@ -85,14 +85,12 @@ pub async fn run(registries: &[String], configure: bool) -> Result<()> {
         println!("Examples:");
         println!("  vouch setup docker --configure ghcr.io");
         println!("  vouch setup docker --configure 123456789012.dkr.ecr.us-east-1.amazonaws.com");
-        println!("  vouch setup docker --configure us-docker.pkg.dev gcr.io");
+        println!("  vouch setup docker --configure 123456789012.dkr.ecr.us-west-2.amazonaws.com");
     }
 
     println!();
     println!("Supported registries:");
     println!("  - AWS ECR:     *.dkr.ecr.*.amazonaws.com");
-    println!("  - GCP GCR:     gcr.io, us.gcr.io, eu.gcr.io, asia.gcr.io");
-    println!("  - GCP GAR:     *-docker.pkg.dev");
     println!("  - GitHub:      ghcr.io");
 
     Ok(())
@@ -245,8 +243,6 @@ fn print_example_config() {
     println!("  {{");
     println!("    \"credHelpers\": {{");
     println!("      \"ghcr.io\": \"vouch\",");
-    println!("      \"gcr.io\": \"vouch\",");
-    println!("      \"us-docker.pkg.dev\": \"vouch\",");
     println!("      \"123456789012.dkr.ecr.us-east-1.amazonaws.com\": \"vouch\"");
     println!("    }}");
     println!("  }}");

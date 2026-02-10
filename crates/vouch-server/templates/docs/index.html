@@ -44,19 +44,6 @@
                 <p class="text-gray-400 text-sm">Configure AWS IAM to trust {{ org_name }} as an OIDC identity provider.</p>
             </a>
 
-            <!-- GCP Integration -->
-            <a href="/docs/gcp" class="block p-4 bg-vouch-raised rounded-lg border border-vouch-border hover:border-vouch-accent transition-colors group">
-                <div class="flex items-center gap-3 mb-2">
-                    <div class="p-2 bg-vouch-bg rounded-lg">
-                        <svg class="w-5 h-5 text-blue-400" fill="currentColor" viewBox="0 0 24 24">
-                            <path d="M12.19 2.38a9.344 9.344 0 0 0-9.234 6.893c.053-.02-.055.013 0 0-3.875 2.551-3.922 8.11-.247 10.941l.006-.007-.007.03a6.717 6.717 0 0 0 4.077 1.356h5.173l.03.03h5.192c6.687.053 9.376-8.605 3.835-12.35a9.365 9.365 0 0 0-8.825-6.893zM8.073 19.215a4.413 4.413 0 0 1-2.553-8.151l-.006.006.162-.094.164-.092c.268-.139.558-.242.857-.31l.068-.013-.003.002a3.68 3.68 0 0 1 .74-.077h.007a3.68 3.68 0 0 1 2.593 1.098 3.68 3.68 0 0 1 1.034 3.341 3.68 3.68 0 0 1-3.063 2.29zM12 17.09a2.816 2.816 0 0 0 .262-.012l-.006.001h5.062a2.797 2.797 0 0 0 2.794-2.78 2.797 2.797 0 0 0-2.78-2.813l-.019-.001h-.075a3.47 3.47 0 0 0-.348.017l.013-.001a5.923 5.923 0 0 0-5.18-3.046h-.02a5.941 5.941 0 0 0-5.603 3.972l-.012.039a5.863 5.863 0 0 0-.203 1.53v.013a2.81 2.81 0 0 0 2.809 2.794z"/>
-                        </svg>
-                    </div>
-                    <h2 class="text-base font-semibold text-gray-200 group-hover:text-vouch-accent transition-colors">Google Cloud</h2>
-                </div>
-                <p class="text-gray-400 text-sm">Configure GCP Workload Identity Federation to trust {{ org_name }}.</p>
-            </a>
-
             <!-- SSH Certificates -->
             <a href="/docs/ssh" class="block p-4 bg-vouch-raised rounded-lg border border-vouch-border hover:border-vouch-accent transition-colors group">
                 <div class="flex items-center gap-3 mb-2">
@@ -106,7 +93,7 @@
                     </div>
                     <h2 class="text-base font-semibold text-gray-200 group-hover:text-vouch-accent transition-colors">Docker Registries</h2>
                 </div>
-                <p class="text-gray-400 text-sm">Authenticate to AWS ECR, GCP, and GitHub container registries.</p>
+                <p class="text-gray-400 text-sm">Authenticate to AWS ECR and GitHub container registries.</p>
             </a>
 
             <!-- Cargo Integration -->

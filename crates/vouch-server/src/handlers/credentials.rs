@@ -4,7 +4,6 @@
 use crate::AppState;
 use crate::db::{self, GitHubCredentialEventParams};
 use crate::services::integrations::aws::{AwsError, AwsService};
-use crate::services::integrations::gcp::{GcpError, GcpService};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
 use crate::services::integrations::k8s::{K8sError, KubernetesService};
 use axum::extract::Query;
@@ -17,9 +16,8 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::{
-    ApiError, AwsTokenResponse, GcpTokenResponse, GitHubStatusResponse, GitHubTokenRequest,
-    GitHubTokenResponse, K8sTokenResponse, SshCaPublicKeyResponse, SshCertificateRequest,
-    SshCertificateResponse,
+    ApiError, AwsTokenResponse, GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse,
+    K8sTokenResponse, SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
 };
 
 use super::common::extract_session;
@@ -249,80 +247,6 @@ pub async fn get_aws_token(
         })?;
 
     Ok(Json(AwsTokenResponse {
-        id_token: result.id_token,
-        expires_in: result.expires_in,
-    }))
-}
-
-// ============================================================================
-// GCP Token Endpoint
-// ============================================================================
-
-/// Query parameters for GCP token endpoint.
-#[derive(Debug, Deserialize)]
-pub struct GcpTokenQuery {
-    /// Workload Identity Pool provider audience URL.
-    /// Format: //iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID
-    pub audience: String,
-}
-
-/// Get an OIDC ID token for GCP Workload Identity Federation.
-///
-/// GET /v1/credentials/gcp/token?audience=...
-///
-/// Returns an OIDC ID token that can be used with GCP Workload Identity Federation.
-/// The GCP Workload Identity Pool must be configured to trust the Vouch OIDC provider.
-///
-/// The audience parameter must be the full Workload Identity Pool provider resource name:
-/// `//iam.googleapis.com/projects/PROJECT_NUMBER/locations/global/workloadIdentityPools/POOL_ID/providers/PROVIDER_ID`
-pub async fn get_gcp_token(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<GcpTokenQuery>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
-    jar: CookieJar,
-) -> Result<Json<GcpTokenResponse>, (StatusCode, Json<ApiError>)> {
-    // Validate session
-    let (claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
-
-    // Get user's organization domain (hd claim) if they belong to an org
-    let hd = get_user_org_domain(&state, &claims.sub).await?;
-
-    // Create GCP service and issue token
-    let config = state.config();
-    let gcp_service = GcpService::new(&state.db, &config, &state.oidc_key);
-    let result = gcp_service
-        .issue_token(
-            &user_email,
-            &query.audience,
-            claims.authenticator_id.as_deref(),
-            hd,
-        )
-        .await
-        .map_err(|e| match e {
-            GcpError::InvalidAudience(msg) => {
-                json_error(StatusCode::BAD_REQUEST, "invalid_audience", msg)
-            }
-            GcpError::NoAuthenticator => {
-                json_error(StatusCode::FORBIDDEN, "no_authenticator", &e.to_string())
-            }
-            GcpError::Database(ref err) => json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &err.to_string(),
-            ),
-            GcpError::ClaimsBuild(_) => json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "claims_error",
-                &e.to_string(),
-            ),
-            GcpError::TokenSign(_) => json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "token_error",
-                &e.to_string(),
-            ),
-        })?;
-
-    Ok(Json(GcpTokenResponse {
         id_token: result.id_token,
         expires_in: result.expires_in,
     }))

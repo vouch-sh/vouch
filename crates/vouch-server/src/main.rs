@@ -396,10 +396,6 @@ async fn run_server(args: config::Args) -> Result<()> {
             get(handlers::credentials::get_aws_token),
         )
         .route(
-            "/v1/credentials/gcp/token",
-            get(handlers::credentials::get_gcp_token),
-        )
-        .route(
             "/v1/credentials/k8s/token",
             get(handlers::credentials::get_k8s_token),
         )
@@ -413,12 +409,6 @@ async fn run_server(args: config::Args) -> Result<()> {
             post(handlers::credentials::get_github_token),
         )
         // Cloud integration config API
-        .route(
-            "/v1/integrations/gcp",
-            get(handlers::integrations::get_gcp_integration)
-                .put(handlers::integrations::set_gcp_integration)
-                .delete(handlers::integrations::delete_gcp_integration),
-        )
         .route(
             "/v1/integrations/aws",
             get(handlers::integrations::get_aws_integration)
@@ -511,7 +501,6 @@ async fn run_server(args: config::Args) -> Result<()> {
             get(handlers::docs::getting_started_page),
         )
         .route("/docs/aws", get(handlers::docs::aws_setup_page))
-        .route("/docs/gcp", get(handlers::docs::gcp_setup_page))
         .route("/docs/ssh", get(handlers::docs::ssh_page))
         .route("/docs/kubernetes", get(handlers::docs::kubernetes_page))
         .route("/docs/github", get(handlers::docs::github_setup_page))
@@ -554,16 +543,6 @@ async fn run_server(args: config::Args) -> Result<()> {
         .route(
             "/enroll/keys/{id}",
             patch(handlers::enroll_keys::rename_key).delete(handlers::enroll_keys::delete_key),
-        )
-        // GCP browser-based configuration
-        .route(
-            "/gcp/configure",
-            get(handlers::integrations::gcp_configure_page)
-                .post(handlers::integrations::gcp_configure_submit),
-        )
-        .route(
-            "/gcp/configure/delete",
-            post(handlers::integrations::gcp_configure_delete),
         )
         // GitHub App installation
         .route(

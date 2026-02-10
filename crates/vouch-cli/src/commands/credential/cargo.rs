@@ -279,7 +279,7 @@ async fn handle_get(registry: &RegistryInfo) -> Result<()> {
 /// Handle "login" action - direct users to vouch login.
 fn handle_login(registry: &RegistryInfo, _options: LoginOptions) -> Result<()> {
     // Vouch manages authentication via `vouch login`, not cargo login.
-    // This is consistent with AWS/SSH/GCP integrations where the user
+    // This is consistent with AWS/SSH integrations where the user
     // authenticates with Vouch once, and native tools use credential helpers.
     eprintln!();
     eprintln!(
