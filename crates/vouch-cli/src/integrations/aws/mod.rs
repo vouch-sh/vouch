@@ -5,6 +5,7 @@
 //! - `sts` - AWS STS (Security Token Service) utilities
 
 pub mod config;
+pub mod sigv4;
 pub mod sts;
 
 // Re-export commonly used types

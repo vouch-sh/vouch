@@ -242,6 +242,18 @@ enum SetupCommands {
         #[arg(long)]
         configure: bool,
     },
+    /// Configure Git to use Vouch for AWS CodeCommit credentials.
+    Codecommit {
+        /// AWS region (default: wildcard matching all regions).
+        #[arg(long)]
+        region: Option<String>,
+        /// AWS profile to use (defaults to auto-detected vouch profile).
+        #[arg(long)]
+        profile: Option<String>,
+        /// Automatically configure git (otherwise just show instructions).
+        #[arg(long)]
+        configure: bool,
+    },
 }
 
 #[tokio::main]
@@ -352,6 +364,14 @@ async fn main() -> Result<()> {
                 registry,
                 configure,
             } => commands::setup::cargo::run(registry.as_deref(), configure).await,
+            SetupCommands::Codecommit {
+                region,
+                profile,
+                configure,
+            } => {
+                commands::setup::codecommit::run(region.as_deref(), profile.as_deref(), configure)
+                    .await
+            }
         },
         Commands::Completions(args) => {
             let mut cmd = Cli::command();

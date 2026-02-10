@@ -4,6 +4,7 @@
 pub mod aws;
 pub mod cargo;
 pub mod docker;
+pub mod git_protocol;
 pub mod github;
 
 pub mod ssh;

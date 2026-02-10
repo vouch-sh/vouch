@@ -57,6 +57,7 @@ pub async fn assume_role_with_web_identity(
     web_identity_token: &str,
     region: &str,
     domain_suffix: &str,
+    tags: &[(String, String)],
 ) -> Result<AssumeRoleWithWebIdentityResponse> {
     let http_client =
         vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
@@ -66,15 +67,23 @@ pub async fn assume_role_with_web_identity(
     // e.g., "sts.us-east-1.amazonaws.com" or "sts.cn-north-1.amazonaws.cn"
     let sts_url = format!("https://sts.{region}.{domain_suffix}/");
 
+    let mut form_params: Vec<(String, String)> = vec![
+        ("Action".to_string(), "AssumeRoleWithWebIdentity".to_string()),
+        ("Version".to_string(), "2011-06-15".to_string()),
+        ("RoleArn".to_string(), role_arn.to_string()),
+        ("RoleSessionName".to_string(), role_session_name.to_string()),
+        (
+            "WebIdentityToken".to_string(),
+            web_identity_token.to_string(),
+        ),
+    ];
+
+    // Add session tags using AWS Tags.member.N format (1-based indexing)
+    append_tag_form_params(&mut form_params, tags);
+
     let response = http_client
         .post(&sts_url)
-        .form(&[
-            ("Action", "AssumeRoleWithWebIdentity"),
-            ("Version", "2011-06-15"),
-            ("RoleArn", role_arn),
-            ("RoleSessionName", role_session_name),
-            ("WebIdentityToken", web_identity_token),
-        ])
+        .form(&form_params)
         .send()
         .await
         .context("failed to call AWS STS")?;
@@ -91,6 +100,18 @@ pub async fn assume_role_with_web_identity(
         .context("failed to read STS response")?;
 
     parse_sts_xml_response(&body)
+}
+
+/// Append session tag parameters to the form body.
+///
+/// Uses the AWS `Tags.member.N.Key` / `Tags.member.N.Value` format
+/// with 1-based indexing.
+fn append_tag_form_params(params: &mut Vec<(String, String)>, tags: &[(String, String)]) {
+    for (i, (key, value)) in tags.iter().enumerate() {
+        let n = i + 1;
+        params.push((format!("Tags.member.{n}.Key"), key.clone()));
+        params.push((format!("Tags.member.{n}.Value"), value.clone()));
+    }
 }
 
 /// Parse AWS STS XML response.
@@ -183,7 +204,7 @@ pub fn get_default_region_for_partition(partition: &str) -> &'static str {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -294,5 +315,47 @@ mod tests {
         );
         assert_eq!(get_default_region_for_partition("aws-iso"), "us-iso-east-1");
         assert_eq!(get_default_region_for_partition("unknown"), "us-east-1");
+    }
+
+    #[test]
+    fn test_append_tag_form_params_empty() {
+        let mut params = Vec::new();
+        append_tag_form_params(&mut params, &[]);
+        assert!(params.is_empty());
+    }
+
+    #[test]
+    fn test_append_tag_form_params_single_tag() {
+        let mut params = Vec::new();
+        let tags = vec![("email".to_string(), "alice@example.com".to_string())];
+        append_tag_form_params(&mut params, &tags);
+        assert_eq!(params.len(), 2);
+        assert_eq!(params[0], ("Tags.member.1.Key".to_string(), "email".to_string()));
+        assert_eq!(
+            params[1],
+            ("Tags.member.1.Value".to_string(), "alice@example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn test_append_tag_form_params_multiple_tags() {
+        let mut params = vec![("Action".to_string(), "AssumeRoleWithWebIdentity".to_string())];
+        let tags = vec![
+            ("email".to_string(), "alice@example.com".to_string()),
+            ("domain".to_string(), "example.com".to_string()),
+        ];
+        append_tag_form_params(&mut params, &tags);
+        // Original param + 2 tags * 2 params each = 5 total
+        assert_eq!(params.len(), 5);
+        assert_eq!(params[1], ("Tags.member.1.Key".to_string(), "email".to_string()));
+        assert_eq!(
+            params[2],
+            ("Tags.member.1.Value".to_string(), "alice@example.com".to_string())
+        );
+        assert_eq!(params[3], ("Tags.member.2.Key".to_string(), "domain".to_string()));
+        assert_eq!(
+            params[4],
+            ("Tags.member.2.Value".to_string(), "example.com".to_string())
+        );
     }
 }

@@ -24,6 +24,10 @@ use std::io::{BufRead, Write};
 
 use crate::client::VouchClient;
 use crate::config::Config;
+use crate::integrations::aws::sigv4::{
+    derive_signing_key, format_amz_date, format_date_stamp, hmac_sha256, sha256_hex,
+};
+use crate::commands::credential::aws::{build_session_tags, decode_jwt_payload};
 use crate::integrations::aws::sts::{StsCredentials, assume_role_with_web_identity};
 use crate::integrations::aws::{AwsConfig, extract_role_from_credential_process};
 use crate::session::get_user_email;
@@ -253,6 +257,11 @@ async fn get_ecr_credential(
         )
     })?;
 
+    // Decode JWT to extract claims for session tags (ABAC)
+    let tags = decode_jwt_payload(&token_response.id_token)
+        .map(|claims| build_session_tags(&claims))
+        .unwrap_or_default();
+
     // Call STS AssumeRoleWithWebIdentity using the shared module
     // Use email as session name for CloudTrail visibility
     let email = get_user_email(server).await;
@@ -263,6 +272,7 @@ async fn get_ecr_credential(
         &token_response.id_token,
         region,
         domain_suffix,
+        &tags,
     )
     .await
     .context("failed to assume AWS role")?;
@@ -338,14 +348,8 @@ async fn get_ecr_authorization_token(
     let string_to_sign =
         format!("{algorithm}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
 
-    // Derive signing key using the exposed secret
-    let k_date = hmac_sha256(
-        format!("AWS4{}", creds.secret_access_key.expose_secret()).as_bytes(),
-        date_stamp.as_bytes(),
-    );
-    let k_region = hmac_sha256(&k_date, region.as_bytes());
-    let k_service = hmac_sha256(&k_region, b"ecr");
-    let k_signing = hmac_sha256(&k_service, b"aws4_request");
+    // Derive signing key using the shared SigV4 utility
+    let k_signing = derive_signing_key(&creds.secret_access_key, &date_stamp, region, "ecr");
 
     let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
 
@@ -421,39 +425,6 @@ impl std::fmt::Debug for EcrAuthorizationData {
             .field("authorization_token", &"[REDACTED]")
             .finish()
     }
-}
-
-/// Format timestamp for AWS X-Amz-Date header.
-fn format_amz_date(ts: jiff::Timestamp) -> String {
-    let dt = ts.to_zoned(jiff::tz::TimeZone::UTC);
-    format!(
-        "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
-        dt.year(),
-        dt.month(),
-        dt.day(),
-        dt.hour(),
-        dt.minute(),
-        dt.second()
-    )
-}
-
-/// Format timestamp for AWS date stamp (YYYYMMDD).
-fn format_date_stamp(ts: jiff::Timestamp) -> String {
-    let dt = ts.to_zoned(jiff::tz::TimeZone::UTC);
-    format!("{:04}{:02}{:02}", dt.year(), dt.month(), dt.day())
-}
-
-/// Compute SHA-256 hash and return as hex string.
-fn sha256_hex(data: &[u8]) -> String {
-    use aws_lc_rs::digest::{SHA256, digest};
-    hex::encode(digest(&SHA256, data).as_ref())
-}
-
-/// Compute HMAC-SHA256.
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    use aws_lc_rs::hmac::{HMAC_SHA256, Key, sign};
-    let key = Key::new(HMAC_SHA256, key);
-    sign(&key, data).as_ref().to_vec()
 }
 
 /// Decode base64 string.
@@ -590,22 +561,6 @@ mod tests {
     fn test_detect_unknown() {
         assert_eq!(detect_registry_type("docker.io"), RegistryType::Unknown);
         assert_eq!(detect_registry_type("quay.io"), RegistryType::Unknown);
-    }
-
-    #[test]
-    fn test_format_amz_date() {
-        // Create a known timestamp: 2024-01-15 10:50:45 UTC
-        let ts = jiff::Timestamp::from_second(1705315845).expect("valid timestamp");
-        let result = format_amz_date(ts);
-        assert_eq!(result, "20240115T105045Z");
-    }
-
-    #[test]
-    fn test_format_date_stamp() {
-        // Create a known timestamp: 2024-01-15 10:50:45 UTC
-        let ts = jiff::Timestamp::from_second(1705315845).expect("valid timestamp");
-        let result = format_date_stamp(ts);
-        assert_eq!(result, "20240115");
     }
 
     #[test]
