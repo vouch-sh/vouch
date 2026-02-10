@@ -145,17 +145,6 @@ enum CredentialCommands {
         #[arg(long)]
         session_name: Option<String>,
     },
-    /// Obtain a Kubernetes identity token (ExecCredential format).
-    ///
-    /// This is used by kubectl as an exec credential plugin.
-    /// Users should not call this directly.
-    /// Instead, use `vouch setup k8s` to configure kubectl.
-    #[command(hide = true)]
-    K8s {
-        /// Kubernetes cluster audience (matches --oidc-client-id on API server).
-        #[arg(long)]
-        audience: String,
-    },
     /// Obtain an SSH certificate.
     Ssh {
         /// Path to SSH private key (default: ~/.ssh/id_ed25519_vouch).
@@ -220,20 +209,20 @@ enum SetupCommands {
         #[arg(long)]
         configure: bool,
     },
-    /// Configure kubectl to use Vouch for Kubernetes OIDC authentication.
-    K8s {
-        /// Cluster name from kubeconfig (prompts if not provided).
+    /// Configure kubectl to use Vouch credentials for Amazon EKS clusters.
+    Eks {
+        /// EKS cluster name.
         #[arg(long)]
-        cluster: Option<String>,
-        /// Audience/client-id for OIDC (defaults to cluster name).
+        cluster: String,
+        /// AWS region (auto-detected from AWS profile or environment if not specified).
         #[arg(long)]
-        audience: Option<String>,
+        region: Option<String>,
+        /// AWS profile to use (defaults to auto-detected vouch profile).
+        #[arg(long)]
+        profile: Option<String>,
         /// Path to kubeconfig file (defaults to ~/.kube/config).
         #[arg(long)]
         kubeconfig: Option<String>,
-        /// Write the configuration (otherwise just show instructions).
-        #[arg(long)]
-        configure: bool,
     },
     /// Configure Docker to use Vouch for container registry authentication.
     Docker {
@@ -320,9 +309,6 @@ async fn main() -> Result<()> {
             CredentialCommands::Aws { role, session_name } => {
                 commands::credential::aws::run(&server, &role, session_name.as_deref()).await
             }
-            CredentialCommands::K8s { audience } => {
-                commands::credential::k8s::run(&server, &audience).await
-            }
             CredentialCommands::Ssh { key } => {
                 commands::credential::ssh::run(&server, key.as_deref()).await
             }
@@ -344,18 +330,17 @@ async fn main() -> Result<()> {
             SetupCommands::Github { host, configure } => {
                 commands::setup::github::run(&host, configure).await
             }
-            SetupCommands::K8s {
+            SetupCommands::Eks {
                 cluster,
-                audience,
+                region,
+                profile,
                 kubeconfig,
-                configure,
             } => {
-                commands::setup::k8s::run(
-                    &server,
-                    cluster.as_deref(),
-                    audience.as_deref(),
+                commands::setup::eks::run(
+                    &cluster,
+                    region.as_deref(),
+                    profile.as_deref(),
                     kubeconfig.as_deref(),
-                    configure,
                 )
                 .await
             }

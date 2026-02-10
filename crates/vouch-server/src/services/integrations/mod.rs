@@ -9,12 +9,11 @@
 //!
 //! - [`aws`] - AWS STS token issuance (OIDC for `AssumeRoleWithWebIdentity`)
 //! - [`github`] - GitHub App installation, OAuth, and webhook handling
-//! - [`k8s`] - Kubernetes OIDC token issuance
 //!
 //! # Distinction from Protocols
 //!
 //! **Integrations** (this module): External systems we connect TO
-//! - GitHub API, AWS STS, Kubernetes OIDC
+//! - GitHub API, AWS STS
 //! - Vouch issues tokens that external systems consume
 //!
 //! **Protocols** (`services/oidc`, future `protocols/`): Standards we IMPLEMENT
@@ -23,8 +22,6 @@
 
 pub mod aws;
 pub mod github;
-pub mod k8s;
 
 pub use aws::{AwsError, AwsResult, AwsService, AwsTokenResult};
 pub use github::GitHubService;
-pub use k8s::{K8sError, K8sResult, K8sTokenResult, KubernetesService, validate_k8s_audience};

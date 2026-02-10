@@ -30,8 +30,8 @@ vouch/
 3. `vouch register` → (requires login) → FIDO2 makeCredential → add additional key
 4. `vouch credential ssh` → exchange session for SSH certificate
 5. `vouch credential aws` → exchange session for AWS temporary credentials
-6. `vouch credential gcp` → exchange session for GCP OIDC token (Workload Identity Federation)
-7. Native tools (ssh, aws, gcloud) call vouch helpers transparently via `credential_process`
+6. `vouch setup eks` → configure kubeconfig for EKS (chains through `vouch credential aws` → `aws eks get-token`)
+7. Native tools (ssh, aws, kubectl) call vouch helpers transparently via `credential_process`
 
 ## Build & Development Commands
 

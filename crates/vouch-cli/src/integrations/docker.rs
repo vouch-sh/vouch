@@ -108,7 +108,10 @@ mod tests {
     fn test_configured() {
         let status = DockerSetupStatus {
             symlink_exists: true,
-            configured_registries: vec!["ghcr.io".to_string(), "123456789012.dkr.ecr.us-east-1.amazonaws.com".to_string()],
+            configured_registries: vec![
+                "ghcr.io".to_string(),
+                "123456789012.dkr.ecr.us-east-1.amazonaws.com".to_string(),
+            ],
         };
         let result = check_docker_status(&status);
         assert!(matches!(result, IntegrationState::Configured(_)));

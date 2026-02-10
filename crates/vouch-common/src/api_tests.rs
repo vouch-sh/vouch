@@ -566,5 +566,4 @@ mod tests {
             Some("arn:aws:iam::111222333444:role/DevRole".to_string())
         );
     }
-
 }

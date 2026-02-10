@@ -95,19 +95,17 @@ pub struct DocsSshTemplate {
 
 impl_template_response!(DocsSshTemplate);
 
-/// Kubernetes setup documentation page template.
+/// Amazon EKS setup documentation page template.
 #[derive(Template)]
-#[template(path = "docs/kubernetes.html")]
-pub struct DocsKubernetesTemplate {
-    /// The OIDC provider URL (base_url).
-    pub provider_url: String,
+#[template(path = "docs/eks.html")]
+pub struct DocsEksTemplate {
     /// Organization name for branding.
     pub org_name: String,
     /// Authentication context for header display.
     pub auth: AuthContext,
 }
 
-impl_template_response!(DocsKubernetesTemplate);
+impl_template_response!(DocsEksTemplate);
 
 /// SCIM Provisioning documentation page template.
 #[derive(Template)]
@@ -229,15 +227,11 @@ pub async fn ssh_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> imp
     }
 }
 
-/// Kubernetes setup documentation page.
-/// GET /docs/kubernetes
-pub async fn kubernetes_page(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-) -> impl IntoResponse {
+/// Amazon EKS setup documentation page.
+/// GET /docs/eks
+pub async fn eks_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
-    DocsKubernetesTemplate {
-        provider_url: state.config().base_url.clone(),
+    DocsEksTemplate {
         org_name: state.config().get_org_display_name().to_string(),
         auth,
     }

@@ -1,0 +1,560 @@
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+//! Amazon EKS setup command.
+//!
+//! Configures kubeconfig so kubectl authenticates via the existing Vouch AWS credential
+//! chain: `vouch login` -> `vouch credential aws` (via credential_process) -> `aws eks
+//! get-token` (via kubeconfig exec) -> kubectl.
+
+use anyhow::{Context, Result, bail};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+use crate::integrations::aws::config::AwsConfig;
+use crate::utils::{ensure_secure_dir, write_secure_file};
+
+// ============================================================================
+// Kubeconfig Types
+// ============================================================================
+
+/// Kubeconfig structure (partial - only what we need to read/modify).
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct Kubeconfig {
+    #[serde(default, rename = "apiVersion")]
+    api_version: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+    #[serde(default)]
+    clusters: Vec<KubeconfigCluster>,
+    #[serde(default)]
+    contexts: Vec<KubeconfigContext>,
+    #[serde(default, rename = "current-context")]
+    current_context: Option<String>,
+    #[serde(default)]
+    users: Vec<KubeconfigUser>,
+    #[serde(default)]
+    preferences: serde_yaml::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KubeconfigCluster {
+    name: String,
+    cluster: KubeconfigClusterData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KubeconfigClusterData {
+    server: String,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        rename = "certificate-authority-data"
+    )]
+    certificate_authority_data: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KubeconfigContext {
+    name: String,
+    context: KubeconfigContextData,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KubeconfigContextData {
+    cluster: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    namespace: Option<String>,
+    user: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct KubeconfigUser {
+    name: String,
+    user: KubeconfigUserData,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct KubeconfigUserData {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exec: Option<ExecConfig>,
+    #[serde(flatten)]
+    other: serde_yaml::Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExecConfig {
+    api_version: String,
+    command: String,
+    args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    env: Option<Vec<EnvVar>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interactive_mode: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct EnvVar {
+    name: String,
+    value: String,
+}
+
+// ============================================================================
+// EKS describe-cluster response (partial)
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct DescribeClusterOutput {
+    cluster: ClusterInfo,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClusterInfo {
+    endpoint: String,
+    #[serde(rename = "certificateAuthority")]
+    certificate_authority: Option<CertificateAuthority>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CertificateAuthority {
+    data: String,
+}
+
+// ============================================================================
+// Kubeconfig Helpers
+// ============================================================================
+
+/// Get the default kubeconfig path (~/.kube/config).
+fn default_kubeconfig_path() -> Result<PathBuf> {
+    // Check KUBECONFIG env var first
+    if let Ok(kubeconfig) = std::env::var("KUBECONFIG") {
+        // KUBECONFIG can contain multiple paths separated by ':'
+        // We only use the first one for writing
+        if let Some(first_path) = kubeconfig.split(':').next()
+            && !first_path.is_empty()
+        {
+            return Ok(PathBuf::from(first_path));
+        }
+    }
+
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home.join(".kube").join("config"))
+}
+
+/// Load kubeconfig from file, or return empty config if file doesn't exist.
+fn load_kubeconfig(path: &std::path::Path) -> Result<Kubeconfig> {
+    if !path.exists() {
+        return Ok(Kubeconfig {
+            api_version: Some("v1".to_string()),
+            kind: Some("Config".to_string()),
+            ..Default::default()
+        });
+    }
+
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read kubeconfig: {}", path.display()))?;
+    let config: Kubeconfig = serde_yaml::from_str(&content)
+        .with_context(|| format!("failed to parse kubeconfig: {}", path.display()))?;
+    Ok(config)
+}
+
+/// Save kubeconfig to file.
+fn save_kubeconfig(path: &std::path::Path, config: &Kubeconfig) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        ensure_secure_dir(parent)?;
+    }
+
+    let content = serde_yaml::to_string(config).context("failed to serialize kubeconfig")?;
+    write_secure_file(path, &content)?;
+    Ok(())
+}
+
+// ============================================================================
+// Auto-discovery Helpers
+// ============================================================================
+
+/// Resolve the AWS profile to use, auto-detecting from ~/.aws/config if not specified.
+fn resolve_profile(profile: Option<&str>) -> Result<String> {
+    if let Some(p) = profile {
+        return Ok(p.to_string());
+    }
+
+    let aws_config = AwsConfig::load()?;
+    match aws_config.find_vouch_profile() {
+        Some(p) => {
+            tracing::debug!("auto-detected vouch AWS profile: {}", p.name);
+            Ok(p.name)
+        }
+        None => bail!(
+            "No Vouch AWS profile found.\n\
+             Run 'vouch setup aws' first, or specify --profile."
+        ),
+    }
+}
+
+/// Resolve the AWS region, checking profile config then environment variables.
+fn resolve_region(region: Option<&str>, profile_name: &str) -> Result<String> {
+    if let Some(r) = region {
+        return Ok(r.to_string());
+    }
+
+    // Check the AWS profile's region setting
+    let aws_config = AwsConfig::load()?;
+    if let Some(profile) = aws_config.get_profile(profile_name)
+        && let Some(r) = profile.region
+    {
+        tracing::debug!("using region from AWS profile '{}': {}", profile_name, r);
+        return Ok(r);
+    }
+
+    // Check environment variables
+    if let Ok(r) = std::env::var("AWS_DEFAULT_REGION") {
+        return Ok(r);
+    }
+    if let Ok(r) = std::env::var("AWS_REGION") {
+        return Ok(r);
+    }
+
+    bail!(
+        "Could not determine AWS region.\n\
+         Specify --region, or set a region in your AWS profile or AWS_DEFAULT_REGION."
+    );
+}
+
+/// Fetch EKS cluster endpoint and CA data via `aws eks describe-cluster`.
+fn describe_cluster(cluster_name: &str, region: &str, profile: &str) -> Result<(String, String)> {
+    let output = std::process::Command::new("aws")
+        .args([
+            "eks",
+            "describe-cluster",
+            "--name",
+            cluster_name,
+            "--region",
+            region,
+            "--profile",
+            profile,
+            "--output",
+            "json",
+        ])
+        .output()
+        .context("failed to run 'aws eks describe-cluster' - is the AWS CLI installed?")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!(
+            "aws eks describe-cluster failed:\n{}\n\
+             Ensure the cluster '{}' exists in region '{}' and you have access.",
+            stderr.trim(),
+            cluster_name,
+            region,
+        );
+    }
+
+    let parsed: DescribeClusterOutput =
+        serde_json::from_slice(&output.stdout).context("failed to parse describe-cluster JSON")?;
+
+    let ca_data = parsed
+        .cluster
+        .certificate_authority
+        .map(|ca| ca.data)
+        .unwrap_or_default();
+
+    Ok((parsed.cluster.endpoint, ca_data))
+}
+
+// ============================================================================
+// Main Command
+// ============================================================================
+
+/// Run the EKS setup command.
+///
+/// Configures kubeconfig so kubectl uses `aws eks get-token` with a Vouch AWS
+/// profile for authentication.
+pub async fn run(
+    cluster_name: &str,
+    region: Option<&str>,
+    profile: Option<&str>,
+    kubeconfig_path: Option<&str>,
+) -> Result<()> {
+    let kubeconfig_path = kubeconfig_path.map(PathBuf::from).unwrap_or_else(|| {
+        default_kubeconfig_path().unwrap_or_else(|_| PathBuf::from("~/.kube/config"))
+    });
+
+    // Auto-discover profile and region
+    let profile_name = resolve_profile(profile)?;
+    let region_name = resolve_region(region, &profile_name)?;
+
+    println!("Amazon EKS Setup");
+    println!("================");
+    println!();
+    println!("Cluster:  {cluster_name}");
+    println!("Region:   {region_name}");
+    println!("Profile:  {profile_name}");
+    println!();
+
+    // Fetch cluster info from AWS
+    println!("Fetching cluster details...");
+    let (endpoint, ca_data) = describe_cluster(cluster_name, &region_name, &profile_name)?;
+
+    // Naming convention
+    let user_name = format!("vouch-eks-{cluster_name}");
+    let context_name = format!("{cluster_name}-vouch");
+
+    // Load existing kubeconfig
+    let mut config = load_kubeconfig(&kubeconfig_path)?;
+
+    // Upsert cluster
+    config.clusters.retain(|c| c.name != cluster_name);
+    config.clusters.push(KubeconfigCluster {
+        name: cluster_name.to_string(),
+        cluster: KubeconfigClusterData {
+            server: endpoint.clone(),
+            certificate_authority_data: if ca_data.is_empty() {
+                None
+            } else {
+                Some(ca_data)
+            },
+        },
+    });
+
+    // Upsert user
+    config.users.retain(|u| u.name != user_name);
+    config.users.push(KubeconfigUser {
+        name: user_name.clone(),
+        user: KubeconfigUserData {
+            exec: Some(ExecConfig {
+                api_version: "client.authentication.k8s.io/v1".to_string(),
+                command: "aws".to_string(),
+                args: vec![
+                    "eks".to_string(),
+                    "get-token".to_string(),
+                    "--cluster-name".to_string(),
+                    cluster_name.to_string(),
+                    "--region".to_string(),
+                    region_name.clone(),
+                ],
+                env: Some(vec![EnvVar {
+                    name: "AWS_PROFILE".to_string(),
+                    value: profile_name.clone(),
+                }]),
+                interactive_mode: Some("Never".to_string()),
+            }),
+            other: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+        },
+    });
+
+    // Upsert context
+    config.contexts.retain(|c| c.name != context_name);
+    config.contexts.push(KubeconfigContext {
+        name: context_name.clone(),
+        context: KubeconfigContextData {
+            cluster: cluster_name.to_string(),
+            namespace: None,
+            user: user_name.clone(),
+        },
+    });
+
+    // Save
+    save_kubeconfig(&kubeconfig_path, &config)?;
+
+    // Print summary
+    println!();
+    println!("Updated kubeconfig: {}", kubeconfig_path.display());
+    println!("  Cluster: {cluster_name} ({endpoint})");
+    println!("  User:    {user_name} (via AWS profile \"{profile_name}\")");
+    println!("  Context: {context_name}");
+    println!();
+    println!("To use:");
+    println!("  kubectl config use-context {context_name}");
+    println!("  kubectl get pods");
+    println!();
+    println!("Prerequisites:");
+    println!("  1. Run 'vouch login' to authenticate");
+    println!("  2. EKS Access Entry must exist for the IAM role in your AWS profile");
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::indexing_slicing)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_kubeconfig_parsing() {
+        let yaml = r#"
+apiVersion: v1
+kind: Config
+clusters:
+- name: production
+  cluster:
+    server: https://ABCDEF.gr7.us-east-1.eks.amazonaws.com
+    certificate-authority-data: LS0tLS1...
+contexts:
+- name: production-vouch
+  context:
+    cluster: production
+    user: vouch-eks-production
+users:
+- name: vouch-eks-production
+  user:
+    exec:
+      apiVersion: client.authentication.k8s.io/v1
+      command: aws
+      args:
+        - eks
+        - get-token
+        - --cluster-name
+        - production
+        - --region
+        - us-east-1
+      env:
+        - name: AWS_PROFILE
+          value: vouch
+      interactiveMode: Never
+"#;
+
+        let config: Kubeconfig = serde_yaml::from_str(yaml).expect("should parse");
+
+        assert_eq!(config.clusters.len(), 1);
+        assert_eq!(config.clusters[0].name, "production");
+        assert!(
+            config.clusters[0]
+                .cluster
+                .server
+                .contains("eks.amazonaws.com")
+        );
+        assert_eq!(config.contexts.len(), 1);
+        assert_eq!(config.contexts[0].name, "production-vouch");
+        assert_eq!(config.users.len(), 1);
+        assert_eq!(config.users[0].name, "vouch-eks-production");
+
+        let exec = config.users[0]
+            .user
+            .exec
+            .as_ref()
+            .expect("should have exec");
+        assert_eq!(exec.command, "aws");
+        assert_eq!(exec.args[0], "eks");
+        assert_eq!(exec.args[1], "get-token");
+    }
+
+    #[test]
+    fn test_empty_kubeconfig() {
+        let yaml = r#"
+apiVersion: v1
+kind: Config
+clusters: []
+contexts: []
+users: []
+"#;
+
+        let config: Kubeconfig = serde_yaml::from_str(yaml).expect("should parse");
+
+        assert!(config.clusters.is_empty());
+        assert!(config.contexts.is_empty());
+        assert!(config.users.is_empty());
+    }
+
+    #[test]
+    fn test_exec_config_serialization() {
+        let exec = ExecConfig {
+            api_version: "client.authentication.k8s.io/v1".to_string(),
+            command: "aws".to_string(),
+            args: vec![
+                "eks".to_string(),
+                "get-token".to_string(),
+                "--cluster-name".to_string(),
+                "test-cluster".to_string(),
+                "--region".to_string(),
+                "us-west-2".to_string(),
+            ],
+            env: Some(vec![EnvVar {
+                name: "AWS_PROFILE".to_string(),
+                value: "vouch".to_string(),
+            }]),
+            interactive_mode: Some("Never".to_string()),
+        };
+
+        let yaml = serde_yaml::to_string(&exec).expect("should serialize");
+        assert!(yaml.contains("apiVersion: client.authentication.k8s.io/v1"));
+        assert!(yaml.contains("command: aws"));
+        assert!(yaml.contains("interactiveMode: Never"));
+        assert!(yaml.contains("AWS_PROFILE"));
+        assert!(yaml.contains("get-token"));
+    }
+
+    #[test]
+    fn test_kubeconfig_context() {
+        let context = KubeconfigContext {
+            name: "my-cluster-vouch".to_string(),
+            context: KubeconfigContextData {
+                cluster: "my-cluster".to_string(),
+                namespace: None,
+                user: "vouch-eks-my-cluster".to_string(),
+            },
+        };
+
+        let yaml = serde_yaml::to_string(&context).expect("should serialize");
+        assert!(yaml.contains("name: my-cluster-vouch"));
+        assert!(yaml.contains("cluster: my-cluster"));
+        assert!(yaml.contains("user: vouch-eks-my-cluster"));
+        assert!(!yaml.contains("namespace"));
+    }
+
+    #[test]
+    fn test_kubeconfig_cluster_with_ca() {
+        let cluster = KubeconfigCluster {
+            name: "prod".to_string(),
+            cluster: KubeconfigClusterData {
+                server: "https://ABCDEF.gr7.us-east-1.eks.amazonaws.com".to_string(),
+                certificate_authority_data: Some("LS0tLS1CRUdJTi...".to_string()),
+            },
+        };
+
+        let yaml = serde_yaml::to_string(&cluster).expect("should serialize");
+        assert!(yaml.contains("name: prod"));
+        assert!(yaml.contains("server:"));
+        assert!(yaml.contains("certificate-authority-data:"));
+    }
+
+    #[test]
+    fn test_kubeconfig_cluster_without_ca() {
+        let cluster = KubeconfigCluster {
+            name: "dev".to_string(),
+            cluster: KubeconfigClusterData {
+                server: "https://ABCDEF.gr7.us-west-2.eks.amazonaws.com".to_string(),
+                certificate_authority_data: None,
+            },
+        };
+
+        let yaml = serde_yaml::to_string(&cluster).expect("should serialize");
+        assert!(yaml.contains("name: dev"));
+        assert!(!yaml.contains("certificate-authority-data"));
+    }
+
+    #[test]
+    fn test_describe_cluster_json_parsing() {
+        let json = r#"{
+            "cluster": {
+                "name": "test-cluster",
+                "endpoint": "https://ABCDEF.gr7.us-east-1.eks.amazonaws.com",
+                "certificateAuthority": {
+                    "data": "LS0tLS1CRUdJTiBDRVJU..."
+                },
+                "status": "ACTIVE"
+            }
+        }"#;
+
+        let parsed: DescribeClusterOutput =
+            serde_json::from_str(json).expect("should parse describe-cluster output");
+        assert!(parsed.cluster.endpoint.contains("eks.amazonaws.com"));
+        assert_eq!(
+            parsed
+                .cluster
+                .certificate_authority
+                .expect("should have CA")
+                .data,
+            "LS0tLS1CRUdJTiBDRVJU..."
+        );
+    }
+}

@@ -267,11 +267,6 @@ pub fn test_router(state: Arc<AppState>) -> Router {
                 .put(handlers::integrations::set_aws_integration)
                 .delete(handlers::integrations::delete_aws_integration),
         )
-        // Kubernetes token endpoint
-        .route(
-            "/v1/credentials/k8s/token",
-            get(handlers::credentials::get_k8s_token),
-        )
         .with_state(state)
 }
 

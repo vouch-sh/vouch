@@ -395,10 +395,6 @@ async fn run_server(args: config::Args) -> Result<()> {
             "/v1/credentials/aws/token",
             get(handlers::credentials::get_aws_token),
         )
-        .route(
-            "/v1/credentials/k8s/token",
-            get(handlers::credentials::get_k8s_token),
-        )
         // GitHub credential endpoints
         .route(
             "/v1/credentials/github/status",
@@ -502,7 +498,7 @@ async fn run_server(args: config::Args) -> Result<()> {
         )
         .route("/docs/aws", get(handlers::docs::aws_setup_page))
         .route("/docs/ssh", get(handlers::docs::ssh_page))
-        .route("/docs/kubernetes", get(handlers::docs::kubernetes_page))
+        .route("/docs/eks", get(handlers::docs::eks_page))
         .route("/docs/github", get(handlers::docs::github_setup_page))
         .route("/docs/docker", get(handlers::docs::docker_page))
         .route("/docs/applications", get(handlers::docs::applications_page))

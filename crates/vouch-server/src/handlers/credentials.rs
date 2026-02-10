@@ -5,19 +5,17 @@ use crate::AppState;
 use crate::db::{self, GitHubCredentialEventParams};
 use crate::services::integrations::aws::{AwsError, AwsService};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
-use crate::services::integrations::k8s::{K8sError, KubernetesService};
-use axum::extract::Query;
 use axum::{Json, extract::State, http::StatusCode};
 use axum_extra::TypedHeader;
 use axum_extra::extract::cookie::CookieJar;
 use headers::authorization::{Authorization, Bearer};
 use jiff::Timestamp;
 use secrecy::ExposeSecret;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::Arc;
 use vouch_common::{
     ApiError, AwsTokenResponse, GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse,
-    K8sTokenResponse, SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
+    SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
 };
 
 use super::common::extract_session;
@@ -247,79 +245,6 @@ pub async fn get_aws_token(
         })?;
 
     Ok(Json(AwsTokenResponse {
-        id_token: result.id_token,
-        expires_in: result.expires_in,
-    }))
-}
-
-// ============================================================================
-// Kubernetes Token Endpoint
-// ============================================================================
-
-/// Query parameters for Kubernetes token endpoint.
-#[derive(Debug, Deserialize)]
-pub struct K8sTokenQuery {
-    /// Kubernetes cluster audience (matches --oidc-client-id on API server).
-    pub audience: String,
-}
-
-/// Get an OIDC ID token for Kubernetes authentication.
-///
-/// GET /v1/credentials/k8s/token?audience=...
-///
-/// Returns an OIDC ID token that can be used with Kubernetes OIDC authentication.
-/// The Kubernetes API server must be configured to trust the Vouch OIDC provider.
-///
-/// The audience parameter should match the `--oidc-client-id` flag configured on
-/// the Kubernetes API server (typically the cluster name).
-pub async fn get_k8s_token(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<K8sTokenQuery>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
-    jar: CookieJar,
-) -> Result<Json<K8sTokenResponse>, (StatusCode, Json<ApiError>)> {
-    // Validate session
-    let (claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
-
-    // Get user's organization domain (hd claim) if they belong to an org
-    let hd = get_user_org_domain(&state, &claims.sub).await?;
-
-    // Create Kubernetes service and issue token
-    let config = state.config();
-    let k8s_service = KubernetesService::new(&state.db, &config, &state.oidc_key);
-    let result = k8s_service
-        .issue_token(
-            &user_email,
-            &query.audience,
-            claims.authenticator_id.as_deref(),
-            hd,
-        )
-        .await
-        .map_err(|e| match e {
-            K8sError::InvalidAudience(msg) => {
-                json_error(StatusCode::BAD_REQUEST, "invalid_audience", msg)
-            }
-            K8sError::NoAuthenticator => {
-                json_error(StatusCode::FORBIDDEN, "no_authenticator", &e.to_string())
-            }
-            K8sError::Database(ref err) => json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &err.to_string(),
-            ),
-            K8sError::ClaimsBuild(_) => json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "claims_error",
-                &e.to_string(),
-            ),
-            K8sError::TokenSign(_) => json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "token_error",
-                &e.to_string(),
-            ),
-        })?;
-
-    Ok(Json(K8sTokenResponse {
         id_token: result.id_token,
         expires_in: result.expires_in,
     }))

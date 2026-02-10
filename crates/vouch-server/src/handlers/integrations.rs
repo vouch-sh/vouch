@@ -5,7 +5,7 @@
 //! - GitHub (org-wide, requires org membership)
 //! - AWS (org-wide config, per-user setup)
 //! - SSH (per-user, CLI setup)
-//! - Kubernetes (coming soon)
+//! - EKS (via AWS IAM and EKS Access Entries)
 //!
 //! Also provides API endpoints for managing cloud integration configs:
 //! - GET/PUT/DELETE /v1/integrations/aws
@@ -271,4 +271,3 @@ pub async fn delete_aws_integration(
         ))
     }
 }
-

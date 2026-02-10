@@ -80,11 +80,11 @@ pub async fn run(server: &str) -> Result<()> {
         all_passed = false;
     }
 
-    // Check 6: Kubernetes config
-    print!("Kubernetes configuration ... ");
-    let k8s_result = check_k8s_config();
-    print_result(&k8s_result);
-    if !k8s_result.passed {
+    // Check 6: EKS config
+    print!("EKS configuration ... ");
+    let eks_result = check_eks_config();
+    print_result(&eks_result);
+    if !eks_result.passed {
         all_passed = false;
     }
 
@@ -250,8 +250,8 @@ fn check_ssh_config() -> CheckResult {
     }
 }
 
-/// Check Kubernetes configuration for Vouch integration.
-fn check_k8s_config() -> CheckResult {
+/// Check EKS configuration for Vouch integration.
+fn check_eks_config() -> CheckResult {
     let home = match dirs::home_dir() {
         Some(h) => h,
         None => return CheckResult::fail("Could not determine home directory"),
@@ -264,16 +264,18 @@ fn check_k8s_config() -> CheckResult {
         .unwrap_or_else(|| home.join(".kube").join("config"));
 
     if !kubeconfig_path.exists() {
-        return CheckResult::pass("No kubeconfig found (Kubernetes not configured)");
+        return CheckResult::pass("No kubeconfig found (EKS not configured)");
     }
 
     match std::fs::read_to_string(&kubeconfig_path) {
         Ok(content) => {
-            // Check if there's a Vouch user configured
-            if content.contains("vouch credential k8s") || content.contains("vouch-") {
-                CheckResult::pass("Kubernetes configured for Vouch")
+            // Check if there's a Vouch EKS user configured
+            if content.contains("vouch-eks-") {
+                CheckResult::pass("EKS configured for Vouch")
             } else {
-                CheckResult::pass("Kubeconfig exists (no Vouch integration). Run: vouch setup k8s")
+                CheckResult::pass(
+                    "Kubeconfig exists (no Vouch EKS integration). Run: vouch setup eks --cluster <name>",
+                )
             }
         }
         Err(_) => CheckResult::fail("Could not read kubeconfig"),
