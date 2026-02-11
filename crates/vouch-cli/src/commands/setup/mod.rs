@@ -3,8 +3,9 @@
 
 pub mod aws;
 pub mod cargo;
+pub mod codeartifact;
+pub mod codecommit;
 pub mod docker;
-pub mod gcp;
+pub mod eks;
 pub mod github;
-pub mod k8s;
 pub mod ssh;

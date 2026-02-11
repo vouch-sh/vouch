@@ -4,7 +4,6 @@
 //! This module implements a Docker credential helper that provides authentication
 //! for container registries using Vouch. It supports:
 //! - AWS ECR (Elastic Container Registry)
-//! - GCP Artifact Registry and GCR (Google Container Registry)
 //! - GitHub Container Registry (ghcr.io)
 //!
 //! Usage: Configure Docker to use this helper:
@@ -12,7 +11,6 @@
 //!   {
 //!     "credHelpers": {
 //!       "123456789012.dkr.ecr.us-east-1.amazonaws.com": "vouch",
-//!       "gcr.io": "vouch",
 //!       "ghcr.io": "vouch"
 //!     }
 //!   }
@@ -20,14 +18,15 @@
 //! Or use `vouch setup docker --configure` to set this up automatically.
 
 use anyhow::{Context, Result};
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
 use crate::client::VouchClient;
+use crate::commands::credential::aws::{OidcTokenResponse, build_session_tags, decode_jwt_payload};
 use crate::config::Config;
+use crate::integrations::aws::get_local_aws_role;
+use crate::integrations::aws::sigv4::sign_and_send_json_rpc;
 use crate::integrations::aws::sts::{StsCredentials, assume_role_with_web_identity};
-use crate::integrations::aws::{AwsConfig, extract_role_from_credential_process};
 use crate::session::get_user_email;
 
 /// Docker credential helper output format.
@@ -58,34 +57,10 @@ pub enum RegistryType {
         /// Domain suffix (e.g., "amazonaws.com", "amazonaws.cn", "amazonaws.eu")
         domain_suffix: String,
     },
-    /// Google Container Registry (gcr.io)
-    Gcr,
-    /// Google Artifact Registry (*-docker.pkg.dev)
-    GarDocker {
-        region: String,
-        project: Option<String>,
-    },
     /// GitHub Container Registry (ghcr.io)
     Ghcr,
     /// Unknown registry type
     Unknown,
-}
-
-/// Response from Vouch GCP token endpoint.
-#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
-struct GcpTokenResponse {
-    id_token: String,
-    #[allow(dead_code)]
-    expires_in: u64,
-}
-
-impl std::fmt::Debug for GcpTokenResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GcpTokenResponse")
-            .field("id_token", &"[REDACTED]")
-            .field("expires_in", &self.expires_in)
-            .finish()
-    }
 }
 
 /// Response from Vouch GitHub token endpoint.
@@ -107,20 +82,6 @@ impl std::fmt::Debug for GitHubTokenResponse {
 struct GitHubTokenRequest {
     owner: Option<String>,
     repositories: Option<Vec<String>>,
-}
-
-/// Response from Vouch AWS token endpoint.
-#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
-struct AwsOidcTokenResponse {
-    id_token: String,
-}
-
-impl std::fmt::Debug for AwsOidcTokenResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("AwsOidcTokenResponse")
-            .field("id_token", &"[REDACTED]")
-            .finish()
-    }
 }
 
 /// Run the Docker credential helper.
@@ -197,24 +158,6 @@ pub fn detect_registry_type(server_url: &str) -> RegistryType {
         return RegistryType::Ghcr;
     }
 
-    // Google Container Registry: gcr.io, us.gcr.io, eu.gcr.io, asia.gcr.io
-    if url == "gcr.io"
-        || url == "us.gcr.io"
-        || url == "eu.gcr.io"
-        || url == "asia.gcr.io"
-        || url.ends_with(".gcr.io")
-    {
-        return RegistryType::Gcr;
-    }
-
-    // Google Artifact Registry: us-docker.pkg.dev, europe-docker.pkg.dev, etc.
-    if let Some(region) = url.strip_suffix("-docker.pkg.dev") {
-        return RegistryType::GarDocker {
-            region: region.to_string(),
-            project: None,
-        };
-    }
-
     RegistryType::Unknown
 }
 
@@ -248,7 +191,6 @@ async fn get_credential() -> Result<()> {
             domain_suffix,
             ..
         } => get_ecr_credential(server, &region, &domain_suffix, &server_url).await?,
-        RegistryType::Gcr | RegistryType::GarDocker { .. } => get_gcp_credential(server).await?,
         RegistryType::Ghcr => get_ghcr_credential(server).await?,
         RegistryType::Unknown => {
             eprintln!("vouch: unknown registry type for URL: {}", server_url);
@@ -266,15 +208,6 @@ async fn get_credential() -> Result<()> {
     Ok(())
 }
 
-/// Try to read the AWS role ARN from the local ~/.aws/config file.
-///
-/// Finds the first vouch profile and extracts the role ARN from its credential_process.
-fn get_local_aws_role() -> Option<String> {
-    let config = AwsConfig::load().ok()?;
-    let profile = config.find_vouch_profile()?;
-    extract_role_from_credential_process(&profile.credential_process?)
-}
-
 /// Get credentials for AWS ECR.
 async fn get_ecr_credential(
     server: &str,
@@ -285,7 +218,7 @@ async fn get_ecr_credential(
     let client = VouchClient::new(server)?;
 
     // First, get OIDC token from Vouch server
-    let token_response: AwsOidcTokenResponse = client
+    let token_response: OidcTokenResponse = client
         .get_authenticated("/v1/credentials/aws/token")
         .await
         .context("failed to get OIDC token from Vouch server")?;
@@ -298,6 +231,11 @@ async fn get_ecr_credential(
         )
     })?;
 
+    // Decode JWT to extract claims for session tags (ABAC)
+    let tags = decode_jwt_payload(&token_response.id_token)
+        .map(|claims| build_session_tags(&claims))
+        .unwrap_or_default();
+
     // Call STS AssumeRoleWithWebIdentity using the shared module
     // Use email as session name for CloudTrail visibility
     let email = get_user_email(server).await;
@@ -308,6 +246,7 @@ async fn get_ecr_credential(
         &token_response.id_token,
         region,
         domain_suffix,
+        &tags,
     )
     .await
     .context("failed to assume AWS role")?;
@@ -343,87 +282,25 @@ async fn get_ecr_authorization_token(
         .next()
         .context("invalid ECR registry URL")?;
 
-    // Build the ECR GetAuthorizationToken request
-    // This requires AWS Signature Version 4 signing
-    // Use the domain suffix from registry detection for the appropriate partition
     let ecr_endpoint = format!("https://api.ecr.{region}.{domain_suffix}");
 
-    // We need to sign the request with AWS SigV4
-    let http_client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
-
-    // ECR uses JSON-RPC style API
     let request_body = serde_json::json!({
         "registryIds": [account_id]
     });
 
-    let now = jiff::Timestamp::now();
-    let amz_date = format_amz_date(now);
-    let date_stamp = format_date_stamp(now);
+    let response_body = sign_and_send_json_rpc(
+        &ecr_endpoint,
+        "ecr",
+        "AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken",
+        region,
+        creds,
+        &request_body,
+    )
+    .await
+    .context("failed to call ECR GetAuthorizationToken")?;
 
-    // Create canonical request for signing
-    // Use ExposeSecret to access the sensitive credential values
-    let host = format!("api.ecr.{region}.{domain_suffix}");
-    let payload_hash = sha256_hex(request_body.to_string().as_bytes());
-
-    let canonical_headers = format!(
-        "content-type:application/x-amz-json-1.1\nhost:{host}\nx-amz-date:{amz_date}\nx-amz-security-token:{}\nx-amz-target:AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken\n",
-        creds.session_token.expose_secret()
-    );
-    let signed_headers = "content-type;host;x-amz-date;x-amz-security-token;x-amz-target";
-
-    let canonical_request =
-        format!("POST\n/\n\n{canonical_headers}\n{signed_headers}\n{payload_hash}");
-
-    let algorithm = "AWS4-HMAC-SHA256";
-    let credential_scope = format!("{date_stamp}/{region}/ecr/aws4_request");
-    let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
-
-    let string_to_sign =
-        format!("{algorithm}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
-
-    // Derive signing key using the exposed secret
-    let k_date = hmac_sha256(
-        format!("AWS4{}", creds.secret_access_key.expose_secret()).as_bytes(),
-        date_stamp.as_bytes(),
-    );
-    let k_region = hmac_sha256(&k_date, region.as_bytes());
-    let k_service = hmac_sha256(&k_region, b"ecr");
-    let k_signing = hmac_sha256(&k_service, b"aws4_request");
-
-    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
-
-    let authorization = format!(
-        "{algorithm} Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
-        creds.access_key_id
-    );
-
-    let response = http_client
-        .post(&ecr_endpoint)
-        .header("Content-Type", "application/x-amz-json-1.1")
-        .header("X-Amz-Date", &amz_date)
-        .header("X-Amz-Security-Token", creds.session_token.expose_secret())
-        .header(
-            "X-Amz-Target",
-            "AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken",
-        )
-        .header("Authorization", &authorization)
-        .body(request_body.to_string())
-        .send()
-        .await
-        .context("failed to call ECR")?;
-
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("ECR returned error {status}: {body}");
-    }
-
-    let ecr_response: EcrAuthorizationResponse = response
-        .json()
-        .await
-        .context("failed to parse ECR response")?;
+    let ecr_response: EcrAuthorizationResponse =
+        serde_json::from_str(&response_body).context("failed to parse ECR response")?;
 
     // The authorization token is base64(username:password)
     // We need to extract just the password part
@@ -468,112 +345,12 @@ impl std::fmt::Debug for EcrAuthorizationData {
     }
 }
 
-/// Format timestamp for AWS X-Amz-Date header.
-fn format_amz_date(ts: jiff::Timestamp) -> String {
-    let dt = ts.to_zoned(jiff::tz::TimeZone::UTC);
-    format!(
-        "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
-        dt.year(),
-        dt.month(),
-        dt.day(),
-        dt.hour(),
-        dt.minute(),
-        dt.second()
-    )
-}
-
-/// Format timestamp for AWS date stamp (YYYYMMDD).
-fn format_date_stamp(ts: jiff::Timestamp) -> String {
-    let dt = ts.to_zoned(jiff::tz::TimeZone::UTC);
-    format!("{:04}{:02}{:02}", dt.year(), dt.month(), dt.day())
-}
-
-/// Compute SHA-256 hash and return as hex string.
-fn sha256_hex(data: &[u8]) -> String {
-    use aws_lc_rs::digest::{SHA256, digest};
-    hex::encode(digest(&SHA256, data).as_ref())
-}
-
-/// Compute HMAC-SHA256.
-fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
-    use aws_lc_rs::hmac::{HMAC_SHA256, Key, sign};
-    let key = Key::new(HMAC_SHA256, key);
-    sign(&key, data).as_ref().to_vec()
-}
-
 /// Decode base64 string.
 fn base64_decode(input: &str) -> Result<Vec<u8>> {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD
         .decode(input)
         .context("invalid base64")
-}
-
-/// GCP external account credential configuration (partial, for reading audience).
-#[derive(Debug, Deserialize)]
-struct GcpExternalAccountConfig {
-    audience: Option<String>,
-}
-
-/// Try to read the GCP audience from local config files.
-///
-/// Looks for vouch credential files in ~/.config/gcloud/vouch-credentials*.json
-fn get_local_gcp_audience() -> Option<String> {
-    let home = dirs::home_dir()?;
-    let gcloud_dir = home.join(".config/gcloud");
-
-    if !gcloud_dir.exists() {
-        return None;
-    }
-
-    // Look for vouch credential files
-    let entries = std::fs::read_dir(&gcloud_dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let filename = path.file_name()?.to_string_lossy();
-
-        // Match vouch-credentials.json or vouch-credentials-*.json
-        if filename.starts_with("vouch-credentials")
-            && filename.ends_with(".json")
-            && let Ok(content) = std::fs::read_to_string(&path)
-            && let Ok(config) = serde_json::from_str::<GcpExternalAccountConfig>(&content)
-            && let Some(audience) = config.audience
-        {
-            return Some(audience);
-        }
-    }
-
-    None
-}
-
-/// Get credentials for GCP (GCR and Artifact Registry).
-async fn get_gcp_credential(server: &str) -> Result<DockerCredential> {
-    let client = VouchClient::new(server)?;
-
-    // Get GCP audience from local config (created by 'vouch setup gcp --configure')
-    let audience = get_local_gcp_audience().ok_or_else(|| {
-        anyhow::anyhow!(
-            "GCP not configured. Run 'vouch setup gcp --configure' to set up GCP Workload Identity Federation"
-        )
-    })?;
-
-    // URL-encode the audience parameter
-    let encoded_audience: String =
-        url::form_urlencoded::byte_serialize(audience.as_bytes()).collect();
-    let path = format!("/v1/credentials/gcp/token?audience={encoded_audience}");
-
-    // Get OIDC token from Vouch server
-    let token_response: GcpTokenResponse = client
-        .get_authenticated(&path)
-        .await
-        .context("failed to get GCP OIDC token")?;
-
-    // For GCP registries, we use the OIDC token directly as the password
-    // with "oauth2accesstoken" as the username
-    Ok(DockerCredential {
-        username: "oauth2accesstoken".to_string(),
-        secret: token_response.id_token.clone(),
-    })
 }
 
 /// Get credentials for GitHub Container Registry.
@@ -699,51 +476,9 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_gcr() {
-        assert_eq!(detect_registry_type("gcr.io"), RegistryType::Gcr);
-        assert_eq!(detect_registry_type("us.gcr.io"), RegistryType::Gcr);
-        assert_eq!(detect_registry_type("eu.gcr.io"), RegistryType::Gcr);
-        assert_eq!(detect_registry_type("asia.gcr.io"), RegistryType::Gcr);
-    }
-
-    #[test]
-    fn test_detect_gar() {
-        assert_eq!(
-            detect_registry_type("us-docker.pkg.dev"),
-            RegistryType::GarDocker {
-                region: "us".to_string(),
-                project: None,
-            }
-        );
-        assert_eq!(
-            detect_registry_type("europe-docker.pkg.dev"),
-            RegistryType::GarDocker {
-                region: "europe".to_string(),
-                project: None,
-            }
-        );
-    }
-
-    #[test]
     fn test_detect_unknown() {
         assert_eq!(detect_registry_type("docker.io"), RegistryType::Unknown);
         assert_eq!(detect_registry_type("quay.io"), RegistryType::Unknown);
-    }
-
-    #[test]
-    fn test_format_amz_date() {
-        // Create a known timestamp: 2024-01-15 10:50:45 UTC
-        let ts = jiff::Timestamp::from_second(1705315845).expect("valid timestamp");
-        let result = format_amz_date(ts);
-        assert_eq!(result, "20240115T105045Z");
-    }
-
-    #[test]
-    fn test_format_date_stamp() {
-        // Create a known timestamp: 2024-01-15 10:50:45 UTC
-        let ts = jiff::Timestamp::from_second(1705315845).expect("valid timestamp");
-        let result = format_date_stamp(ts);
-        assert_eq!(result, "20240115");
     }
 
     #[test]

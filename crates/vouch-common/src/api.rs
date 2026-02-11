@@ -546,10 +546,10 @@ pub struct SshCaPublicKeyResponse {
 }
 
 // ============================================================================
-// Cloud Provider Credentials (AWS, GCP)
+// Cloud Provider Credentials (AWS)
 // ============================================================================
 
-/// Cloud provider token response (AWS and GCP use identical format).
+/// Cloud provider token response.
 /// Contains an OIDC ID token for use with cloud provider identity federation.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CloudTokenResponse {
@@ -562,29 +562,9 @@ pub struct CloudTokenResponse {
 /// Response containing an OIDC ID token for AWS STS.
 pub type AwsTokenResponse = CloudTokenResponse;
 
-/// Response containing an OIDC ID token for GCP Workload Identity Federation.
-pub type GcpTokenResponse = CloudTokenResponse;
-
-/// Response containing an OIDC ID token for Kubernetes authentication.
-pub type K8sTokenResponse = CloudTokenResponse;
-
 // ============================================================================
 // Cloud Provider Integration Configs
 // ============================================================================
-
-/// GCP Workload Identity Federation configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GcpIntegrationConfig {
-    /// GCP project number (numeric, not project ID).
-    pub project_number: String,
-    /// Workload Identity Pool ID.
-    pub pool_id: String,
-    /// Provider ID within the Workload Identity Pool.
-    pub provider_id: String,
-    /// Optional service account email to impersonate.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub service_account: Option<String>,
-}
 
 /// AWS OIDC federation configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]

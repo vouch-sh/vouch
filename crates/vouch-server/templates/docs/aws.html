@@ -147,7 +147,7 @@ cat > trust-policy.json &lt;&lt;'EOF'
       "Principal": {
         "Federated": "arn:aws:iam::ACCOUNT_ID:oidc-provider/{{ rp_id }}"
       },
-      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Action": ["sts:AssumeRoleWithWebIdentity", "sts:TagSession"],
       "Condition": {
         "StringEquals": {
           "{{ rp_id }}:aud": "{{ provider_url }}"
@@ -194,7 +194,9 @@ Resources:
           - Effect: Allow
             Principal:
               Federated: !Ref OIDCProviderArn
-            Action: sts:AssumeRoleWithWebIdentity
+            Action:
+              - sts:AssumeRoleWithWebIdentity
+              - sts:TagSession
             Condition:
               StringEquals:
                 {{ rp_id }}:aud: {{ provider_url }}
@@ -230,7 +232,7 @@ resource "aws_iam_role" "vouch_developer" {
         Principal = {
           Federated = aws_iam_openid_connect_provider.vouch.arn
         }
-        Action = "sts:AssumeRoleWithWebIdentity"
+        Action = ["sts:AssumeRoleWithWebIdentity", "sts:TagSession"]
         Condition = {
           StringEquals = {
             "{{ rp_id }}:aud" = "{{ provider_url }}"
@@ -292,6 +294,51 @@ output "role_arn" {
                     <p class="text-gray-500 text-xs mt-2">
                         AWS only supports <code>aud</code> and <code>sub</code> as condition keys for custom OIDC providers.
                         Custom claims like <code>hd</code> are not available in IAM policy conditions.
+                    </p>
+                </div>
+
+                <!-- Session tags (ABAC) section -->
+                <div class="mt-6 p-4 bg-vouch-bg rounded border border-vouch-border">
+                    <h4 class="text-gray-200 font-semibold mb-2">Session Tags for Attribute-Based Access Control (ABAC)</h4>
+                    <p class="text-gray-400 text-sm mb-3">
+                        Vouch automatically passes <code class="text-vouch-accent">email</code> and <code class="text-vouch-accent">domain</code>
+                        as <a href="https://docs.aws.amazon.com/IAM/latest/UserGuide/id_session-tags.html" target="_blank" class="text-vouch-accent hover:underline">STS session tags</a>
+                        with every <code>AssumeRoleWithWebIdentity</code> call. This enables fine-grained, attribute-based access control
+                        using <code class="text-vouch-accent">${{ "{{" }}aws:PrincipalTag/email{{ "}}" }}</code> and <code class="text-vouch-accent">${{ "{{" }}aws:PrincipalTag/domain{{ "}}" }}</code>
+                        in IAM policies.
+                    </p>
+
+                    <p class="text-gray-400 text-sm mb-2">
+                        <strong class="text-gray-300">Restrict allowed tag keys</strong> in your trust policy to prevent tag injection:
+                    </p>
+                    <div class="code-block mt-2 text-xs">
+                        <pre class="whitespace-pre-wrap">"Condition": {
+  "StringEquals": {
+    "{{ rp_id }}:aud": "{{ provider_url }}"
+  },
+  "ForAllValues:StringEquals": {
+    "aws:TagKeys": ["email", "domain"]
+  }
+}</pre>
+                    </div>
+
+                    <p class="text-gray-400 text-sm mt-3 mb-2">
+                        <strong class="text-gray-300">Example:</strong> Per-user S3 prefix access using session tags:
+                    </p>
+                    <div class="code-block mt-2 text-xs">
+                        <pre class="whitespace-pre-wrap">{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Resource": "arn:aws:s3:::my-bucket/users/${{ "{{" }}aws:PrincipalTag/email{{ "}}" }}/*"
+    }
+  ]
+}</pre>
+                    </div>
+                    <p class="text-gray-500 text-xs mt-2">
+                        The trust policies above already include <code>sts:TagSession</code>. No additional configuration is needed to use session tags.
                     </p>
                 </div>
             </div>

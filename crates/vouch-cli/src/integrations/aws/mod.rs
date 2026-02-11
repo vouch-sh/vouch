@@ -4,11 +4,22 @@
 //! - `config` - AWS config file (~/.aws/config) parsing
 //! - `sts` - AWS STS (Security Token Service) utilities
 
+pub mod codeartifact;
 pub mod config;
+pub mod sigv4;
 pub mod sts;
 
 // Re-export commonly used types
 pub use config::{AwsConfig, AwsProfile, extract_role_from_credential_process};
+
+/// Try to read the AWS role ARN from the local `~/.aws/config` file.
+///
+/// Finds the first vouch profile and extracts the role ARN from its `credential_process`.
+pub(crate) fn get_local_aws_role() -> Option<String> {
+    let config = AwsConfig::load().ok()?;
+    let profile = config.find_vouch_profile()?;
+    extract_role_from_credential_process(&profile.credential_process?)
+}
 
 use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
 

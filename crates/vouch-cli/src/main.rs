@@ -145,28 +145,6 @@ enum CredentialCommands {
         #[arg(long)]
         session_name: Option<String>,
     },
-    /// Obtain a GCP identity token (executable-sourced credential format).
-    ///
-    /// This is used by GCP libraries as an executable credential source.
-    /// Users should not call this directly.
-    /// Instead, use `vouch setup gcp` to configure GCP.
-    #[command(hide = true)]
-    Gcp {
-        /// Workload Identity Pool provider audience URL.
-        #[arg(long)]
-        audience: String,
-    },
-    /// Obtain a Kubernetes identity token (ExecCredential format).
-    ///
-    /// This is used by kubectl as an exec credential plugin.
-    /// Users should not call this directly.
-    /// Instead, use `vouch setup k8s` to configure kubectl.
-    #[command(hide = true)]
-    K8s {
-        /// Kubernetes cluster audience (matches --oidc-client-id on API server).
-        #[arg(long)]
-        audience: String,
-    },
     /// Obtain an SSH certificate.
     Ssh {
         /// Path to SSH private key (default: ~/.ssh/id_ed25519_vouch).
@@ -202,6 +180,18 @@ enum CredentialCommands {
         #[arg(long = "cargo-plugin", hide = true)]
         _cargo_plugin: bool,
     },
+    /// Obtain a CodeArtifact authorization token.
+    Codeartifact {
+        /// CodeArtifact domain name.
+        #[arg(long)]
+        domain: String,
+        /// AWS account ID that owns the domain.
+        #[arg(long)]
+        domain_owner: String,
+        /// AWS region (default: us-east-1).
+        #[arg(long, default_value = "us-east-1")]
+        region: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -214,38 +204,6 @@ enum SetupCommands {
         /// AWS IAM role ARN to assume.
         #[arg(long)]
         role: String,
-    },
-    /// Configure GCP to use Vouch credentials via Workload Identity Federation.
-    ///
-    /// If no options are provided, configuration is fetched from the server.
-    /// This requires your organization admin to have configured GCP integration.
-    Gcp {
-        /// Profile name for the credential file (e.g., "prod", "staging").
-        /// Creates vouch-credentials-{profile}.json instead of vouch-credentials.json.
-        #[arg(long)]
-        profile: Option<String>,
-        /// GCP project number (numeric, not project ID).
-        /// If not provided, uses server configuration.
-        #[arg(long)]
-        project_number: Option<String>,
-        /// Workload Identity Pool ID.
-        /// If not provided, uses server configuration.
-        #[arg(long)]
-        pool_id: Option<String>,
-        /// Provider ID within the Workload Identity Pool.
-        /// If not provided, uses server configuration.
-        #[arg(long)]
-        provider_id: Option<String>,
-        /// Service account email to impersonate (optional).
-        /// Overrides server configuration if provided.
-        #[arg(long)]
-        service_account: Option<String>,
-        /// Output path for credential configuration file.
-        #[arg(long)]
-        output: Option<String>,
-        /// Write the configuration file (otherwise just show instructions).
-        #[arg(long)]
-        configure: bool,
     },
     /// Configure SSH to use Vouch certificates.
     Ssh {
@@ -263,24 +221,24 @@ enum SetupCommands {
         #[arg(long)]
         configure: bool,
     },
-    /// Configure kubectl to use Vouch for Kubernetes OIDC authentication.
-    K8s {
-        /// Cluster name from kubeconfig (prompts if not provided).
+    /// Configure kubectl to use Vouch credentials for Amazon EKS clusters.
+    Eks {
+        /// EKS cluster name.
         #[arg(long)]
-        cluster: Option<String>,
-        /// Audience/client-id for OIDC (defaults to cluster name).
+        cluster: String,
+        /// AWS region (auto-detected from AWS profile or environment if not specified).
         #[arg(long)]
-        audience: Option<String>,
+        region: Option<String>,
+        /// AWS profile to use (defaults to auto-detected vouch profile).
+        #[arg(long)]
+        profile: Option<String>,
         /// Path to kubeconfig file (defaults to ~/.kube/config).
         #[arg(long)]
         kubeconfig: Option<String>,
-        /// Write the configuration (otherwise just show instructions).
-        #[arg(long)]
-        configure: bool,
     },
     /// Configure Docker to use Vouch for container registry authentication.
     Docker {
-        /// Container registries to configure (e.g., ghcr.io, gcr.io).
+        /// Container registries to configure (e.g., ghcr.io).
         #[arg(trailing_var_arg = true)]
         registries: Vec<String>,
         /// Automatically configure Docker (otherwise just show instructions).
@@ -295,6 +253,36 @@ enum SetupCommands {
         /// Write the configuration (otherwise just show instructions).
         #[arg(long)]
         configure: bool,
+    },
+    /// Configure Git to use Vouch for AWS CodeCommit credentials.
+    Codecommit {
+        /// AWS region (default: wildcard matching all regions).
+        #[arg(long)]
+        region: Option<String>,
+        /// AWS profile to use (defaults to auto-detected vouch profile).
+        #[arg(long)]
+        profile: Option<String>,
+        /// Automatically configure git (otherwise just show instructions).
+        #[arg(long)]
+        configure: bool,
+    },
+    /// Configure a package manager for AWS CodeArtifact.
+    Codeartifact {
+        /// Package manager to configure (cargo, pip, npm).
+        #[arg(long)]
+        tool: crate::commands::setup::codeartifact::Tool,
+        /// CodeArtifact domain name.
+        #[arg(long)]
+        domain: String,
+        /// AWS account ID that owns the domain.
+        #[arg(long)]
+        domain_owner: String,
+        /// AWS region (default: us-east-1).
+        #[arg(long, default_value = "us-east-1")]
+        region: String,
+        /// CodeArtifact repository name.
+        #[arg(long)]
+        repository: String,
     },
 }
 
@@ -363,12 +351,6 @@ async fn main() -> Result<()> {
             CredentialCommands::Aws { role, session_name } => {
                 commands::credential::aws::run(&server, &role, session_name.as_deref()).await
             }
-            CredentialCommands::Gcp { audience } => {
-                commands::credential::gcp::run(&server, &audience).await
-            }
-            CredentialCommands::K8s { audience } => {
-                commands::credential::k8s::run(&server, &audience).await
-            }
             CredentialCommands::Ssh { key } => {
                 commands::credential::ssh::run(&server, key.as_deref()).await
             }
@@ -379,31 +361,18 @@ async fn main() -> Result<()> {
                 commands::credential::docker::run(&operation).await
             }
             CredentialCommands::Cargo { .. } => commands::credential::cargo::run().await,
+            CredentialCommands::Codeartifact {
+                domain,
+                domain_owner,
+                region,
+            } => {
+                commands::credential::codeartifact::run(&server, &domain, &domain_owner, &region)
+                    .await
+            }
         },
         Commands::Setup { command } => match command {
             SetupCommands::Aws { profile, role } => {
                 commands::setup::aws::run(profile.as_deref(), &role).await
-            }
-            SetupCommands::Gcp {
-                profile,
-                project_number,
-                pool_id,
-                provider_id,
-                service_account,
-                output,
-                configure,
-            } => {
-                commands::setup::gcp::run(
-                    &server,
-                    profile.as_deref(),
-                    project_number.as_deref(),
-                    pool_id.as_deref(),
-                    provider_id.as_deref(),
-                    service_account.as_deref(),
-                    output.as_deref(),
-                    configure,
-                )
-                .await
             }
             SetupCommands::Ssh { hosts } => {
                 commands::setup::ssh::run(&server, hosts.as_deref()).await
@@ -411,18 +380,17 @@ async fn main() -> Result<()> {
             SetupCommands::Github { host, configure } => {
                 commands::setup::github::run(&host, configure).await
             }
-            SetupCommands::K8s {
+            SetupCommands::Eks {
                 cluster,
-                audience,
+                region,
+                profile,
                 kubeconfig,
-                configure,
             } => {
-                commands::setup::k8s::run(
-                    &server,
-                    cluster.as_deref(),
-                    audience.as_deref(),
+                commands::setup::eks::run(
+                    &cluster,
+                    region.as_deref(),
+                    profile.as_deref(),
                     kubeconfig.as_deref(),
-                    configure,
                 )
                 .await
             }
@@ -434,6 +402,31 @@ async fn main() -> Result<()> {
                 registry,
                 configure,
             } => commands::setup::cargo::run(registry.as_deref(), configure).await,
+            SetupCommands::Codecommit {
+                region,
+                profile,
+                configure,
+            } => {
+                commands::setup::codecommit::run(region.as_deref(), profile.as_deref(), configure)
+                    .await
+            }
+            SetupCommands::Codeartifact {
+                tool,
+                domain,
+                domain_owner,
+                region,
+                repository,
+            } => {
+                commands::setup::codeartifact::run(
+                    &server,
+                    tool,
+                    &domain,
+                    &domain_owner,
+                    &region,
+                    &repository,
+                )
+                .await
+            }
         },
         Commands::Completions(args) => {
             let mut cmd = Cli::command();

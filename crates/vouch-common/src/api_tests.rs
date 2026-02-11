@@ -521,56 +521,6 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_gcp_integration_config_round_trip() {
-        let config = GcpIntegrationConfig {
-            project_number: "123456789012".to_string(),
-            pool_id: "vouch-pool".to_string(),
-            provider_id: "vouch-provider".to_string(),
-            service_account: Some("sa@project.iam.gserviceaccount.com".to_string()),
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        let decoded: GcpIntegrationConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.project_number, "123456789012");
-        assert_eq!(decoded.pool_id, "vouch-pool");
-        assert_eq!(decoded.provider_id, "vouch-provider");
-        assert_eq!(
-            decoded.service_account,
-            Some("sa@project.iam.gserviceaccount.com".to_string())
-        );
-    }
-
-    #[test]
-    fn test_gcp_integration_config_without_service_account() {
-        let config = GcpIntegrationConfig {
-            project_number: "123456789012".to_string(),
-            pool_id: "vouch-pool".to_string(),
-            provider_id: "vouch-provider".to_string(),
-            service_account: None,
-        };
-        let json = serde_json::to_string(&config).unwrap();
-
-        // service_account should be omitted from JSON
-        assert!(!json.contains("service_account"));
-
-        let decoded: GcpIntegrationConfig = serde_json::from_str(&json).unwrap();
-        assert!(decoded.service_account.is_none());
-    }
-
-    #[test]
-    fn test_gcp_integration_config_deserialization_from_json() {
-        let json = r#"{
-            "project_number": "987654321",
-            "pool_id": "custom-pool",
-            "provider_id": "custom-provider"
-        }"#;
-        let config: GcpIntegrationConfig = serde_json::from_str(json).unwrap();
-        assert_eq!(config.project_number, "987654321");
-        assert_eq!(config.pool_id, "custom-pool");
-        assert_eq!(config.provider_id, "custom-provider");
-        assert!(config.service_account.is_none());
-    }
-
-    #[test]
     fn test_aws_integration_config_round_trip() {
         let config = AwsIntegrationConfig {
             default_role_arn: Some("arn:aws:iam::123456789012:role/VouchDeveloper".to_string()),
@@ -598,46 +548,6 @@ mod tests {
     }
 
     #[test]
-    fn test_integration_config_response_gcp_configured() {
-        let config = GcpIntegrationConfig {
-            project_number: "123456789012".to_string(),
-            pool_id: "vouch-pool".to_string(),
-            provider_id: "vouch-provider".to_string(),
-            service_account: None,
-        };
-        let response: IntegrationConfigResponse<GcpIntegrationConfig> = IntegrationConfigResponse {
-            configured: true,
-            config: Some(config),
-        };
-        let json = serde_json::to_string(&response).unwrap();
-        assert!(json.contains("\"configured\":true"));
-        assert!(json.contains("\"project_number\""));
-
-        let decoded: IntegrationConfigResponse<GcpIntegrationConfig> =
-            serde_json::from_str(&json).unwrap();
-        assert!(decoded.configured);
-        assert!(decoded.config.is_some());
-    }
-
-    #[test]
-    fn test_integration_config_response_gcp_not_configured() {
-        let response: IntegrationConfigResponse<GcpIntegrationConfig> = IntegrationConfigResponse {
-            configured: false,
-            config: None,
-        };
-        let json = serde_json::to_string(&response).unwrap();
-        assert!(json.contains("\"configured\":false"));
-
-        // config should be omitted from JSON
-        assert!(!json.contains("\"config\""));
-
-        let decoded: IntegrationConfigResponse<GcpIntegrationConfig> =
-            serde_json::from_str(&json).unwrap();
-        assert!(!decoded.configured);
-        assert!(decoded.config.is_none());
-    }
-
-    #[test]
     fn test_integration_config_response_aws_configured() {
         let config = AwsIntegrationConfig {
             default_role_arn: Some("arn:aws:iam::111222333444:role/DevRole".to_string()),
@@ -655,34 +565,5 @@ mod tests {
             cfg.default_role_arn,
             Some("arn:aws:iam::111222333444:role/DevRole".to_string())
         );
-    }
-
-    #[test]
-    fn test_gcp_integration_config_missing_required_field() {
-        // Missing pool_id should fail
-        let json = r#"{
-            "project_number": "123456789012",
-            "provider_id": "vouch-provider"
-        }"#;
-        let result: Result<GcpIntegrationConfig, _> = serde_json::from_str(json);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("pool_id"));
-    }
-
-    #[test]
-    fn test_gcp_integration_config_empty_fields() {
-        // Empty strings are technically valid at serialization level
-        // (semantic validation happens in the handler)
-        let config = GcpIntegrationConfig {
-            project_number: "".to_string(),
-            pool_id: "".to_string(),
-            provider_id: "".to_string(),
-            service_account: None,
-        };
-        let json = serde_json::to_string(&config).unwrap();
-        let decoded: GcpIntegrationConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.project_number, "");
-        assert_eq!(decoded.pool_id, "");
-        assert_eq!(decoded.provider_id, "");
     }
 }

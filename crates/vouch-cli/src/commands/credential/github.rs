@@ -10,44 +10,13 @@
 //!
 //! Or use `vouch setup github --configure` to set this up automatically.
 
-use anyhow::{Context, Result};
-use std::io::{BufRead, Write};
+use anyhow::Result;
+use std::io::Write;
 use vouch_common::{GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse};
 
 use crate::client::VouchClient;
+use crate::commands::credential::git_protocol::read_credential_input;
 use crate::config::Config;
-
-/// Git credential protocol input.
-#[derive(Debug, Default)]
-struct CredentialInput {
-    protocol: Option<String>,
-    host: Option<String>,
-    path: Option<String>,
-}
-
-/// Parse git credential protocol input from stdin.
-fn read_credential_input() -> Result<CredentialInput> {
-    let stdin = std::io::stdin();
-    let mut input = CredentialInput::default();
-
-    for line in stdin.lock().lines() {
-        let line = line.context("failed to read stdin")?;
-        if line.is_empty() {
-            break;
-        }
-
-        if let Some((key, value)) = line.split_once('=') {
-            match key {
-                "protocol" => input.protocol = Some(value.to_string()),
-                "host" => input.host = Some(value.to_string()),
-                "path" => input.path = Some(value.to_string()),
-                _ => {} // Ignore other fields
-            }
-        }
-    }
-
-    Ok(input)
-}
 
 /// Check if the host is a GitHub host.
 fn is_github_host(host: &str) -> bool {

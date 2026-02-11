@@ -262,26 +262,10 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         )
         // Cloud integration config API
         .route(
-            "/v1/integrations/gcp",
-            get(handlers::integrations::get_gcp_integration)
-                .put(handlers::integrations::set_gcp_integration)
-                .delete(handlers::integrations::delete_gcp_integration),
-        )
-        .route(
             "/v1/integrations/aws",
             get(handlers::integrations::get_aws_integration)
                 .put(handlers::integrations::set_aws_integration)
                 .delete(handlers::integrations::delete_aws_integration),
-        )
-        // GCP token endpoint
-        .route(
-            "/v1/credentials/gcp/token",
-            get(handlers::credentials::get_gcp_token),
-        )
-        // Kubernetes token endpoint
-        .route(
-            "/v1/credentials/k8s/token",
-            get(handlers::credentials::get_k8s_token),
         )
         .with_state(state)
 }

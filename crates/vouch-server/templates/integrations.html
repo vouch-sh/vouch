@@ -88,85 +88,6 @@
                 </div>
             </div>
 
-            {# GCP Integration (Org-wide config, per-user setup) #}
-            <div class="card">
-                <div class="flex items-center gap-2 mb-1">
-                    {# GCP logo #}
-                    <svg class="w-6 h-6 text-blue-400 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M12.19 2.38a9.344 9.344 0 0 0-9.234 6.893c.053-.02-.055.013 0 0-3.875 2.551-3.922 8.11-.247 10.941l.006-.007-.007.03a6.717 6.717 0 0 0 4.077 1.356h5.173l.03.03h5.192c6.687.053 9.376-8.605 3.835-12.35a9.365 9.365 0 0 0-8.825-6.893zM8.073 19.215a4.413 4.413 0 0 1-2.553-8.151l-.006.006.162-.094.164-.092c.268-.139.558-.242.857-.31l.068-.013-.003.002a3.68 3.68 0 0 1 .74-.077h.007a3.68 3.68 0 0 1 2.593 1.098 3.68 3.68 0 0 1 1.034 3.341 3.68 3.68 0 0 1-3.063 2.29zM12 17.09a2.816 2.816 0 0 0 .262-.012l-.006.001h5.062a2.797 2.797 0 0 0 2.794-2.78 2.797 2.797 0 0 0-2.78-2.813l-.019-.001h-.075a3.47 3.47 0 0 0-.348.017l.013-.001a5.923 5.923 0 0 0-5.18-3.046h-.02a5.941 5.941 0 0 0-5.603 3.972l-.012.039a5.863 5.863 0 0 0-.203 1.53v.013a2.81 2.81 0 0 0 2.809 2.794z"/>
-                    </svg>
-                    <h2 class="text-lg font-semibold text-gray-200">Google Cloud</h2>
-                    {% if auth.has_org %}
-                    <span class="text-xs bg-vouch-surface text-gray-400 px-2 py-0.5 rounded">Org config</span>
-                    {% else %}
-                    <span class="text-xs bg-vouch-surface text-gray-400 px-2 py-0.5 rounded">Per-user</span>
-                    {% endif %}
-                </div>
-                <p class="text-gray-400 text-sm mb-4">Get temporary GCP credentials via Workload Identity Federation.</p>
-
-                {% if gcp_configured %}
-                <div class="space-y-3">
-                    <div class="flex items-center justify-between">
-                        <div class="flex items-center gap-2">
-                            <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
-                            </svg>
-                            <span class="text-sm text-green-400">Configured</span>
-                        </div>
-                        {% if auth.is_org_admin %}
-                        <a href="/gcp/configure" class="btn-secondary text-sm">Edit</a>
-                        {% endif %}
-                    </div>
-                    {% if let Some(config) = gcp_config %}
-                    <div class="bg-vouch-surface rounded-lg p-2 text-xs text-gray-400 space-y-0.5">
-                        <div><span class="text-gray-500">Project:</span> {{ config.project_number }}</div>
-                        <div><span class="text-gray-500">Pool:</span> {{ config.pool_id }}</div>
-                        <div><span class="text-gray-500">Provider:</span> {{ config.provider_id }}</div>
-                    </div>
-                    {% endif %}
-                    <div class="bg-vouch-surface rounded-lg p-3">
-                        <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs mb-2">vouch setup gcp --configure</code>
-                        <a href="/docs/gcp" class="text-sm text-vouch-accent hover:text-vouch-accent-hover inline-flex items-center gap-1">
-                            Setup guide
-                            <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
-                            </svg>
-                        </a>
-                    </div>
-                </div>
-                {% elif auth.has_org && !gcp_configured %}
-                <div class="space-y-3">
-                    <div class="bg-yellow-900/20 border border-yellow-700/30 rounded-lg p-3 flex items-center justify-between">
-                        <p class="text-sm text-yellow-300">Not configured</p>
-                        {% if auth.is_org_admin %}
-                        <a href="/gcp/configure" class="btn-primary text-sm whitespace-nowrap ml-3">Configure</a>
-                        {% endif %}
-                    </div>
-                    <div class="bg-vouch-surface rounded-lg p-3">
-                        <p class="text-xs text-gray-500 mb-2">Or configure manually:</p>
-                        <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs mb-2">vouch setup gcp --project-number PROJECT --pool-id POOL --provider-id PROVIDER</code>
-                        <a href="/docs/gcp" class="text-sm text-vouch-accent hover:text-vouch-accent-hover inline-flex items-center gap-1">
-                            Setup guide
-                            <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                                <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
-                            </svg>
-                        </a>
-                    </div>
-                </div>
-                {% else %}
-                <div class="bg-vouch-surface rounded-lg p-3">
-                    <p class="text-sm text-gray-400 mb-2">Configure via the CLI:</p>
-                    <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs mb-2">vouch setup gcp --project-number PROJECT --pool-id POOL --provider-id PROVIDER</code>
-                    <a href="/docs/gcp" class="text-sm text-vouch-accent hover:text-vouch-accent-hover inline-flex items-center gap-1">
-                        Setup guide
-                        <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
-                        </svg>
-                    </a>
-                </div>
-                {% endif %}
-            </div>
-
             {# SSH Integration (Per-user) #}
             <div class="card{% if ssh_ca_public_key.is_none() %} opacity-50{% endif %}"{% if ssh_ca_public_key.is_none() %} style="order:99"{% endif %}>
                 <div class="flex items-center gap-2 mb-1">
@@ -202,22 +123,22 @@
                 {% endif %}
             </div>
 
-            {# Kubernetes Integration (Per-user) #}
+            {# Amazon EKS Integration (Per-user) #}
             <div class="card">
                 <div class="flex items-center gap-2 mb-1">
-                    {# Kubernetes logo #}
-                    <svg class="w-6 h-6 text-blue-400 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M10.204 14.35l.007.01-.999 2.413a5.171 5.171 0 01-2.075-2.597l2.578-.437.489.611zm-.211-1.792a1.027 1.027 0 00-.88-.537c-.272 0-.52.137-.67.358l-.012.017-.016.022-1.93 2.856a5.144 5.144 0 01-.398-3.018l.008-.038c.153-1.015.548-1.9 1.1-2.642l.016-.02 2.07 2.363.712.639zm2.008.007v1.058l1.066.814 2.243-.393a5.127 5.127 0 01-2.029 2.572l-.956-2.354-.067-.084-.257-.312v-1.3zm-2.814-3.535l-.001-.002a1.03 1.03 0 00-1.45-.155l-.014.012-2.242 1.783a5.156 5.156 0 012.155-2.938l1.552 1.3zm4.415.387l1.55-1.298a5.156 5.156 0 012.165 2.934l-2.244-1.78-.015-.013a1.03 1.03 0 00-1.456.157zm.725 2.933l.712-.64 2.069-2.362a5.16 5.16 0 011.092 2.632l.01.05c.086.582.086 1.167.007 1.738l-.004.026-.004.026-1.925-2.849-.016-.022-.012-.017a.824.824 0 00-.67-.358 1.027 1.027 0 00-.88.537l-.379.474zm-.115 2.422l-1 2.414-.006.01a5.162 5.162 0 01-2.086-2.598l2.587-.438.505.612zm.5-6.407l-1.4-1.172v.014c-.034-1.197-1.031-2.158-2.234-2.158s-2.2.96-2.234 2.158v-.014l-1.4 1.172.058-.032c-.32.35-.6.732-.839 1.144a5.11 5.11 0 00-.645 1.78l-.007.037-.007.037a5.15 5.15 0 00.09 1.861l.006.025.006.025c.047.217.108.428.18.635l.008.02.008.02a5.157 5.157 0 001.413 2.156l.015.014.015.014c.33.309.696.582 1.094.815l.032.018.032.018a5.165 5.165 0 002.543.684 5.17 5.17 0 002.543-.684l.032-.018.032-.018c.398-.233.764-.506 1.094-.815l.015-.014.015-.014a5.157 5.157 0 001.414-2.156l.008-.02.008-.02c.072-.207.133-.418.18-.635l.006-.025.006-.025a5.149 5.149 0 00.09-1.861l-.007-.037-.007-.037a5.11 5.11 0 00-.645-1.78 5.053 5.053 0 00-.839-1.144l.058.032zM12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0z"/>
+                    {# EKS / AWS logo #}
+                    <svg class="w-6 h-6 text-orange-400 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M6.763 10.036c0 .296.032.535.088.71.064.176.144.368.256.576.04.063.056.127.056.183 0 .08-.048.16-.152.24l-.503.335a.383.383 0 0 1-.208.072c-.08 0-.16-.04-.239-.112a2.47 2.47 0 0 1-.287-.375 6.18 6.18 0 0 1-.248-.471c-.622.734-1.405 1.101-2.347 1.101-.67 0-1.205-.191-1.596-.574-.391-.384-.59-.894-.59-1.533 0-.678.239-1.23.726-1.644.487-.415 1.133-.623 1.955-.623.272 0 .551.024.846.064.296.04.6.104.918.176v-.583c0-.607-.127-1.03-.375-1.277-.255-.248-.686-.367-1.3-.367-.28 0-.568.032-.863.104-.296.072-.583.16-.863.271a2.287 2.287 0 0 1-.28.104.488.488 0 0 1-.127.024c-.112 0-.168-.08-.168-.247v-.391c0-.128.016-.224.056-.28a.597.597 0 0 1 .224-.167c.28-.144.614-.264 1.005-.36a4.84 4.84 0 0 1 1.246-.151c.95 0 1.644.216 2.091.647.439.43.662 1.085.662 1.963v2.586zm-3.24 1.214c.263 0 .534-.048.822-.144.287-.096.543-.271.758-.51.128-.152.224-.32.272-.512.047-.191.08-.423.08-.694v-.335a6.66 6.66 0 0 0-.735-.136 6.02 6.02 0 0 0-.75-.048c-.535 0-.926.104-1.19.32-.263.215-.39.518-.39.917 0 .375.095.655.295.846.191.2.47.296.838.296zm6.41.862c-.144 0-.24-.024-.304-.08-.064-.048-.12-.16-.168-.311L7.586 5.55a1.398 1.398 0 0 1-.072-.32c0-.128.064-.2.191-.2h.783c.151 0 .255.025.31.08.065.048.113.16.16.312l1.342 5.284 1.245-5.284c.04-.16.088-.264.151-.312a.549.549 0 0 1 .32-.08h.638c.152 0 .256.025.32.08.063.048.12.16.151.312l1.261 5.348 1.381-5.348c.048-.16.104-.264.16-.312a.52.52 0 0 1 .311-.08h.743c.127 0 .2.065.2.2 0 .04-.009.08-.017.128a1.137 1.137 0 0 1-.056.2l-1.923 6.17c-.048.16-.104.263-.168.311a.51.51 0 0 1-.303.08h-.687c-.151 0-.255-.024-.32-.08-.063-.056-.119-.16-.15-.32l-1.238-5.148-1.23 5.14c-.04.16-.087.264-.15.32-.065.056-.177.08-.32.08zm10.256.215c-.415 0-.83-.048-1.229-.143-.399-.096-.71-.2-.918-.32-.128-.071-.215-.151-.247-.223a.563.563 0 0 1-.048-.224v-.407c0-.167.064-.247.183-.247.048 0 .096.008.144.024.048.016.12.048.2.08.271.12.566.215.878.279.319.064.63.096.95.096.502 0 .894-.088 1.165-.264a.86.86 0 0 0 .415-.758.777.777 0 0 0-.215-.559c-.144-.151-.416-.287-.807-.414l-1.157-.36c-.583-.183-1.014-.454-1.277-.813a1.902 1.902 0 0 1-.4-1.158c0-.335.073-.63.216-.886.144-.255.335-.479.575-.654.24-.184.51-.32.83-.415.32-.096.655-.136 1.006-.136.175 0 .359.008.535.032.183.024.35.056.518.088.16.04.312.08.455.127.144.048.256.096.336.144a.69.69 0 0 1 .24.2.43.43 0 0 1 .071.263v.375c0 .168-.064.256-.184.256a.83.83 0 0 1-.303-.096 3.652 3.652 0 0 0-1.532-.311c-.455 0-.815.071-1.062.223-.248.152-.375.383-.375.71 0 .224.08.416.24.567.159.152.454.304.877.44l1.134.358c.574.184.99.44 1.237.767.247.327.367.702.367 1.117 0 .343-.072.655-.207.926-.144.272-.336.511-.583.703-.248.2-.543.343-.886.447-.36.111-.734.167-1.142.167zM21.698 16.207c-2.626 1.94-6.442 2.969-9.722 2.969-4.598 0-8.74-1.7-11.87-4.526-.247-.223-.024-.527.27-.351 3.384 1.963 7.559 3.153 11.877 3.153 2.914 0 6.114-.607 9.06-1.852.439-.2.814.287.385.607zM22.792 14.961c-.336-.43-2.22-.207-3.074-.103-.255.032-.295-.192-.063-.36 1.5-1.053 3.967-.75 4.254-.399.287.36-.08 2.826-1.485 4.007-.215.184-.423.088-.327-.151.32-.79 1.03-2.57.695-2.994z"/>
                     </svg>
-                    <h2 class="text-lg font-semibold text-gray-200">Kubernetes</h2>
+                    <h2 class="text-lg font-semibold text-gray-200">Amazon EKS</h2>
                     <span class="text-xs bg-vouch-surface text-gray-400 px-2 py-0.5 rounded">Per-user</span>
                 </div>
-                <p class="text-gray-400 text-sm mb-4">Authenticate to Kubernetes clusters using OIDC.</p>
+                <p class="text-gray-400 text-sm mb-4">Authenticate to EKS clusters using AWS IAM.</p>
 
                 <div class="bg-vouch-surface rounded-lg p-3">
                     <p class="text-sm text-gray-400 mb-2">Configure via the CLI:</p>
-                    <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs mb-2">vouch setup k8s --configure</code>
-                    <a href="/docs/kubernetes" class="text-sm text-vouch-accent hover:text-vouch-accent-hover inline-flex items-center gap-1">
+                    <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs mb-2">vouch setup eks --cluster &lt;name&gt; --region &lt;region&gt;</code>
+                    <a href="/docs/eks" class="text-sm text-vouch-accent hover:text-vouch-accent-hover inline-flex items-center gap-1">
                         Setup guide
                         <svg class="w-3 h-3" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M13.5 4.5 21 12m0 0-7.5 7.5M21 12H3" />
@@ -236,7 +157,7 @@
                     <h2 class="text-lg font-semibold text-gray-200">Docker Registries</h2>
                     <span class="text-xs bg-vouch-surface text-gray-400 px-2 py-0.5 rounded">Per-user</span>
                 </div>
-                <p class="text-gray-400 text-sm mb-4">Authenticate to AWS ECR, GCP, and GitHub container registries.</p>
+                <p class="text-gray-400 text-sm mb-4">Authenticate to AWS ECR and GitHub container registries.</p>
 
                 <div class="bg-vouch-surface rounded-lg p-3">
                     <p class="text-sm text-gray-400 mb-2">Configure via the CLI:</p>

@@ -4,7 +4,7 @@
 use serde::Serialize;
 
 /// Standard OIDC ID token claims with Vouch extensions.
-/// Used by both AWS and GCP credential endpoints.
+/// Used by cloud credential endpoints (AWS).
 #[derive(Debug, Serialize)]
 pub struct OidcIdTokenClaims {
     /// Issuer (Vouch server URL).
@@ -69,32 +69,6 @@ impl OidcIdTokenClaimsBuilder {
             .issuer(issuer)
             .subject(email)
             .audience(issuer) // AWS uses issuer as audience
-            .email(email)
-    }
-
-    /// Create a builder pre-configured for GCP.
-    ///
-    /// GCP uses a custom audience (Workload Identity Pool provider resource name).
-    /// The subject and email are both set to the user's email.
-    #[must_use]
-    pub fn for_gcp(issuer: &str, email: &str, audience: &str) -> Self {
-        Self::new()
-            .issuer(issuer)
-            .subject(email)
-            .audience(audience) // GCP uses WIF provider audience
-            .email(email)
-    }
-
-    /// Create a builder pre-configured for Kubernetes.
-    ///
-    /// Kubernetes uses a custom audience (typically cluster name or API server URL).
-    /// The subject and email are both set to the user's email.
-    #[must_use]
-    pub fn for_k8s(issuer: &str, email: &str, audience: &str) -> Self {
-        Self::new()
-            .issuer(issuer)
-            .subject(email)
-            .audience(audience) // K8s uses --oidc-client-id as audience
             .email(email)
     }
 
@@ -267,45 +241,6 @@ mod tests {
             assert_eq!(claims.sub, "user@example.com");
             assert_eq!(claims.aud, "https://vouch.example.com"); // issuer == audience for AWS
             assert_eq!(claims.email, "user@example.com");
-        }
-    }
-
-    #[test]
-    fn test_for_gcp_uses_custom_audience() {
-        let audience = "//iam.googleapis.com/projects/123456/locations/global/workloadIdentityPools/my-pool/providers/my-provider";
-        let result = OidcIdTokenClaimsBuilder::for_gcp(
-            "https://vouch.example.com",
-            "user@example.com",
-            audience,
-        )
-        .build();
-
-        assert!(result.is_ok());
-        if let Ok(claims) = result {
-            assert_eq!(claims.iss, "https://vouch.example.com");
-            assert_eq!(claims.sub, "user@example.com");
-            assert_eq!(claims.aud, audience); // custom audience for GCP
-            assert_eq!(claims.email, "user@example.com");
-        }
-    }
-
-    #[test]
-    fn test_for_k8s_uses_custom_audience() {
-        let audience = "my-kubernetes-cluster";
-        let result = OidcIdTokenClaimsBuilder::for_k8s(
-            "https://vouch.example.com",
-            "user@example.com",
-            audience,
-        )
-        .build();
-
-        assert!(result.is_ok());
-        if let Ok(claims) = result {
-            assert_eq!(claims.iss, "https://vouch.example.com");
-            assert_eq!(claims.sub, "user@example.com");
-            assert_eq!(claims.aud, audience); // custom audience for K8s
-            assert_eq!(claims.email, "user@example.com");
-            assert!(claims.hardware_verified);
         }
     }
 }

@@ -37,22 +37,6 @@ pub struct DocsAwsTemplate {
 
 impl_template_response!(DocsAwsTemplate);
 
-/// GCP setup documentation page template.
-#[derive(Template)]
-#[template(path = "docs/gcp.html")]
-pub struct DocsGcpTemplate {
-    /// The OIDC provider URL (base_url).
-    pub provider_url: String,
-    /// The RP ID (domain) for the OIDC provider.
-    pub rp_id: String,
-    /// Organization name for branding.
-    pub org_name: String,
-    /// Authentication context for header display.
-    pub auth: AuthContext,
-}
-
-impl_template_response!(DocsGcpTemplate);
-
 /// GitHub setup documentation page template.
 #[derive(Template)]
 #[template(path = "docs/github.html")]
@@ -111,19 +95,17 @@ pub struct DocsSshTemplate {
 
 impl_template_response!(DocsSshTemplate);
 
-/// Kubernetes setup documentation page template.
+/// Amazon EKS setup documentation page template.
 #[derive(Template)]
-#[template(path = "docs/kubernetes.html")]
-pub struct DocsKubernetesTemplate {
-    /// The OIDC provider URL (base_url).
-    pub provider_url: String,
+#[template(path = "docs/eks.html")]
+pub struct DocsEksTemplate {
     /// Organization name for branding.
     pub org_name: String,
     /// Authentication context for header display.
     pub auth: AuthContext,
 }
 
-impl_template_response!(DocsKubernetesTemplate);
+impl_template_response!(DocsEksTemplate);
 
 /// SCIM Provisioning documentation page template.
 #[derive(Template)]
@@ -191,21 +173,6 @@ pub async fn aws_setup_page(
     }
 }
 
-/// GCP setup documentation page.
-/// GET /docs/gcp
-pub async fn gcp_setup_page(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-) -> impl IntoResponse {
-    let auth = get_auth_context(&state, &jar).await;
-    DocsGcpTemplate {
-        provider_url: state.config().base_url.clone(),
-        rp_id: state.config().rp_id.clone(),
-        org_name: state.config().get_org_display_name().to_string(),
-        auth,
-    }
-}
-
 /// GitHub setup documentation page.
 /// GET /docs/github
 pub async fn github_setup_page(
@@ -260,15 +227,11 @@ pub async fn ssh_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> imp
     }
 }
 
-/// Kubernetes setup documentation page.
-/// GET /docs/kubernetes
-pub async fn kubernetes_page(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-) -> impl IntoResponse {
+/// Amazon EKS setup documentation page.
+/// GET /docs/eks
+pub async fn eks_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
-    DocsKubernetesTemplate {
-        provider_url: state.config().base_url.clone(),
+    DocsEksTemplate {
         org_name: state.config().get_org_display_name().to_string(),
         auth,
     }

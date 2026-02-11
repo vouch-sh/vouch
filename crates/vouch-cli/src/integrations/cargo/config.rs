@@ -68,6 +68,17 @@ impl CargoConfig {
             .is_some_and(Self::item_contains_vouch)
     }
 
+    /// Get the index URL for a specific registry.
+    #[must_use]
+    pub fn get_registry_index(&self, registry: &str) -> Option<String> {
+        self.doc
+            .get("registries")
+            .and_then(|r| r.get(registry))
+            .and_then(|r| r.get("index"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    }
+
     /// Find the first registry that uses vouch.
     #[must_use]
     pub fn find_vouch_registry(&self) -> Option<String> {
@@ -98,6 +109,35 @@ impl CargoConfig {
                 "global-credential-providers",
                 Item::Value(Value::Array(array)),
             );
+        }
+    }
+
+    /// Set the index URL for a specific registry.
+    ///
+    /// This sets `[registries.<name>].index`.
+    pub fn set_registry_index(&mut self, registry: &str, index_url: &str) {
+        // Ensure [registries] section exists
+        if self.doc.get("registries").is_none() {
+            self.doc.insert("registries", Item::Table(Table::new()));
+        }
+
+        // Ensure [registries.<name>] section exists and set index
+        if let Some(registries) = self
+            .doc
+            .get_mut("registries")
+            .and_then(|r| r.as_table_mut())
+        {
+            if registries.get(registry).is_none() {
+                registries.insert(registry, Item::Table(Table::new()));
+            }
+            if let Some(reg_table) = registries.get_mut(registry).and_then(|r| r.as_table_mut()) {
+                reg_table.insert(
+                    "index",
+                    Item::Value(Value::String(toml_edit::Formatted::new(
+                        index_url.to_string(),
+                    ))),
+                );
+            }
         }
     }
 
