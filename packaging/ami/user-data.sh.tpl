@@ -63,15 +63,8 @@ echo "Downloaded ${RPM_NAME}"
 # Extract binary from RPM into KIWI overlay
 mkdir -p /tmp/ami-build/root/usr/bin /tmp/rpm-extract
 cd /tmp/rpm-extract
-rpm2cpio "/tmp/${RPM_NAME}" | cpio -idmv 2>&1 | head -20
-echo "=== Extracted RPM contents ==="
-find . -type f
-BINARY=$(find . -name vouch-server -type f | head -1)
-if [ -z "$BINARY" ]; then
-    echo "ERROR: vouch-server binary not found in RPM"
-    exit 1
-fi
-cp "$BINARY" /tmp/ami-build/root/usr/bin/vouch-server
+rpm2cpio "/tmp/${RPM_NAME}" | cpio -idm --no-absolute-filenames
+cp usr/bin/vouch-server /tmp/ami-build/root/usr/bin/vouch-server
 chmod 755 /tmp/ami-build/root/usr/bin/vouch-server
 cd /tmp/ami-build
 rm -rf /tmp/rpm-extract "/tmp/${RPM_NAME}"
