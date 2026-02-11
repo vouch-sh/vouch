@@ -17,7 +17,9 @@ use super::types::{
 use crate::AppState;
 use crate::db;
 
-/// GET /scim/v2/Groups
+/// GET /scim/v2/Groups (RFC 7644 Section 3.4.2).
+///
+/// Returns a paginated list of Group resources, with optional filtering.
 pub async fn list_groups(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -82,7 +84,10 @@ pub async fn list_groups(
     .into_response()
 }
 
-/// POST /scim/v2/Groups
+/// POST /scim/v2/Groups (RFC 7644 Section 3.3).
+///
+/// Creates a new Group resource. Returns 201 Created on success,
+/// 409 Conflict if the group already exists.
 pub async fn create_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -149,7 +154,9 @@ pub async fn create_group(
     (StatusCode::CREATED, Json(scim_group)).into_response()
 }
 
-/// GET /scim/v2/Groups/:id
+/// GET /scim/v2/Groups/:id (RFC 7644 Section 3.4.1).
+///
+/// Retrieves a single Group resource by ID, including its members.
 pub async fn get_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -184,7 +191,10 @@ pub async fn get_group(
     Json(db_group_to_scim(base_url, group, members)).into_response()
 }
 
-/// PATCH /scim/v2/Groups/:id
+/// PATCH /scim/v2/Groups/:id (RFC 7644 Section 3.5.2).
+///
+/// Modifies a Group resource using SCIM PATCH operations (add, replace, remove).
+/// Supports member management via the `members` path.
 #[allow(clippy::too_many_lines)]
 pub async fn patch_group(
     State(state): State<Arc<AppState>>,
@@ -339,7 +349,10 @@ pub async fn patch_group(
     Json(db_group_to_scim(base_url, updated, members)).into_response()
 }
 
-/// DELETE /scim/v2/Groups/:id
+/// DELETE /scim/v2/Groups/:id (RFC 7644 Section 3.6).
+///
+/// Permanently deletes a Group resource. Returns 204 No Content on success.
+/// Group membership records are cascade-deleted.
 pub async fn delete_group(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

@@ -15,36 +15,36 @@ use jsonwebtoken::{DecodingKey, Validation};
 use serde::Serialize;
 use std::sync::Arc;
 
-/// Result of token introspection.
+/// Result of token introspection (RFC 7662 Section 2.2).
 #[derive(Debug, Serialize)]
 pub struct IntrospectionResult {
-    /// Whether the token is active.
+    /// RFC 7662 Section 2.2: Whether the token is currently active.
     pub active: bool,
-    /// Token scope.
+    /// RFC 7662 Section 2.2: Space-separated scope values.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
-    /// Client ID that requested the token.
+    /// RFC 7662 Section 2.2: Client identifier for the OAuth 2.0 client that requested this token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
-    /// Username (typically email).
+    /// RFC 7662 Section 2.2: Human-readable identifier for the resource owner (typically email).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub username: Option<String>,
-    /// Token type.
+    /// RFC 7662 Section 2.2: Type of the token (e.g., "Bearer").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_type: Option<String>,
-    /// Expiration time.
+    /// RFC 7662 Section 2.2: Integer timestamp indicating when the token expires.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exp: Option<i64>,
-    /// Issued at time.
+    /// RFC 7662 Section 2.2: Integer timestamp indicating when the token was issued.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iat: Option<i64>,
-    /// Subject.
+    /// RFC 7662 Section 2.2: Subject of the token (typically the resource owner).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sub: Option<String>,
-    /// Audience.
+    /// RFC 7662 Section 2.2: Service-specific string identifying the intended audience.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub aud: Option<String>,
-    /// Issuer.
+    /// RFC 7662 Section 2.2: String representing the issuer of the token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iss: Option<String>,
 }
@@ -86,6 +86,7 @@ pub struct RevocationResult {
 /// * `state` - Application state
 /// * `token` - The token to introspect
 /// * `_token_type_hint` - Optional hint about token type (ignored but included for compatibility)
+/// * `caller_client_id` - The authenticated caller's client_id (for `aud` field)
 ///
 /// # Returns
 /// Introspection result with token metadata if active, or `{"active": false}` if invalid.
@@ -93,6 +94,7 @@ pub async fn introspect_token(
     state: &Arc<AppState>,
     token: &str,
     _token_type_hint: Option<&str>,
+    caller_client_id: Option<&str>,
 ) -> ServiceResult<IntrospectionResult> {
     // Try to decode the token as a JWT
     let claims = match jsonwebtoken::decode::<SessionClaims>(
@@ -120,14 +122,14 @@ pub async fn introspect_token(
     // Token is valid - return active response with claims
     Ok(IntrospectionResult {
         active: true,
-        scope: Some("openid email profile".to_string()),
-        client_id: None,
+        scope: Some("openid email".to_string()),
+        client_id: None, // Session tokens don't track originating client_id
         username: Some(claims.email.clone()),
         token_type: Some("Bearer".to_string()),
         exp: Some(claims.exp),
         iat: Some(claims.iat),
         sub: Some(claims.email),
-        aud: None,
+        aud: caller_client_id.map(String::from),
         iss: Some(state.config().base_url.clone()),
     })
 }

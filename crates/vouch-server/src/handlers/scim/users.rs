@@ -18,7 +18,9 @@ use crate::AppState;
 use crate::db;
 use crate::redact_email;
 
-/// GET /scim/v2/Users
+/// GET /scim/v2/Users (RFC 7644 Section 3.4.2).
+///
+/// Returns a paginated list of User resources, with optional filtering.
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -82,7 +84,10 @@ pub async fn list_users(
     .into_response()
 }
 
-/// POST /scim/v2/Users
+/// POST /scim/v2/Users (RFC 7644 Section 3.3).
+///
+/// Creates a new User resource. Returns 201 Created on success,
+/// 409 Conflict if the user already exists (RFC 7644 Section 3.3.1).
 pub async fn create_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -167,7 +172,9 @@ pub async fn create_user(
     (StatusCode::CREATED, Json(scim_user)).into_response()
 }
 
-/// GET /scim/v2/Users/:id
+/// GET /scim/v2/Users/:id (RFC 7644 Section 3.4.1).
+///
+/// Retrieves a single User resource by ID.
 pub async fn get_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -201,7 +208,10 @@ pub async fn get_user(
     Json(db_user_to_scim(base_url, user)).into_response()
 }
 
-/// PATCH /scim/v2/Users/:id
+/// PATCH /scim/v2/Users/:id (RFC 7644 Section 3.5.2).
+///
+/// Modifies a User resource using SCIM PATCH operations (add, replace, remove).
+/// Deactivating a user invalidates all sessions and revokes SSH certificates.
 #[allow(clippy::too_many_lines)]
 pub async fn patch_user(
     State(state): State<Arc<AppState>>,
@@ -384,7 +394,10 @@ pub async fn patch_user(
     Json(db_user_to_scim(base_url, updated)).into_response()
 }
 
-/// DELETE /scim/v2/Users/:id
+/// DELETE /scim/v2/Users/:id (RFC 7644 Section 3.6).
+///
+/// Permanently deletes a User resource. Returns 204 No Content on success.
+/// All sessions are invalidated and SSH certificates are revoked.
 pub async fn delete_user(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

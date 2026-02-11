@@ -11,8 +11,8 @@ use crate::db::{self, CreatePendingOAuthParams};
 use crate::impl_template_response;
 use crate::services::oidc::authorization::{
     AuthorizationCodeParams, AuthorizationSessionState, AuthorizeRequestParams,
-    check_client_access, check_session_for_authorization, issue_authorization_code,
-    validate_authorize_request,
+    CodeChallengeMethod, check_client_access, check_session_for_authorization,
+    issue_authorization_code, validate_authorize_request,
 };
 use askama::Template;
 use axum::{
@@ -33,24 +33,24 @@ pub struct AuthorizeDeniedTemplate {
 
 impl_template_response!(AuthorizeDeniedTemplate);
 
-/// Authorization request query parameters.
+/// Authorization request query parameters (RFC 6749 Section 4.1.1).
 #[derive(Debug, Deserialize)]
 pub struct AuthorizeQuery {
-    /// Response type (must be "code").
+    /// RFC 6749 Section 4.1.1: Response type (must be "code").
     response_type: Option<String>,
-    /// Client identifier.
+    /// RFC 6749 Section 4.1.1: Client identifier.
     client_id: Option<String>,
-    /// Redirect URI for the response.
+    /// RFC 6749 Section 4.1.1: Redirect URI for the response.
     redirect_uri: Option<String>,
-    /// Requested scope.
+    /// RFC 6749 Section 3.3: Requested scope.
     scope: Option<String>,
-    /// State parameter (opaque, returned unchanged).
+    /// RFC 6749 Section 4.1.1: State parameter (opaque, returned unchanged).
     state: Option<String>,
-    /// OIDC nonce.
+    /// OIDC Core Section 3.1.2.1: Nonce value.
     nonce: Option<String>,
-    /// PKCE code challenge.
+    /// RFC 7636 Section 4.2: PKCE code challenge.
     code_challenge: Option<String>,
-    /// PKCE code challenge method.
+    /// RFC 7636 Section 4.3: PKCE code challenge method.
     code_challenge_method: Option<String>,
     /// Pending OAuth authorization ID (when returning from login).
     pending_auth: Option<String>,
@@ -116,11 +116,28 @@ pub async fn authorize(
 
     let validated = match validate_authorize_request(request_params) {
         Ok(v) => v,
-        Err(_) => {
+        Err(e) => {
+            // Map the specific error type to the correct OAuth error code
+            let (error_code, description) = match &e {
+                crate::services::ServiceError::OAuth { code, description } => {
+                    (code.as_str(), description.clone())
+                }
+                _ => ("server_error", e.to_string()),
+            };
+
+            // RFC 6749 Section 4.1.2.1: If client_id is unknown, show error page
+            if client_id.is_empty() {
+                return AuthorizeDeniedTemplate {
+                    client_name: "Unknown Application".to_string(),
+                    error_message: format!("Invalid request: {description}"),
+                }
+                .into_response();
+            }
+
             return oauth_error_redirect(
                 &redirect_uri,
-                "unsupported_response_type",
-                "Only 'code' response type is supported",
+                error_code,
+                &description,
                 params.state.as_deref(),
                 &state.config().base_url,
             );
@@ -128,26 +145,26 @@ pub async fn authorize(
     };
 
     // Look up the OAuth client to get app details
+    // RFC 6749 Section 4.1.2.1: If the client identifier is invalid, the authorization
+    // server MUST NOT automatically redirect the user-agent to the invalid redirection URI.
     let oauth_client =
         match db::get_oauth_client_by_client_id(&state.db, &validated.client_id).await {
             Ok(Some(client)) => client,
             Ok(None) => {
-                return oauth_error_redirect(
-                    &validated.redirect_uri,
-                    "invalid_client",
-                    "Unknown client_id",
-                    validated.state.as_deref(),
-                    &state.config().base_url,
-                );
+                return AuthorizeDeniedTemplate {
+                    client_name: "Unknown Application".to_string(),
+                    error_message:
+                        "Unknown client application. Please contact the application administrator."
+                            .to_string(),
+                }
+                .into_response();
             }
             Err(_) => {
-                return oauth_error_redirect(
-                    &validated.redirect_uri,
-                    "server_error",
-                    "Database error",
-                    validated.state.as_deref(),
-                    &state.config().base_url,
-                );
+                return AuthorizeDeniedTemplate {
+                    client_name: "Unknown Application".to_string(),
+                    error_message: "An error occurred. Please try again.".to_string(),
+                }
+                .into_response();
             }
         };
 
@@ -202,7 +219,7 @@ pub async fn authorize(
                 scope: &validated.scope,
                 nonce: validated.nonce.as_deref(),
                 code_challenge: validated.code_challenge.as_deref(),
-                code_challenge_method: validated.code_challenge_method.as_deref(),
+                code_challenge_method: validated.code_challenge_method,
             };
 
             match issue_authorization_code(&state, code_params) {
@@ -240,7 +257,7 @@ pub async fn authorize(
                 scope: Some(&validated.scope),
                 nonce: validated.nonce.as_deref(),
                 code_challenge: validated.code_challenge.as_deref(),
-                code_challenge_method: validated.code_challenge_method.as_deref(),
+                code_challenge_method: validated.code_challenge_method.map(|m| m.as_str()),
             };
 
             match db::create_pending_oauth_authorization(&state.db, pending_params).await {
@@ -350,7 +367,10 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                 scope: pending.scope.as_deref().unwrap_or("openid"),
                 nonce: pending.nonce.as_deref(),
                 code_challenge: pending.code_challenge.as_deref(),
-                code_challenge_method: pending.code_challenge_method.as_deref(),
+                code_challenge_method: pending
+                    .code_challenge_method
+                    .as_deref()
+                    .and_then(CodeChallengeMethod::parse),
             };
 
             match issue_authorization_code(state, code_params) {

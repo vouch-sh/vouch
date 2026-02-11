@@ -1,41 +1,21 @@
-# Git
-.git
-.gitignore
+# Exclude everything by default
+*
 
-# Rust build artifacts
-target/
-debug/
+# Root build files
+!Cargo.toml
+!Cargo.lock
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
+# Workspace crate manifests (needed for dependency caching layer)
+!crates/vouch-common/Cargo.toml
+!crates/vouch-server/Cargo.toml
+!crates/vouch-cli/Cargo.toml
+!crates/vouch-agent/Cargo.toml
 
-# Documentation
-docs/
-*.md
-!crates/*/src/**/*.md
-
-# Tests (not needed in production image)
-tests/
-
-# Local development files
-.env
-.env.*
-*.db
-*.db-journal
-*.db-shm
-*.db-wal
-
-# Kamal
-.kamal/
-config/deploy.yml
-
-# macOS
-.DS_Store
-._*
-
-# Other crates - keep Cargo.toml for workspace resolution, exclude src
-crates/vouch-cli/src/
-crates/vouch-agent/src/
+# Source code: only server and its shared dependency
+!crates/vouch-common/src/
+!crates/vouch-server/src/
+!crates/vouch-server/migrations/
+!crates/vouch-server/templates/
+!crates/vouch-server/static/
+!crates/vouch-server/styles/
+!crates/vouch-server/tailwind.config.js

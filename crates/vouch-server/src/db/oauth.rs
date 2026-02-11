@@ -115,7 +115,6 @@ impl OAuthClientType {
 
     /// Whether this client type requires PKCE.
     #[must_use]
-    #[allow(dead_code)]
     pub fn requires_pkce(&self) -> bool {
         matches!(self, Self::Native | Self::Spa)
     }

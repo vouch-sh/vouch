@@ -10,59 +10,61 @@ use crate::services::ServiceError;
 use serde::Serialize;
 use std::sync::Arc;
 
-/// OpenID Connect Discovery document.
-/// See: https://openid.net/specs/openid-connect-discovery-1_0.html
+/// OpenID Connect Discovery document (OIDC Discovery 1.0 Section 3).
+///
+/// All fields defined in OpenID Provider Metadata:
+/// <https://openid.net/specs/openid-connect-discovery-1_0.html#ProviderMetadata>
 #[derive(Debug, Serialize)]
 pub struct OidcDiscoveryDocument {
-    /// Issuer identifier (must match tokens).
+    /// OIDC Discovery 1.0 Section 3: REQUIRED. Issuer Identifier (must match tokens).
     pub issuer: String,
-    /// URL of the authorization endpoint.
+    /// OIDC Discovery 1.0 Section 3: REQUIRED. URL of the authorization endpoint.
     pub authorization_endpoint: String,
-    /// URL of the token endpoint.
+    /// OIDC Discovery 1.0 Section 3: REQUIRED. URL of the token endpoint.
     pub token_endpoint: String,
-    /// URL of the userinfo endpoint.
+    /// OIDC Discovery 1.0 Section 3: RECOMMENDED. URL of the UserInfo endpoint.
     pub userinfo_endpoint: String,
-    /// URL of the JWKS endpoint.
+    /// OIDC Discovery 1.0 Section 3: REQUIRED. URL of the JWKS endpoint.
     pub jwks_uri: String,
-    /// URL of the token revocation endpoint.
+    /// RFC 7009 Section 2.1: URL of the token revocation endpoint.
     pub revocation_endpoint: String,
-    /// URL of the token introspection endpoint.
+    /// RFC 7662 Section 2: URL of the token introspection endpoint.
     pub introspection_endpoint: String,
-    /// URL of the device authorization endpoint (RFC 8628).
+    /// RFC 8628 Section 4: URL of the device authorization endpoint.
     pub device_authorization_endpoint: String,
-    /// URL of the dynamic registration endpoint (optional).
+    /// OIDC Discovery 1.0 Section 3: OPTIONAL. URL of the dynamic registration endpoint.
     pub registration_endpoint: Option<String>,
-    /// Supported scopes.
+    /// OIDC Discovery 1.0 Section 3: RECOMMENDED. Supported OAuth 2.0 scope values.
     pub scopes_supported: Vec<String>,
-    /// Supported response types.
+    /// OIDC Discovery 1.0 Section 3: REQUIRED. Supported OAuth 2.0 response_type values.
     pub response_types_supported: Vec<String>,
-    /// Supported response modes.
+    /// OIDC Discovery 1.0 Section 3: OPTIONAL. Supported OAuth 2.0 response_mode values.
     pub response_modes_supported: Vec<String>,
-    /// Supported grant types.
+    /// OIDC Discovery 1.0 Section 3: OPTIONAL. Supported OAuth 2.0 grant_type values.
     pub grant_types_supported: Vec<String>,
-    /// Supported subject types.
+    /// OIDC Discovery 1.0 Section 3: REQUIRED. Supported Subject Identifier types.
     pub subject_types_supported: Vec<String>,
-    /// Supported ID token signing algorithms.
+    /// OIDC Discovery 1.0 Section 3: REQUIRED. Supported JWS alg values for ID Tokens.
     pub id_token_signing_alg_values_supported: Vec<String>,
-    /// Supported token endpoint auth methods.
+    /// OIDC Discovery 1.0 Section 3: OPTIONAL. Supported token endpoint auth methods.
     pub token_endpoint_auth_methods_supported: Vec<String>,
-    /// Supported claims.
+    /// OIDC Discovery 1.0 Section 3: RECOMMENDED. Supported Claim Names.
     pub claims_supported: Vec<String>,
-    /// Supported PKCE code challenge methods.
+    /// RFC 7636 Section 6.2: Supported PKCE code challenge methods.
     pub code_challenge_methods_supported: Vec<String>,
-    /// RFC 9449: Supported DPoP signing algorithms.
+    /// RFC 9449 Section 5.1: Supported DPoP JWS signing algorithms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dpop_signing_alg_values_supported: Option<Vec<String>>,
-    /// RFC 9207: Authorization Response Issuer Identifier support.
+    /// RFC 9207 Section 3: Authorization Response Issuer Identifier support.
     /// Indicates that the authorization server includes the `iss` parameter
     /// in authorization responses to prevent mix-up attacks.
     pub authorization_response_iss_parameter_supported: bool,
 }
 
-/// JSON Web Key Set response.
+/// JSON Web Key Set response (RFC 7517 Section 5).
 #[derive(Debug, Serialize)]
 pub struct JwksResponse {
-    /// The keys in this key set.
+    /// RFC 7517 Section 5.1: The "keys" parameter is an array of JWK values.
     pub keys: Vec<super::keys::EcJwk>,
 }
 
@@ -87,11 +89,7 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         introspection_endpoint: format!("{base_url}/oauth/introspect"),
         device_authorization_endpoint: format!("{base_url}/oauth/device"),
         registration_endpoint: None, // Dynamic registration not supported
-        scopes_supported: vec![
-            "openid".to_string(),
-            "email".to_string(),
-            "profile".to_string(),
-        ],
+        scopes_supported: vec!["openid".to_string(), "email".to_string()],
         response_types_supported: vec!["code".to_string()],
         response_modes_supported: vec!["query".to_string()],
         grant_types_supported: vec![
@@ -113,7 +111,6 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "iat".to_string(),
             "email".to_string(),
             "email_verified".to_string(),
-            "name".to_string(),
             "hardware_verified".to_string(),
             "hardware_aaguid".to_string(),
         ],

@@ -513,3 +513,57 @@ pub async fn create_test_scim_token(pool: &Pool, description: &str) -> String {
 
     token
 }
+
+/// Result of creating a test OAuth client with credentials.
+pub struct TestOAuthClient {
+    /// The client_id.
+    pub client_id: String,
+    /// The plaintext client secret.
+    pub client_secret: String,
+}
+
+impl TestOAuthClient {
+    /// Build a `Basic` authorization header value for this client.
+    pub fn basic_auth_header(&self) -> String {
+        use base64::Engine;
+        use base64::engine::general_purpose::STANDARD;
+        let creds = format!("{}:{}", self.client_id, self.client_secret);
+        format!("Basic {}", STANDARD.encode(creds))
+    }
+}
+
+/// Create a test OAuth client with a secret for use in tests.
+pub async fn create_test_oauth_client(pool: &Pool, user_id: &str) -> TestOAuthClient {
+    use aws_lc_rs::digest::{self, SHA256};
+    use aws_lc_rs::rand as aws_rand;
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let (client, client_id) = crate::db::create_oauth_client(
+        pool,
+        user_id,
+        "Test App",
+        None,
+        crate::db::OAuthClientType::Web,
+        &["https://example.com/callback".to_string()],
+        crate::db::AccessScope::Public,
+        None,
+    )
+    .await
+    .expect("Failed to create test OAuth client");
+
+    // Generate a secret
+    let mut secret_bytes = [0u8; 32];
+    aws_rand::fill(&mut secret_bytes).expect("RNG failure");
+    let secret = URL_SAFE_NO_PAD.encode(secret_bytes);
+    let secret_hash = URL_SAFE_NO_PAD.encode(digest::digest(&SHA256, secret.as_bytes()));
+
+    crate::db::create_oauth_client_secret(pool, &client.id, &secret_hash, Some("test"), None)
+        .await
+        .expect("Failed to create test OAuth client secret");
+
+    TestOAuthClient {
+        client_id,
+        client_secret: secret,
+    }
+}

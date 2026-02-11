@@ -194,23 +194,23 @@ impl OidcSigningKey {
     }
 }
 
-/// EC JWK (JSON Web Key) for P-256 keys.
+/// EC JWK (JSON Web Key) for P-256 keys (RFC 7517 Section 4, RFC 7518 Section 6.2).
 #[derive(Debug, Clone, Serialize)]
 pub struct EcJwk {
-    /// Key type (always "EC" for elliptic curve).
+    /// RFC 7517 Section 4.1: Key Type — "EC" for Elliptic Curve.
     pub kty: String,
-    /// Curve name (P-256).
+    /// RFC 7518 Section 6.2.1.1: Curve — "P-256" for NIST P-256.
     pub crv: String,
-    /// Algorithm (ES256).
+    /// RFC 7517 Section 4.4: Algorithm — "ES256" (ECDSA using P-256 and SHA-256).
     pub alg: String,
-    /// Key ID.
+    /// RFC 7517 Section 4.5: Key ID.
     pub kid: String,
-    /// Key usage (sig for signing).
+    /// RFC 7517 Section 4.2: Public Key Use — "sig" for signature.
     #[serde(rename = "use")]
     pub key_use: String,
-    /// X coordinate (base64url encoded).
+    /// RFC 7518 Section 6.2.1.2: X Coordinate (base64url encoded).
     pub x: String,
-    /// Y coordinate (base64url encoded).
+    /// RFC 7518 Section 6.2.1.3: Y Coordinate (base64url encoded).
     pub y: String,
 }
 
