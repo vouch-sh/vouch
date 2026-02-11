@@ -1032,9 +1032,9 @@ dependencies = [
 
 [[package]]
 name = "clap_complete"
-version = "4.5.65"
+version = "4.5.66"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "430b4dc2b5e3861848de79627b2bedc9f3342c7da5173a14eaa5d0f8dc18ae5d"
+checksum = "c757a3b7e39161a4e56f9365141ada2a6c915a8622c408ab6bb4b5d047371031"
 dependencies = [
  "clap",
 ]
@@ -2516,7 +2516,7 @@ checksum = "3d0b95e02c851351f877147b7deea7b1afb1df71b63aa5f8270716e0c5720616"
 dependencies = [
  "bitflags",
  "libc",
- "redox_syscall 0.7.0",
+ "redox_syscall 0.7.1",
 ]
 
 [[package]]
@@ -3261,9 +3261,9 @@ dependencies = [
 
 [[package]]
 name = "redox_syscall"
-version = "0.7.0"
+version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "49f3fe0889e69e2ae9e41f4d6c4c0181701d00e4697b356fb1f74173a5e0ee27"
+checksum = "35985aa610addc02e24fc232012c86fd11f14111180f902b67e2d5331f8ebf2b"
 dependencies = [
  "bitflags",
 ]
@@ -4732,7 +4732,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.2.21"
+version = "2026.2.22"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -4755,7 +4755,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.2.21"
+version = "2026.2.22"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4796,7 +4796,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.2.21"
+version = "2026.2.22"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4815,7 +4815,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.2.21"
+version = "2026.2.22"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4872,7 +4872,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.2.21"
+version = "2026.2.22"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
