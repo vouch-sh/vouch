@@ -52,9 +52,10 @@ mkdir -p /tmp/ami-build
 tar -xzf /tmp/ami-files.tar.gz -C /tmp/ami-build
 cd /tmp/ami-build
 
-# Update version in appliance.kiwi
+# Update version in appliance.kiwi and pin vouch-server package version
 echo "=== Updating version to ${VERSION} ==="
 sed -i "s/<version>.*<\/version>/<version>${VERSION}<\/version>/" appliance.kiwi
+sed -i "s/<package name=\"vouch-server\"\/>/<package name=\"vouch-server-${VERSION}\"\/>/" appliance.kiwi
 
 # Download Secure Boot signing key from S3 (if configured)
 if [ -n "${SB_KEY_S3_PATH}" ]; then

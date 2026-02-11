@@ -27,6 +27,10 @@ chmod 750 /var/lib/vouch-server
 #======================================
 # The overlay copies files but doesn't preserve execute permissions
 chmod +x /usr/local/bin/vouch-fetch-config.sh
+# Empty .pgpass with strict permissions so sqlx doesn't warn about
+# missing or world-readable credential files (ProtectHome=yes blocks ~/.pgpass)
+chmod 0600 /etc/vouch-server/.pgpass
+chown vouch:vouch /etc/vouch-server/.pgpass
 
 #======================================
 # Create log directories
