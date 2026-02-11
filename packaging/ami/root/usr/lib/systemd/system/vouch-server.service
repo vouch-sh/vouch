@@ -13,7 +13,6 @@ Group=vouch
 EnvironmentFile=/run/vouch-server/env
 Environment=AWS_CONFIG_FILE=/dev/null
 Environment=AWS_SHARED_CREDENTIALS_FILE=/dev/null
-Environment=PGPASSFILE=/etc/vouch-server/.pgpass
 Environment=AWS_USE_DUALSTACK_ENDPOINT=true
 Environment=AWS_STS_REGIONAL_ENDPOINTS=regional
 Environment=AWS_DEFAULTS_MODE=in-region

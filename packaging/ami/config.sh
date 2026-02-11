@@ -14,23 +14,26 @@ echo "enable set-hostname-imds.service" >> /usr/lib/systemd/system-preset/80-amz
 systemctl preset set-hostname-imds
 
 #======================================
-# Create vouch system user
-#======================================
-groupadd --system vouch || true
-useradd --system --gid vouch --no-create-home --shell /usr/sbin/nologin vouch || true
-mkdir -p /var/lib/vouch-server
-chown vouch:vouch /var/lib/vouch-server
-chmod 750 /var/lib/vouch-server
-
-#======================================
 # Set permissions on overlay files
 #======================================
 # The overlay copies files but doesn't preserve execute permissions
 chmod +x /usr/local/bin/vouch-fetch-config.sh
-# Empty .pgpass with strict permissions so sqlx doesn't warn about
-# missing or world-readable credential files (ProtectHome=yes blocks ~/.pgpass)
-chmod 0600 /etc/vouch-server/.pgpass
-chown vouch:vouch /etc/vouch-server/.pgpass
+
+#======================================
+# Verify vouch-server binary
+#======================================
+if [ ! -x /usr/bin/vouch-server ]; then
+    echo "ERROR: /usr/bin/vouch-server not found or not executable"
+    exit 1
+fi
+
+#======================================
+# Set vouch home directory permissions
+#======================================
+chown vouch:vouch /var/lib/vouch-server
+chmod 750 /var/lib/vouch-server
+chmod 0600 /var/lib/vouch-server/.pgpass
+chown vouch:vouch /var/lib/vouch-server/.pgpass
 
 #======================================
 # Create log directories

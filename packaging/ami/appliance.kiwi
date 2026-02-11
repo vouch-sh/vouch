@@ -39,13 +39,12 @@
         </type>
     </preferences>
 
+    <users>
+        <user name="vouch" password="*" home="/var/lib/vouch-server" shell="/usr/sbin/nologin" groups="vouch" id="997"/>
+    </users>
+
     <repository priority="2" package_gpgcheck="true" sourcetype="mirrorlist" customize="add-gpg-key.sh">
         <source path="https://cdn.amazonlinux.com/al2023/core/mirrors/latest/$basearch/mirror.list"/>
-    </repository>
-
-    <!-- Vouch package repository -->
-    <repository priority="1" package_gpgcheck="true" sourcetype="baseurl" customize="add-vouch-gpg-key.sh">
-        <source path="https://packages.vouch.sh/rpm/$basearch/"/>
     </repository>
 
     <packages type="image">
@@ -73,8 +72,6 @@
         <package name="awscli-2"/>
         <!-- CloudWatch Logs forwarding -->
         <package name="amazon-cloudwatch-agent"/>
-        <!-- Vouch Server (from packages.vouch.sh) -->
-        <package name="vouch-server"/>
         <!-- Don't install these packages -->
         <ignore name="ec2-hibinit-agent"/>
         <ignore name="grubby"/>

@@ -52,10 +52,23 @@ mkdir -p /tmp/ami-build
 tar -xzf /tmp/ami-files.tar.gz -C /tmp/ami-build
 cd /tmp/ami-build
 
-# Update version in appliance.kiwi and pin vouch-server package version
-echo "=== Updating version to ${VERSION} ==="
-sed -i "s/<version>.*<\/version>/<version>${VERSION}<\/version>/" appliance.kiwi
-sed -i "s/<package name=\"vouch-server\"\/>/<package name=\"vouch-server-${VERSION}\"\/>/" appliance.kiwi
+# Download vouch-server binary from GitHub Releases
+echo "=== Downloading vouch-server ${VERSION} from GitHub Releases ==="
+ARCH=$(uname -m)
+RPM_NAME="vouch-server-${VERSION}-1.${ARCH}.rpm"
+RPM_URL="https://github.com/vouch-sh/vouch/releases/download/v${VERSION}/${RPM_NAME}"
+curl -sfL "$RPM_URL" -o "/tmp/${RPM_NAME}"
+echo "Downloaded ${RPM_NAME}"
+
+# Extract binary from RPM into KIWI overlay
+mkdir -p /tmp/ami-build/root/usr/bin /tmp/rpm-extract
+cd /tmp/rpm-extract
+rpm2cpio "/tmp/${RPM_NAME}" | cpio -idm ./usr/bin/vouch-server
+cp ./usr/bin/vouch-server /tmp/ami-build/root/usr/bin/vouch-server
+chmod 755 /tmp/ami-build/root/usr/bin/vouch-server
+cd /tmp/ami-build
+rm -rf /tmp/rpm-extract "/tmp/${RPM_NAME}"
+echo "Extracted vouch-server binary to overlay"
 
 # Download Secure Boot signing key from S3 (if configured)
 if [ -n "${SB_KEY_S3_PATH}" ]; then
@@ -80,7 +93,9 @@ echo "=== Starting kiwi-ng build ==="
 kiwi-ng --color-output system build \
     --description /tmp/ami-build \
     --target-dir /tmp/image \
-    --allow-existing-root
+    --allow-existing-root \
+    --set-release-version="${VERSION}" \
+    --clear-cache
 echo "=== kiwi-ng build completed ==="
 
 # Securely delete Secure Boot signing key
