@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.2.18"
+version = "2026.2.19"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.93"
@@ -41,7 +41,7 @@ string_slice = "warn"
 tokio = { version = "=1.49.0", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
 
 # CLI
-clap = { version = "=4.5.57", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context"] }
+clap = { version = "=4.5.58", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context"] }
 
 # Serialization
 serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }

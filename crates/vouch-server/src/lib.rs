@@ -127,7 +127,7 @@ async fn redirect_to_https(
     // Validate Host header against configured rp_id
     // This prevents Host header injection attacks
     if !is_valid_host(hostname, &config.rp_id) {
-        tracing::warn!(
+        tracing::debug!(
             target: "security",
             host = %hostname,
             expected = %config.rp_id,

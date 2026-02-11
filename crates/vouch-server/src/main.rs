@@ -12,7 +12,7 @@ use arc_swap::ArcSwap;
 use axum::{
     Router,
     extract::Path,
-    http::{StatusCode, header},
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
     serve::ListenerExt,
@@ -67,7 +67,24 @@ async fn static_handler(Path(path): Path<String>) -> Response {
     match Assets::get(&path) {
         Some(content) => {
             let mime = mime_guess::from_path(&path).first_or_octet_stream();
-            ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
+            // Use rust-embed's SHA256 hash as ETag for cache validation
+            let etag = format!("\"{}\"", hex::encode(content.metadata.sha256_hash()));
+            // Images and fonts rarely change — cache for 24h.
+            // CSS/JS may change on each deploy — always revalidate via ETag.
+            let mime_type = mime.type_().as_str();
+            let cache_control = match mime_type {
+                "image" | "font" => "public, max-age=86400",
+                _ => "no-cache",
+            };
+            (
+                [
+                    (header::CONTENT_TYPE, mime.as_ref().to_string()),
+                    (header::CACHE_CONTROL, cache_control.to_string()),
+                    (header::ETAG, etag),
+                ],
+                content.data,
+            )
+                .into_response()
         }
         None => StatusCode::NOT_FOUND.into_response(),
     }
@@ -479,7 +496,19 @@ async fn run_server(args: config::Args) -> Result<()> {
                 .patch(handlers::scim::patch_group)
                 .delete(handlers::scim::delete_group),
         )
-        .layer(build_api_cors_layer());
+        .layer(build_api_cors_layer())
+        .layer(SetResponseHeaderLayer::overriding(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::PRAGMA,
+            HeaderValue::from_static("no-cache"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::EXPIRES,
+            HeaderValue::from_static("0"),
+        ));
 
     let ui_routes = Router::new()
         // Landing page with smart routing
@@ -840,6 +869,10 @@ fn apply_security_layers(
     use axum::http::{HeaderName, HeaderValue};
 
     let router = router
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache"),
+        ))
         .layer(SetResponseHeaderLayer::overriding(
             header::X_FRAME_OPTIONS,
             HeaderValue::from_static("DENY"),
