@@ -63,8 +63,8 @@ echo "Downloaded ${RPM_NAME}"
 # Extract binary from RPM into KIWI overlay
 mkdir -p /tmp/ami-build/root/usr/bin /tmp/rpm-extract
 cd /tmp/rpm-extract
-rpm2cpio "/tmp/${RPM_NAME}" | cpio -idm ./usr/bin/vouch-server
-cp ./usr/bin/vouch-server /tmp/ami-build/root/usr/bin/vouch-server
+rpm2cpio "/tmp/${RPM_NAME}" | cpio -idm
+cp usr/bin/vouch-server /tmp/ami-build/root/usr/bin/vouch-server
 chmod 755 /tmp/ami-build/root/usr/bin/vouch-server
 cd /tmp/ami-build
 rm -rf /tmp/rpm-extract "/tmp/${RPM_NAME}"
