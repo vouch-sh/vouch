@@ -14,6 +14,12 @@ echo "enable set-hostname-imds.service" >> /usr/lib/systemd/system-preset/80-amz
 systemctl preset set-hostname-imds
 
 #======================================
+# Create vouch system user
+#======================================
+groupadd --system vouch || true
+useradd --system --gid vouch --home-dir /var/lib/vouch-server --no-create-home --shell /usr/sbin/nologin vouch || true
+
+#======================================
 # Set permissions on overlay files
 #======================================
 # The overlay copies files but doesn't preserve execute permissions

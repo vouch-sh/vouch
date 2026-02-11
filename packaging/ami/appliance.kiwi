@@ -39,10 +39,6 @@
         </type>
     </preferences>
 
-    <users>
-        <user name="vouch" password="*" home="/var/lib/vouch-server" shell="/usr/sbin/nologin" groups="vouch" id="997"/>
-    </users>
-
     <repository priority="2" package_gpgcheck="true" sourcetype="mirrorlist" customize="add-gpg-key.sh">
         <source path="https://cdn.amazonlinux.com/al2023/core/mirrors/latest/$basearch/mirror.list"/>
     </repository>
