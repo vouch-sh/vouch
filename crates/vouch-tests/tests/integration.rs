@@ -1073,7 +1073,7 @@ mod oidc {
 
         assert_eq!(response.status, 401);
         let error: serde_json::Value = response.json().expect("Failed to parse error");
-        assert_eq!(error["code"], "invalid_token");
+        assert_eq!(error["error"], "invalid_token");
     }
 
     /// Test that userinfo returns claims with valid token.
@@ -1107,13 +1107,20 @@ mod oidc {
     async fn test_revoke_token_succeeds() {
         let harness = TestHarness::new().await;
 
-        let (_user, _auth_id, token) = harness
+        let (user, _auth_id, token) = harness
             .create_authenticated_user("revoke@example.com")
             .await
             .expect("Failed to create authenticated user");
 
+        // RFC 7009 Section 2.1: Revocation requires client authentication
+        let client = harness
+            .create_oauth_client(&user.id)
+            .await
+            .expect("Failed to create OAuth client");
+        let auth_header = client.basic_auth_header();
+
         let response = harness
-            .post_form("/oauth/revoke", &format!("token={}", token))
+            .post_form_with_auth("/oauth/revoke", &format!("token={}", token), &auth_header)
             .await
             .expect("Failed to revoke token");
 
@@ -1126,13 +1133,24 @@ mod oidc {
     async fn test_introspect_active_token() {
         let harness = TestHarness::new().await;
 
-        let (_user, _auth_id, token) = harness
+        let (user, _auth_id, token) = harness
             .create_authenticated_user("introspect@example.com")
             .await
             .expect("Failed to create authenticated user");
 
+        // RFC 7662: Introspection requires client authentication
+        let client = harness
+            .create_oauth_client(&user.id)
+            .await
+            .expect("Failed to create OAuth client");
+        let auth_header = client.basic_auth_header();
+
         let response = harness
-            .post_form("/oauth/introspect", &format!("token={}", token))
+            .post_form_with_auth(
+                "/oauth/introspect",
+                &format!("token={}", token),
+                &auth_header,
+            )
             .await
             .expect("Failed to introspect token");
 
@@ -1164,7 +1182,7 @@ mod token_exchange {
 
         assert_eq!(response.status, 400);
         let error: serde_json::Value = response.json().expect("Failed to parse error");
-        assert_eq!(error["code"], "invalid_grant");
+        assert_eq!(error["error"], "invalid_grant");
     }
 
     /// Test that token exchange works with valid token.
@@ -1248,7 +1266,7 @@ mod token_exchange {
 
         assert_eq!(response.status, 400);
         let error: serde_json::Value = response.json().expect("Failed to parse error");
-        assert_eq!(error["code"], "invalid_request");
+        assert_eq!(error["error"], "invalid_request");
     }
 }
 
@@ -1491,10 +1509,17 @@ mod session {
     async fn test_logout_via_revoke_clears_session() {
         let harness = TestHarness::new().await;
 
-        let (_user, _auth_id, token) = harness
+        let (user, _auth_id, token) = harness
             .create_authenticated_user("logout@example.com")
             .await
             .expect("Failed to create authenticated user");
+
+        // RFC 7009 Section 2.1: Revocation requires client authentication
+        let client = harness
+            .create_oauth_client(&user.id)
+            .await
+            .expect("Failed to create OAuth client");
+        let auth_header = client.basic_auth_header();
 
         // Verify token works
         let response = harness
@@ -1506,7 +1531,7 @@ mod session {
 
         // Revoke the token
         harness
-            .post_form("/oauth/revoke", &format!("token={}", token))
+            .post_form_with_auth("/oauth/revoke", &format!("token={}", token), &auth_header)
             .await
             .expect("Failed to revoke token");
 

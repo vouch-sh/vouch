@@ -6,6 +6,7 @@
 //! - RFC 7636 - PKCE (Proof Key for Code Exchange)
 //! - RFC 9449 - DPoP (Demonstrating Proof of Possession)
 
+use super::authorization::CodeChallengeMethod;
 use super::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
 use crate::AppState;
 use crate::db::{self, Authenticator, OAuthClient, OAuthClientType, Session, User};
@@ -26,30 +27,33 @@ use subtle::ConstantTimeEq;
 
 use super::authorization::{AuthorizationCode, decode_authorization_code};
 
-/// Parameters for exchanging an authorization code for tokens.
+/// Parameters for exchanging an authorization code for tokens (RFC 6749 Section 4.1.3).
 #[derive(Debug)]
 pub struct AuthCodeExchangeParams<'a> {
-    /// The authorization code.
+    /// RFC 6749 Section 4.1.3: The authorization code received from the authorization server.
     pub code: &'a str,
-    /// The redirect URI (must match original request).
+    /// RFC 6749 Section 4.1.3: The redirect URI (REQUIRED if included in authorization request).
     pub redirect_uri: Option<&'a str>,
-    /// Client credentials.
+    /// RFC 6749 Section 2.3: Client credentials for authentication.
     pub credentials: Option<&'a ClientCredentials>,
-    /// PKCE code verifier.
+    /// RFC 7636 Section 4.5: The PKCE code verifier.
     pub code_verifier: Option<&'a str>,
-    /// Validated DPoP proof (if present).
+    /// RFC 9449 Section 5: Validated DPoP proof (if present).
     pub dpop_proof: Option<ValidatedDpopProof>,
 }
 
-/// Client credentials for authentication.
+/// Client credentials for authentication (RFC 6749 Section 2.3).
+///
+/// Supports `client_secret_basic` (RFC 6749 Section 2.3.1) and
+/// `client_secret_post` (RFC 6749 Section 2.3.1) authentication methods.
 ///
 /// The client secret is wrapped in `SecretString` to prevent accidental logging
 /// and ensure it is zeroized on drop.
 #[derive(Debug)]
 pub struct ClientCredentials {
-    /// Client ID.
+    /// Client ID (RFC 6749 Section 2.2).
     pub client_id: String,
-    /// Client secret (optional for public clients).
+    /// Client secret (optional for public clients per RFC 6749 Section 2.1).
     pub client_secret: Option<SecretString>,
 }
 
@@ -112,32 +116,30 @@ impl ClientAuthError {
     }
 }
 
-/// OIDC ID Token claims.
+/// OIDC ID Token claims (OIDC Core Section 2).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IdTokenClaims {
-    /// Issuer.
+    /// OIDC Core Section 2: Issuer Identifier.
     pub iss: String,
-    /// Subject.
+    /// OIDC Core Section 2: Subject Identifier.
     pub sub: String,
-    /// Audience.
+    /// OIDC Core Section 2: Audience(s).
     pub aud: String,
-    /// Expiration time.
+    /// OIDC Core Section 2: Expiration time.
     pub exp: i64,
-    /// Issued at time.
+    /// OIDC Core Section 2: Issued at time.
     pub iat: i64,
-    /// OIDC nonce.
+    /// OIDC Core Section 3.1.2.1: Nonce value from the authorization request.
     pub nonce: Option<String>,
-    /// Email.
+    /// OIDC Core Section 5.1: User email.
     pub email: Option<String>,
-    /// Email verified.
+    /// OIDC Core Section 5.1: Whether the email has been verified.
     pub email_verified: Option<bool>,
-    /// Name.
-    pub name: Option<String>,
-    /// Hardware verification flag.
+    /// Custom claim: Hardware verification flag (FIDO2 presence proof).
     pub hardware_verified: bool,
-    /// Hardware authenticator AAGUID.
+    /// Custom claim: Hardware authenticator AAGUID.
     pub hardware_aaguid: Option<String>,
-    /// RFC 9449 DPoP: Token binding confirmation.
+    /// RFC 9449 Section 6: DPoP token binding confirmation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cnf: Option<CnfClaim>,
 }
@@ -161,11 +163,11 @@ pub async fn exchange_authorization_code(
     // Decode and validate the authorization code
     let auth_code = decode_authorization_code(state, params.code)?;
 
-    // Authenticate the client (if credentials provided)
+    // RFC 6749 Section 4.1.3: Authenticate the client (if credentials provided)
     let authenticated_client = if let Some(creds) = params.credentials {
         match authenticate_client(state, creds).await {
             Ok(client) => {
-                // Verify the client_id in the authorization code matches
+                // RFC 6749 Section 4.1.3: Verify the client_id in the authorization code matches
                 if client.client.client_id != auth_code.client_id {
                     tracing::warn!(
                         "Client ID mismatch: token request from {} but code was issued to {}",
@@ -178,24 +180,31 @@ pub async fn exchange_authorization_code(
                     ));
                 }
 
-                // For public clients, require PKCE
-                if client.is_public && auth_code.code_challenge.is_none() {
+                // RFC 7636 Section 4: Require PKCE for public clients and client types that mandate it
+                let pkce_required = client.is_public
+                    || client
+                        .client
+                        .client_type()
+                        .is_some_and(|t| t.requires_pkce());
+                if pkce_required && auth_code.code_challenge.is_none() {
                     tracing::warn!(
-                        "Public client {} attempted token exchange without PKCE",
+                        "Client {} requires PKCE but no code_challenge was present",
                         client.client.client_id
                     );
                     return Err(ServiceError::oauth(
                         OAuthErrorCode::InvalidRequest,
-                        "PKCE required for public clients",
+                        "PKCE required for this client type",
                     ));
                 }
 
                 Some(client)
             }
+            // RFC 6749 Section 4.1.3: Client authentication is REQUIRED
             Err(ClientAuthError::InvalidClient | ClientAuthError::MissingClientId) => {
-                // Client not registered - allow legacy behavior for backward compatibility
-                tracing::debug!("Unregistered client, using legacy token exchange");
-                None
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClient,
+                    "Client authentication required",
+                ));
             }
             Err(e) => {
                 return Err(e.into_service_error());
@@ -205,14 +214,23 @@ pub async fn exchange_authorization_code(
         None
     };
 
-    // Validate redirect_uri matches what was in the authorization request
-    if let Some(redirect_uri) = params.redirect_uri
-        && redirect_uri != auth_code.redirect_uri
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            "Redirect URI mismatch",
-        ));
+    // RFC 6749 Section 4.1.3: redirect_uri MUST be present if it was in the authorization request
+    if !auth_code.redirect_uri.is_empty() {
+        match params.redirect_uri {
+            Some(redirect_uri) if redirect_uri != auth_code.redirect_uri => {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidGrant,
+                    "Redirect URI mismatch",
+                ));
+            }
+            None => {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidRequest,
+                    "redirect_uri is required when it was included in the authorization request",
+                ));
+            }
+            _ => {} // matches
+        }
     }
 
     // Validate PKCE code_verifier if code_challenge was present
@@ -255,7 +273,7 @@ pub async fn exchange_authorization_code(
         tracing::warn!("Failed to record OAuth event: {e}");
     }
 
-    // Token type is "DPoP" if proof was provided, otherwise "Bearer"
+    // RFC 9449 Section 5: Token type is "DPoP" if proof was provided, otherwise "Bearer"
     let token_type = if params.dpop_proof.is_some() {
         "DPoP"
     } else {
@@ -279,7 +297,7 @@ pub async fn exchange_authorization_code(
     })
 }
 
-/// Validate PKCE code verifier against code challenge.
+/// Validate PKCE code verifier against code challenge (RFC 7636 Section 4.6).
 ///
 /// Uses constant-time comparison to prevent timing side-channel attacks.
 fn validate_pkce(auth_code: &AuthorizationCode, code_verifier: Option<&str>) -> ServiceResult<()> {
@@ -292,12 +310,12 @@ fn validate_pkce(auth_code: &AuthorizationCode, code_verifier: Option<&str>) -> 
         ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Missing code_verifier")
     })?;
 
+    // RFC 7636 Section 4.6: Compute the challenge from the verifier using the method
     let method = auth_code
         .code_challenge_method
-        .as_deref()
-        .unwrap_or("plain");
+        .unwrap_or(CodeChallengeMethod::Plain);
 
-    let computed_challenge = if method == "S256" {
+    let computed_challenge = if method == CodeChallengeMethod::S256 {
         let hash = digest::digest(&SHA256, code_verifier.as_bytes());
         URL_SAFE_NO_PAD.encode(hash.as_ref())
     } else {
@@ -320,11 +338,11 @@ fn validate_pkce(auth_code: &AuthorizationCode, code_verifier: Option<&str>) -> 
     Ok(())
 }
 
-/// Authenticate an OAuth client using client credentials.
+/// Authenticate an OAuth client using client credentials (RFC 6749 Section 2.3).
 ///
 /// Supports:
-/// - Confidential clients with client_secret
-/// - Public clients (native/SPA) without secret (must use PKCE)
+/// - Confidential clients with `client_secret` (RFC 6749 Section 2.3.1)
+/// - Public clients (native/SPA) without secret (must use PKCE per RFC 7636)
 pub async fn authenticate_client(
     state: &Arc<AppState>,
     credentials: &ClientCredentials,
@@ -431,7 +449,6 @@ fn generate_id_token(
         nonce: nonce.map(String::from),
         email: Some(email.to_string()),
         email_verified: Some(true),
-        name: None,
         hardware_verified: true,
         hardware_aaguid: aaguid.map(String::from),
         cnf,
@@ -581,7 +598,7 @@ mod tests {
             scope: "openid".to_string(),
             nonce: None,
             code_challenge: Some(expected_challenge.to_string()),
-            code_challenge_method: Some("S256".to_string()),
+            code_challenge_method: Some(CodeChallengeMethod::S256),
             iat: 0,
             exp: i64::MAX,
         };
@@ -602,7 +619,7 @@ mod tests {
             scope: "openid".to_string(),
             nonce: None,
             code_challenge: Some("expected_challenge".to_string()),
-            code_challenge_method: Some("S256".to_string()),
+            code_challenge_method: Some(CodeChallengeMethod::S256),
             iat: 0,
             exp: i64::MAX,
         };
@@ -623,7 +640,7 @@ mod tests {
             scope: "openid".to_string(),
             nonce: None,
             code_challenge: Some("challenge".to_string()),
-            code_challenge_method: Some("S256".to_string()),
+            code_challenge_method: Some(CodeChallengeMethod::S256),
             iat: 0,
             exp: i64::MAX,
         };

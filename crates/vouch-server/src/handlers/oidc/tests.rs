@@ -253,7 +253,7 @@ async fn test_userinfo_requires_bearer_token() {
     let (status, body) = http_get(&app, "/oauth/userinfo", &[]).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["code"], "invalid_token");
+    assert_eq!(error["error"], "invalid_token");
 
     // Invalid token format
     let (status, _body) = http_get(
@@ -308,7 +308,7 @@ async fn test_userinfo_invalid_token() {
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["code"], "invalid_token");
+    assert_eq!(error["error"], "invalid_token");
 }
 
 // ========================================================================
@@ -330,7 +330,7 @@ async fn test_token_invalid_grant_type() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["code"], "unsupported_grant_type");
+    assert_eq!(error["error"], "unsupported_grant_type");
 }
 
 #[tokio::test]
@@ -343,25 +343,30 @@ async fn test_token_missing_code() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["code"], "invalid_request");
+    assert_eq!(error["error"], "invalid_request");
 }
 
 #[tokio::test]
 async fn test_token_invalid_code() {
     // RFC 6749 Section 5.2: invalid_grant for invalid authorization code
-    let (app, _state) = test_app().await;
+    let (app, state) = test_app().await;
+
+    // Create a test user and OAuth client for authentication
+    let user = create_test_user(&state.db, "invalid-code@example.com").await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let auth_header = client.basic_auth_header();
 
     let (status, body) = http_post_form(
         &app,
         "/oauth/token",
         "grant_type=authorization_code&code=invalid_code&redirect_uri=https://example.com/callback",
-        &[],
+        &[("Authorization", &auth_header)],
     )
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["code"], "invalid_grant");
+    assert_eq!(error["error"], "invalid_grant");
 }
 
 // ========================================================================
@@ -422,10 +427,12 @@ async fn test_revoke_token_invalidates_session() {
     // After revocation, the token should not work
     let (app, state) = test_app().await;
 
-    // Create a test session
+    // Create a test session and OAuth client for authentication
     let user = create_test_user(&state.db, "revoke-check@example.com").await;
     let auth_id = create_test_authenticator(&state.db, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let auth_header = client.basic_auth_header();
 
     // Verify token works before revocation
     let (status, _body) = http_get(
@@ -440,9 +447,14 @@ async fn test_revoke_token_invalidates_session() {
         "Token should work before revocation"
     );
 
-    // Revoke the token
-    let (status, _body) =
-        http_post_form(&app, "/oauth/revoke", &format!("token={}", token), &[]).await;
+    // Revoke the token (requires client authentication per RFC 7009)
+    let (status, _body) = http_post_form(
+        &app,
+        "/oauth/revoke",
+        &format!("token={}", token),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
 
     // Verify token no longer works after revocation
@@ -468,13 +480,20 @@ async fn test_introspect_active_token() {
     // RFC 7662 Section 2.2: Active token returns active=true with claims
     let (app, state) = test_app().await;
 
-    // Create a test session
+    // Create a test user, OAuth client (for auth), and session
     let user = create_test_user(&state.db, "introspect@example.com").await;
     let auth_id = create_test_authenticator(&state.db, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let auth_header = client.basic_auth_header();
 
-    let (status, body) =
-        http_post_form(&app, "/oauth/introspect", &format!("token={}", token), &[]).await;
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        &format!("token={}", token),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK);
     let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -496,10 +515,20 @@ async fn test_introspect_active_token() {
 #[tokio::test]
 async fn test_introspect_invalid_token() {
     // RFC 7662 Section 2.2: Invalid token returns active=false
-    let (app, _state) = test_app().await;
+    let (app, state) = test_app().await;
 
-    let (status, body) =
-        http_post_form(&app, "/oauth/introspect", "token=invalid_token_here", &[]).await;
+    // Create an OAuth client for authentication (RFC 7662 Section 2.1)
+    let user = create_test_user(&state.db, "introspect-invalid@example.com").await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        "token=invalid_token_here",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK);
     let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -514,17 +543,30 @@ async fn test_introspect_revoked_token() {
     // RFC 7662 Section 2.2: Revoked token returns active=false
     let (app, state) = test_app().await;
 
-    // Create and then revoke a token
+    // Create user, OAuth client, and session
     let user = create_test_user(&state.db, "introspect-revoked@example.com").await;
     let auth_id = create_test_authenticator(&state.db, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let auth_header = client.basic_auth_header();
 
-    // Revoke the token
-    let _ = http_post_form(&app, "/oauth/revoke", &format!("token={}", token), &[]).await;
+    // Revoke the token (requires client authentication per RFC 7009)
+    let _ = http_post_form(
+        &app,
+        "/oauth/revoke",
+        &format!("token={}", token),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
 
-    // Introspect should now return inactive
-    let (status, body) =
-        http_post_form(&app, "/oauth/introspect", &format!("token={}", token), &[]).await;
+    // Introspect should now return inactive (with client auth per RFC 7662)
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        &format!("token={}", token),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
 
     assert_eq!(status, StatusCode::OK);
     let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -550,7 +592,7 @@ async fn test_token_exchange_requires_grant_type() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["code"], "unsupported_grant_type");
+    assert_eq!(error["error"], "unsupported_grant_type");
 }
 
 #[tokio::test]
@@ -586,7 +628,7 @@ async fn test_token_exchange_invalid_subject_token() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["code"], "invalid_grant");
+    assert_eq!(error["error"], "invalid_grant");
 }
 
 #[tokio::test]

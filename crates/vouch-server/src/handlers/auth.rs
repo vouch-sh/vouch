@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Authentication handlers for registration and login.
+//!
+//! Implements:
+//! - WebAuthn Level 2 Section 7.1 — Registering a New Credential
+//! - WebAuthn Level 2 Section 7.2 — Verifying an Authentication Assertion
 
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
@@ -110,7 +114,8 @@ impl AuthenticationState {
 // Handlers
 // ============================================================================
 
-/// Start registration - generate challenge and return to client.
+/// Start registration - generate challenge and return to client
+/// (WebAuthn Level 2 Section 7.1, Step 1-3).
 ///
 /// This endpoint requires authentication. Users must first enroll via OIDC
 /// (`vouch enroll`) to register their first key. After that, they can add
@@ -201,7 +206,8 @@ pub async fn register_start(
     }))
 }
 
-/// Complete registration - verify attestation and store credential.
+/// Complete registration - verify attestation and store credential
+/// (WebAuthn Level 2 Section 7.1, Step 4-22).
 pub async fn register_complete(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterCompleteRequest>,
@@ -291,8 +297,11 @@ pub async fn register_complete(
     }))
 }
 
-/// Start login - generate challenge for discoverable credential authentication.
-/// No email lookup needed - the YubiKey identifies the user via user_handle.
+/// Start login - generate challenge for discoverable credential authentication
+/// (WebAuthn Level 2 Section 7.2, Step 1-3).
+///
+/// No email lookup needed — the YubiKey identifies the user via user_handle
+/// (discoverable credential / resident key flow).
 pub async fn login_start(
     State(state): State<Arc<AppState>>,
     Json(_req): Json<LoginStartRequest>,
@@ -326,8 +335,11 @@ pub async fn login_start(
     }))
 }
 
-/// Complete login - verify assertion and issue session token.
-/// Uses discoverable credential flow: credential_id and user_handle identify the user.
+/// Complete login - verify assertion and issue session token
+/// (WebAuthn Level 2 Section 7.2, Step 4-21).
+///
+/// Uses discoverable credential flow: `credential_id` and `user_handle`
+/// identify the user without a prior email lookup.
 pub async fn login_complete(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,

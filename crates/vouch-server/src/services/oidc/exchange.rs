@@ -26,44 +26,46 @@ pub mod token_types {
     pub const JWT: &str = "urn:ietf:params:oauth:token-type:jwt";
 }
 
-/// Parameters for token exchange.
+/// Parameters for token exchange (RFC 8693 Section 2.1).
 #[derive(Debug)]
 pub struct TokenExchangeParams<'a> {
-    /// The subject token to exchange.
+    /// RFC 8693 Section 2.1: The subject token (REQUIRED).
     pub subject_token: &'a str,
-    /// Type of the subject token.
+    /// RFC 8693 Section 2.1: An identifier for the type of the subject token (REQUIRED).
     pub subject_token_type: &'a str,
-    /// Optional actor token (for delegation chains).
+    /// RFC 8693 Section 2.1: Optional actor token for delegation chains.
     pub actor_token: Option<&'a str>,
-    /// Type of the actor token.
+    /// RFC 8693 Section 2.1: An identifier for the type of the actor token.
     pub actor_token_type: Option<&'a str>,
-    /// Requested audience for the new token.
+    /// RFC 8693 Section 2.1: The logical name of the target service (OPTIONAL).
     pub audience: Option<&'a str>,
-    /// Requested scope for the new token.
+    /// RFC 8693 Section 2.1: The requested scope for the new token (OPTIONAL).
     pub scope: Option<&'a str>,
+    /// RFC 8693 Section 2.1: The desired type of the requested security token (OPTIONAL).
+    pub requested_token_type: Option<&'a str>,
 }
 
-/// Result of a token exchange.
+/// Result of a token exchange (RFC 8693 Section 2.2).
 #[derive(Debug)]
 pub struct TokenExchangeResult {
-    /// The exchanged access token.
+    /// The security token issued by the authorization server.
     pub access_token: String,
-    /// Type of the issued token.
+    /// RFC 8693 Section 2.2.1: The type of the issued security token.
     pub issued_token_type: String,
-    /// Token type (typically "Bearer").
+    /// RFC 6749 Section 7.1: The type of the token issued (e.g., "Bearer").
     pub token_type: String,
-    /// Token expiration in seconds.
+    /// The lifetime in seconds of the access token.
     pub expires_in: u64,
-    /// Granted scope (may be subset of requested).
+    /// RFC 8693 Section 2.2: Granted scope (may be subset of requested).
     pub scope: Option<String>,
 }
 
-/// Actor claim for delegation chains.
+/// Actor claim for delegation chains (RFC 8693 Section 4.1).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ActorClaim {
-    /// Subject identifier of the actor.
+    /// RFC 8693 Section 4.1: Subject identifier of the actor.
     pub sub: String,
-    /// Nested actor (for multi-hop delegation).
+    /// RFC 8693 Section 4.1: Nested actor (for multi-hop delegation).
     #[serde(rename = "act", skip_serializing_if = "Option::is_none")]
     pub actor: Option<Box<ActorClaim>>,
 }
@@ -118,6 +120,16 @@ pub async fn exchange_token(
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
             "Unsupported subject_token_type",
+        ));
+    }
+
+    // RFC 8693 Section 2.1: Validate requested_token_type if provided
+    if let Some(requested_type) = params.requested_token_type
+        && !valid_token_types.contains(&requested_type)
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            "Unsupported requested_token_type",
         ));
     }
 
@@ -281,7 +293,7 @@ pub async fn exchange_token(
 
 /// Calculate the granted scope based on requested and available scopes.
 fn calculate_granted_scope(requested: Option<&str>) -> Option<String> {
-    let available_scope = "openid email profile";
+    let available_scope = "openid email";
 
     if let Some(requested) = requested {
         // Only grant scopes that are both requested and available
@@ -307,7 +319,7 @@ mod tests {
     #[test]
     fn test_calculate_granted_scope_full() {
         let result = calculate_granted_scope(None);
-        assert_eq!(result, Some("openid email profile".to_string()));
+        assert_eq!(result, Some("openid email".to_string()));
     }
 
     #[test]

@@ -12,9 +12,57 @@ use jiff::{Span, Timestamp};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, encode};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::sync::Arc;
 
 use super::token::validate_session_token;
+
+/// PKCE code challenge method (RFC 7636 Section 4.2).
+///
+/// Determines how the `code_verifier` is transformed before comparison.
+/// `S256` is RECOMMENDED by RFC 7636 Section 4.2; `Plain` is only for
+/// constrained environments that cannot perform SHA-256.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CodeChallengeMethod {
+    /// SHA-256 transformation: `BASE64URL(SHA256(code_verifier))`.
+    /// RFC 7636 Section 4.2.
+    #[serde(rename = "S256")]
+    S256,
+    /// Plain transformation: `code_challenge == code_verifier`.
+    /// RFC 7636 Section 4.2.
+    #[serde(rename = "plain")]
+    Plain,
+}
+
+impl CodeChallengeMethod {
+    /// Parse a code challenge method from a string value.
+    ///
+    /// Returns `None` for unsupported methods.
+    /// RFC 7636 Section 4.3.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "S256" => Some(Self::S256),
+            "plain" => Some(Self::Plain),
+            _ => None,
+        }
+    }
+
+    /// Return the string representation used in OAuth parameters.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::S256 => "S256",
+            Self::Plain => "plain",
+        }
+    }
+}
+
+impl fmt::Display for CodeChallengeMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// Parameters for creating an authorization code.
 #[derive(Debug)]
@@ -35,30 +83,31 @@ pub struct AuthorizationCodeParams<'a> {
     pub scope: &'a str,
     /// OIDC nonce.
     pub nonce: Option<&'a str>,
-    /// PKCE code challenge.
+    /// PKCE code challenge (RFC 7636 Section 4.2).
     pub code_challenge: Option<&'a str>,
-    /// PKCE code challenge method.
-    pub code_challenge_method: Option<&'a str>,
+    /// PKCE code challenge method (RFC 7636 Section 4.2).
+    pub code_challenge_method: Option<CodeChallengeMethod>,
 }
 
 /// Authorization request parameters (from query string).
 #[derive(Debug)]
 pub struct AuthorizeRequestParams {
-    /// Response type (must be "code").
+    /// Response type (must be "code") — RFC 6749 Section 4.1.1.
     pub response_type: String,
-    /// Client ID.
+    /// Client ID — RFC 6749 Section 4.1.1.
     pub client_id: String,
-    /// Redirect URI.
+    /// Redirect URI — RFC 6749 Section 4.1.1.
     pub redirect_uri: String,
-    /// Requested scope.
+    /// Requested scope — RFC 6749 Section 3.3.
     pub scope: Option<String>,
-    /// State parameter (opaque to server).
+    /// State parameter (opaque to server) — RFC 6749 Section 4.1.1.
     pub state: Option<String>,
-    /// OIDC nonce.
+    /// OIDC nonce — OIDC Core Section 3.1.2.1.
     pub nonce: Option<String>,
-    /// PKCE code challenge.
+    /// PKCE code challenge — RFC 7636 Section 4.2.
     pub code_challenge: Option<String>,
-    /// PKCE code challenge method.
+    /// PKCE code challenge method (raw string from request, validated into enum).
+    /// RFC 7636 Section 4.3.
     pub code_challenge_method: Option<String>,
 }
 
@@ -75,10 +124,10 @@ pub struct ValidatedAuthRequest {
     pub state: Option<String>,
     /// OIDC nonce.
     pub nonce: Option<String>,
-    /// PKCE code challenge.
+    /// PKCE code challenge — RFC 7636 Section 4.2.
     pub code_challenge: Option<String>,
-    /// PKCE code challenge method.
-    pub code_challenge_method: Option<String>,
+    /// PKCE code challenge method — RFC 7636 Section 4.2.
+    pub code_challenge_method: Option<CodeChallengeMethod>,
 }
 
 /// Result of checking session state for authorization.
@@ -97,6 +146,9 @@ pub enum AuthorizationSessionState {
 }
 
 /// Authorization code stored temporarily (JWT-encoded).
+///
+/// Encodes all parameters from the authorization request so they can be
+/// verified at the token endpoint (RFC 6749 Section 4.1.3).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthorizationCode {
     pub client_id: String,
@@ -106,9 +158,12 @@ pub struct AuthorizationCode {
     pub authenticator_id: String,
     pub aaguid: Option<String>,
     pub scope: String,
+    /// OIDC nonce — OIDC Core Section 3.1.2.1.
     pub nonce: Option<String>,
+    /// PKCE code challenge — RFC 7636 Section 4.2.
     pub code_challenge: Option<String>,
-    pub code_challenge_method: Option<String>,
+    /// PKCE code challenge method — RFC 7636 Section 4.2.
+    pub code_challenge_method: Option<CodeChallengeMethod>,
     pub iat: i64,
     pub exp: i64,
 }
@@ -152,7 +207,7 @@ pub fn validate_authorize_request(
     // RFC 6749 Section 4.1.1: response_type must be "code"
     if params.response_type != "code" {
         return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRequest,
+            OAuthErrorCode::UnsupportedResponseType,
             "Only 'code' response type is supported",
         ));
     }
@@ -173,6 +228,26 @@ pub fn validate_authorize_request(
         ));
     }
 
+    // RFC 7636 Section 4.3: Validate code_challenge_method if provided
+    let parsed_method = if let Some(ref method_str) = params.code_challenge_method {
+        let method = CodeChallengeMethod::parse(method_str).ok_or_else(|| {
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Unsupported code_challenge_method. Supported: S256, plain",
+            )
+        })?;
+        // code_challenge_method without code_challenge is invalid
+        if params.code_challenge.is_none() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "code_challenge is required when code_challenge_method is provided",
+            ));
+        }
+        Some(method)
+    } else {
+        None
+    };
+
     Ok(ValidatedAuthRequest {
         client_id: params.client_id,
         redirect_uri: params.redirect_uri,
@@ -180,7 +255,7 @@ pub fn validate_authorize_request(
         state: params.state,
         nonce: params.nonce,
         code_challenge: params.code_challenge,
-        code_challenge_method: params.code_challenge_method,
+        code_challenge_method: parsed_method,
     })
 }
 
@@ -241,7 +316,7 @@ pub fn issue_authorization_code(
         scope: params.scope.to_string(),
         nonce: params.nonce.map(String::from),
         code_challenge: params.code_challenge.map(String::from),
-        code_challenge_method: params.code_challenge_method.map(String::from),
+        code_challenge_method: params.code_challenge_method,
         iat: now.as_second(),
         exp,
     };
@@ -437,7 +512,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRequest);
+                assert_eq!(code, OAuthErrorCode::UnsupportedResponseType);
             }
             _ => panic!("Expected OAuth error"),
         }

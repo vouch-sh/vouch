@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Authentication service for FIDO2/WebAuthn login.
 //!
+//! Implements:
+//! - WebAuthn Level 2 Section 7.2 — Verifying an Authentication Assertion
+//! - RFC 7519 — JSON Web Token (JWT) for session tokens
+//!
 //! This module provides business logic for authenticating users via WebAuthn
 //! discoverable credentials. It handles:
 //! - Authenticator lookup and ownership verification
@@ -95,7 +99,10 @@ pub struct LoginAssertionResult {
     pub user_verified: bool,
 }
 
-/// Verify a WebAuthn login assertion.
+/// Verify a WebAuthn login assertion (WebAuthn Level 2 Section 7.2).
+///
+/// Performs signature verification, user verification check, and counter
+/// validation as specified in the WebAuthn authentication ceremony.
 ///
 /// # Errors
 ///
@@ -140,19 +147,19 @@ pub fn verify_login_assertion(
     })
 }
 
-/// Session claims for JWT tokens.
+/// Session claims for JWT tokens (RFC 7519 Section 4.1).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionClaims {
-    /// Subject (user ID).
+    /// RFC 7519 Section 4.1.2: Subject — the user ID.
     pub sub: String,
-    /// User email.
+    /// User email (custom claim).
     pub email: String,
-    /// Authenticator ID used for this session.
+    /// Authenticator ID used for this session (custom claim).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub authenticator_id: Option<String>,
-    /// Issued at (Unix timestamp).
+    /// RFC 7519 Section 4.1.6: Issued At — Unix timestamp.
     pub iat: i64,
-    /// Expiration (Unix timestamp).
+    /// RFC 7519 Section 4.1.4: Expiration Time — Unix timestamp.
     pub exp: i64,
 }
 

@@ -36,7 +36,10 @@ pub use users::{create_user, delete_user, get_user, list_users, patch_user};
 // Authentication
 // ============================================================================
 
-/// Extract and validate SCIM bearer token.
+/// Extract and validate SCIM bearer token (RFC 7644 Section 2).
+///
+/// SCIM endpoints require authentication via OAuth 2.0 Bearer Token
+/// (RFC 6750). The token is validated against the SCIM token store.
 pub async fn authenticate_scim(
     state: &AppState,
     headers: &HeaderMap,

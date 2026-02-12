@@ -3,7 +3,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// SCIM error response.
+/// SCIM error response (RFC 7644 Section 3.12).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimError {
@@ -29,7 +29,7 @@ impl ScimError {
     }
 }
 
-/// SCIM list response.
+/// SCIM list response (RFC 7644 Section 3.4.2).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimListResponse<T> {
@@ -41,7 +41,7 @@ pub struct ScimListResponse<T> {
     pub resources: Vec<T>,
 }
 
-/// SCIM User resource.
+/// SCIM User resource (RFC 7643 Section 4.1).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimUser {
@@ -65,7 +65,7 @@ fn default_true() -> bool {
     true
 }
 
-/// SCIM Name component.
+/// SCIM Name component (RFC 7643 Section 4.1.1).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimName {
@@ -77,7 +77,7 @@ pub struct ScimName {
     pub given_name: Option<String>,
 }
 
-/// SCIM Email component.
+/// SCIM Email component (RFC 7643 Section 4.1.2).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimEmail {
@@ -88,7 +88,7 @@ pub struct ScimEmail {
     pub email_type: Option<String>,
 }
 
-/// SCIM Meta component.
+/// SCIM Meta component (RFC 7643 Section 3.1).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimMeta {
@@ -99,7 +99,7 @@ pub struct ScimMeta {
     pub location: String,
 }
 
-/// SCIM Patch operation.
+/// SCIM Patch operation request (RFC 7644 Section 3.5.2).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimPatchRequest {
@@ -132,7 +132,7 @@ pub struct ScimPatchOp {
     pub value: Option<serde_json::Value>,
 }
 
-/// SCIM Service Provider Config.
+/// SCIM Service Provider Configuration (RFC 7643 Section 5).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimServiceProviderConfig {
@@ -178,7 +178,7 @@ pub struct ScimAuthScheme {
     pub spec_uri: String,
 }
 
-/// SCIM Schema definition.
+/// SCIM Schema definition (RFC 7643 Section 7).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimSchema {
@@ -188,7 +188,7 @@ pub struct ScimSchema {
     pub attributes: Vec<ScimAttribute>,
 }
 
-/// SCIM Attribute definition.
+/// SCIM Attribute definition (RFC 7643 Section 7).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimAttribute {
@@ -203,7 +203,7 @@ pub struct ScimAttribute {
     pub uniqueness: String,
 }
 
-/// SCIM Resource Type definition.
+/// SCIM Resource Type definition (RFC 7643 Section 6).
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimResourceType {
@@ -215,7 +215,7 @@ pub struct ScimResourceType {
     pub schema: String,
 }
 
-/// Query parameters for listing users/groups.
+/// Query parameters for listing users/groups (RFC 7644 Section 3.4.2).
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimListQuery {
@@ -224,7 +224,7 @@ pub struct ScimListQuery {
     pub filter: Option<String>,
 }
 
-/// SCIM Group resource.
+/// SCIM Group resource (RFC 7643 Section 4.2).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimGroup {
@@ -240,7 +240,7 @@ pub struct ScimGroup {
     pub meta: Option<ScimMeta>,
 }
 
-/// SCIM Group member reference.
+/// SCIM Group member reference (RFC 7643 Section 8.7.1).
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScimGroupMember {

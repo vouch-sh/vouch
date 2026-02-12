@@ -61,10 +61,10 @@ tower = { workspace = true, optional = true }
 sea-query = { version = "=0.32.7", default-features = false, features = ["backend-sqlite", "backend-postgres", "derive"] }
 
 # AWS SDK for DSQL token generation, credential loading, S3 config, and KMS envelope decryption
-aws-config = { version = "=1.8.13", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "sso", "rustls"] }
-aws-sdk-dsql = { version = "=1.50.0", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "rustls"] }
-aws-sdk-kms = { version = "=1.99.0", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "rustls"] }
-aws-sdk-s3 = { version = "=1.122.0", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "rustls"] }
+aws-config = { version = "=1.8.14", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "sso", "rustls"] }
+aws-sdk-dsql = { version = "=1.51.0", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "rustls"] }
+aws-sdk-kms = { version = "=1.100.0", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "rustls"] }
+aws-sdk-s3 = { version = "=1.123.0", default-features = false, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "rustls"] }
 aws-smithy-types = { version = "=1.4.4", default-features = false }
 
 # Temp files for NitroTPM attestation (writing ephemeral RSA public key)

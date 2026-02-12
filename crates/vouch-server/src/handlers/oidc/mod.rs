@@ -6,19 +6,20 @@
 //!
 //! ## Endpoints
 //!
-//! - `GET /.well-known/openid-configuration` - Discovery document
-//! - `GET /oauth/jwks` - Public keys for token verification
-//! - `GET /oauth/authorize` - Authorization endpoint
-//! - `POST /oauth/token` - Token endpoint
-//! - `GET /oauth/userinfo` - User info endpoint
-//! - `POST /oauth/revoke` - Token revocation (RFC 7009)
-//! - `POST /oauth/introspect` - Token introspection (RFC 7662)
+//! - `GET /.well-known/openid-configuration` — OIDC Discovery 1.0 Section 4
+//! - `GET /oauth/jwks` — RFC 7517 Section 5 (JWK Set)
+//! - `GET /oauth/authorize` — RFC 6749 Section 3.1 (Authorization Endpoint)
+//! - `POST /oauth/token` — RFC 6749 Section 3.2 (Token Endpoint)
+//! - `GET /oauth/userinfo` — OIDC Core 1.0 Section 5.3 (UserInfo Endpoint)
+//! - `POST /oauth/revoke` — RFC 7009 Section 2 (Token Revocation)
+//! - `POST /oauth/introspect` — RFC 7662 Section 2 (Token Introspection)
 //!
 //! ## Token Claims
 //!
-//! ID tokens include standard OIDC claims plus Vouch-specific claims:
-//! - `hardware_verified: true` - Indicates hardware authentication was used
-//! - `hardware_aaguid` - The AAGUID of the authenticator used
+//! ID tokens include standard OIDC claims (OIDC Core 1.0 Section 5.1) plus
+//! Vouch-specific claims:
+//! - `hardware_verified: true` — Indicates hardware authentication was used
+//! - `hardware_aaguid` — The AAGUID of the authenticator used
 
 mod authorize;
 mod discovery;

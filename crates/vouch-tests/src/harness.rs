@@ -324,6 +324,35 @@ impl TestHarness {
             .await
     }
 
+    /// Make a POST request with form-urlencoded body and a custom Authorization header.
+    pub async fn post_form_with_auth(
+        &self,
+        path: &str,
+        body: &str,
+        auth_header: &str,
+    ) -> Result<vouch_cli::HttpResponse> {
+        let url = self.url(path);
+        self.http_client
+            .request(
+                "POST",
+                &url,
+                Some(body.as_bytes()),
+                Some("application/x-www-form-urlencoded"),
+                Some(auth_header),
+            )
+            .await
+    }
+
+    /// Create a test OAuth client with secret for use in introspection/revocation tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if client creation fails.
+    pub async fn create_oauth_client(&self, user_id: &str) -> Result<test_utils::TestOAuthClient> {
+        let client = test_utils::create_test_oauth_client(&self.state.db, user_id).await;
+        Ok(client)
+    }
+
     /// Create a SCIM bearer token for testing.
     ///
     /// # Errors

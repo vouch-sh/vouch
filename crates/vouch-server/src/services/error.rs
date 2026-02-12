@@ -69,33 +69,35 @@ pub enum ServiceError {
 /// OAuth 2.0 error codes (RFC 6749 Section 5.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OAuthErrorCode {
-    /// The request is missing a required parameter.
+    /// RFC 6749 Section 5.2: The request is missing a required parameter.
     InvalidRequest,
-    /// Client authentication failed.
+    /// RFC 6749 Section 5.2: Client authentication failed.
     InvalidClient,
-    /// The provided authorization grant is invalid.
+    /// RFC 6749 Section 5.2: The provided authorization grant is invalid.
     InvalidGrant,
-    /// The client is not authorized to use this grant type.
+    /// RFC 6749 Section 5.2: The client is not authorized to use this grant type.
     UnauthorizedClient,
-    /// The authorization grant type is not supported.
+    /// RFC 6749 Section 5.2: The authorization grant type is not supported.
     UnsupportedGrantType,
-    /// The requested scope is invalid or unknown.
+    /// RFC 6749 Section 5.2: The requested scope is invalid or unknown.
     InvalidScope,
-    /// The authorization server encountered an unexpected condition.
+    /// RFC 6749 Section 5.2: The authorization server encountered an unexpected condition.
     ServerError,
-    /// The authorization server is temporarily unavailable.
+    /// RFC 6749 Section 5.2: The authorization server is temporarily unavailable.
     TemporarilyUnavailable,
-    /// The authorization request is still pending (RFC 8628).
+    /// RFC 8628 Section 3.5: The authorization request is still pending.
     AuthorizationPending,
-    /// Polling too frequently (RFC 8628).
+    /// RFC 8628 Section 3.5: Polling too frequently.
     SlowDown,
-    /// The device code has expired (RFC 8628).
+    /// RFC 8628 Section 3.5: The device code has expired.
     ExpiredToken,
-    /// Access denied by the user (RFC 8628).
+    /// RFC 6749 Section 4.1.2.1: Access denied by the resource owner or authorization server.
     AccessDenied,
-    /// Invalid DPoP proof (RFC 9449).
+    /// RFC 6749 Section 4.1.2.1: The response type is not supported.
+    UnsupportedResponseType,
+    /// RFC 9449 Section 5.1: Invalid DPoP proof.
     InvalidDpopProof,
-    /// DPoP nonce required (RFC 9449).
+    /// RFC 9449 Section 5.1: DPoP nonce required.
     UseDpopNonce,
 }
 
@@ -116,6 +118,7 @@ impl OAuthErrorCode {
             Self::InvalidClient | Self::UnauthorizedClient => StatusCode::UNAUTHORIZED,
             Self::InvalidGrant
             | Self::UnsupportedGrantType
+            | Self::UnsupportedResponseType
             | Self::AuthorizationPending
             | Self::SlowDown
             | Self::ExpiredToken
@@ -134,6 +137,7 @@ impl OAuthErrorCode {
             Self::InvalidGrant => "invalid_grant",
             Self::UnauthorizedClient => "unauthorized_client",
             Self::UnsupportedGrantType => "unsupported_grant_type",
+            Self::UnsupportedResponseType => "unsupported_response_type",
             Self::InvalidScope => "invalid_scope",
             Self::ServerError => "server_error",
             Self::TemporarilyUnavailable => "temporarily_unavailable",
@@ -150,12 +154,12 @@ impl OAuthErrorCode {
 /// OAuth 2.0 error response (RFC 6749 Section 5.2).
 #[derive(Debug, Serialize)]
 pub struct OAuthErrorResponse {
-    /// Error code.
+    /// RFC 6749 Section 5.2: A single ASCII error code.
     pub error: String,
-    /// Human-readable description.
+    /// RFC 6749 Section 5.2: Human-readable ASCII text providing additional information.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_description: Option<String>,
-    /// URI with more information.
+    /// RFC 6749 Section 5.2: A URI identifying a human-readable web page with error information.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_uri: Option<String>,
 }

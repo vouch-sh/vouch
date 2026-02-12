@@ -2,6 +2,8 @@
 //! Token endpoint handler.
 
 use crate::AppState;
+use crate::impl_template_response;
+use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::{
     exchange::{TokenExchangeParams, exchange_token},
     token::{
@@ -21,9 +23,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use vouch_common::ApiError;
-
-use crate::impl_template_response;
 
 /// Authorization page template.
 #[derive(Template)]
@@ -61,75 +60,107 @@ impl OAuthGrantType {
     }
 }
 
-/// Token response.
+/// Token response (RFC 6749 Section 5.1).
 #[derive(Debug, Serialize)]
 pub struct TokenResponse {
+    /// The access token issued by the authorization server.
     pub access_token: String,
+    /// The type of the token issued ("Bearer" or "DPoP").
     pub token_type: String,
+    /// The lifetime in seconds of the access token.
     pub expires_in: u64,
+    /// OIDC Core Section 3.1.3.3: The ID Token.
     pub id_token: Option<String>,
+    /// RFC 6749 Section 3.3: The scope of the access token.
     pub scope: Option<String>,
 }
 
-/// Token request for all grant types (authorization_code, device_code, token_exchange).
+/// Token request for all grant types (RFC 6749 Section 4.1.3, RFC 8628 Section 3.4, RFC 8693 Section 2.1).
 #[derive(Debug, Deserialize)]
 pub struct TokenRequest {
+    /// RFC 6749 Section 4.1.3: The grant type.
     pub grant_type: String,
+    /// RFC 6749 Section 4.1.3: The authorization code received from the authorization server.
     #[serde(default)]
     pub code: Option<String>,
+    /// RFC 6749 Section 4.1.3: The redirect URI used in the authorization request.
     #[serde(default)]
     pub redirect_uri: Option<String>,
+    /// RFC 6749 Section 4.1.3: The client identifier.
     #[serde(default)]
     pub client_id: Option<String>,
-    /// Client secret (wrapped in SecretString to prevent accidental logging).
+    /// RFC 6749 Section 2.3.1: Client secret (wrapped in `SecretString` to prevent accidental logging).
     #[serde(default)]
     pub client_secret: Option<SecretString>,
+    /// RFC 7636 Section 4.5: The code verifier for PKCE.
     #[serde(default)]
     pub code_verifier: Option<String>,
+    /// RFC 8628 Section 3.4: The device verification code.
     #[serde(default)]
     pub device_code: Option<String>,
-    // Token exchange parameters (RFC 8693)
+    /// RFC 8693 Section 2.1: The subject token to exchange.
     #[serde(default)]
     pub subject_token: Option<String>,
+    /// RFC 8693 Section 2.1: Type identifier for the subject token.
     #[serde(default)]
     pub subject_token_type: Option<String>,
+    /// RFC 8693 Section 2.1: Optional actor token (for delegation).
     #[serde(default)]
     pub actor_token: Option<String>,
+    /// RFC 8693 Section 2.1: Type identifier for the actor token.
     #[serde(default)]
     pub actor_token_type: Option<String>,
+    /// RFC 8693 Section 2.1: The target audience for the requested token.
     #[serde(default)]
     pub audience: Option<String>,
+    /// RFC 6749 Section 3.3: The requested scope.
     #[serde(default)]
     pub scope: Option<String>,
+    /// RFC 8693 Section 2.1: The desired type of the requested security token (OPTIONAL).
+    #[serde(default)]
+    pub requested_token_type: Option<String>,
 }
 
-/// Token exchange response (RFC 8693).
+/// Token exchange response (RFC 8693 Section 2.2).
 #[derive(Debug, Serialize)]
 pub struct TokenExchangeResponse {
+    /// The security token issued by the authorization server.
     pub access_token: String,
+    /// RFC 8693 Section 2.2.1: The type of the issued security token.
     pub issued_token_type: String,
+    /// The type of the token issued (e.g., "Bearer").
     pub token_type: String,
+    /// The lifetime in seconds of the access token.
     pub expires_in: u64,
+    /// RFC 6749 Section 3.3: The scope of the access token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<String>,
 }
 
 /// POST /oauth/token
 ///
-/// Unified token endpoint that handles authorization_code, device_code, and token_exchange grants.
+/// Unified token endpoint (RFC 6749 Section 3.2) that handles:
+/// - `authorization_code` grant (RFC 6749 Section 4.1.3)
+/// - `urn:ietf:params:oauth:grant-type:device_code` grant (RFC 8628 Section 3.4)
+/// - `urn:ietf:params:oauth:grant-type:token-exchange` grant (RFC 8693 Section 2.1)
 pub async fn token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::Form(params): axum::Form<TokenRequest>,
 ) -> Response {
+    // RFC 6749 Section 5.2: Return unsupported_grant_type error for unknown grants
     let Some(grant_type) = OAuthGrantType::from_str(&params.grant_type) else {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ApiError::new(
-                "unsupported_grant_type",
-                "Supported grant types: authorization_code, urn:ietf:params:oauth:grant-type:device_code, urn:ietf:params:oauth:grant-type:token-exchange",
-            )),
-        ).into_response();
+            Json(OAuthErrorResponse {
+                error: "unsupported_grant_type".to_string(),
+                error_description: Some(
+                    "Supported grant types: authorization_code, urn:ietf:params:oauth:grant-type:device_code, urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+                ),
+                error_uri: None,
+            }),
+        )
+            .into_response();
     };
 
     match grant_type {
@@ -147,12 +178,17 @@ async fn handle_authorization_code_grant(
     headers: HeaderMap,
     params: TokenRequest,
 ) -> Response {
+    // RFC 6749 Section 4.1.3: The "code" parameter is REQUIRED
     let code = match &params.code {
         Some(c) => c,
         None => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ApiError::new("invalid_request", "Missing code parameter")),
+                Json(OAuthErrorResponse {
+                    error: "invalid_request".to_string(),
+                    error_description: Some("Missing code parameter".to_string()),
+                    error_uri: None,
+                }),
             )
                 .into_response();
         }
@@ -162,12 +198,12 @@ async fn handle_authorization_code_grant(
     let credentials =
         extract_client_credentials(&headers, params.client_id.as_deref(), params.client_secret);
 
-    // Validate DPoP if present
+    // RFC 9449 Section 5: Validate DPoP proof if present at the token endpoint
     let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
     let dpop_proof =
         match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
             Ok(proof) => proof,
-            Err(e) => return service_error_to_api_error(e).into_response(),
+            Err(e) => return e.into_oauth_response().into_response(),
         };
 
     // Exchange the authorization code
@@ -188,7 +224,7 @@ async fn handle_authorization_code_grant(
             scope: Some(result.scope),
         })
         .into_response(),
-        Err(e) => service_error_to_api_error(e).into_response(),
+        Err(e) => e.into_oauth_response().into_response(),
     }
 }
 
@@ -219,6 +255,7 @@ async fn handle_token_exchange_grant(
         actor_token_type: params.actor_token_type.as_deref(),
         audience: params.audience.as_deref(),
         scope: params.scope.as_deref(),
+        requested_token_type: params.requested_token_type.as_deref(),
     };
 
     match exchange_token(&state, exchange_params).await {
@@ -230,40 +267,7 @@ async fn handle_token_exchange_grant(
             scope: result.scope,
         })
         .into_response(),
-        Err(e) => service_error_to_api_error(e).into_response(),
-    }
-}
-
-/// Convert a ServiceError to an ApiError response.
-fn service_error_to_api_error(e: crate::services::ServiceError) -> (StatusCode, Json<ApiError>) {
-    use crate::services::ServiceError;
-
-    match e {
-        ServiceError::OAuth { code, description } => {
-            let status = code.status_code();
-            (status, Json(ApiError::new(code.as_str(), description)))
-        }
-        ServiceError::NotFound(entity) => (
-            StatusCode::NOT_FOUND,
-            Json(ApiError::new("not_found", format!("{entity} not found"))),
-        ),
-        ServiceError::Validation(msg) => (
-            StatusCode::BAD_REQUEST,
-            Json(ApiError::new("invalid_request", msg)),
-        ),
-        ServiceError::Unauthorized(msg) => (
-            StatusCode::UNAUTHORIZED,
-            Json(ApiError::new("unauthorized", msg.to_string())),
-        ),
-        ServiceError::Forbidden(msg) => (
-            StatusCode::FORBIDDEN,
-            Json(ApiError::new("forbidden", msg.to_string())),
-        ),
-        ServiceError::Conflict(msg) => (StatusCode::CONFLICT, Json(ApiError::new("conflict", msg))),
-        ServiceError::Database(_) | ServiceError::Internal(_) | ServiceError::Scim { .. } => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiError::new("server_error", "Internal server error")),
-        ),
+        Err(e) => e.into_oauth_response().into_response(),
     }
 }
 
@@ -274,7 +278,7 @@ fn service_error_to_api_error(e: crate::services::ServiceError) -> (StatusCode, 
 ///
 /// The client secret is wrapped in `SecretString` to prevent accidental logging
 /// and ensure it is zeroized on drop.
-fn extract_client_credentials(
+pub fn extract_client_credentials(
     headers: &HeaderMap,
     client_id_param: Option<&str>,
     client_secret_param: Option<SecretString>,
@@ -284,15 +288,20 @@ fn extract_client_credentials(
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Basic "))
-        && let Ok(decoded) = URL_SAFE_NO_PAD
+        && let Ok(decoded) = base64::engine::general_purpose::STANDARD
             .decode(auth_header.trim())
-            .or_else(|_| base64::engine::general_purpose::STANDARD.decode(auth_header.trim()))
+            .or_else(|_| URL_SAFE_NO_PAD.decode(auth_header.trim()))
         && let Ok(creds) = String::from_utf8(decoded)
         && let Some((id, secret)) = creds.split_once(':')
     {
+        // RFC 6749 Section 2.3.1: URL-decode client_id and client_secret after base64 decoding
+        let decoded_id =
+            urlencoding::decode(id).map_or_else(|_| id.to_string(), |d| d.into_owned());
+        let decoded_secret =
+            urlencoding::decode(secret).map_or_else(|_| secret.to_string(), |d| d.into_owned());
         return Some(ClientCredentials {
-            client_id: id.to_string(),
-            client_secret: Some(SecretString::from(secret.to_string())),
+            client_id: decoded_id,
+            client_secret: Some(SecretString::from(decoded_secret)),
         });
     }
 

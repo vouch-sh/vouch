@@ -323,12 +323,11 @@ fn generate_random_string(len: usize) -> String {
     URL_SAFE_NO_PAD.encode(&bytes)
 }
 
-/// Compute the access token hash (ath) for DPoP.
+/// Compute the access token hash (`ath`) for DPoP (RFC 9449 Section 4.2).
 ///
 /// The hash is the base64url-encoded SHA-256 hash of the ASCII access token.
 /// This is used at protected resource endpoints (e.g., userinfo) to verify
 /// that the DPoP proof was created for the specific access token being used.
-#[allow(dead_code)]
 pub fn compute_access_token_hash(access_token: &str) -> String {
     let hash = digest::digest(&SHA256, access_token.as_bytes());
     URL_SAFE_NO_PAD.encode(hash.as_ref())
@@ -415,17 +414,24 @@ pub fn validate_dpop_claims(
         return Err(DpopError::Expired);
     }
 
-    // Check nonce if required (constant-time comparison for defense-in-depth)
-    if require_nonce {
-        match (&claims.nonce, expected_nonce) {
-            (Some(proof_nonce), Some(expected)) => {
+    // RFC 9449 Section 5.1: Nonce validation.
+    // When `expected_nonce` is Some, validate inline with constant-time comparison.
+    // When `expected_nonce` is None (callers use the nonce manager instead), skip
+    // the inline check here. Callers handle missing nonce before calling this
+    // function and validate provided nonces via the nonce manager afterward.
+    if let Some(expected) = expected_nonce {
+        match &claims.nonce {
+            Some(proof_nonce) => {
                 let is_valid: bool = proof_nonce.as_bytes().ct_eq(expected.as_bytes()).into();
                 if !is_valid {
                     return Err(DpopError::InvalidNonce);
                 }
             }
-            _ => return Err(DpopError::InvalidNonce),
+            None => return Err(DpopError::InvalidNonce),
         }
+    } else if require_nonce && claims.nonce.is_none() {
+        // Nonce is required but not provided and caller didn't handle it
+        return Err(DpopError::InvalidNonce);
     }
 
     // Check access token hash if provided (constant-time comparison for defense-in-depth)
@@ -445,14 +451,18 @@ pub fn validate_dpop_claims(
 }
 
 /// Normalize a URI by removing query string and fragment.
+///
+/// RFC 9449 Section 4.2: The `htu` claim should contain the HTTP target URI
+/// without query and fragment components.
 fn normalize_uri(uri: &str) -> String {
-    if let Some(idx) = uri.find('?') {
-        uri[..idx].to_string()
-    } else if let Some(idx) = uri.find('#') {
-        uri[..idx].to_string()
-    } else {
-        uri.to_string()
-    }
+    // Find the first occurrence of either '?' or '#' to handle all orderings
+    let end = uri
+        .find('?')
+        .into_iter()
+        .chain(uri.find('#'))
+        .min()
+        .unwrap_or(uri.len());
+    uri[..end].to_string()
 }
 
 /// Build a `DecodingKey` from a DPoP JWK.
@@ -553,14 +563,16 @@ pub async fn validate_dpop_proof(
     }
 
     // Validate claims
-    let expected_nonce = if require_nonce {
+    // Note: Nonce validation is handled by the nonce manager below (lines 579-586).
+    // We pass None here to avoid a redundant self-comparison of the client's own nonce.
+    let expected_nonce: Option<&str> = if require_nonce {
         // Generate a nonce if required but not provided
         if claims.nonce.is_none() {
             let mut nonce_manager = dpop_state.nonce_manager.write().await;
             let new_nonce = nonce_manager.generate_nonce();
             return Err(DpopError::UseNonce(new_nonce));
         }
-        claims.nonce.as_deref()
+        None
     } else {
         None
     };
@@ -580,6 +592,86 @@ pub async fn validate_dpop_proof(
         let mut nonce_manager = dpop_state.nonce_manager.write().await;
         if !nonce_manager.validate_nonce(nonce) {
             // Generate a new nonce for the client
+            let new_nonce = nonce_manager.generate_nonce();
+            return Err(DpopError::UseNonce(new_nonce));
+        }
+    }
+
+    // Return validated proof info
+    Ok(ValidatedDpopProof {
+        jkt: header.jwk.thumbprint(),
+        jwk: header.jwk,
+        jti: claims.jti,
+    })
+}
+
+/// Validate a DPoP proof at a resource endpoint (e.g., userinfo).
+///
+/// This is similar to `validate_dpop_proof` but also validates the `ath` claim
+/// (access token hash) per RFC 9449 Section 7.1. Resource endpoints MUST verify
+/// that the DPoP proof binds to the specific access token being used.
+///
+/// # Arguments
+/// * `proof` - The DPoP proof JWT from the `DPoP` header
+/// * `access_token` - The access token from the `Authorization: DPoP` header
+/// * `method` - HTTP method of the request
+/// * `uri` - Full request URI
+/// * `dpop_state` - DPoP state for JTI and nonce management
+/// * `config_max_age` - Maximum allowed proof age in seconds
+/// * `require_nonce` - Whether server-provided nonces are required
+pub async fn validate_dpop_at_resource(
+    proof: &str,
+    access_token: &str,
+    method: &str,
+    uri: &str,
+    dpop_state: &DpopState,
+    config_max_age: i64,
+    require_nonce: bool,
+) -> Result<ValidatedDpopProof, DpopError> {
+    // Parse the proof
+    let (header, claims) = parse_dpop_proof(proof)?;
+
+    // Verify signature
+    verify_dpop_signature(proof, &header)?;
+
+    // Check for replay (JTI must be unique)
+    {
+        let mut jti_cache = dpop_state.jti_cache.write().await;
+        if !jti_cache.check_and_record(&claims.jti) {
+            return Err(DpopError::ReplayDetected);
+        }
+    }
+
+    // Compute the expected access token hash
+    let expected_ath = compute_access_token_hash(access_token);
+
+    // Handle nonce: pass None to skip redundant self-comparison in validate_dpop_claims
+    let expected_nonce: Option<&str> = if require_nonce {
+        if claims.nonce.is_none() {
+            let mut nonce_manager = dpop_state.nonce_manager.write().await;
+            let new_nonce = nonce_manager.generate_nonce();
+            return Err(DpopError::UseNonce(new_nonce));
+        }
+        None
+    } else {
+        None
+    };
+
+    // Validate claims including the access token hash
+    validate_dpop_claims(
+        &claims,
+        method,
+        uri,
+        config_max_age,
+        require_nonce,
+        expected_nonce,
+        Some(&expected_ath),
+    )?;
+
+    // Validate nonce via nonce manager if provided
+    if let Some(nonce) = &claims.nonce {
+        let mut nonce_manager = dpop_state.nonce_manager.write().await;
+        if !nonce_manager.validate_nonce(nonce) {
             let new_nonce = nonce_manager.generate_nonce();
             return Err(DpopError::UseNonce(new_nonce));
         }

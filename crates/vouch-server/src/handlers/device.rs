@@ -129,8 +129,15 @@ pub async fn device_code(
     }))
 }
 
-/// Poll for device token.
+/// Poll for device token (RFC 8628 Section 3.4).
 /// POST /oauth/token
+///
+/// RFC 8628 Section 3.5: The server responds with one of:
+/// - `authorization_pending` — the user hasn't completed authorization yet
+/// - `slow_down` — the client is polling too frequently
+/// - `expired_token` — the device code has expired
+/// - `access_denied` — the user denied the authorization request
+/// - A successful token response when the user has authorized
 #[allow(clippy::unused_async)]
 pub async fn device_token(
     State(state): State<Arc<AppState>>,
@@ -665,7 +672,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
         let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-        assert_eq!(error["code"], "unsupported_grant_type");
+        assert_eq!(error["error"], "unsupported_grant_type");
     }
 
     // ========================================================================
