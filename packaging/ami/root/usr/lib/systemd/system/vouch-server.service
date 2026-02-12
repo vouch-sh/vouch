@@ -10,6 +10,7 @@ StartLimitIntervalSec=0
 Type=simple
 User=vouch
 Group=vouch
+SupplementaryGroups=tss
 EnvironmentFile=/run/vouch-server/env
 Environment=AWS_CONFIG_FILE=/dev/null
 Environment=AWS_SHARED_CREDENTIALS_FILE=/dev/null

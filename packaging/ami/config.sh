@@ -18,6 +18,7 @@ systemctl preset set-hostname-imds
 #======================================
 groupadd --system vouch || true
 useradd --system --gid vouch --home-dir /var/lib/vouch-server --no-create-home --shell /usr/sbin/nologin vouch || true
+usermod -a -G tss vouch
 
 #======================================
 # Set permissions on overlay files

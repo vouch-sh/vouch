@@ -1,0 +1,2 @@
+# Grant tss group access to /dev/tpm0 (overrides default tpm2-tss rule which only sets OWNER)
+KERNEL=="tpm[0-9]*", GROUP="tss"
