@@ -83,6 +83,9 @@ else
     echo "WARNING: SB_KEY_S3_PATH not set, UKI will not be signed"
 fi
 
+# Substitute version in appliance.kiwi so the output image filename uses the correct version
+sed -i "s|<version>1.0.0</version>|<version>${VERSION}</version>|" /tmp/ami-build/appliance.kiwi
+
 # Show build configuration
 echo "=== Build configuration ==="
 ls -la /tmp/ami-build/
@@ -94,7 +97,6 @@ kiwi-ng --color-output system build \
     --description /tmp/ami-build \
     --target-dir /tmp/image \
     --allow-existing-root \
-    --set-release-version="${VERSION}" \
     --clear-cache
 echo "=== kiwi-ng build completed ==="
 
