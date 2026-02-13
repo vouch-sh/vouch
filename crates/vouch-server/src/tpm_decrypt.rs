@@ -35,6 +35,8 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+use crate::ber::DerParser;
+
 // ============================================================================
 // Encrypted Envelope Format
 // ============================================================================
@@ -378,6 +380,9 @@ fn decrypt_cms_envelope(
     Ok(plaintext)
 }
 
+/// Maximum CMS envelope size (64 KiB). KMS responses are typically ~4 KiB.
+const MAX_CMS_SIZE: usize = 64 * 1024;
+
 /// Minimal ASN.1 DER parser to extract fields from a CMS EnvelopedData structure.
 ///
 /// Returns `(encrypted_key, encrypted_content, iv)`.
@@ -409,61 +414,77 @@ fn decrypt_cms_envelope(
 ///   }
 /// }
 /// ```
+///
+// Note: The parser only processes ciphertext (RSA-OAEP encrypted key,
+// AES-CBC encrypted content) and non-secret parameters (IVs, OIDs).
+// Plaintext key material never enters the parser -- decryption happens
+// downstream in aws-lc-rs with Zeroizing wrappers.
 fn parse_cms_enveloped_data(der: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
+    if der.len() > MAX_CMS_SIZE {
+        anyhow::bail!(
+            "CMS envelope too large ({} bytes, max {})",
+            der.len(),
+            MAX_CMS_SIZE
+        );
+    }
+
     let mut parser = DerParser::new(der);
 
+    // KMS CMS responses may use BER indefinite-length encoding on any
+    // constructed type, so we use BER-aware methods throughout.
+
     // ContentInfo SEQUENCE
-    let content_info = parser.expect_sequence()?;
+    let content_info = parser.expect_sequence_ber()?;
     let mut ci_parser = DerParser::new(content_info);
 
     // OID (envelopedData) — skip
-    ci_parser.skip_tlv()?;
+    ci_parser.skip_tlv_ber()?;
 
     // [0] EXPLICIT wrapper
-    let explicit_0 = ci_parser.expect_context_explicit(0)?;
+    let explicit_0 = ci_parser.expect_context_explicit_ber(0)?;
     let mut e0_parser = DerParser::new(explicit_0);
 
     // EnvelopedData SEQUENCE
-    let enveloped_data = e0_parser.expect_sequence()?;
+    let enveloped_data = e0_parser.expect_sequence_ber()?;
     let mut ed_parser = DerParser::new(enveloped_data);
 
-    // version INTEGER — skip
+    // version INTEGER — skip (always definite length)
     ed_parser.skip_tlv()?;
 
     // RecipientInfos SET
-    let recipient_infos = ed_parser.expect_set()?;
+    let recipient_infos = ed_parser.expect_set_ber()?;
     let mut ri_parser = DerParser::new(recipient_infos);
 
     // KeyTransRecipientInfo SEQUENCE
-    let ktri = ri_parser.expect_sequence()?;
+    let ktri = ri_parser.expect_sequence_ber()?;
     let mut ktri_parser = DerParser::new(ktri);
 
     // version INTEGER — skip
     ktri_parser.skip_tlv()?;
     // rid (issuerAndSerialNumber or subjectKeyIdentifier) — skip
-    ktri_parser.skip_tlv()?;
+    ktri_parser.skip_tlv_ber()?;
     // keyEncryptionAlgorithm SEQUENCE — skip
-    ktri_parser.skip_tlv()?;
-    // encryptedKey OCTET STRING
+    ktri_parser.skip_tlv_ber()?;
+    // encryptedKey OCTET STRING (primitive, always definite length)
     let encrypted_key = ktri_parser.expect_octet_string()?;
 
     // EncryptedContentInfo SEQUENCE
-    let eci = ed_parser.expect_sequence()?;
+    let eci = ed_parser.expect_sequence_ber()?;
     let mut eci_parser = DerParser::new(eci);
 
     // contentType OID — skip
     eci_parser.skip_tlv()?;
 
     // contentEncryptionAlgorithm SEQUENCE
-    let cea = eci_parser.expect_sequence()?;
+    let cea = eci_parser.expect_sequence_ber()?;
     let mut cea_parser = DerParser::new(cea);
     // algorithm OID — skip
     cea_parser.skip_tlv()?;
-    // parameters (IV) OCTET STRING
+    // parameters (IV) OCTET STRING (primitive, always definite length)
     let iv = cea_parser.expect_octet_string()?;
 
     // encryptedContent [0] IMPLICIT OCTET STRING
-    let encrypted_content = eci_parser.expect_context_implicit(0)?;
+    let encrypted_content = eci_parser.expect_context_implicit_ber(0)?;
 
     Ok((
         encrypted_key.to_vec(),
@@ -594,141 +615,6 @@ pub fn aes_256_gcm_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     result.extend_from_slice(&in_out);
 
     Ok(result)
-}
-
-// ============================================================================
-// Minimal ASN.1 DER Parser
-// ============================================================================
-
-/// Lightweight ASN.1 DER parser for extracting fields from CMS structures.
-///
-/// This is intentionally minimal — it only handles the subset of DER needed
-/// to parse KMS CMS `CiphertextForRecipient` responses.
-struct DerParser<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> DerParser<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
-    }
-
-    /// Read a TLV (tag-length-value) and return (tag, value_bytes).
-    fn read_tlv(&mut self) -> Result<(u8, &'a [u8])> {
-        if self.pos >= self.data.len() {
-            anyhow::bail!("DER: unexpected end of data at position {}", self.pos);
-        }
-
-        let tag = *self.data.get(self.pos).context("DER: missing tag byte")?;
-        self.pos += 1;
-
-        let length = self.read_length()?;
-
-        if self.pos + length > self.data.len() {
-            anyhow::bail!(
-                "DER: value length {} exceeds remaining data {} at position {}",
-                length,
-                self.data.len() - self.pos,
-                self.pos
-            );
-        }
-
-        let value = self
-            .data
-            .get(self.pos..self.pos + length)
-            .context("DER: failed to read value bytes")?;
-        self.pos += length;
-
-        Ok((tag, value))
-    }
-
-    /// Read a DER length field.
-    fn read_length(&mut self) -> Result<usize> {
-        let first = *self
-            .data
-            .get(self.pos)
-            .context("DER: missing length byte")?;
-        self.pos += 1;
-
-        if first < 0x80 {
-            // Short form
-            Ok(first as usize)
-        } else if first == 0x80 {
-            anyhow::bail!("DER: indefinite length not supported");
-        } else {
-            // Long form
-            let num_bytes = (first & 0x7f) as usize;
-            if num_bytes > 4 {
-                anyhow::bail!("DER: length field too long ({} bytes)", num_bytes);
-            }
-
-            let mut length: usize = 0;
-            for _ in 0..num_bytes {
-                let byte = *self
-                    .data
-                    .get(self.pos)
-                    .context("DER: truncated length field")?;
-                self.pos += 1;
-                length = length.checked_shl(8).context("DER: length overflow")? | (byte as usize);
-            }
-
-            Ok(length)
-        }
-    }
-
-    /// Skip one TLV element.
-    fn skip_tlv(&mut self) -> Result<()> {
-        let _ = self.read_tlv()?;
-        Ok(())
-    }
-
-    /// Expect a SEQUENCE (tag 0x30) and return its contents.
-    fn expect_sequence(&mut self) -> Result<&'a [u8]> {
-        let (tag, value) = self.read_tlv()?;
-        if tag != 0x30 {
-            anyhow::bail!("DER: expected SEQUENCE (0x30), got 0x{tag:02x}");
-        }
-        Ok(value)
-    }
-
-    /// Expect a SET (tag 0x31) and return its contents.
-    fn expect_set(&mut self) -> Result<&'a [u8]> {
-        let (tag, value) = self.read_tlv()?;
-        if tag != 0x31 {
-            anyhow::bail!("DER: expected SET (0x31), got 0x{tag:02x}");
-        }
-        Ok(value)
-    }
-
-    /// Expect an OCTET STRING (tag 0x04) and return its contents.
-    fn expect_octet_string(&mut self) -> Result<&'a [u8]> {
-        let (tag, value) = self.read_tlv()?;
-        if tag != 0x04 {
-            anyhow::bail!("DER: expected OCTET STRING (0x04), got 0x{tag:02x}");
-        }
-        Ok(value)
-    }
-
-    /// Expect context-specific EXPLICIT [n] (tag 0xa0 + n) and return inner contents.
-    fn expect_context_explicit(&mut self, n: u8) -> Result<&'a [u8]> {
-        let expected_tag = 0xa0 | n;
-        let (tag, value) = self.read_tlv()?;
-        if tag != expected_tag {
-            anyhow::bail!("DER: expected context [{n}] (0x{expected_tag:02x}), got 0x{tag:02x}");
-        }
-        Ok(value)
-    }
-
-    /// Expect context-specific IMPLICIT [n] (tag 0x80 + n) and return raw value.
-    fn expect_context_implicit(&mut self, n: u8) -> Result<&'a [u8]> {
-        let expected_tag = 0x80 | n;
-        let (tag, value) = self.read_tlv()?;
-        if tag != expected_tag {
-            anyhow::bail!("DER: expected implicit [{n}] (0x{expected_tag:02x}), got 0x{tag:02x}");
-        }
-        Ok(value)
-    }
 }
 
 // ============================================================================
@@ -945,57 +831,6 @@ mod tests {
     }
 
     #[test]
-    fn test_der_parser_sequence() {
-        // A simple SEQUENCE { INTEGER 1 }
-        let data = [0x30, 0x03, 0x02, 0x01, 0x01];
-        let mut parser = DerParser::new(&data);
-        let seq = parser.expect_sequence().unwrap();
-        assert_eq!(seq, &[0x02, 0x01, 0x01]);
-    }
-
-    #[test]
-    fn test_der_parser_octet_string() {
-        let data = [0x04, 0x03, 0x01, 0x02, 0x03];
-        let mut parser = DerParser::new(&data);
-        let octets = parser.expect_octet_string().unwrap();
-        assert_eq!(octets, &[0x01, 0x02, 0x03]);
-    }
-
-    #[test]
-    fn test_der_parser_long_length() {
-        // OCTET STRING with 128 bytes (long form length: 0x81 0x80)
-        let mut data = vec![0x04, 0x81, 0x80];
-        data.extend_from_slice(&[0xAA; 128]);
-        let mut parser = DerParser::new(&data);
-        let octets = parser.expect_octet_string().unwrap();
-        assert_eq!(octets.len(), 128);
-    }
-
-    #[test]
-    fn test_der_parser_skip_tlv() {
-        // Two OCTET STRINGs in sequence
-        let data = [0x04, 0x02, 0x01, 0x02, 0x04, 0x01, 0x03];
-        let mut parser = DerParser::new(&data);
-        parser.skip_tlv().unwrap();
-        let octets = parser.expect_octet_string().unwrap();
-        assert_eq!(octets, &[0x03]);
-    }
-
-    #[test]
-    fn test_der_parser_error_on_truncated() {
-        let data = [0x04, 0x05, 0x01]; // claims 5 bytes but only has 1
-        let mut parser = DerParser::new(&data);
-        assert!(parser.expect_octet_string().is_err());
-    }
-
-    #[test]
-    fn test_der_parser_error_on_wrong_tag() {
-        let data = [0x02, 0x01, 0x01]; // INTEGER, not SEQUENCE
-        let mut parser = DerParser::new(&data);
-        assert!(parser.expect_sequence().is_err());
-    }
-
-    #[test]
     fn test_aes_256_cbc_round_trip() {
         use aws_lc_rs::cipher::{AES_256, PaddedBlockEncryptingKey, UnboundCipherKey};
 
@@ -1105,61 +940,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// DER parser: empty input should fail.
-    #[test]
-    fn test_der_parser_empty_input() {
-        let mut parser = DerParser::new(&[]);
-        assert!(parser.read_tlv().is_err());
-    }
-
-    /// DER parser: zero-length value is valid.
-    #[test]
-    fn test_der_parser_zero_length_value() {
-        // OCTET STRING with zero length
-        let data = [0x04, 0x00];
-        let mut parser = DerParser::new(&data);
-        let octets = parser.expect_octet_string().unwrap();
-        assert!(octets.is_empty());
-    }
-
-    /// DER parser: indefinite length (0x80) should be rejected.
-    #[test]
-    fn test_der_parser_indefinite_length_rejected() {
-        let data = [0x30, 0x80, 0x00, 0x00]; // SEQUENCE with indefinite length
-        let mut parser = DerParser::new(&data);
-        let err = parser.expect_sequence().unwrap_err();
-        assert!(
-            format!("{err}").contains("indefinite"),
-            "Expected indefinite length error, got: {err}"
-        );
-    }
-
-    /// DER parser: 4-byte long-form length at the boundary.
-    #[test]
-    fn test_der_parser_max_long_form_length() {
-        // OCTET STRING with 4-byte long-form length encoding 256 bytes
-        // 0x84 means 4 length bytes follow, value = 0x00000100 = 256
-        let mut data = vec![0x04, 0x84, 0x00, 0x00, 0x01, 0x00];
-        data.extend_from_slice(&[0xBB; 256]);
-        let mut parser = DerParser::new(&data);
-        let octets = parser.expect_octet_string().unwrap();
-        assert_eq!(octets.len(), 256);
-    }
-
-    /// DER parser: 5-byte long-form length should be rejected.
-    #[test]
-    fn test_der_parser_length_too_long_rejected() {
-        // 0x85 means 5 length bytes — exceeds our 4-byte limit
-        let data = [0x04, 0x85, 0x00, 0x00, 0x00, 0x00, 0x01];
-        let mut parser = DerParser::new(&data);
-        let err = parser.expect_octet_string().unwrap_err();
-        assert!(
-            format!("{err}").contains("too long"),
-            "Expected length-too-long error, got: {err}"
-        );
-    }
-
-    /// Round-trip test: encrypt → serialize envelope → deserialize → decrypt.
+    /// Round-trip test: encrypt -> serialize envelope -> deserialize -> decrypt.
     ///
     /// Exercises the full `EncryptedEnvelope` serialization path without KMS
     /// by using a locally-generated random key.
