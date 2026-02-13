@@ -408,7 +408,8 @@ const MAX_CMS_SIZE: usize = 64 * 1024;
 ///           OID 2.16.840.1.101.3.4.1.42 (aes-256-cbc)
 ///           OCTET STRING (iv)                   <-- we extract this
 ///         }
-///         [0] IMPLICIT OCTET STRING (encryptedContent) <-- we extract this
+///         [0] IMPLICIT OCTET STRING (encryptedContent)  <-- we extract this
+///           (BER: may be constructed 0xa0 with inner OCTET STRING chunks)
 ///       }
 ///     }
 ///   }
@@ -484,11 +485,13 @@ fn parse_cms_enveloped_data(der: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let iv = cea_parser.expect_octet_string()?;
 
     // encryptedContent [0] IMPLICIT OCTET STRING
-    let encrypted_content = eci_parser.expect_context_implicit_ber(0)?;
+    // BER may encode this as constructed (tag 0xa0, with inner OCTET STRING
+    // chunks) or primitive (tag 0x80, raw bytes). KMS uses constructed form.
+    let encrypted_content = eci_parser.read_implicit_octet_string_ber(0)?;
 
     Ok((
         encrypted_key.to_vec(),
-        encrypted_content.to_vec(),
+        encrypted_content,
         iv.to_vec(),
     ))
 }

@@ -320,6 +320,7 @@ impl<'a> DerParser<'a> {
     }
 
     /// Expect context-specific IMPLICIT [n], tolerating BER indefinite length.
+    #[allow(dead_code)]
     pub(crate) fn expect_context_implicit_ber(&mut self, n: u8) -> Result<&'a [u8]> {
         let expected_tag = 0x80 | n;
         let (tag, value) = self.read_tlv_ber()?;
@@ -327,6 +328,45 @@ impl<'a> DerParser<'a> {
             anyhow::bail!("BER: expected implicit [{n}] (0x{expected_tag:02x}), got 0x{tag:02x}");
         }
         Ok(value)
+    }
+
+    /// Read `[n] IMPLICIT OCTET STRING` handling both primitive and BER
+    /// constructed encodings.
+    ///
+    /// Per ITU-T X.690 Section 8.1.2.2, IMPLICIT tags preserve the primitive/
+    /// constructed bit from the underlying type. OCTET STRING (universal tag 4)
+    /// may be encoded as:
+    /// - **Primitive** (tag `0x80|n`): value bytes are the raw content.
+    /// - **Constructed** (tag `0xa0|n`): value contains one or more OCTET STRING
+    ///   chunks (each `0x04 len data...`) that must be concatenated. BER uses
+    ///   this form for indefinite-length encoding (ITU-T X.690 Section 8.1.3.6
+    ///   requires constructed form for indefinite length).
+    ///
+    /// Returns the reassembled content as `Vec<u8>` since constructed encoding
+    /// requires concatenation of multiple chunks.
+    pub(crate) fn read_implicit_octet_string_ber(&mut self, n: u8) -> Result<Vec<u8>> {
+        let primitive_tag = 0x80 | n;
+        let constructed_tag = 0xa0 | n;
+        let (tag, value) = self.read_tlv_ber()?;
+
+        if tag == primitive_tag {
+            // Primitive: value is the raw content directly
+            Ok(value.to_vec())
+        } else if tag == constructed_tag {
+            // Constructed: value contains OCTET STRING chunks to reassemble
+            let mut inner = DerParser::new(value);
+            let mut result = Vec::new();
+            while inner.pos < inner.data.len() {
+                let chunk = inner.expect_octet_string()?;
+                result.extend_from_slice(chunk);
+            }
+            Ok(result)
+        } else {
+            anyhow::bail!(
+                "BER: expected implicit [{n}] (0x{primitive_tag:02x} or \
+                 0x{constructed_tag:02x}), got 0x{tag:02x}"
+            );
+        }
     }
 }
 
@@ -594,5 +634,80 @@ mod tests {
         let (tag, value) = inner.read_tlv().unwrap();
         assert_eq!(tag, 0x02); // INTEGER
         assert_eq!(value, &[0x42]);
+    }
+
+    // ====================================================================
+    // Tests for read_implicit_octet_string_ber (constructed OCTET STRING)
+    // ====================================================================
+
+    /// Primitive [0] IMPLICIT OCTET STRING (tag 0x80): value is raw content.
+    #[test]
+    fn test_implicit_octet_string_primitive() {
+        // [0] IMPLICIT primitive, 3 bytes
+        let data = [0x80, 0x03, 0xAA, 0xBB, 0xCC];
+        let mut parser = DerParser::new(&data);
+        let result = parser.read_implicit_octet_string_ber(0).unwrap();
+        assert_eq!(result, vec![0xAA, 0xBB, 0xCC]);
+    }
+
+    /// Constructed [0] IMPLICIT OCTET STRING (tag 0xa0) with a single chunk.
+    /// This is what KMS produces: the content is one OCTET STRING TLV.
+    #[test]
+    fn test_implicit_octet_string_constructed_single_chunk() {
+        // [0] CONSTRUCTED (0xa0), definite length 5
+        //   OCTET STRING (0x04), 3 bytes: AA BB CC
+        let data = [0xa0, 0x05, 0x04, 0x03, 0xAA, 0xBB, 0xCC];
+        let mut parser = DerParser::new(&data);
+        let result = parser.read_implicit_octet_string_ber(0).unwrap();
+        assert_eq!(result, vec![0xAA, 0xBB, 0xCC]);
+    }
+
+    /// Constructed [0] IMPLICIT OCTET STRING with multiple chunks (BER chunking).
+    #[test]
+    fn test_implicit_octet_string_constructed_multiple_chunks() {
+        // [0] CONSTRUCTED (0xa0), definite length 11
+        //   OCTET STRING (0x04), 2 bytes: AA BB   = 4 bytes
+        //   OCTET STRING (0x04), 3 bytes: CC DD EE = 5 bytes
+        //   OCTET STRING (0x04), 0 bytes (empty)   = 2 bytes
+        //   Total inner: 4 + 5 + 2 = 11
+        let data = [
+            0xa0, 0x0b, // constructed [0], 11 bytes
+            0x04, 0x02, 0xAA, 0xBB, // chunk 1
+            0x04, 0x03, 0xCC, 0xDD, 0xEE, // chunk 2
+            0x04, 0x00, // chunk 3 (empty, valid)
+        ];
+        let mut parser = DerParser::new(&data);
+        let result = parser.read_implicit_octet_string_ber(0).unwrap();
+        assert_eq!(result, vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE]);
+    }
+
+    /// Constructed [0] IMPLICIT OCTET STRING with indefinite length.
+    #[test]
+    fn test_implicit_octet_string_constructed_indefinite() {
+        // [0] CONSTRUCTED (0xa0), indefinite length (0x80)
+        //   OCTET STRING (0x04), 2 bytes: AA BB
+        //   EOC (0x00 0x00)
+        let data = [
+            0xa0, 0x80, // constructed [0], indefinite
+            0x04, 0x02, 0xAA, 0xBB, // chunk
+            0x00, 0x00, // EOC
+        ];
+        let mut parser = DerParser::new(&data);
+        let result = parser.read_implicit_octet_string_ber(0).unwrap();
+        assert_eq!(result, vec![0xAA, 0xBB]);
+    }
+
+    /// Wrong tag should error.
+    #[test]
+    fn test_implicit_octet_string_wrong_tag() {
+        // Tag 0x30 (SEQUENCE) instead of 0x80 or 0xa0
+        let data = [0x30, 0x03, 0x02, 0x01, 0x42];
+        let mut parser = DerParser::new(&data);
+        let err = parser.read_implicit_octet_string_ber(0).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("expected implicit"),
+            "Expected implicit tag error, got: {msg}"
+        );
     }
 }
