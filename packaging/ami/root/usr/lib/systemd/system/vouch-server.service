@@ -17,17 +17,6 @@ Environment=AWS_SHARED_CREDENTIALS_FILE=/dev/null
 Environment=AWS_USE_DUALSTACK_ENDPOINT=true
 Environment=AWS_STS_REGIONAL_ENDPOINTS=regional
 Environment=AWS_DEFAULTS_MODE=in-region
-ExecStartPre=/bin/bash -c '\
-  if [ -c /dev/tpm0 ]; then \
-    echo "TPM diagnostics:"; \
-    echo "  device: $(ls -la /dev/tpm0 2>&1)"; \
-    echo "  nitro-tpm-attest: $(rpm -q aws-nitro-tpm-tools 2>&1)"; \
-    echo "  tpm2-tss: $(rpm -q tpm2-tss 2>&1)"; \
-    if command -v tpm2_getcap >/dev/null 2>&1; then \
-      echo "  NV_INDEX_MAX: $(tpm2_getcap properties-fixed 2>&1 | grep -A1 NV_INDEX_MAX || echo unknown)"; \
-      echo "  NV_BUFFER_MAX: $(tpm2_getcap properties-fixed 2>&1 | grep -A1 NV_BUFFER_MAX || echo unknown)"; \
-    fi; \
-  fi'
 ExecStart=/usr/bin/vouch-server
 Restart=always
 RestartSec=30

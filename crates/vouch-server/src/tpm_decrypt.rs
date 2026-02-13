@@ -134,42 +134,6 @@ fn is_attest_binary_available() -> bool {
         .is_some_and(|found| found)
 }
 
-/// Query `TPM2_PT_NV_INDEX_MAX` via `tpm2_getcap` (best-effort, returns empty on failure).
-///
-/// Used to provide actionable diagnostics when `nitro-tpm-attest` fails with
-/// `NV_DefineSpace` / `TPM_RC_SIZE`. This requires `tpm2-tools` to be installed.
-fn query_nv_index_max() -> Option<String> {
-    let output = std::process::Command::new("tpm2_getcap")
-        .arg("properties-fixed")
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    // Parse output lines like:
-    //   TPM2_PT_NV_INDEX_MAX:
-    //     value: 0x800
-    let mut found_nv_index_max = false;
-    for line in stdout.lines() {
-        if line.contains("TPM2_PT_NV_INDEX_MAX") {
-            found_nv_index_max = true;
-            continue;
-        }
-        if found_nv_index_max {
-            let trimmed = line.trim();
-            if trimmed.starts_with("value:") || trimmed.starts_with("raw:") {
-                return Some(trimmed.to_string());
-            }
-            // Stop if we hit a different property
-            if !trimmed.is_empty() && !trimmed.starts_with("value:") {
-                return None;
-            }
-        }
-    }
-    None
-}
-
 // ============================================================================
 // RSA Key Pair Generation (for encryption/decryption, not signing)
 // ============================================================================
@@ -235,21 +199,15 @@ fn get_attestation_document(public_key_der: &[u8]) -> Result<Vec<u8>> {
 
         // Detect NV_DefineSpace size error and provide actionable context.
         // nitro-tpm-attest allocates an 8192-byte NV index for the attestation message
-        // buffer. If the NitroTPM's TPM2_PT_NV_INDEX_MAX is smaller, NV_DefineSpace
-        // fails with TPM_RC_SIZE (0x2d5) on parameter 2.
+        // buffer. If the NitroTPM's TPM2_PT_NV_INDEX_MAX is smaller (e.g. 2048 on
+        // burstable t3/t4g instances), NV_DefineSpace fails with TPM_RC_SIZE (0x2d5).
         if stderr.contains("NV_DefineSpace") || stderr.contains("0x000002d5") {
-            // Try to query actual TPM limit for the error message
-            let nv_max = query_nv_index_max().unwrap_or_default();
-            let nv_info = if nv_max.is_empty() {
-                String::from(
-                    "Run 'tpm2_getcap properties-fixed | grep NV_INDEX_MAX' to check the limit",
-                )
-            } else {
-                format!("TPM2_PT_NV_INDEX_MAX on this instance: {nv_max}")
-            };
             anyhow::bail!(
                 "nitro-tpm-attest failed: NV_DefineSpace rejected the 8192-byte message buffer. \
-                 The NitroTPM's TPM2_PT_NV_INDEX_MAX may be smaller than 8192. {nv_info}. \
+                 This instance's NitroTPM TPM2_PT_NV_INDEX_MAX is likely smaller than 8192 \
+                 (burstable instance types t3/t4g have a 2048-byte limit). \
+                 Use a non-burstable instance type (m5, c7g, etc.). \
+                 See https://github.com/aws/NitroTPM-Tools/issues/7 \
                  stderr: {stderr}"
             );
         }
@@ -408,7 +366,8 @@ const MAX_CMS_SIZE: usize = 64 * 1024;
 ///           OID 2.16.840.1.101.3.4.1.42 (aes-256-cbc)
 ///           OCTET STRING (iv)                   <-- we extract this
 ///         }
-///         [0] IMPLICIT OCTET STRING (encryptedContent) <-- we extract this
+///         [0] IMPLICIT OCTET STRING (encryptedContent)  <-- we extract this
+///           (BER: may be constructed 0xa0 with inner OCTET STRING chunks)
 ///       }
 ///     }
 ///   }
@@ -484,13 +443,11 @@ fn parse_cms_enveloped_data(der: &[u8]) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let iv = cea_parser.expect_octet_string()?;
 
     // encryptedContent [0] IMPLICIT OCTET STRING
-    let encrypted_content = eci_parser.expect_context_implicit_ber(0)?;
+    // BER may encode this as constructed (tag 0xa0, with inner OCTET STRING
+    // chunks) or primitive (tag 0x80, raw bytes). KMS uses constructed form.
+    let encrypted_content = eci_parser.read_implicit_octet_string_ber(0)?;
 
-    Ok((
-        encrypted_key.to_vec(),
-        encrypted_content.to_vec(),
-        iv.to_vec(),
-    ))
+    Ok((encrypted_key.to_vec(), encrypted_content, iv.to_vec()))
 }
 
 // ============================================================================

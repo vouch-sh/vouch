@@ -61,7 +61,6 @@
         <package name="dracut-kiwi-verity"/>
         <package name="dracut-kiwi-overlay"/>
         <package name="aws-nitro-tpm-tools"/>
-        <package name="tpm2-tools"/>
         <!-- Networking -->
         <package name="systemd-resolved"/>
         <package name="amazon-chrony-config"/>
