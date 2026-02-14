@@ -4,14 +4,14 @@
 //! This crate provides the Vouch identity server with OIDC provider,
 //! WebAuthn authentication, and credential issuance.
 
-pub mod ber;
+pub(crate) mod ber;
 pub mod cleanup;
 pub mod config;
 pub mod db;
 pub mod encrypt_config;
-pub mod extractors;
+pub(crate) mod extractors;
 pub mod handlers;
-pub mod pem;
+pub(crate) mod pem;
 pub mod s3_config;
 pub mod services;
 pub mod ssh_ca;
@@ -51,7 +51,7 @@ use std::sync::Arc;
 /// - `"a@example.com"` → `"a***@example.com"`
 /// - `"not-an-email"` → `"n***"`
 #[must_use]
-pub fn redact_email(email: &str) -> String {
+pub(crate) fn redact_email(email: &str) -> String {
     match email.split_once('@') {
         Some((local, domain)) => {
             let first_char = local.chars().next().unwrap_or('*');

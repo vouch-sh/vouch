@@ -444,7 +444,7 @@ impl YubiKey {
 /// Prompt for `YubiKey` PIN securely (no echo).
 ///
 /// Returns the PIN wrapped in `SecretString` for memory protection.
-pub fn prompt_pin() -> Result<SecretString> {
+fn prompt_pin() -> Result<SecretString> {
     eprint!("YubiKey PIN: ");
     let pin = rpassword::read_password().context("failed to read PIN")?;
     Ok(SecretString::from(pin))
@@ -519,7 +519,7 @@ fn translate_fido2_error(err: anyhow::Error, operation: &str) -> anyhow::Error {
 /// - Maximum 63 characters (FIDO2 limit)
 ///
 /// Returns the PIN wrapped in `SecretString` for memory protection.
-pub fn prompt_new_pin() -> Result<SecretString> {
+fn prompt_new_pin() -> Result<SecretString> {
     use std::io::{Write, stderr};
 
     loop {
@@ -554,7 +554,7 @@ pub fn prompt_new_pin() -> Result<SecretString> {
 /// Check if a PIN is set on the YubiKey, and if not, guide the user through setup.
 ///
 /// Returns the PIN wrapped in `SecretString` (either existing or newly set).
-pub fn ensure_pin_configured(key: &YubiKey) -> Result<SecretString> {
+pub(crate) fn ensure_pin_configured(key: &YubiKey) -> Result<SecretString> {
     if key.is_pin_set()? {
         // PIN is already set, just prompt for it
         return prompt_pin();
