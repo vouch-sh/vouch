@@ -31,6 +31,8 @@
 pub mod client;
 pub mod daemon;
 pub mod error;
+#[cfg(unix)]
+pub mod expiry_monitor;
 pub mod protocol;
 #[cfg(unix)]
 pub mod recovery;
