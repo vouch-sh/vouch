@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Agent server with Unix socket listener.
 
+use crate::audit;
 use crate::error::Result;
 use crate::protocol::{
     CacheCredentialParams, GetCachedCredentialParams, Request, Response, StoreSessionParams,
@@ -159,9 +160,10 @@ async fn handle_store_session(
         Err(e) => return Response::invalid_params(request.id, &format!("invalid expires_at: {e}")),
     };
 
+    let user_email = params.user_email;
     let session = Session::new(
         SecretString::from(params.token),
-        params.user_email,
+        user_email.clone(),
         expires_at,
     );
 
@@ -201,6 +203,10 @@ async fn handle_store_session(
     }
 
     info!("Session stored");
+    audit::log_event(
+        audit::events::SESSION_STORED,
+        serde_json::json!({"email": user_email}),
+    );
 
     Response::success(request.id, true)
 }
@@ -214,6 +220,7 @@ async fn handle_clear_session(
     state.clear_session().await;
     ssh_state.clear_credentials().await;
     info!("Session and SSH credentials cleared");
+    audit::log_event(audit::events::SESSION_CLEARED, serde_json::json!({}));
     Response::success(request.id, true)
 }
 
@@ -256,6 +263,13 @@ async fn handle_store_ssh_credentials(
                 .await;
 
             info!("SSH credentials stored with session linkage");
+            audit::log_event(
+                audit::events::SSH_CERT_PROVISIONED,
+                serde_json::json!({
+                    "key_path": params.key_path,
+                    "cert_path": params.cert_path,
+                }),
+            );
             Response::success(request.id, true)
         }
         Err(e) => {
