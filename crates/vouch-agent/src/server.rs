@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Agent server with Unix socket listener.
 
-use crate::audit;
+use crate::audit::{self, AuditEvent};
 use crate::error::Result;
 use crate::protocol::{
     CacheCredentialParams, GetCachedCredentialParams, Request, Response, StoreSessionParams,
@@ -127,14 +127,11 @@ fn handle_ping(request: &Request) -> Response {
 
 /// Handle `get_session` request.
 async fn handle_get_session(request: &Request, state: &Arc<AgentState>) -> Response {
+    // `get_session()` already filters out expired sessions (returns None).
     match state.get_session().await {
         Some(session) => {
-            if session.is_expired() {
-                Response::session_expired(request.id)
-            } else {
-                let info = SessionInfo::from(&session);
-                Response::success(request.id, info)
-            }
+            let info = SessionInfo::from(&session);
+            Response::success(request.id, info)
         }
         None => Response::not_authenticated(request.id),
     }
@@ -203,10 +200,7 @@ async fn handle_store_session(
     }
 
     info!("Session stored");
-    audit::log_event(
-        audit::events::SESSION_STORED,
-        serde_json::json!({"email": user_email}),
-    );
+    audit::log_event(AuditEvent::SessionStored { email: user_email });
 
     Response::success(request.id, true)
 }
@@ -220,7 +214,7 @@ async fn handle_clear_session(
     state.clear_session().await;
     ssh_state.clear_credentials().await;
     info!("Session and SSH credentials cleared");
-    audit::log_event(audit::events::SESSION_CLEARED, serde_json::json!({}));
+    audit::log_event(AuditEvent::SessionCleared);
     Response::success(request.id, true)
 }
 
@@ -263,13 +257,10 @@ async fn handle_store_ssh_credentials(
                 .await;
 
             info!("SSH credentials stored with session linkage");
-            audit::log_event(
-                audit::events::SSH_CERT_PROVISIONED,
-                serde_json::json!({
-                    "key_path": params.key_path,
-                    "cert_path": params.cert_path,
-                }),
-            );
+            audit::log_event(AuditEvent::SshCertProvisioned {
+                key_path: params.key_path,
+                cert_path: params.cert_path,
+            });
             Response::success(request.id, true)
         }
         Err(e) => {
@@ -312,12 +303,14 @@ async fn handle_cache_credential(request: &Request, state: &Arc<AgentState>) -> 
     };
 
     let credential = CachedCredential::new(params.data, expires_at);
+    let credential_type = params.credential_type;
 
     state
-        .cache_credential(params.credential_type.clone(), credential)
+        .cache_credential(credential_type.clone(), credential)
         .await;
 
-    info!("Cached credential: {}", params.credential_type);
+    info!("Cached credential: {credential_type}");
+    audit::log_event(AuditEvent::CredentialCached { credential_type });
     Response::success(request.id, true)
 }
 
@@ -333,7 +326,7 @@ async fn handle_get_cached_credential(request: &Request, state: &Arc<AgentState>
 
     match state.get_cached_credential(&params.credential_type).await {
         Some(credential) => Response::success(request.id, credential),
-        None => Response::not_authenticated(request.id),
+        None => Response::cache_miss(request.id),
     }
 }
 
@@ -341,6 +334,7 @@ async fn handle_get_cached_credential(request: &Request, state: &Arc<AgentState>
 async fn handle_clear_credential_cache(request: &Request, state: &Arc<AgentState>) -> Response {
     state.clear_credential_cache().await;
     info!("Credential cache cleared");
+    audit::log_event(AuditEvent::CredentialCacheCleared);
     Response::success(request.id, true)
 }
 

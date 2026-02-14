@@ -3,21 +3,20 @@
 
 use crate::error::{AgentError, Result};
 use crate::protocol::{
-    CacheCredentialParams, GetCachedCredentialParams, NOT_AUTHENTICATED, Request, Response,
-    SESSION_EXPIRED, StoreSessionParams, StoreSshCredentialsParams,
+    CACHE_MISS, CacheCredentialParams, GetCachedCredentialParams, NOT_AUTHENTICATED, Request,
+    Response, SESSION_EXPIRED, StoreSessionParams, StoreSshCredentialsParams,
 };
 use crate::socket::socket_path;
 use crate::state::CachedCredential;
 use crate::state::SessionInfo;
 use crate::wire;
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::UnixStream;
 
 /// Client for communicating with the agent.
 pub struct AgentClient {
     stream: UnixStream,
-    next_id: AtomicU64,
+    next_id: u64,
 }
 
 impl AgentClient {
@@ -40,15 +39,13 @@ impl AgentClient {
             }
         })?;
 
-        Ok(Self {
-            stream,
-            next_id: AtomicU64::new(1),
-        })
+        Ok(Self { stream, next_id: 1 })
     }
 
     /// Send a request and receive a response.
     async fn call(&mut self, method: &str, params: Option<serde_json::Value>) -> Result<Response> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let id = self.next_id;
+        self.next_id += 1;
 
         let request = Request {
             jsonrpc: "2.0".to_string(),
@@ -306,8 +303,7 @@ impl AgentClient {
             .await?;
 
         if let Some(error) = &response.error {
-            if error.code == NOT_AUTHENTICATED {
-                // No cached credential found (reusing the error code for "not found")
+            if error.code == CACHE_MISS {
                 return Ok(None);
             }
             return Err(AgentError::Protocol(error.message.clone()));

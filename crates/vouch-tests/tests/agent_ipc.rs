@@ -417,59 +417,66 @@ mod wire_protocol {
 }
 
 mod audit_log {
-    use vouch_agent::audit::{AuditEvent, events};
+    use vouch_agent::audit::AuditEvent;
 
-    /// Audit event serializes correctly.
+    /// Audit event with data serializes correctly.
     #[test]
     fn test_audit_event_serialization() {
-        let event = AuditEvent {
-            timestamp: "2024-01-15T10:30:00Z".to_string(),
-            event: events::SESSION_STORED,
-            details: serde_json::json!({"email": "user@example.com"}),
+        let event = AuditEvent::SessionStored {
+            email: "user@example.com".to_string(),
         };
 
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"event\":\"session_stored\""));
         assert!(json.contains("\"email\":\"user@example.com\""));
-        assert!(json.contains("\"timestamp\""));
     }
 
-    /// All event type constants are valid strings.
+    /// All enum variants serialize to snake_case event names.
     #[test]
-    fn test_all_event_types_are_non_empty() {
-        let types = [
-            events::SESSION_STORED,
-            events::SESSION_CLEARED,
-            events::SESSION_EXPIRED,
-            events::SSH_CERT_PROVISIONED,
-            events::SSH_SIGNING,
-            events::CREDENTIAL_CACHED,
-            events::CREDENTIAL_CACHE_CLEARED,
+    fn test_all_event_types_serialize_to_snake_case() {
+        let events: Vec<AuditEvent> = vec![
+            AuditEvent::SessionStored {
+                email: "test@example.com".to_string(),
+            },
+            AuditEvent::SessionCleared,
+            AuditEvent::SessionExpired { email: None },
+            AuditEvent::SshCertProvisioned {
+                key_path: "/tmp/key".to_string(),
+                cert_path: "/tmp/cert".to_string(),
+            },
+            AuditEvent::SshSigning,
+            AuditEvent::CredentialCached {
+                credential_type: "aws".to_string(),
+            },
+            AuditEvent::CredentialCacheCleared,
         ];
 
-        for event_type in &types {
-            assert!(!event_type.is_empty());
-            // Should be snake_case identifiers
+        for event in &events {
+            let json = serde_json::to_string(event).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let event_name = parsed["event"].as_str().unwrap();
             assert!(
-                event_type
+                !event_name.is_empty(),
+                "event name should not be empty: {json}"
+            );
+            assert!(
+                event_name
                     .chars()
-                    .all(|c| c.is_ascii_lowercase() || c == '_')
+                    .all(|c| c.is_ascii_lowercase() || c == '_'),
+                "event name should be snake_case: {event_name}"
             );
         }
     }
 
-    /// Audit event with empty details.
+    /// Audit event with no extra fields.
     #[test]
-    fn test_audit_event_empty_details() {
-        let event = AuditEvent {
-            timestamp: "2024-01-15T10:30:00Z".to_string(),
-            event: events::SESSION_CLEARED,
-            details: serde_json::json!({}),
-        };
+    fn test_audit_event_empty_variant() {
+        let event = AuditEvent::SessionCleared;
 
         let json = serde_json::to_string(&event).unwrap();
-        // Should still have timestamp and event fields
         assert!(json.contains("\"event\":\"session_cleared\""));
-        assert!(json.contains("\"timestamp\""));
+        // Only the event field, no extra data
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.as_object().unwrap().len(), 1);
     }
 }

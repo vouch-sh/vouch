@@ -94,6 +94,11 @@ impl Response {
         Self::error(id, INVALID_PARAMS, &format!("invalid params: {detail}"))
     }
 
+    /// Create a "cache miss" error response (no cached credential found).
+    pub fn cache_miss(id: u64) -> Self {
+        Self::error(id, CACHE_MISS, "cache miss")
+    }
+
     /// Create a "method not found" error response.
     pub fn method_not_found(id: u64) -> Self {
         Self::error(id, METHOD_NOT_FOUND, "method not found")
@@ -122,9 +127,10 @@ pub const INTERNAL_ERROR: i32 = -32603;
 // Application-specific error codes (starting at -32000)
 pub const NOT_AUTHENTICATED: i32 = -32000;
 pub const SESSION_EXPIRED: i32 = -32001;
+pub const CACHE_MISS: i32 = -32002;
 
 /// Parameters for `store_session` method.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct StoreSessionParams {
     /// JWT token.
     pub token: String,
@@ -135,6 +141,17 @@ pub struct StoreSessionParams {
     /// Server URL for credential refresh (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub server_url: Option<String>,
+}
+
+impl std::fmt::Debug for StoreSessionParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoreSessionParams")
+            .field("token", &"[REDACTED]")
+            .field("user_email", &self.user_email)
+            .field("expires_at", &self.expires_at)
+            .field("server_url", &self.server_url)
+            .finish()
+    }
 }
 
 /// Parameters for `store_ssh_credentials` method.
@@ -153,7 +170,7 @@ pub struct StoreSshCredentialsParams {
 }
 
 /// Parameters for `cache_credential` method.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct CacheCredentialParams {
     /// Credential type (e.g., "aws", "github").
     pub credential_type: String,
@@ -161,6 +178,16 @@ pub struct CacheCredentialParams {
     pub data: serde_json::Value,
     /// When the credential expires (ISO 8601).
     pub expires_at: String,
+}
+
+impl std::fmt::Debug for CacheCredentialParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CacheCredentialParams")
+            .field("credential_type", &self.credential_type)
+            .field("data", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Parameters for `get_cached_credential` method.
@@ -258,5 +285,6 @@ mod tests {
         // Verify application-specific error codes
         assert_eq!(NOT_AUTHENTICATED, -32000);
         assert_eq!(SESSION_EXPIRED, -32001);
+        assert_eq!(CACHE_MISS, -32002);
     }
 }
