@@ -152,6 +152,24 @@ pub struct StoreSshCredentialsParams {
     pub server_url: Option<String>,
 }
 
+/// Parameters for `cache_credential` method.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CacheCredentialParams {
+    /// Credential type (e.g., "aws", "github").
+    pub credential_type: String,
+    /// Credential data (service-specific JSON fields).
+    pub data: serde_json::Value,
+    /// When the credential expires (ISO 8601).
+    pub expires_at: String,
+}
+
+/// Parameters for `get_cached_credential` method.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct GetCachedCredentialParams {
+    /// Credential type to retrieve (e.g., "aws", "github").
+    pub credential_type: String,
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {

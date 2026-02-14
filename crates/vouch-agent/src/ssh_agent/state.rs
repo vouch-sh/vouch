@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! SSH Agent state management.
+//!
+//! Uses a single `RwLock<SshAgentInner>` to ensure atomic reads and writes
+//! across all state fields (credentials, session expiry, server URL, refresh timing).
 
 use super::MIN_REFRESH_INTERVAL_SECONDS;
 use super::credentials::SshCredentials;
@@ -8,25 +11,31 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info};
 
-/// SSH Agent state with session linkage.
-pub struct SshAgentState {
+/// Internal state protected by a single lock.
+#[derive(Default)]
+struct SshAgentInner {
     /// Current SSH credentials (if loaded).
-    credentials: RwLock<Option<SshCredentials>>,
+    credentials: Option<SshCredentials>,
     /// Session expiration timestamp (linked to Vouch session).
-    session_expires_at: RwLock<Option<Timestamp>>,
+    session_expires_at: Option<Timestamp>,
     /// Server URL for credential refresh.
-    server_url: RwLock<Option<String>>,
+    server_url: Option<String>,
     /// Last refresh attempt timestamp (for rate limiting).
-    last_refresh_at: RwLock<Option<Timestamp>>,
+    last_refresh_at: Option<Timestamp>,
+}
+
+/// SSH Agent state with session linkage.
+///
+/// All fields are protected by a single `RwLock` to ensure consistency
+/// when reading or updating multiple fields in a single operation.
+pub struct SshAgentState {
+    inner: RwLock<SshAgentInner>,
 }
 
 impl Default for SshAgentState {
     fn default() -> Self {
         Self {
-            credentials: RwLock::new(None),
-            session_expires_at: RwLock::new(None),
-            server_url: RwLock::new(None),
-            last_refresh_at: RwLock::new(None),
+            inner: RwLock::new(SshAgentInner::default()),
         }
     }
 }
@@ -44,50 +53,45 @@ impl SshAgentState {
         session_expires_at: Option<Timestamp>,
         server_url: Option<String>,
     ) {
-        let mut cred_guard = self.credentials.write().await;
-        *cred_guard = Some(creds);
+        let mut guard = self.inner.write().await;
+        guard.credentials = Some(creds);
 
         if let Some(expires) = session_expires_at {
-            let mut session_guard = self.session_expires_at.write().await;
-            *session_guard = Some(expires);
+            guard.session_expires_at = Some(expires);
         }
 
         if let Some(url) = server_url {
-            let mut url_guard = self.server_url.write().await;
-            *url_guard = Some(url);
+            guard.server_url = Some(url);
         }
     }
 
     /// Store SSH credentials without session info (backwards compatibility).
     pub async fn store_credentials_simple(&self, creds: SshCredentials) {
-        let mut guard = self.credentials.write().await;
-        *guard = Some(creds);
+        let mut guard = self.inner.write().await;
+        guard.credentials = Some(creds);
     }
 
     /// Clear SSH credentials and session linkage.
     pub async fn clear_credentials(&self) {
-        let mut cred_guard = self.credentials.write().await;
-        *cred_guard = None;
-
-        let mut session_guard = self.session_expires_at.write().await;
-        *session_guard = None;
-
-        let mut url_guard = self.server_url.write().await;
-        *url_guard = None;
-
-        let mut refresh_guard = self.last_refresh_at.write().await;
-        *refresh_guard = None;
+        let mut guard = self.inner.write().await;
+        guard.credentials = None;
+        guard.session_expires_at = None;
+        guard.server_url = None;
+        guard.last_refresh_at = None;
     }
 
     /// Get current credentials (if any).
     pub async fn get_credentials(&self) -> Option<SshCredentials> {
-        let guard = self.credentials.read().await;
-        guard.clone()
+        let guard = self.inner.read().await;
+        guard.credentials.clone()
     }
 
     /// Get valid credentials (not expired, session not expired).
+    ///
+    /// Reads certificate and session expiry atomically under a single lock.
     pub async fn get_valid_credentials(&self) -> Option<SshCredentials> {
-        let creds = self.get_credentials().await?;
+        let guard = self.inner.read().await;
+        let creds = guard.credentials.as_ref()?;
 
         // Check if certificate is expired
         if creds.is_expired() {
@@ -95,34 +99,36 @@ impl SshAgentState {
             return None;
         }
 
-        // Check if session is expired
-        let session_expires = self.session_expires_at.read().await;
-        if let Some(expires) = *session_expires
+        // Check if session is expired (atomic read under the same lock)
+        if let Some(expires) = guard.session_expires_at
             && Timestamp::now() >= expires
         {
             debug!("Session has expired");
             return None;
         }
 
-        Some(creds)
+        Some(creds.clone())
     }
 
     /// Check if credentials are loaded.
     pub async fn has_credentials(&self) -> bool {
-        let guard = self.credentials.read().await;
-        guard.is_some()
+        let guard = self.inner.read().await;
+        guard.credentials.is_some()
     }
 
     /// Check if certificate needs refresh.
     pub async fn needs_refresh(&self) -> bool {
-        let guard = self.credentials.read().await;
-        guard.as_ref().is_some_and(|c| c.is_expiring_soon())
+        let guard = self.inner.read().await;
+        guard
+            .credentials
+            .as_ref()
+            .is_some_and(|c| c.is_expiring_soon())
     }
 
     /// Check if we can attempt refresh (rate limiting).
     pub async fn can_attempt_refresh(&self) -> bool {
-        let guard = self.last_refresh_at.read().await;
-        match *guard {
+        let guard = self.inner.read().await;
+        match guard.last_refresh_at {
             Some(last) => {
                 let now = Timestamp::now();
                 let elapsed = now.as_second() - last.as_second();
@@ -134,27 +140,27 @@ impl SshAgentState {
 
     /// Record refresh attempt time.
     pub async fn record_refresh_attempt(&self) {
-        let mut guard = self.last_refresh_at.write().await;
-        *guard = Some(Timestamp::now());
+        let mut guard = self.inner.write().await;
+        guard.last_refresh_at = Some(Timestamp::now());
     }
 
     /// Set the server URL for credential refresh/lazy provisioning.
     pub async fn set_server_url(&self, url: String) {
-        let mut guard = self.server_url.write().await;
-        *guard = Some(url);
+        let mut guard = self.inner.write().await;
+        guard.server_url = Some(url);
     }
 
     /// Get the server URL for refresh.
     pub async fn get_server_url(&self) -> Option<String> {
-        let guard = self.server_url.read().await;
-        guard.clone()
+        let guard = self.inner.read().await;
+        guard.server_url.clone()
     }
 
     /// Clean up expired credentials.
     pub async fn cleanup_expired(&self) {
         let should_clear = {
-            let guard = self.credentials.read().await;
-            guard.as_ref().is_some_and(|c| c.is_expired())
+            let guard = self.inner.read().await;
+            guard.credentials.as_ref().is_some_and(|c| c.is_expired())
         };
 
         if should_clear {

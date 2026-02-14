@@ -3,10 +3,11 @@
 
 use crate::error::{AgentError, Result};
 use crate::protocol::{
-    NOT_AUTHENTICATED, Request, Response, SESSION_EXPIRED, StoreSessionParams,
-    StoreSshCredentialsParams,
+    CacheCredentialParams, GetCachedCredentialParams, NOT_AUTHENTICATED, Request, Response,
+    SESSION_EXPIRED, StoreSessionParams, StoreSshCredentialsParams,
 };
 use crate::socket::socket_path;
+use crate::state::CachedCredential;
 use crate::state::SessionInfo;
 use crate::wire;
 
@@ -256,6 +257,84 @@ impl AgentClient {
         result
             .as_bool()
             .ok_or_else(|| AgentError::Protocol("invalid result".to_string()))
+    }
+    /// Cache a credential in the agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AgentError::Protocol` if the request fails.
+    pub async fn cache_credential(
+        &mut self,
+        credential_type: &str,
+        data: serde_json::Value,
+        expires_at: &str,
+    ) -> Result<()> {
+        let params = CacheCredentialParams {
+            credential_type: credential_type.to_string(),
+            data,
+            expires_at: expires_at.to_string(),
+        };
+
+        let response = self
+            .call("cache_credential", Some(serde_json::to_value(params)?))
+            .await?;
+
+        if let Some(error) = response.error {
+            return Err(AgentError::Protocol(error.message));
+        }
+
+        Ok(())
+    }
+
+    /// Get a cached credential from the agent.
+    ///
+    /// Returns `None` if no valid cached credential exists for this type.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AgentError::Protocol` if the request fails.
+    pub async fn get_cached_credential(
+        &mut self,
+        credential_type: &str,
+    ) -> Result<Option<CachedCredential>> {
+        let params = GetCachedCredentialParams {
+            credential_type: credential_type.to_string(),
+        };
+
+        let response = self
+            .call("get_cached_credential", Some(serde_json::to_value(params)?))
+            .await?;
+
+        if let Some(error) = &response.error {
+            if error.code == NOT_AUTHENTICATED {
+                // No cached credential found (reusing the error code for "not found")
+                return Ok(None);
+            }
+            return Err(AgentError::Protocol(error.message.clone()));
+        }
+
+        let result = response
+            .result
+            .ok_or_else(|| AgentError::Protocol("missing result".to_string()))?;
+
+        let credential: CachedCredential =
+            serde_json::from_value(result).map_err(AgentError::from)?;
+        Ok(Some(credential))
+    }
+
+    /// Clear all cached credentials.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AgentError::Protocol` if the request fails.
+    pub async fn clear_credential_cache(&mut self) -> Result<()> {
+        let response = self.call("clear_credential_cache", None).await?;
+
+        if let Some(error) = response.error {
+            return Err(AgentError::Protocol(error.message));
+        }
+
+        Ok(())
     }
 }
 

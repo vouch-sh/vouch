@@ -4,6 +4,7 @@
 use jiff::Timestamp;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -107,11 +108,34 @@ impl From<&Session> for SessionInfo {
     }
 }
 
+/// Cached credential for non-SSH services (AWS, GitHub, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedCredential {
+    /// Credential data (service-specific JSON fields).
+    pub data: serde_json::Value,
+    /// When the credential expires (ISO 8601).
+    pub expires_at: String,
+    /// When the credential was cached (ISO 8601).
+    pub cached_at: String,
+}
+
+impl CachedCredential {
+    /// Check if this cached credential is still valid (not expired).
+    pub fn is_valid(&self) -> bool {
+        match self.expires_at.parse::<Timestamp>() {
+            Ok(ts) => Timestamp::now() < ts,
+            Err(_) => false,
+        }
+    }
+}
+
 /// Agent state (shared across connections).
 #[derive(Debug, Default)]
 pub struct AgentState {
     /// Current session (if authenticated).
     session: RwLock<Option<Session>>,
+    /// Credential cache keyed by type (e.g., "aws", "github").
+    credential_cache: RwLock<HashMap<String, CachedCredential>>,
 }
 
 impl AgentState {
@@ -119,6 +143,7 @@ impl AgentState {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             session: RwLock::new(None),
+            credential_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -137,10 +162,33 @@ impl AgentState {
         *guard = Some(session);
     }
 
-    /// Clear the current session.
+    /// Clear the current session and credential cache.
     pub async fn clear_session(&self) {
         let mut guard = self.session.write().await;
         *guard = None;
+        drop(guard);
+
+        self.clear_credential_cache().await;
+    }
+
+    /// Store a credential in the cache.
+    pub async fn cache_credential(&self, credential_type: String, credential: CachedCredential) {
+        let mut guard = self.credential_cache.write().await;
+        guard.insert(credential_type, credential);
+    }
+
+    /// Get a cached credential if it is still valid.
+    pub async fn get_cached_credential(&self, credential_type: &str) -> Option<CachedCredential> {
+        let guard = self.credential_cache.read().await;
+        guard
+            .get(credential_type)
+            .and_then(|c| if c.is_valid() { Some(c.clone()) } else { None })
+    }
+
+    /// Clear all cached credentials.
+    pub async fn clear_credential_cache(&self) {
+        let mut guard = self.credential_cache.write().await;
+        guard.clear();
     }
 
     /// Get seconds until session expiry (`None` if no session, `Some(0)` if expired).
