@@ -150,10 +150,14 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
         info!("Session recovered from disk");
     }
 
+    // Shutdown signal channel for graceful shutdown
+    let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+
     // Create servers
     let server = AgentServer::new(Arc::clone(&state), Arc::clone(&ssh_state));
     // Create SSH agent server with access to main agent state for certificate refresh
-    let ssh_server = SshAgentServer::with_agent_state(Arc::clone(&ssh_state), Arc::clone(&state));
+    let ssh_server =
+        SshAgentServer::with_agent_state(Arc::clone(&ssh_state), Arc::clone(&state), shutdown_rx);
 
     info!("Agent starting");
 
@@ -198,6 +202,8 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
                     warn!("Failed to listen for Ctrl+C: {e}");
                 }
             }
+            // Signal SSH agent to stop accepting new connections
+            let _ = shutdown_tx.send(true);
             ExitCode::SUCCESS
         }
         Some(()) = async {
@@ -207,6 +213,8 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
             }
         } => {
             info!("Received SIGTERM, shutting down...");
+            // Signal SSH agent to stop accepting new connections
+            let _ = shutdown_tx.send(true);
             ExitCode::SUCCESS
         }
     };

@@ -20,12 +20,12 @@ use crate::session::get_user_email;
 /// See: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html
 #[derive(Serialize, zeroize::ZeroizeOnDrop)]
 #[serde(rename_all = "PascalCase")]
-struct CredentialProcessOutput {
+pub(crate) struct CredentialProcessOutput {
     version: u32,
     access_key_id: String,
     secret_access_key: String,
     session_token: String,
-    expiration: String,
+    pub(crate) expiration: String,
 }
 
 impl std::fmt::Debug for CredentialProcessOutput {
@@ -98,11 +98,55 @@ pub(crate) fn build_session_tags(claims: &serde_json::Value) -> Vec<(String, Str
 
 /// Run the AWS credential command.
 ///
-/// This command:
-/// 1. Gets an OIDC ID token from the Vouch server
-/// 2. Calls AWS STS `AssumeRoleWithWebIdentity`
-/// 3. Outputs credentials in `credential_process` format
+/// Uses a cache-first strategy:
+/// 1. Check agent cache — return immediately if valid cached credentials exist
+/// 2. Fetch fresh OIDC token from Vouch server, call STS, cache the result
+/// 3. On network error, fall back to cached credentials (if any)
 pub async fn run(server: &str, role_arn: &str, session_name: Option<&str>) -> Result<()> {
+    let cache_key = format!("aws:{role_arn}");
+
+    // 1. Check agent cache first
+    if let Some(cached) = super::cache::get(&cache_key).await {
+        let json = serde_json::to_string(&cached).context("failed to serialize credentials")?;
+        println!("{json}");
+        return Ok(());
+    }
+
+    // 2. Fetch fresh credentials from server + STS
+    match fetch_and_assume(server, role_arn, session_name).await {
+        Ok(output) => {
+            let json = serde_json::to_string(&output).context("failed to serialize credentials")?;
+
+            // Cache for subsequent calls (best-effort)
+            if let Ok(cache_data) = serde_json::to_value(&output) {
+                super::cache::store(&cache_key, cache_data, &output.expiration).await;
+            }
+
+            println!("{json}");
+            Ok(())
+        }
+        Err(server_err) if super::cache::is_network_error(&server_err) => {
+            // 3. Network error — fall back to cache (may have been stored by a prior call)
+            if let Some(cached) = super::cache::get(&cache_key).await {
+                eprintln!("vouch: using cached AWS credentials (server unreachable)");
+                let json =
+                    serde_json::to_string(&cached).context("failed to serialize credentials")?;
+                println!("{json}");
+                Ok(())
+            } else {
+                Err(server_err)
+            }
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Fetch an OIDC token from the Vouch server and exchange it for STS credentials.
+pub(crate) async fn fetch_and_assume(
+    server: &str,
+    role_arn: &str,
+    session_name: Option<&str>,
+) -> Result<CredentialProcessOutput> {
     let client = VouchClient::new(server)?;
 
     // Get OIDC token from Vouch server
@@ -136,22 +180,16 @@ pub async fn run(server: &str, role_arn: &str, session_name: Option<&str>) -> Re
     .await
     .context("failed to assume AWS role")?;
 
-    // Output in credential_process format
     let creds = &sts_response
         .assume_role_with_web_identity_result
         .credentials;
-    let output = CredentialProcessOutput {
+    Ok(CredentialProcessOutput {
         version: 1,
         access_key_id: creds.access_key_id.clone(),
         secret_access_key: creds.secret_access_key.expose_secret().to_string(),
         session_token: creds.session_token.expose_secret().to_string(),
         expiration: creds.expiration.clone(),
-    };
-
-    let json = serde_json::to_string(&output).context("failed to serialize credentials")?;
-    println!("{json}");
-
-    Ok(())
+    })
 }
 
 #[cfg(test)]

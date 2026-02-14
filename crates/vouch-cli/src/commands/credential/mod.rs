@@ -2,6 +2,7 @@
 //! Credential issuance commands.
 
 pub mod aws;
+pub(crate) mod cache;
 pub mod cargo;
 pub mod codeartifact;
 pub mod docker;

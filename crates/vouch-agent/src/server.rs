@@ -2,10 +2,13 @@
 //! Agent server with Unix socket listener.
 
 use crate::error::Result;
-use crate::protocol::{Request, Response, StoreSessionParams, StoreSshCredentialsParams};
+use crate::protocol::{
+    CacheCredentialParams, GetCachedCredentialParams, Request, Response, StoreSessionParams,
+    StoreSshCredentialsParams,
+};
 use crate::socket::{bind_socket, ensure_vouch_dir, remove_socket, socket_path};
 use crate::ssh_agent::{SshAgentState, SshCredentials};
-use crate::state::{AgentState, Session, SessionInfo};
+use crate::state::{AgentState, CachedCredential, Session, SessionInfo};
 use crate::wire;
 
 use jiff::Timestamp;
@@ -109,6 +112,9 @@ async fn handle_request(
         "store_ssh_credentials" => handle_store_ssh_credentials(request, ssh_state).await,
         "clear_ssh_credentials" => handle_clear_ssh_credentials(request, ssh_state).await,
         "has_ssh_credentials" => handle_has_ssh_credentials(request, ssh_state).await,
+        "cache_credential" => handle_cache_credential(request, state).await,
+        "get_cached_credential" => handle_get_cached_credential(request, state).await,
+        "clear_credential_cache" => handle_clear_credential_cache(request, state).await,
         _ => Response::method_not_found(request.id),
     }
 }
@@ -273,6 +279,55 @@ async fn handle_clear_ssh_credentials(
 async fn handle_has_ssh_credentials(request: &Request, ssh_state: &Arc<SshAgentState>) -> Response {
     let has_creds = ssh_state.has_credentials().await;
     Response::success(request.id, has_creds)
+}
+
+/// Handle `cache_credential` request.
+async fn handle_cache_credential(request: &Request, state: &Arc<AgentState>) -> Response {
+    let params: CacheCredentialParams = match &request.params {
+        Some(p) => match serde_json::from_value(p.clone()) {
+            Ok(params) => params,
+            Err(e) => return Response::invalid_params(request.id, &e.to_string()),
+        },
+        None => return Response::invalid_params(request.id, "missing params"),
+    };
+
+    // Parse expiration timestamp
+    let expires_at: Timestamp = match params.expires_at.parse() {
+        Ok(ts) => ts,
+        Err(e) => return Response::invalid_params(request.id, &format!("invalid expires_at: {e}")),
+    };
+
+    let credential = CachedCredential::new(params.data, expires_at);
+
+    state
+        .cache_credential(params.credential_type.clone(), credential)
+        .await;
+
+    info!("Cached credential: {}", params.credential_type);
+    Response::success(request.id, true)
+}
+
+/// Handle `get_cached_credential` request.
+async fn handle_get_cached_credential(request: &Request, state: &Arc<AgentState>) -> Response {
+    let params: GetCachedCredentialParams = match &request.params {
+        Some(p) => match serde_json::from_value(p.clone()) {
+            Ok(params) => params,
+            Err(e) => return Response::invalid_params(request.id, &e.to_string()),
+        },
+        None => return Response::invalid_params(request.id, "missing params"),
+    };
+
+    match state.get_cached_credential(&params.credential_type).await {
+        Some(credential) => Response::success(request.id, credential),
+        None => Response::not_authenticated(request.id),
+    }
+}
+
+/// Handle `clear_credential_cache` request.
+async fn handle_clear_credential_cache(request: &Request, state: &Arc<AgentState>) -> Response {
+    state.clear_credential_cache().await;
+    info!("Credential cache cleared");
+    Response::success(request.id, true)
 }
 
 /// Send a response over the stream.

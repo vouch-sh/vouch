@@ -6,6 +6,7 @@ use crate::socket::bind_socket;
 use crate::wire;
 use std::sync::Arc;
 use tokio::net::UnixStream;
+use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
 use super::provisioning::{handle_request_identities, handle_sign_request};
@@ -15,18 +16,20 @@ use super::{
     ssh_agent_socket_path,
 };
 
-/// SSH Agent server.
+/// SSH Agent server with graceful shutdown support.
 pub struct SshAgentServer {
     state: Arc<SshAgentState>,
     agent_state: Option<Arc<crate::state::AgentState>>,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl SshAgentServer {
-    /// Create a new SSH agent server.
-    pub fn new(state: Arc<SshAgentState>) -> Self {
+    /// Create a new SSH agent server with a shutdown signal.
+    pub fn new(state: Arc<SshAgentState>, shutdown_rx: watch::Receiver<bool>) -> Self {
         Self {
             state,
             agent_state: None,
+            shutdown_rx,
         }
     }
 
@@ -34,36 +37,53 @@ impl SshAgentServer {
     pub fn with_agent_state(
         state: Arc<SshAgentState>,
         agent_state: Arc<crate::state::AgentState>,
+        shutdown_rx: watch::Receiver<bool>,
     ) -> Self {
         Self {
             state,
             agent_state: Some(agent_state),
+            shutdown_rx,
         }
     }
 
     /// Run the SSH agent server.
+    ///
+    /// Stops accepting new connections when the shutdown signal is received.
+    /// In-flight connections continue until they complete naturally.
     pub async fn run(&self) -> Result<()> {
         let path = ssh_agent_socket_path()?;
         let listener = bind_socket(&path).await?;
 
         info!("SSH agent listening on {}", path.display());
 
+        let mut shutdown = self.shutdown_rx.clone();
+
         loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let state = Arc::clone(&self.state);
-                    let agent_state = self.agent_state.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_ssh_connection(stream, state, agent_state).await {
-                            debug!("SSH agent connection error: {e}");
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, _)) => {
+                            let state = Arc::clone(&self.state);
+                            let agent_state = self.agent_state.clone();
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_ssh_connection(stream, state, agent_state).await {
+                                    debug!("SSH agent connection error: {e}");
+                                }
+                            });
                         }
-                    });
+                        Err(e) => {
+                            error!("SSH agent accept error: {e}");
+                        }
+                    }
                 }
-                Err(e) => {
-                    error!("SSH agent accept error: {e}");
+                _ = shutdown.changed() => {
+                    info!("SSH agent received shutdown signal, stopping listener");
+                    break;
                 }
             }
         }
+
+        Ok(())
     }
 }
 
