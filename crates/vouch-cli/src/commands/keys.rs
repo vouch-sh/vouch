@@ -166,10 +166,17 @@ fn format_key_for_display(key: &KeyInfo) -> String {
 }
 
 /// List all registered keys (non-interactive).
-pub async fn list(server: &str) -> Result<()> {
+pub async fn list(server: &str, json: bool) -> Result<()> {
     let client = VouchClient::new(server)?;
 
     let response: ListKeysResponse = client.get_authenticated("/v1/keys").await?;
+
+    if json {
+        let json_str =
+            serde_json::to_string_pretty(&response.keys).unwrap_or_else(|_| "[]".to_string());
+        println!("{json_str}");
+        return Ok(());
+    }
 
     if response.keys.is_empty() {
         println!("No keys registered.");
