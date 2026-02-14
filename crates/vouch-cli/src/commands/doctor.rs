@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Doctor command - diagnostic checks for the Vouch environment.
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use ctap_hid_fido2::{Cfg, FidoKeyHidFactory};
 #[cfg(unix)]
 use vouch_agent::AgentClient;
@@ -32,15 +32,24 @@ impl CheckResult {
 }
 
 /// Run the doctor command.
-pub async fn run(server: &str) -> Result<()> {
-    println!("Vouch Doctor - Environment Diagnostics\n");
+///
+/// Returns an error if any checks fail, so the CLI exits with a non-zero code.
+/// When `quiet` is true, all output is suppressed (exit code only).
+pub async fn run(server: &str, quiet: bool) -> Result<()> {
+    if !quiet {
+        println!("Vouch Doctor - Environment Diagnostics\n");
+    }
 
     let mut all_passed = true;
 
     // Check 1: YubiKey connectivity
-    print!("YubiKey connectivity ... ");
+    if !quiet {
+        print!("YubiKey connectivity ... ");
+    }
     let yubikey_result = check_yubikey();
-    print_result(&yubikey_result);
+    if !quiet {
+        print_result(&yubikey_result);
+    }
     if !yubikey_result.passed {
         all_passed = false;
     }
@@ -48,63 +57,93 @@ pub async fn run(server: &str) -> Result<()> {
     // Check 2: Agent running (Unix only — agent requires Unix sockets)
     #[cfg(unix)]
     {
-        print!("Agent running ... ");
+        if !quiet {
+            print!("Agent running ... ");
+        }
         let agent_result = check_agent().await;
-        print_result(&agent_result);
+        if !quiet {
+            print_result(&agent_result);
+        }
         if !agent_result.passed {
             all_passed = false;
         }
     }
 
     // Check 3: Server reachable
-    print!("Server reachable ... ");
+    if !quiet {
+        print!("Server reachable ... ");
+    }
     let server_result = check_server(server).await;
-    print_result(&server_result);
+    if !quiet {
+        print_result(&server_result);
+    }
     if !server_result.passed {
         all_passed = false;
     }
 
     // Check 4: Session valid
-    print!("Session valid ... ");
+    if !quiet {
+        print!("Session valid ... ");
+    }
     let session_result = check_session().await;
-    print_result(&session_result);
+    if !quiet {
+        print_result(&session_result);
+    }
     if !session_result.passed {
         all_passed = false;
     }
 
     // Check 5: SSH config
-    print!("SSH configuration ... ");
+    if !quiet {
+        print!("SSH configuration ... ");
+    }
     let ssh_result = check_ssh_config();
-    print_result(&ssh_result);
+    if !quiet {
+        print_result(&ssh_result);
+    }
     if !ssh_result.passed {
         all_passed = false;
     }
 
     // Check 6: EKS config
-    print!("EKS configuration ... ");
+    if !quiet {
+        print!("EKS configuration ... ");
+    }
     let eks_result = check_eks_config();
-    print_result(&eks_result);
+    if !quiet {
+        print_result(&eks_result);
+    }
     if !eks_result.passed {
         all_passed = false;
     }
 
     // Check 7: Server URL security
-    print!("Server URL security ... ");
+    if !quiet {
+        print!("Server URL security ... ");
+    }
     let security_result = check_server_url_security(server);
-    print_result(&security_result);
+    if !quiet {
+        print_result(&security_result);
+    }
     if !security_result.passed {
         all_passed = false;
     }
 
     // Summary
-    println!();
-    if all_passed {
-        println!("All checks passed!");
-    } else {
-        println!("Some checks failed. Review the issues above.");
+    if !quiet {
+        println!();
     }
-
-    Ok(())
+    if all_passed {
+        if !quiet {
+            println!("All checks passed!");
+        }
+        Ok(())
+    } else {
+        if !quiet {
+            println!("Some checks failed. Review the issues above.");
+        }
+        bail!("doctor: one or more checks failed")
+    }
 }
 
 /// Print check result with color indicators.

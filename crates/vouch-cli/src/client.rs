@@ -194,12 +194,21 @@ impl VouchClient {
                 .await
                 .context("failed to parse server response")
         } else {
-            // Try to parse as API error
+            // Try to parse as API error for a clean message
             let error_text = response.text().await.unwrap_or_default();
             if let Ok(api_error) = serde_json::from_str::<ApiError>(&error_text) {
-                bail!("{}: {}", api_error.code, api_error.message);
+                bail!("{}", api_error.message);
             }
-            bail!("server error ({status}): {error_text}");
+            // Non-JSON error body — provide actionable guidance
+            match status.as_u16() {
+                401 => bail!("not authenticated - run 'vouch login' first"),
+                403 => bail!("permission denied by server"),
+                404 => bail!("server endpoint not found (status 404). Check your server URL."),
+                500..=599 => {
+                    bail!("server error ({status}). Run 'vouch doctor' to check connectivity.")
+                }
+                _ => bail!("unexpected server response ({status})"),
+            }
         }
     }
 }

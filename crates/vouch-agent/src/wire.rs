@@ -73,22 +73,32 @@ pub fn encode_u32(value: u32) -> [u8; 4] {
 }
 
 /// Encode a string with u32 length prefix.
-pub fn encode_string(s: &str) -> Vec<u8> {
+///
+/// # Errors
+///
+/// Returns an error if the string length exceeds `u32::MAX`.
+pub fn encode_string(s: &str) -> Result<Vec<u8>> {
     let bytes = s.as_bytes();
-    let len = bytes.len() as u32;
+    let len = u32::try_from(bytes.len())
+        .map_err(|_| AgentError::Protocol("string too large for wire format".to_string()))?;
     let mut buf = Vec::with_capacity(4 + bytes.len());
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(bytes);
-    buf
+    Ok(buf)
 }
 
 /// Encode a byte slice with u32 length prefix.
-pub fn encode_bytes(data: &[u8]) -> Vec<u8> {
-    let len = data.len() as u32;
+///
+/// # Errors
+///
+/// Returns an error if the data length exceeds `u32::MAX`.
+pub fn encode_bytes(data: &[u8]) -> Result<Vec<u8>> {
+    let len = u32::try_from(data.len())
+        .map_err(|_| AgentError::Protocol("data too large for wire format".to_string()))?;
     let mut buf = Vec::with_capacity(4 + data.len());
     buf.extend_from_slice(&len.to_be_bytes());
     buf.extend_from_slice(data);
-    buf
+    Ok(buf)
 }
 
 #[cfg(test)]
@@ -167,7 +177,7 @@ mod tests {
 
     #[test]
     fn test_encode_string() {
-        let encoded = encode_string("test");
+        let encoded = encode_string("test").unwrap();
         assert_eq!(encoded.len(), 8); // 4 bytes length + 4 bytes "test"
         assert_eq!(&encoded[..4], &[0, 0, 0, 4]);
         assert_eq!(&encoded[4..], b"test");
@@ -175,14 +185,14 @@ mod tests {
 
     #[test]
     fn test_encode_string_empty() {
-        let encoded = encode_string("");
+        let encoded = encode_string("").unwrap();
         assert_eq!(encoded, vec![0, 0, 0, 0]);
     }
 
     #[test]
     fn test_encode_bytes() {
         let data = [0x01, 0x02, 0x03];
-        let encoded = encode_bytes(&data);
+        let encoded = encode_bytes(&data).unwrap();
         assert_eq!(encoded.len(), 7);
         assert_eq!(&encoded[..4], &[0, 0, 0, 3]);
         assert_eq!(&encoded[4..], &[0x01, 0x02, 0x03]);

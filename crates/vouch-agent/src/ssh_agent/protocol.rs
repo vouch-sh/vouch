@@ -120,10 +120,10 @@ pub(super) fn sign_data(private_key: &PrivateKey, data: &[u8]) -> Result<Vec<u8>
     let mut buf = Vec::new();
 
     // Algorithm name
-    buf.extend_from_slice(&wire::encode_string(alg_name));
+    buf.extend_from_slice(&wire::encode_string(alg_name)?);
 
     // Signature blob
-    buf.extend_from_slice(&wire::encode_bytes(&sig_bytes));
+    buf.extend_from_slice(&wire::encode_bytes(&sig_bytes)?);
 
     Ok(buf)
 }

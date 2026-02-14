@@ -250,12 +250,24 @@ fn handle_response<Resp: DeserializeOwned>(response: HttpResponse) -> Result<Res
     if response.is_success() {
         response.json()
     } else {
-        // Try to parse as API error
+        // Try to parse as API error for a clean message
         let error_text = response.text().unwrap_or_default();
         if let Ok(api_error) = serde_json::from_str::<ApiError>(&error_text) {
-            bail!("{}: {}", api_error.code, api_error.message);
+            bail!("{}", api_error.message);
         }
-        bail!("server error ({}): {}", response.status, error_text);
+        // Non-JSON error body — provide actionable guidance
+        match response.status {
+            401 => bail!("not authenticated - run 'vouch login' first"),
+            403 => bail!("permission denied by server"),
+            404 => bail!("server endpoint not found (status 404). Check your server URL."),
+            500..=599 => {
+                bail!(
+                    "server error ({}). Run 'vouch doctor' to check connectivity.",
+                    response.status
+                )
+            }
+            _ => bail!("unexpected server response ({})", response.status),
+        }
     }
 }
 

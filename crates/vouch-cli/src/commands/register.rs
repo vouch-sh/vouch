@@ -15,7 +15,7 @@ use crate::config::Config;
 use crate::fido2::{self, YubiKey};
 
 /// Run the register command.
-pub async fn run(server: &str, name: Option<&str>) -> Result<()> {
+pub async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> Result<()> {
     // Require authentication
     let config = Config::load()?;
     let token = config.token().context(
@@ -28,7 +28,7 @@ pub async fn run(server: &str, name: Option<&str>) -> Result<()> {
     println!("Registering additional YubiKey '{name}'...\n");
 
     // Step 1: Wait for YubiKey to be inserted
-    let key = YubiKey::wait_for_device()?;
+    let key = YubiKey::wait_for_device(timeout_secs)?;
 
     // Step 2: Start registration with server (authenticated)
     print!("Contacting server... ");
