@@ -429,10 +429,7 @@ pub async fn cicd_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> im
 
 /// AI Model Access (Bedrock) documentation page.
 /// GET /docs/bedrock
-pub async fn bedrock_page(
-    State(state): State<Arc<AppState>>,
-    jar: CookieJar,
-) -> impl IntoResponse {
+pub async fn bedrock_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
     let auth = get_auth_context(&state, &jar).await;
     DocsBedrockTemplate {
         org_name: state.config().get_org_display_name().to_string(),
