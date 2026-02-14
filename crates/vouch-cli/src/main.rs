@@ -91,7 +91,11 @@ enum Commands {
         timeout: u64,
     },
     /// Show current session status.
-    Status,
+    Status {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// End your current session.
     Logout,
     /// Manage registered security keys.
@@ -100,6 +104,21 @@ enum Commands {
     Keys {
         #[command(subcommand)]
         command: Option<KeysCommands>,
+    },
+    /// Run a command with Vouch-provided credentials in the environment.
+    Exec {
+        /// Credential type to inject.
+        #[arg(long = "type", value_enum)]
+        credential_type: commands::exec::CredentialType,
+        /// AWS IAM role ARN (required for --type aws).
+        #[arg(long)]
+        role: Option<String>,
+        /// Session name for the assumed role.
+        #[arg(long)]
+        session_name: Option<String>,
+        /// Command and arguments to execute.
+        #[arg(trailing_var_arg = true, required = true)]
+        command: Vec<String>,
     },
     /// Obtain credentials for various services.
     Credential {
@@ -137,7 +156,11 @@ impl Commands {
 #[derive(Subcommand)]
 enum KeysCommands {
     /// List all registered keys (non-interactive).
-    List,
+    List {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Remove a registered key (non-interactive).
     Remove {
         /// Key ID to remove.
@@ -369,11 +392,11 @@ async fn run() -> Result<()> {
             commands::register::run(&server, name.as_deref(), timeout).await
         }
         Commands::Login { timeout } => commands::login::run(&server, timeout).await,
-        Commands::Status => commands::status::run(&server).await,
+        Commands::Status { json } => commands::status::run(&server, json).await,
         Commands::Logout => commands::logout::run().await,
         Commands::Keys { command } => match command {
             None => commands::keys::interactive(&server).await,
-            Some(KeysCommands::List) => commands::keys::list(&server).await,
+            Some(KeysCommands::List { json }) => commands::keys::list(&server, json).await,
             Some(KeysCommands::Remove { id, force }) => {
                 commands::keys::remove(&server, &id, force).await
             }
@@ -381,6 +404,21 @@ async fn run() -> Result<()> {
                 commands::keys::rename(&server, &id, &name).await
             }
         },
+        Commands::Exec {
+            credential_type,
+            role,
+            session_name,
+            command,
+        } => {
+            commands::exec::run(
+                &server,
+                &credential_type,
+                role.as_deref(),
+                session_name.as_deref(),
+                &command,
+            )
+            .await
+        }
         Commands::Credential { command } => match command {
             CredentialCommands::Aws { role, session_name } => {
                 commands::credential::aws::run(&server, &role, session_name.as_deref()).await

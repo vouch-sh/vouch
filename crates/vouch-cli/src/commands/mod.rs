@@ -6,6 +6,7 @@ pub mod credential;
 pub mod diag;
 pub mod doctor;
 pub mod enroll;
+pub mod exec;
 pub mod keys;
 pub mod login;
 pub mod logout;

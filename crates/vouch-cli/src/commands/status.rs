@@ -2,6 +2,7 @@
 //! Status command - show current session status.
 
 use anyhow::Result;
+use serde::Serialize;
 #[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError, SessionInfo};
 use vouch_common::SessionStatus;
@@ -13,28 +14,72 @@ use crate::integrations::{
     SshIntegration, print_integration_status,
 };
 
+/// JSON output for `vouch status --json`.
+#[derive(Serialize)]
+struct StatusJson {
+    authenticated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expires_in_seconds: Option<u64>,
+    agent_running: bool,
+}
+
+/// Print a serializable value as JSON to stdout.
+fn print_json<T: Serialize>(value: &T) {
+    if let Ok(s) = serde_json::to_string_pretty(value) {
+        println!("{s}");
+    }
+}
+
 /// Run the status command.
-pub async fn run(server: &str) -> Result<()> {
+pub async fn run(server: &str, json: bool) -> Result<()> {
     // First, try to get session from agent (Unix only)
     #[cfg(unix)]
     match get_session_from_agent().await {
         Ok(session) => {
-            print_agent_session(server, &session);
-            print_all_integrations(server).await;
+            if json {
+                print_json(&StatusJson {
+                    authenticated: true,
+                    email: Some(session.user_email.clone()),
+                    expires_in_seconds: Some(session.expires_in_seconds),
+                    agent_running: true,
+                });
+            } else {
+                print_agent_session(server, &session);
+                print_all_integrations(server).await;
+            }
             return Ok(());
         }
         Err(AgentError::NotRunning) => {
-            // Agent not running, fall back to server check
             tracing::debug!("Agent not running, checking server");
         }
         Err(AgentError::NotAuthenticated) => {
-            println!("Not authenticated.");
-            println!("\nRun 'vouch login' to authenticate.");
+            if json {
+                print_json(&StatusJson {
+                    authenticated: false,
+                    email: None,
+                    expires_in_seconds: None,
+                    agent_running: true,
+                });
+            } else {
+                println!("Not authenticated.");
+                println!("\nRun 'vouch login' to authenticate.");
+            }
             return Ok(());
         }
         Err(AgentError::SessionExpired) => {
-            println!("Session expired.");
-            println!("\nRun 'vouch login' to re-authenticate.");
+            if json {
+                print_json(&StatusJson {
+                    authenticated: false,
+                    email: None,
+                    expires_in_seconds: Some(0),
+                    agent_running: true,
+                });
+            } else {
+                println!("Session expired.");
+                println!("\nRun 'vouch login' to re-authenticate.");
+            }
             return Ok(());
         }
         Err(e) => {
@@ -46,8 +91,17 @@ pub async fn run(server: &str) -> Result<()> {
     let config = Config::load()?;
 
     if config.token().is_none() {
-        println!("Not authenticated.");
-        println!("\nRun 'vouch login' to authenticate.");
+        if json {
+            print_json(&StatusJson {
+                authenticated: false,
+                email: None,
+                expires_in_seconds: None,
+                agent_running: false,
+            });
+        } else {
+            println!("Not authenticated.");
+            println!("\nRun 'vouch login' to authenticate.");
+        }
         return Ok(());
     }
 
@@ -58,7 +112,14 @@ pub async fn run(server: &str) -> Result<()> {
         .await
     {
         Ok(status) => {
-            if status.authenticated {
+            if json {
+                print_json(&StatusJson {
+                    authenticated: status.authenticated,
+                    email: status.email.clone(),
+                    expires_in_seconds: status.expires_in_seconds,
+                    agent_running: false,
+                });
+            } else if status.authenticated {
                 println!("Authenticated ({server})");
                 if let Some(email) = &status.email {
                     println!("  Email: {email}");
@@ -80,9 +141,17 @@ pub async fn run(server: &str) -> Result<()> {
             }
         }
         Err(e) => {
-            // Token might be invalid/expired
-            println!("Session invalid: {e}");
-            println!("\nRun 'vouch login' to re-authenticate.");
+            if json {
+                print_json(&StatusJson {
+                    authenticated: false,
+                    email: None,
+                    expires_in_seconds: None,
+                    agent_running: false,
+                });
+            } else {
+                println!("Session invalid: {e}");
+                println!("\nRun 'vouch login' to re-authenticate.");
+            }
         }
     }
 
