@@ -98,6 +98,30 @@ enum Commands {
     },
     /// End your current session.
     Logout,
+    /// Output credential environment variables for `eval`.
+    ///
+    /// Usage: `eval "$(vouch env --type aws --shell bash --role <ARN>)"`
+    Env {
+        /// Credential type to export.
+        #[arg(long = "type")]
+        credential_type: commands::env::CredentialType,
+        /// Shell syntax to emit.
+        #[arg(long, default_value = "bash")]
+        shell: commands::env::Shell,
+        /// AWS IAM role ARN (required for --type aws).
+        #[arg(long)]
+        role: Option<String>,
+        /// Session name for AWS assumed role.
+        #[arg(long)]
+        session_name: Option<String>,
+    },
+    /// Output a shell hook for ambient auth status.
+    ///
+    /// Add `eval "$(vouch init bash)"` to your shell profile.
+    Init {
+        /// Shell to generate hook for.
+        shell: commands::init::Shell,
+    },
     /// Manage registered security keys.
     ///
     /// Without a subcommand, opens an interactive menu.
@@ -148,7 +172,7 @@ impl Commands {
     fn uses_server(&self) -> bool {
         !matches!(
             self,
-            Commands::Completions(_) | Commands::Diag(_) | Commands::Logout
+            Commands::Completions(_) | Commands::Diag(_) | Commands::Logout | Commands::Init { .. }
         )
     }
 }
@@ -394,6 +418,22 @@ async fn run() -> Result<()> {
         Commands::Login { timeout } => commands::login::run(&server, timeout).await,
         Commands::Status { json } => commands::status::run(&server, json).await,
         Commands::Logout => commands::logout::run().await,
+        Commands::Env {
+            credential_type,
+            shell,
+            role,
+            session_name,
+        } => {
+            commands::env::run(
+                &server,
+                &credential_type,
+                &shell,
+                role.as_deref(),
+                session_name.as_deref(),
+            )
+            .await
+        }
+        Commands::Init { shell } => commands::init::run(&shell),
         Commands::Keys { command } => match command {
             None => commands::keys::interactive(&server).await,
             Some(KeysCommands::List { json }) => commands::keys::list(&server, json).await,

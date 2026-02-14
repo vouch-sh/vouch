@@ -143,6 +143,12 @@ impl AgentState {
         *guard = None;
     }
 
+    /// Get seconds until session expiry (`None` if no session, `Some(0)` if expired).
+    pub async fn expires_in_seconds(&self) -> Option<u64> {
+        let guard = self.session.read().await;
+        guard.as_ref().map(Session::expires_in_seconds)
+    }
+
     /// Get the raw token (if session is valid).
     pub async fn get_token(&self) -> Option<String> {
         let guard = self.session.read().await;

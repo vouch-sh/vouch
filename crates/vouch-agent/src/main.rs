@@ -157,6 +157,9 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
 
     info!("Agent starting");
 
+    // Spawn session expiry monitor (background task)
+    tokio::spawn(vouch_agent::expiry_monitor::run(Arc::clone(&state)));
+
     // Set up SIGTERM handler before select!
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate());
 
