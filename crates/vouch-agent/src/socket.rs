@@ -13,7 +13,7 @@ const SOCKET_FILENAME: &str = "agent.sock";
 /// # Errors
 ///
 /// Returns `AgentError::SocketPath` if the home directory cannot be determined.
-pub fn vouch_dir() -> Result<PathBuf> {
+pub(crate) fn vouch_dir() -> Result<PathBuf> {
     let home = dirs::home_dir()
         .ok_or_else(|| AgentError::SocketPath("could not determine home directory".to_string()))?;
     Ok(home.join(".vouch"))
@@ -33,7 +33,7 @@ pub fn socket_path() -> Result<PathBuf> {
 /// # Errors
 ///
 /// Returns `AgentError::SocketPath` if the directory cannot be created or permissions cannot be set.
-pub fn ensure_vouch_dir() -> Result<()> {
+pub(crate) fn ensure_vouch_dir() -> Result<()> {
     let dir = vouch_dir()?;
     if !dir.exists() {
         std::fs::create_dir_all(&dir).map_err(|e| {
@@ -73,7 +73,7 @@ pub fn remove_socket() -> Result<()> {
 /// # Errors
 ///
 /// Returns `AgentError::SocketPath` if the socket cannot be bound.
-pub async fn bind_socket(path: &Path) -> Result<UnixListener> {
+pub(crate) async fn bind_socket(path: &Path) -> Result<UnixListener> {
     // Remove stale socket if it exists
     if path.exists() {
         std::fs::remove_file(path).ok();
@@ -94,7 +94,7 @@ pub async fn bind_socket(path: &Path) -> Result<UnixListener> {
 /// # Errors
 ///
 /// Returns `AgentError::SocketPath` if permissions cannot be set.
-pub fn set_socket_permissions(path: &Path) -> Result<()> {
+pub(crate) fn set_socket_permissions(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     let perms = std::fs::Permissions::from_mode(0o600);
     std::fs::set_permissions(path, perms).map_err(|e| {

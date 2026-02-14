@@ -71,7 +71,7 @@ struct AuditRecord {
 /// Log a security-relevant audit event to `~/.vouch/audit.log`.
 ///
 /// Best-effort: failures are logged at debug level and never block the agent.
-pub fn log_event(event: AuditEvent) {
+pub(crate) fn log_event(event: AuditEvent) {
     let record = AuditRecord {
         timestamp: jiff::Timestamp::now().to_string(),
         event,

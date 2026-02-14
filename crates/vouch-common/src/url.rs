@@ -35,7 +35,7 @@ impl UrlSecurity {
 /// # Examples
 ///
 /// ```
-/// use vouch_common::url::{check_url_security, UrlSecurity};
+/// use vouch_common::{check_url_security, UrlSecurity};
 ///
 /// assert_eq!(check_url_security("https://vouch.example.com"), UrlSecurity::Secure);
 /// assert_eq!(check_url_security("http://localhost:3000"), UrlSecurity::Secure);

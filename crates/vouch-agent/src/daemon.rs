@@ -33,7 +33,7 @@ pub fn pid_file_path() -> Result<PathBuf> {
 }
 
 /// Get the path to the log file.
-pub fn log_file_path() -> Result<PathBuf> {
+pub(crate) fn log_file_path() -> Result<PathBuf> {
     let cache_dir = dirs::cache_dir()
         .ok_or_else(|| AgentError::Config("Could not determine cache directory".to_string()))?;
     let vouch_dir = cache_dir.join("vouch");

@@ -4,14 +4,10 @@
 //! This crate provides the Vouch CLI for hardware-backed identity,
 //! along with reusable components for testing.
 
-pub mod client;
-pub mod config;
 pub mod fido2;
 pub mod http;
-pub mod session;
 
 // Re-export commonly used types
-pub use client::VouchClient;
 pub use fido2::{AuthenticationResult, FidoDevice, RegistrationResult, YubiKey};
 pub use http::{HttpClient, HttpClientExt, HttpResponse, ReqwestClient};
 

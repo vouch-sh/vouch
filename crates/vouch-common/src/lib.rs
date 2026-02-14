@@ -2,19 +2,19 @@
 //! Shared types for vouch CLI and server.
 
 pub mod aaguid;
-pub mod api;
-pub mod attestation;
-pub mod clock;
-pub mod config;
+pub(crate) mod api;
+pub(crate) mod attestation;
+pub(crate) mod clock;
+pub(crate) mod config;
 pub mod contracts;
-pub mod cookie;
+pub(crate) mod cookie;
 pub mod encoding;
-pub mod error;
+pub(crate) mod error;
 pub mod fido2_types;
 pub mod fixtures;
 pub mod http;
 pub mod oidc;
-pub mod url;
+pub(crate) mod url;
 
 #[cfg(test)]
 mod api_tests;

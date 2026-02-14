@@ -44,14 +44,12 @@
 //! Services return [`ServiceError`] which can be converted to protocol-appropriate
 //! responses (OAuth, SCIM, or standard HTTP errors).
 
-pub mod auth;
-pub mod error;
+pub(crate) mod auth;
+pub(crate) mod error;
 pub mod integrations;
 pub mod oidc;
 
 // Protocol modules will be added here as they are implemented:
 // pub mod scim;
 
-pub use error::{
-    OAuthErrorCode, OAuthErrorResponse, ScimErrorResponse, ServiceError, ServiceResult,
-};
+pub(crate) use error::{OAuthErrorCode, ServiceError, ServiceResult};

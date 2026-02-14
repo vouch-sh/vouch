@@ -24,10 +24,10 @@ mod oauth;
 mod organizations;
 mod pending_oauth;
 mod pool;
-pub mod schema;
+pub(crate) mod schema;
 mod scim;
 mod sessions;
-pub mod types;
+pub(crate) mod types;
 mod users;
 
 // Re-export Pool, DatabaseType, and Transaction for use throughout the application
