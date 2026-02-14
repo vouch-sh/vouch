@@ -2,17 +2,9 @@
 //! Exec command - run a command with Vouch-provided credentials in the environment.
 
 use anyhow::{Context, Result, bail};
-use secrecy::ExposeSecret;
 use std::process::Command;
 
-use crate::client::VouchClient;
-use crate::integrations::aws::sts::{
-    assume_role_with_web_identity, extract_partition_from_role_arn,
-    get_default_region_for_partition, get_domain_suffix_for_partition,
-};
-use crate::session::get_user_email;
-
-use super::credential::aws::{OidcTokenResponse, build_session_tags, decode_jwt_payload};
+use super::credential::cache;
 
 /// Credential type to inject into the subprocess environment.
 #[derive(Clone, Debug, clap::ValueEnum)]
@@ -60,88 +52,104 @@ pub async fn run(
 
     if !status.success() {
         let code = status.code().unwrap_or(1);
-        // Propagate the child's exit code via a special error
-        // The main function will classify this as GENERAL (exit code 1)
-        // but we use std::process::ExitCode::from directly
         bail!("command exited with status {code}");
     }
 
     Ok(())
 }
 
-/// Fetch AWS STS credentials and inject them into the command's environment.
+/// Fetch AWS STS credentials (cache-first) and inject them into the environment.
 async fn inject_aws_credentials(
     cmd: &mut Command,
     server: &str,
     role_arn: &str,
     session_name: Option<&str>,
 ) -> Result<()> {
-    let client = VouchClient::new(server)?;
+    let cache_key = format!("aws:{role_arn}");
 
-    // Get OIDC token from Vouch server
-    let token_response: OidcTokenResponse = client
-        .get_authenticated("/v1/credentials/aws/token")
-        .await
-        .context("failed to get OIDC token from Vouch server")?;
+    // Try cache first, then server + STS, then cache fallback on network error
+    let data = match cache::get(&cache_key).await {
+        Some(cached) => cached,
+        None => {
+            match super::credential::aws::fetch_and_assume(server, role_arn, session_name).await {
+                Ok(output) => {
+                    let data =
+                        serde_json::to_value(&output).context("failed to serialize credentials")?;
+                    cache::store(&cache_key, data.clone(), &output.expiration).await;
+                    data
+                }
+                Err(e) if cache::is_network_error(&e) => {
+                    if let Some(cached) = cache::get(&cache_key).await {
+                        eprintln!("vouch: using cached AWS credentials (server unreachable)");
+                        cached
+                    } else {
+                        return Err(e);
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
+    };
 
-    // Decode JWT for session tags
-    let tags = decode_jwt_payload(&token_response.id_token)
-        .map(|claims| build_session_tags(&claims))
-        .unwrap_or_default();
-
-    // Determine region from role ARN
-    let partition = extract_partition_from_role_arn(role_arn).unwrap_or("aws");
-    let region = get_default_region_for_partition(partition);
-    let domain_suffix = get_domain_suffix_for_partition(partition);
-
-    // Get session name
-    let email = get_user_email(server).await;
-    let session = session_name.or(email.as_deref()).unwrap_or("vouch-session");
-
-    // Call STS
-    let sts_response = assume_role_with_web_identity(
-        role_arn,
-        session,
-        &token_response.id_token,
-        region,
-        domain_suffix,
-        &tags,
-    )
-    .await
-    .context("failed to assume AWS role")?;
-
-    let creds = &sts_response
-        .assume_role_with_web_identity_result
-        .credentials;
-
-    cmd.env("AWS_ACCESS_KEY_ID", &creds.access_key_id);
-    cmd.env(
-        "AWS_SECRET_ACCESS_KEY",
-        creds.secret_access_key.expose_secret(),
-    );
-    cmd.env("AWS_SESSION_TOKEN", creds.session_token.expose_secret());
-    cmd.env("AWS_CREDENTIAL_EXPIRATION", &creds.expiration);
+    if let Some(v) = data.get("AccessKeyId").and_then(|v| v.as_str()) {
+        cmd.env("AWS_ACCESS_KEY_ID", v);
+    }
+    if let Some(v) = data.get("SecretAccessKey").and_then(|v| v.as_str()) {
+        cmd.env("AWS_SECRET_ACCESS_KEY", v);
+    }
+    if let Some(v) = data.get("SessionToken").and_then(|v| v.as_str()) {
+        cmd.env("AWS_SESSION_TOKEN", v);
+    }
+    if let Some(v) = data.get("Expiration").and_then(|v| v.as_str()) {
+        cmd.env("AWS_CREDENTIAL_EXPIRATION", v);
+    }
 
     Ok(())
 }
 
-/// Fetch a GitHub token and inject it into the command's environment.
+/// Fetch a GitHub token (cache-first) and inject it into the environment.
 async fn inject_github_credentials(cmd: &mut Command, server: &str) -> Result<()> {
-    let client = VouchClient::new(server)?;
+    let cache_key = "github";
 
-    // Use the same endpoint as `vouch credential github`
-    let response: serde_json::Value = client
-        .get_authenticated("/v1/credentials/github/token")
-        .await
-        .context("failed to get GitHub token from Vouch server")?;
+    let data = match cache::get(cache_key).await {
+        Some(cached) => cached,
+        None => match fetch_github_token(server).await {
+            Ok(response) => {
+                let expires_at = response
+                    .get("expires_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                cache::store(cache_key, response.clone(), expires_at).await;
+                response
+            }
+            Err(e) if cache::is_network_error(&e) => {
+                if let Some(cached) = cache::get(cache_key).await {
+                    eprintln!("vouch: using cached GitHub token (server unreachable)");
+                    cached
+                } else {
+                    return Err(e);
+                }
+            }
+            Err(e) => return Err(e),
+        },
+    };
 
-    let token = response
+    let token = data
         .get("token")
         .and_then(serde_json::Value::as_str)
-        .context("server response missing 'token' field")?;
+        .context("cached credential missing 'token' field")?;
 
     cmd.env("GITHUB_TOKEN", token);
     cmd.env("GH_TOKEN", token);
 
     Ok(())
+}
+
+/// Fetch a GitHub token from the Vouch server.
+pub(crate) async fn fetch_github_token(server: &str) -> Result<serde_json::Value> {
+    let client = crate::client::VouchClient::new(server)?;
+    client
+        .get_authenticated("/v1/credentials/github/token")
+        .await
+        .context("failed to get GitHub token from Vouch server")
 }

@@ -291,11 +291,13 @@ async fn handle_cache_credential(request: &Request, state: &Arc<AgentState>) -> 
         None => return Response::invalid_params(request.id, "missing params"),
     };
 
-    let credential = CachedCredential {
-        data: params.data,
-        expires_at: params.expires_at,
-        cached_at: jiff::Timestamp::now().to_string(),
+    // Parse expiration timestamp
+    let expires_at: Timestamp = match params.expires_at.parse() {
+        Ok(ts) => ts,
+        Err(e) => return Response::invalid_params(request.id, &format!("invalid expires_at: {e}")),
     };
+
+    let credential = CachedCredential::new(params.data, expires_at);
 
     state
         .cache_credential(params.credential_type.clone(), credential)
