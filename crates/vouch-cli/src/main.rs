@@ -3,11 +3,13 @@
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser, Subcommand};
+use std::process::ExitCode;
 use tracing_subscriber::EnvFilter;
 
 mod client;
 mod commands;
 mod config;
+mod exit_code;
 mod fido2;
 mod integrations;
 mod session;
@@ -41,7 +43,15 @@ fn check_docker_credential_invocation() -> Result<bool> {
 #[command(
     name = "vouch",
     about = "Hardware-backed identity for developers",
-    version
+    version,
+    after_help = "Exit codes:\n  \
+        0  Success\n  \
+        1  General error\n  \
+        2  Not authenticated (session expired or missing)\n  \
+        3  Hardware key not detected\n  \
+        4  Network/server unreachable\n  \
+        5  Permission denied\n  \
+        6  Configuration error"
 )]
 struct Cli {
     /// Vouch server URL.
@@ -70,9 +80,16 @@ enum Commands {
         /// Defaults to "`YubiKey`" if not specified.
         #[arg(long)]
         name: Option<String>,
+        /// Timeout in seconds for YubiKey detection (0 for no timeout).
+        #[arg(long, default_value = "60")]
+        timeout: u64,
     },
     /// Authenticate with your `YubiKey`.
-    Login,
+    Login {
+        /// Timeout in seconds for YubiKey detection (0 for no timeout).
+        #[arg(long, default_value = "60")]
+        timeout: u64,
+    },
     /// Show current session status.
     Status,
     /// End your current session.
@@ -97,7 +114,11 @@ enum Commands {
     /// Generate shell completions.
     Completions(commands::completions::CompletionsArgs),
     /// Check your Vouch environment for common issues.
-    Doctor,
+    Doctor {
+        /// Suppress output (exit code only).
+        #[arg(short, long)]
+        quiet: bool,
+    },
     /// Run diagnostic test of YubiKey registration + authentication (bypasses server).
     #[command(hide = true)]
     Diag(commands::diag::DiagArgs),
@@ -287,7 +308,18 @@ enum SetupCommands {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> ExitCode {
+    match run().await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("Error: {err:#}");
+            exit_code::classify(&err)
+        }
+    }
+}
+
+/// Inner entry point that returns `anyhow::Result`.
+async fn run() -> Result<()> {
     // Check if invoked as docker-credential-vouch (via symlink)
     if check_docker_credential_invocation()? {
         return Ok(());
@@ -333,8 +365,10 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Commands::Enroll => commands::enroll::run(&server).await,
-        Commands::Register { name } => commands::register::run(&server, name.as_deref()).await,
-        Commands::Login => commands::login::run(&server).await,
+        Commands::Register { name, timeout } => {
+            commands::register::run(&server, name.as_deref(), timeout).await
+        }
+        Commands::Login { timeout } => commands::login::run(&server, timeout).await,
         Commands::Status => commands::status::run(&server).await,
         Commands::Logout => commands::logout::run().await,
         Commands::Keys { command } => match command {
@@ -433,7 +467,7 @@ async fn main() -> Result<()> {
             commands::completions::run(&args, &mut cmd);
             Ok(())
         }
-        Commands::Doctor => commands::doctor::run(&server).await,
+        Commands::Doctor { quiet } => commands::doctor::run(&server, quiet).await,
         Commands::Diag(args) => commands::diag::run(args),
     }
 }

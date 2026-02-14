@@ -17,11 +17,11 @@ use crate::fido2::{self, YubiKey};
 
 /// Run the login command.
 /// Uses discoverable credentials - the YubiKey identifies the user.
-pub async fn run(server: &str) -> Result<()> {
+pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
     println!("Logging in...\n");
 
     // Step 1: Wait for YubiKey to be inserted
-    let key = YubiKey::wait_for_device()?;
+    let key = YubiKey::wait_for_device(timeout_secs)?;
 
     // Step 2: Start authentication with server (no email needed)
     print!("Contacting server ({server})... ");

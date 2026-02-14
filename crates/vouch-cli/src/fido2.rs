@@ -198,13 +198,14 @@ impl YubiKey {
         Ok(Self { device })
     }
 
-    /// Wait for a `YubiKey` to be inserted, polling until one is found.
+    /// Wait for a `YubiKey` to be inserted, polling until one is found or timeout.
     ///
     /// Prompts the user to insert their device and polls every 500ms.
-    pub fn wait_for_device() -> Result<Self> {
+    /// A `timeout_secs` of 0 means wait indefinitely.
+    pub fn wait_for_device(timeout_secs: u64) -> Result<Self> {
         use std::io::{Write, stdout};
         use std::thread;
-        use std::time::Duration;
+        use std::time::{Duration, Instant};
 
         let cfg = LibCfg::init();
 
@@ -217,6 +218,13 @@ impl YubiKey {
         print!("Please insert your YubiKey... ");
         stdout().flush().ok();
 
+        let start = Instant::now();
+        let timeout = if timeout_secs == 0 {
+            None
+        } else {
+            Some(Duration::from_secs(timeout_secs))
+        };
+
         loop {
             thread::sleep(Duration::from_millis(500));
 
@@ -225,6 +233,16 @@ impl YubiKey {
                 let key = Self { device };
                 key.wait_until_ready()?;
                 return Ok(key);
+            }
+
+            if let Some(t) = timeout
+                && start.elapsed() >= t
+            {
+                println!();
+                bail!(
+                    "Timed out waiting for YubiKey after {timeout_secs}s. \
+                     Insert your key and try again."
+                );
             }
         }
     }
