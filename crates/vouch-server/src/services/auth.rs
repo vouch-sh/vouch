@@ -15,7 +15,7 @@
 
 use crate::AppState;
 use crate::db::{self, Authenticator, User};
-use crate::handlers::common::{generate_challenge, hash_token};
+use crate::handlers::common::hash_token;
 use crate::webauthn_verify;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -229,12 +229,4 @@ pub async fn create_login_session(
         token,
         expires_at: expires.to_string(),
     })
-}
-
-/// Generate a WebAuthn challenge.
-///
-/// This is a wrapper around the common challenge generation for use in services.
-#[must_use]
-pub fn new_challenge() -> Vec<u8> {
-    generate_challenge()
 }

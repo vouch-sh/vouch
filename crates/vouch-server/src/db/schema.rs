@@ -164,7 +164,6 @@ pub enum ScimGroupMembers {
     Table,
     GroupId,
     UserId,
-    CreatedAt,
 }
 
 /// OAuth clients table.
@@ -235,25 +234,6 @@ pub enum PendingOAuthAuthorizations {
     CreatedAt,
     ExpiresAt,
     ConsumedAt,
-}
-
-/// DPoP nonces table.
-#[derive(Iden)]
-pub enum DpopNonces {
-    Table,
-    Id,
-    Nonce,
-    CreatedAt,
-    ExpiresAt,
-}
-
-/// DPoP JTI cache table.
-#[derive(Iden)]
-pub enum DpopJtiCache {
-    Table,
-    Jti,
-    CreatedAt,
-    ExpiresAt,
 }
 
 /// Token exchanges table (RFC 8693).

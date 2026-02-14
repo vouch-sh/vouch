@@ -53,11 +53,6 @@ use sea_query::{
 /// ```
 pub type DbTimestamp = jiff_sqlx::Timestamp;
 
-/// Extension trait for converting jiff timestamps to database timestamps.
-///
-/// Re-exported from jiff_sqlx for convenience.
-pub use jiff_sqlx::ToSqlx;
-
 // ============================================================================
 // Sea-Query Integration Helpers
 // ============================================================================
