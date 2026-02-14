@@ -1,0 +1,247 @@
+{% extends "base.html" %}
+{% import "macros/auth.html" as auth_macros %}
+
+{% block title %}CodeArtifact - {{ org_name }}{% endblock %}
+
+{% block header_right %}
+{{ auth_macros::header_auth(auth) }}
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center flex-1 p-5">
+    <div class="card max-w-4xl w-full">
+        <a href="/docs" class="inline-flex items-center gap-1.5 text-vouch-accent text-sm mb-6 hover:text-vouch-accent-hover">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+            Back to docs
+        </a>
+        <h1 class="text-3xl font-bold text-gray-200 mb-2">AWS CodeArtifact</h1>
+        <p class="text-gray-400 mb-8">Use private npm, pip, and Maven packages with hardware-verified auth</p>
+
+        <!-- Overview -->
+        <div class="mb-8 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-2">How it works</h2>
+            <p class="text-gray-400 text-sm">
+                <a href="https://docs.aws.amazon.com/codeartifact/latest/ug/welcome.html" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">AWS CodeArtifact</a>
+                hosts private packages for npm, pip, Maven, NuGet, Swift, Cargo, and generic formats.
+                Authentication requires an STS token, which <code class="text-vouch-accent">aws codeartifact login</code>
+                converts into a bearer token for your package manager.
+                Vouch's <code class="text-vouch-accent">credential_process</code> provides the STS credentials automatically &mdash;
+                every token request is backed by a YubiKey tap.
+            </p>
+            <div class="mt-3 text-gray-500 text-xs font-mono">
+                vouch login &rarr; credential_process &rarr; STS &rarr; codeartifact login &rarr; bearer token &rarr; package manager
+            </div>
+        </div>
+
+        <!-- Prerequisites -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Prerequisites</h2>
+            <ul class="space-y-2 text-gray-400 text-sm ml-4">
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-accent mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    <span>Vouch AWS profile configured &mdash; see the <a href="/docs/aws" class="text-vouch-accent hover:text-vouch-accent-hover">AWS setup guide</a></span>
+                </li>
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-accent mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    <span>IAM role with <code class="text-vouch-accent">codeartifact:GetAuthorizationToken</code> and <code class="text-vouch-accent">sts:GetServiceBearerToken</code> permissions</span>
+                </li>
+            </ul>
+        </div>
+
+        <!-- Step 1: Login to CodeArtifact -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">1</span>
+                <span class="text-lg font-semibold text-gray-200">Authenticate to CodeArtifact</span>
+            </div>
+            <div class="ml-11">
+                <p class="text-gray-400 text-sm mb-3">
+                    Use <code class="text-vouch-accent">aws codeartifact login</code> with your Vouch profile.
+                    This fetches an authorization token and configures your package manager automatically.
+                </p>
+
+                <!-- Tabs -->
+                <div class="flex gap-2 mb-3">
+                    <button class="tab tab-active" onclick="showPmTab('npm')">npm</button>
+                    <button class="tab" onclick="showPmTab('pip')">pip</button>
+                    <button class="tab" onclick="showPmTab('maven')">Maven</button>
+                </div>
+
+                <!-- npm -->
+                <div id="pm-npm-tab" class="tab-content">
+                    <div class="code-block relative text-sm">
+                        <pre class="whitespace-pre-wrap"># Configure npm to use your CodeArtifact repository
+aws codeartifact login \
+  --tool npm \
+  --domain my-domain \
+  --domain-owner 123456789012 \
+  --repository my-repo \
+  --profile vouch
+
+# npm is now configured — install packages as normal
+npm install @my-scope/my-package</pre>
+                        <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                    </div>
+                </div>
+
+                <!-- pip -->
+                <div id="pm-pip-tab" class="tab-content hidden">
+                    <div class="code-block relative text-sm">
+                        <pre class="whitespace-pre-wrap"># Configure pip to use your CodeArtifact repository
+aws codeartifact login \
+  --tool pip \
+  --domain my-domain \
+  --domain-owner 123456789012 \
+  --repository my-repo \
+  --profile vouch
+
+# pip is now configured — install packages as normal
+pip install my-private-package
+
+# For publishing, use twine
+aws codeartifact login \
+  --tool twine \
+  --domain my-domain \
+  --domain-owner 123456789012 \
+  --repository my-repo \
+  --profile vouch
+
+twine upload --repository codeartifact dist/*</pre>
+                        <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                    </div>
+                </div>
+
+                <!-- Maven -->
+                <div id="pm-maven-tab" class="tab-content hidden">
+                    <div class="code-block relative text-sm">
+                        <pre class="whitespace-pre-wrap"># Get an auth token for Maven
+export CODEARTIFACT_AUTH_TOKEN=$(aws codeartifact \
+  get-authorization-token \
+  --domain my-domain \
+  --domain-owner 123456789012 \
+  --query authorizationToken \
+  --output text \
+  --profile vouch)
+
+# Use the token in your settings.xml or pass via CLI
+mvn deploy -s settings.xml</pre>
+                        <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                    </div>
+                    <div class="mt-3 p-3 bg-vouch-bg rounded border border-vouch-border">
+                        <p class="text-gray-400 text-sm">
+                            <strong class="text-gray-300">settings.xml</strong> &mdash; reference the environment variable as the password:
+                        </p>
+                        <div class="code-block mt-2 text-xs">
+                            <pre class="whitespace-pre-wrap">&lt;server&gt;
+  &lt;id&gt;codeartifact&lt;/id&gt;
+  &lt;username&gt;aws&lt;/username&gt;
+  &lt;password&gt;${env.CODEARTIFACT_AUTH_TOKEN}&lt;/password&gt;
+&lt;/server&gt;</pre>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Token lifetime -->
+        <div class="mb-8 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-2">Token lifetime and refresh</h2>
+            <p class="text-gray-400 text-sm">
+                CodeArtifact authorization tokens are valid for up to <strong class="text-gray-300">12 hours</strong> by default.
+                When the token expires, re-run <code class="text-vouch-accent">aws codeartifact login</code> to get a fresh token.
+                If your Vouch session (8 hours) has also expired, run <code class="text-vouch-accent">vouch login</code> first.
+            </p>
+        </div>
+
+        <!-- Cross-account access -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">2</span>
+                <span class="text-lg font-semibold text-gray-200">Cross-Account Access</span>
+            </div>
+            <div class="ml-11">
+                <p class="text-gray-400 text-sm mb-3">
+                    If your CodeArtifact domain is in a different AWS account, configure a separate Vouch
+                    profile with a role in that account and pass <code class="text-vouch-accent">--profile</code>
+                    to <code class="text-vouch-accent">aws codeartifact login</code>.
+                </p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># Set up a second profile for the artifacts account
+vouch setup aws \
+  --role arn:aws:iam::ARTIFACTS_ACCOUNT:role/CodeArtifactReader \
+  --profile vouch-artifacts
+
+# Use it when logging in to CodeArtifact
+aws codeartifact login \
+  --tool npm \
+  --domain shared-packages \
+  --domain-owner ARTIFACTS_ACCOUNT \
+  --repository npm-store \
+  --profile vouch-artifacts</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Troubleshooting -->
+        <div class="mt-10 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-3">Troubleshooting</h2>
+            <dl class="space-y-3 text-sm">
+                <div>
+                    <dt class="text-gray-300 font-medium">Token expired during long build</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Re-run <code class="text-vouch-accent">aws codeartifact login</code> to refresh the token.
+                        You can set a longer duration with <code class="text-vouch-accent">--duration-seconds 43200</code> (12 hours max).
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">AccessDeniedException on login</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Your IAM role needs <code class="text-vouch-accent">codeartifact:GetAuthorizationToken</code>
+                        and <code class="text-vouch-accent">sts:GetServiceBearerToken</code> permissions. Also ensure
+                        the CodeArtifact domain policy allows access from your account.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">403 when installing packages</dt>
+                    <dd class="text-gray-400 mt-1">
+                        The IAM role also needs <code class="text-vouch-accent">codeartifact:ReadFromRepository</code>
+                        (or <code class="text-vouch-accent">codeartifact:PublishPackageVersion</code> for publishing).
+                        Check the repository resource policy.
+                    </dd>
+                </div>
+            </dl>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function showPmTab(tab) {
+        document.querySelectorAll('[onclick^="showPmTab"]').forEach(el => {
+            el.classList.remove('tab-active');
+        });
+        event.target.classList.add('tab-active');
+
+        document.querySelectorAll('[id^="pm-"][id$="-tab"]').forEach(el => {
+            el.classList.add('hidden');
+        });
+        document.getElementById('pm-' + tab + '-tab').classList.remove('hidden');
+    }
+
+    function copyCode(button) {
+        const codeBlock = button.parentElement.querySelector('pre');
+        const text = codeBlock.textContent;
+        navigator.clipboard.writeText(text).then(() => {
+            const original = button.textContent;
+            button.textContent = 'Copied!';
+            setTimeout(() => button.textContent = original, 2000);
+        });
+    }
+</script>
+{% endblock %}

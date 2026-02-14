@@ -1,0 +1,135 @@
+{% extends "base.html" %}
+{% import "macros/auth.html" as auth_macros %}
+
+{% block title %}Infrastructure as Code - {{ org_name }}{% endblock %}
+
+{% block header_right %}
+{{ auth_macros::header_auth(auth) }}
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center flex-1 p-5">
+    <div class="card max-w-4xl w-full">
+        <a href="/docs" class="inline-flex items-center gap-1.5 text-vouch-accent text-sm mb-6 hover:text-vouch-accent-hover">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+            Back to docs
+        </a>
+        <h1 class="text-3xl font-bold text-gray-200 mb-2">Infrastructure as Code</h1>
+        <p class="text-gray-400 mb-8">Use CDK, Terraform, SAM, and other IaC tools with Vouch</p>
+
+        <!-- Overview -->
+        <div class="mb-8 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-2">How it works</h2>
+            <p class="text-gray-400 text-sm">
+                If a tool reads <code class="text-vouch-accent">~/.aws/config</code>, it already works with Vouch.
+                The <code class="text-vouch-accent">credential_process</code> setting in your Vouch AWS profile
+                is picked up by the AWS SDK, which means every IaC tool that uses the SDK gets hardware-verified
+                credentials automatically. No plugins or wrappers needed.
+            </p>
+        </div>
+
+        <!-- Tools -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Supported Tools</h2>
+
+            <!-- AWS CDK -->
+            <div class="mb-4 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+                <h3 class="font-medium text-gray-200 mb-2">AWS CDK</h3>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">cdk deploy --profile vouch</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+                <p class="text-gray-400 text-sm mt-2">
+                    CDK has known issues with SSO credential discovery
+                    (<a href="https://github.com/aws/aws-cdk/issues/23520" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">#23520</a>,
+                    <a href="https://github.com/aws/aws-cdk/issues/21328" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">#21328</a>)
+                    that <code class="text-vouch-accent">credential_process</code> avoids entirely.
+                </p>
+            </div>
+
+            <!-- AWS SAM -->
+            <div class="mb-4 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+                <h3 class="font-medium text-gray-200 mb-2">AWS SAM</h3>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">sam deploy --profile vouch</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- Terraform -->
+            <div class="mb-4 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+                <h3 class="font-medium text-gray-200 mb-2">Terraform</h3>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># Set the AWS profile for the session
+export AWS_PROFILE=vouch
+terraform plan
+terraform apply</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+                <p class="text-gray-400 text-sm mt-2">
+                    This works for the AWS provider's authentication. Terraform Cloud registry auth is separate and not
+                    handled by Vouch.
+                </p>
+            </div>
+
+            <!-- AWS Copilot -->
+            <div class="mb-4 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+                <h3 class="font-medium text-gray-200 mb-2">AWS Copilot</h3>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">export AWS_PROFILE=vouch
+copilot deploy</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+
+            <!-- AWS Amplify -->
+            <div class="mb-4 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+                <h3 class="font-medium text-gray-200 mb-2">AWS Amplify</h3>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">export AWS_PROFILE=vouch
+amplify push</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+                <p class="text-gray-400 text-sm mt-2">
+                    <code class="text-vouch-accent">amplify configure</code> normally encourages creating long-lived IAM access keys.
+                    With Vouch, you skip that entirely &mdash; temporary credentials are provided on every request.
+                </p>
+            </div>
+
+            <!-- Pulumi -->
+            <div class="p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+                <h3 class="font-medium text-gray-200 mb-2">Pulumi</h3>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">export AWS_PROFILE=vouch
+pulumi up</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tip -->
+        <div class="p-4 bg-vouch-bg rounded-lg border border-vouch-border">
+            <p class="text-gray-400 text-sm">
+                <strong class="text-gray-300">Tip:</strong> Instead of passing <code class="text-vouch-accent">--profile vouch</code>
+                to every command, set <code class="text-vouch-accent">export AWS_PROFILE=vouch</code> in your shell
+                or add it to your <code class="text-vouch-accent">.bashrc</code> / <code class="text-vouch-accent">.zshrc</code>.
+                All AWS SDK-based tools will then use Vouch automatically.
+            </p>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function copyCode(button) {
+        const codeBlock = button.parentElement.querySelector('pre');
+        const text = codeBlock.textContent;
+        navigator.clipboard.writeText(text).then(() => {
+            const original = button.textContent;
+            button.textContent = 'Copied!';
+            setTimeout(() => button.textContent = original, 2000);
+        });
+    }
+</script>
+{% endblock %}

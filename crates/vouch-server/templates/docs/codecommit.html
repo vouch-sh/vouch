@@ -1,0 +1,180 @@
+{% extends "base.html" %}
+{% import "macros/auth.html" as auth_macros %}
+
+{% block title %}CodeCommit - {{ org_name }}{% endblock %}
+
+{% block header_right %}
+{{ auth_macros::header_auth(auth) }}
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center flex-1 p-5">
+    <div class="card max-w-4xl w-full">
+        <a href="/docs" class="inline-flex items-center gap-1.5 text-vouch-accent text-sm mb-6 hover:text-vouch-accent-hover">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+            Back to docs
+        </a>
+        <h1 class="text-3xl font-bold text-gray-200 mb-2">AWS CodeCommit</h1>
+        <p class="text-gray-400 mb-8">Access CodeCommit repositories using short-lived credentials</p>
+
+        <!-- Overview -->
+        <div class="mb-8 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-2">How it works</h2>
+            <p class="text-gray-400 text-sm">
+                <a href="https://docs.aws.amazon.com/codecommit/latest/userguide/setting-up-git-remote-codecommit.html" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">git-remote-codecommit</a>
+                is a Git remote helper that uses the AWS credential chain to sign requests to CodeCommit.
+                With Vouch's <code class="text-vouch-accent">credential_process</code> in your AWS profile,
+                every <code class="text-vouch-accent">git clone</code>, <code class="text-vouch-accent">git push</code>,
+                and <code class="text-vouch-accent">git pull</code> is authenticated with short-lived STS credentials
+                backed by your YubiKey.
+            </p>
+        </div>
+
+        <!-- Why this approach -->
+        <div class="mb-8 p-4 bg-vouch-bg rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-2">Why git-remote-codecommit?</h2>
+            <p class="text-gray-400 text-sm mb-3">
+                AWS offers three ways to authenticate to CodeCommit. The <code class="text-vouch-accent">codecommit://</code>
+                protocol with <code class="text-vouch-accent">git-remote-codecommit</code> is the only one that works
+                cleanly with short-lived credentials:
+            </p>
+            <dl class="space-y-2 text-sm">
+                <div>
+                    <dt class="text-gray-300 font-medium">HTTPS Git credentials (IAM-generated username/password)</dt>
+                    <dd class="text-gray-400 mt-1">Static credentials that must be rotated manually. Stored in plaintext by most Git credential managers.</dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">aws codecommit credential-helper</dt>
+                    <dd class="text-gray-400 mt-1">Conflicts with macOS Keychain and Git Credential Manager. Known to cause "unable to access" errors when other credential helpers are installed.</dd>
+                </div>
+                <div>
+                    <dt class="text-vouch-accent font-medium">git-remote-codecommit (recommended)</dt>
+                    <dd class="text-gray-400 mt-1">Uses the standard AWS credential chain. No conflicts with other credential helpers. Works with <code class="text-vouch-accent">credential_process</code> out of the box.</dd>
+                </div>
+            </dl>
+        </div>
+
+        <!-- Prerequisites -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Prerequisites</h2>
+            <ul class="space-y-2 text-gray-400 text-sm ml-4">
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-accent mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    <span>Vouch AWS profile configured &mdash; see the <a href="/docs/aws" class="text-vouch-accent hover:text-vouch-accent-hover">AWS setup guide</a></span>
+                </li>
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-accent mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    <span><code class="text-vouch-accent">pip install git-remote-codecommit</code></span>
+                </li>
+            </ul>
+        </div>
+
+        <!-- Step 1: Install -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">1</span>
+                <span class="text-lg font-semibold text-gray-200">Install git-remote-codecommit</span>
+            </div>
+            <div class="ml-11">
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">pip install git-remote-codecommit</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Step 2: Clone -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">2</span>
+                <span class="text-lg font-semibold text-gray-200">Clone a Repository</span>
+            </div>
+            <div class="ml-11">
+                <p class="text-gray-400 text-sm mb-3">
+                    Use the <code class="text-vouch-accent">codecommit://</code> URL scheme with your Vouch AWS profile name.
+                </p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># Clone using your Vouch profile
+git clone codecommit://vouch@my-repo
+
+# For a specific region
+git clone codecommit::us-west-2://vouch@my-repo</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+                <p class="text-gray-500 text-xs mt-2">
+                    The profile name before <code>@</code> must match your Vouch AWS profile (typically <code>vouch</code>).
+                </p>
+            </div>
+        </div>
+
+        <!-- Step 3: Use Git normally -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">3</span>
+                <span class="text-lg font-semibold text-gray-200">Use Git Normally</span>
+            </div>
+            <div class="ml-11">
+                <p class="text-gray-400 text-sm mb-3">
+                    All Git operations work as expected. Vouch provides fresh STS credentials for each operation.
+                </p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap">git add .
+git commit -m "Update feature"
+git push
+git pull</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Troubleshooting -->
+        <div class="mt-10 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-3">Troubleshooting</h2>
+            <dl class="space-y-3 text-sm">
+                <div>
+                    <dt class="text-gray-300 font-medium">"git: 'remote-codecommit' is not a git command"</dt>
+                    <dd class="text-gray-400 mt-1">
+                        <code class="text-vouch-accent">git-remote-codecommit</code> is not installed or not on your PATH.
+                        Run <code class="text-vouch-accent">pip install git-remote-codecommit</code> and ensure the pip scripts
+                        directory is in your PATH.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">Access denied on push/pull</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Your IAM role needs <code class="text-vouch-accent">codecommit:GitPull</code> and
+                        <code class="text-vouch-accent">codecommit:GitPush</code> permissions. Check that the
+                        profile name in the clone URL matches your Vouch profile.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">Conflicts with existing Git credential helper</dt>
+                    <dd class="text-gray-400 mt-1">
+                        The <code class="text-vouch-accent">codecommit://</code> protocol bypasses Git's credential helper system entirely,
+                        so there should be no conflicts. If you previously configured <code>credential.helper</code>
+                        for CodeCommit HTTPS URLs, those settings are ignored for <code>codecommit://</code> URLs.
+                    </dd>
+                </div>
+            </dl>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function copyCode(button) {
+        const codeBlock = button.parentElement.querySelector('pre');
+        const text = codeBlock.textContent;
+        navigator.clipboard.writeText(text).then(() => {
+            const original = button.textContent;
+            button.textContent = 'Copied!';
+            setTimeout(() => button.textContent = original, 2000);
+        });
+    }
+</script>
+{% endblock %}

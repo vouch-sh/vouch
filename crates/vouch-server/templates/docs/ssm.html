@@ -1,0 +1,211 @@
+{% extends "base.html" %}
+{% import "macros/auth.html" as auth_macros %}
+
+{% block title %}SSM Session Manager - {{ org_name }}{% endblock %}
+
+{% block header_right %}
+{{ auth_macros::header_auth(auth) }}
+{% endblock %}
+
+{% block content %}
+<div class="flex items-center justify-center flex-1 p-5">
+    <div class="card max-w-4xl w-full">
+        <a href="/docs" class="inline-flex items-center gap-1.5 text-vouch-accent text-sm mb-6 hover:text-vouch-accent-hover">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M10.5 19.5 3 12m0 0 7.5-7.5M3 12h18"/></svg>
+            Back to docs
+        </a>
+        <h1 class="text-3xl font-bold text-gray-200 mb-2">SSM Session Manager</h1>
+        <p class="text-gray-400 mb-8">SSH to EC2 instances through Session Manager with hardware-verified access</p>
+
+        <!-- Overview -->
+        <div class="mb-8 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-2">How it works</h2>
+            <p class="text-gray-400 text-sm">
+                <a href="https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager.html" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">AWS Systems Manager Session Manager</a>
+                provides shell access to EC2 instances without opening inbound ports or managing SSH keys.
+                Sessions are tunneled through the SSM agent and authenticated via IAM.
+                With Vouch's <code class="text-vouch-accent">credential_process</code>, every session start
+                requires a hardware-verified identity, and STS session tags populate the SSM session with your email for audit.
+            </p>
+        </div>
+
+        <!-- Benefits -->
+        <div class="mb-8 p-4 bg-vouch-bg rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-3">Benefits over direct SSH</h2>
+            <ul class="text-gray-400 text-sm space-y-2">
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-success flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>
+                    <span><strong class="text-gray-300">No security group changes</strong> &mdash; instances don't need port 22 open</span>
+                </li>
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-success flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>
+                    <span><strong class="text-gray-300">No key management</strong> &mdash; authentication is through IAM, not SSH keys</span>
+                </li>
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-success flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>
+                    <span><strong class="text-gray-300">Full audit trail</strong> &mdash; every session is logged in CloudTrail with your Vouch identity</span>
+                </li>
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-success flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>
+                    <span><strong class="text-gray-300">Private instances</strong> &mdash; works with instances that have no public IP</span>
+                </li>
+            </ul>
+        </div>
+
+        <!-- Prerequisites -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-4">Prerequisites</h2>
+            <ul class="space-y-2 text-gray-400 text-sm ml-4">
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-accent mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    <span>Vouch AWS profile configured &mdash; see the <a href="/docs/aws" class="text-vouch-accent hover:text-vouch-accent-hover">AWS setup guide</a></span>
+                </li>
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-accent mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    <span><a href="https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">Session Manager plugin</a> installed</span>
+                </li>
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-accent mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                    </svg>
+                    <span>EC2 instances with the SSM agent running and an instance profile with <code class="text-vouch-accent">AmazonSSMManagedInstanceCore</code></span>
+                </li>
+            </ul>
+        </div>
+
+        <!-- Step 1: SSH Config -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">1</span>
+                <span class="text-lg font-semibold text-gray-200">Configure SSH ProxyCommand</span>
+            </div>
+            <div class="ml-11">
+                <p class="text-gray-400 text-sm mb-3">
+                    Add a host pattern to <code class="text-vouch-accent">~/.ssh/config</code> that routes
+                    connections to instance IDs through Session Manager.
+                </p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># ~/.ssh/config
+Host i-*
+    ProxyCommand sh -c "AWS_PROFILE=vouch aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters 'portNumber=%p'"
+    User ec2-user
+    StrictHostKeyChecking accept-new</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+                <p class="text-gray-500 text-xs mt-2">
+                    This matches any hostname starting with <code>i-</code> (EC2 instance IDs) and tunnels through SSM.
+                </p>
+            </div>
+        </div>
+
+        <!-- Step 2: Connect -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">2</span>
+                <span class="text-lg font-semibold text-gray-200">Connect to an Instance</span>
+            </div>
+            <div class="ml-11">
+                <p class="text-gray-400 text-sm mb-3">
+                    SSH to any instance by its instance ID. Vouch's <code class="text-vouch-accent">credential_process</code>
+                    handles FIDO2 verification automatically when the SSH connection triggers an AWS API call.
+                </p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># SSH via SSM — triggers FIDO2 verification
+ssh i-0123456789abcdef0
+
+# Or start a raw session (no SSH)
+AWS_PROFILE=vouch aws ssm start-session --target i-0123456789abcdef0</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Port Forwarding -->
+        <div class="mb-8">
+            <div class="flex items-center gap-3 mb-4">
+                <span class="step-number">3</span>
+                <span class="text-lg font-semibold text-gray-200">Port Forwarding</span>
+            </div>
+            <div class="ml-11">
+                <p class="text-gray-400 text-sm mb-3">
+                    Use SSM port forwarding to access databases and other services running on private instances
+                    without exposing them to the network.
+                </p>
+                <div class="code-block relative text-sm">
+                    <pre class="whitespace-pre-wrap"># Forward local port 5432 to RDS through a bastion instance
+AWS_PROFILE=vouch aws ssm start-session \
+  --target i-0123456789abcdef0 \
+  --document-name AWS-StartPortForwardingSessionToRemoteHost \
+  --parameters '{
+    "host": ["my-database.cluster-abc123.us-east-1.rds.amazonaws.com"],
+    "portNumber": ["5432"],
+    "localPortNumber": ["5432"]
+  }'
+
+# Then connect locally
+psql -h localhost -p 5432 -U myuser mydb</pre>
+                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Session Tags -->
+        <div class="mb-8 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-2">Session identity and audit</h2>
+            <p class="text-gray-400 text-sm">
+                Vouch passes your <code class="text-vouch-accent">email</code> and <code class="text-vouch-accent">domain</code>
+                as STS session tags with every credential request. These tags appear in CloudTrail as part of the
+                <code class="text-vouch-accent">StartSession</code> event, providing a clear audit trail from YubiKey tap
+                to SSM session.
+            </p>
+        </div>
+
+        <!-- Troubleshooting -->
+        <div class="mt-10 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-3">Troubleshooting</h2>
+            <dl class="space-y-3 text-sm">
+                <div>
+                    <dt class="text-gray-300 font-medium">SessionManagerPlugin is not found</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Install the <a href="https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">Session Manager plugin</a>.
+                        On macOS: <code class="text-vouch-accent">brew install session-manager-plugin</code>.
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">TargetNotConnected error</dt>
+                    <dd class="text-gray-400 mt-1">
+                        The SSM agent is not running or the instance doesn't have connectivity to the SSM endpoints.
+                        Verify the instance profile includes <code class="text-vouch-accent">AmazonSSMManagedInstanceCore</code>
+                        and the instance can reach SSM endpoints (via NAT, VPC endpoint, or public IP).
+                    </dd>
+                </div>
+                <div>
+                    <dt class="text-gray-300 font-medium">Access denied on StartSession</dt>
+                    <dd class="text-gray-400 mt-1">
+                        Your IAM role needs <code class="text-vouch-accent">ssm:StartSession</code> permission.
+                        You can scope this to specific instances using resource ARNs or tags.
+                    </dd>
+                </div>
+            </dl>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+    function copyCode(button) {
+        const codeBlock = button.parentElement.querySelector('pre');
+        const text = codeBlock.textContent;
+        navigator.clipboard.writeText(text).then(() => {
+            const original = button.textContent;
+            button.textContent = 'Copied!';
+            setTimeout(() => button.textContent = original, 2000);
+        });
+    }
+</script>
+{% endblock %}

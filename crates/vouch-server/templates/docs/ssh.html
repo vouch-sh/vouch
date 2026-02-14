@@ -222,6 +222,33 @@ ssh-keygen -L -f ~/.ssh/id_vouch-cert.pub</pre>
             </div>
         </div>
 
+        <!-- IDE Remote Development -->
+        <div class="mb-8 p-4 bg-vouch-bg rounded-lg border border-vouch-border">
+            <h2 class="text-lg font-semibold text-gray-200 mb-2">IDE Remote Development</h2>
+            <p class="text-gray-400 text-sm mb-3">
+                Because Vouch configures your local <code class="text-vouch-accent">~/.ssh/config</code>, IDE remote development
+                features that use your SSH config work automatically:
+            </p>
+            <ul class="text-gray-400 text-sm space-y-2">
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-success flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>
+                    <span><strong class="text-gray-300">VS Code Remote - SSH</strong> &mdash; connect to remote hosts from the command palette</span>
+                </li>
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-success flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>
+                    <span><strong class="text-gray-300">JetBrains Gateway</strong> &mdash; remote development via SSH</span>
+                </li>
+                <li class="flex items-start gap-2">
+                    <svg class="w-5 h-5 text-vouch-success flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>
+                    <span><strong class="text-gray-300">scp, rsync, sftp</strong> &mdash; any tool that reads SSH config</span>
+                </li>
+            </ul>
+            <p class="text-gray-500 text-xs mt-3">
+                No additional configuration needed. Just run <code class="text-vouch-accent">vouch login</code> and your IDE
+                picks up the certificate automatically.
+            </p>
+        </div>
+
         <!-- Troubleshooting -->
         <div class="mt-10 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
             <h2 class="text-lg font-semibold text-gray-200 mb-3">Troubleshooting</h2>
