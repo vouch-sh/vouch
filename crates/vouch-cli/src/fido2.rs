@@ -58,14 +58,23 @@ impl SuppressStdout {
         use std::os::unix::io::AsRawFd;
 
         let stdout_fd = std::io::stdout().as_raw_fd();
+        // SAFETY: `libc::dup` duplicates a valid file descriptor (stdout = fd 1).
+        // This is safe because fd 1 is always open in a running process and `dup`
+        // only reads the fd table. All FIDO2 calls are synchronous and single-threaded,
+        // so no other thread is concurrently modifying stdout.
         let saved_fd = unsafe { libc::dup(stdout_fd) };
         if saved_fd < 0 {
             return None;
         }
         if let Ok(devnull) = std::fs::OpenOptions::new().write(true).open("/dev/null") {
+            // SAFETY: `libc::dup2` atomically replaces stdout (fd 1) with /dev/null.
+            // Both `devnull.as_raw_fd()` and `stdout_fd` are valid open descriptors.
+            // The original stdout is preserved in `saved_fd` and restored on drop.
             unsafe { libc::dup2(devnull.as_raw_fd(), stdout_fd) };
             Some(Self { saved_fd })
         } else {
+            // SAFETY: `saved_fd` is a valid fd returned by `dup` above. We close it
+            // because we failed to open /dev/null and won't be using the guard.
             unsafe { libc::close(saved_fd) };
             None
         }
@@ -78,6 +87,11 @@ impl Drop for SuppressStdout {
     fn drop(&mut self) {
         use std::os::unix::io::AsRawFd;
         let stdout_fd = std::io::stdout().as_raw_fd();
+        // SAFETY: Restoring stdout by dup2'ing the saved fd back onto fd 1, then
+        // closing the saved copy. `self.saved_fd` was obtained from `dup(stdout_fd)`
+        // in `new()` and is still valid (only used here). `stdout_fd` (fd 1) is valid
+        // in any running process. Single-threaded FIDO2 context ensures no concurrent
+        // fd modifications.
         unsafe {
             libc::dup2(self.saved_fd, stdout_fd);
             libc::close(self.saved_fd);

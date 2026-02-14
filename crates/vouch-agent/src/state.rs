@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::warn;
 
 /// Session information stored by the agent.
 #[derive(Debug, Clone)]
@@ -135,10 +136,24 @@ struct CachedCredentialWire {
 
 impl From<CachedCredentialWire> for CachedCredential {
     fn from(wire: CachedCredentialWire) -> Self {
+        let expires_at = wire.expires_at.parse().unwrap_or_else(|e| {
+            warn!(
+                "invalid expires_at timestamp '{}': {e}; treating as expired",
+                wire.expires_at
+            );
+            Timestamp::UNIX_EPOCH
+        });
+        let cached_at = wire.cached_at.parse().unwrap_or_else(|e| {
+            warn!(
+                "invalid cached_at timestamp '{}': {e}; defaulting to epoch",
+                wire.cached_at
+            );
+            Timestamp::UNIX_EPOCH
+        });
         Self {
             data: SecretString::from(wire.data.to_string()),
-            expires_at: wire.expires_at.parse().unwrap_or(Timestamp::UNIX_EPOCH),
-            cached_at: wire.cached_at.parse().unwrap_or(Timestamp::UNIX_EPOCH),
+            expires_at,
+            cached_at,
         }
     }
 }

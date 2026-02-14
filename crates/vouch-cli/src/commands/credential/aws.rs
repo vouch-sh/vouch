@@ -98,47 +98,24 @@ pub(crate) fn build_session_tags(claims: &serde_json::Value) -> Vec<(String, Str
 
 /// Run the AWS credential command.
 ///
-/// Uses a cache-first strategy:
+/// Uses a cache-first strategy via [`super::cache::get_or_fetch`]:
 /// 1. Check agent cache — return immediately if valid cached credentials exist
 /// 2. Fetch fresh OIDC token from Vouch server, call STS, cache the result
 /// 3. On network error, fall back to cached credentials (if any)
 pub async fn run(server: &str, role_arn: &str, session_name: Option<&str>) -> Result<()> {
     let cache_key = format!("aws:{role_arn}");
 
-    // 1. Check agent cache first
-    if let Some(cached) = super::cache::get(&cache_key).await {
-        let json = serde_json::to_string(&cached).context("failed to serialize credentials")?;
-        println!("{json}");
-        return Ok(());
-    }
+    let data = super::cache::get_or_fetch(&cache_key, "AWS credentials", || async {
+        let output = fetch_and_assume(server, role_arn, session_name).await?;
+        let expires_at = output.expiration.clone();
+        let data = serde_json::to_value(&output).context("failed to serialize credentials")?;
+        Ok((data, expires_at))
+    })
+    .await?;
 
-    // 2. Fetch fresh credentials from server + STS
-    match fetch_and_assume(server, role_arn, session_name).await {
-        Ok(output) => {
-            let json = serde_json::to_string(&output).context("failed to serialize credentials")?;
-
-            // Cache for subsequent calls (best-effort)
-            if let Ok(cache_data) = serde_json::to_value(&output) {
-                super::cache::store(&cache_key, cache_data, &output.expiration).await;
-            }
-
-            println!("{json}");
-            Ok(())
-        }
-        Err(server_err) if super::cache::is_network_error(&server_err) => {
-            // 3. Network error — fall back to cache (may have been stored by a prior call)
-            if let Some(cached) = super::cache::get(&cache_key).await {
-                eprintln!("vouch: using cached AWS credentials (server unreachable)");
-                let json =
-                    serde_json::to_string(&cached).context("failed to serialize credentials")?;
-                println!("{json}");
-                Ok(())
-            } else {
-                Err(server_err)
-            }
-        }
-        Err(e) => Err(e),
-    }
+    let json = serde_json::to_string(&data).context("failed to serialize credentials")?;
+    println!("{json}");
+    Ok(())
 }
 
 /// Fetch an OIDC token from the Vouch server and exchange it for STS credentials.

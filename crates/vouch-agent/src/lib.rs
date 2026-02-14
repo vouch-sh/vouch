@@ -27,6 +27,7 @@
 //! }
 //! ```
 
+pub mod audit;
 #[cfg(unix)]
 pub mod client;
 pub mod daemon;
