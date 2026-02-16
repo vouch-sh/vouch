@@ -153,8 +153,13 @@ async fn run_agent_server(enable_ssh_agent: bool) -> ExitCode {
     // Shutdown signal channel for graceful shutdown
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
 
-    // Create servers
-    let server = AgentServer::new(Arc::clone(&state), Arc::clone(&ssh_state));
+    // Create servers — each gets its own receiver from the shutdown channel
+    let agent_shutdown_rx = shutdown_rx.clone();
+    let server = AgentServer::new(
+        Arc::clone(&state),
+        Arc::clone(&ssh_state),
+        agent_shutdown_rx,
+    );
     // Create SSH agent server with access to main agent state for certificate refresh
     let ssh_server =
         SshAgentServer::with_agent_state(Arc::clone(&ssh_state), Arc::clone(&state), shutdown_rx);

@@ -161,6 +161,9 @@ enum Commands {
         /// Suppress output (exit code only).
         #[arg(short, long)]
         quiet: bool,
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Run diagnostic test of YubiKey registration + authentication (bypasses server).
     #[command(hide = true)]
@@ -545,7 +548,7 @@ async fn run() -> Result<()> {
             commands::completions::run(&args, &mut cmd);
             Ok(())
         }
-        Commands::Doctor { quiet } => commands::doctor::run(&server, quiet).await,
+        Commands::Doctor { quiet, json } => commands::doctor::run(&server, quiet, json).await,
         Commands::Diag(args) => commands::diag::run(args),
     }
 }

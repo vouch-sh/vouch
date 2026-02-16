@@ -71,7 +71,7 @@ aws-smithy-types = { version = "=1.4.4", default-features = false }
 tempfile = { workspace = true }
 
 # Lock-free atomic config updates
-arc-swap = { version = "=1.8.1", default-features = false }
+arc-swap = { version = "=1.8.2", default-features = false }
 
 # Async utilities for coordinated shutdown (CancellationToken)
 tokio-util = { version = "=0.7.18", default-features = false }
