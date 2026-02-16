@@ -533,6 +533,13 @@ async fn run_server(args: config::Args) -> Result<()> {
         .route("/docs/applications", get(handlers::docs::applications_page))
         .route("/docs/scim", get(handlers::docs::scim_page))
         .route("/docs/cargo", get(handlers::docs::cargo_page))
+        .route("/docs/codeartifact", get(handlers::docs::codeartifact_page))
+        .route("/docs/codecommit", get(handlers::docs::codecommit_page))
+        .route("/docs/ssm", get(handlers::docs::ssm_page))
+        .route("/docs/databases", get(handlers::docs::databases_page))
+        .route("/docs/iac", get(handlers::docs::iac_page))
+        .route("/docs/cicd", get(handlers::docs::cicd_page))
+        .route("/docs/bedrock", get(handlers::docs::bedrock_page))
         // Integrations page
         .route(
             "/integrations",

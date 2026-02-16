@@ -267,3 +267,172 @@ pub async fn cargo_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> i
         auth,
     }
 }
+
+/// CodeArtifact documentation page template.
+#[derive(Template)]
+#[template(path = "docs/codeartifact.html")]
+pub struct DocsCodeArtifactTemplate {
+    /// Organization name for branding.
+    pub org_name: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
+}
+
+impl_template_response!(DocsCodeArtifactTemplate);
+
+/// CodeCommit documentation page template.
+#[derive(Template)]
+#[template(path = "docs/codecommit.html")]
+pub struct DocsCodeCommitTemplate {
+    /// Organization name for branding.
+    pub org_name: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
+}
+
+impl_template_response!(DocsCodeCommitTemplate);
+
+/// SSM Session Manager documentation page template.
+#[derive(Template)]
+#[template(path = "docs/ssm.html")]
+pub struct DocsSsmTemplate {
+    /// Organization name for branding.
+    pub org_name: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
+}
+
+impl_template_response!(DocsSsmTemplate);
+
+/// Database Authentication documentation page template.
+#[derive(Template)]
+#[template(path = "docs/databases.html")]
+pub struct DocsDatabasesTemplate {
+    /// Organization name for branding.
+    pub org_name: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
+}
+
+impl_template_response!(DocsDatabasesTemplate);
+
+/// Infrastructure as Code documentation page template.
+#[derive(Template)]
+#[template(path = "docs/iac.html")]
+pub struct DocsIacTemplate {
+    /// Organization name for branding.
+    pub org_name: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
+}
+
+impl_template_response!(DocsIacTemplate);
+
+/// CI/CD Integration documentation page template.
+#[derive(Template)]
+#[template(path = "docs/cicd.html")]
+pub struct DocsCicdTemplate {
+    /// The OIDC provider URL (base_url).
+    pub provider_url: String,
+    /// The RP ID (domain) for the OIDC provider.
+    pub rp_id: String,
+    /// Organization name for branding.
+    pub org_name: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
+}
+
+impl_template_response!(DocsCicdTemplate);
+
+/// AI Model Access (Bedrock) documentation page template.
+#[derive(Template)]
+#[template(path = "docs/bedrock.html")]
+pub struct DocsBedrockTemplate {
+    /// Organization name for branding.
+    pub org_name: String,
+    /// Authentication context for header display.
+    pub auth: AuthContext,
+}
+
+impl_template_response!(DocsBedrockTemplate);
+
+/// CodeArtifact documentation page.
+/// GET /docs/codeartifact
+pub async fn codeartifact_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let auth = get_auth_context(&state, &jar).await;
+    DocsCodeArtifactTemplate {
+        org_name: state.config().get_org_display_name().to_string(),
+        auth,
+    }
+}
+
+/// CodeCommit documentation page.
+/// GET /docs/codecommit
+pub async fn codecommit_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let auth = get_auth_context(&state, &jar).await;
+    DocsCodeCommitTemplate {
+        org_name: state.config().get_org_display_name().to_string(),
+        auth,
+    }
+}
+
+/// SSM Session Manager documentation page.
+/// GET /docs/ssm
+pub async fn ssm_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
+    let auth = get_auth_context(&state, &jar).await;
+    DocsSsmTemplate {
+        org_name: state.config().get_org_display_name().to_string(),
+        auth,
+    }
+}
+
+/// Database Authentication documentation page.
+/// GET /docs/databases
+pub async fn databases_page(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> impl IntoResponse {
+    let auth = get_auth_context(&state, &jar).await;
+    DocsDatabasesTemplate {
+        org_name: state.config().get_org_display_name().to_string(),
+        auth,
+    }
+}
+
+/// Infrastructure as Code documentation page.
+/// GET /docs/iac
+pub async fn iac_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
+    let auth = get_auth_context(&state, &jar).await;
+    DocsIacTemplate {
+        org_name: state.config().get_org_display_name().to_string(),
+        auth,
+    }
+}
+
+/// CI/CD Integration documentation page.
+/// GET /docs/cicd
+pub async fn cicd_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
+    let auth = get_auth_context(&state, &jar).await;
+    DocsCicdTemplate {
+        provider_url: state.config().base_url.clone(),
+        rp_id: state.config().rp_id.clone(),
+        org_name: state.config().get_org_display_name().to_string(),
+        auth,
+    }
+}
+
+/// AI Model Access (Bedrock) documentation page.
+/// GET /docs/bedrock
+pub async fn bedrock_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> impl IntoResponse {
+    let auth = get_auth_context(&state, &jar).await;
+    DocsBedrockTemplate {
+        org_name: state.config().get_org_display_name().to_string(),
+        auth,
+    }
+}

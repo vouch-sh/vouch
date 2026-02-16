@@ -117,9 +117,54 @@
                 </li>
                 <li class="flex items-start gap-2">
                     <svg class="w-5 h-5 text-vouch-success flex-shrink-0 mt-0.5" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5"/></svg>
-                    <span>Everything <strong class="text-gray-300">auto-expires</strong> - no keys to rotate or revoke</span>
+                    <span>Everything <strong class="text-gray-300">auto-expires</strong> &mdash; no keys to rotate or revoke</span>
                 </li>
             </ul>
+        </div>
+
+        <!-- What just started working -->
+        <div class="mb-8">
+            <h2 class="text-lg font-semibold text-gray-200 mb-3">What just started working?</h2>
+            <p class="text-gray-400 text-sm mb-4">
+                One YubiKey tap gives you credentials that cascade across your entire toolchain:
+            </p>
+            <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <div class="p-3 bg-vouch-raised rounded-lg border border-vouch-border text-center">
+                    <div class="code-block text-xs mb-1">ssh</div>
+                    <span class="text-gray-500 text-xs">Servers</span>
+                </div>
+                <div class="p-3 bg-vouch-raised rounded-lg border border-vouch-border text-center">
+                    <div class="code-block text-xs mb-1">git push</div>
+                    <span class="text-gray-500 text-xs">GitHub</span>
+                </div>
+                <div class="p-3 bg-vouch-raised rounded-lg border border-vouch-border text-center">
+                    <div class="code-block text-xs mb-1">aws s3 ls</div>
+                    <span class="text-gray-500 text-xs">AWS CLI</span>
+                </div>
+                <div class="p-3 bg-vouch-raised rounded-lg border border-vouch-border text-center">
+                    <div class="code-block text-xs mb-1">cdk deploy</div>
+                    <span class="text-gray-500 text-xs">IaC</span>
+                </div>
+                <div class="p-3 bg-vouch-raised rounded-lg border border-vouch-border text-center">
+                    <div class="code-block text-xs mb-1">terraform apply</div>
+                    <span class="text-gray-500 text-xs">IaC</span>
+                </div>
+                <div class="p-3 bg-vouch-raised rounded-lg border border-vouch-border text-center">
+                    <div class="code-block text-xs mb-1">docker push</div>
+                    <span class="text-gray-500 text-xs">ECR / GHCR</span>
+                </div>
+                <div class="p-3 bg-vouch-raised rounded-lg border border-vouch-border text-center">
+                    <div class="code-block text-xs mb-1">helm push</div>
+                    <span class="text-gray-500 text-xs">OCI Charts</span>
+                </div>
+                <div class="p-3 bg-vouch-raised rounded-lg border border-vouch-border text-center">
+                    <div class="code-block text-xs mb-1">kubectl</div>
+                    <span class="text-gray-500 text-xs">EKS</span>
+                </div>
+            </div>
+            <p class="text-gray-500 text-xs mt-3">
+                These tools read your AWS config or Docker config &mdash; no additional setup beyond the integrations below.
+            </p>
         </div>
 
         <!-- Next steps -->
