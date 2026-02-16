@@ -2,8 +2,12 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <!-- Homebrew users: use `brew services start vouch` instead of this plist.
+         This file is for manual/MDM installations where vouch-agent is placed
+         in /usr/local/bin/. -->
+
     <key>Label</key>
-    <string>com.vouch.agent</string>
+    <string>sh.vouch.agent</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -18,10 +22,10 @@
     <true/>
 
     <key>StandardOutPath</key>
-    <string>/tmp/vouch-agent.log</string>
+    <string>Library/Logs/vouch-agent.log</string>
 
     <key>StandardErrorPath</key>
-    <string>/tmp/vouch-agent.log</string>
+    <string>Library/Logs/vouch-agent.log</string>
 
     <key>ProcessType</key>
     <string>Background</string>
