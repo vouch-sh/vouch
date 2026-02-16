@@ -3,6 +3,7 @@
 
 use anyhow::{Result, bail};
 use ctap_hid_fido2::{Cfg, FidoKeyHidFactory};
+use serde::Serialize;
 #[cfg(unix)]
 use vouch_agent::AgentClient;
 
@@ -11,20 +12,38 @@ use crate::config::Config;
 
 /// Check result with status and optional message.
 struct CheckResult {
+    name: &'static str,
     passed: bool,
     message: String,
 }
 
+/// JSON representation of a single doctor check.
+#[derive(Serialize)]
+struct DoctorCheckJson {
+    name: &'static str,
+    passed: bool,
+    message: String,
+}
+
+/// JSON representation of all doctor check results.
+#[derive(Serialize)]
+struct DoctorJson {
+    checks: Vec<DoctorCheckJson>,
+    all_passed: bool,
+}
+
 impl CheckResult {
-    fn pass(msg: impl Into<String>) -> Self {
+    fn pass(name: &'static str, msg: impl Into<String>) -> Self {
         Self {
+            name,
             passed: true,
             message: msg.into(),
         }
     }
 
-    fn fail(msg: impl Into<String>) -> Self {
+    fn fail(name: &'static str, msg: impl Into<String>) -> Self {
         Self {
+            name,
             passed: false,
             message: msg.into(),
         }
@@ -35,111 +54,118 @@ impl CheckResult {
 ///
 /// Returns an error if any checks fail, so the CLI exits with a non-zero code.
 /// When `quiet` is true, all output is suppressed (exit code only).
-pub async fn run(server: &str, quiet: bool) -> Result<()> {
-    if !quiet {
+/// When `json` is true, results are printed as JSON to stdout.
+pub async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
+    let suppress = quiet || json;
+
+    if !suppress {
         println!("Vouch Doctor - Environment Diagnostics\n");
     }
 
-    let mut all_passed = true;
+    let mut checks: Vec<CheckResult> = Vec::new();
 
     // Check 1: YubiKey connectivity
-    if !quiet {
+    if !suppress {
         print!("YubiKey connectivity ... ");
     }
     let yubikey_result = check_yubikey();
-    if !quiet {
+    if !suppress {
         print_result(&yubikey_result);
     }
-    if !yubikey_result.passed {
-        all_passed = false;
-    }
+    checks.push(yubikey_result);
 
     // Check 2: Agent running (Unix only — agent requires Unix sockets)
     #[cfg(unix)]
     {
-        if !quiet {
+        if !suppress {
             print!("Agent running ... ");
         }
         let agent_result = check_agent().await;
-        if !quiet {
+        if !suppress {
             print_result(&agent_result);
         }
-        if !agent_result.passed {
-            all_passed = false;
-        }
+        checks.push(agent_result);
     }
 
     // Check 3: Server reachable
-    if !quiet {
+    if !suppress {
         print!("Server reachable ... ");
     }
     let server_result = check_server(server).await;
-    if !quiet {
+    if !suppress {
         print_result(&server_result);
     }
-    if !server_result.passed {
-        all_passed = false;
-    }
+    checks.push(server_result);
 
     // Check 4: Session valid
-    if !quiet {
+    if !suppress {
         print!("Session valid ... ");
     }
     let session_result = check_session().await;
-    if !quiet {
+    if !suppress {
         print_result(&session_result);
     }
-    if !session_result.passed {
-        all_passed = false;
-    }
+    checks.push(session_result);
 
     // Check 5: SSH config
-    if !quiet {
+    if !suppress {
         print!("SSH configuration ... ");
     }
     let ssh_result = check_ssh_config();
-    if !quiet {
+    if !suppress {
         print_result(&ssh_result);
     }
-    if !ssh_result.passed {
-        all_passed = false;
-    }
+    checks.push(ssh_result);
 
     // Check 6: EKS config
-    if !quiet {
+    if !suppress {
         print!("EKS configuration ... ");
     }
     let eks_result = check_eks_config();
-    if !quiet {
+    if !suppress {
         print_result(&eks_result);
     }
-    if !eks_result.passed {
-        all_passed = false;
-    }
+    checks.push(eks_result);
 
     // Check 7: Server URL security
-    if !quiet {
+    if !suppress {
         print!("Server URL security ... ");
     }
     let security_result = check_server_url_security(server);
-    if !quiet {
+    if !suppress {
         print_result(&security_result);
     }
-    if !security_result.passed {
-        all_passed = false;
+    checks.push(security_result);
+
+    let all_passed = checks.iter().all(|c| c.passed);
+
+    // JSON output
+    if json {
+        let json_output = DoctorJson {
+            checks: checks
+                .into_iter()
+                .map(|c| DoctorCheckJson {
+                    name: c.name,
+                    passed: c.passed,
+                    message: c.message,
+                })
+                .collect(),
+            all_passed,
+        };
+        println!("{}", serde_json::to_string_pretty(&json_output)?);
     }
 
     // Summary
-    if !quiet {
+    if !suppress {
         println!();
     }
     if all_passed {
-        if !quiet {
+        if !suppress {
             println!("All checks passed!");
         }
         Ok(())
     } else {
-        if !quiet {
+        if !suppress {
             println!("Some checks failed. Review the issues above.");
         }
         bail!("doctor: one or more checks failed")
@@ -159,8 +185,8 @@ fn print_result(result: &CheckResult) {
 fn check_yubikey() -> CheckResult {
     let cfg = Cfg::init();
     match FidoKeyHidFactory::create(&cfg) {
-        Ok(_device) => CheckResult::pass("FIDO2 device found"),
-        Err(e) => CheckResult::fail(format!("No FIDO2 device found: {e}")),
+        Ok(_device) => CheckResult::pass("yubikey", "FIDO2 device found"),
+        Err(e) => CheckResult::fail("yubikey", format!("No FIDO2 device found: {e}")),
     }
 }
 
@@ -178,11 +204,13 @@ async fn check_agent() -> CheckResult {
                         .and_then(|p| std::fs::read_to_string(p).ok())
                         .and_then(|s| s.trim().parse::<u32>().ok());
                     match pid_info {
-                        Some(pid) => CheckResult::pass(format!("Agent is running (PID {pid})")),
-                        None => CheckResult::pass("Agent is running"),
+                        Some(pid) => {
+                            CheckResult::pass("agent", format!("Agent is running (PID {pid})"))
+                        }
+                        None => CheckResult::pass("agent", "Agent is running"),
                     }
                 }
-                Err(e) => CheckResult::fail(format!("Agent connection failed: {e}")),
+                Err(e) => CheckResult::fail("agent", format!("Agent connection failed: {e}")),
             }
         }
         Err(e) => {
@@ -190,9 +218,15 @@ async fn check_agent() -> CheckResult {
             if let Ok(socket_path) = vouch_agent::socket::socket_path()
                 && socket_path.exists()
             {
-                return CheckResult::fail(format!("Socket exists but connection failed: {e}"));
+                return CheckResult::fail(
+                    "agent",
+                    format!("Socket exists but connection failed: {e}"),
+                );
             }
-            CheckResult::fail("Agent not running. Start with: vouch-agent --foreground")
+            CheckResult::fail(
+                "agent",
+                "Agent not running. Start with: vouch-agent --foreground",
+            )
         }
     }
 }
@@ -201,16 +235,19 @@ async fn check_agent() -> CheckResult {
 async fn check_server(server: &str) -> CheckResult {
     let client = match VouchClient::new(server) {
         Ok(c) => c,
-        Err(e) => return CheckResult::fail(format!("Invalid server URL: {e}")),
+        Err(e) => return CheckResult::fail("server", format!("Invalid server URL: {e}")),
     };
 
     let url = format!("{}/health", client.base_url());
     match client.raw_client().get(&url).send().await {
         Ok(resp) if resp.status().is_success() => {
-            CheckResult::pass(format!("Server at {server} is reachable"))
+            CheckResult::pass("server", format!("Server at {server} is reachable"))
         }
-        Ok(resp) => CheckResult::fail(format!("Server returned status: {}", resp.status())),
-        Err(e) => CheckResult::fail(format!("Server unreachable: {e}")),
+        Ok(resp) => CheckResult::fail(
+            "server",
+            format!("Server returned status: {}", resp.status()),
+        ),
+        Err(e) => CheckResult::fail("server", format!("Server unreachable: {e}")),
     }
 }
 
@@ -224,28 +261,34 @@ async fn check_session() -> CheckResult {
                 if session.expires_in_seconds > 0 {
                     let hours = session.expires_in_seconds / 3600;
                     let mins = (session.expires_in_seconds % 3600) / 60;
-                    CheckResult::pass(format!(
-                        "Session valid for {}h {}m ({})",
-                        hours, mins, session.user_email
-                    ))
+                    CheckResult::pass(
+                        "session",
+                        format!(
+                            "Session valid for {}h {}m ({})",
+                            hours, mins, session.user_email
+                        ),
+                    )
                 } else {
-                    CheckResult::fail("Session expired. Run: vouch login")
+                    CheckResult::fail("session", "Session expired. Run: vouch login")
                 }
             }
-            Err(_) => CheckResult::fail("No active session. Run: vouch login"),
+            Err(_) => CheckResult::fail("session", "No active session. Run: vouch login"),
         };
     }
 
     // Fall back to config
     let config = match Config::load() {
         Ok(c) => c,
-        Err(_) => return CheckResult::fail("No config found. Run: vouch login"),
+        Err(_) => return CheckResult::fail("session", "No config found. Run: vouch login"),
     };
 
     if config.token().is_some() {
-        CheckResult::pass("Session token found (agent not running for full validation)")
+        CheckResult::pass(
+            "session",
+            "Session token found (agent not running for full validation)",
+        )
     } else {
-        CheckResult::fail("No session token. Run: vouch login")
+        CheckResult::fail("session", "No session token. Run: vouch login")
     }
 }
 
@@ -253,7 +296,7 @@ async fn check_session() -> CheckResult {
 fn check_ssh_config() -> CheckResult {
     let home = match dirs::home_dir() {
         Some(h) => h,
-        None => return CheckResult::fail("Could not determine home directory"),
+        None => return CheckResult::fail("ssh", "Could not determine home directory"),
     };
 
     let ssh_config_path = home.join(".ssh").join("config");
@@ -283,9 +326,9 @@ fn check_ssh_config() -> CheckResult {
     }
 
     if issues.is_empty() {
-        CheckResult::pass("SSH configured for Vouch")
+        CheckResult::pass("ssh", "SSH configured for Vouch")
     } else {
-        CheckResult::fail(issues.join("; "))
+        CheckResult::fail("ssh", issues.join("; "))
     }
 }
 
@@ -293,7 +336,7 @@ fn check_ssh_config() -> CheckResult {
 fn check_eks_config() -> CheckResult {
     let home = match dirs::home_dir() {
         Some(h) => h,
-        None => return CheckResult::fail("Could not determine home directory"),
+        None => return CheckResult::fail("eks", "Could not determine home directory"),
     };
 
     // Check KUBECONFIG env var first, then default path
@@ -303,31 +346,36 @@ fn check_eks_config() -> CheckResult {
         .unwrap_or_else(|| home.join(".kube").join("config"));
 
     if !kubeconfig_path.exists() {
-        return CheckResult::pass("No kubeconfig found (EKS not configured)");
+        return CheckResult::pass("eks", "No kubeconfig found (EKS not configured)");
     }
 
     match std::fs::read_to_string(&kubeconfig_path) {
         Ok(content) => {
             // Check if there's a Vouch EKS user configured
             if content.contains("vouch-eks-") {
-                CheckResult::pass("EKS configured for Vouch")
+                CheckResult::pass("eks", "EKS configured for Vouch")
             } else {
                 CheckResult::pass(
+                    "eks",
                     "Kubeconfig exists (no Vouch EKS integration). Run: vouch setup eks --cluster <name>",
                 )
             }
         }
-        Err(_) => CheckResult::fail("Could not read kubeconfig"),
+        Err(_) => CheckResult::fail("eks", "Could not read kubeconfig"),
     }
 }
 
 /// Check if the server URL uses secure transport.
 fn check_server_url_security(server: &str) -> CheckResult {
     if vouch_common::check_url_security(server).is_insecure() {
-        CheckResult::fail(format!(
-            "Server uses plain HTTP ({server}). Use HTTPS or set VOUCH_ALLOW_INSECURE=1."
-        ))
+        CheckResult::fail(
+            "server_url_security",
+            format!("Server uses plain HTTP ({server}). Use HTTPS or set VOUCH_ALLOW_INSECURE=1."),
+        )
     } else {
-        CheckResult::pass("Server URL is secure (HTTPS or localhost)")
+        CheckResult::pass(
+            "server_url_security",
+            "Server URL is secure (HTTPS or localhost)",
+        )
     }
 }

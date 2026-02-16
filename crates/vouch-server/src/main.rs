@@ -515,24 +515,9 @@ async fn run_server(args: config::Args) -> Result<()> {
         .route("/", get(handlers::home::home_page))
         .route("/install", get(handlers::install::install_page))
         .route("/health", get(|| async { "ok" }))
-        // Legal pages
-        .route("/about", get(handlers::about::about_page))
+        // Legal pages (redirect to vouch.sh)
         .route("/privacy", get(handlers::legal::privacy_page))
         .route("/terms", get(handlers::legal::terms_page))
-        // Documentation pages
-        .route("/docs", get(handlers::docs::docs_index_page))
-        .route(
-            "/docs/getting-started",
-            get(handlers::docs::getting_started_page),
-        )
-        .route("/docs/aws", get(handlers::docs::aws_setup_page))
-        .route("/docs/ssh", get(handlers::docs::ssh_page))
-        .route("/docs/eks", get(handlers::docs::eks_page))
-        .route("/docs/github", get(handlers::docs::github_setup_page))
-        .route("/docs/docker", get(handlers::docs::docker_page))
-        .route("/docs/applications", get(handlers::docs::applications_page))
-        .route("/docs/scim", get(handlers::docs::scim_page))
-        .route("/docs/cargo", get(handlers::docs::cargo_page))
         // Integrations page
         .route(
             "/integrations",

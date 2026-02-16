@@ -16,21 +16,34 @@ use jiff::Timestamp;
 use secrecy::SecretString;
 use std::sync::Arc;
 use tokio::net::UnixStream;
+use tokio::sync::watch;
 use tracing::{debug, error, info, warn};
 
-/// Agent server.
+/// Agent server with graceful shutdown support.
 pub struct AgentServer {
     state: Arc<AgentState>,
     ssh_state: Arc<SshAgentState>,
+    shutdown_rx: watch::Receiver<bool>,
 }
 
 impl AgentServer {
-    /// Create a new agent server.
-    pub fn new(state: Arc<AgentState>, ssh_state: Arc<SshAgentState>) -> Self {
-        Self { state, ssh_state }
+    /// Create a new agent server with a shutdown signal.
+    pub fn new(
+        state: Arc<AgentState>,
+        ssh_state: Arc<SshAgentState>,
+        shutdown_rx: watch::Receiver<bool>,
+    ) -> Self {
+        Self {
+            state,
+            ssh_state,
+            shutdown_rx,
+        }
     }
 
     /// Run the server, listening on the Unix socket.
+    ///
+    /// Stops accepting new connections when the shutdown signal is received.
+    /// In-flight connections continue until they complete naturally.
     ///
     /// # Errors
     ///
@@ -47,22 +60,34 @@ impl AgentServer {
 
         info!("Agent listening on {}", path.display());
 
+        let mut shutdown = self.shutdown_rx.clone();
+
         loop {
-            match listener.accept().await {
-                Ok((stream, _)) => {
-                    let state = Arc::clone(&self.state);
-                    let ssh_state = Arc::clone(&self.ssh_state);
-                    tokio::spawn(async move {
-                        if let Err(e) = handle_connection(stream, state, ssh_state).await {
-                            debug!("Connection error: {e}");
+            tokio::select! {
+                result = listener.accept() => {
+                    match result {
+                        Ok((stream, _)) => {
+                            let state = Arc::clone(&self.state);
+                            let ssh_state = Arc::clone(&self.ssh_state);
+                            tokio::spawn(async move {
+                                if let Err(e) = handle_connection(stream, state, ssh_state).await {
+                                    debug!("Connection error: {e}");
+                                }
+                            });
                         }
-                    });
+                        Err(e) => {
+                            error!("Accept error: {e}");
+                        }
+                    }
                 }
-                Err(e) => {
-                    error!("Accept error: {e}");
+                _ = shutdown.changed() => {
+                    info!("Agent received shutdown signal, stopping listener");
+                    break;
                 }
             }
         }
+
+        Ok(())
     }
 }
 

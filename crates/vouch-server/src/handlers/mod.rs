@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! HTTP request handlers.
 
-pub mod about;
 pub mod admin;
 pub mod applications;
 pub mod auth;
@@ -9,7 +8,6 @@ pub mod browser_login;
 pub(crate) mod common;
 pub mod credentials;
 pub mod device;
-pub mod docs;
 pub mod enroll;
 pub mod enroll_keys;
 pub mod github;
