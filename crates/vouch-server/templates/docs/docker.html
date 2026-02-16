@@ -183,61 +183,6 @@ docker pull ghcr.io/my-org/my-image:latest</pre>
             </div>
         </div>
 
-        <!-- Helm & Compatible Tools -->
-        <div class="mb-8">
-            <h2 class="text-lg font-semibold text-gray-200 mb-4">Helm &amp; Other Compatible Tools</h2>
-
-            <div class="mb-4 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
-                <h3 class="font-medium text-gray-200 mb-2">Helm</h3>
-                <p class="text-gray-400 text-sm mb-3">
-                    Helm 3.8+ supports OCI registries for chart storage. Because it uses the Docker credential
-                    store, charts hosted in ECR or GHCR authenticate through Vouch automatically.
-                </p>
-                <div class="code-block relative text-sm">
-                    <pre class="whitespace-pre-wrap"># Push a chart to ECR
-helm push my-chart-0.1.0.tgz oci://123456789012.dkr.ecr.us-east-1.amazonaws.com/charts
-
-# Pull a chart from ECR
-helm pull oci://123456789012.dkr.ecr.us-east-1.amazonaws.com/charts/my-chart --version 0.1.0
-
-# Install directly from OCI
-helm install my-release oci://123456789012.dkr.ecr.us-east-1.amazonaws.com/charts/my-chart</pre>
-                    <button onclick="copyCode(this)" class="absolute right-3 top-3 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
-                </div>
-            </div>
-
-            <div class="p-4 bg-vouch-bg rounded-lg border border-vouch-border">
-                <p class="text-gray-400 text-sm mb-2">
-                    <strong class="text-gray-300">Other tools that read Docker credentials:</strong>
-                </p>
-                <ul class="text-gray-400 text-sm space-y-1">
-                    <li class="flex items-start gap-2">
-                        <span class="text-vouch-accent">&bull;</span>
-                        <span><strong class="text-gray-300">crane</strong> &mdash; image manipulation without a Docker daemon</span>
-                    </li>
-                    <li class="flex items-start gap-2">
-                        <span class="text-vouch-accent">&bull;</span>
-                        <span><strong class="text-gray-300">skopeo</strong> &mdash; copy images between registries</span>
-                    </li>
-                    <li class="flex items-start gap-2">
-                        <span class="text-vouch-accent">&bull;</span>
-                        <span><strong class="text-gray-300">Podman</strong> &mdash; daemonless container engine</span>
-                    </li>
-                    <li class="flex items-start gap-2">
-                        <span class="text-vouch-accent">&bull;</span>
-                        <span><strong class="text-gray-300">buildah</strong> &mdash; OCI image builder</span>
-                    </li>
-                    <li class="flex items-start gap-2">
-                        <span class="text-vouch-accent">&bull;</span>
-                        <span><strong class="text-gray-300">ORAS</strong> &mdash; OCI artifacts (Wasm modules, ML models, etc.)</span>
-                    </li>
-                </ul>
-                <p class="text-gray-500 text-xs mt-2">
-                    Any tool that reads <code class="text-vouch-accent">~/.docker/config.json</code> credHelpers will use Vouch automatically.
-                </p>
-            </div>
-        </div>
-
         <!-- Troubleshooting -->
         <div class="mt-10 p-4 bg-vouch-raised rounded-lg border border-vouch-border">
             <h2 class="text-lg font-semibold text-gray-200 mb-3">Troubleshooting</h2>
