@@ -142,10 +142,13 @@ pub async fn run(region: Option<&str>, profile: Option<&str>, configure: bool) -
         println!("Or run: vouch setup codecommit --configure");
     }
 
+    let example_region = region.unwrap_or("us-east-1");
     println!();
     println!("To verify, run:");
-    println!("  git ls-remote https://git-codecommit.us-east-1.amazonaws.com/v1/repos/YOUR-REPO");
-    println!("  git ls-remote codecommit::us-east-1://YOUR-REPO");
+    println!(
+        "  git ls-remote https://git-codecommit.{example_region}.amazonaws.com/v1/repos/YOUR-REPO"
+    );
+    println!("  git ls-remote codecommit::{example_region}://YOUR-REPO");
 
     println!();
     println!("To undo:");
@@ -214,7 +217,10 @@ fn get_remote_helper_symlink_path() -> Result<PathBuf> {
 }
 
 /// Create the `git-remote-codecommit` symlink pointing to the vouch binary.
-fn create_remote_helper_symlink(vouch_path: &PathBuf, symlink_path: &PathBuf) -> Result<()> {
+fn create_remote_helper_symlink(
+    vouch_path: &std::path::Path,
+    symlink_path: &std::path::Path,
+) -> Result<()> {
     // Ensure parent directory exists
     if let Some(parent) = symlink_path.parent()
         && !parent.exists()
@@ -242,16 +248,14 @@ fn create_remote_helper_symlink(vouch_path: &PathBuf, symlink_path: &PathBuf) ->
         );
 
         // Check if the symlink directory is in PATH
-        if let Some(parent) = symlink_path.parent() {
-            let parent_str = parent.to_string_lossy().to_string();
-            if let Ok(path) = std::env::var("PATH")
-                && !path.contains(&parent_str)
-            {
-                println!();
-                println!("Note: {} is not in your PATH.", parent.display());
-                println!("Add it to your shell profile:");
-                println!("  export PATH=\"$PATH:{}\"", parent.display());
-            }
+        if let Some(parent) = symlink_path.parent()
+            && let Ok(path_var) = std::env::var("PATH")
+            && !std::env::split_paths(&path_var).any(|p| p == parent)
+        {
+            println!();
+            println!("Note: {} is not in your PATH.", parent.display());
+            println!("Add it to your shell profile:");
+            println!("  export PATH=\"$PATH:{}\"", parent.display());
         }
     }
 
@@ -265,23 +269,24 @@ fn create_remote_helper_symlink(vouch_path: &PathBuf, symlink_path: &PathBuf) ->
                 .with_context(|| format!("failed to remove existing {}", bat_path.display()))?;
         }
 
-        // The batch file passes all arguments through to vouch
-        // Git will invoke: git-remote-codecommit.bat <remote-name> <url>
-        // The vouch binary detects argv[0] and handles it as a remote helper
-        let batch_content = format!("@echo off\r\n\"{}\" %*\r\n", vouch_path.display());
+        // The batch file sets VOUCH_GIT_REMOTE_CODECOMMIT=1 so vouch can detect
+        // it was invoked as a remote helper (argv[0] detection doesn't work through .bat)
+        let batch_content = format!(
+            "@echo off\r\nset VOUCH_GIT_REMOTE_CODECOMMIT=1\r\n\"{}\" %*\r\n",
+            vouch_path.display()
+        );
         std::fs::write(&bat_path, &batch_content)
             .with_context(|| format!("failed to create {}", bat_path.display()))?;
 
         println!("Created: {}", bat_path.display());
 
         if let Some(parent) = bat_path.parent() {
-            let parent_str = parent.to_string_lossy().to_string();
-            if let Ok(path) = std::env::var("PATH") {
-                if !path.split(';').any(|p| p.eq_ignore_ascii_case(&parent_str)) {
-                    println!();
-                    println!("Note: {} is not in your PATH.", parent.display());
-                    println!("Add it to your system PATH environment variable.");
-                }
+            if let Ok(path_var) = std::env::var("PATH")
+                && !std::env::split_paths(&path_var).any(|p| p == parent)
+            {
+                println!();
+                println!("Note: {} is not in your PATH.", parent.display());
+                println!("Add it to your system PATH environment variable.");
             }
         }
     }

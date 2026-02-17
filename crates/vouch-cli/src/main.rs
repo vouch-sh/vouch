@@ -43,10 +43,18 @@ fn check_docker_credential_invocation() -> Result<bool> {
 /// `Ok(false)` if not, or an error if the remote helper failed.
 ///
 /// Git invokes remote helpers as: `git-remote-codecommit <remote-name> <url>`
+///
+/// Detection works via:
+/// - **Unix**: argv\[0\] ends with `git-remote-codecommit` (symlink)
+/// - **Windows**: `VOUCH_GIT_REMOTE_CODECOMMIT=1` env var (set by batch wrapper)
 fn check_git_remote_codecommit_invocation() -> Result<bool> {
     let argv0 = std::env::args().next().unwrap_or_default();
 
-    if argv0.ends_with("git-remote-codecommit") || argv0.ends_with("git-remote-codecommit.exe") {
+    let is_remote_helper = argv0.ends_with("git-remote-codecommit")
+        || argv0.ends_with("git-remote-codecommit.exe")
+        || std::env::var("VOUCH_GIT_REMOTE_CODECOMMIT").is_ok_and(|v| v == "1");
+
+    if is_remote_helper {
         let remote_name = std::env::args().nth(1).unwrap_or_default();
         let url = std::env::args().nth(2).unwrap_or_default();
 

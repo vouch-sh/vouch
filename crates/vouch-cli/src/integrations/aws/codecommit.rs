@@ -141,6 +141,11 @@ pub fn parse_codecommit_url(url: &str) -> Option<CodeCommitUrl> {
         (None, remainder.to_string())
     };
 
+    // Reject repository names containing path separators to prevent path traversal
+    if repository.contains('/') || repository.contains('\\') {
+        return None;
+    }
+
     Some(CodeCommitUrl {
         profile,
         repository,
@@ -281,6 +286,16 @@ mod tests {
     #[test]
     fn test_parse_empty_region() {
         assert!(parse_codecommit_url("codecommit:://my-repo").is_none());
+    }
+
+    #[test]
+    fn test_parse_repo_with_slash() {
+        assert!(parse_codecommit_url("codecommit://my/repo").is_none());
+    }
+
+    #[test]
+    fn test_parse_repo_with_backslash() {
+        assert!(parse_codecommit_url("codecommit://my\\repo").is_none());
     }
 
     #[test]
