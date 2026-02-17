@@ -38,6 +38,40 @@ fn check_docker_credential_invocation() -> Result<bool> {
     Ok(false)
 }
 
+/// Check if invoked as git-remote-codecommit and handle accordingly.
+/// Returns `Ok(true)` if this was a git remote helper invocation (handled),
+/// `Ok(false)` if not, or an error if the remote helper failed.
+///
+/// Git invokes remote helpers as: `git-remote-codecommit <remote-name> <url>`
+fn check_git_remote_codecommit_invocation() -> Result<bool> {
+    let argv0 = std::env::args().next().unwrap_or_default();
+
+    if argv0.ends_with("git-remote-codecommit") || argv0.ends_with("git-remote-codecommit.exe") {
+        let remote_name = std::env::args().nth(1).unwrap_or_default();
+        let url = std::env::args().nth(2).unwrap_or_default();
+
+        if remote_name.is_empty() || url.is_empty() {
+            anyhow::bail!(
+                "usage: git-remote-codecommit <remote-name> <url>\n\
+                 This is a git remote helper. Use it via:\n  \
+                 git clone codecommit://[profile@]repo-name\n  \
+                 git clone codecommit::region://[profile@]repo-name"
+            );
+        }
+
+        let rt = tokio::runtime::Runtime::new()?;
+        rt.block_on(commands::credential::codecommit::run_remote_helper(
+            &remote_name,
+            &url,
+        ))
+        .map_err(|e| anyhow::anyhow!("git-remote-codecommit: {e}"))?;
+
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
 /// Hardware-backed identity for developers.
 #[derive(Parser)]
 #[command(
@@ -251,6 +285,15 @@ enum CredentialCommands {
         #[arg(long = "cargo-plugin", hide = true)]
         _cargo_plugin: bool,
     },
+    /// Git credential helper for AWS CodeCommit.
+    ///
+    /// This is used by git as a credential helper. Users should not call this directly.
+    /// Instead, use `vouch setup codecommit` to configure git.
+    #[command(hide = true)]
+    Codecommit {
+        /// Git credential operation (get, store, erase).
+        operation: String,
+    },
     /// Obtain a CodeArtifact authorization token.
     Codeartifact {
         /// CodeArtifact domain name.
@@ -375,6 +418,11 @@ async fn run() -> Result<()> {
         return Ok(());
     }
 
+    // Check if invoked as git-remote-codecommit (via symlink)
+    if check_git_remote_codecommit_invocation()? {
+        return Ok(());
+    }
+
     let cli = Cli::parse();
 
     // Initialize logging
@@ -476,6 +524,9 @@ async fn run() -> Result<()> {
                 commands::credential::docker::run(&operation).await
             }
             CredentialCommands::Cargo { .. } => commands::credential::cargo::run().await,
+            CredentialCommands::Codecommit { operation } => {
+                commands::credential::codecommit::run(&operation).await
+            }
             CredentialCommands::Codeartifact {
                 domain,
                 domain_owner,

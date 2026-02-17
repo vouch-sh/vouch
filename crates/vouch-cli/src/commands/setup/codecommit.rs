@@ -1,40 +1,46 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! CodeCommit setup command.
 //!
-//! Configures Git to use the AWS CLI's built-in CodeCommit credential helper
-//! with the Vouch AWS profile. This chains through Vouch automatically:
+//! Configures Git to use Vouch's native CodeCommit support:
 //!
-//! 1. git asks for CodeCommit credentials
-//! 2. `aws codecommit credential-helper` is invoked (with `--profile vouch`)
-//! 3. AWS CLI needs credentials → reads `credential_process = vouch credential aws --role ...`
-//! 4. Vouch gets OIDC token → STS AssumeRoleWithWebIdentity → returns temp AWS creds
-//! 5. AWS CLI uses those creds to generate SigV4-signed CodeCommit credentials
+//! 1. **Credential helper** — for `https://git-codecommit.*.amazonaws.com` URLs:
+//!    git asks for credentials → `vouch credential codecommit` signs with SigV4
+//!
+//! 2. **Remote helper** — for `codecommit://` URLs:
+//!    `git-remote-codecommit` symlink → `vouch` binary → signs and delegates to `git remote-http`
+//!
+//! No AWS CLI dependency required. Vouch handles the full chain:
+//! OIDC token → STS AssumeRoleWithWebIdentity → SigV4 signing for CodeCommit.
 
 use anyhow::{Context, Result};
+use std::path::PathBuf;
 use std::process::Command;
 
 use crate::config::Config;
 use crate::integrations::aws::{AwsConfig, extract_role_from_credential_process};
 
-/// Git config patterns for CodeCommit credential helper.
+/// Git config patterns for CodeCommit credential helper by partition.
 ///
-/// Both commercial and China domain patterns are always configured —
-/// non-matching entries are harmless and it avoids needing a `--china` flag.
-const COMMERCIAL_PATTERN: &str = "https://git-codecommit.*.amazonaws.com";
-const CHINA_PATTERN: &str = "https://git-codecommit.*.amazonaws.com.cn";
+/// All partition patterns are always configured — non-matching entries are
+/// harmless and it avoids needing partition-specific flags.
+const PARTITION_PATTERNS: &[&str] = &[
+    "https://git-codecommit.*.amazonaws.com", // Commercial + GovCloud
+    "https://git-codecommit.*.amazonaws.com.cn", // China
+    "https://git-codecommit.*.amazonaws.eu",  // European Sovereign Cloud (future)
+];
 
 /// Run the CodeCommit setup command.
 ///
 /// This command:
 /// 1. Verifies the user is enrolled
 /// 2. Checks AWS is configured and shows profile/role
-/// 3. Verifies the AWS CLI is installed
-/// 4. Configures git to use `aws codecommit credential-helper` with the vouch profile
+/// 3. Creates the `git-remote-codecommit` symlink for `codecommit://` URLs
+/// 4. Configures git to use `vouch credential codecommit` for HTTPS URLs
 ///
 /// # Arguments
 /// * `region` - Optional specific region (default: wildcard `*` matching all regions)
 /// * `profile` - Optional AWS profile name (default: auto-detect vouch profile)
-/// * `configure` - If true, automatically configure git; if false, just show instructions
+/// * `configure` - If true, automatically configure; if false, just show instructions
 pub async fn run(region: Option<&str>, profile: Option<&str>, configure: bool) -> Result<()> {
     // Load config to verify enrollment
     let config = Config::load().context("failed to load config - run 'vouch enroll' first")?;
@@ -53,33 +59,41 @@ pub async fn run(region: Option<&str>, profile: Option<&str>, configure: bool) -
     }
     println!();
 
-    // Verify AWS CLI is installed
-    check_aws_cli_installed()?;
+    // Get vouch binary path for the credential helper command and symlink
+    let vouch_path = std::env::current_exe().context("could not determine vouch binary path")?;
 
-    // Build the helper command using the AWS CLI's built-in credential helper.
-    // The `!` prefix tells git this is a shell command, not an executable name.
-    // `$@` passes through the git credential operation (get/store/erase).
-    let helper_command = format!("!aws --profile {profile_name} codecommit credential-helper $@");
+    // Build the native credential helper command
+    let helper_command = format!("{} credential codecommit", vouch_path.display());
 
     // Determine the credential pattern(s)
-    let patterns = if let Some(r) = region {
-        vec![
-            format!("https://git-codecommit.{r}.amazonaws.com"),
-            format!("https://git-codecommit.{r}.amazonaws.com.cn"),
-        ]
+    let patterns: Vec<String> = if let Some(r) = region {
+        // Region-specific: replace wildcard with actual region in each partition pattern
+        PARTITION_PATTERNS
+            .iter()
+            .map(|p| p.replace('*', r))
+            .collect()
     } else {
-        vec![COMMERCIAL_PATTERN.to_string(), CHINA_PATTERN.to_string()]
+        PARTITION_PATTERNS
+            .iter()
+            .map(|p| (*p).to_string())
+            .collect()
     };
+
+    // Symlink path for git-remote-codecommit
+    let symlink_path = get_remote_helper_symlink_path()?;
 
     if configure {
         // Check for conflicting credential helpers
         detect_conflicting_helpers()?;
 
+        // 1. Create git-remote-codecommit symlink for codecommit:// URLs
+        create_remote_helper_symlink(&vouch_path, &symlink_path)?;
+
+        // 2. Configure git credential helper for HTTPS URLs
         for pattern in &patterns {
             let config_key = format!("credential.{pattern}.helper");
             let use_http_path_key = format!("credential.{pattern}.useHttpPath");
 
-            // Configure the credential helper
             let status = Command::new("git")
                 .args(["config", "--global", &config_key, &helper_command])
                 .status()
@@ -89,8 +103,7 @@ pub async fn run(region: Option<&str>, profile: Option<&str>, configure: bool) -
                 anyhow::bail!("failed to configure git credential helper for {pattern}");
             }
 
-            // Set useHttpPath = true (critical for CodeCommit — git must pass the
-            // full path including region and repo name)
+            // useHttpPath is critical — git must pass the full path (region + repo)
             let status = Command::new("git")
                 .args(["config", "--global", &use_http_path_key, "true"])
                 .status()
@@ -101,15 +114,25 @@ pub async fn run(region: Option<&str>, profile: Option<&str>, configure: bool) -
             }
         }
 
-        println!("Git configured for CodeCommit.");
-        println!();
-        println!("Configuration added:");
+        println!("\nGit configured for CodeCommit.\n");
+        println!("Credential helper (HTTPS URLs):");
         for pattern in &patterns {
             println!("  credential.{pattern}.helper = {helper_command}");
             println!("  credential.{pattern}.useHttpPath = true");
         }
+        println!();
+        println!("Remote helper (codecommit:// URLs):");
+        println!("  {} -> {}", symlink_path.display(), vouch_path.display());
     } else {
-        println!("Add to ~/.gitconfig:\n");
+        println!("Step 1: Create symlink for codecommit:// URL support\n");
+        println!(
+            "  ln -sf \"{}\" \"{}\"",
+            vouch_path.display(),
+            symlink_path.display()
+        );
+
+        println!("\nStep 2: Configure git credential helper for HTTPS URLs\n");
+        println!("  Add to ~/.gitconfig:\n");
         for pattern in &patterns {
             println!("[credential \"{pattern}\"]");
             println!("    helper = {helper_command}");
@@ -122,9 +145,11 @@ pub async fn run(region: Option<&str>, profile: Option<&str>, configure: bool) -
     println!();
     println!("To verify, run:");
     println!("  git ls-remote https://git-codecommit.us-east-1.amazonaws.com/v1/repos/YOUR-REPO");
+    println!("  git ls-remote codecommit::us-east-1://YOUR-REPO");
 
     println!();
     println!("To undo:");
+    println!("  rm \"{}\"", symlink_path.display());
     for pattern in &patterns {
         println!(
             "  git config --global --remove-section credential.\"{}\"",
@@ -170,24 +195,95 @@ fn check_aws_config(profile: Option<&str>) -> Result<(String, Option<String>)> {
     }
 }
 
-/// Verify the AWS CLI is installed and accessible.
-fn check_aws_cli_installed() -> Result<()> {
-    let output = Command::new("aws").arg("--version").output().context(
-        "AWS CLI not found. Install it from https://aws.amazon.com/cli/\n\
-             The AWS CLI is required for CodeCommit credential generation.",
-    )?;
+/// Get the path for the `git-remote-codecommit` symlink.
+fn get_remote_helper_symlink_path() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("could not determine home directory")?;
 
-    if !output.status.success() {
-        anyhow::bail!(
-            "AWS CLI check failed. Install it from https://aws.amazon.com/cli/\n\
-             The AWS CLI is required for CodeCommit credential generation."
-        );
+    #[cfg(unix)]
+    {
+        Ok(home.join(".local/bin/git-remote-codecommit"))
     }
 
-    let version = String::from_utf8_lossy(&output.stdout);
-    let version_str = version.trim();
-    if !version_str.is_empty() {
-        println!("AWS CLI:     {version_str}");
+    #[cfg(windows)]
+    {
+        Ok(home
+            .join(".local")
+            .join("bin")
+            .join("git-remote-codecommit"))
+    }
+}
+
+/// Create the `git-remote-codecommit` symlink pointing to the vouch binary.
+fn create_remote_helper_symlink(vouch_path: &PathBuf, symlink_path: &PathBuf) -> Result<()> {
+    // Ensure parent directory exists
+    if let Some(parent) = symlink_path.parent()
+        && !parent.exists()
+    {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        println!("Created directory: {}", parent.display());
+    }
+
+    #[cfg(unix)]
+    {
+        // Remove existing symlink if present
+        if symlink_path.exists() || symlink_path.is_symlink() {
+            std::fs::remove_file(symlink_path)
+                .with_context(|| format!("failed to remove existing {}", symlink_path.display()))?;
+        }
+
+        std::os::unix::fs::symlink(vouch_path, symlink_path)
+            .with_context(|| format!("failed to create symlink at {}", symlink_path.display()))?;
+
+        println!(
+            "Created symlink: {} -> {}",
+            symlink_path.display(),
+            vouch_path.display()
+        );
+
+        // Check if the symlink directory is in PATH
+        if let Some(parent) = symlink_path.parent() {
+            let parent_str = parent.to_string_lossy().to_string();
+            if let Ok(path) = std::env::var("PATH")
+                && !path.contains(&parent_str)
+            {
+                println!();
+                println!("Note: {} is not in your PATH.", parent.display());
+                println!("Add it to your shell profile:");
+                println!("  export PATH=\"$PATH:{}\"", parent.display());
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        // On Windows, create a batch file wrapper
+        let bat_path = symlink_path.with_extension("bat");
+
+        if bat_path.exists() {
+            std::fs::remove_file(&bat_path)
+                .with_context(|| format!("failed to remove existing {}", bat_path.display()))?;
+        }
+
+        // The batch file passes all arguments through to vouch
+        // Git will invoke: git-remote-codecommit.bat <remote-name> <url>
+        // The vouch binary detects argv[0] and handles it as a remote helper
+        let batch_content = format!("@echo off\r\n\"{}\" %*\r\n", vouch_path.display());
+        std::fs::write(&bat_path, &batch_content)
+            .with_context(|| format!("failed to create {}", bat_path.display()))?;
+
+        println!("Created: {}", bat_path.display());
+
+        if let Some(parent) = bat_path.parent() {
+            let parent_str = parent.to_string_lossy().to_string();
+            if let Ok(path) = std::env::var("PATH") {
+                if !path.split(';').any(|p| p.eq_ignore_ascii_case(&parent_str)) {
+                    println!();
+                    println!("Note: {} is not in your PATH.", parent.display());
+                    println!("Add it to your system PATH environment variable.");
+                }
+            }
+        }
     }
 
     Ok(())
@@ -208,13 +304,12 @@ fn detect_conflicting_helpers() -> Result<()> {
     if output.status.success() {
         let existing = String::from_utf8_lossy(&output.stdout);
         for line in existing.lines() {
-            // Skip entries that are already using the AWS CLI with a vouch profile
-            if line.contains("--profile vouch") || line.contains("--profile=vouch") {
+            // Skip entries that already use vouch
+            if line.contains("vouch credential codecommit") {
                 continue;
             }
             if line.contains("aws codecommit credential-helper")
                 || line.contains("git-remote-codecommit")
-                || line.contains("vouch credential codecommit")
             {
                 println!("Warning: Existing CodeCommit credential helper detected:\n  {line}");
                 println!("This may conflict. Consider removing it.\n");

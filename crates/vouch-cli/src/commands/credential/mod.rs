@@ -5,6 +5,7 @@ pub mod aws;
 pub(crate) mod cache;
 pub mod cargo;
 pub mod codeartifact;
+pub mod codecommit;
 pub mod docker;
 pub mod git_protocol;
 pub mod github;
