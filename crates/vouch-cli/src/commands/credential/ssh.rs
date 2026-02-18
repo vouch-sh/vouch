@@ -56,17 +56,8 @@ pub(crate) fn ensure_keypair(key_path: &Path) -> Result<KeypairAction> {
         return Ok(KeypairAction::Loaded(pub_key));
     }
 
-    // Ensure .ssh directory exists
-    let ssh_dir = ssh_dir()?;
-    if !ssh_dir.exists() {
-        std::fs::create_dir_all(&ssh_dir)
-            .with_context(|| format!("failed to create {}", ssh_dir.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))?;
-        }
-    }
+    // Ensure .ssh directory exists with secure permissions
+    crate::utils::ensure_secure_dir(&ssh_dir()?)?;
 
     // Generate new keypair
     let private_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519)

@@ -9,16 +9,16 @@ use std::path::Path;
 /// Ensure a directory exists with secure permissions (0o700 on Unix).
 ///
 /// Creates the directory and all parent directories if they don't exist.
-/// On Unix systems, sets permissions to 0o700 (owner read/write/execute only).
+/// On Unix systems, always enforces permissions to 0o700 (owner read/write/execute only),
+/// even if the directory already exists, to guard against directories created
+/// by another process with permissive modes.
 pub fn ensure_secure_dir(path: &Path) -> Result<()> {
-    if !path.exists() {
-        fs::create_dir_all(path)
-            .with_context(|| format!("failed to create directory {}", path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-        }
+    fs::create_dir_all(path)
+        .with_context(|| format!("failed to create directory {}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
     Ok(())
 }
@@ -50,10 +50,9 @@ fn atomic_write_impl(path: &Path, content: &[u8], mode: FileMode) -> Result<()> 
         .parent()
         .context("file path has no parent directory")?;
 
-    if !parent.exists() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory {}", parent.display()))?;
-    }
+    // create_dir_all is idempotent — no existence check needed.
+    fs::create_dir_all(parent)
+        .with_context(|| format!("failed to create directory {}", parent.display()))?;
 
     let mut tmp = tempfile::NamedTempFile::new_in(parent)
         .with_context(|| format!("failed to create temp file in {}", parent.display()))?;
@@ -78,6 +77,12 @@ fn atomic_write_impl(path: &Path, content: &[u8], mode: FileMode) -> Result<()> 
         .with_context(|| format!("failed to write temp file for {}", path.display()))?;
     tmp.flush()
         .with_context(|| format!("failed to flush temp file for {}", path.display()))?;
+
+    // Ensure data is durable on disk before the atomic rename.
+    // Without this, a power failure after rename could leave a zero-length file.
+    tmp.as_file()
+        .sync_all()
+        .with_context(|| format!("failed to sync temp file for {}", path.display()))?;
 
     tmp.persist(path)
         .with_context(|| format!("failed to persist temp file to {}", path.display()))?;

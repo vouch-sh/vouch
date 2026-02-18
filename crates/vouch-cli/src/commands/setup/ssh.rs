@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use vouch_common::SshCaPublicKeyResponse;
 
 use crate::client::VouchClient;
-use crate::utils::{atomic_write, atomic_write_secure};
+use crate::utils::{atomic_write, atomic_write_secure, ensure_secure_dir};
 
 /// Get the SSH config path (~/.ssh/config).
 fn ssh_config_path() -> Result<PathBuf> {
@@ -62,16 +62,9 @@ pub async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
     let ca_path = ca_key_path(server)?;
     let ca_content = format!("{} {}\n", ca_response.public_key, ca_response.comment);
 
-    // Ensure .ssh directory exists
-    if let Some(parent) = ca_path.parent()
-        && !parent.exists()
-    {
-        fs::create_dir_all(parent)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-        }
+    // Ensure .ssh directory exists with secure permissions
+    if let Some(parent) = ca_path.parent() {
+        ensure_secure_dir(parent)?;
     }
 
     atomic_write(&ca_path, ca_content.as_bytes())
