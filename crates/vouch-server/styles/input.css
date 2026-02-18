@@ -1,14 +1,33 @@
 @import "tailwindcss";
 @config "../tailwind.config.js";
 
+/* Self-hosted fonts — Inter (variable, 400–700) and JetBrains Mono (variable, 400–500) */
+@font-face {
+  font-family: 'Inter';
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url('/static/fonts/inter-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: 'JetBrains Mono';
+  font-style: normal;
+  font-weight: 400 500;
+  font-display: swap;
+  src: url('/static/fonts/jetbrains-mono-latin.woff2') format('woff2');
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
 /* Custom Vouch styles — dark-mode-only, flat design */
 @layer components {
   .code-block {
-    @apply bg-[#0a1220] text-gray-300 p-4 rounded-md font-mono text-sm overflow-x-auto border border-vouch-subtle;
+    @apply bg-[#161616] text-gray-300 p-4 rounded-md font-mono text-sm overflow-x-auto border border-vouch-subtle;
   }
 
   .btn-primary {
-    @apply inline-block px-6 py-3 bg-vouch-accent text-white font-medium rounded-md hover:bg-vouch-accent-hover transition-colors;
+    @apply inline-block px-6 py-3 bg-vouch-accent text-[#0a0a0a] font-medium rounded-md hover:bg-vouch-accent-hover transition-colors;
   }
 
   .btn-secondary {
@@ -93,5 +112,9 @@
 
   .badge-warning {
     @apply bg-vouch-warning-bg text-vouch-warning;
+  }
+
+  .select-all {
+    user-select: all;
   }
 }

@@ -63,6 +63,10 @@ enum Commands {
 #[folder = "static/"]
 struct Assets;
 
+async fn favicon_handler() -> Response {
+    static_handler(Path("images/favicon.ico".to_string())).await
+}
+
 async fn static_handler(Path(path): Path<String>) -> Response {
     match Assets::get(&path) {
         Some(content) => {
@@ -594,6 +598,8 @@ async fn run_server(args: config::Args) -> Result<()> {
         )
         // Static file serving for CSS, JS, and assets (embedded in binary via rust-embed)
         .route("/static/{*path}", get(static_handler))
+        // Browsers request /favicon.ico at the root path
+        .route("/favicon.ico", get(favicon_handler))
         .layer(build_ui_cors_layer(&config));
 
     let app = apply_security_layers(api_routes.merge(ui_routes), &config).with_state(state.clone());

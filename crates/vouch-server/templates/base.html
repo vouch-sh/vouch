@@ -13,7 +13,7 @@
     <link rel="icon" type="image/png" sizes="16x16" href="/static/images/favicon-16x16.png">
     <link rel="apple-touch-icon" sizes="180x180" href="/static/images/apple-touch-icon.png">
     <link rel="manifest" href="/static/site.webmanifest">
-    <meta name="theme-color" content="#0f1b2d">
+    <meta name="theme-color" content="#0a0a0a">
 
     <!-- SEO Meta Tags -->
     <meta name="description" content="{% block description %}Hardware-backed authentication with short-lived credentials. No credential issuance without human presence proof.{% endblock %}">
@@ -36,10 +36,13 @@
 <body class="{% block body_class %}min-h-screen flex flex-col bg-vouch-bg text-gray-300{% endblock %}">
     <header class="px-4 py-3 border-b border-vouch-border flex items-center justify-between">
         <a href="/" class="flex items-center gap-2 text-gray-200 hover:text-white">
-            <svg class="w-6 h-6 text-vouch-accent" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" d="M16.5 10.5V6.75a4.5 4.5 0 1 0-9 0v3.75m-.75 11.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-6.75a2.25 2.25 0 0 0-2.25-2.25H6.75a2.25 2.25 0 0 0-2.25 2.25v6.75a2.25 2.25 0 0 0 2.25 2.25Z"/>
+            <svg class="w-6 h-6 text-white" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <rect x="9" y="14" width="14" height="12" rx="2" stroke="currentColor" stroke-width="2"/>
+                <path d="M12 14V10a4 4 0 1 1 8 0v4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                <circle cx="16" cy="20" r="1.5" fill="currentColor"/>
+                <line x1="16" y1="21.5" x2="16" y2="23.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
             </svg>
-            <span class="font-semibold">Vouch</span>
+            <span class="font-semibold">vouch</span>
         </a>
         {% block header_right %}{% endblock %}
     </header>

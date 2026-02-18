@@ -8,13 +8,13 @@ export default {
     extend: {
       colors: {
         vouch: {
-          bg: '#0f1b2d',
-          surface: '#1a2332',
-          raised: '#243040',
-          border: '#354150',
-          subtle: '#2a3544',
-          accent: '#539fe5',
-          'accent-hover': '#89bceb',
+          bg: '#0a0a0a',
+          surface: '#141414',
+          raised: '#1e1e1e',
+          border: '#2a2a2a',
+          subtle: '#333333',
+          accent: '#3ecf8e',
+          'accent-hover': '#5edba5',
           success: '#2ea043',
           'success-bg': '#0d2818',
           error: '#d73a49',
@@ -24,7 +24,8 @@ export default {
         },
       },
       fontFamily: {
-        mono: ['SF Mono', 'Monaco', 'Consolas', 'monospace'],
+        sans: ['Inter', 'system-ui', '-apple-system', 'BlinkMacSystemFont', 'Segoe UI', 'Roboto', 'sans-serif'],
+        mono: ['JetBrains Mono', 'SF Mono', 'Monaco', 'Consolas', 'monospace'],
       },
     },
   },
