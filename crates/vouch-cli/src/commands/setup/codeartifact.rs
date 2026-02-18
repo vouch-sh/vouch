@@ -254,8 +254,12 @@ fn write_pip_config(index_url: &str) -> Result<()> {
 
     // Serialize INI to a buffer, then atomically write
     let mut buf = Vec::new();
-    ini.write_to(&mut buf)
-        .with_context(|| format!("failed to serialize pip config for {}", config_path.display()))?;
+    ini.write_to(&mut buf).with_context(|| {
+        format!(
+            "failed to serialize pip config for {}",
+            config_path.display()
+        )
+    })?;
     crate::utils::atomic_write_secure(&config_path, &buf)
         .with_context(|| format!("failed to write {}", config_path.display()))?;
 

@@ -46,9 +46,7 @@ pub(crate) enum FileMode {
 /// On Unix, sets file permissions on the temp file before the rename
 /// so the file is never visible with incorrect permissions.
 fn atomic_write_impl(path: &Path, content: &[u8], mode: FileMode) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("file path has no parent directory")?;
+    let parent = path.parent().context("file path has no parent directory")?;
 
     // create_dir_all is idempotent — no existence check needed.
     fs::create_dir_all(parent)
