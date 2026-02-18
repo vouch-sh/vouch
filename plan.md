@@ -55,7 +55,9 @@ return instantly from the agent.
 - `crates/vouch-cli/src/commands/credential/codeartifact.rs` — load defaults when flags omitted
 
 **What:** When the user runs `vouch setup codeartifact`, save the domain/domain-owner/region
-settings into the existing `~/.vouch/config.json` file under a `codeartifact` key.
+settings into the existing `~/.vouch/config.json` as named profiles (similar to AWS CLI
+profiles). Users can have multiple CodeArtifact domains and switch between them with
+`--profile`.
 
 **Config format (in `~/.vouch/config.json`):**
 ```json
@@ -64,9 +66,19 @@ settings into the existing `~/.vouch/config.json` file under a `codeartifact` ke
   "token": "eyJ...",
   "email": "alice@example.com",
   "codeartifact": {
-    "domain": "my-domain",
-    "domain_owner": "123456789012",
-    "region": "us-east-1"
+    "default": "internal",
+    "profiles": {
+      "internal": {
+        "domain": "internal-packages",
+        "domain_owner": "111111111111",
+        "region": "us-east-1"
+      },
+      "shared": {
+        "domain": "shared-libs",
+        "domain_owner": "222222222222",
+        "region": "us-west-2"
+      }
+    }
   }
 }
 ```
@@ -77,29 +89,47 @@ pub struct Config {
     server_url: Option<String>,
     token: Option<SecretString>,
     email: Option<String>,
-    codeartifact: Option<CodeArtifactDefaults>,  // NEW
+    codeartifact: Option<CodeArtifactConfig>,  // NEW
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct CodeArtifactDefaults {
-    pub domain: Option<String>,
-    pub domain_owner: Option<String>,
-    pub region: Option<String>,
+pub struct CodeArtifactConfig {
+    /// Name of the default profile (used when --profile is omitted).
+    pub default: Option<String>,
+    /// Named profiles, keyed by user-chosen name.
+    pub profiles: BTreeMap<String, CodeArtifactProfile>,
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct CodeArtifactProfile {
+    pub domain: String,
+    pub domain_owner: String,
+    pub region: String,
 }
 ```
 
 **CLI changes:**
 - `vouch credential codeartifact` — make `--domain`, `--domain-owner`, `--region` optional.
-  If omitted, load from `config.codeartifact`. Error with helpful message if neither flags
-  nor config are present.
-- `vouch setup codeartifact` — save CodeArtifact defaults to config after successful setup.
-- Saved config also read by Cargo credential provider when detecting CodeArtifact URLs
-  (no change needed there since it parses the URL directly).
+  Add `--profile <name>` flag. Resolution order:
+  1. Explicit flags (`--domain`, `--domain-owner`, `--region`) — highest priority
+  2. Named profile (`--profile shared`)
+  3. Default profile (`codeartifact.default`)
+  4. Error with helpful message listing available profiles
+- `vouch setup codeartifact --profile <name>` — save/update profile in config after
+  successful setup. First profile saved automatically becomes the default.
+- `vouch exec --type codeartifact --profile shared -- ...` — profile flag also works
+  with exec/env commands.
+- Cargo credential provider is unaffected (it parses the URL directly).
 
-**Why:** After initial `vouch setup codeartifact --tool pip --domain X --domain-owner Y
---region Z --repository R`, refreshing the pip token becomes just
-`vouch setup codeartifact --tool pip --repository R` (or even shorter with repository
-defaults per tool).
+**Why:** Users commonly work with multiple CodeArtifact domains (e.g., team-internal
+packages vs. shared org libraries, or different AWS accounts). Named profiles with a
+default eliminate repetitive flag passing while supporting multi-domain workflows.
+After initial setup, usage becomes:
+```bash
+vouch credential codeartifact                    # uses default profile
+vouch credential codeartifact --profile shared   # uses named profile
+vouch exec --type codeartifact -- pip install ... # uses default profile
+```
 
 ---
 
@@ -167,20 +197,24 @@ commands, which already support AWS and GitHub credentials.
 
 **Usage:**
 ```bash
-# Inject CODEARTIFACT_AUTH_TOKEN into a subprocess
+# Inject CODEARTIFACT_AUTH_TOKEN into a subprocess (uses default profile)
 vouch exec --type codeartifact -- pip install my-package
 
-# With explicit domain (overrides config defaults)
+# Use a named profile
+vouch exec --type codeartifact --profile shared -- pip install my-package
+
+# With explicit domain (overrides profile)
 vouch exec --type codeartifact --domain my-domain --domain-owner 123456789012 --region us-east-1 -- pip install my-package
 
 # Export for shell eval
 eval "$(vouch env --type codeartifact --shell bash)"
+eval "$(vouch env --type codeartifact --profile shared --shell bash)"
 # → export CODEARTIFACT_AUTH_TOKEN='eyJ...';
 ```
 
 **How:**
 - Add `Codeartifact` to the `CredentialType` enum in both `exec.rs` and `env.rs`
-- When type is `Codeartifact`, load domain/owner/region from flags or config defaults
+- Add `--profile` flag (same resolution order as step 2: flags > profile > default)
 - Call `codeartifact::get_token()` (benefits from caching in step 1)
 - Inject/export `CODEARTIFACT_AUTH_TOKEN` environment variable
 
