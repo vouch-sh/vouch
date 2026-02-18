@@ -14,6 +14,8 @@ pub enum Shell {
     Fish,
 }
 
+use super::exec::CodeArtifactOptions;
+
 /// Credential type to export.
 #[derive(Clone, Debug, clap::ValueEnum)]
 pub enum CredentialType {
@@ -21,6 +23,8 @@ pub enum CredentialType {
     Aws,
     /// GitHub token.
     Github,
+    /// CodeArtifact authorization token.
+    Codeartifact,
 }
 
 /// Run the env command - output shell-evaluable credential exports.
@@ -30,6 +34,7 @@ pub async fn run(
     shell: &Shell,
     role: Option<&str>,
     session_name: Option<&str>,
+    ca_opts: Option<CodeArtifactOptions<'_>>,
 ) -> Result<()> {
     match credential_type {
         CredentialType::Aws => {
@@ -39,6 +44,15 @@ pub async fn run(
             print_aws_env(server, role_arn, session_name, shell).await
         }
         CredentialType::Github => print_github_env(server, shell).await,
+        CredentialType::Codeartifact => {
+            let opts = ca_opts.unwrap_or(CodeArtifactOptions {
+                domain: None,
+                domain_owner: None,
+                region: None,
+                profile: None,
+            });
+            print_codeartifact_env(server, &opts, shell).await
+        }
     }
 }
 
@@ -104,6 +118,34 @@ async fn print_github_env(server: &str, shell: &Shell) -> Result<()> {
         print_export(shell, "GITHUB_TOKEN", token);
         print_export(shell, "GH_TOKEN", token);
     }
+
+    Ok(())
+}
+
+/// Fetch CodeArtifact token and print export statement.
+async fn print_codeartifact_env(
+    server: &str,
+    opts: &CodeArtifactOptions<'_>,
+    shell: &Shell,
+) -> Result<()> {
+    use secrecy::ExposeSecret;
+    let (domain, domain_owner, region) =
+        super::credential::codeartifact::resolve_codeartifact_params(
+            opts.domain,
+            opts.domain_owner,
+            opts.region,
+            opts.profile,
+        )?;
+
+    let token = super::credential::codeartifact::get_token(server, &domain, &domain_owner, &region)
+        .await
+        .context("failed to get CodeArtifact token")?;
+
+    print_export(
+        shell,
+        "CODEARTIFACT_AUTH_TOKEN",
+        token.authorization_token.expose_secret(),
+    );
 
     Ok(())
 }

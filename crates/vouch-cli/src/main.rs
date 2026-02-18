@@ -156,6 +156,18 @@ enum Commands {
         /// Session name for AWS assumed role.
         #[arg(long)]
         session_name: Option<String>,
+        /// CodeArtifact domain name (for --type codeartifact).
+        #[arg(long)]
+        ca_domain: Option<String>,
+        /// CodeArtifact domain owner (for --type codeartifact).
+        #[arg(long)]
+        ca_domain_owner: Option<String>,
+        /// CodeArtifact region (for --type codeartifact).
+        #[arg(long)]
+        ca_region: Option<String>,
+        /// CodeArtifact profile name (for --type codeartifact).
+        #[arg(long)]
+        ca_profile: Option<String>,
     },
     /// Output a shell hook for ambient auth status.
     ///
@@ -182,6 +194,18 @@ enum Commands {
         /// Session name for the assumed role.
         #[arg(long)]
         session_name: Option<String>,
+        /// CodeArtifact domain name (for --type codeartifact).
+        #[arg(long)]
+        ca_domain: Option<String>,
+        /// CodeArtifact domain owner (for --type codeartifact).
+        #[arg(long)]
+        ca_domain_owner: Option<String>,
+        /// CodeArtifact region (for --type codeartifact).
+        #[arg(long)]
+        ca_region: Option<String>,
+        /// CodeArtifact profile name (for --type codeartifact).
+        #[arg(long)]
+        ca_profile: Option<String>,
         /// Command and arguments to execute.
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
@@ -302,17 +326,34 @@ enum CredentialCommands {
         /// Git credential operation (get, store, erase).
         operation: String,
     },
+    /// pip keyring credential helper for CodeArtifact.
+    ///
+    /// Implements the keyring CLI protocol for dynamic pip authentication.
+    /// Users should not call this directly.
+    /// Instead, use `vouch setup codeartifact --tool pip` to configure pip.
+    #[command(hide = true)]
+    Pip {
+        /// Keyring operation (get, set, del).
+        operation: String,
+        /// Service URL.
+        service_url: Option<String>,
+        /// Username.
+        username: Option<String>,
+    },
     /// Obtain a CodeArtifact authorization token.
     Codeartifact {
-        /// CodeArtifact domain name.
+        /// CodeArtifact domain name (or use --profile / saved default).
         #[arg(long)]
-        domain: String,
+        domain: Option<String>,
         /// AWS account ID that owns the domain.
         #[arg(long)]
-        domain_owner: String,
-        /// AWS region (default: us-east-1).
-        #[arg(long, default_value = "us-east-1")]
-        region: String,
+        domain_owner: Option<String>,
+        /// AWS region.
+        #[arg(long)]
+        region: Option<String>,
+        /// Named CodeArtifact profile from config.
+        #[arg(long)]
+        profile: Option<String>,
     },
 }
 
@@ -393,18 +434,21 @@ enum SetupCommands {
         /// Package manager to configure (cargo, pip, npm).
         #[arg(long)]
         tool: crate::commands::setup::codeartifact::Tool,
-        /// CodeArtifact domain name.
+        /// CodeArtifact domain name (or use --profile / saved default).
         #[arg(long)]
-        domain: String,
+        domain: Option<String>,
         /// AWS account ID that owns the domain.
         #[arg(long)]
-        domain_owner: String,
-        /// AWS region (default: us-east-1).
-        #[arg(long, default_value = "us-east-1")]
-        region: String,
+        domain_owner: Option<String>,
+        /// AWS region.
+        #[arg(long)]
+        region: Option<String>,
         /// CodeArtifact repository name.
         #[arg(long)]
         repository: String,
+        /// Named CodeArtifact profile to use / save.
+        #[arg(long)]
+        profile: Option<String>,
     },
 }
 
@@ -482,13 +526,24 @@ async fn run() -> Result<()> {
             shell,
             role,
             session_name,
+            ca_domain,
+            ca_domain_owner,
+            ca_region,
+            ca_profile,
         } => {
+            let ca_opts = commands::exec::CodeArtifactOptions {
+                domain: ca_domain.as_deref(),
+                domain_owner: ca_domain_owner.as_deref(),
+                region: ca_region.as_deref(),
+                profile: ca_profile.as_deref(),
+            };
             commands::env::run(
                 &server,
                 &credential_type,
                 &shell,
                 role.as_deref(),
                 session_name.as_deref(),
+                Some(ca_opts),
             )
             .await
         }
@@ -507,14 +562,25 @@ async fn run() -> Result<()> {
             credential_type,
             role,
             session_name,
+            ca_domain,
+            ca_domain_owner,
+            ca_region,
+            ca_profile,
             command,
         } => {
+            let ca_opts = commands::exec::CodeArtifactOptions {
+                domain: ca_domain.as_deref(),
+                domain_owner: ca_domain_owner.as_deref(),
+                region: ca_region.as_deref(),
+                profile: ca_profile.as_deref(),
+            };
             commands::exec::run(
                 &server,
                 &credential_type,
                 role.as_deref(),
                 session_name.as_deref(),
                 &command,
+                Some(ca_opts),
             )
             .await
         }
@@ -535,13 +601,32 @@ async fn run() -> Result<()> {
             CredentialCommands::Codecommit { operation } => {
                 commands::credential::codecommit::run(&operation).await
             }
+            CredentialCommands::Pip {
+                operation,
+                service_url,
+                username,
+            } => {
+                commands::credential::pip::run(
+                    &operation,
+                    service_url.as_deref(),
+                    username.as_deref(),
+                )
+                .await
+            }
             CredentialCommands::Codeartifact {
                 domain,
                 domain_owner,
                 region,
+                profile,
             } => {
-                commands::credential::codeartifact::run(&server, &domain, &domain_owner, &region)
-                    .await
+                commands::credential::codeartifact::run(
+                    &server,
+                    domain.as_deref(),
+                    domain_owner.as_deref(),
+                    region.as_deref(),
+                    profile.as_deref(),
+                )
+                .await
             }
         },
         Commands::Setup { command } => match command {
@@ -590,14 +675,16 @@ async fn run() -> Result<()> {
                 domain_owner,
                 region,
                 repository,
+                profile,
             } => {
                 commands::setup::codeartifact::run(
                     &server,
                     tool,
-                    &domain,
-                    &domain_owner,
-                    &region,
+                    domain.as_deref(),
+                    domain_owner.as_deref(),
+                    region.as_deref(),
                     &repository,
+                    profile.as_deref(),
                 )
                 .await
             }

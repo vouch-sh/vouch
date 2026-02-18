@@ -4,6 +4,7 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -21,6 +22,30 @@ pub struct Config {
     token: Option<SecretString>,
     /// User's email address (for session naming).
     email: Option<String>,
+    /// CodeArtifact profile configuration.
+    codeartifact: Option<CodeArtifactConfig>,
+}
+
+/// CodeArtifact configuration with named profiles (similar to AWS CLI profiles).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct CodeArtifactConfig {
+    /// Name of the default profile (used when `--profile` is omitted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// Named profiles, keyed by user-chosen name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, CodeArtifactProfile>,
+}
+
+/// A single CodeArtifact domain profile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeArtifactProfile {
+    /// CodeArtifact domain name.
+    pub domain: String,
+    /// AWS account ID that owns the domain.
+    pub domain_owner: String,
+    /// AWS region (e.g., "us-east-1").
+    pub region: String,
 }
 
 /// Intermediate type for serialization/deserialization.
@@ -31,6 +56,9 @@ struct ConfigFile {
     server_url: Option<String>,
     token: Option<String>,
     email: Option<String>,
+    #[zeroize(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codeartifact: Option<CodeArtifactConfig>,
 }
 
 impl std::fmt::Debug for Config {
@@ -39,6 +67,7 @@ impl std::fmt::Debug for Config {
             .field("server_url", &self.server_url)
             .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
             .field("email", &self.email)
+            .field("codeartifact", &self.codeartifact)
             .finish()
     }
 }
@@ -163,6 +192,28 @@ impl Config {
         self.save()
     }
 
+    /// Get the CodeArtifact configuration.
+    #[must_use]
+    pub fn codeartifact(&self) -> Option<&CodeArtifactConfig> {
+        self.codeartifact.as_ref()
+    }
+
+    /// Save a CodeArtifact profile. If this is the first profile, it becomes the default.
+    pub fn save_codeartifact_profile(
+        &mut self,
+        name: &str,
+        profile: CodeArtifactProfile,
+    ) -> Result<()> {
+        let ca = self
+            .codeartifact
+            .get_or_insert_with(CodeArtifactConfig::default);
+        if ca.profiles.is_empty() && ca.default.is_none() {
+            ca.default = Some(name.to_string());
+        }
+        ca.profiles.insert(name.to_string(), profile);
+        self.save()
+    }
+
     /// Get the path to the config file.
     fn config_path() -> Result<PathBuf> {
         let home = dirs::home_dir().context("could not determine home directory")?;
@@ -179,6 +230,7 @@ impl From<ConfigFile> for Config {
             server_url: std::mem::take(&mut file.server_url),
             token: std::mem::take(&mut file.token).map(SecretString::from),
             email: std::mem::take(&mut file.email),
+            codeartifact: file.codeartifact.take(),
         }
     }
 }
@@ -189,6 +241,7 @@ impl From<&Config> for ConfigFile {
             server_url: config.server_url.clone(),
             token: config.token.as_ref().map(|s| s.expose_secret().to_string()),
             email: config.email.clone(),
+            codeartifact: config.codeartifact.clone(),
         }
     }
 }

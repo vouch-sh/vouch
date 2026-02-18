@@ -13,6 +13,16 @@ pub enum CredentialType {
     Aws,
     /// GitHub token (GITHUB_TOKEN, GH_TOKEN).
     Github,
+    /// CodeArtifact authorization token (CODEARTIFACT_AUTH_TOKEN).
+    Codeartifact,
+}
+
+/// CodeArtifact-specific options for exec/env commands.
+pub struct CodeArtifactOptions<'a> {
+    pub domain: Option<&'a str>,
+    pub domain_owner: Option<&'a str>,
+    pub region: Option<&'a str>,
+    pub profile: Option<&'a str>,
 }
 
 /// Run a command with credentials injected as environment variables.
@@ -22,6 +32,7 @@ pub async fn run(
     role: Option<&str>,
     session_name: Option<&str>,
     command: &[String],
+    ca_opts: Option<CodeArtifactOptions<'_>>,
 ) -> Result<()> {
     if command.is_empty() {
         bail!("No command specified. Usage: vouch exec -- <command> [args...]");
@@ -42,6 +53,15 @@ pub async fn run(
         }
         CredentialType::Github => {
             inject_github_credentials(&mut cmd, server).await?;
+        }
+        CredentialType::Codeartifact => {
+            let opts = ca_opts.unwrap_or(CodeArtifactOptions {
+                domain: None,
+                domain_owner: None,
+                region: None,
+                profile: None,
+            });
+            inject_codeartifact_credentials(&mut cmd, server, &opts).await?;
         }
     }
 
@@ -144,4 +164,31 @@ pub(crate) async fn fetch_github_token(server: &str) -> Result<serde_json::Value
         .get_authenticated("/v1/credentials/github/token")
         .await
         .context("failed to get GitHub token from Vouch server")
+}
+
+/// Fetch a CodeArtifact token and inject it into the environment.
+async fn inject_codeartifact_credentials(
+    cmd: &mut Command,
+    server: &str,
+    opts: &CodeArtifactOptions<'_>,
+) -> Result<()> {
+    use secrecy::ExposeSecret;
+    let (domain, domain_owner, region) =
+        super::credential::codeartifact::resolve_codeartifact_params(
+            opts.domain,
+            opts.domain_owner,
+            opts.region,
+            opts.profile,
+        )?;
+
+    let token = super::credential::codeartifact::get_token(server, &domain, &domain_owner, &region)
+        .await
+        .context("failed to get CodeArtifact token")?;
+
+    cmd.env(
+        "CODEARTIFACT_AUTH_TOKEN",
+        token.authorization_token.expose_secret(),
+    );
+
+    Ok(())
 }
