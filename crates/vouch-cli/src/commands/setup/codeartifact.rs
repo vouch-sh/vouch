@@ -229,7 +229,19 @@ fn install_keyring_wrapper() -> Result<()> {
     }
 
     println!("Installed keyring wrapper: {}", keyring_path.display());
-    println!("Ensure {} is in your PATH.", bin_dir.display());
+
+    // Check if the bin directory is in PATH
+    let bin_dir_str = bin_dir.display().to_string();
+    let in_path = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .any(|p| p == bin_dir_str);
+    if !in_path {
+        println!();
+        println!("WARNING: {} is not in your PATH.", bin_dir.display());
+        println!("Add it to your shell profile:");
+        println!("  export PATH=\"{}:$PATH\"", bin_dir.display());
+    }
 
     Ok(())
 }
@@ -329,8 +341,9 @@ async fn setup_npm(
     println!();
     println!("Registry URL: {}", registry_url);
     println!();
-    println!("Note: The npm token expires in ~12 hours.");
-    println!("Re-run this command to refresh it.");
+    println!("Note: Unlike Cargo and pip, npm does not support dynamic credential");
+    println!("helpers. The token written to ~/.npmrc expires in ~12 hours.");
+    println!("To refresh: vouch setup codeartifact --tool npm --repository {repository}");
 
     Ok(())
 }

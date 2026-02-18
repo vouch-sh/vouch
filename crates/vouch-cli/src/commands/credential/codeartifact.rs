@@ -194,12 +194,28 @@ async fn fetch_token(
     })?;
 
     // Decode JWT to extract claims for session tags (ABAC)
-    let tags = decode_jwt_payload(&token_response.id_token)
-        .map(|claims| build_session_tags(&claims))
-        .unwrap_or_default();
+    let tags = match decode_jwt_payload(&token_response.id_token) {
+        Ok(claims) => build_session_tags(&claims),
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "failed to decode JWT payload for session tags, proceeding without ABAC tags"
+            );
+            Vec::new()
+        }
+    };
 
     // Determine domain suffix from role ARN partition
-    let partition = extract_partition_from_role_arn(&role_arn).unwrap_or("aws");
+    let partition = match extract_partition_from_role_arn(&role_arn) {
+        Some(p) => p,
+        None => {
+            tracing::debug!(
+                role_arn = %role_arn,
+                "could not extract partition from role ARN, defaulting to 'aws'"
+            );
+            "aws"
+        }
+    };
     let domain_suffix = get_domain_suffix_for_partition(partition);
 
     // Call STS AssumeRoleWithWebIdentity

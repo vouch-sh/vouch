@@ -156,16 +156,16 @@ enum Commands {
         /// Session name for AWS assumed role.
         #[arg(long)]
         session_name: Option<String>,
-        /// CodeArtifact domain name (for --type codeartifact).
+        /// CodeArtifact domain name (required for --type codeartifact unless profile is set).
         #[arg(long)]
         ca_domain: Option<String>,
-        /// CodeArtifact domain owner (for --type codeartifact).
+        /// AWS account ID that owns the CodeArtifact domain (required for --type codeartifact unless profile is set).
         #[arg(long)]
         ca_domain_owner: Option<String>,
-        /// CodeArtifact region (for --type codeartifact).
+        /// AWS region for CodeArtifact (required for --type codeartifact unless profile is set).
         #[arg(long)]
         ca_region: Option<String>,
-        /// CodeArtifact profile name (for --type codeartifact).
+        /// Named CodeArtifact profile from config (for --type codeartifact).
         #[arg(long)]
         ca_profile: Option<String>,
     },
@@ -194,16 +194,16 @@ enum Commands {
         /// Session name for the assumed role.
         #[arg(long)]
         session_name: Option<String>,
-        /// CodeArtifact domain name (for --type codeartifact).
+        /// CodeArtifact domain name (required for --type codeartifact unless profile is set).
         #[arg(long)]
         ca_domain: Option<String>,
-        /// CodeArtifact domain owner (for --type codeartifact).
+        /// AWS account ID that owns the CodeArtifact domain (required for --type codeartifact unless profile is set).
         #[arg(long)]
         ca_domain_owner: Option<String>,
-        /// CodeArtifact region (for --type codeartifact).
+        /// AWS region for CodeArtifact (required for --type codeartifact unless profile is set).
         #[arg(long)]
         ca_region: Option<String>,
-        /// CodeArtifact profile name (for --type codeartifact).
+        /// Named CodeArtifact profile from config (for --type codeartifact).
         #[arg(long)]
         ca_profile: Option<String>,
         /// Command and arguments to execute.
@@ -328,16 +328,19 @@ enum CredentialCommands {
     },
     /// pip keyring credential helper for CodeArtifact.
     ///
-    /// Implements the keyring CLI protocol for dynamic pip authentication.
+    /// Implements the keyring CLI protocol (`keyring get/set/del`) so pip can
+    /// dynamically fetch fresh CodeArtifact tokens. This command is called by
+    /// pip when `keyring-provider = subprocess` is configured.
+    ///
     /// Users should not call this directly.
-    /// Instead, use `vouch setup codeartifact --tool pip` to configure pip.
+    /// Run `vouch setup codeartifact --tool pip` to configure pip.
     #[command(hide = true)]
     Pip {
         /// Keyring operation (get, set, del).
         operation: String,
-        /// Service URL.
+        /// Service URL passed by pip (the CodeArtifact index URL).
         service_url: Option<String>,
-        /// Username.
+        /// Username passed by pip (typically "aws").
         username: Option<String>,
     },
     /// Obtain a CodeArtifact authorization token.

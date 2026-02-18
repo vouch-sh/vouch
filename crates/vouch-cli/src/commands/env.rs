@@ -95,10 +95,13 @@ async fn print_github_env(server: &str, shell: &Shell) -> Result<()> {
     })
     .await?;
 
-    if let Some(token) = data.get("token").and_then(|v| v.as_str()) {
-        print_export(shell, "GITHUB_TOKEN", token);
-        print_export(shell, "GH_TOKEN", token);
-    }
+    let token = data
+        .get("token")
+        .and_then(|v| v.as_str())
+        .context("GitHub credential missing 'token' field")?;
+
+    print_export(shell, "GITHUB_TOKEN", token);
+    print_export(shell, "GH_TOKEN", token);
 
     Ok(())
 }
