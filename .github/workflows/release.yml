@@ -887,6 +887,7 @@ jobs:
           path: .helm-packages/*.tgz
           if-no-files-found: error
           retention-days: 5
+          include-hidden-files: true
 
       - name: Push Helm chart to OCI registry
         run: |

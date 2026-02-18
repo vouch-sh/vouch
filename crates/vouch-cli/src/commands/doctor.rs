@@ -127,7 +127,17 @@ pub async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
     }
     checks.push(eks_result);
 
-    // Check 7: Server URL security
+    // Check 7: SSM config
+    if !suppress {
+        print!("SSM configuration ... ");
+    }
+    let ssm_result = check_ssm_config();
+    if !suppress {
+        print_result(&ssm_result);
+    }
+    checks.push(ssm_result);
+
+    // Check 8: Server URL security
     if !suppress {
         print!("Server URL security ... ");
     }
@@ -362,6 +372,44 @@ fn check_eks_config() -> CheckResult {
             }
         }
         Err(_) => CheckResult::fail("eks", "Could not read kubeconfig"),
+    }
+}
+
+/// Check SSM configuration.
+///
+/// Checks for `session-manager-plugin` on PATH and the Vouch SSM marker in SSH config.
+fn check_ssm_config() -> CheckResult {
+    use crate::commands::setup::ssm::SSM_MARKER;
+    use crate::integrations::ssm::is_plugin_available;
+
+    let plugin_found = is_plugin_available();
+
+    let home = match dirs::home_dir() {
+        Some(h) => h,
+        None => return CheckResult::fail("ssm", "Could not determine home directory"),
+    };
+
+    let ssh_config_path = home.join(".ssh").join("config");
+    let marker_found = ssh_config_path
+        .exists()
+        .then(|| std::fs::read_to_string(&ssh_config_path).ok())
+        .flatten()
+        .is_some_and(|content| content.contains(SSM_MARKER));
+
+    match (plugin_found, marker_found) {
+        (true, true) => CheckResult::pass("ssm", "SSM configured for Vouch"),
+        (true, false) => CheckResult::pass(
+            "ssm",
+            "session-manager-plugin found (not configured). Run: vouch setup ssm",
+        ),
+        (false, true) => CheckResult::fail(
+            "ssm",
+            "SSH config references SSM but session-manager-plugin not found on PATH",
+        ),
+        (false, false) => CheckResult::pass(
+            "ssm",
+            "SSM not configured (session-manager-plugin not found)",
+        ),
     }
 }
 

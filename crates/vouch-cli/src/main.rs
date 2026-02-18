@@ -432,6 +432,22 @@ enum SetupCommands {
         #[arg(long)]
         configure: bool,
     },
+    /// Configure SSH for AWS Systems Manager Session Manager.
+    Ssm {
+        /// AWS profile to use (defaults to auto-detected vouch profile).
+        #[arg(long)]
+        profile: Option<String>,
+        /// AWS region (auto-detected from AWS profile or environment if not specified).
+        #[arg(long)]
+        region: Option<String>,
+        /// SSH host patterns for SSM proxying (i-* = EC2 instances, mi-* = managed
+        /// instances).
+        #[arg(long, default_value = crate::commands::setup::ssm::DEFAULT_HOST_PATTERN)]
+        hosts: String,
+        /// Replace existing Vouch SSM configuration if present.
+        #[arg(long)]
+        force: bool,
+    },
     /// Configure a package manager for AWS CodeArtifact.
     Codeartifact {
         /// Package manager to configure (cargo, pip, npm).
@@ -655,6 +671,15 @@ async fn run() -> Result<()> {
                     kubeconfig.as_deref(),
                 )
                 .await
+            }
+            SetupCommands::Ssm {
+                profile,
+                region,
+                hosts,
+                force,
+            } => {
+                commands::setup::ssm::run(profile.as_deref(), region.as_deref(), &hosts, force)
+                    .await
             }
             SetupCommands::Docker {
                 registries,

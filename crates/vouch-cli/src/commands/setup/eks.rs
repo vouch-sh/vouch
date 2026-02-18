@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-use crate::integrations::aws::config::AwsConfig;
+use crate::integrations::aws;
 use crate::utils::{ensure_secure_dir, write_secure_file};
 
 // ============================================================================
@@ -172,54 +172,6 @@ fn save_kubeconfig(path: &std::path::Path, config: &Kubeconfig) -> Result<()> {
 // Auto-discovery Helpers
 // ============================================================================
 
-/// Resolve the AWS profile to use, auto-detecting from ~/.aws/config if not specified.
-fn resolve_profile(profile: Option<&str>) -> Result<String> {
-    if let Some(p) = profile {
-        return Ok(p.to_string());
-    }
-
-    let aws_config = AwsConfig::load()?;
-    match aws_config.find_vouch_profile() {
-        Some(p) => {
-            tracing::debug!("auto-detected vouch AWS profile: {}", p.name);
-            Ok(p.name)
-        }
-        None => bail!(
-            "No Vouch AWS profile found.\n\
-             Run 'vouch setup aws' first, or specify --profile."
-        ),
-    }
-}
-
-/// Resolve the AWS region, checking profile config then environment variables.
-fn resolve_region(region: Option<&str>, profile_name: &str) -> Result<String> {
-    if let Some(r) = region {
-        return Ok(r.to_string());
-    }
-
-    // Check the AWS profile's region setting
-    let aws_config = AwsConfig::load()?;
-    if let Some(profile) = aws_config.get_profile(profile_name)
-        && let Some(r) = profile.region
-    {
-        tracing::debug!("using region from AWS profile '{}': {}", profile_name, r);
-        return Ok(r);
-    }
-
-    // Check environment variables
-    if let Ok(r) = std::env::var("AWS_DEFAULT_REGION") {
-        return Ok(r);
-    }
-    if let Ok(r) = std::env::var("AWS_REGION") {
-        return Ok(r);
-    }
-
-    bail!(
-        "Could not determine AWS region.\n\
-         Specify --region, or set a region in your AWS profile or AWS_DEFAULT_REGION."
-    );
-}
-
 /// Fetch EKS cluster endpoint and CA data via `aws eks describe-cluster`.
 fn describe_cluster(cluster_name: &str, region: &str, profile: &str) -> Result<(String, String)> {
     let output = std::process::Command::new("aws")
@@ -280,8 +232,8 @@ pub async fn run(
     });
 
     // Auto-discover profile and region
-    let profile_name = resolve_profile(profile)?;
-    let region_name = resolve_region(region, &profile_name)?;
+    let profile_name = aws::resolve_profile(profile)?;
+    let region_name = aws::resolve_region(region, &profile_name)?;
 
     println!("Amazon EKS Setup");
     println!("================");
