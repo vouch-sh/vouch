@@ -9,3 +9,4 @@ pub mod docker;
 pub mod eks;
 pub mod github;
 pub mod ssh;
+pub mod ssm;

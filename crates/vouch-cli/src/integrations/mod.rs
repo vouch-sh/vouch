@@ -14,6 +14,7 @@ pub mod docker;
 pub mod eks;
 pub mod github;
 pub mod ssh;
+pub mod ssm;
 
 pub use aws::AwsIntegration;
 pub use cargo::CargoIntegration;
@@ -21,6 +22,7 @@ pub use docker::DockerIntegration;
 pub use eks::EksIntegration;
 pub use github::GitHubIntegration;
 pub use ssh::SshIntegration;
+pub use ssm::SsmIntegration;
 
 /// Result of checking an integration's status.
 pub enum IntegrationState {

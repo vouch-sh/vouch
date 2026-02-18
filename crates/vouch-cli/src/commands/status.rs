@@ -11,7 +11,7 @@ use crate::client::VouchClient;
 use crate::config::Config;
 use crate::integrations::{
     AwsIntegration, CargoIntegration, DockerIntegration, EksIntegration, GitHubIntegration,
-    SshIntegration, print_integration_status,
+    SshIntegration, SsmIntegration, print_integration_status,
 };
 
 /// JSON output for `vouch status --json`.
@@ -193,6 +193,7 @@ async fn print_all_integrations(server: &str) {
     print_integration_status(&SshIntegration::new());
     print_integration_status(&AwsIntegration::new());
     print_integration_status(&EksIntegration::new());
+    print_integration_status(&SsmIntegration::new());
     print_integration_status(&DockerIntegration::new());
     print_integration_status(&CargoIntegration::new());
 

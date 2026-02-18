@@ -12,7 +12,7 @@ use crate::client::VouchClient;
 use crate::utils::{atomic_write, atomic_write_secure, ensure_secure_dir};
 
 /// Get the SSH config path (~/.ssh/config).
-fn ssh_config_path() -> Result<PathBuf> {
+pub(crate) fn ssh_config_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     Ok(home.join(".ssh").join("config"))
 }

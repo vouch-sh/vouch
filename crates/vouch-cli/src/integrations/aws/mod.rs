@@ -13,6 +13,54 @@ pub mod sts;
 // Re-export commonly used types
 pub use config::{AwsConfig, AwsProfile, extract_role_from_credential_process};
 
+/// Resolve the AWS profile to use, auto-detecting from ~/.aws/config if not specified.
+pub fn resolve_profile(profile: Option<&str>) -> anyhow::Result<String> {
+    if let Some(p) = profile {
+        return Ok(p.to_string());
+    }
+
+    let aws_config = AwsConfig::load()?;
+    match aws_config.find_vouch_profile() {
+        Some(p) => {
+            tracing::debug!("auto-detected vouch AWS profile: {}", p.name);
+            Ok(p.name)
+        }
+        None => anyhow::bail!(
+            "No Vouch AWS profile found.\n\
+             Run 'vouch setup aws' first, or specify --profile."
+        ),
+    }
+}
+
+/// Resolve the AWS region, checking profile config then environment variables.
+pub fn resolve_region(region: Option<&str>, profile_name: &str) -> anyhow::Result<String> {
+    if let Some(r) = region {
+        return Ok(r.to_string());
+    }
+
+    // Check the AWS profile's region setting
+    let aws_config = AwsConfig::load()?;
+    if let Some(profile) = aws_config.get_profile(profile_name)
+        && let Some(r) = profile.region
+    {
+        tracing::debug!("using region from AWS profile '{}': {}", profile_name, r);
+        return Ok(r);
+    }
+
+    // Check environment variables
+    if let Ok(r) = std::env::var("AWS_DEFAULT_REGION") {
+        return Ok(r);
+    }
+    if let Ok(r) = std::env::var("AWS_REGION") {
+        return Ok(r);
+    }
+
+    anyhow::bail!(
+        "Could not determine AWS region.\n\
+         Specify --region, or set a region in your AWS profile or AWS_DEFAULT_REGION."
+    );
+}
+
 /// Try to read the AWS role ARN from the local `~/.aws/config` file.
 ///
 /// Finds the first vouch profile and extracts the role ARN from its `credential_process`.

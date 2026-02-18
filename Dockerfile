@@ -9,25 +9,25 @@ ARG TARGETARCH
 WORKDIR /app
 
 # Download standalone tailwindcss CLI with checksum verification
-# Checksums for v4.1.8:
-#   tailwindcss-linux-x64:   8f84ce810bdff225e599781d1e2daa82b4282229021c867a71b419f59f9aa836
-#   tailwindcss-linux-arm64: 28a77d1e59b0e45b41683c1e3947621fdfe73f6895b05db7c34f63f3f4898e8d
+# Checksums for v4.2.0:
+#   tailwindcss-linux-x64:   8f65e2d21c675f1e8d265219979d17d10634c1f553a2f583265b7edb28726432
+#   tailwindcss-linux-arm64: 376fd4da2c29eb81ae0638cd2f84a4304af92532f2f1576555f41bdb44c185da
 RUN apt-get update && apt-get install -y curl \
     && rm -rf /var/lib/apt/lists/* \
     && case "$TARGETARCH" in \
          amd64) \
            BINARY="tailwindcss-linux-x64" \
-           CHECKSUM="8f84ce810bdff225e599781d1e2daa82b4282229021c867a71b419f59f9aa836" \
+           CHECKSUM="8f65e2d21c675f1e8d265219979d17d10634c1f553a2f583265b7edb28726432" \
            ;; \
          arm64) \
            BINARY="tailwindcss-linux-arm64" \
-           CHECKSUM="28a77d1e59b0e45b41683c1e3947621fdfe73f6895b05db7c34f63f3f4898e8d" \
+           CHECKSUM="376fd4da2c29eb81ae0638cd2f84a4304af92532f2f1576555f41bdb44c185da" \
            ;; \
          *) \
            echo "Unsupported architecture: $TARGETARCH" && exit 1 \
            ;; \
        esac \
-    && curl -sLO "https://github.com/tailwindlabs/tailwindcss/releases/download/v4.1.8/${BINARY}" \
+    && curl -sLO "https://github.com/tailwindlabs/tailwindcss/releases/download/v4.2.0/${BINARY}" \
     && echo "${CHECKSUM}  ${BINARY}" | sha256sum -c - \
     && chmod +x "${BINARY}" \
     && mv "${BINARY}" tailwindcss
@@ -44,7 +44,7 @@ RUN cd crates/vouch-server \
     && /app/tailwindcss -i styles/input.css -o static/css/output.css --minify
 
 # Rust build stage - using musl for static binary
-FROM rust:1.93-alpine AS builder
+FROM rust:1.93.1-alpine AS builder
 
 # Build argument for reproducible builds
 ARG SOURCE_DATE_EPOCH=0
