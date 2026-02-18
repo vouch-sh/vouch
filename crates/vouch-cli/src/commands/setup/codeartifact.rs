@@ -207,26 +207,8 @@ fn install_keyring_wrapper() -> Result<()> {
 
     let script = format!("#!/bin/sh\nexec \"{vouch_path_str}\" credential pip \"$@\"\n");
 
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o755)
-            .open(&keyring_path)
-            .with_context(|| format!("failed to write {}", keyring_path.display()))?;
-        file.write_all(script.as_bytes())
-            .with_context(|| format!("failed to write {}", keyring_path.display()))?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        std::fs::write(&keyring_path, &script)
-            .with_context(|| format!("failed to write {}", keyring_path.display()))?;
-    }
+    crate::utils::atomic_write_executable(&keyring_path, script.as_bytes())
+        .with_context(|| format!("failed to write {}", keyring_path.display()))?;
 
     println!("Installed keyring wrapper: {}", keyring_path.display());
 
@@ -270,29 +252,12 @@ fn write_pip_config(index_url: &str) -> Result<()> {
         .set("index-url", index_url)
         .set("keyring-provider", "subprocess");
 
-    // Write with restrictive permissions
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&config_path)
-            .with_context(|| format!("failed to write {}", config_path.display()))?;
-        ini.write_to(&mut file)
-            .with_context(|| format!("failed to write {}", config_path.display()))?;
-        file.flush()
-            .with_context(|| format!("failed to flush {}", config_path.display()))?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        ini.write_to_file(&config_path)
-            .with_context(|| format!("failed to write {}", config_path.display()))?;
-    }
+    // Serialize INI to a buffer, then atomically write
+    let mut buf = Vec::new();
+    ini.write_to(&mut buf)
+        .with_context(|| format!("failed to serialize pip config for {}", config_path.display()))?;
+    crate::utils::atomic_write_secure(&config_path, &buf)
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
 
     println!("Wrote pip config: {}", config_path.display());
 
@@ -377,27 +342,8 @@ fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
 
     let content = lines.join("\n") + "\n";
 
-    // Write with restrictive permissions
-    #[cfg(unix)]
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&npmrc_path)
-            .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
-        file.write_all(content.as_bytes())
-            .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
-    }
-
-    #[cfg(not(unix))]
-    {
-        std::fs::write(&npmrc_path, &content)
-            .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
-    }
+    crate::utils::atomic_write_secure(&npmrc_path, content.as_bytes())
+        .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
 
     println!("Wrote npm config: {}", npmrc_path.display());
 

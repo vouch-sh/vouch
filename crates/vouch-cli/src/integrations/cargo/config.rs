@@ -167,14 +167,11 @@ impl CargoConfig {
     }
 
     /// Save the config to its file path.
+    ///
+    /// Uses atomic write (temp file + rename) to prevent corruption
+    /// if the process is interrupted mid-write.
     pub fn save(&self) -> Result<()> {
-        // Ensure parent directory exists
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create directory {}", parent.display()))?;
-        }
-
-        std::fs::write(&self.path, self.doc.to_string())
+        crate::utils::atomic_write(&self.path, self.doc.to_string().as_bytes())
             .with_context(|| format!("failed to write {}", self.path.display()))
     }
 

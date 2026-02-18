@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use vouch_common::SshCaPublicKeyResponse;
 
 use crate::client::VouchClient;
+use crate::utils::{atomic_write, atomic_write_secure};
 
 /// Get the SSH config path (~/.ssh/config).
 fn ssh_config_path() -> Result<PathBuf> {
@@ -73,7 +74,7 @@ pub async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
         }
     }
 
-    fs::write(&ca_path, &ca_content)
+    atomic_write(&ca_path, ca_content.as_bytes())
         .with_context(|| format!("failed to write {}", ca_path.display()))?;
     println!("Saved CA public key: {}", ca_path.display());
 
@@ -177,7 +178,7 @@ Host *
     };
 
     let new_config = format!("{existing}{vouch_config}");
-    fs::write(&config_path, new_config)
+    atomic_write_secure(&config_path, new_config.as_bytes())
         .with_context(|| format!("failed to write {}", config_path.display()))?;
 
     println!("Updated SSH config: {}", config_path.display());
@@ -228,7 +229,7 @@ fn add_trusted_ca_to_known_hosts(ca_path: &PathBuf, host_patterns: &str) -> Resu
 
     // Append entry
     let new_content = format!("{existing}{entry}");
-    fs::write(&known_hosts_path, new_content)?;
+    atomic_write_secure(&known_hosts_path, new_content.as_bytes())?;
     println!("Added CA to known_hosts for hosts: {}", host_patterns);
 
     Ok(())

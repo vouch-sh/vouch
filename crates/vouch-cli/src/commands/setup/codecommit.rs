@@ -275,7 +275,7 @@ fn create_remote_helper_symlink(
             "@echo off\r\nset VOUCH_GIT_REMOTE_CODECOMMIT=1\r\n\"{}\" %*\r\n",
             vouch_path.display()
         );
-        std::fs::write(&bat_path, &batch_content)
+        crate::utils::atomic_write(&bat_path, batch_content.as_bytes())
             .with_context(|| format!("failed to create {}", bat_path.display()))?;
 
         println!("Created: {}", bat_path.display());

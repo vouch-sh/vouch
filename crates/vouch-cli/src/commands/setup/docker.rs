@@ -176,7 +176,7 @@ fn create_credential_helper_symlink(vouch_path: &PathBuf, symlink_path: &PathBuf
             "@echo off\r\n\"{}\" credential docker %1\r\n",
             vouch_path.display()
         );
-        std::fs::write(&bat_path, &batch_content)
+        crate::utils::atomic_write(&bat_path, batch_content.as_bytes())
             .with_context(|| format!("failed to create {}", bat_path.display()))?;
 
         println!("Created: {}", bat_path.display());
@@ -227,10 +227,10 @@ fn configure_docker_config(registries: &[String]) -> Result<()> {
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
-    // Write config
+    // Write config atomically to avoid corruption if interrupted
     let json =
         serde_json::to_string_pretty(&config).context("failed to serialize Docker config")?;
-    std::fs::write(&docker_config_path, json)
+    crate::utils::atomic_write(&docker_config_path, json.as_bytes())
         .with_context(|| format!("failed to write {}", docker_config_path.display()))?;
 
     println!("Updated: {}", docker_config_path.display());

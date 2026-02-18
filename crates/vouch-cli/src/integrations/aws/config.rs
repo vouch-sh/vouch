@@ -153,9 +153,15 @@ impl AwsConfig {
     }
 
     /// Save the config to its file path.
+    ///
+    /// Uses atomic write (temp file + rename) to prevent corruption
+    /// if the process is interrupted mid-write.
     pub fn save(&self) -> Result<()> {
+        let mut buf = Vec::new();
         self.ini
-            .write_to_file(&self.path)
+            .write_to(&mut buf)
+            .with_context(|| format!("failed to serialize {}", self.path.display()))?;
+        crate::utils::atomic_write(&self.path, &buf)
             .with_context(|| format!("failed to write {}", self.path.display()))
     }
 

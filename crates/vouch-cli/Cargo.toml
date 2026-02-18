@@ -60,5 +60,7 @@ axum = { workspace = true, optional = true }
 tower = { workspace = true, optional = true }
 http = { workspace = true, optional = true }
 
+[dependencies.tempfile]
+workspace = true
+
 [dev-dependencies]
-tempfile = { workspace = true }
