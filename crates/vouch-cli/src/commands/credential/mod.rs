@@ -9,5 +9,6 @@ pub mod codecommit;
 pub mod docker;
 pub mod git_protocol;
 pub mod github;
+pub mod pip;
 
 pub mod ssh;

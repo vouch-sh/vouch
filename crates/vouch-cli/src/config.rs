@@ -4,6 +4,7 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -21,6 +22,30 @@ pub struct Config {
     token: Option<SecretString>,
     /// User's email address (for session naming).
     email: Option<String>,
+    /// CodeArtifact profile configuration.
+    codeartifact: Option<CodeArtifactConfig>,
+}
+
+/// CodeArtifact configuration with named profiles (similar to AWS CLI profiles).
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct CodeArtifactConfig {
+    /// Name of the default profile (used when `--profile` is omitted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<String>,
+    /// Named profiles, keyed by user-chosen name.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub profiles: BTreeMap<String, CodeArtifactProfile>,
+}
+
+/// A single CodeArtifact domain profile.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodeArtifactProfile {
+    /// CodeArtifact domain name.
+    pub domain: String,
+    /// AWS account ID that owns the domain.
+    pub domain_owner: String,
+    /// AWS region (e.g., "us-east-1").
+    pub region: String,
 }
 
 /// Intermediate type for serialization/deserialization.
@@ -31,6 +56,9 @@ struct ConfigFile {
     server_url: Option<String>,
     token: Option<String>,
     email: Option<String>,
+    #[zeroize(skip)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    codeartifact: Option<CodeArtifactConfig>,
 }
 
 impl std::fmt::Debug for Config {
@@ -39,6 +67,7 @@ impl std::fmt::Debug for Config {
             .field("server_url", &self.server_url)
             .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
             .field("email", &self.email)
+            .field("codeartifact", &self.codeartifact)
             .finish()
     }
 }
@@ -163,6 +192,28 @@ impl Config {
         self.save()
     }
 
+    /// Get the CodeArtifact configuration.
+    #[must_use]
+    pub fn codeartifact(&self) -> Option<&CodeArtifactConfig> {
+        self.codeartifact.as_ref()
+    }
+
+    /// Save a CodeArtifact profile. If this is the first profile, it becomes the default.
+    pub fn save_codeartifact_profile(
+        &mut self,
+        name: &str,
+        profile: CodeArtifactProfile,
+    ) -> Result<()> {
+        let ca = self
+            .codeartifact
+            .get_or_insert_with(CodeArtifactConfig::default);
+        if ca.profiles.is_empty() && ca.default.is_none() {
+            ca.default = Some(name.to_string());
+        }
+        ca.profiles.insert(name.to_string(), profile);
+        self.save()
+    }
+
     /// Get the path to the config file.
     fn config_path() -> Result<PathBuf> {
         let home = dirs::home_dir().context("could not determine home directory")?;
@@ -179,6 +230,7 @@ impl From<ConfigFile> for Config {
             server_url: std::mem::take(&mut file.server_url),
             token: std::mem::take(&mut file.token).map(SecretString::from),
             email: std::mem::take(&mut file.email),
+            codeartifact: file.codeartifact.take(),
         }
     }
 }
@@ -189,6 +241,124 @@ impl From<&Config> for ConfigFile {
             server_url: config.server_url.clone(),
             token: config.token.as_ref().map(|s| s.expose_secret().to_string()),
             email: config.email.clone(),
+            codeartifact: config.codeartifact.clone(),
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_codeartifact_config_round_trip() {
+        let json = r#"{
+            "server_url": "https://vouch.example.com",
+            "token": "test-token",
+            "email": "alice@example.com",
+            "codeartifact": {
+                "default": "prod",
+                "profiles": {
+                    "prod": {
+                        "domain": "my-domain",
+                        "domain_owner": "123456789012",
+                        "region": "us-east-1"
+                    },
+                    "staging": {
+                        "domain": "staging-domain",
+                        "domain_owner": "987654321098",
+                        "region": "eu-west-1"
+                    }
+                }
+            }
+        }"#;
+
+        let file: ConfigFile = serde_json::from_str(json).unwrap();
+        let config = Config::from(file);
+
+        assert_eq!(config.server_url(), Some("https://vouch.example.com"));
+        assert_eq!(config.email(), Some("alice@example.com"));
+
+        let ca = config
+            .codeartifact()
+            .expect("codeartifact config should exist");
+        assert_eq!(ca.default.as_deref(), Some("prod"));
+        assert_eq!(ca.profiles.len(), 2);
+
+        let prod = ca.profiles.get("prod").expect("prod profile should exist");
+        assert_eq!(prod.domain, "my-domain");
+        assert_eq!(prod.domain_owner, "123456789012");
+        assert_eq!(prod.region, "us-east-1");
+
+        let staging = ca
+            .profiles
+            .get("staging")
+            .expect("staging profile should exist");
+        assert_eq!(staging.domain, "staging-domain");
+        assert_eq!(staging.domain_owner, "987654321098");
+        assert_eq!(staging.region, "eu-west-1");
+
+        // Round-trip back to ConfigFile
+        let file2 = ConfigFile::from(&config);
+        let json2 = serde_json::to_string(&file2).unwrap();
+        let file3: ConfigFile = serde_json::from_str(&json2).unwrap();
+        let config2 = Config::from(file3);
+
+        assert_eq!(config2.server_url(), config.server_url());
+        assert_eq!(config2.email(), config.email());
+        let ca2 = config2
+            .codeartifact()
+            .expect("round-tripped codeartifact config");
+        assert_eq!(ca2.default, ca.default);
+        assert_eq!(ca2.profiles.len(), ca.profiles.len());
+    }
+
+    #[test]
+    fn test_config_without_codeartifact() {
+        let json = r#"{
+            "server_url": "https://vouch.example.com",
+            "token": "test-token"
+        }"#;
+
+        let file: ConfigFile = serde_json::from_str(json).unwrap();
+        let config = Config::from(file);
+
+        assert!(config.codeartifact().is_none());
+
+        // Round-trip should not add a codeartifact field
+        let file2 = ConfigFile::from(&config);
+        let json2 = serde_json::to_string(&file2).unwrap();
+        assert!(!json2.contains("codeartifact"));
+    }
+
+    #[test]
+    fn test_empty_codeartifact_not_serialized() {
+        let ca = CodeArtifactConfig::default();
+        let json = serde_json::to_string(&ca).unwrap();
+        // Empty profiles map should be omitted via skip_serializing_if
+        assert!(!json.contains("profiles"));
+    }
+
+    #[test]
+    fn test_save_codeartifact_profile_sets_default_for_first() {
+        let mut config = Config::default();
+
+        config
+            .save_codeartifact_profile(
+                "myteam",
+                CodeArtifactProfile {
+                    domain: "team-domain".into(),
+                    domain_owner: "111111111111".into(),
+                    region: "us-west-2".into(),
+                },
+            )
+            .unwrap_or_default(); // save may fail in test env (no home dir)
+
+        let ca = config
+            .codeartifact()
+            .expect("should have codeartifact config");
+        assert_eq!(ca.default.as_deref(), Some("myteam"));
+        assert_eq!(ca.profiles.len(), 1);
     }
 }

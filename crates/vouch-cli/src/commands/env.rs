@@ -4,6 +4,7 @@
 use anyhow::{Context, Result};
 
 use super::credential::cache;
+use super::exec::CodeArtifactOptions;
 
 /// Shell format for environment variable output.
 #[derive(Clone, Debug, clap::ValueEnum)]
@@ -14,23 +15,16 @@ pub enum Shell {
     Fish,
 }
 
-/// Credential type to export.
-#[derive(Clone, Debug, clap::ValueEnum)]
-pub enum CredentialType {
-    /// AWS temporary credentials.
-    Aws,
-    /// GitHub token.
-    Github,
-}
-
 /// Run the env command - output shell-evaluable credential exports.
 pub async fn run(
     server: &str,
-    credential_type: &CredentialType,
+    credential_type: &super::exec::CredentialType,
     shell: &Shell,
     role: Option<&str>,
     session_name: Option<&str>,
+    ca_opts: CodeArtifactOptions<'_>,
 ) -> Result<()> {
+    use super::exec::CredentialType;
     match credential_type {
         CredentialType::Aws => {
             let role_arn = role.context(
@@ -39,6 +33,7 @@ pub async fn run(
             print_aws_env(server, role_arn, session_name, shell).await
         }
         CredentialType::Github => print_github_env(server, shell).await,
+        CredentialType::Codeartifact => print_codeartifact_env(server, &ca_opts, shell).await,
     }
 }
 
@@ -100,10 +95,41 @@ async fn print_github_env(server: &str, shell: &Shell) -> Result<()> {
     })
     .await?;
 
-    if let Some(token) = data.get("token").and_then(|v| v.as_str()) {
-        print_export(shell, "GITHUB_TOKEN", token);
-        print_export(shell, "GH_TOKEN", token);
-    }
+    let token = data
+        .get("token")
+        .and_then(|v| v.as_str())
+        .context("GitHub credential missing 'token' field")?;
+
+    print_export(shell, "GITHUB_TOKEN", token);
+    print_export(shell, "GH_TOKEN", token);
+
+    Ok(())
+}
+
+/// Fetch CodeArtifact token and print export statement.
+async fn print_codeartifact_env(
+    server: &str,
+    opts: &CodeArtifactOptions<'_>,
+    shell: &Shell,
+) -> Result<()> {
+    use secrecy::ExposeSecret;
+    let (domain, domain_owner, region) =
+        super::credential::codeartifact::resolve_codeartifact_params(
+            opts.domain,
+            opts.domain_owner,
+            opts.region,
+            opts.profile,
+        )?;
+
+    let token = super::credential::codeartifact::get_token(server, &domain, &domain_owner, &region)
+        .await
+        .context("failed to get CodeArtifact token")?;
+
+    print_export(
+        shell,
+        "CODEARTIFACT_AUTH_TOKEN",
+        token.authorization_token.expose_secret(),
+    );
 
     Ok(())
 }
