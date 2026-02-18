@@ -18,6 +18,7 @@ pub enum CredentialType {
 }
 
 /// CodeArtifact-specific options for exec/env commands.
+#[derive(Default)]
 pub struct CodeArtifactOptions<'a> {
     pub domain: Option<&'a str>,
     pub domain_owner: Option<&'a str>,
@@ -32,7 +33,7 @@ pub async fn run(
     role: Option<&str>,
     session_name: Option<&str>,
     command: &[String],
-    ca_opts: Option<CodeArtifactOptions<'_>>,
+    ca_opts: CodeArtifactOptions<'_>,
 ) -> Result<()> {
     if command.is_empty() {
         bail!("No command specified. Usage: vouch exec -- <command> [args...]");
@@ -55,13 +56,7 @@ pub async fn run(
             inject_github_credentials(&mut cmd, server).await?;
         }
         CredentialType::Codeartifact => {
-            let opts = ca_opts.unwrap_or(CodeArtifactOptions {
-                domain: None,
-                domain_owner: None,
-                region: None,
-                profile: None,
-            });
-            inject_codeartifact_credentials(&mut cmd, server, &opts).await?;
+            inject_codeartifact_credentials(&mut cmd, server, &ca_opts).await?;
         }
     }
 

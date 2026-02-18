@@ -146,7 +146,7 @@ enum Commands {
     Env {
         /// Credential type to export.
         #[arg(long = "type")]
-        credential_type: commands::env::CredentialType,
+        credential_type: commands::exec::CredentialType,
         /// Shell syntax to emit.
         #[arg(long, default_value = "bash")]
         shell: commands::env::Shell,
@@ -543,7 +543,7 @@ async fn run() -> Result<()> {
                 &shell,
                 role.as_deref(),
                 session_name.as_deref(),
-                Some(ca_opts),
+                ca_opts,
             )
             .await
         }
@@ -580,7 +580,7 @@ async fn run() -> Result<()> {
                 role.as_deref(),
                 session_name.as_deref(),
                 &command,
-                Some(ca_opts),
+                ca_opts,
             )
             .await
         }

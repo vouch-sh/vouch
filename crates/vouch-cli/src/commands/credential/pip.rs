@@ -55,11 +55,11 @@ async fn handle_get(url: &str) -> Result<()> {
     })?;
 
     let config = crate::config::Config::load()
-        .context("failed to load config - run 'vouch enroll' first")?;
+        .context("vouch is not enrolled - run 'vouch enroll' to set up authentication")?;
 
     let server = config
         .server_url()
-        .context("not configured - run 'vouch enroll' first")?;
+        .context("vouch is not enrolled - run 'vouch enroll' to set up authentication")?;
 
     let token = super::codeartifact::get_token(
         server,
@@ -97,5 +97,44 @@ mod tests {
     fn test_non_codeartifact_url_returns_none() {
         assert!(parse_codeartifact_url("https://pypi.org/simple/").is_none());
         assert!(parse_codeartifact_url("https://files.pythonhosted.org/packages/").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_operation_succeeds_silently() {
+        assert!(
+            run("set", Some("https://example.com"), Some("user"))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_del_operation_succeeds_silently() {
+        assert!(
+            run("del", Some("https://example.com"), Some("user"))
+                .await
+                .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_unknown_operation_succeeds_silently() {
+        assert!(run("unknown", None, None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_get_without_url_returns_error() {
+        let result = run("get", None, None).await;
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("keyring get requires a service URL"));
+    }
+
+    #[tokio::test]
+    async fn test_get_non_codeartifact_url_returns_error() {
+        let result = run("get", Some("https://pypi.org/simple/"), Some("user")).await;
+        assert!(result.is_err());
+        let err = format!("{}", result.unwrap_err());
+        assert!(err.contains("does not appear to be a CodeArtifact registry"));
     }
 }

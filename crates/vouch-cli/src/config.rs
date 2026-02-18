@@ -245,3 +245,120 @@ impl From<&Config> for ConfigFile {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_codeartifact_config_round_trip() {
+        let json = r#"{
+            "server_url": "https://vouch.example.com",
+            "token": "test-token",
+            "email": "alice@example.com",
+            "codeartifact": {
+                "default": "prod",
+                "profiles": {
+                    "prod": {
+                        "domain": "my-domain",
+                        "domain_owner": "123456789012",
+                        "region": "us-east-1"
+                    },
+                    "staging": {
+                        "domain": "staging-domain",
+                        "domain_owner": "987654321098",
+                        "region": "eu-west-1"
+                    }
+                }
+            }
+        }"#;
+
+        let file: ConfigFile = serde_json::from_str(json).unwrap();
+        let config = Config::from(file);
+
+        assert_eq!(config.server_url(), Some("https://vouch.example.com"));
+        assert_eq!(config.email(), Some("alice@example.com"));
+
+        let ca = config
+            .codeartifact()
+            .expect("codeartifact config should exist");
+        assert_eq!(ca.default.as_deref(), Some("prod"));
+        assert_eq!(ca.profiles.len(), 2);
+
+        let prod = ca.profiles.get("prod").expect("prod profile should exist");
+        assert_eq!(prod.domain, "my-domain");
+        assert_eq!(prod.domain_owner, "123456789012");
+        assert_eq!(prod.region, "us-east-1");
+
+        let staging = ca
+            .profiles
+            .get("staging")
+            .expect("staging profile should exist");
+        assert_eq!(staging.domain, "staging-domain");
+        assert_eq!(staging.domain_owner, "987654321098");
+        assert_eq!(staging.region, "eu-west-1");
+
+        // Round-trip back to ConfigFile
+        let file2 = ConfigFile::from(&config);
+        let json2 = serde_json::to_string(&file2).unwrap();
+        let file3: ConfigFile = serde_json::from_str(&json2).unwrap();
+        let config2 = Config::from(file3);
+
+        assert_eq!(config2.server_url(), config.server_url());
+        assert_eq!(config2.email(), config.email());
+        let ca2 = config2
+            .codeartifact()
+            .expect("round-tripped codeartifact config");
+        assert_eq!(ca2.default, ca.default);
+        assert_eq!(ca2.profiles.len(), ca.profiles.len());
+    }
+
+    #[test]
+    fn test_config_without_codeartifact() {
+        let json = r#"{
+            "server_url": "https://vouch.example.com",
+            "token": "test-token"
+        }"#;
+
+        let file: ConfigFile = serde_json::from_str(json).unwrap();
+        let config = Config::from(file);
+
+        assert!(config.codeartifact().is_none());
+
+        // Round-trip should not add a codeartifact field
+        let file2 = ConfigFile::from(&config);
+        let json2 = serde_json::to_string(&file2).unwrap();
+        assert!(!json2.contains("codeartifact"));
+    }
+
+    #[test]
+    fn test_empty_codeartifact_not_serialized() {
+        let ca = CodeArtifactConfig::default();
+        let json = serde_json::to_string(&ca).unwrap();
+        // Empty profiles map should be omitted via skip_serializing_if
+        assert!(!json.contains("profiles"));
+    }
+
+    #[test]
+    fn test_save_codeartifact_profile_sets_default_for_first() {
+        let mut config = Config::default();
+
+        config
+            .save_codeartifact_profile(
+                "myteam",
+                CodeArtifactProfile {
+                    domain: "team-domain".into(),
+                    domain_owner: "111111111111".into(),
+                    region: "us-west-2".into(),
+                },
+            )
+            .unwrap_or_default(); // save may fail in test env (no home dir)
+
+        let ca = config
+            .codeartifact()
+            .expect("should have codeartifact config");
+        assert_eq!(ca.default.as_deref(), Some("myteam"));
+        assert_eq!(ca.profiles.len(), 1);
+    }
+}

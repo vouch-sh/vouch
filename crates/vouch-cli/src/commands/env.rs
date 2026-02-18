@@ -4,6 +4,7 @@
 use anyhow::{Context, Result};
 
 use super::credential::cache;
+use super::exec::CodeArtifactOptions;
 
 /// Shell format for environment variable output.
 #[derive(Clone, Debug, clap::ValueEnum)]
@@ -14,28 +15,16 @@ pub enum Shell {
     Fish,
 }
 
-use super::exec::CodeArtifactOptions;
-
-/// Credential type to export.
-#[derive(Clone, Debug, clap::ValueEnum)]
-pub enum CredentialType {
-    /// AWS temporary credentials.
-    Aws,
-    /// GitHub token.
-    Github,
-    /// CodeArtifact authorization token.
-    Codeartifact,
-}
-
 /// Run the env command - output shell-evaluable credential exports.
 pub async fn run(
     server: &str,
-    credential_type: &CredentialType,
+    credential_type: &super::exec::CredentialType,
     shell: &Shell,
     role: Option<&str>,
     session_name: Option<&str>,
-    ca_opts: Option<CodeArtifactOptions<'_>>,
+    ca_opts: CodeArtifactOptions<'_>,
 ) -> Result<()> {
+    use super::exec::CredentialType;
     match credential_type {
         CredentialType::Aws => {
             let role_arn = role.context(
@@ -44,15 +33,7 @@ pub async fn run(
             print_aws_env(server, role_arn, session_name, shell).await
         }
         CredentialType::Github => print_github_env(server, shell).await,
-        CredentialType::Codeartifact => {
-            let opts = ca_opts.unwrap_or(CodeArtifactOptions {
-                domain: None,
-                domain_owner: None,
-                region: None,
-                profile: None,
-            });
-            print_codeartifact_env(server, &opts, shell).await
-        }
+        CredentialType::Codeartifact => print_codeartifact_env(server, &ca_opts, shell).await,
     }
 }
 

@@ -159,7 +159,10 @@ pub async fn get_token(
         .get("authorization_token")
         .and_then(|v| v.as_str())
         .context("cached CodeArtifact token missing authorization_token")?;
-    let expiration = data.get("expiration").and_then(|v| v.as_i64()).unwrap_or(0);
+    let expiration = data
+        .get("expiration")
+        .and_then(|v| v.as_i64())
+        .context("cached CodeArtifact token missing expiration")?;
 
     Ok(CodeArtifactToken {
         authorization_token: SecretString::from(auth_token.to_string()),

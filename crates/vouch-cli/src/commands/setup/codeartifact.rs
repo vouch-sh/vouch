@@ -56,7 +56,7 @@ pub async fn run(
 
     // Save profile to config
     let profile_name = profile.unwrap_or("default");
-    let mut config = Config::load().unwrap_or_default();
+    let mut config = Config::load().context("failed to load config")?;
     config.save_codeartifact_profile(
         profile_name,
         CodeArtifactProfile {
@@ -77,17 +77,7 @@ pub async fn run(
 
     match tool {
         Tool::Cargo => setup_cargo(&ca_host, repository),
-        Tool::Pip => {
-            setup_pip(
-                server,
-                &domain,
-                &domain_owner,
-                &region,
-                &ca_host,
-                repository,
-            )
-            .await
-        }
+        Tool::Pip => setup_pip(&ca_host, repository),
         Tool::Npm => {
             setup_npm(
                 server,
@@ -164,14 +154,7 @@ fn configure_cargo_registry(registry_name: &str, index_url: &str, vouch_path: &s
 /// Instead of embedding a static token that expires in ~12h, this sets up
 /// pip to use `vouch credential pip` as a keyring backend. pip will call
 /// vouch on each request to get a fresh token transparently.
-async fn setup_pip(
-    _server: &str,
-    _domain: &str,
-    _domain_owner: &str,
-    _region: &str,
-    ca_host: &str,
-    repository: &str,
-) -> Result<()> {
+fn setup_pip(ca_host: &str, repository: &str) -> Result<()> {
     let index_url = format!("https://aws@{ca_host}/pypi/{repository}/simple/");
 
     write_pip_config(&index_url)?;
@@ -202,16 +185,22 @@ fn install_keyring_wrapper() -> Result<()> {
 
     // Don't overwrite if it exists and isn't ours
     if keyring_path.exists() {
-        let existing = std::fs::read_to_string(&keyring_path).unwrap_or_default();
+        let existing = std::fs::read_to_string(&keyring_path)
+            .with_context(|| format!("failed to read {}", keyring_path.display()))?;
         if !existing.contains("vouch credential pip") {
             println!(
                 "Note: {} already exists (not managed by vouch).",
                 keyring_path.display()
             );
-            println!("To use vouch as pip's keyring backend, either:");
-            println!("  1. Replace it with: exec {vouch_path_str} credential pip \"$@\"");
-            println!("  2. Or run: pip config set global.keyring-provider subprocess");
-            println!("     and ensure 'vouch credential pip' is in your PATH as 'keyring'");
+            println!("To use vouch for CodeArtifact authentication, you can:");
+            println!("  1. Rename the existing keyring and re-run this command:");
+            println!(
+                "     mv {} {}.bak",
+                keyring_path.display(),
+                keyring_path.display()
+            );
+            println!("  2. Or manually create a wrapper that delegates to vouch:");
+            println!("     exec {vouch_path_str} credential pip \"$@\"");
             return Ok(());
         }
     }
@@ -347,17 +336,35 @@ async fn setup_npm(
 }
 
 /// Write npm configuration file (~/.npmrc).
+///
+/// Preserves existing entries while updating/adding CodeArtifact-specific lines.
+/// Only lines matching this specific host/repo are replaced.
 fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     let npmrc_path = home.join(".npmrc");
 
-    let content = format!(
-        "//{ca_host}/npm/{repository}/:_authToken={token}\n\
-         //{ca_host}/npm/{repository}/:always-auth=true\n\
-         registry=https://{ca_host}/npm/{repository}/\n"
-    );
+    // Read existing content, preserving lines not related to this registry
+    let ca_prefix = format!("//{ca_host}/npm/{repository}/");
+    let ca_registry = format!("registry=https://{ca_host}/npm/{repository}/");
+    let mut lines: Vec<String> = if npmrc_path.exists() {
+        std::fs::read_to_string(&npmrc_path)
+            .with_context(|| format!("failed to read {}", npmrc_path.display()))?
+            .lines()
+            .filter(|line| !line.starts_with(&ca_prefix) && !line.starts_with(&ca_registry))
+            .map(String::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
 
-    // Create file with restrictive permissions atomically (avoids TOCTOU)
+    // Append the new CodeArtifact entries
+    lines.push(format!("{ca_prefix}:_authToken={token}"));
+    lines.push(format!("{ca_prefix}:always-auth=true"));
+    lines.push(format!("registry=https://{ca_host}/npm/{repository}/"));
+
+    let content = lines.join("\n") + "\n";
+
+    // Write with restrictive permissions
     #[cfg(unix)]
     {
         use std::io::Write;
