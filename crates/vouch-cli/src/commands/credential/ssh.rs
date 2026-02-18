@@ -56,41 +56,26 @@ pub(crate) fn ensure_keypair(key_path: &Path) -> Result<KeypairAction> {
         return Ok(KeypairAction::Loaded(pub_key));
     }
 
-    // Ensure .ssh directory exists
-    let ssh_dir = ssh_dir()?;
-    if !ssh_dir.exists() {
-        std::fs::create_dir_all(&ssh_dir)
-            .with_context(|| format!("failed to create {}", ssh_dir.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&ssh_dir, std::fs::Permissions::from_mode(0o700))?;
-        }
-    }
+    // Ensure .ssh directory exists with secure permissions
+    crate::utils::ensure_secure_dir(&ssh_dir()?)?;
 
     // Generate new keypair
     let private_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519)
         .map_err(|e| anyhow::anyhow!("failed to generate SSH key: {e}"))?;
 
-    // Save private key
+    // Save private key (atomic + secure permissions)
     let private_key_str = private_key
         .to_openssh(LineEnding::LF)
         .map_err(|e| anyhow::anyhow!("failed to serialize private key: {e}"))?;
-    std::fs::write(key_path, private_key_str.as_bytes())
+    crate::utils::atomic_write_secure(key_path, private_key_str.as_bytes())
         .with_context(|| format!("failed to write {}", key_path.display()))?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(key_path, std::fs::Permissions::from_mode(0o600))?;
-    }
-
-    // Save public key
+    // Save public key (atomic)
     let public_key = private_key.public_key();
     let pub_key_str = public_key
         .to_openssh()
         .map_err(|e| anyhow::anyhow!("failed to serialize public key: {e}"))?;
-    std::fs::write(&pub_path, format!("{pub_key_str}\n"))
+    crate::utils::atomic_write(&pub_path, format!("{pub_key_str}\n").as_bytes())
         .with_context(|| format!("failed to write {}", pub_path.display()))?;
 
     Ok(KeypairAction::Generated(public_key.clone()))
@@ -139,9 +124,9 @@ pub(crate) async fn provision_ssh_certificate(
         .await
         .context("failed to get SSH certificate")?;
 
-    // Save certificate
+    // Save certificate (atomic)
     let cert_path = PathBuf::from(format!("{}-cert.pub", key_path.display()));
-    std::fs::write(&cert_path, format!("{}\n", response.certificate))
+    crate::utils::atomic_write(&cert_path, format!("{}\n", response.certificate).as_bytes())
         .with_context(|| format!("failed to write {}", cert_path.display()))?;
 
     Ok(SshProvisionResult {

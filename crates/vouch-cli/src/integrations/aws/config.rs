@@ -153,9 +153,15 @@ impl AwsConfig {
     }
 
     /// Save the config to its file path.
+    ///
+    /// Uses atomic write (temp file + rename) to prevent corruption
+    /// if the process is interrupted mid-write.
     pub fn save(&self) -> Result<()> {
+        let mut buf = Vec::new();
         self.ini
-            .write_to_file(&self.path)
+            .write_to(&mut buf)
+            .with_context(|| format!("failed to serialize {}", self.path.display()))?;
+        crate::utils::atomic_write(&self.path, &buf)
             .with_context(|| format!("failed to write {}", self.path.display()))
     }
 
@@ -210,14 +216,27 @@ pub fn extract_role_from_credential_process(credential_process: &str) -> Option<
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
 
-    fn create_temp_config(content: &str) -> NamedTempFile {
-        let mut file = NamedTempFile::new().expect("failed to create temp file");
-        file.write_all(content.as_bytes())
-            .expect("failed to write temp file");
-        file
+    /// Wrapper that writes config content to a file inside a temporary directory.
+    /// The file handle is released immediately, but the directory (and file) persist
+    /// until this struct is dropped. This avoids Windows "Access is denied" errors
+    /// when `atomic_write` tries to rename over an open file handle.
+    struct TempConfig {
+        _dir: tempfile::TempDir,
+        path: PathBuf,
+    }
+
+    impl TempConfig {
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    fn create_temp_config(content: &str) -> TempConfig {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("config");
+        std::fs::write(&path, content).expect("failed to write temp config");
+        TempConfig { _dir: dir, path }
     }
 
     #[test]

@@ -167,14 +167,11 @@ impl CargoConfig {
     }
 
     /// Save the config to its file path.
+    ///
+    /// Uses atomic write (temp file + rename) to prevent corruption
+    /// if the process is interrupted mid-write.
     pub fn save(&self) -> Result<()> {
-        // Ensure parent directory exists
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create directory {}", parent.display()))?;
-        }
-
-        std::fs::write(&self.path, self.doc.to_string())
+        crate::utils::atomic_write(&self.path, self.doc.to_string().as_bytes())
             .with_context(|| format!("failed to write {}", self.path.display()))
     }
 
@@ -233,14 +230,27 @@ impl CargoConfig {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
 
-    fn create_temp_config(content: &str) -> NamedTempFile {
-        let mut file = NamedTempFile::new().expect("failed to create temp file");
-        file.write_all(content.as_bytes())
-            .expect("failed to write temp file");
-        file
+    /// Wrapper that writes config content to a file inside a temporary directory.
+    /// The file handle is released immediately, but the directory (and file) persist
+    /// until this struct is dropped. This avoids Windows "Access is denied" errors
+    /// when `atomic_write` tries to rename over an open file handle.
+    struct TempConfig {
+        _dir: tempfile::TempDir,
+        path: PathBuf,
+    }
+
+    impl TempConfig {
+        fn path(&self) -> &std::path::Path {
+            &self.path
+        }
+    }
+
+    fn create_temp_config(content: &str) -> TempConfig {
+        let dir = tempfile::tempdir().expect("failed to create temp dir");
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, content).expect("failed to write temp config");
+        TempConfig { _dir: dir, path }
     }
 
     #[test]

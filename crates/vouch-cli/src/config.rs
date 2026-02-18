@@ -89,39 +89,18 @@ impl Config {
     }
 
     /// Save configuration to disk.
+    ///
+    /// Uses atomic write (temp file + rename) to prevent corruption
+    /// if the process is interrupted mid-write.
     pub fn save(&self) -> Result<()> {
         let path = Self::config_path()?;
-
-        // Ensure parent directory exists
-        if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create config directory {}", parent.display())
-            })?;
-        }
 
         let config_file = ConfigFile::from(self);
         let content =
             serde_json::to_string_pretty(&config_file).context("failed to serialize config")?;
 
-        // Write with restrictive permissions (0600)
-        #[cfg(unix)]
-        {
-            use std::io::Write;
-            use std::os::unix::fs::OpenOptionsExt;
-            let mut options = fs::OpenOptions::new();
-            options.write(true).create(true).truncate(true).mode(0o600);
-            let mut file = options
-                .open(&path)
-                .with_context(|| format!("failed to create config file {}", path.display()))?;
-            file.write_all(content.as_bytes())
-                .with_context(|| format!("failed to write config to {}", path.display()))?;
-        }
-
-        #[cfg(not(unix))]
-        {
-            fs::write(&path, &content)
-                .with_context(|| format!("failed to write config to {}", path.display()))?;
-        }
+        crate::utils::atomic_write_secure(path.as_path(), content.as_bytes())
+            .with_context(|| format!("failed to write config to {}", path.display()))?;
 
         Ok(())
     }

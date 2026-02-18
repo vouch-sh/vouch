@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use vouch_common::SshCaPublicKeyResponse;
 
 use crate::client::VouchClient;
+use crate::utils::{atomic_write, atomic_write_secure, ensure_secure_dir};
 
 /// Get the SSH config path (~/.ssh/config).
 fn ssh_config_path() -> Result<PathBuf> {
@@ -61,19 +62,12 @@ pub async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
     let ca_path = ca_key_path(server)?;
     let ca_content = format!("{} {}\n", ca_response.public_key, ca_response.comment);
 
-    // Ensure .ssh directory exists
-    if let Some(parent) = ca_path.parent()
-        && !parent.exists()
-    {
-        fs::create_dir_all(parent)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
-        }
+    // Ensure .ssh directory exists with secure permissions
+    if let Some(parent) = ca_path.parent() {
+        ensure_secure_dir(parent)?;
     }
 
-    fs::write(&ca_path, &ca_content)
+    atomic_write(&ca_path, ca_content.as_bytes())
         .with_context(|| format!("failed to write {}", ca_path.display()))?;
     println!("Saved CA public key: {}", ca_path.display());
 
@@ -177,7 +171,7 @@ Host *
     };
 
     let new_config = format!("{existing}{vouch_config}");
-    fs::write(&config_path, new_config)
+    atomic_write_secure(&config_path, new_config.as_bytes())
         .with_context(|| format!("failed to write {}", config_path.display()))?;
 
     println!("Updated SSH config: {}", config_path.display());
@@ -200,15 +194,18 @@ Host *
 fn add_trusted_ca_to_known_hosts(ca_path: &PathBuf, host_patterns: &str) -> Result<()> {
     let known_hosts_path = known_hosts_path()?;
     let ca_pub_key = fs::read_to_string(ca_path)?;
-    // Remove comment and trailing newline
+    // Extract "algorithm base64key" from the first line (strip comment, trailing newline)
     let ca_pub_key = ca_pub_key
         .lines()
         .next()
-        .unwrap_or("")
+        .context("CA public key file is empty")?
         .split_whitespace()
         .take(2)
         .collect::<Vec<_>>()
         .join(" ");
+    if ca_pub_key.is_empty() {
+        anyhow::bail!("CA public key file does not contain a valid key");
+    }
 
     // Create entry
     let entry = format!("@cert-authority {} {}\n", host_patterns, ca_pub_key);
@@ -228,7 +225,7 @@ fn add_trusted_ca_to_known_hosts(ca_path: &PathBuf, host_patterns: &str) -> Resu
 
     // Append entry
     let new_content = format!("{existing}{entry}");
-    fs::write(&known_hosts_path, new_content)?;
+    atomic_write_secure(&known_hosts_path, new_content.as_bytes())?;
     println!("Added CA to known_hosts for hosts: {}", host_patterns);
 
     Ok(())
