@@ -257,9 +257,9 @@ dependencies = [
 
 [[package]]
 name = "aws-lc-rs"
-version = "1.15.4"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7b7b6141e96a8c160799cc2d5adecd5cbbe5054cb8c7c4af53da0f83bb7ad256"
+checksum = "d9a7b350e3bb1767102698302bc37256cbd48422809984b98d292c40e2579aa9"
 dependencies = [
  "aws-lc-sys",
  "untrusted 0.7.1",
@@ -898,9 +898,9 @@ dependencies = [
 
 [[package]]
 name = "bumpalo"
-version = "3.19.1"
+version = "3.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5dd9dc738b7a8311c7ade152424974d8115f2cdad61e8dab8dac9f2362298510"
+checksum = "c81d250916401487680ed13b8b675660281dcfc3ab0121fe44c94bcab9eae2fb"
 
 [[package]]
 name = "byteorder"
@@ -4775,7 +4775,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.2.28"
+version = "2026.2.29"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -4798,7 +4798,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.2.28"
+version = "2026.2.29"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4839,7 +4839,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.2.28"
+version = "2026.2.29"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4858,7 +4858,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.2.28"
+version = "2026.2.29"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -4915,7 +4915,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.2.28"
+version = "2026.2.29"
 dependencies = [
  "anyhow",
  "aws-lc-rs",

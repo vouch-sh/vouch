@@ -44,7 +44,7 @@
                 <dt class="text-gray-400">Type</dt>
                 <dd>
                     <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded
-                        {% if app.application_type == "web" %}bg-[#0d1f3c] text-[#539fe5]
+                        {% if app.application_type == "web" %}bg-[#0d2d1f] text-[#3ecf8e]
                         {% elif app.application_type == "native" %}bg-vouch-success-bg text-vouch-success
                         {% elif app.application_type == "spa" %}bg-vouch-warning-bg text-vouch-warning
                         {% else %}bg-[#1f0d2d] text-[#a78bfa]{% endif %}">
@@ -58,7 +58,7 @@
                         {% match app.access_scope %}
                         {% when crate::db::AccessScope::Organization %}bg-[#0d2d1f] text-[#4ade80]
                         {% when crate::db::AccessScope::Personal %}bg-[#2d1f0d] text-[#fbbf24]
-                        {% when crate::db::AccessScope::Public %}bg-[#0d1f3c] text-[#539fe5]
+                        {% when crate::db::AccessScope::Public %}bg-[#0d2d1f] text-[#3ecf8e]
                         {% endmatch %}">
                         {{ app.access_scope.display_name() }}
                     </span>
@@ -186,7 +186,7 @@
                 <button type="button" onclick="toggleEditForm()" class="px-4 py-2 text-gray-400 hover:text-gray-200 text-sm font-medium transition-colors">
                     Cancel
                 </button>
-                <button type="submit" class="px-4 py-2 bg-vouch-accent hover:bg-vouch-accent-hover text-white rounded-md text-sm font-medium transition-colors">
+                <button type="submit" class="px-4 py-2 bg-vouch-accent hover:bg-vouch-accent-hover text-[#0a0a0a] rounded-md text-sm font-medium transition-colors">
                     Save Changes
                 </button>
             </div>

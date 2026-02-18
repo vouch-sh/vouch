@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.2.28"
+version = "2026.2.29"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.93"
@@ -78,7 +78,7 @@ dirs = { version = "=6.0.0", default-features = false }
 rustls = { version = "=0.23.36", default-features = false, features = ["aws-lc-rs", "std", "tls12", "prefer-post-quantum"] }
 
 # Crypto
-aws-lc-rs = { version = "=1.15.4", default-features = false }
+aws-lc-rs = { version = "=1.16.0", default-features = false }
 base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
 hex = { version = "=0.4.3", default-features = false, features = ["std"] }
 
