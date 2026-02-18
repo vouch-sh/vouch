@@ -194,15 +194,18 @@ Host *
 fn add_trusted_ca_to_known_hosts(ca_path: &PathBuf, host_patterns: &str) -> Result<()> {
     let known_hosts_path = known_hosts_path()?;
     let ca_pub_key = fs::read_to_string(ca_path)?;
-    // Remove comment and trailing newline
+    // Extract "algorithm base64key" from the first line (strip comment, trailing newline)
     let ca_pub_key = ca_pub_key
         .lines()
         .next()
-        .unwrap_or("")
+        .context("CA public key file is empty")?
         .split_whitespace()
         .take(2)
         .collect::<Vec<_>>()
         .join(" ");
+    if ca_pub_key.is_empty() {
+        anyhow::bail!("CA public key file does not contain a valid key");
+    }
 
     // Create entry
     let entry = format!("@cert-authority {} {}\n", host_patterns, ca_pub_key);

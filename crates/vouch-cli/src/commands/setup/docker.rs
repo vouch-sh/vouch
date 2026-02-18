@@ -207,7 +207,8 @@ fn configure_docker_config(registries: &[String]) -> Result<()> {
     let mut config: DockerConfig = if docker_config_path.exists() {
         let content = std::fs::read_to_string(&docker_config_path)
             .with_context(|| format!("failed to read {}", docker_config_path.display()))?;
-        serde_json::from_str(&content).unwrap_or_default()
+        serde_json::from_str(&content)
+            .with_context(|| format!("failed to parse {}", docker_config_path.display()))?
     } else {
         DockerConfig::default()
     };
