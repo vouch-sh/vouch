@@ -836,7 +836,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: merge
     permissions:
-      contents: write
+      contents: read
       packages: write
       id-token: write
       attestations: write
@@ -880,12 +880,13 @@ jobs:
         with:
           subject-path: .helm-packages/*.tgz
 
-      - name: Upload Helm chart to release
-        uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2.5.0
+      - name: Upload Helm chart artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
-          files: .helm-packages/*.tgz
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          draft: true
+          name: helm-chart
+          path: .helm-packages/*.tgz
+          if-no-files-found: error
+          retention-days: 5
 
       - name: Push Helm chart to OCI registry
         run: |
@@ -913,6 +914,12 @@ jobs:
           pattern: packages-*
           merge-multiple: true
 
+      - name: Download Helm chart artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: helm-chart
+          path: artifacts
+
       - name: Generate consolidated SHA256SUMS
         run: |
           cd artifacts
@@ -926,6 +933,7 @@ jobs:
           files: |
             artifacts/*.tar.gz
             artifacts/*.zip
+            artifacts/*.tgz
             artifacts/*.deb
             artifacts/*.rpm
             artifacts/*cdx.json
