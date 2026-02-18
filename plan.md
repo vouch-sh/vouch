@@ -50,26 +50,49 @@ return instantly from the agent.
 ### 2. Profile-based CodeArtifact defaults (reduce parameter burden)
 
 **Files:**
-- `crates/vouch-cli/src/integrations/aws/codeartifact.rs` — add `CodeArtifactConfig` struct and persistence
+- `crates/vouch-cli/src/config.rs` — add `codeartifact` field to `Config`/`ConfigFile`
 - `crates/vouch-cli/src/commands/setup/codeartifact.rs` — save config during setup
 - `crates/vouch-cli/src/commands/credential/codeartifact.rs` — load defaults when flags omitted
 
 **What:** When the user runs `vouch setup codeartifact`, save the domain/domain-owner/region
-settings so subsequent commands can use them as defaults. Store in `~/.vouch/codeartifact.toml`.
+settings into the existing `~/.vouch/config.json` file under a `codeartifact` key.
 
-**Config format:**
-```toml
-# Saved by `vouch setup codeartifact`
-domain = "my-domain"
-domain_owner = "123456789012"
-region = "us-east-1"
+**Config format (in `~/.vouch/config.json`):**
+```json
+{
+  "server_url": "https://vouch.example.com",
+  "token": "eyJ...",
+  "email": "alice@example.com",
+  "codeartifact": {
+    "domain": "my-domain",
+    "domain_owner": "123456789012",
+    "region": "us-east-1"
+  }
+}
+```
+
+**Changes to `Config` struct:**
+```rust
+pub struct Config {
+    server_url: Option<String>,
+    token: Option<SecretString>,
+    email: Option<String>,
+    codeartifact: Option<CodeArtifactDefaults>,  // NEW
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct CodeArtifactDefaults {
+    pub domain: Option<String>,
+    pub domain_owner: Option<String>,
+    pub region: Option<String>,
+}
 ```
 
 **CLI changes:**
 - `vouch credential codeartifact` — make `--domain`, `--domain-owner`, `--region` optional.
-  If omitted, load from saved config. Error with helpful message if neither flags nor config
-  are present.
-- `vouch setup codeartifact` — save config after successful setup.
+  If omitted, load from `config.codeartifact`. Error with helpful message if neither flags
+  nor config are present.
+- `vouch setup codeartifact` — save CodeArtifact defaults to config after successful setup.
 - Saved config also read by Cargo credential provider when detecting CodeArtifact URLs
   (no change needed there since it parses the URL directly).
 
@@ -132,85 +155,42 @@ just works indefinitely (as long as the user has a valid vouch session).
 
 ---
 
-### 4. npm credential helper via `_auth` + credential exec
+### 4. `vouch exec` and `vouch env` support for CodeArtifact
 
 **Files:**
-- `crates/vouch-cli/src/commands/credential/npm.rs` (new)
-- `crates/vouch-cli/src/commands/credential/mod.rs` — add `npm` module
-- `crates/vouch-cli/src/main.rs` — wire up hidden `vouch credential npm` command
-- `crates/vouch-cli/src/commands/setup/codeartifact.rs` — update npm setup
+- `crates/vouch-cli/src/commands/exec.rs` — add `Codeartifact` variant to `CredentialType`
+- `crates/vouch-cli/src/commands/env.rs` — add `Codeartifact` variant to `CredentialType`
+- `crates/vouch-cli/src/main.rs` — add `--domain`, `--domain-owner`, `--region` flags to exec/env
 
-**What:** npm doesn't have a native credential provider protocol like Cargo or pip's
-keyring. However, we can use a shell wrapper approach:
+**What:** Add CodeArtifact as a credential type to the existing `vouch exec` and `vouch env`
+commands, which already support AWS and GitHub credentials.
 
-**Option A — `_authToken` script wrapper (recommended):**
-Create a tiny shell script at `~/.local/bin/vouch-npm-token` that npm calls to get a
-fresh token. Configure `.npmrc` to use it via npm's `tokenHelper` or by using npm's
-`execpath` configuration.
-
-Actually, npm does not natively support dynamic token helpers. The approach is:
-
-1. Write a small shell wrapper that refreshes `.npmrc` before npm runs
-2. Or configure npm to use a `preinstall`/`preresolve` lifecycle script
-
-**Better approach — npm preauth wrapper:**
-Instead of modifying npm internals, provide a `vouch credential npm refresh` command and
-document its use. The setup command creates an npm lifecycle hook or shell alias:
+**Usage:**
 ```bash
-alias npm='vouch credential npm refresh --quiet && command npm'
+# Inject CODEARTIFACT_AUTH_TOKEN into a subprocess
+vouch exec --type codeartifact -- pip install my-package
+
+# With explicit domain (overrides config defaults)
+vouch exec --type codeartifact --domain my-domain --domain-owner 123456789012 --region us-east-1 -- pip install my-package
+
+# Export for shell eval
+eval "$(vouch env --type codeartifact --shell bash)"
+# → export CODEARTIFACT_AUTH_TOKEN='eyJ...';
 ```
 
-Or for project-level: add to `.npmrc`:
-```
-; Use vouch for authentication
-```
-And provide a simple `vouch npm` wrapper command that refreshes the token then delegates
-to npm.
+**How:**
+- Add `Codeartifact` to the `CredentialType` enum in both `exec.rs` and `env.rs`
+- When type is `Codeartifact`, load domain/owner/region from flags or config defaults
+- Call `codeartifact::get_token()` (benefits from caching in step 1)
+- Inject/export `CODEARTIFACT_AUTH_TOKEN` environment variable
 
-**Revised simpler approach:** Since npm lacks a dynamic credential protocol, the best
-we can do without changing npm itself is:
-
-1. **Auto-refresh on `vouch credential npm`**: A command that refreshes the `.npmrc` token
-   in-place, designed to be run before npm operations
-2. **Smart refresh in setup**: Only re-fetch the token if the current one is expired or
-   about to expire (check the existing `.npmrc` for token expiry)
-3. **Shell integration**: Provide an opt-in shell function that auto-refreshes:
-   ```bash
-   # Added to ~/.bashrc by `vouch setup codeartifact --tool npm --configure`
-   npm() { vouch credential npm refresh --quiet 2>/dev/null; command npm "$@"; }
-   ```
-
-**Why:** While not as seamless as pip's keyring protocol, this still eliminates the
-manual "re-run setup every 12 hours" workflow. The token refresh becomes automatic.
+**Why:** Reuses the existing credential injection infrastructure. No new `--export` flag
+needed on the codeartifact command — `vouch exec` and `vouch env` already handle shell
+quoting, caching, and multiple shell formats.
 
 ---
 
-### 5. `CODEARTIFACT_AUTH_TOKEN` environment variable support
-
-**Files:**
-- `crates/vouch-cli/src/commands/credential/codeartifact.rs` — add `--export` flag
-
-**What:** Add a `--export` flag to `vouch credential codeartifact` that outputs
-shell-eval-friendly export statements:
-```bash
-$ vouch credential codeartifact --export
-export CODEARTIFACT_AUTH_TOKEN=eyJ...
-```
-
-This is useful for:
-- CI/CD scripts that set the env var for multiple tools
-- Tools that check `CODEARTIFACT_AUTH_TOKEN` (AWS CLI, some SDK integrations)
-- Shell initialization (e.g., in `.bashrc` or `.envrc`)
-
-**Also support `--format` flag for flexible output:**
-```bash
-$ vouch credential codeartifact --format json
-{"token": "eyJ...", "expiration": 1708189234}
-```
-
----
-
-### 6. Additional package manager setup support
+### 5. Additional package manager setup support
 
 **Files:**
 - `crates/vouch-cli/src/commands/setup/codeartifact.rs` — add Maven, NuGet, Go, Poetry tools
@@ -252,34 +232,34 @@ NuGet and Go are lower priority.
 1. **Agent credential caching** (step 1) — Immediate performance win, small change, benefits all tools
 2. **Profile-based defaults** (step 2) — Reduces parameter burden for all subsequent work
 3. **pip keyring helper** (step 3) — Highest-impact UX improvement (eliminates 12h expiry for pip)
-4. **npm refresh command** (step 4) — Addresses npm's 12h expiry with best available approach
-5. **Export flag** (step 5) — Small addition, useful for CI and scripting
-6. **Additional package managers** (step 6) — Poetry first, then Maven, then others
+4. **`vouch exec`/`vouch env` for CodeArtifact** (step 4) — Extends existing infra, small change
+5. **Additional package managers** (step 5) — Poetry first, then Maven, then others
 
 ## Files Changed Summary
 
 | File | Change |
 |------|--------|
-| `crates/vouch-cli/src/commands/credential/codeartifact.rs` | Add caching, profile defaults, `--export` flag |
+| `crates/vouch-cli/src/commands/credential/codeartifact.rs` | Add caching, load config defaults |
 | `crates/vouch-cli/src/commands/credential/pip.rs` | **New** — pip keyring credential helper |
-| `crates/vouch-cli/src/commands/credential/npm.rs` | **New** — npm token refresh command |
-| `crates/vouch-cli/src/commands/credential/mod.rs` | Add `pip`, `npm` modules |
-| `crates/vouch-cli/src/commands/setup/codeartifact.rs` | Update pip/npm setup, add Poetry/Maven, save config |
-| `crates/vouch-cli/src/integrations/aws/codeartifact.rs` | Add `CodeArtifactConfig` persistence |
-| `crates/vouch-cli/src/main.rs` | Wire up new credential commands, make CA flags optional |
+| `crates/vouch-cli/src/commands/credential/mod.rs` | Add `pip` module |
+| `crates/vouch-cli/src/config.rs` | Add `codeartifact` field to `Config`/`ConfigFile` |
+| `crates/vouch-cli/src/commands/setup/codeartifact.rs` | Update pip setup, add Poetry/Maven, save config defaults |
+| `crates/vouch-cli/src/commands/exec.rs` | Add `Codeartifact` variant, inject `CODEARTIFACT_AUTH_TOKEN` |
+| `crates/vouch-cli/src/commands/env.rs` | Add `Codeartifact` variant, export `CODEARTIFACT_AUTH_TOKEN` |
+| `crates/vouch-cli/src/main.rs` | Wire up pip credential command, add CA flags to exec/env |
 
 ## Testing Strategy
 
-- Unit tests for config parsing/serialization in `codeartifact.rs`
+- Unit tests for config parsing/serialization with `codeartifact` field
 - Unit tests for pip keyring protocol parsing in `pip.rs`
-- Unit tests for npm token refresh logic in `npm.rs`
 - Existing tests continue to pass (credential URL parsing, Cargo protocol, etc.)
 - Manual testing with actual CodeArtifact repositories for each package manager
 
 ## Security Considerations
 
 - All tokens continue to use `SecretString` / `ZeroizeOnDrop`
-- Config file at `~/.vouch/codeartifact.toml` contains no secrets (just domain/owner/region)
-- pip/npm config files written with 0o600 permissions (existing pattern)
+- CodeArtifact defaults in `~/.vouch/config.json` contain no secrets (just domain/owner/region)
+- pip config files written with 0o600 permissions (existing pattern)
 - Cached tokens in agent memory are `CachedCredential` with `SecretString` data field
+- `vouch exec` and `vouch env` already handle shell injection protection (single-quoting)
 - No new dependencies required
