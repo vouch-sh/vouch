@@ -38,6 +38,9 @@ pub async fn run(server: &str, json: bool) -> Result<()> {
     #[cfg(unix)]
     match get_session_from_agent().await {
         Ok(session) => {
+            // Prefer the server URL from the agent (it knows the real server),
+            // falling back to the CLI-resolved server URL.
+            let effective_server = session.server_url.as_deref().unwrap_or(server);
             if json {
                 print_json(&StatusJson {
                     authenticated: true,
@@ -46,8 +49,8 @@ pub async fn run(server: &str, json: bool) -> Result<()> {
                     agent_running: true,
                 });
             } else {
-                print_agent_session(server, &session);
-                print_all_integrations(server).await;
+                print_agent_session(effective_server, &session);
+                print_all_integrations(effective_server).await;
             }
             return Ok(());
         }

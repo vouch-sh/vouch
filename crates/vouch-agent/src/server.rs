@@ -131,7 +131,7 @@ async fn handle_request(
 ) -> Response {
     match request.method.as_str() {
         "ping" => handle_ping(request),
-        "get_session" => handle_get_session(request, state).await,
+        "get_session" => handle_get_session(request, state, ssh_state).await,
         "store_session" => handle_store_session(request, state, ssh_state).await,
         "clear_session" => handle_clear_session(request, state, ssh_state).await,
         "get_token" => handle_get_token(request, state).await,
@@ -151,11 +151,16 @@ fn handle_ping(request: &Request) -> Response {
 }
 
 /// Handle `get_session` request.
-async fn handle_get_session(request: &Request, state: &Arc<AgentState>) -> Response {
+async fn handle_get_session(
+    request: &Request,
+    state: &Arc<AgentState>,
+    ssh_state: &Arc<SshAgentState>,
+) -> Response {
     // `get_session()` already filters out expired sessions (returns None).
     match state.get_session().await {
         Some(session) => {
-            let info = SessionInfo::from(&session);
+            let mut info = SessionInfo::from(&session);
+            info.server_url = ssh_state.get_server_url().await;
             Response::success(request.id, info)
         }
         None => Response::not_authenticated(request.id),

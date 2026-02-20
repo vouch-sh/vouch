@@ -26,11 +26,27 @@ fn known_hosts_path() -> Result<PathBuf> {
 /// Get the CA public key path.
 fn ca_key_path(server: &str) -> Result<PathBuf> {
     let home = dirs::home_dir().context("could not determine home directory")?;
-    // Sanitize server URL for filename
+    // Sanitize server URL for filename: strip scheme, replace non-alphanumeric with underscores,
+    // and collapse multiple underscores. e.g. "https://us.vouch.sh" → "vouch_ca_us_vouch_sh.pub"
     let safe_host = server
         .replace("https://", "")
         .replace("http://", "")
-        .replace([':', '/'], "_");
+        .replace(|c: char| !c.is_ascii_alphanumeric(), "_");
+    // Collapse consecutive underscores and trim trailing ones
+    let mut collapsed = String::with_capacity(safe_host.len());
+    let mut prev_underscore = false;
+    for c in safe_host.chars() {
+        if c == '_' {
+            if !prev_underscore {
+                collapsed.push('_');
+            }
+            prev_underscore = true;
+        } else {
+            collapsed.push(c);
+            prev_underscore = false;
+        }
+    }
+    let safe_host = collapsed.trim_end_matches('_');
     Ok(home.join(".ssh").join(format!("vouch_ca_{safe_host}.pub")))
 }
 
@@ -229,4 +245,38 @@ fn add_trusted_ca_to_known_hosts(ca_path: &PathBuf, host_patterns: &str) -> Resu
     println!("Added CA to known_hosts for hosts: {}", host_patterns);
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_ca_key_path_https() {
+        let path = ca_key_path("https://us.vouch.sh").unwrap();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(filename, "vouch_ca_us_vouch_sh.pub");
+    }
+
+    #[test]
+    fn test_ca_key_path_localhost() {
+        let path = ca_key_path("http://localhost:3000").unwrap();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(filename, "vouch_ca_localhost_3000.pub");
+    }
+
+    #[test]
+    fn test_ca_key_path_with_port() {
+        let path = ca_key_path("https://vouch.example.com:8443").unwrap();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(filename, "vouch_ca_vouch_example_com_8443.pub");
+    }
+
+    #[test]
+    fn test_ca_key_path_trailing_slash() {
+        let path = ca_key_path("https://us.vouch.sh/").unwrap();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(filename, "vouch_ca_us_vouch_sh.pub");
+    }
 }

@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use secrecy::SecretString;
 
-use super::sigv4::sign_and_send_json_rpc;
+use super::sigv4::sign_and_send_rest_post;
 use super::sts::StsCredentials;
 
 /// CodeArtifact authorization token and expiration.
@@ -105,9 +105,10 @@ struct GetAuthorizationTokenResponse {
     expiration: f64,
 }
 
-/// Get a CodeArtifact authorization token via SigV4-signed API call.
+/// Get a CodeArtifact authorization token via SigV4-signed REST API call.
 ///
-/// This calls the CodeArtifact `GetAuthorizationToken` API using the
+/// This calls the CodeArtifact `GetAuthorizationToken` REST API
+/// (`POST /v1/authorization-token?domain=...&domain-owner=...`) using the
 /// provided STS credentials. The returned token can be used as a bearer
 /// token for authenticating with any CodeArtifact repository in the domain.
 ///
@@ -123,18 +124,18 @@ pub async fn get_authorization_token(
         registry.region, registry.domain_suffix
     );
 
-    let request_body = serde_json::json!({
-        "domain": registry.domain,
-        "domainOwner": registry.domain_owner
-    });
+    let query_params: Vec<(&str, &str)> = vec![
+        ("domain", &registry.domain),
+        ("domain-owner", &registry.domain_owner),
+    ];
 
-    let response_body = sign_and_send_json_rpc(
+    let response_body = sign_and_send_rest_post(
         &endpoint,
+        "/v1/authorization-token",
+        &query_params,
         "codeartifact",
-        "CodeArtifactControlPlaneService.GetAuthorizationToken",
         &registry.region,
         creds,
-        &request_body,
     )
     .await
     .context("failed to call CodeArtifact GetAuthorizationToken")?;

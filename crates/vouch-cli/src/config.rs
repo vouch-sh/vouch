@@ -53,11 +53,14 @@ pub struct CodeArtifactProfile {
 /// Implements `ZeroizeOnDrop` to clear sensitive data from memory.
 #[derive(Debug, Default, Serialize, Deserialize, zeroize::ZeroizeOnDrop)]
 struct ConfigFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     server_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     email: Option<String>,
     #[zeroize(skip)]
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     codeartifact: Option<CodeArtifactConfig>,
 }
 
@@ -304,11 +307,50 @@ mod tests {
         let config = Config::from(file);
 
         assert!(config.codeartifact().is_none());
+        assert!(config.email().is_none());
 
-        // Round-trip should not add a codeartifact field
+        // Round-trip should not add codeartifact or email fields
         let file2 = ConfigFile::from(&config);
         let json2 = serde_json::to_string(&file2).unwrap();
         assert!(!json2.contains("codeartifact"));
+        assert!(!json2.contains("email"));
+        assert!(!json2.contains("null"));
+    }
+
+    #[test]
+    fn test_none_fields_omitted_from_serialization() {
+        // A completely empty config should serialize to just "{}"
+        let config = Config::default();
+        let file = ConfigFile::from(&config);
+        let json = serde_json::to_string(&file).unwrap();
+        assert_eq!(json, "{}");
+        assert!(!json.contains("null"));
+
+        // Deserializing "{}" back should produce valid defaults
+        let file2: ConfigFile = serde_json::from_str(&json).unwrap();
+        let config2 = Config::from(file2);
+        assert!(config2.server_url().is_none());
+        assert!(config2.token().is_none());
+        assert!(config2.email().is_none());
+        assert!(config2.codeartifact().is_none());
+    }
+
+    #[test]
+    fn test_explicit_null_values_deserialize_as_none() {
+        // Existing config files with explicit null values should still work
+        let json = r#"{
+            "server_url": null,
+            "token": null,
+            "email": null,
+            "codeartifact": null
+        }"#;
+
+        let file: ConfigFile = serde_json::from_str(json).unwrap();
+        let config = Config::from(file);
+        assert!(config.server_url().is_none());
+        assert!(config.token().is_none());
+        assert!(config.email().is_none());
+        assert!(config.codeartifact().is_none());
     }
 
     #[test]

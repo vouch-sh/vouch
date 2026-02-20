@@ -433,3 +433,23 @@ pub async fn get_user_github_refresh_token(pool: &Pool, user_id: &str) -> Result
 
     Ok(token.flatten())
 }
+
+/// Clear a user's GitHub refresh token.
+///
+/// Used during SCIM deactivation to prevent further GitHub API access.
+pub async fn clear_user_github_refresh_token(pool: &Pool, user_id: &str) -> Result<bool> {
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::update()
+            .table(Users::Table)
+            .value(Users::GitHubRefreshToken, Option::<String>::None)
+            .and_where(Expr::col(Users::Id).eq(user_id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute_prod!(pool, sqlx::query(&sql))?;
+
+    Ok(result.rows_affected() > 0)
+}

@@ -2,7 +2,7 @@
 //! AWS Signature Version 4 utilities.
 //!
 //! Shared SigV4 helper functions used by ECR, CodeArtifact, CodeCommit,
-//! and other AWS JSON-RPC style API calls.
+//! and other AWS API calls (both JSON-RPC and REST style).
 
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
@@ -73,7 +73,7 @@ pub fn derive_signing_key(
 
 /// Send a SigV4-signed JSON-RPC style POST request to an AWS service.
 ///
-/// Many AWS services (ECR, CodeArtifact, etc.) use the same pattern:
+/// Many AWS services (ECR, etc.) use the same pattern:
 /// - `POST /` with `Content-Type: application/x-amz-json-1.1`
 /// - `X-Amz-Target` header to specify the operation
 /// - SigV4 signature over the request
@@ -161,6 +161,121 @@ pub async fn sign_and_send_json_rpc(
         .context("failed to read AWS API response body")
 }
 
+/// URI-encode a string per AWS SigV4 rules (RFC 3986 unreserved characters).
+///
+/// Encodes all characters except `A-Z a-z 0-9 - _ . ~`.
+fn uri_encode(input: &str) -> String {
+    let mut encoded = String::with_capacity(input.len());
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            _ => {
+                use std::fmt::Write;
+                let _res = write!(encoded, "%{byte:02X}");
+            }
+        }
+    }
+    encoded
+}
+
+/// Send a SigV4-signed REST-style POST request to an AWS service.
+///
+/// Some AWS services (e.g., CodeArtifact) use REST APIs with query parameters
+/// instead of JSON-RPC. This function handles:
+/// - `POST /{path}?{sorted query params}` with no request body
+/// - SigV4 signature over the request
+///
+/// # Arguments
+/// * `endpoint` - Base URL (e.g., `https://codeartifact.us-east-1.amazonaws.com`)
+/// * `path` - URI path (e.g., `/v1/authorization-token`)
+/// * `query_params` - Query parameter key-value pairs (will be sorted for signing)
+/// * `service` - AWS service name for signing (e.g., `codeartifact`)
+/// * `region` - AWS region
+/// * `creds` - Temporary AWS credentials from STS
+pub async fn sign_and_send_rest_post(
+    endpoint: &str,
+    path: &str,
+    query_params: &[(&str, &str)],
+    service: &str,
+    region: &str,
+    creds: &StsCredentials,
+) -> Result<String> {
+    let http_client =
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
+
+    // Extract host from endpoint URL
+    let host = endpoint
+        .strip_prefix("https://")
+        .unwrap_or(endpoint)
+        .trim_end_matches('/');
+
+    // Build sorted canonical query string (SigV4 requires alphabetical order)
+    let mut sorted_params: Vec<(&str, &str)> = query_params.to_vec();
+    sorted_params.sort_by(|a, b| a.0.cmp(b.0));
+    let canonical_query_string: String = sorted_params
+        .iter()
+        .map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v)))
+        .collect::<Vec<_>>()
+        .join("&");
+
+    let now = jiff::Timestamp::now();
+    let amz_date = format_amz_date(now);
+    let date_stamp = format_date_stamp(now);
+
+    // Empty body for REST-style requests with query parameters
+    let payload_hash = sha256_hex(b"");
+
+    let canonical_headers = format!(
+        "host:{host}\nx-amz-date:{amz_date}\nx-amz-security-token:{}\n",
+        creds.session_token.expose_secret()
+    );
+    let signed_headers = "host;x-amz-date;x-amz-security-token";
+
+    let canonical_request = format!(
+        "POST\n{path}\n{canonical_query_string}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    );
+
+    let algorithm = "AWS4-HMAC-SHA256";
+    let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
+    let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
+
+    let string_to_sign =
+        format!("{algorithm}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
+
+    let k_signing = derive_signing_key(&creds.secret_access_key, &date_stamp, region, service);
+    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
+
+    let authorization = format!(
+        "{algorithm} Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
+        creds.access_key_id
+    );
+
+    let url = format!("{endpoint}{path}?{canonical_query_string}");
+
+    let response = http_client
+        .post(&url)
+        .header("X-Amz-Date", &amz_date)
+        .header("X-Amz-Security-Token", creds.session_token.expose_secret())
+        .header("Authorization", &authorization)
+        .send()
+        .await
+        .context("failed to send AWS API request")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let response_body = response.text().await.unwrap_or_default();
+        anyhow::bail!("{service} returned error {status}: {response_body}");
+    }
+
+    response
+        .text()
+        .await
+        .context("failed to read AWS API response body")
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -217,5 +332,26 @@ mod tests {
             hex::encode(key.as_slice()),
             "f4780e2d9f65fa895f9c67b32ce1baf0b0d8a43505a000a1a9e090d414db404d"
         );
+    }
+
+    #[test]
+    fn test_uri_encode_unreserved() {
+        // Unreserved characters should not be encoded
+        assert_eq!(uri_encode("abc123"), "abc123");
+        assert_eq!(uri_encode("my-domain"), "my-domain");
+        assert_eq!(uri_encode("a_b.c~d"), "a_b.c~d");
+    }
+
+    #[test]
+    fn test_uri_encode_special_chars() {
+        assert_eq!(uri_encode("hello world"), "hello%20world");
+        assert_eq!(uri_encode("a+b"), "a%2Bb");
+        assert_eq!(uri_encode("foo/bar"), "foo%2Fbar");
+        assert_eq!(uri_encode("key=value"), "key%3Dvalue");
+    }
+
+    #[test]
+    fn test_uri_encode_empty() {
+        assert_eq!(uri_encode(""), "");
     }
 }

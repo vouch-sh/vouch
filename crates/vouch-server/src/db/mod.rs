@@ -35,8 +35,8 @@ pub use pool::{DatabaseType, Pool, Transaction};
 
 // Re-export user types and functions
 pub use users::{
-    User, delete_user, get_user_by_email, get_user_by_id, get_user_github_refresh_token,
-    update_user_github_identity,
+    User, clear_user_github_refresh_token, delete_user, get_user_by_email, get_user_by_id,
+    get_user_github_refresh_token, update_user_github_identity,
 };
 
 // Re-export user test helpers (only available in tests)
@@ -86,11 +86,11 @@ pub use config::{
 // Re-export SCIM types and functions
 pub use scim::{
     ScimGroupRecord, ScimToken, ScimUserRecord, add_scim_group_member, count_scim_groups,
-    count_scim_users, create_scim_group, create_scim_token, create_scim_user, delete_scim_group,
-    delete_scim_token, get_scim_group, get_scim_group_members, get_scim_token_by_hash,
-    get_scim_user, insert_scim_audit, list_scim_groups, list_scim_tokens, list_scim_users,
-    remove_scim_group_member, replace_scim_group_members, update_scim_group,
-    update_scim_token_last_used, update_scim_user,
+    count_scim_users, create_scim_group, create_scim_token, create_scim_user,
+    delete_old_scim_audit_logs, delete_scim_group, delete_scim_token, get_scim_group,
+    get_scim_group_members, get_scim_token_by_hash, get_scim_user, insert_scim_audit,
+    list_scim_groups, list_scim_tokens, list_scim_users, remove_scim_group_member,
+    replace_scim_group_members, update_scim_group, update_scim_token_last_used, update_scim_user,
 };
 
 // Re-export OAuth types and functions
@@ -107,10 +107,10 @@ pub use oauth::{
 pub use credentials::{
     CloudIntegration, EnrollmentSession, check_delegation_policy, create_enrollment_session,
     delete_cloud_integration, delete_expired_enrollment_sessions, delete_expired_ssh_revocations,
-    get_cloud_integration, get_delegation_policies, get_enrollment_session_by_token_hash,
-    get_revoked_ssh_certificates, insert_token_exchange, is_ssh_certificate_revoked,
-    revoke_all_ssh_certificates_for_user, revoke_ssh_certificate, touch_enrollment_session,
-    upsert_cloud_integration,
+    delete_old_token_exchanges, get_cloud_integration, get_delegation_policies,
+    get_enrollment_session_by_token_hash, get_revoked_ssh_certificates, insert_token_exchange,
+    is_ssh_certificate_revoked, revoke_all_ssh_certificates_for_user, revoke_ssh_certificate,
+    touch_enrollment_session, upsert_cloud_integration,
 };
 
 // Re-export GitHub types and functions
