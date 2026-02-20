@@ -4,7 +4,9 @@
 use anyhow::Result;
 use vouch_common::GitHubStatusResponse;
 
+use super::{LABEL_WIDTH, VALUE_INDENT};
 use crate::client::VouchClient;
+use crate::style;
 
 /// GitHub integration checker.
 pub struct GitHubIntegration {
@@ -85,23 +87,38 @@ fn print_github_status(status: &GitHubStatus, server: &str) {
         Some(server_status) if server_status.configured && server_status.connected => {
             // Fully working - show connected accounts
             let host = status.host.as_deref().unwrap_or("github.com");
-            println!("  GitHub: connected ({host})");
+            println!(
+                "  {:LABEL_WIDTH$} {} ({host})",
+                "GitHub:",
+                style::green("connected")
+            );
             if !server_status.github_accounts.is_empty() {
                 print_github_accounts(server_status, &status.current_repo);
             }
         }
         Some(server_status) if !server_status.configured => {
             // Server doesn't have GitHub App configured at all
-            println!("  GitHub: not available");
-            println!("       Server does not have GitHub App configured");
+            println!(
+                "  {:LABEL_WIDTH$} {}",
+                "GitHub:",
+                style::dim("not available")
+            );
+            println!(
+                "{VALUE_INDENT}{}",
+                style::dim("Server does not have GitHub App configured")
+            );
         }
         Some(_) => {
             // GitHub App configured on server, but not installed for this org
-            println!("  GitHub: not installed");
-            println!("       Admin action: visit {server}/github/connect");
+            println!(
+                "  {:LABEL_WIDTH$} {}",
+                "GitHub:",
+                style::yellow("not installed")
+            );
+            println!("{VALUE_INDENT}Admin action: visit {server}/github/connect");
             if status.local_configured {
                 let host = status.host.as_deref().unwrap_or("github.com");
-                println!("       (git credential helper ready for {host})");
+                println!("{VALUE_INDENT}(git credential helper ready for {host})");
             }
         }
         None => {
@@ -111,11 +128,19 @@ fn print_github_status(status: &GitHubStatus, server: &str) {
             }
             if status.local_configured {
                 let host = status.host.as_deref().unwrap_or("github.com");
-                println!("  GitHub: unknown (git helper configured for {host})");
-                println!("       Could not check server status");
+                println!(
+                    "  {:LABEL_WIDTH$} {} (git helper configured for {host})",
+                    "GitHub:",
+                    style::yellow("unknown")
+                );
+                println!("{VALUE_INDENT}Could not check server status");
             } else {
-                println!("  GitHub: not configured");
-                println!("       Run: vouch setup github");
+                println!(
+                    "  {:LABEL_WIDTH$} {}",
+                    "GitHub:",
+                    style::dim("not configured")
+                );
+                println!("{VALUE_INDENT}{}", style::dim("Run: vouch setup github"));
             }
         }
     }
@@ -331,20 +356,29 @@ fn print_github_accounts(status: &GitHubStatusResponse, current_repo: &Option<Cu
         if account.suspended {
             let current_tag = format_current_tag_for_owner(&account.login, current_repo);
             println!(
-                "       \u{2718} {}/*{} (suspended)",
-                account.login, current_tag
+                "{VALUE_INDENT}{} {}/*{} (suspended)",
+                style::red("\u{2718}"),
+                account.login,
+                current_tag
             );
             mark_owner_remotes_printed(&account.login, current_repo, &mut printed_remotes);
         } else if account.repository_selection == "all" {
             let current_tag = format_current_tag_for_owner(&account.login, current_repo);
-            println!("       \u{2714} {}/*{}", account.login, current_tag);
+            println!(
+                "{VALUE_INDENT}{} {}/*{}",
+                style::green("\u{2714}"),
+                account.login,
+                current_tag
+            );
             mark_owner_remotes_printed(&account.login, current_repo, &mut printed_remotes);
         } else if let Some(repos) = &account.repositories {
             if repos.is_empty() {
                 let current_tag = format_current_tag_for_owner(&account.login, current_repo);
                 println!(
-                    "       \u{2718} {}/*{} (no repos)",
-                    account.login, current_tag
+                    "{VALUE_INDENT}{} {}/*{} (no repos)",
+                    style::red("\u{2718}"),
+                    account.login,
+                    current_tag
                 );
             } else {
                 for repo in repos {
@@ -354,11 +388,17 @@ fn print_github_accounts(status: &GitHubStatusResponse, current_repo: &Option<Cu
                         printed_remotes
                             .insert(format!("{}/{}", account.login, repo).to_lowercase());
                     }
-                    println!("       \u{2714} {}/{}{}", account.login, repo, current_tag);
+                    println!(
+                        "{VALUE_INDENT}{} {}/{}{}",
+                        style::green("\u{2714}"),
+                        account.login,
+                        repo,
+                        current_tag
+                    );
                 }
             }
         } else {
-            println!("       ? {}/* (repos unknown)", account.login);
+            println!("{VALUE_INDENT}? {}/* (repos unknown)", account.login);
         }
     }
 
@@ -368,8 +408,11 @@ fn print_github_accounts(status: &GitHubStatusResponse, current_repo: &Option<Cu
             let key = format!("{}/{}", r.owner, r.repo).to_lowercase();
             if !printed_remotes.contains(&key) {
                 println!(
-                    "       \u{2718} {}/{} ({}) [current]",
-                    r.owner, r.repo, r.name
+                    "{VALUE_INDENT}{} {}/{} ({}) [current]",
+                    style::red("\u{2718}"),
+                    r.owner,
+                    r.repo,
+                    r.name
                 );
                 printed_remotes.insert(key);
             }

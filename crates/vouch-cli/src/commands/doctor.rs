@@ -9,6 +9,7 @@ use vouch_agent::AgentClient;
 
 use crate::client::VouchClient;
 use crate::config::Config;
+use crate::style;
 
 /// Check result with status and optional message.
 struct CheckResult {
@@ -185,9 +186,9 @@ pub async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
 /// Print check result with color indicators.
 fn print_result(result: &CheckResult) {
     if result.passed {
-        println!("[OK] {}", result.message);
+        println!("{} {}", style::green("[OK]"), result.message);
     } else {
-        println!("[FAIL] {}", result.message);
+        println!("{} {}", style::red("[FAIL]"), result.message);
     }
 }
 

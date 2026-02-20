@@ -11,8 +11,9 @@ use crate::client::VouchClient;
 use crate::config::Config;
 use crate::integrations::{
     AwsIntegration, CargoIntegration, DockerIntegration, EksIntegration, GitHubIntegration,
-    SshIntegration, SsmIntegration, print_integration_status,
+    LABEL_WIDTH, SshIntegration, SsmIntegration, print_integration_status,
 };
+use crate::style;
 
 /// JSON output for `vouch status --json`.
 #[derive(Serialize)]
@@ -50,6 +51,7 @@ pub async fn run(server: &str, json: bool) -> Result<()> {
                 });
             } else {
                 print_agent_session(effective_server, &session);
+                println!();
                 print_all_integrations(effective_server).await;
             }
             return Ok(());
@@ -66,8 +68,8 @@ pub async fn run(server: &str, json: bool) -> Result<()> {
                     agent_running: true,
                 });
             } else {
-                println!("Not authenticated.");
-                println!("\nRun 'vouch login' to authenticate.");
+                println!("{}", style::bold_red("Not authenticated."));
+                println!("\n{}", style::dim("Run 'vouch login' to authenticate."));
             }
             return Ok(());
         }
@@ -80,8 +82,8 @@ pub async fn run(server: &str, json: bool) -> Result<()> {
                     agent_running: true,
                 });
             } else {
-                println!("Session expired.");
-                println!("\nRun 'vouch login' to re-authenticate.");
+                println!("{}", style::bold_red("Session expired."));
+                println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
             }
             return Ok(());
         }
@@ -102,8 +104,8 @@ pub async fn run(server: &str, json: bool) -> Result<()> {
                 agent_running: false,
             });
         } else {
-            println!("Not authenticated.");
-            println!("\nRun 'vouch login' to authenticate.");
+            println!("{}", style::bold_red("Not authenticated."));
+            println!("\n{}", style::dim("Run 'vouch login' to authenticate."));
         }
         return Ok(());
     }
@@ -123,24 +125,32 @@ pub async fn run(server: &str, json: bool) -> Result<()> {
                     agent_running: false,
                 });
             } else if status.authenticated {
-                println!("Authenticated ({server})");
+                println!("{} ({server})", style::bold_green("Authenticated"));
                 if let Some(email) = &status.email {
-                    println!("  Email: {email}");
+                    println!("  {:LABEL_WIDTH$} {email}", "Email:");
                 }
                 if let Some(device) = &status.device_name {
-                    println!("  Device: {device}");
+                    println!("  {:LABEL_WIDTH$} {device}", "Device:");
                 }
                 if let Some(expires_in) = status.expires_in_seconds {
                     print_expiry(expires_in);
                 }
-                println!("  Agent: not running");
+                println!(
+                    "  {:LABEL_WIDTH$} {}",
+                    "Agent:",
+                    style::yellow("not running")
+                );
+                println!();
                 print_all_integrations(server).await;
                 println!(
-                    "\nHint: Start the agent for faster status checks: vouch-agent --foreground"
+                    "\n{}",
+                    style::dim(
+                        "Hint: Start the agent for faster status checks: vouch-agent --foreground"
+                    )
                 );
             } else {
-                println!("Session expired.");
-                println!("\nRun 'vouch login' to re-authenticate.");
+                println!("{}", style::bold_red("Session expired."));
+                println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
             }
         }
         Err(e) => {
@@ -152,8 +162,8 @@ pub async fn run(server: &str, json: bool) -> Result<()> {
                     agent_running: false,
                 });
             } else {
-                println!("Session invalid: {e}");
-                println!("\nRun 'vouch login' to re-authenticate.");
+                println!("{}: {e}", style::bold_red("Session invalid"));
+                println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
             }
         }
     }
@@ -171,16 +181,49 @@ async fn get_session_from_agent() -> vouch_agent::Result<SessionInfo> {
 /// Print session info from agent.
 #[cfg(unix)]
 fn print_agent_session(server: &str, session: &SessionInfo) {
-    println!("Authenticated ({server})");
-    println!("  Email: {}", session.user_email);
+    println!("{} ({server})", style::bold_green("Authenticated"));
+    println!("  {:LABEL_WIDTH$} {}", "Email:", session.user_email);
     print_expiry(session.expires_in_seconds);
-    println!("  Agent: running");
+    println!("  {:LABEL_WIDTH$} {}", "Agent:", style::green("running"));
 }
 
-/// Print expiry time.
+/// Print expiry time with wall-clock time and remaining duration.
+///
+/// Color: green (>1 h), yellow (<=1 h), red (<=15 min).
 fn print_expiry(expires_in: u64) {
-    let remaining = jiff::SignedDuration::from_mins((expires_in / 60) as i64);
-    println!("  Expires in: {remaining:#}");
+    let remaining_mins = expires_in / 60;
+    let hours = remaining_mins / 60;
+    let mins = remaining_mins % 60;
+
+    let label = "Expires:";
+
+    // Color based on remaining time
+    let color_fn: fn(&str) -> String = if expires_in > 3600 {
+        style::green
+    } else if expires_in > 900 {
+        style::yellow
+    } else {
+        style::red
+    };
+
+    let duration = jiff::SignedDuration::from_secs(expires_in as i64);
+    let now = jiff::Zoned::now();
+    if let Ok(expiry_ts) = now.timestamp().checked_add(duration) {
+        let expiry = expiry_ts.to_zoned(now.time_zone().clone());
+        let value = if hours > 0 {
+            format!("{} (in {hours}h {mins}m)", expiry.strftime("%H:%M"))
+        } else {
+            format!("{} (in {mins}m)", expiry.strftime("%H:%M"))
+        };
+        println!("  {label:<LABEL_WIDTH$} {}", color_fn(&value));
+    } else {
+        let value = if hours > 0 {
+            format!("in {hours}h {mins}m")
+        } else {
+            format!("in {mins}m")
+        };
+        println!("  {label:<LABEL_WIDTH$} {}", color_fn(&value));
+    }
 }
 
 /// Print all integration statuses.

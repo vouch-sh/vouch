@@ -24,6 +24,14 @@ pub use github::GitHubIntegration;
 pub use ssh::SshIntegration;
 pub use ssm::SsmIntegration;
 
+use crate::style;
+
+/// Width for left-aligned integration labels (e.g., "SSH:", "Expires:").
+pub(crate) const LABEL_WIDTH: usize = 8;
+
+/// Indentation for continuation/detail lines (2 leading + 8 label + 1 space = 11).
+pub(crate) const VALUE_INDENT: &str = "           ";
+
 /// Result of checking an integration's status.
 pub enum IntegrationState {
     /// Integration is fully configured and ready.
@@ -57,24 +65,32 @@ pub trait IntegrationCheck {
 /// Print the status of a synchronous integration check.
 pub fn print_integration_status<I: IntegrationCheck>(integration: &I) {
     let name = integration.name();
+    let label = format!("{name}:");
     match integration.check() {
         IntegrationState::Configured(details) => {
-            println!("  {name}: configured ({})", details.summary);
+            println!(
+                "  {label:<LABEL_WIDTH$} {} ({})",
+                style::green("configured"),
+                details.summary
+            );
             for (key, value) in details.details {
-                println!("       {key}: {value}");
+                println!("{VALUE_INDENT}{key}: {value}");
             }
         }
         IntegrationState::NotConfigured { setup_hint } => {
-            println!("  {name}: not configured");
-            println!("       Run: {setup_hint}");
+            println!("  {label:<LABEL_WIDTH$} {}", style::dim("not configured"));
+            println!(
+                "{VALUE_INDENT}{}",
+                style::dim(&format!("Run: {setup_hint}"))
+            );
         }
         IntegrationState::Partial {
             message,
             setup_hint,
         } => {
-            println!("  {name}: {message}");
+            println!("  {label:<LABEL_WIDTH$} {}", style::yellow(&message));
             if let Some(hint) = setup_hint {
-                println!("       Run: {hint}");
+                println!("{VALUE_INDENT}{}", style::dim(&format!("Run: {hint}")));
             }
         }
     }

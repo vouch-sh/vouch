@@ -13,6 +13,7 @@ mod exit_code;
 mod fido2;
 mod integrations;
 mod session;
+mod style;
 mod utils;
 
 /// Check if invoked as docker-credential-vouch and handle accordingly.
@@ -104,6 +105,10 @@ struct Cli {
     /// Enable verbose output.
     #[arg(short, long, global = true)]
     verbose: bool,
+
+    /// Control color output.
+    #[arg(long, global = true, default_value = "auto")]
+    color: style::ColorChoice,
 
     #[command(subcommand)]
     command: Commands,
@@ -492,6 +497,8 @@ async fn run() -> Result<()> {
     }
 
     let cli = Cli::parse();
+
+    style::init(cli.color);
 
     // Initialize logging
     let filter = if cli.verbose {
