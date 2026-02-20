@@ -65,7 +65,7 @@ fn default_key_path() -> Result<PathBuf> {
 /// 4. Optionally updates ~/.ssh/config to use the Vouch SSH agent
 /// 5. Shows instructions for SSH config
 pub async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::new(server).await?;
 
     // Download CA public key
     println!("Downloading SSH CA public key from server...");

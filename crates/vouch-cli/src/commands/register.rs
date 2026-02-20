@@ -11,19 +11,10 @@ use vouch_common::{
 };
 
 use crate::client::VouchClient;
-use crate::config::Config;
 use crate::fido2::{self, YubiKey};
 
 /// Run the register command.
 pub async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> Result<()> {
-    // Require authentication
-    let config = Config::load()?;
-    let token = config.token().context(
-        "Not authenticated.\n\n\
-         To register your first key: vouch enroll\n\
-         To add additional keys: vouch login, then vouch register",
-    )?;
-
     let name = name.unwrap_or("YubiKey");
     println!("Registering additional YubiKey '{name}'...\n");
 
@@ -32,33 +23,20 @@ pub async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> Result<
 
     // Step 2: Start registration with server (authenticated)
     print!("Contacting server... ");
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::new(server).await.context(
+        "Not authenticated.\n\n\
+         To register your first key: vouch enroll\n\
+         To add additional keys: vouch login, then vouch register",
+    )?;
     let start_resp: RegisterStartResponse = client
-        .raw_client()
-        .post(format!("{}/v1/auth/register/start", client.base_url()))
-        .header("Authorization", format!("Bearer {}", token.expose_secret()))
-        .json(&RegisterStartRequest {
-            name: name.to_string(),
-        })
-        .send()
+        .post_authenticated(
+            "/v1/auth/register/start",
+            &RegisterStartRequest {
+                name: name.to_string(),
+            },
+        )
         .await
-        .context("failed to connect to server")?
-        .error_for_status()
-        .map_err(|e| {
-            if e.status() == Some(reqwest::StatusCode::UNAUTHORIZED) {
-                anyhow::anyhow!(
-                    "Session expired.\n\n\
-                     Please run 'vouch login' first, then try again."
-                )
-            } else if e.status() == Some(reqwest::StatusCode::CONFLICT) {
-                anyhow::anyhow!("This security key is already registered.")
-            } else {
-                anyhow::anyhow!("Server error: {}", e)
-            }
-        })?
-        .json()
-        .await
-        .context("failed to parse server response")?;
+        .context("failed to start registration")?;
     println!("ok");
 
     // Show info about existing keys
@@ -86,30 +64,18 @@ pub async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> Result<
     // Step 5: Complete registration with server (authenticated)
     print!("Completing registration... ");
     let complete_resp: RegisterCompleteResponse = client
-        .raw_client()
-        .post(format!("{}/v1/auth/register/complete", client.base_url()))
-        .header("Authorization", format!("Bearer {}", token.expose_secret()))
-        .json(&RegisterCompleteRequest {
-            state: start_resp.state,
-            credential_id: result.credential_id,
-            public_key: result.public_key,
-            attestation_object: result.attestation_object,
-            client_data_json: result.client_data_json,
-        })
-        .send()
+        .post_authenticated(
+            "/v1/auth/register/complete",
+            &RegisterCompleteRequest {
+                state: start_resp.state,
+                credential_id: result.credential_id,
+                public_key: result.public_key,
+                attestation_object: result.attestation_object,
+                client_data_json: result.client_data_json,
+            },
+        )
         .await
-        .context("failed to connect to server")?
-        .error_for_status()
-        .map_err(|e| {
-            if e.status() == Some(reqwest::StatusCode::CONFLICT) {
-                anyhow::anyhow!("This security key is already registered.")
-            } else {
-                anyhow::anyhow!("Server error: {}", e)
-            }
-        })?
-        .json()
-        .await
-        .context("failed to parse server response")?;
+        .context("failed to complete registration")?;
     println!("ok\n");
 
     println!("Registration successful!");

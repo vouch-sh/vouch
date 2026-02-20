@@ -243,7 +243,7 @@ async fn check_agent() -> CheckResult {
 
 /// Check if the server is reachable.
 async fn check_server(server: &str) -> CheckResult {
-    let client = match VouchClient::new(server) {
+    let client = match VouchClient::unauthenticated(server) {
         Ok(c) => c,
         Err(e) => return CheckResult::fail("server", format!("Invalid server URL: {e}")),
     };

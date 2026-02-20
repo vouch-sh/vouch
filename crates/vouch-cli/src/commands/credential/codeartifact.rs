@@ -177,7 +177,7 @@ async fn fetch_token(
     domain_owner: &str,
     region: &str,
 ) -> Result<CodeArtifactToken> {
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::new(server).await?;
 
     // Get OIDC token from Vouch server
     let token_response: OidcTokenResponse = client

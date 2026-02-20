@@ -145,7 +145,7 @@ fn check_git_credential_helper() -> (bool, Option<String>) {
 
 /// Get GitHub status from server.
 async fn get_github_server_status(server: &str) -> Result<GitHubStatusResponse> {
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::new(server).await?;
     client
         .get_authenticated("/v1/credentials/github/status")
         .await

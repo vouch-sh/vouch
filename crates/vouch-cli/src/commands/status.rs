@@ -108,7 +108,7 @@ pub async fn run(server: &str, json: bool) -> Result<()> {
         return Ok(());
     }
 
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::new(server).await?;
 
     match client
         .get_authenticated::<SessionStatus>("/v1/auth/status")

@@ -25,7 +25,7 @@ pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
 
     // Step 2: Start authentication with server (no email needed)
     print!("Contacting server ({server})... ");
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::unauthenticated(server)?;
     let start_resp: LoginStartResponse = client
         .post("/v1/auth/login/start", &LoginStartRequest {})
         .await
@@ -65,7 +65,6 @@ pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
     let mut config = Config::load()?;
     config.set_server_url(server);
     config.set_token(&complete_resp.token);
-    config.set_email(&complete_resp.email);
     config.save()?;
 
     // Agent IPC and cookie write are independent — run concurrently

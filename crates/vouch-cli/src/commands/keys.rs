@@ -14,7 +14,7 @@ use crate::client::VouchClient;
 
 /// Interactive key management.
 pub async fn interactive(server: &str) -> Result<()> {
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::new(server).await?;
 
     loop {
         // Fetch current keys
@@ -167,7 +167,7 @@ fn format_key_for_display(key: &KeyInfo) -> String {
 
 /// List all registered keys (non-interactive).
 pub async fn list(server: &str, json: bool) -> Result<()> {
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::new(server).await?;
 
     let response: ListKeysResponse = client.get_authenticated("/v1/keys").await?;
 
@@ -209,7 +209,7 @@ pub async fn list(server: &str, json: bool) -> Result<()> {
 
 /// Remove a registered key (non-interactive).
 pub async fn remove(server: &str, key_id: &str, force: bool) -> Result<()> {
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::new(server).await?;
 
     // First, get key info to show the name
     let keys_response: ListKeysResponse = client.get_authenticated("/v1/keys").await?;
@@ -258,7 +258,7 @@ pub async fn remove(server: &str, key_id: &str, force: bool) -> Result<()> {
 
 /// Rename a registered key (non-interactive).
 pub async fn rename(server: &str, key_id: &str, new_name: &str) -> Result<()> {
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::new(server).await?;
 
     // Validate name
     let new_name = new_name.trim();

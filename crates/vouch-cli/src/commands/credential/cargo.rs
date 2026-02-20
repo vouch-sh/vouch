@@ -20,8 +20,8 @@ use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
-use crate::config::Config;
 use crate::integrations::aws::codeartifact;
+use crate::session;
 
 /// Protocol version supported by this credential provider.
 const PROTOCOL_VERSION: u32 = 1;
@@ -244,18 +244,10 @@ async fn handle_get(registry: &RegistryInfo) -> Result<()> {
     }
 
     // Standard Vouch token flow for non-CodeArtifact registries
-    // Load Vouch config
-    let config = match Config::load() {
-        Ok(c) => c,
-        Err(e) => {
-            return send_error("not-found", Some(format!("failed to load config: {e}")));
-        }
-    };
-
-    // Get the session token
-    let token = match config.token() {
-        Some(t) => t,
-        None => {
+    // Resolve token from agent or config
+    let token = match session::resolve_token().await {
+        Ok(t) => t,
+        Err(_) => {
             return send_error(
                 "not-found",
                 Some(format!(
@@ -288,23 +280,17 @@ async fn handle_get(registry: &RegistryInfo) -> Result<()> {
 /// Uses the Vouch → STS → CodeArtifact flow to obtain a bearer token
 /// that Cargo can use for the CodeArtifact Cargo registry.
 async fn handle_get_codeartifact(registry: &codeartifact::CodeArtifactRegistry) -> Result<()> {
-    // Load Vouch config to get server URL
-    let config = match Config::load() {
-        Ok(c) => c,
-        Err(e) => {
-            return send_error("not-found", Some(format!("failed to load config: {e}")));
-        }
-    };
-
-    let server = match config.server_url() {
-        Some(s) => s.to_string(),
-        None => {
+    // Resolve session to get server URL (tries agent first, then config)
+    let resolved = match session::resolve_session().await {
+        Ok(s) => s,
+        Err(_) => {
             return send_error(
                 "not-found",
                 Some("not configured - run 'vouch enroll' first".to_string()),
             );
         }
     };
+    let server = resolved.server_url;
 
     // Use the shared CodeArtifact credential flow
     let result = match super::codeartifact::get_token(

@@ -54,13 +54,14 @@ pub fn sign_request(
     let amz_date = sigv4::format_amz_date(now);
     let date_stamp = sigv4::format_date_stamp(now);
 
-    // Canonical request: GIT method, repository path, host-only header
+    // Canonical request: GIT method, repository path, host-only header.
+    // CodeCommit uses a non-standard SigV4 canonical request: no payload hash,
+    // just a trailing newline after signed headers.
+    // Ref: https://github.com/aws/git-remote-codecommit
     let canonical_headers = format!("host:{hostname}\n");
     let signed_headers = "host";
-    let empty_payload_hash = sigv4::sha256_hex(b"");
 
-    let canonical_request =
-        format!("GIT\n{path}\n\n{canonical_headers}\n{signed_headers}\n{empty_payload_hash}");
+    let canonical_request = format!("GIT\n{path}\n\n{canonical_headers}\n{signed_headers}\n");
 
     let canonical_request_hash = sigv4::sha256_hex(canonical_request.as_bytes());
 
@@ -453,6 +454,37 @@ mod tests {
             signature_part.chars().all(|c| c.is_ascii_hexdigit()),
             "signature should be hex"
         );
+    }
+
+    /// Verify the canonical request format matches the AWS reference implementation
+    /// (git-remote-codecommit). CodeCommit's SigV4 canonical request does NOT include
+    /// a payload hash — it ends with just a trailing newline after signed headers.
+    #[test]
+    fn test_canonical_request_no_payload_hash() {
+        let hostname = "git-codecommit.us-east-1.amazonaws.com";
+        let path = "/v1/repos/my-repo";
+        let canonical_headers = format!("host:{hostname}\n");
+        let signed_headers = "host";
+
+        let canonical_request = format!("GIT\n{path}\n\n{canonical_headers}\n{signed_headers}\n");
+
+        // Must end with "host\n" — no SHA-256 payload hash after it
+        assert!(
+            canonical_request.ends_with("host\n"),
+            "canonical request should end with 'host\\n', not a payload hash"
+        );
+
+        // Must NOT contain the SHA-256 hash of empty payload
+        let empty_hash = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        assert!(
+            !canonical_request.contains(empty_hash),
+            "canonical request must not contain empty payload hash"
+        );
+
+        // Verify exact format matches AWS reference:
+        // 'GIT\n{path}\n\nhost:{hostname}\n\nhost\n'
+        let expected = format!("GIT\n{path}\n\nhost:{hostname}\n\nhost\n");
+        assert_eq!(canonical_request, expected);
     }
 
     #[test]

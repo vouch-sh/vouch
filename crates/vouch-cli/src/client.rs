@@ -3,21 +3,36 @@
 
 use anyhow::{Context, Result, bail};
 use reqwest::Client;
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
 use vouch_common::ApiError;
-
-use crate::config::Config;
 
 /// HTTP client wrapper for vouch server API.
 pub struct VouchClient {
     client: Client,
     base_url: String,
+    /// Authentication token. Set at construction for authenticated clients,
+    /// `None` for unauthenticated clients (login/enroll flows).
+    token: Option<SecretString>,
 }
 
 impl VouchClient {
-    /// Create a new client for the given server URL.
-    pub fn new(base_url: &str) -> Result<Self> {
+    /// Create an authenticated client.
+    ///
+    /// Resolves the token once from the agent (if running) or config file.
+    /// This is the standard constructor for most commands.
+    pub async fn new(base_url: &str) -> Result<Self> {
+        let mut client = Self::unauthenticated(base_url)?;
+        let token = crate::session::resolve_token().await?;
+        client.token = Some(token);
+        Ok(client)
+    }
+
+    /// Create a client without authentication.
+    ///
+    /// Used only during login/enroll flows where the user doesn't have a
+    /// token yet, and for health checks that don't require auth.
+    pub fn unauthenticated(base_url: &str) -> Result<Self> {
         let client = vouch_common::http::interactive_client(&format!(
             "vouch-cli/{}",
             env!("CARGO_PKG_VERSION")
@@ -27,7 +42,16 @@ impl VouchClient {
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
+            token: None,
         })
+    }
+
+    /// Set an explicit authentication token.
+    ///
+    /// Used when the caller has already resolved the token (e.g., from
+    /// `resolve_session()`) and wants to avoid resolving it again.
+    pub fn set_token(&mut self, token: SecretString) {
+        self.token = Some(token);
     }
 
     /// Get the base URL.
@@ -38,6 +62,13 @@ impl VouchClient {
     /// Get a reference to the raw reqwest client.
     pub fn raw_client(&self) -> &Client {
         &self.client
+    }
+
+    /// Get the stored authentication token, or error if not authenticated.
+    fn token(&self) -> Result<&SecretString> {
+        self.token
+            .as_ref()
+            .context("not authenticated - run 'vouch login' first")
     }
 
     /// POST a JSON request and get a JSON response.
@@ -86,10 +117,7 @@ impl VouchClient {
     where
         Resp: DeserializeOwned,
     {
-        let config = Config::load()?;
-        let token = config
-            .token()
-            .context("not authenticated - run 'vouch login' first")?;
+        let token = self.token()?;
 
         let url = format!("{}{}", self.base_url, path);
         tracing::debug!("GET {} (authenticated)", url);
@@ -110,10 +138,7 @@ impl VouchClient {
     where
         Resp: DeserializeOwned,
     {
-        let config = Config::load()?;
-        let token = config
-            .token()
-            .context("not authenticated - run 'vouch login' first")?;
+        let token = self.token()?;
 
         let url = format!("{}{}", self.base_url, path);
         tracing::debug!("DELETE {} (authenticated)", url);
@@ -135,10 +160,7 @@ impl VouchClient {
         Req: Serialize,
         Resp: DeserializeOwned,
     {
-        let config = Config::load()?;
-        let token = config
-            .token()
-            .context("not authenticated - run 'vouch login' first")?;
+        let token = self.token()?;
 
         let url = format!("{}{}", self.base_url, path);
         tracing::debug!("POST {} (authenticated)", url);
@@ -161,10 +183,7 @@ impl VouchClient {
         Req: Serialize,
         Resp: DeserializeOwned,
     {
-        let config = Config::load()?;
-        let token = config
-            .token()
-            .context("not authenticated - run 'vouch login' first")?;
+        let token = self.token()?;
 
         let url = format!("{}{}", self.base_url, path);
         tracing::debug!("PATCH {} (authenticated)", url);

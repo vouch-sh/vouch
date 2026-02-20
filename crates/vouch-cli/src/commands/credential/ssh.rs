@@ -114,7 +114,7 @@ pub(crate) async fn provision_ssh_certificate(
         .map_err(|e| anyhow::anyhow!("failed to format public key: {e}"))?;
 
     // Request certificate from server
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::new(server).await?;
     let request = SshCertificateRequest {
         public_key: pub_key_str,
     };
