@@ -534,7 +534,6 @@ impl TestOAuthClient {
 
 /// Create a test OAuth client with a secret for use in tests.
 pub async fn create_test_oauth_client(pool: &Pool, user_id: &str) -> TestOAuthClient {
-    use aws_lc_rs::digest::{self, SHA256};
     use aws_lc_rs::rand as aws_rand;
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -556,7 +555,7 @@ pub async fn create_test_oauth_client(pool: &Pool, user_id: &str) -> TestOAuthCl
     let mut secret_bytes = [0u8; 32];
     aws_rand::fill(&mut secret_bytes).expect("RNG failure");
     let secret = URL_SAFE_NO_PAD.encode(secret_bytes);
-    let secret_hash = URL_SAFE_NO_PAD.encode(digest::digest(&SHA256, secret.as_bytes()));
+    let secret_hash = crate::handlers::hash_token(&secret);
 
     crate::db::create_oauth_client_secret(pool, &client.id, &secret_hash, Some("test"), None)
         .await
