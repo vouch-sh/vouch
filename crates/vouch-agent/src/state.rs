@@ -96,6 +96,9 @@ pub struct SessionInfo {
     pub authenticated_at: String,
     /// Seconds until expiration.
     pub expires_in_seconds: u64,
+    /// Server URL the session is connected to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
 }
 
 impl From<&Session> for SessionInfo {
@@ -105,6 +108,7 @@ impl From<&Session> for SessionInfo {
             expires_at: session.expires_at.to_string(),
             authenticated_at: session.authenticated_at.to_string(),
             expires_in_seconds: session.expires_in_seconds(),
+            server_url: None,
         }
     }
 }
