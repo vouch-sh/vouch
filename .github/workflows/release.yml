@@ -67,7 +67,9 @@ jobs:
           context: .
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=${{ matrix.platform }}
+          cache-from: |
+            type=gha,scope=${{ matrix.platform }}
+            type=gha,scope=ci-scan
           cache-to: type=gha,mode=max,scope=${{ matrix.platform }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
           provenance: true
@@ -218,7 +220,7 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          prefix-key: "v1"
+          prefix-key: "v2"
           shared-key: "release-${{ matrix.target }}"
 
       - name: Cache cargo binaries
@@ -695,7 +697,7 @@ jobs:
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
-          prefix-key: "v1"
+          prefix-key: "v2"
           shared-key: "verify-x86_64-unknown-linux-gnu"
 
       - name: Rebuild binaries
