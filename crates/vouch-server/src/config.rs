@@ -165,7 +165,7 @@ pub struct Args {
     pub auth_events_retention_days: i64,
 
     /// Retention period for OAuth usage events in days.
-    #[arg(long, env = "VOUCH_OAUTH_EVENTS_RETENTION_DAYS", default_value = "30")]
+    #[arg(long, env = "VOUCH_OAUTH_EVENTS_RETENTION_DAYS", default_value = "90")]
     pub oauth_events_retention_days: i64,
 
     /// CORS allowed origins (comma-separated). Empty means same-origin only.
@@ -288,7 +288,7 @@ pub struct ServerConfig {
     pub cleanup_interval_minutes: u64,
     /// Retention period for auth events in days (default: 90).
     pub auth_events_retention_days: i64,
-    /// Retention period for OAuth usage events in days (default: 30).
+    /// Retention period for OAuth usage events in days (default: 90).
     pub oauth_events_retention_days: i64,
     /// CORS allowed origins (comma-separated). Empty means same-origin only.
     /// Use "*" to allow all origins (not recommended for production).

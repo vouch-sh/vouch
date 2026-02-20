@@ -359,6 +359,10 @@ pub async fn patch_user(
         {
             tracing::error!("Failed to revoke SSH certificates for deactivated user: {e}");
         }
+        // Clear GitHub refresh token to prevent further API access
+        if let Err(e) = db::clear_user_github_refresh_token(&state.db, &id).await {
+            tracing::error!("Failed to clear GitHub refresh token for deactivated user: {e}");
+        }
     }
 
     // Audit log

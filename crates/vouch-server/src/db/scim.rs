@@ -239,6 +239,23 @@ pub async fn insert_scim_audit(
     Ok(id)
 }
 
+/// Delete SCIM audit log entries older than the specified timestamp.
+pub async fn delete_old_scim_audit_logs(pool: &Pool, before: &str) -> Result<u64> {
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(ScimAuditLog::Table)
+            .and_where(Expr::col(ScimAuditLog::CreatedAt).lt(before))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
+
+    Ok(result.rows_affected())
+}
+
 // ============================================================================
 // SCIM Users
 // ============================================================================

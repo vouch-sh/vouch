@@ -7,6 +7,9 @@
 //! - Expired OIDC states
 //! - Old authentication events
 //! - Old OAuth usage events
+//! - Old GitHub credential events
+//! - Old SCIM audit logs
+//! - Old token exchange records
 //! - DPoP nonces and JTI cache
 
 use crate::db::{self, Pool};
@@ -138,6 +141,47 @@ pub async fn run_cleanup(
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!("Failed to clean up old OAuth usage events: {e}");
+            }
+        }
+    }
+
+    // Clean up old GitHub credential events
+    if let Ok(cutoff) = now.checked_sub(oauth_events_retention_days.days()) {
+        match db::delete_old_github_credential_events(db, &cutoff).await {
+            Ok(count) if count > 0 => {
+                tracing::info!("Cleaned up {count} old GitHub credential events");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("Failed to clean up old GitHub credential events: {e}");
+            }
+        }
+    }
+
+    // Clean up old SCIM audit logs
+    if let Ok(cutoff) = now.checked_sub(auth_events_retention_days.days()) {
+        let cutoff_str = cutoff.to_string();
+        match db::delete_old_scim_audit_logs(db, &cutoff_str).await {
+            Ok(count) if count > 0 => {
+                tracing::info!("Cleaned up {count} old SCIM audit logs");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("Failed to clean up old SCIM audit logs: {e}");
+            }
+        }
+    }
+
+    // Clean up old token exchange records
+    if let Ok(cutoff) = now.checked_sub(oauth_events_retention_days.days()) {
+        let cutoff_str = cutoff.to_string();
+        match db::delete_old_token_exchanges(db, &cutoff_str).await {
+            Ok(count) if count > 0 => {
+                tracing::info!("Cleaned up {count} old token exchange records");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("Failed to clean up old token exchange records: {e}");
             }
         }
     }

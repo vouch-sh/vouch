@@ -68,6 +68,23 @@ pub async fn insert_token_exchange(
     Ok(id)
 }
 
+/// Delete token exchange records older than the specified timestamp.
+pub async fn delete_old_token_exchanges(pool: &Pool, before: &str) -> Result<u64> {
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(TokenExchanges::Table)
+            .and_where(Expr::col(TokenExchanges::CreatedAt).lt(before))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
+
+    Ok(result.rows_affected())
+}
+
 /// Get token exchange records for a user.
 #[allow(dead_code)]
 pub async fn get_token_exchanges_for_user(
