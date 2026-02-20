@@ -231,6 +231,23 @@ impl SshCa {
                 .map_err(|e| anyhow::anyhow!("Failed to add principal {principal}: {e}"))?;
         }
 
+        // Add standard OpenSSH extensions for user certificates
+        builder
+            .extension("permit-X11-forwarding", "")
+            .map_err(|e| anyhow::anyhow!("Failed to add extension: {e}"))?;
+        builder
+            .extension("permit-agent-forwarding", "")
+            .map_err(|e| anyhow::anyhow!("Failed to add extension: {e}"))?;
+        builder
+            .extension("permit-port-forwarding", "")
+            .map_err(|e| anyhow::anyhow!("Failed to add extension: {e}"))?;
+        builder
+            .extension("permit-pty", "")
+            .map_err(|e| anyhow::anyhow!("Failed to add extension: {e}"))?;
+        builder
+            .extension("permit-user-rc", "")
+            .map_err(|e| anyhow::anyhow!("Failed to add extension: {e}"))?;
+
         // Sign the certificate
         let certificate = builder
             .sign(&self.private_key)
@@ -316,5 +333,45 @@ mod tests {
         assert!(SshCa::extract_principals("notanemail").is_err());
         assert!(SshCa::extract_principals("").is_err());
         assert!(SshCa::extract_principals("@domain.com").is_err());
+    }
+
+    #[test]
+    fn test_certificate_includes_standard_extensions() {
+        use ssh_key::certificate::Certificate;
+
+        // Generate a CA keypair
+        let ca_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let ca = SshCa {
+            private_key: ca_key,
+            rp_id: "test.example.com".to_string(),
+        };
+
+        // Generate a user keypair
+        let user_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let user_pub = user_key.public_key().to_openssh().unwrap();
+
+        // Sign a certificate
+        let signed = ca
+            .sign_certificate(&user_pub, "alice@example.com", 3600)
+            .unwrap();
+
+        // Parse the certificate back
+        let cert = Certificate::from_openssh(&signed.certificate).unwrap();
+        let extensions = cert.extensions();
+
+        // Verify all five standard OpenSSH extensions are present
+        let expected = [
+            "permit-X11-forwarding",
+            "permit-agent-forwarding",
+            "permit-port-forwarding",
+            "permit-pty",
+            "permit-user-rc",
+        ];
+        for ext in &expected {
+            assert!(
+                extensions.get(*ext).is_some(),
+                "Missing expected extension: {ext}"
+            );
+        }
     }
 }
