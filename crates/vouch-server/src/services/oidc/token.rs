@@ -689,7 +689,9 @@ mod tests {
 
         // Must contain only URL-safe base64 characters (no padding)
         assert!(
-            hash1.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            hash1
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "hash must use URL-safe base64 characters only"
         );
 
