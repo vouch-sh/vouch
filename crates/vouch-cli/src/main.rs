@@ -18,7 +18,7 @@ mod utils;
 /// Check if invoked as docker-credential-vouch and handle accordingly.
 /// Returns `Ok(true)` if this was a Docker credential helper invocation (handled),
 /// `Ok(false)` if not, or an error if the Docker credential helper failed.
-fn check_docker_credential_invocation() -> Result<bool> {
+async fn check_docker_credential_invocation() -> Result<bool> {
     let argv0 = std::env::args().next().unwrap_or_default();
 
     // Check if invoked as docker-credential-vouch (via symlink or direct call)
@@ -28,8 +28,8 @@ fn check_docker_credential_invocation() -> Result<bool> {
         let operation = std::env::args().nth(1).unwrap_or_default();
 
         // Run the Docker credential helper
-        let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(commands::credential::docker::run(&operation))
+        commands::credential::docker::run(&operation)
+            .await
             .map_err(|e| anyhow::anyhow!("docker-credential-vouch: {e}"))?;
 
         return Ok(true);
@@ -47,7 +47,7 @@ fn check_docker_credential_invocation() -> Result<bool> {
 /// Detection works via:
 /// - **Unix**: argv\[0\] ends with `git-remote-codecommit` (symlink)
 /// - **Windows**: `VOUCH_GIT_REMOTE_CODECOMMIT=1` env var (set by batch wrapper)
-fn check_git_remote_codecommit_invocation() -> Result<bool> {
+async fn check_git_remote_codecommit_invocation() -> Result<bool> {
     let argv0 = std::env::args().next().unwrap_or_default();
 
     let is_remote_helper = argv0.ends_with("git-remote-codecommit")
@@ -67,12 +67,9 @@ fn check_git_remote_codecommit_invocation() -> Result<bool> {
             );
         }
 
-        let rt = tokio::runtime::Runtime::new()?;
-        rt.block_on(commands::credential::codecommit::run_remote_helper(
-            &remote_name,
-            &url,
-        ))
-        .map_err(|e| anyhow::anyhow!("git-remote-codecommit: {e}"))?;
+        commands::credential::codecommit::run_remote_helper(&remote_name, &url)
+            .await
+            .map_err(|e| anyhow::anyhow!("git-remote-codecommit: {e}"))?;
 
         return Ok(true);
     }
@@ -485,12 +482,12 @@ async fn main() -> ExitCode {
 /// Inner entry point that returns `anyhow::Result`.
 async fn run() -> Result<()> {
     // Check if invoked as docker-credential-vouch (via symlink)
-    if check_docker_credential_invocation()? {
+    if check_docker_credential_invocation().await? {
         return Ok(());
     }
 
     // Check if invoked as git-remote-codecommit (via symlink)
-    if check_git_remote_codecommit_invocation()? {
+    if check_git_remote_codecommit_invocation().await? {
         return Ok(());
     }
 
