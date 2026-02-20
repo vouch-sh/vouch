@@ -72,7 +72,7 @@ struct ExecEnvVar {
 
 impl IntegrationCheck for EksIntegration {
     fn name(&self) -> &'static str {
-        "eks"
+        "EKS"
     }
 
     fn check(&self) -> IntegrationState {

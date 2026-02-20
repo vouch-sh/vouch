@@ -522,7 +522,10 @@ mod tests {
         let result = format_codecommit_timestamp(ts);
         // Must NOT have trailing Z (unlike standard SigV4 format_amz_date)
         assert_eq!(result, "20240115T105045");
-        assert!(!result.ends_with('Z'), "CodeCommit timestamp must not end with Z");
+        assert!(
+            !result.ends_with('Z'),
+            "CodeCommit timestamp must not end with Z"
+        );
     }
 
     /// Verify the string-to-sign uses a timestamp WITHOUT trailing Z.
