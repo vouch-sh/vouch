@@ -124,7 +124,7 @@ pub(crate) async fn fetch_and_assume(
     role_arn: &str,
     session_name: Option<&str>,
 ) -> Result<CredentialProcessOutput> {
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::new(server).await?;
 
     // Get OIDC token from Vouch server
     let token_response: OidcTokenResponse = client

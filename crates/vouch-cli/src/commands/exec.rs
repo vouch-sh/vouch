@@ -154,7 +154,7 @@ async fn inject_github_credentials(cmd: &mut Command, server: &str) -> Result<()
 
 /// Fetch a GitHub token from the Vouch server.
 pub(crate) async fn fetch_github_token(server: &str) -> Result<serde_json::Value> {
-    let client = crate::client::VouchClient::new(server)?;
+    let client = crate::client::VouchClient::new(server).await?;
     client
         .get_authenticated("/v1/credentials/github/token")
         .await

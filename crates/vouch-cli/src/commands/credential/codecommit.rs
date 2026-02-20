@@ -128,12 +128,11 @@ pub async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()> {
 /// Reuses the shared `fetch_and_assume` from the AWS credential module to avoid
 /// duplicating the OIDC → STS logic, and wraps it with the agent credential cache.
 async fn get_sts_credentials(_region: &str) -> Result<StsCredentials> {
-    let config = crate::config::Config::load()
-        .context("failed to load config - run 'vouch enroll' first")?;
-
-    let server = config
-        .server_url()
+    let session = crate::session::resolve_session()
+        .await
         .context("not configured - run 'vouch enroll' first")?;
+
+    let server = session.server_url;
 
     let role_arn = get_local_aws_role().ok_or_else(|| {
         anyhow::anyhow!(
@@ -146,7 +145,7 @@ async fn get_sts_credentials(_region: &str) -> Result<StsCredentials> {
 
     let data = super::cache::get_or_fetch(&cache_key, "AWS credentials", || async {
         let output =
-            super::aws::fetch_and_assume(server, &role_arn, Some("vouch-codecommit")).await?;
+            super::aws::fetch_and_assume(&server, &role_arn, Some("vouch-codecommit")).await?;
         let expires_at = output.expiration.clone();
         let data = serde_json::to_value(&output).context("failed to serialize credentials")?;
         Ok((data, expires_at))

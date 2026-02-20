@@ -21,10 +21,10 @@ pub async fn run() -> Result<()> {
     #[cfg(not(unix))]
     let agent_cleared = false;
 
-    // Clear token and email from config
+    // Clear token from config
     if had_token {
-        config.clear_token()?;
-        config.clear_email()?;
+        config.clear_token();
+        config.save()?;
     }
 
     // Clear cookie file

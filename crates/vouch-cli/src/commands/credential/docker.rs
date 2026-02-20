@@ -21,13 +21,14 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
+use secrecy::SecretString;
+
 use crate::client::VouchClient;
 use crate::commands::credential::aws::{OidcTokenResponse, build_session_tags, decode_jwt_payload};
-use crate::config::Config;
 use crate::integrations::aws::get_local_aws_role;
 use crate::integrations::aws::sigv4::sign_and_send_json_rpc;
 use crate::integrations::aws::sts::{StsCredentials, assume_role_with_web_identity};
-use crate::session::get_user_email;
+use crate::session::{get_user_email, resolve_session};
 
 /// Docker credential helper output format.
 /// See: https://docs.docker.com/engine/reference/commandline/login/#credential-helper-protocol
@@ -173,16 +174,11 @@ async fn get_credential() -> Result<()> {
     // Detect registry type
     let registry_type = detect_registry_type(&server_url);
 
-    // Load config
-    let config = Config::load().map_err(|e| {
-        eprintln!("vouch: failed to load config: {e}");
-        e
-    })?;
-
-    let server = config.server_url().ok_or_else(|| {
+    // Resolve session (tries agent first, then config)
+    let session = resolve_session().await.inspect_err(|_| {
         eprintln!("vouch: not configured - run 'vouch enroll' first");
-        anyhow::anyhow!("not configured")
     })?;
+    let server = session.server_url.as_str();
 
     // Get credentials based on registry type
     let credential = match registry_type {
@@ -190,8 +186,10 @@ async fn get_credential() -> Result<()> {
             region,
             domain_suffix,
             ..
-        } => get_ecr_credential(server, &region, &domain_suffix, &server_url).await?,
-        RegistryType::Ghcr => get_ghcr_credential(server).await?,
+        } => {
+            get_ecr_credential(server, &session.token, &region, &domain_suffix, &server_url).await?
+        }
+        RegistryType::Ghcr => get_ghcr_credential(server, &session.token).await?,
         RegistryType::Unknown => {
             eprintln!("vouch: unknown registry type for URL: {}", server_url);
             anyhow::bail!("unsupported registry: {}", server_url);
@@ -211,11 +209,13 @@ async fn get_credential() -> Result<()> {
 /// Get credentials for AWS ECR.
 async fn get_ecr_credential(
     server: &str,
+    token: &SecretString,
     region: &str,
     domain_suffix: &str,
     registry_url: &str,
 ) -> Result<DockerCredential> {
-    let client = VouchClient::new(server)?;
+    let mut client = VouchClient::unauthenticated(server)?;
+    client.set_token(token.clone());
 
     // First, get OIDC token from Vouch server
     let token_response: OidcTokenResponse = client
@@ -354,8 +354,9 @@ fn base64_decode(input: &str) -> Result<Vec<u8>> {
 }
 
 /// Get credentials for GitHub Container Registry.
-async fn get_ghcr_credential(server: &str) -> Result<DockerCredential> {
-    let client = VouchClient::new(server)?;
+async fn get_ghcr_credential(server: &str, token: &SecretString) -> Result<DockerCredential> {
+    let mut client = VouchClient::unauthenticated(server)?;
+    client.set_token(token.clone());
 
     // Request token from server (no specific owner/repo for GHCR)
     let request = GitHubTokenRequest {

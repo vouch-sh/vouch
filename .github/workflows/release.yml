@@ -16,8 +16,18 @@ env:
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
+  license-audit:
+    name: License Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: EmbarkStudios/cargo-deny-action@44db170f6a7d12a6e90340e9e0fca1f650d34b14 # v2.0.15
+        with:
+          command: check licenses advisories sources
+
   build:
     name: Build and Push (${{ matrix.platform }})
+    needs: license-audit
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
@@ -155,6 +165,7 @@ jobs:
 
   build-cli:
     name: Build CLI (${{ matrix.name }})
+    needs: license-audit
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -416,6 +427,7 @@ jobs:
 
   build-server:
     name: Build Server (${{ matrix.name }})
+    needs: license-audit
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read

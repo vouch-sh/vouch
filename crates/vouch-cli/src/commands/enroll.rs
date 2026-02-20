@@ -34,7 +34,7 @@ impl std::fmt::Debug for DeviceTokenResponse {
 
 /// Run the enroll command.
 pub async fn run(server: &str) -> Result<()> {
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::unauthenticated(server)?;
 
     println!("Starting enrollment...\n");
 
@@ -74,11 +74,11 @@ pub async fn run(server: &str) -> Result<()> {
     // Step 3: Poll for token
     let token_response = poll_for_token(&client, &device_response).await?;
 
-    // Step 4: Save server URL, token, and email
+    // Step 4: Save server URL and token (single atomic write)
     let mut config = Config::load()?;
-    config.save_server_url(server)?;
-    config.save_token(&token_response.access_token)?;
-    config.save_email(&token_response.email)?;
+    config.set_server_url(server);
+    config.set_token(&token_response.access_token);
+    config.save()?;
 
     // Step 5: Compute expiration timestamp from expires_in
     let expires_at = jiff::Timestamp::now()

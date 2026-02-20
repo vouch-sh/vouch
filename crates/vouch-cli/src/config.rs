@@ -8,6 +8,21 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
+/// Acquire an exclusive advisory lock on a file using `flock(2)`.
+///
+/// This is the only `unsafe` call in the CLI crate. `flock` is a well-defined
+/// POSIX API and the file descriptor is guaranteed valid by the borrow of `File`.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+fn flock_exclusive(file: &fs::File) -> Result<(), std::io::Error> {
+    use std::os::unix::io::{AsFd, AsRawFd};
+    let ret = unsafe { libc::flock(file.as_fd().as_raw_fd(), libc::LOCK_EX) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// CLI configuration stored in ~/.vouch/config.json
 ///
 /// Note: The token is stored as a plain string in the file for serialization purposes.
@@ -20,8 +35,6 @@ pub struct Config {
     server_url: Option<String>,
     /// Current session token (JWT), protected in memory.
     token: Option<SecretString>,
-    /// User's email address (for session naming).
-    email: Option<String>,
     /// CodeArtifact profile configuration.
     codeartifact: Option<CodeArtifactConfig>,
 }
@@ -57,8 +70,6 @@ struct ConfigFile {
     server_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    email: Option<String>,
     #[zeroize(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     codeartifact: Option<CodeArtifactConfig>,
@@ -69,7 +80,6 @@ impl std::fmt::Debug for Config {
         f.debug_struct("Config")
             .field("server_url", &self.server_url)
             .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
-            .field("email", &self.email)
             .field("codeartifact", &self.codeartifact)
             .finish()
     }
@@ -108,6 +118,59 @@ impl Config {
         Ok(())
     }
 
+    /// Atomically load, modify, and save the config file under an advisory lock.
+    ///
+    /// This prevents concurrent processes from clobbering each other's changes.
+    /// The lock is held for the entire load-modify-save cycle.
+    #[cfg(unix)]
+    pub fn modify(f: impl FnOnce(&mut Config)) -> Result<()> {
+        let path = Self::config_path()?;
+        let lock_path = path.with_extension("lock");
+
+        // Ensure the directory exists before creating the lock file
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        }
+
+        let lock_file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&lock_path)
+            .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
+
+        // Restrict lock file permissions to owner-only (match config file)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&lock_path, std::fs::Permissions::from_mode(0o600));
+        }
+
+        // Acquire exclusive advisory lock (blocks until available)
+        flock_exclusive(&lock_file).context("failed to acquire config file lock")?;
+
+        // Load, modify, save under the lock
+        let mut config = Self::load()?;
+        f(&mut config);
+        config.save()?;
+
+        // Lock is released when lock_file is dropped
+        drop(lock_file);
+
+        Ok(())
+    }
+
+    /// Atomically load, modify, and save the config file.
+    ///
+    /// Non-Unix fallback without advisory locking.
+    #[cfg(not(unix))]
+    pub fn modify(f: impl FnOnce(&mut Config)) -> Result<()> {
+        let mut config = Self::load()?;
+        f(&mut config);
+        config.save()
+    }
+
     /// Get the configured server URL.
     #[must_use]
     pub fn server_url(&self) -> Option<&str> {
@@ -128,50 +191,14 @@ impl Config {
         self.server_url = Some(url.to_string());
     }
 
-    /// Save the server URL.
-    pub fn save_server_url(&mut self, url: &str) -> Result<()> {
-        self.set_server_url(url);
-        self.save()
-    }
-
     /// Set a new session token (in memory only, call `save()` to persist).
     pub fn set_token(&mut self, token: &str) {
         self.token = Some(SecretString::from(token.to_string()));
     }
 
-    /// Save a new session token.
-    pub fn save_token(&mut self, token: &str) -> Result<()> {
-        self.set_token(token);
-        self.save()
-    }
-
-    /// Clear the session token (logout).
-    pub fn clear_token(&mut self) -> Result<()> {
+    /// Clear the session token in memory (call `save()` to persist).
+    pub fn clear_token(&mut self) {
         self.token = None;
-        self.save()
-    }
-
-    /// Get the user's email address.
-    #[must_use]
-    pub fn email(&self) -> Option<&str> {
-        self.email.as_deref()
-    }
-
-    /// Set the user's email address (in memory only, call `save()` to persist).
-    pub fn set_email(&mut self, email: &str) {
-        self.email = Some(email.to_string());
-    }
-
-    /// Save the user's email address.
-    pub fn save_email(&mut self, email: &str) -> Result<()> {
-        self.set_email(email);
-        self.save()
-    }
-
-    /// Clear the user's email address.
-    pub fn clear_email(&mut self) -> Result<()> {
-        self.email = None;
-        self.save()
     }
 
     /// Get the CodeArtifact configuration.
@@ -180,12 +207,9 @@ impl Config {
         self.codeartifact.as_ref()
     }
 
-    /// Save a CodeArtifact profile. If this is the first profile, it becomes the default.
-    pub fn save_codeartifact_profile(
-        &mut self,
-        name: &str,
-        profile: CodeArtifactProfile,
-    ) -> Result<()> {
+    /// Add a CodeArtifact profile (in memory only, call `save()` to persist).
+    /// If this is the first profile, it becomes the default.
+    pub fn set_codeartifact_profile(&mut self, name: &str, profile: CodeArtifactProfile) {
         let ca = self
             .codeartifact
             .get_or_insert_with(CodeArtifactConfig::default);
@@ -193,7 +217,6 @@ impl Config {
             ca.default = Some(name.to_string());
         }
         ca.profiles.insert(name.to_string(), profile);
-        self.save()
     }
 
     /// Get the path to the config file.
@@ -211,7 +234,6 @@ impl From<ConfigFile> for Config {
         Self {
             server_url: std::mem::take(&mut file.server_url),
             token: std::mem::take(&mut file.token).map(SecretString::from),
-            email: std::mem::take(&mut file.email),
             codeartifact: file.codeartifact.take(),
         }
     }
@@ -222,7 +244,6 @@ impl From<&Config> for ConfigFile {
         Self {
             server_url: config.server_url.clone(),
             token: config.token.as_ref().map(|s| s.expose_secret().to_string()),
-            email: config.email.clone(),
             codeartifact: config.codeartifact.clone(),
         }
     }
@@ -238,7 +259,6 @@ mod tests {
         let json = r#"{
             "server_url": "https://vouch.example.com",
             "token": "test-token",
-            "email": "alice@example.com",
             "codeartifact": {
                 "default": "prod",
                 "profiles": {
@@ -260,7 +280,6 @@ mod tests {
         let config = Config::from(file);
 
         assert_eq!(config.server_url(), Some("https://vouch.example.com"));
-        assert_eq!(config.email(), Some("alice@example.com"));
 
         let ca = config
             .codeartifact()
@@ -288,7 +307,6 @@ mod tests {
         let config2 = Config::from(file3);
 
         assert_eq!(config2.server_url(), config.server_url());
-        assert_eq!(config2.email(), config.email());
         let ca2 = config2
             .codeartifact()
             .expect("round-tripped codeartifact config");
@@ -307,13 +325,11 @@ mod tests {
         let config = Config::from(file);
 
         assert!(config.codeartifact().is_none());
-        assert!(config.email().is_none());
 
-        // Round-trip should not add codeartifact or email fields
+        // Round-trip should not add codeartifact field
         let file2 = ConfigFile::from(&config);
         let json2 = serde_json::to_string(&file2).unwrap();
         assert!(!json2.contains("codeartifact"));
-        assert!(!json2.contains("email"));
         assert!(!json2.contains("null"));
     }
 
@@ -331,7 +347,6 @@ mod tests {
         let config2 = Config::from(file2);
         assert!(config2.server_url().is_none());
         assert!(config2.token().is_none());
-        assert!(config2.email().is_none());
         assert!(config2.codeartifact().is_none());
     }
 
@@ -341,7 +356,6 @@ mod tests {
         let json = r#"{
             "server_url": null,
             "token": null,
-            "email": null,
             "codeartifact": null
         }"#;
 
@@ -349,8 +363,26 @@ mod tests {
         let config = Config::from(file);
         assert!(config.server_url().is_none());
         assert!(config.token().is_none());
-        assert!(config.email().is_none());
         assert!(config.codeartifact().is_none());
+    }
+
+    #[test]
+    fn test_legacy_email_field_ignored() {
+        // Old config files may still contain the email field; it should be silently ignored
+        let json = r#"{
+            "server_url": "https://vouch.example.com",
+            "token": "test-token",
+            "email": "alice@example.com"
+        }"#;
+
+        let file: ConfigFile = serde_json::from_str(json).unwrap();
+        let config = Config::from(file);
+        assert_eq!(config.server_url(), Some("https://vouch.example.com"));
+
+        // Round-trip should not include the email field
+        let file2 = ConfigFile::from(&config);
+        let json2 = serde_json::to_string(&file2).unwrap();
+        assert!(!json2.contains("email"));
     }
 
     #[test]
@@ -362,19 +394,17 @@ mod tests {
     }
 
     #[test]
-    fn test_save_codeartifact_profile_sets_default_for_first() {
+    fn test_set_codeartifact_profile_sets_default_for_first() {
         let mut config = Config::default();
 
-        config
-            .save_codeartifact_profile(
-                "myteam",
-                CodeArtifactProfile {
-                    domain: "team-domain".into(),
-                    domain_owner: "111111111111".into(),
-                    region: "us-west-2".into(),
-                },
-            )
-            .unwrap_or_default(); // save may fail in test env (no home dir)
+        config.set_codeartifact_profile(
+            "myteam",
+            CodeArtifactProfile {
+                domain: "team-domain".into(),
+                domain_owner: "111111111111".into(),
+                region: "us-west-2".into(),
+            },
+        );
 
         let ca = config
             .codeartifact()

@@ -1,0 +1,52 @@
+# cargo-deny configuration
+# https://embarkstudios.github.io/cargo-deny/
+#
+# Run locally: cargo deny check licenses advisories sources
+
+[graph]
+all-features = true
+
+[advisories]
+ignore = [
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is a thin wrapper around rustls-pki-types; migration tracked separately" },
+]
+
+[licenses]
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "OpenSSL",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+# vouch-server uses BUSL-1.1 intentionally (see crates/vouch-server/LICENSE)
+exceptions = [
+    { allow = ["BUSL-1.1"], crate = "vouch-server" },
+]
+
+[[licenses.clarify]]
+crate = "vouch-server"
+expression = "BUSL-1.1"
+license-files = [{ path = "LICENSE", hash = 0xca620b74 }]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

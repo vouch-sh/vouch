@@ -16,7 +16,7 @@ use vouch_common::{GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse
 
 use crate::client::VouchClient;
 use crate::commands::credential::git_protocol::read_credential_input;
-use crate::config::Config;
+use crate::session::resolve_session;
 
 /// Check if the host is a GitHub host.
 fn is_github_host(host: &str) -> bool {
@@ -68,22 +68,17 @@ async fn get_credential() -> Result<()> {
         return Ok(());
     }
 
-    // Load config
-    let config = Config::load().map_err(|e| {
-        eprintln!("vouch: failed to load config: {e}");
-        e
-    })?;
-
-    let server = config.server_url().ok_or_else(|| {
+    // Resolve session (tries agent first, then config)
+    let session = resolve_session().await.inspect_err(|_| {
         eprintln!("vouch: not configured - run 'vouch enroll' first");
-        anyhow::anyhow!("not configured")
     })?;
 
-    // Create client
-    let client = VouchClient::new(server).map_err(|e| {
+    // Create authenticated client
+    let mut client = VouchClient::unauthenticated(&session.server_url).map_err(|e| {
         eprintln!("vouch: failed to create client: {e}");
         e
     })?;
+    client.set_token(session.token);
 
     // Extract owner from path (e.g., "acme-corp/my-repo.git" -> "acme-corp")
     let owner = extract_owner(input.path.as_deref());
@@ -117,7 +112,7 @@ async fn get_credential() -> Result<()> {
 
 /// Check GitHub integration status.
 pub async fn check_status(server: &str) -> Result<GitHubStatusResponse> {
-    let client = VouchClient::new(server)?;
+    let client = VouchClient::new(server).await?;
     client
         .get_authenticated("/v1/credentials/github/status")
         .await

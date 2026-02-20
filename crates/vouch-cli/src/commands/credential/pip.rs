@@ -54,15 +54,12 @@ async fn handle_get(url: &str) -> Result<()> {
         )
     })?;
 
-    let config = crate::config::Config::load()
-        .context("vouch is not enrolled - run 'vouch enroll' to set up authentication")?;
-
-    let server = config
-        .server_url()
+    let session = crate::session::resolve_session()
+        .await
         .context("vouch is not enrolled - run 'vouch enroll' to set up authentication")?;
 
     let token = super::codeartifact::get_token(
-        server,
+        &session.server_url,
         &registry.domain,
         &registry.domain_owner,
         &registry.region,

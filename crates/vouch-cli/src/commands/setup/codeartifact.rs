@@ -54,17 +54,20 @@ pub async fn run(
     println!("CodeArtifact Setup");
     println!("==================\n");
 
-    // Save profile to config
+    // Save profile to config (using file lock for concurrent safety)
     let profile_name = profile.unwrap_or("default");
-    let mut config = Config::load().context("failed to load config")?;
-    config.save_codeartifact_profile(
-        profile_name,
-        CodeArtifactProfile {
+    {
+        let name = profile_name.to_string();
+        let ca_profile = CodeArtifactProfile {
             domain: domain.clone(),
             domain_owner: domain_owner.clone(),
             region: region.clone(),
-        },
-    )?;
+        };
+        Config::modify(|config| {
+            config.set_codeartifact_profile(&name, ca_profile);
+        })
+        .context("failed to save CodeArtifact profile")?;
+    }
     println!("Saved CodeArtifact profile '{profile_name}' to config.\n");
 
     // Derive domain suffix from the AWS config's role ARN partition
@@ -341,7 +344,6 @@ fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
 
     // Append the new CodeArtifact entries
     lines.push(format!("{ca_prefix}:_authToken={token}"));
-    lines.push(format!("{ca_prefix}:always-auth=true"));
     lines.push(format!("registry=https://{ca_host}/npm/{repository}/"));
 
     let content = lines.join("\n") + "\n";
