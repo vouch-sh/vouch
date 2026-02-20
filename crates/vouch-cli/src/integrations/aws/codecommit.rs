@@ -8,7 +8,8 @@
 //! The CodeCommit signing differs from standard SigV4 JSON-RPC calls:
 //! - HTTP method is `GIT` (not `GET`/`POST`)
 //! - Only the `host` header is signed
-//! - The "password" is `{timestamp}{signature}` (timestamp includes trailing `Z`)
+//! - The "password" is `{timestamp}Z{signature}` where timestamp has NO trailing Z
+//!   (unlike standard SigV4 X-Amz-Date). The Z serves as a separator only.
 //! - The "username" is `{access_key_id}%{session_token}` for temporary credentials
 
 use secrecy::{ExposeSecret, SecretString};
@@ -33,6 +34,33 @@ impl std::fmt::Debug for CodeCommitCredentials {
     }
 }
 
+/// Format timestamp for CodeCommit SigV4 signing (`YYYYMMDDTHHMMSS`, no trailing Z).
+///
+/// CodeCommit's SigV4 variant omits the trailing `Z` from the timestamp used in
+/// the string-to-sign. This differs from standard SigV4 (which uses `YYYYMMDDTHHMMSSZ`).
+///
+/// In the AWS reference implementation (`git-remote-codecommit`), the timestamp is
+/// stored in `request.context['timestamp']` using `strftime('%Y%m%dT%H%M%S')` (no Z):
+///   <https://github.com/aws/git-remote-codecommit/blob/master/git_remote_codecommit/__init__.py>
+///
+/// botocore's `SigV4Auth.string_to_sign()` uses this value directly (no re-formatting):
+///   <https://github.com/boto/botocore/blob/develop/botocore/auth.py>
+///
+/// The `Z` only appears as a separator between timestamp and signature in the
+/// password output: `{timestamp}Z{hex_signature}`.
+fn format_codecommit_timestamp(now: jiff::Timestamp) -> String {
+    let dt = now.to_zoned(jiff::tz::TimeZone::UTC);
+    format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}",
+        dt.year(),
+        dt.month(),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second()
+    )
+}
+
 /// Generate SigV4-signed credentials for a CodeCommit repository.
 ///
 /// The signing uses the `GIT` HTTP method with only the `host` header,
@@ -51,7 +79,7 @@ pub fn sign_request(
     region: &str,
 ) -> CodeCommitCredentials {
     let now = jiff::Timestamp::now();
-    let amz_date = sigv4::format_amz_date(now);
+    let timestamp = format_codecommit_timestamp(now);
     let date_stamp = sigv4::format_date_stamp(now);
 
     // Canonical request: GIT method, repository path, host-only header.
@@ -65,10 +93,10 @@ pub fn sign_request(
 
     let canonical_request_hash = sigv4::sha256_hex(canonical_request.as_bytes());
 
-    // String to sign (standard SigV4 format)
+    // String to sign — uses timestamp WITHOUT trailing Z (CodeCommit-specific)
     let credential_scope = format!("{date_stamp}/{region}/codecommit/aws4_request");
     let string_to_sign =
-        format!("AWS4-HMAC-SHA256\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
+        format!("AWS4-HMAC-SHA256\n{timestamp}\n{credential_scope}\n{canonical_request_hash}");
 
     // Sign
     let signing_key =
@@ -83,8 +111,8 @@ pub fn sign_request(
         format!("{}%{session_token}", creds.access_key_id)
     };
 
-    // Password: timestamp (with Z) immediately followed by signature
-    let password = SecretString::from(format!("{amz_date}{signature}"));
+    // Password: timestamp (no Z) + 'Z' separator + hex signature
+    let password = SecretString::from(format!("{timestamp}Z{signature}"));
 
     CodeCommitCredentials { username, password }
 }
@@ -432,9 +460,9 @@ mod tests {
         assert!(result.username.starts_with("AKIAIOSFODNN7EXAMPLE%"));
         assert!(result.username.contains("FwoGZXIvYXdzEBYaDM"));
 
-        // Password should be timestampZsignature (timestamp includes Z)
+        // Password should be {timestamp}Z{signature} where Z is a separator
         let password = result.password.expose_secret();
-        // Format: YYYYMMDDTHHMMSSZhexsignature
+        // Format: YYYYMMDDTHHMMSSZhexsignature (Z is separator, not part of timestamp)
         assert!(password.len() > 16, "password too short: {password}");
         // The Z is at position 15 (0-indexed)
         assert_eq!(
@@ -485,6 +513,55 @@ mod tests {
         // 'GIT\n{path}\n\nhost:{hostname}\n\nhost\n'
         let expected = format!("GIT\n{path}\n\nhost:{hostname}\n\nhost\n");
         assert_eq!(canonical_request, expected);
+    }
+
+    #[test]
+    fn test_format_codecommit_timestamp() {
+        // Create a known timestamp: 2024-01-15 10:50:45 UTC
+        let ts = jiff::Timestamp::from_second(1705315845).expect("valid timestamp");
+        let result = format_codecommit_timestamp(ts);
+        // Must NOT have trailing Z (unlike standard SigV4 format_amz_date)
+        assert_eq!(result, "20240115T105045");
+        assert!(
+            !result.ends_with('Z'),
+            "CodeCommit timestamp must not end with Z"
+        );
+    }
+
+    /// Verify the string-to-sign uses a timestamp WITHOUT trailing Z.
+    ///
+    /// The AWS reference implementation (`git-remote-codecommit`) stores the
+    /// timestamp as `%Y%m%dT%H%M%S` (no Z) and uses it directly in
+    /// `string_to_sign`. CodeCommit recomputes the signature server-side
+    /// using this format, so a trailing Z causes a signature mismatch (403).
+    #[test]
+    fn test_string_to_sign_no_trailing_z() {
+        let hostname = "git-codecommit.us-east-1.amazonaws.com";
+        let path = "/v1/repos/my-repo";
+        let region = "us-east-1";
+
+        // Build string-to-sign the same way sign_request does
+        let ts = jiff::Timestamp::from_second(1705315845).expect("valid timestamp");
+        let timestamp = format_codecommit_timestamp(ts);
+        let date_stamp = sigv4::format_date_stamp(ts);
+
+        let canonical_headers = format!("host:{hostname}\n");
+        let signed_headers = "host";
+        let canonical_request = format!("GIT\n{path}\n\n{canonical_headers}\n{signed_headers}\n");
+        let canonical_request_hash = sigv4::sha256_hex(canonical_request.as_bytes());
+
+        let credential_scope = format!("{date_stamp}/{region}/codecommit/aws4_request");
+        let string_to_sign =
+            format!("AWS4-HMAC-SHA256\n{timestamp}\n{credential_scope}\n{canonical_request_hash}");
+
+        // Line 2 of string-to-sign should be timestamp WITHOUT Z
+        let lines: Vec<&str> = string_to_sign.split('\n').collect();
+        let timestamp_line = lines.get(1).copied();
+        assert_eq!(timestamp_line, Some("20240115T105045"));
+        assert!(
+            !timestamp_line.unwrap().ends_with('Z'),
+            "string-to-sign timestamp must not have trailing Z"
+        );
     }
 
     #[test]

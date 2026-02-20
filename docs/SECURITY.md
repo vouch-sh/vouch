@@ -295,7 +295,12 @@ Certificate:
     Valid: 2024-01-14T10:00:00 to 2024-01-14T18:00:00 (8 hours)
     Principals: user@example.com, user
     Critical Options: (none)
-    Extensions: (none)
+    Extensions:
+        permit-X11-forwarding
+        permit-agent-forwarding
+        permit-port-forwarding
+        permit-pty
+        permit-user-rc
 ```
 
 **AWS Credentials:**
