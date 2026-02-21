@@ -245,7 +245,8 @@ cargo test --features yubikey-tests -- --ignored
 | FIDO2 types | `crates/vouch-common/src/fido2_types.rs` |
 | Server handlers | `crates/vouch-server/src/handlers/` |
 | Server services | `crates/vouch-server/src/services/` (oidc/, integrations/) |
-| SSH CA | `crates/vouch-server/src/ssh_ca.rs` |
+| Crypto primitives | `crates/vouch-server/src/crypto/` (jwt.rs, ssh_ca.rs, webauthn_verify.rs, tpm_decrypt.rs, ber.rs, pem.rs) |
+| Server infra | `crates/vouch-server/src/infra/` (tls.rs, cleanup.rs, s3_config.rs, encrypt_config.rs) |
 | Database modules | `crates/vouch-server/src/db/` (pool.rs, users.rs, sessions.rs, etc.) |
 | HTML templates | `crates/vouch-server/templates/` |
 | CSS source | `crates/vouch-server/styles/input.css` |
@@ -279,12 +280,17 @@ Before implementing a feature:
 - [WebAuthn Level 2](https://www.w3.org/TR/webauthn-2/)
 - [RFC 6749 - OAuth 2.0](https://www.rfc-editor.org/rfc/rfc6749)
 - [RFC 7636 - PKCE](https://www.rfc-editor.org/rfc/rfc7636)
-- [RFC 8628 - Device Authorization Grant](https://www.rfc-editor.org/rfc/rfc8628)
 - [RFC 7009 - Token Revocation](https://www.rfc-editor.org/rfc/rfc7009)
 - [RFC 7662 - Token Introspection](https://www.rfc-editor.org/rfc/rfc7662)
+- [RFC 8176 - Authentication Method Reference Values](https://www.rfc-editor.org/rfc/rfc8176)
+- [RFC 8414 - OAuth 2.0 Authorization Server Metadata](https://www.rfc-editor.org/rfc/rfc8414)
+- [RFC 8628 - Device Authorization Grant](https://www.rfc-editor.org/rfc/rfc8628)
 - [RFC 8693 - Token Exchange](https://www.rfc-editor.org/rfc/rfc8693)
+- [RFC 8725 - JWT Best Current Practices](https://www.rfc-editor.org/rfc/rfc8725)
 - [RFC 9068 - JWT Profile for OAuth 2.0 Access Tokens](https://www.rfc-editor.org/rfc/rfc9068)
+- [RFC 9207 - OAuth 2.0 Authorization Server Issuer Identification](https://www.rfc-editor.org/rfc/rfc9207)
 - [RFC 9449 - DPoP](https://www.rfc-editor.org/rfc/rfc9449)
+- [RFC 9700 - OAuth 2.0 Security Best Current Practice](https://www.rfc-editor.org/rfc/rfc9700)
 - [RFC 7643/7644 - SCIM 2.0](https://www.rfc-editor.org/rfc/rfc7643)
 
 **Crates:**
