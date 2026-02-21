@@ -370,7 +370,7 @@ pub async fn authenticate_client(
             .ok_or(ClientAuthError::SecretRequired)?;
 
         // Hash the provided secret and validate against stored hash
-        let secret_hash = hash_client_secret(secret.expose_secret());
+        let secret_hash = hash_token(secret.expose_secret());
 
         // Validate credentials
         let validated =
@@ -398,12 +398,6 @@ pub async fn authenticate_client(
             is_public: true,
         })
     }
-}
-
-/// Hash a client secret for comparison with stored hash.
-fn hash_client_secret(secret: &str) -> String {
-    let hash = digest::digest(&SHA256, secret.as_bytes());
-    URL_SAFE_NO_PAD.encode(hash.as_ref())
 }
 
 /// Generate an opaque access token.
@@ -676,5 +670,32 @@ mod tests {
         let token = generate_access_token();
         assert!(token.starts_with("vouch_"));
         assert!(token.len() > 40); // vouch_ prefix + base64 encoded 32 bytes
+    }
+
+    #[test]
+    fn test_hash_token_produces_consistent_base64url() {
+        // Regression test: hash_token must produce base64url-encoded SHA-256 output.
+        // A previous bug used hex encoding at creation time but base64url at validation,
+        // causing client secret authentication to always fail.
+        let input = "vouch_test_secret_value";
+        let hash1 = hash_token(input);
+        let hash2 = hash_token(input);
+
+        // Must be deterministic
+        assert_eq!(hash1, hash2);
+
+        // SHA-256 produces 32 bytes; base64url-no-pad encodes that as 43 characters
+        assert_eq!(hash1.len(), 43, "base64url(SHA-256) should be 43 chars");
+
+        // Must contain only URL-safe base64 characters (no padding)
+        assert!(
+            hash1
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "hash must use URL-safe base64 characters only"
+        );
+
+        // Must NOT be hex-encoded (hex would be 64 chars)
+        assert_ne!(hash1.len(), 64, "hash must not be hex-encoded");
     }
 }

@@ -8,7 +8,6 @@ use crate::AppState;
 use crate::db::{self, AccessScope, OAuthClient, OAuthClientType, OAuthEventType};
 use crate::impl_template_response;
 use askama::Template;
-use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::rand as aws_rand;
 use axum::{
     Form, Json,
@@ -26,7 +25,7 @@ use std::sync::Arc;
 use vouch_common::ApiError;
 
 use super::common::{AuthContext, extract_session};
-use super::{extract_session_from_cookie, json_error};
+use super::{extract_session_from_cookie, hash_token, json_error};
 
 // ============================================================================
 // Constants
@@ -284,11 +283,6 @@ pub struct RotateSecretResponse {
 // Helper Functions
 // ============================================================================
 
-/// Hash a secret for storage.
-fn hash_secret(secret: &str) -> String {
-    hex::encode(digest::digest(&SHA256, secret.as_bytes()))
-}
-
 /// Generate a secure random client secret.
 ///
 /// # Panics
@@ -517,7 +511,7 @@ pub async fn create_application_form(
     // Generate client secret for confidential clients
     let client_secret = if app_type.requires_secret() {
         let secret = generate_client_secret();
-        let secret_hash = hash_secret(&secret);
+        let secret_hash = hash_token(&secret);
 
         if let Err(e) = db::create_oauth_client_secret(
             &state.db,
@@ -832,7 +826,7 @@ pub async fn rotate_secret_form(
 
     // Generate new secret
     let secret = generate_client_secret();
-    let secret_hash = hash_secret(&secret);
+    let secret_hash = hash_token(&secret);
 
     // Revoke old secrets
     if let Err(e) = db::revoke_all_oauth_client_secrets(&state.db, &app_id).await {
@@ -1007,7 +1001,7 @@ pub async fn create_application_api(
     // Generate client secret for confidential clients
     let client_secret = if app_type.requires_secret() {
         let secret = generate_client_secret();
-        let secret_hash = hash_secret(&secret);
+        let secret_hash = hash_token(&secret);
 
         db::create_oauth_client_secret(
             &state.db,
@@ -1302,7 +1296,7 @@ pub async fn rotate_secret_api(
 
     // Generate new secret
     let secret = generate_client_secret();
-    let secret_hash = hash_secret(&secret);
+    let secret_hash = hash_token(&secret);
 
     // Revoke old secrets
     db::revoke_all_oauth_client_secrets(&state.db, &app_id)

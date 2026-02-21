@@ -842,7 +842,12 @@ mod tests {
     // Additional tests from review feedback
     // ====================================================================
 
-    /// AES-256-CBC: wrong key should fail decryption (padding validation).
+    /// AES-256-CBC: wrong key must not produce correct plaintext.
+    ///
+    /// With PKCS#7 padding, a wrong key may either trigger a padding error
+    /// (most likely) or produce garbage that happens to have valid padding
+    /// (~1/256 chance). Either outcome is acceptable as long as the original
+    /// plaintext is never recovered.
     #[test]
     fn test_aes_256_cbc_wrong_key() {
         use aws_lc_rs::cipher::{AES_256, PaddedBlockEncryptingKey, UnboundCipherKey};
@@ -858,9 +863,14 @@ mod tests {
         let context = enc.encrypt(&mut in_out).unwrap();
         let iv: &[u8] = (&context).try_into().unwrap();
 
-        // Decrypt with wrong key
+        // Decrypt with wrong key — must either fail or produce wrong plaintext
         let result = aes_256_cbc_decrypt(&wrong_key, iv, &in_out);
-        assert!(result.is_err());
+        if let Ok(decrypted) = result {
+            assert_ne!(
+                &**decrypted, plaintext,
+                "wrong key must not recover original plaintext"
+            );
+        }
     }
 
     /// AES-256-CBC: wrong IV should produce wrong plaintext or fail.

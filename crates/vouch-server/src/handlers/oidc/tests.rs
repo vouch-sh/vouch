@@ -699,3 +699,32 @@ async fn test_token_exchange_scope_downgrade() {
     // Should only have requested scope (openid) not full scope
     assert!(scope.contains("openid") || scope.is_empty());
 }
+
+// ========================================================================
+// Client Secret Hash Round-Trip Tests (regression)
+// ========================================================================
+
+#[tokio::test]
+async fn test_client_secret_hash_roundtrip() {
+    // Regression test: client secrets hashed at creation time must match
+    // hashes produced during authentication. A previous bug used hex encoding
+    // at creation but base64url at validation, so authentication always failed.
+    let (_app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "secret-roundtrip@example.com").await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // The test helper uses hash_token() (base64url). Validate that
+    // db::validate_oauth_client_credentials finds the secret when we
+    // hash the plaintext secret with the same function.
+    let secret_hash = crate::handlers::hash_token(&client.client_secret);
+    let result =
+        crate::db::validate_oauth_client_credentials(&state.db, &client.client_id, &secret_hash)
+            .await
+            .expect("DB query should succeed");
+
+    assert!(
+        result.is_some(),
+        "Client secret round-trip must succeed: hash at creation must match hash at validation"
+    );
+}
