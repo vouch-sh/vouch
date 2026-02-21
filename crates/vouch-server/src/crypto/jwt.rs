@@ -58,6 +58,7 @@ impl JwtType {
     }
 
     /// Parse a `typ` header value to a `JwtType`.
+    #[cfg(test)]
     #[must_use]
     pub fn from_header_str(s: &str) -> Option<Self> {
         match s {
@@ -88,11 +89,11 @@ impl JwtType {
 /// Avoids parameter proliferation on [`decode_token`].
 pub struct TokenValidationContext<'a> {
     /// HS256 symmetric secret.
-    pub jwt_secret: &'a [u8],
+    pub(crate) jwt_secret: &'a [u8],
     /// ES256 OIDC signing key.
-    pub oidc_key: &'a OidcSigningKey,
+    pub(crate) oidc_key: &'a OidcSigningKey,
     /// Expected issuer (base_url).
-    pub expected_issuer: &'a str,
+    pub(crate) expected_issuer: &'a str,
 }
 
 impl<'a> TokenValidationContext<'a> {
@@ -143,7 +144,7 @@ pub fn decode_token(token: &str, ctx: &TokenValidationContext<'_>) -> Option<Dec
 
             // RFC 9068 Section 2.1: Verify typ is "at+jwt" to prevent
             // ID tokens from being accepted as access tokens (same signing key).
-            if token_data.header.typ.as_deref() != Some("at+jwt") {
+            if token_data.header.typ.as_deref() != Some(JwtType::AccessToken.as_header_str()) {
                 return None;
             }
 
