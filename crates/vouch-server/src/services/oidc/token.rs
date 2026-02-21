@@ -11,7 +11,7 @@ use super::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
 use super::scope::{OAuthScope, ScopeSet};
 use crate::AppState;
 use crate::db::{self, Authenticator, OAuthClient, OAuthClientType, Session, User};
-use crate::handlers::hash_token;
+use crate::handlers::common::hash_token;
 use crate::redact_email;
 use crate::services::auth::{
     CreateOAuthTokenParams, DecodedToken, create_oauth_access_token, decode_token,
@@ -122,7 +122,7 @@ impl ClientAuthError {
 pub struct IdTokenClaims {
     /// OIDC Core Section 2: Issuer Identifier.
     pub iss: String,
-    /// OIDC Core Section 2: Subject Identifier.
+    /// OIDC Core Section 2: Subject Identifier (stable user ID, not email).
     pub sub: String,
     /// OIDC Core Section 2: Audience(s).
     pub aud: String,
@@ -130,6 +130,9 @@ pub struct IdTokenClaims {
     pub exp: i64,
     /// OIDC Core Section 2: Issued at time.
     pub iat: i64,
+    /// OIDC Core Section 2: Time when the End-User authentication occurred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_time: Option<i64>,
     /// OIDC Core Section 3.1.2.1: Nonce value from the authorization request.
     pub nonce: Option<String>,
     /// OIDC Core Section 5.1: User email.
@@ -165,6 +168,57 @@ pub async fn exchange_authorization_code(
 ) -> ServiceResult<AuthCodeExchangeResult> {
     // Decode and validate the authorization code
     let auth_code = decode_authorization_code(state, params.code)?;
+
+    // RFC 6749 Section 10.5: Enforce single-use authorization codes.
+    // Try to consume the code; if already consumed this is a replay attack.
+    let code_hash = hash_token(params.code);
+    match db::try_consume_authorization_code(&state.db, &code_hash).await {
+        Ok(true) => { /* First use — proceed */ }
+        Ok(false) => {
+            // Code was already consumed or doesn't exist.
+            // Check if it was consumed (replay) vs never stored (legacy).
+            if let Ok(true) = db::is_authorization_code_consumed(&state.db, &code_hash).await {
+                tracing::warn!(
+                    target: "security",
+                    client_id = %auth_code.client_id,
+                    "Authorization code replay detected — code already consumed"
+                );
+
+                // RFC 6749 Section 10.5: "If the authorization server observes
+                // multiple attempts to exchange an authorization code, the
+                // authorization server SHOULD attempt to revoke all access tokens
+                // already granted based on the compromised authorization code."
+                if let Ok(Some((user_id, _client_id))) =
+                    db::get_authorization_code_owner(&state.db, &code_hash).await
+                {
+                    match db::delete_oauth_sessions_for_user(&state.db, &user_id).await {
+                        Ok(count) if count > 0 => {
+                            tracing::warn!(
+                                target: "security",
+                                user_id = %user_id,
+                                revoked_count = count,
+                                "Revoked OAuth tokens due to authorization code replay"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::error!("Failed to revoke tokens during replay detection: {e}");
+                        }
+                    }
+                }
+            }
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "Authorization code has already been used",
+            ));
+        }
+        Err(e) => {
+            tracing::error!("Failed to consume authorization code: {}", e);
+            return Err(ServiceError::Internal(
+                "Failed to validate authorization code".to_string(),
+            ));
+        }
+    }
 
     // RFC 6749 Section 4.1.3: Authenticate the client (if credentials provided)
     let authenticated_client = if let Some(creds) = params.credentials {
@@ -252,6 +306,9 @@ pub async fn exchange_authorization_code(
             dpop_jkt,
             act: None,
             audience: None,
+            // auth_time is the iat of the authorization code, reflecting when the
+            // FIDO2 session was active at the time of authorization.
+            auth_time: Some(auth_code.iat),
         },
     )
     .await?;
@@ -263,12 +320,16 @@ pub async fn exchange_authorization_code(
         state,
         IdTokenParams {
             client_id: &auth_code.client_id,
+            user_id: &auth_code.user_id,
             email: &auth_code.email,
             aaguid: auth_code.aaguid.as_deref(),
             nonce: auth_code.nonce.as_deref(),
             expires_in,
             dpop_jkt,
             scope: &auth_code.scope,
+            // auth_time is the iat of the authorization code, which reflects when
+            // the FIDO2 session was active at the time of authorization.
+            auth_time: Some(auth_code.iat),
         },
     )?;
 
@@ -329,16 +390,15 @@ fn validate_pkce(auth_code: &AuthorizationCode, code_verifier: Option<&str>) -> 
         ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Missing code_verifier")
     })?;
 
-    // RFC 7636 Section 4.6: Compute the challenge from the verifier using the method
-    let method = auth_code
+    // RFC 9700 Section 2.1.1: Only S256 is supported.
+    // Default to S256 for backward compatibility with codes that don't store the method.
+    let _method = auth_code
         .code_challenge_method
-        .unwrap_or(CodeChallengeMethod::Plain);
+        .unwrap_or(CodeChallengeMethod::S256);
 
-    let computed_challenge = if method == CodeChallengeMethod::S256 {
+    let computed_challenge = {
         let hash = digest::digest(&SHA256, code_verifier.as_bytes());
         URL_SAFE_NO_PAD.encode(hash.as_ref())
-    } else {
-        code_verifier.to_string()
     };
 
     // Use constant-time comparison to prevent timing side-channel attacks
@@ -422,12 +482,15 @@ pub async fn authenticate_client(
 /// Parameters for ID token generation.
 struct IdTokenParams<'a> {
     client_id: &'a str,
+    user_id: &'a str,
     email: &'a str,
     aaguid: Option<&'a str>,
     nonce: Option<&'a str>,
     expires_in: u64,
     dpop_jkt: Option<&'a str>,
     scope: &'a ScopeSet,
+    /// Time when the user authenticated (FIDO2 session creation time).
+    auth_time: Option<i64>,
 }
 
 /// Generate an OIDC ID token.
@@ -449,10 +512,11 @@ fn generate_id_token(state: &Arc<AppState>, params: IdTokenParams<'_>) -> Servic
 
     let claims = IdTokenClaims {
         iss: state.config().base_url.clone(),
-        sub: params.email.to_string(), // Use email as subject
+        sub: params.user_id.to_string(),
         aud: params.client_id.to_string(),
         exp,
         iat: now.as_second(),
+        auth_time: params.auth_time,
         nonce: params.nonce.map(String::from),
         email: if has_email {
             Some(params.email.to_string())

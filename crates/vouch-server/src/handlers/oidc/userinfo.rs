@@ -16,7 +16,7 @@ use crate::services::oidc::token::validate_session_token;
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
@@ -48,7 +48,11 @@ pub struct UserInfoResponse {
 ///
 /// Returns information about the authenticated user.
 /// Supports both `Bearer` and `DPoP` authorization schemes (RFC 9449 Section 7.1).
-pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+pub async fn userinfo(
+    State(state): State<Arc<AppState>>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
     // Extract token and scheme from Authorization header
     let auth_header = match headers
         .get(header::AUTHORIZATION)
@@ -93,7 +97,7 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         match dpop::validate_dpop_at_resource(
             dpop_header,
             token,
-            "GET",
+            method.as_str(),
             &full_uri,
             &state.dpop,
             state.config().dpop_max_age_seconds,
@@ -188,26 +192,24 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         }
     };
 
-    let validated = result;
-
     // Determine whether email claims should be returned based on granted scope.
     // Backward compat: legacy OAuth tokens without a scope field are treated as
     // having full scope if they are OAuthAccessToken purpose.
-    let has_email_scope = match &validated.scope {
+    let has_email_scope = match &result.scope {
         Some(scope_set) => scope_set.contains(OAuthScope::Email),
-        None => validated.session.session_type == SessionPurpose::OAuthAccessToken.as_str(),
+        None => result.session.session_type == SessionPurpose::OAuthAccessToken.as_str(),
     };
 
     Json(UserInfoResponse {
-        sub: validated.user.email.clone(),
+        sub: result.user.id.clone(),
         email: if has_email_scope {
-            Some(validated.user.email)
+            Some(result.user.email)
         } else {
             None
         },
         email_verified: if has_email_scope { Some(true) } else { None },
-        hardware_verified: validated.authenticator.is_some(),
-        hardware_aaguid: validated.authenticator.and_then(|a| a.aaguid),
+        hardware_verified: result.authenticator.is_some(),
+        hardware_aaguid: result.authenticator.and_then(|a| a.aaguid),
     })
     .into_response()
 }

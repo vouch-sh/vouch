@@ -3,14 +3,11 @@
 
 use crate::AppState;
 use crate::db::{self, SessionPurpose};
-use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::rand as aws_rand;
 use axum::Json;
 use axum::http::StatusCode;
 use axum_extra::TypedHeader;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use headers::authorization::{Authorization, Bearer};
 use jsonwebtoken::{DecodingKey, Validation};
 use time::Duration;
@@ -102,6 +99,10 @@ pub fn json_error(status: StatusCode, code: &str, message: &str) -> (StatusCode,
 /// tokens securely in the database without keeping the raw token value.
 #[must_use]
 pub fn hash_token(token: &str) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
     let hash = digest::digest(&SHA256, token.as_bytes());
     URL_SAFE_NO_PAD.encode(hash.as_ref())
 }

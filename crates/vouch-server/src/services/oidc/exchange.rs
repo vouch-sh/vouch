@@ -6,7 +6,7 @@
 
 use crate::AppState;
 use crate::db;
-use crate::handlers::hash_token;
+use crate::handlers::common::hash_token;
 use crate::redact_email;
 use crate::services::auth::{
     ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, create_oauth_access_token,
@@ -46,6 +46,8 @@ pub struct TokenExchangeParams<'a> {
     pub requested_token_type: Option<&'a str>,
     /// OAuth client_id of the requesting client.
     pub client_id: &'a str,
+    /// RFC 9449: DPoP JWK thumbprint for sender-constrained token binding.
+    pub dpop_jkt: Option<&'a str>,
 }
 
 /// Result of a token exchange (RFC 8693 Section 2.2).
@@ -252,9 +254,11 @@ pub async fn exchange_token(
     // rather than defaulting to ScopeSet::all() to prevent scope escalation.
     let granted_scope = calculate_granted_scope(params.scope, subject_decoded.scope());
 
-    // Calculate expiration with policy TTL limit
+    // Calculate expiration with policy TTL limit and subject token remaining TTL.
+    // RFC 8693 Section 2.2: The exchanged token's lifetime should not exceed
+    // the remaining lifetime of the subject token.
     let default_expires_in = state.config().session_hours * 3600;
-    let expires_in = match max_ttl_override {
+    let mut expires_in = match max_ttl_override {
         Some(max_ttl) => {
             let max_ttl_u64 = u64::try_from(max_ttl).map_err(|_| {
                 ServiceError::Internal("Delegation policy max_ttl is negative".to_string())
@@ -263,6 +267,17 @@ pub async fn exchange_token(
         }
         None => default_expires_in,
     };
+
+    // Cap by subject token's remaining TTL
+    if let Some(subject_exp) = subject_decoded.exp() {
+        let now = Timestamp::now().as_second();
+        let remaining = subject_exp.saturating_sub(now);
+        if remaining > 0
+            && let Ok(remaining_u64) = u64::try_from(remaining)
+        {
+            expires_in = expires_in.min(remaining_u64);
+        }
+    }
 
     // RFC 9068: Audience is the explicit audience param (target resource server),
     // falling back to client_id if no audience specified.
@@ -280,9 +295,11 @@ pub async fn exchange_token(
             authenticator_id,
             client_id: params.client_id,
             scope: granted_scope.clone(),
-            dpop_jkt: None,
+            dpop_jkt: params.dpop_jkt,
             act: actor_claim,
             audience,
+            // Token exchange does not carry auth_time from the subject token
+            auth_time: None,
         },
     )
     .await?;
@@ -320,10 +337,17 @@ pub async fn exchange_token(
         params.audience
     );
 
+    // RFC 9449 Section 5: token_type is "DPoP" when the token is sender-constrained
+    let token_type = if params.dpop_jkt.is_some() {
+        "DPoP"
+    } else {
+        "Bearer"
+    };
+
     Ok(TokenExchangeResult {
         access_token: session_result.token,
         issued_token_type: token_types::ACCESS_TOKEN.to_string(),
-        token_type: "Bearer".to_string(),
+        token_type: token_type.to_string(),
         expires_in,
         scope: granted_scope,
     })

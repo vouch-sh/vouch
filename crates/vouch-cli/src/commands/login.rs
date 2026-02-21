@@ -170,7 +170,8 @@ fn format_expiry(expires_at: &str) -> String {
 
     let secs = ts.duration_since(jiff::Timestamp::now()).as_secs().max(0);
     let remaining = jiff::SignedDuration::from_mins(secs / 60);
-    let datetime = ts.strftime("%Y-%m-%d %H:%M UTC");
+    let local = ts.to_zoned(jiff::tz::TimeZone::system());
+    let datetime = local.strftime("%Y-%m-%d %H:%M %Z");
 
     format!("in {remaining:#} ({datetime})")
 }

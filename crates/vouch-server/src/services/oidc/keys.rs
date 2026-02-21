@@ -147,62 +147,48 @@ impl OidcSigningKey {
         &self.decoding_key
     }
 
+    /// Extract the base64url-encoded x and y coordinates from a P-256 public key.
+    ///
+    /// P-256 uncompressed public keys are 65 bytes: `0x04 || x (32) || y (32)`.
+    fn extract_ec_coordinates(key_pair: &EcdsaKeyPair) -> Result<(String, String)> {
+        let pub_key_bytes = key_pair.public_key().as_ref();
+
+        if pub_key_bytes.len() != 65 {
+            bail!(
+                "Invalid P-256 public key length: expected 65, got {}",
+                pub_key_bytes.len()
+            );
+        }
+        if pub_key_bytes.first() != Some(&0x04) {
+            bail!("Invalid P-256 public key format: expected uncompressed point (0x04)");
+        }
+
+        let x = pub_key_bytes
+            .get(1..33)
+            .map(|b| URL_SAFE_NO_PAD.encode(b))
+            .ok_or_else(|| anyhow::anyhow!("Failed to extract x coordinate"))?;
+        let y = pub_key_bytes
+            .get(33..65)
+            .map(|b| URL_SAFE_NO_PAD.encode(b))
+            .ok_or_else(|| anyhow::anyhow!("Failed to extract y coordinate"))?;
+
+        Ok((x, y))
+    }
+
     /// Build a `DecodingKey` from an ECDSA key pair's public key.
     ///
     /// Uses `DecodingKey::from_ec_components` with x/y coordinates,
     /// which correctly handles the uncompressed P-256 point format
     /// from `aws-lc-rs`.
     fn build_decoding_key(key_pair: &EcdsaKeyPair) -> Result<DecodingKey> {
-        let pub_key_bytes = key_pair.public_key().as_ref();
-
-        // P-256 public key is 65 bytes: 0x04 || x (32 bytes) || y (32 bytes)
-        if pub_key_bytes.len() != 65 {
-            bail!(
-                "Invalid P-256 public key length: expected 65, got {}",
-                pub_key_bytes.len()
-            );
-        }
-        if pub_key_bytes.first() != Some(&0x04) {
-            bail!("Invalid P-256 public key format: expected uncompressed point (0x04)");
-        }
-
-        let x = pub_key_bytes
-            .get(1..33)
-            .map(|b| URL_SAFE_NO_PAD.encode(b))
-            .ok_or_else(|| anyhow::anyhow!("Failed to extract x coordinate"))?;
-        let y = pub_key_bytes
-            .get(33..65)
-            .map(|b| URL_SAFE_NO_PAD.encode(b))
-            .ok_or_else(|| anyhow::anyhow!("Failed to extract y coordinate"))?;
-
+        let (x, y) = Self::extract_ec_coordinates(key_pair)?;
         DecodingKey::from_ec_components(&x, &y)
             .map_err(|e| anyhow::anyhow!("Failed to build decoding key: {e}"))
     }
 
     /// Get the public key as a JWK for the JWKS endpoint.
     pub fn public_key_jwk(&self) -> Result<EcJwk> {
-        let pub_key_bytes = self.key_pair.public_key().as_ref();
-
-        // P-256 public key is 65 bytes: 0x04 || x (32 bytes) || y (32 bytes)
-        if pub_key_bytes.len() != 65 {
-            bail!(
-                "Invalid P-256 public key length: expected 65, got {}",
-                pub_key_bytes.len()
-            );
-        }
-        if pub_key_bytes.first() != Some(&0x04) {
-            bail!("Invalid P-256 public key format: expected uncompressed point (0x04)");
-        }
-
-        let x = pub_key_bytes
-            .get(1..33)
-            .map(|b| URL_SAFE_NO_PAD.encode(b))
-            .ok_or_else(|| anyhow::anyhow!("Failed to extract x coordinate"))?;
-        let y = pub_key_bytes
-            .get(33..65)
-            .map(|b| URL_SAFE_NO_PAD.encode(b))
-            .ok_or_else(|| anyhow::anyhow!("Failed to extract y coordinate"))?;
-
+        let (x, y) = Self::extract_ec_coordinates(&self.key_pair)?;
         Ok(EcJwk {
             kty: "EC".to_string(),
             crv: "P-256".to_string(),

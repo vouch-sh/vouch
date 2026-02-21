@@ -368,7 +368,11 @@ async fn run_server(args: config::Args) -> Result<()> {
         )
         .route("/oauth/jwks", get(handlers::oidc::jwks))
         .route("/oauth/authorize", get(handlers::oidc::authorize))
-        .route("/oauth/userinfo", get(handlers::oidc::userinfo))
+        // OIDC Core Section 5.3.1: UserInfo MUST support GET and POST
+        .route(
+            "/oauth/userinfo",
+            get(handlers::oidc::userinfo).post(handlers::oidc::userinfo),
+        )
         .route("/oauth/revoke", post(handlers::oidc::revoke))
         .route("/oauth/introspect", post(handlers::oidc::introspect))
         .route("/oauth/device", post(handlers::device::device_code))

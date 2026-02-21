@@ -337,6 +337,19 @@ pub enum GitHubCredentialEvents {
     CreatedAt,
 }
 
+/// Authorization codes table for single-use enforcement (RFC 6749 Section 10.5).
+#[derive(Iden)]
+pub enum AuthorizationCodes {
+    #[iden = "authorization_codes"]
+    Table,
+    CodeHash,
+    ClientId,
+    UserId,
+    ConsumedAt,
+    CreatedAt,
+    ExpiresAt,
+}
+
 /// Cloud integrations table.
 #[derive(Iden)]
 pub enum CloudIntegrations {

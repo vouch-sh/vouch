@@ -20,31 +20,25 @@ use super::token::validate_session_token;
 
 /// PKCE code challenge method (RFC 7636 Section 4.2).
 ///
-/// Determines how the `code_verifier` is transformed before comparison.
-/// `S256` is RECOMMENDED by RFC 7636 Section 4.2; `Plain` is only for
-/// constrained environments that cannot perform SHA-256.
+/// Only `S256` is supported per RFC 9700 Section 2.1.1: "Clients MUST use
+/// `code_challenge_method` value `S256`." The `plain` method is rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CodeChallengeMethod {
     /// SHA-256 transformation: `BASE64URL(SHA256(code_verifier))`.
     /// RFC 7636 Section 4.2.
     #[serde(rename = "S256")]
     S256,
-    /// Plain transformation: `code_challenge == code_verifier`.
-    /// RFC 7636 Section 4.2.
-    #[serde(rename = "plain")]
-    Plain,
 }
 
 impl CodeChallengeMethod {
     /// Parse a code challenge method from a string value.
     ///
-    /// Returns `None` for unsupported methods.
-    /// RFC 7636 Section 4.3.
+    /// Only `S256` is accepted per RFC 9700. Returns `None` for `plain`
+    /// and all other unsupported methods.
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "S256" => Some(Self::S256),
-            "plain" => Some(Self::Plain),
             _ => None,
         }
     }
@@ -54,7 +48,6 @@ impl CodeChallengeMethod {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::S256 => "S256",
-            Self::Plain => "plain",
         }
     }
 }
@@ -229,12 +222,12 @@ pub fn validate_authorize_request(
         ));
     }
 
-    // RFC 7636 Section 4.3: Validate code_challenge_method if provided
+    // RFC 9700 Section 2.1.1: PKCE with S256 is required for all clients.
     let parsed_method = if let Some(ref method_str) = params.code_challenge_method {
         let method = CodeChallengeMethod::parse(method_str).ok_or_else(|| {
             ServiceError::oauth(
                 OAuthErrorCode::InvalidRequest,
-                "Unsupported code_challenge_method. Supported: S256, plain",
+                "Unsupported code_challenge_method. Only S256 is supported",
             )
         })?;
         // code_challenge_method without code_challenge is invalid
@@ -245,8 +238,15 @@ pub fn validate_authorize_request(
             ));
         }
         Some(method)
+    } else if params.code_challenge.is_some() {
+        // code_challenge without method defaults to S256
+        Some(CodeChallengeMethod::S256)
     } else {
-        None
+        // RFC 9700: PKCE is required for all clients
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            "PKCE is required: code_challenge and code_challenge_method=S256 must be provided",
+        ));
     };
 
     let scope = ScopeSet::parse(&params.scope.unwrap_or_else(|| "openid".to_string()));
@@ -296,6 +296,9 @@ pub async fn check_session_for_authorization(
 
 /// Issue an authorization code for a validated request.
 ///
+/// Stores the code hash in the database for single-use enforcement
+/// per RFC 6749 Section 10.5.
+///
 /// # Arguments
 /// * `state` - Application state
 /// * `params` - Parameters for the authorization code
@@ -304,8 +307,8 @@ pub async fn check_session_for_authorization(
 /// The encoded authorization code (JWT).
 ///
 /// # Errors
-/// Returns `ServiceError` if encoding fails.
-pub fn issue_authorization_code(
+/// Returns `ServiceError` if encoding fails or database storage fails.
+pub async fn issue_authorization_code(
     state: &Arc<AppState>,
     params: AuthorizationCodeParams<'_>,
 ) -> ServiceResult<String> {
@@ -330,12 +333,33 @@ pub fn issue_authorization_code(
         exp,
     };
 
-    auth_code
+    let code = auth_code
         .encode(state.config().jwt_secret.expose_secret())
         .map_err(|e| {
             tracing::error!("Failed to encode authorization code: {}", e);
             ServiceError::Internal("Failed to generate authorization code".to_string())
-        })
+        })?;
+
+    // RFC 6749 Section 10.5: Store code hash for single-use enforcement.
+    let code_hash = crate::handlers::common::hash_token(&code);
+    let expires_at = Timestamp::from_second(exp).unwrap_or(now).to_string();
+
+    if let Err(e) = crate::db::store_authorization_code(
+        &state.db,
+        &code_hash,
+        params.client_id,
+        params.user_id,
+        &expires_at,
+    )
+    .await
+    {
+        tracing::error!("Failed to store authorization code hash: {}", e);
+        return Err(ServiceError::Internal(
+            "Failed to generate authorization code".to_string(),
+        ));
+    }
+
+    Ok(code)
 }
 
 /// Decode and validate an authorization code.
@@ -513,8 +537,8 @@ mod tests {
             scope: None,
             state: None,
             nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
         };
 
         let result = validate_authorize_request(params);
@@ -536,8 +560,8 @@ mod tests {
             scope: None,
             state: None,
             nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
         };
 
         let result = validate_authorize_request(params);
@@ -553,14 +577,62 @@ mod tests {
             scope: None, // No scope provided
             state: None,
             nonce: None,
-            code_challenge: None,
-            code_challenge_method: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
         };
 
         let result = validate_authorize_request(params);
         assert!(result.is_ok());
         let validated = result.unwrap();
         assert_eq!(validated.scope, ScopeSet::parse("openid")); // Default scope
+    }
+
+    #[test]
+    fn test_validate_authorize_request_rejects_missing_pkce() {
+        // RFC 9700: PKCE is required for all clients
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: None,
+            state: None,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ServiceError::OAuth { code, .. } => {
+                assert_eq!(code, OAuthErrorCode::InvalidRequest);
+            }
+            _ => panic!("Expected OAuth InvalidRequest error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_authorize_request_rejects_plain_pkce() {
+        // RFC 9700: Only S256 is supported
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: None,
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("plain".to_string()),
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ServiceError::OAuth { code, .. } => {
+                assert_eq!(code, OAuthErrorCode::InvalidRequest);
+            }
+            _ => panic!("Expected OAuth InvalidRequest error"),
+        }
     }
 
     // =========================================================================

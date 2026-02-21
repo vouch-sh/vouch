@@ -325,7 +325,12 @@ fn parse_redirect_uris(input: &str) -> Vec<String> {
         .collect()
 }
 
-/// Validate that all redirect URIs are valid HTTP(S) URLs.
+/// Validate that all redirect URIs are valid URLs with proper schemes.
+///
+/// Per RFC 8252 Section 7.3 and RFC 9700 Section 4.1.3:
+/// - `http://` is only allowed for loopback addresses (`localhost`, `127.0.0.1`, `[::1]`)
+/// - `https://` is required for all other hosts
+///
 /// Returns `Ok(())` if all URIs are valid, or `Err` with a list of invalid URIs.
 fn validate_redirect_uris(uris: &[String]) -> Result<(), Vec<String>> {
     let invalid: Vec<String> = uris
@@ -333,8 +338,15 @@ fn validate_redirect_uris(uris: &[String]) -> Result<(), Vec<String>> {
         .filter(|uri| {
             match url::Url::parse(uri) {
                 Ok(parsed) => {
-                    // Only allow http and https schemes
-                    !matches!(parsed.scheme(), "http" | "https")
+                    match parsed.scheme() {
+                        "https" => false, // HTTPS is always valid
+                        "http" => {
+                            // RFC 8252 Section 7.3: HTTP only for loopback
+                            let host = parsed.host_str().unwrap_or("");
+                            !matches!(host, "localhost" | "127.0.0.1" | "[::1]")
+                        }
+                        _ => true, // Other schemes are not allowed
+                    }
                 }
                 Err(_) => true,
             }

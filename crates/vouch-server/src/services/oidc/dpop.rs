@@ -9,9 +9,6 @@
 //! - JWK Thumbprint: SHA-256 hash of the public key (RFC 7638)
 //! - Token Binding: Access tokens include `cnf` claim with JWK thumbprint
 
-// Allow string slicing for JWT parsing
-#![allow(clippy::string_slice)]
-
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::rand as aws_rand;
 use base64::Engine;
@@ -98,30 +95,45 @@ impl DpopJwk {
     ///
     /// The thumbprint is a base64url-encoded SHA-256 hash of the canonical
     /// JSON representation of the required JWK members.
-    pub fn thumbprint(&self) -> String {
-        let canonical = match self {
+    ///
+    /// Uses `BTreeMap` to guarantee lexicographic key ordering per RFC 7638 Section 3.2,
+    /// and `serde_json` for proper escaping of values.
+    ///
+    /// # Errors
+    ///
+    /// Returns `DpopError::InvalidFormat` if canonical JSON serialization fails.
+    pub fn thumbprint(&self) -> Result<String, DpopError> {
+        use std::collections::BTreeMap;
+
+        let mut members = BTreeMap::new();
+        match self {
             DpopJwk::Ec(ec) => {
-                // For EC keys: {"crv":"...","kty":"EC","x":"...","y":"..."}
-                format!(
-                    r#"{{"crv":"{}","kty":"{}","x":"{}","y":"{}"}}"#,
-                    ec.crv, ec.kty, ec.x, ec.y
-                )
+                // RFC 7638 Section 3.2: Required EC members in lexicographic order
+                members.insert("crv", ec.crv.as_str());
+                members.insert("kty", ec.kty.as_str());
+                members.insert("x", ec.x.as_str());
+                members.insert("y", ec.y.as_str());
             }
             DpopJwk::Rsa(rsa) => {
-                // For RSA keys: {"e":"...","kty":"RSA","n":"..."}
-                format!(r#"{{"e":"{}","kty":"{}","n":"{}"}}"#, rsa.e, rsa.kty, rsa.n)
+                // RFC 7638 Section 3.2: Required RSA members in lexicographic order
+                members.insert("e", rsa.e.as_str());
+                members.insert("kty", rsa.kty.as_str());
+                members.insert("n", rsa.n.as_str());
             }
             DpopJwk::Okp(okp) => {
-                // For OKP keys: {"crv":"...","kty":"OKP","x":"..."}
-                format!(
-                    r#"{{"crv":"{}","kty":"{}","x":"{}"}}"#,
-                    okp.crv, okp.kty, okp.x
-                )
+                // RFC 7638 Section 3.2: Required OKP members in lexicographic order
+                members.insert("crv", okp.crv.as_str());
+                members.insert("kty", okp.kty.as_str());
+                members.insert("x", okp.x.as_str());
             }
         };
 
+        // BTreeMap iteration is lexicographic, serde_json handles escaping
+        let canonical = serde_json::to_string(&members).map_err(|e| {
+            DpopError::InvalidFormat(format!("JWK thumbprint serialization failed: {e}"))
+        })?;
         let hash = digest::digest(&SHA256, canonical.as_bytes());
-        URL_SAFE_NO_PAD.encode(hash.as_ref())
+        Ok(URL_SAFE_NO_PAD.encode(hash.as_ref()))
     }
 }
 
@@ -192,6 +204,12 @@ pub struct ValidatedDpopProof {
     pub jti: String,
 }
 
+/// Maximum number of entries in the nonce manager before rejecting new nonces.
+const MAX_NONCE_ENTRIES: usize = 100_000;
+
+/// Maximum number of entries in the JTI cache before rejecting new JTIs.
+const MAX_JTI_ENTRIES: usize = 100_000;
+
 /// DPoP nonce manager for server-provided nonces.
 pub struct DpopNonceManager {
     /// Active nonces (nonce -> expiration).
@@ -210,13 +228,24 @@ impl DpopNonceManager {
     }
 
     /// Generate a new nonce.
-    pub fn generate_nonce(&mut self) -> String {
-        let nonce = generate_random_string(32);
+    ///
+    /// Returns `None` if the RNG fails or if the cache is at capacity
+    /// after cleanup.
+    pub fn generate_nonce(&mut self) -> Option<String> {
+        // Periodically clean up expired entries
+        self.cleanup();
+
+        // Reject if still at capacity after cleanup
+        if self.nonces.len() >= MAX_NONCE_ENTRIES {
+            return None;
+        }
+
+        let nonce = generate_random_string(32)?;
         let expires_at = Timestamp::now()
             .checked_add(self.validity_seconds.seconds())
             .unwrap_or_else(|_| Timestamp::now());
         self.nonces.insert(nonce.clone(), expires_at);
-        nonce
+        Some(nonce)
     }
 
     /// Validate and consume a nonce.
@@ -260,7 +289,8 @@ impl JtiCache {
 
     /// Check if a JTI has been seen before and record it.
     ///
-    /// Returns `true` if this is a new JTI, `false` if it's a replay.
+    /// Returns `true` if this is a new JTI, `false` if it's a replay
+    /// or if the cache is at capacity.
     pub fn check_and_record(&mut self, jti: &str) -> bool {
         let now = Timestamp::now();
 
@@ -269,6 +299,11 @@ impl JtiCache {
 
         // Check if already seen
         if self.jtis.contains_key(jti) {
+            return false;
+        }
+
+        // Reject if at capacity after cleanup
+        if self.jtis.len() >= MAX_JTI_ENTRIES {
             return false;
         }
 
@@ -314,13 +349,11 @@ impl Default for DpopState {
 
 /// Generate a random URL-safe string.
 ///
-/// # Panics
-/// Panics if the system RNG fails.
-#[allow(clippy::expect_used)]
-fn generate_random_string(len: usize) -> String {
+/// Returns `None` if the system RNG fails.
+fn generate_random_string(len: usize) -> Option<String> {
     let mut bytes = vec![0u8; len];
-    aws_rand::fill(&mut bytes).expect("RNG failure");
-    URL_SAFE_NO_PAD.encode(&bytes)
+    aws_rand::fill(&mut bytes).ok()?;
+    Some(URL_SAFE_NO_PAD.encode(&bytes))
 }
 
 /// Compute the access token hash (`ath`) for DPoP (RFC 9449 Section 4.2).
@@ -333,22 +366,24 @@ pub fn compute_access_token_hash(access_token: &str) -> String {
     URL_SAFE_NO_PAD.encode(hash.as_ref())
 }
 
-/// Parse a DPoP proof JWT (without signature verification).
+/// Parse a DPoP proof JWT header (without signature verification or claims parsing).
 ///
-/// This extracts the header and claims for initial validation.
-/// Signature verification must be done separately using the embedded JWK.
-pub fn parse_dpop_proof(proof: &str) -> Result<(DpopHeader, DpopClaims), DpopError> {
-    let parts: Vec<&str> = proof.split('.').collect();
-    if parts.len() != 3 {
+/// Extracts only the header to obtain the JWK and algorithm. Used internally
+/// by `parse_and_verify_dpop_proof` to build the decoding key before
+/// performing combined signature verification + claims extraction.
+fn parse_dpop_header(proof: &str) -> Result<DpopHeader, DpopError> {
+    let header_part = proof
+        .split('.')
+        .next()
+        .ok_or_else(|| DpopError::InvalidFormat("JWT must have 3 parts".to_string()))?;
+
+    // Verify the JWT has exactly 3 parts
+    if proof.split('.').count() != 3 {
         return Err(DpopError::InvalidFormat(
             "JWT must have 3 parts".to_string(),
         ));
     }
 
-    // Decode header
-    let header_part = parts
-        .first()
-        .ok_or_else(|| DpopError::InvalidFormat("missing header".to_string()))?;
     let header_bytes = URL_SAFE_NO_PAD
         .decode(header_part)
         .map_err(|e| DpopError::InvalidFormat(format!("invalid header encoding: {e}")))?;
@@ -367,17 +402,42 @@ pub fn parse_dpop_proof(proof: &str) -> Result<(DpopHeader, DpopClaims), DpopErr
         return Err(DpopError::UnsupportedAlgorithm(header.alg.clone()));
     }
 
-    // Decode claims
-    let claims_part = parts
-        .get(1)
-        .ok_or_else(|| DpopError::InvalidFormat("missing claims".to_string()))?;
-    let claims_bytes = URL_SAFE_NO_PAD
-        .decode(claims_part)
-        .map_err(|e| DpopError::InvalidFormat(format!("invalid claims encoding: {e}")))?;
-    let claims: DpopClaims = serde_json::from_slice(&claims_bytes)
-        .map_err(|e| DpopError::InvalidFormat(format!("invalid claims JSON: {e}")))?;
+    Ok(header)
+}
 
-    Ok((header, claims))
+/// Parse and verify a DPoP proof in a single pass.
+///
+/// 1. Decodes the header to extract the JWK and algorithm.
+/// 2. Builds a decoding key from the JWK.
+/// 3. Uses `jsonwebtoken::decode()` for combined signature verification
+///    and claims extraction (avoiding a redundant second parse).
+///
+/// Returns the parsed header and verified claims.
+fn parse_and_verify_dpop_proof(proof: &str) -> Result<(DpopHeader, DpopClaims), DpopError> {
+    let header = parse_dpop_header(proof)?;
+
+    // Build decoding key from JWK
+    let decoding_key = build_decoding_key(&header.jwk, &header.alg)?;
+
+    // Map algorithm string to jsonwebtoken Algorithm
+    let algorithm = match header.alg.as_str() {
+        "ES256" => jsonwebtoken::Algorithm::ES256,
+        "RS256" => jsonwebtoken::Algorithm::RS256,
+        "EdDSA" => jsonwebtoken::Algorithm::EdDSA,
+        alg => return Err(DpopError::UnsupportedAlgorithm(alg.to_string())),
+    };
+
+    // Build validation settings
+    let mut validation = jsonwebtoken::Validation::new(algorithm);
+    validation.required_spec_claims.clear(); // DPoP has custom claims
+    validation.validate_exp = false; // We validate iat manually
+    validation.validate_aud = false; // No audience in DPoP
+
+    // Verify signature and extract claims in a single pass
+    let token_data = jsonwebtoken::decode::<DpopClaims>(proof, &decoding_key, &validation)
+        .map_err(|_| DpopError::InvalidSignature)?;
+
+    Ok((header, token_data.claims))
 }
 
 /// Validate DPoP proof claims (without signature verification).
@@ -454,8 +514,11 @@ pub fn validate_dpop_claims(
 ///
 /// RFC 9449 Section 4.2: The `htu` claim should contain the HTTP target URI
 /// without query and fragment components.
+#[allow(clippy::string_slice)]
 fn normalize_uri(uri: &str) -> String {
     // Find the first occurrence of either '?' or '#' to handle all orderings
+    // Safety: both `find('?')` and `find('#')` return byte offsets of ASCII
+    // characters, so slicing at `end` is always at a valid char boundary.
     let end = uri
         .find('?')
         .into_iter()
@@ -502,42 +565,12 @@ fn build_decoding_key(jwk: &DpopJwk, alg: &str) -> Result<jsonwebtoken::Decoding
     }
 }
 
-/// Verify a DPoP proof signature using the embedded JWK.
-///
-/// This verifies that the proof was signed by the private key corresponding
-/// to the public key embedded in the JWT header.
-pub fn verify_dpop_signature(proof: &str, header: &DpopHeader) -> Result<(), DpopError> {
-    // Build decoding key from JWK
-    let decoding_key = build_decoding_key(&header.jwk, &header.alg)?;
-
-    // Map algorithm string to jsonwebtoken Algorithm
-    let algorithm = match header.alg.as_str() {
-        "ES256" => jsonwebtoken::Algorithm::ES256,
-        "RS256" => jsonwebtoken::Algorithm::RS256,
-        "EdDSA" => jsonwebtoken::Algorithm::EdDSA,
-        alg => return Err(DpopError::UnsupportedAlgorithm(alg.to_string())),
-    };
-
-    // Build validation settings
-    let mut validation = jsonwebtoken::Validation::new(algorithm);
-    validation.required_spec_claims.clear(); // DPoP has custom claims
-    validation.validate_exp = false; // We validate iat manually
-    validation.validate_aud = false; // No audience in DPoP
-
-    // Verify signature
-    jsonwebtoken::decode::<DpopClaims>(proof, &decoding_key, &validation)
-        .map_err(|_| DpopError::InvalidSignature)?;
-
-    Ok(())
-}
-
 /// Fully validate a DPoP proof, including signature verification.
 ///
 /// This is the main entry point for DPoP validation. It:
-/// 1. Parses the JWT
-/// 2. Verifies the signature using the embedded JWK
-/// 3. Validates all claims (method, URI, timestamp, etc.)
-/// 4. Checks for replay (JTI)
+/// 1. Parses the JWT header and verifies the signature in a single pass
+/// 2. Validates all claims (method, URI, timestamp, etc.)
+/// 3. Checks for replay (JTI)
 ///
 /// Returns the validated proof information including the JWK thumbprint.
 pub async fn validate_dpop_proof(
@@ -548,11 +581,8 @@ pub async fn validate_dpop_proof(
     config_max_age: i64,
     require_nonce: bool,
 ) -> Result<ValidatedDpopProof, DpopError> {
-    // Parse the proof
-    let (header, claims) = parse_dpop_proof(proof)?;
-
-    // Verify signature
-    verify_dpop_signature(proof, &header)?;
+    // Parse header, verify signature, and extract claims in a single pass
+    let (header, claims) = parse_and_verify_dpop_proof(proof)?;
 
     // Check for replay (JTI must be unique)
     {
@@ -569,7 +599,9 @@ pub async fn validate_dpop_proof(
         // Generate a nonce if required but not provided
         if claims.nonce.is_none() {
             let mut nonce_manager = dpop_state.nonce_manager.write().await;
-            let new_nonce = nonce_manager.generate_nonce();
+            let new_nonce = nonce_manager
+                .generate_nonce()
+                .ok_or_else(|| DpopError::InvalidFormat("nonce generation failed".to_string()))?;
             return Err(DpopError::UseNonce(new_nonce));
         }
         None
@@ -592,14 +624,17 @@ pub async fn validate_dpop_proof(
         let mut nonce_manager = dpop_state.nonce_manager.write().await;
         if !nonce_manager.validate_nonce(nonce) {
             // Generate a new nonce for the client
-            let new_nonce = nonce_manager.generate_nonce();
+            let new_nonce = nonce_manager
+                .generate_nonce()
+                .ok_or_else(|| DpopError::InvalidFormat("nonce generation failed".to_string()))?;
             return Err(DpopError::UseNonce(new_nonce));
         }
     }
 
     // Return validated proof info
+    let jkt = header.jwk.thumbprint()?;
     Ok(ValidatedDpopProof {
-        jkt: header.jwk.thumbprint(),
+        jkt,
         jwk: header.jwk,
         jti: claims.jti,
     })
@@ -628,11 +663,8 @@ pub async fn validate_dpop_at_resource(
     config_max_age: i64,
     require_nonce: bool,
 ) -> Result<ValidatedDpopProof, DpopError> {
-    // Parse the proof
-    let (header, claims) = parse_dpop_proof(proof)?;
-
-    // Verify signature
-    verify_dpop_signature(proof, &header)?;
+    // Parse header, verify signature, and extract claims in a single pass
+    let (header, claims) = parse_and_verify_dpop_proof(proof)?;
 
     // Check for replay (JTI must be unique)
     {
@@ -649,7 +681,9 @@ pub async fn validate_dpop_at_resource(
     let expected_nonce: Option<&str> = if require_nonce {
         if claims.nonce.is_none() {
             let mut nonce_manager = dpop_state.nonce_manager.write().await;
-            let new_nonce = nonce_manager.generate_nonce();
+            let new_nonce = nonce_manager
+                .generate_nonce()
+                .ok_or_else(|| DpopError::InvalidFormat("nonce generation failed".to_string()))?;
             return Err(DpopError::UseNonce(new_nonce));
         }
         None
@@ -672,14 +706,17 @@ pub async fn validate_dpop_at_resource(
     if let Some(nonce) = &claims.nonce {
         let mut nonce_manager = dpop_state.nonce_manager.write().await;
         if !nonce_manager.validate_nonce(nonce) {
-            let new_nonce = nonce_manager.generate_nonce();
+            let new_nonce = nonce_manager
+                .generate_nonce()
+                .ok_or_else(|| DpopError::InvalidFormat("nonce generation failed".to_string()))?;
             return Err(DpopError::UseNonce(new_nonce));
         }
     }
 
     // Return validated proof info
+    let jkt = header.jwk.thumbprint()?;
     Ok(ValidatedDpopProof {
-        jkt: header.jwk.thumbprint(),
+        jkt,
         jwk: header.jwk,
         jti: claims.jti,
     })
@@ -700,7 +737,7 @@ mod tests {
             y: "test_y".to_string(),
         });
 
-        let thumbprint = jwk.thumbprint();
+        let thumbprint = jwk.thumbprint().expect("thumbprint");
         assert!(!thumbprint.is_empty());
         // Thumbprint should be base64url encoded SHA-256 (43 chars)
         assert_eq!(thumbprint.len(), 43);
@@ -724,7 +761,7 @@ mod tests {
     fn test_nonce_manager() {
         let mut manager = DpopNonceManager::new(300);
 
-        let nonce = manager.generate_nonce();
+        let nonce = manager.generate_nonce().expect("should generate nonce");
         assert!(!nonce.is_empty());
 
         // Validate should succeed and consume

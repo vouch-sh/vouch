@@ -226,6 +226,10 @@ pub struct AccessTokenClaims {
     /// RFC 9449 Section 6: DPoP confirmation (sender-constrained token binding).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cnf: Option<CnfClaim>,
+    /// RFC 9068 Section 2.2: Time when the End-User authentication occurred.
+    /// RECOMMENDED per OIDC Core Section 2. Reflects FIDO2 session creation time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_time: Option<i64>,
     /// RFC 8693 Section 4.1: Actor claim for delegation chains.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub act: Option<ActorClaim>,
@@ -250,6 +254,9 @@ pub struct CreateOAuthTokenParams<'a> {
     /// Optional audience override (for token exchange with explicit audience).
     /// When `None`, defaults to `client_id`.
     pub audience: Option<&'a str>,
+    /// Time when the End-User authentication occurred (Unix timestamp).
+    /// Populated from FIDO2 session creation time for authorization code grants.
+    pub auth_time: Option<i64>,
 }
 
 /// Session claims for JWT tokens (RFC 7519 Section 4.1).
@@ -406,6 +413,7 @@ pub async fn create_oauth_access_token(
         email_verified: if has_email_scope { Some(true) } else { None },
         hardware_verified: true,
         cnf,
+        auth_time: params.auth_time,
         act: params.act,
     };
 
@@ -476,6 +484,15 @@ impl DecodedToken {
         match self {
             Self::Session(_) => None,
             Self::AccessToken(c) => c.cnf.as_ref(),
+        }
+    }
+
+    /// RFC 7519 Section 4.1.4: Expiration time (Unix timestamp).
+    #[must_use]
+    pub fn exp(&self) -> Option<i64> {
+        match self {
+            Self::Session(c) => Some(c.exp),
+            Self::AccessToken(c) => Some(c.exp),
         }
     }
 
@@ -570,6 +587,7 @@ mod tests {
             email_verified: Some(true),
             hardware_verified: true,
             cnf: None,
+            auth_time: None,
             act: None,
         };
         key.sign_access_token_jwt(&claims).expect("sign")
@@ -645,6 +663,7 @@ mod tests {
             email_verified: None,
             hardware_verified: false,
             cnf: None,
+            auth_time: None,
             act: None,
         };
 
@@ -690,6 +709,7 @@ mod tests {
             email_verified: None,
             hardware_verified: false,
             cnf: None,
+            auth_time: None,
             act: None,
         };
 
@@ -785,6 +805,7 @@ mod tests {
             email_verified: None,
             hardware_verified: false,
             cnf: None,
+            auth_time: None,
             act: None,
         };
 
@@ -796,6 +817,7 @@ mod tests {
         assert!(parsed.get("email").is_none());
         assert!(parsed.get("email_verified").is_none());
         assert!(parsed.get("cnf").is_none());
+        assert!(parsed.get("auth_time").is_none());
         assert!(parsed.get("act").is_none());
         // Required fields should be present
         assert_eq!(parsed["iss"], "https://example.com");

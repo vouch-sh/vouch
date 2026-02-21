@@ -2,17 +2,16 @@
 //! Token endpoint handler.
 
 use crate::AppState;
-use crate::impl_template_response;
 use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::{
     ScopeSet,
     exchange::{TokenExchangeParams, exchange_token},
     token::{
-        AuthCodeExchangeParams, ClientCredentials, exchange_authorization_code,
-        validate_dpop_if_present,
+        AuthCodeExchangeParams, ClientCredentials, authenticate_client,
+        exchange_authorization_code, validate_dpop_if_present,
     },
 };
-use askama::Template;
+use crate::services::{OAuthErrorCode, ServiceError};
 use axum::{
     Json,
     extract::State,
@@ -25,18 +24,6 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// Authorization page template.
-#[derive(Template)]
-#[template(path = "authorize.html")]
-pub struct AuthorizeTemplate {
-    pub client_id: String,
-    pub client_name: Option<String>,
-    pub is_org_app: bool,
-    pub org_name: Option<String>,
-}
-
-impl_template_response!(AuthorizeTemplate);
-
 /// OAuth grant types supported by this server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OAuthGrantType {
@@ -48,15 +35,15 @@ pub enum OAuthGrantType {
     TokenExchange,
 }
 
-impl OAuthGrantType {
-    /// Parse a grant type from a string.
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for OAuthGrantType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "authorization_code" => Some(Self::AuthorizationCode),
-            "urn:ietf:params:oauth:grant-type:device_code" => Some(Self::DeviceCode),
-            "urn:ietf:params:oauth:grant-type:token-exchange" => Some(Self::TokenExchange),
-            _ => None,
+            "authorization_code" => Ok(Self::AuthorizationCode),
+            "urn:ietf:params:oauth:grant-type:device_code" => Ok(Self::DeviceCode),
+            "urn:ietf:params:oauth:grant-type:token-exchange" => Ok(Self::TokenExchange),
+            _ => Err(format!("unsupported grant_type: {s}")),
         }
     }
 }
@@ -150,7 +137,7 @@ pub async fn token(
     axum::Form(params): axum::Form<TokenRequest>,
 ) -> Response {
     // RFC 6749 Section 5.2: Return unsupported_grant_type error for unknown grants
-    let Some(grant_type) = OAuthGrantType::from_str(&params.grant_type) else {
+    let Ok(grant_type) = params.grant_type.parse::<OAuthGrantType>() else {
         return (
             StatusCode::BAD_REQUEST,
             Json(OAuthErrorResponse {
@@ -169,7 +156,9 @@ pub async fn token(
             handle_authorization_code_grant(State(state), headers, params).await
         }
         OAuthGrantType::DeviceCode => handle_device_code_grant(State(state), params).await,
-        OAuthGrantType::TokenExchange => handle_token_exchange_grant(State(state), params).await,
+        OAuthGrantType::TokenExchange => {
+            handle_token_exchange_grant(State(state), headers, params).await
+        }
     }
 }
 
@@ -245,10 +234,43 @@ async fn handle_device_code_grant(
 }
 
 /// Handle token exchange grant (RFC 8693).
+///
+/// RFC 8693 Section 2.1: The token exchange grant requires client
+/// authentication. The client_id in the authenticated credentials must
+/// match any client_id provided in the request body.
 async fn handle_token_exchange_grant(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     params: TokenRequest,
 ) -> Response {
+    // Extract and authenticate client credentials (required for token exchange)
+    let credentials =
+        extract_client_credentials(&headers, params.client_id.as_deref(), params.client_secret);
+
+    let Some(creds) = credentials else {
+        return ServiceError::oauth(
+            OAuthErrorCode::InvalidClient,
+            "Client authentication required for token exchange",
+        )
+        .into_oauth_response()
+        .into_response();
+    };
+
+    let authenticated_client = match authenticate_client(&state, &creds).await {
+        Ok(client) => client,
+        Err(e) => return e.into_service_error().into_oauth_response().into_response(),
+    };
+
+    // RFC 9449 Section 5: Validate DPoP proof if present at the token endpoint
+    let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
+    let dpop_proof =
+        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
+            Ok(proof) => proof,
+            Err(e) => return e.into_oauth_response().into_response(),
+        };
+
+    let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.clone());
+
     let exchange_params = TokenExchangeParams {
         subject_token: params.subject_token.as_deref().unwrap_or_default(),
         subject_token_type: params.subject_token_type.as_deref().unwrap_or_default(),
@@ -257,7 +279,8 @@ async fn handle_token_exchange_grant(
         audience: params.audience.as_deref(),
         scope: params.scope.as_deref(),
         requested_token_type: params.requested_token_type.as_deref(),
-        client_id: params.client_id.as_deref().unwrap_or("unknown"),
+        client_id: &authenticated_client.client.client_id,
+        dpop_jkt: dpop_jkt.as_deref(),
     };
 
     match exchange_token(&state, exchange_params).await {

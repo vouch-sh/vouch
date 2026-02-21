@@ -134,7 +134,11 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         )
         .route("/oauth/jwks", get(handlers::oidc::jwks))
         .route("/oauth/authorize", get(handlers::oidc::authorize))
-        .route("/oauth/userinfo", get(handlers::oidc::userinfo))
+        // OIDC Core Section 5.3.1: UserInfo MUST support GET and POST
+        .route(
+            "/oauth/userinfo",
+            get(handlers::oidc::userinfo).post(handlers::oidc::userinfo),
+        )
         .route("/oauth/revoke", post(handlers::oidc::revoke))
         .route("/oauth/introspect", post(handlers::oidc::introspect))
         .route("/oauth/token", post(handlers::oidc::token))
@@ -313,9 +317,65 @@ pub async fn http_request(
     (status, body_str)
 }
 
+/// Full response from an HTTP request, including headers.
+pub struct HttpResponse {
+    /// HTTP status code.
+    pub status: StatusCode,
+    /// Response body as a string.
+    pub body: String,
+    /// Response headers.
+    pub headers: axum::http::HeaderMap,
+}
+
+/// Helper for making test HTTP requests that returns full response including headers.
+pub async fn http_request_full(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    body: Option<String>,
+    headers: &[(&str, &str)],
+) -> HttpResponse {
+    let mut req_builder = Request::builder().method(method).uri(uri);
+
+    for (name, value) in headers {
+        req_builder = req_builder.header(*name, *value);
+    }
+
+    let body = match body {
+        Some(b) => Body::from(b),
+        None => Body::empty(),
+    };
+
+    let request = req_builder.body(body).expect("Failed to build request");
+
+    let response: axum::response::Response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("Failed to execute request");
+
+    let status = response.status();
+    let response_headers = response.headers().clone();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("Failed to read response body");
+    let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+
+    HttpResponse {
+        status,
+        body: body_str,
+        headers: response_headers,
+    }
+}
+
 /// Helper for making GET requests.
 pub async fn http_get(app: &Router, uri: &str, headers: &[(&str, &str)]) -> (StatusCode, String) {
     http_request(app, "GET", uri, None, headers).await
+}
+
+/// Helper for making GET requests that returns full response including headers.
+pub async fn http_get_full(app: &Router, uri: &str, headers: &[(&str, &str)]) -> HttpResponse {
+    http_request_full(app, "GET", uri, None, headers).await
 }
 
 /// Helper for making POST requests with form body.
@@ -328,6 +388,18 @@ pub async fn http_post_form(
     let mut all_headers = vec![("Content-Type", "application/x-www-form-urlencoded")];
     all_headers.extend_from_slice(headers);
     http_request(app, "POST", uri, Some(body.to_string()), &all_headers).await
+}
+
+/// Helper for making POST requests with form body that returns full response including headers.
+pub async fn http_post_form_full(
+    app: &Router,
+    uri: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> HttpResponse {
+    let mut all_headers = vec![("Content-Type", "application/x-www-form-urlencoded")];
+    all_headers.extend_from_slice(headers);
+    http_request_full(app, "POST", uri, Some(body.to_string()), &all_headers).await
 }
 
 /// Helper for making POST requests with JSON body.

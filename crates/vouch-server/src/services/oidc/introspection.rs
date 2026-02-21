@@ -7,7 +7,7 @@
 
 use crate::AppState;
 use crate::db::{self, SessionPurpose};
-use crate::handlers::hash_token;
+use crate::handlers::common::hash_token;
 use crate::redact_email;
 use crate::services::ServiceResult;
 use crate::services::auth::{DecodedToken, decode_token};
@@ -153,7 +153,7 @@ pub async fn introspect_token(
                 token_type: Some("Bearer".to_string()),
                 exp: Some(claims.exp),
                 iat: Some(claims.iat),
-                sub: Some(claims.email.clone()),
+                sub: Some(claims.sub.clone()),
                 aud: caller_client_id.map(String::from),
                 iss: Some(state.config().base_url.clone()),
             })

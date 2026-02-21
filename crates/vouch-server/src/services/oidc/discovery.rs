@@ -113,12 +113,14 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "aud".to_string(),
             "exp".to_string(),
             "iat".to_string(),
+            "auth_time".to_string(),
+            "nonce".to_string(),
             "email".to_string(),
             "email_verified".to_string(),
             "hardware_verified".to_string(),
             "hardware_aaguid".to_string(),
         ],
-        code_challenge_methods_supported: vec!["S256".to_string(), "plain".to_string()],
+        code_challenge_methods_supported: vec!["S256".to_string()],
         dpop_signing_alg_values_supported: if state.config().dpop_enabled {
             Some(vec![
                 "ES256".to_string(),
