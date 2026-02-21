@@ -299,9 +299,9 @@ pub async fn delete_scim_token(
     jar: CookieJar,
     Path(token_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let (_user, _org_id) = extract_org_admin(&state, auth_header, &jar).await?;
+    let (_user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
 
-    db::delete_scim_token(&state.db, &token_id)
+    let deleted = db::delete_scim_token(&state.db, &token_id, &org_id)
         .await
         .map_err(|e| {
             json_error(
@@ -310,6 +310,14 @@ pub async fn delete_scim_token(
                 &e.to_string(),
             )
         })?;
+
+    if !deleted {
+        return Err(json_error(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "SCIM token not found",
+        ));
+    }
 
     tracing::info!("Deleted SCIM token: {}", token_id);
 

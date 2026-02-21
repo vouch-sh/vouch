@@ -273,10 +273,10 @@ pub struct ServerConfig {
     pub ssh_ca_key_path: Option<String>,
     /// SSH CA private key content (PEM format, Ed25519).
     /// If set, takes precedence over `ssh_ca_key_path`.
-    pub ssh_ca_key: Option<String>,
+    pub ssh_ca_key: Option<SecretString>,
     /// OIDC signing key content (PEM format, P-256 EC).
     /// Used for signing OIDC ID tokens with ES256 algorithm.
-    pub oidc_signing_key: Option<String>,
+    pub oidc_signing_key: Option<SecretString>,
     /// Enable RFC 9449 DPoP support (default: true).
     pub dpop_enabled: bool,
     /// Require DPoP nonce in proofs (default: false).
@@ -387,8 +387,8 @@ impl ServerConfig {
             cli_download_linux: args.cli_download_linux,
             cli_download_windows: args.cli_download_windows,
             ssh_ca_key_path,
-            ssh_ca_key: args.ssh_ca_key,
-            oidc_signing_key: args.oidc_signing_key,
+            ssh_ca_key: args.ssh_ca_key.map(SecretString::from),
+            oidc_signing_key: args.oidc_signing_key.map(SecretString::from),
             dpop_enabled,
             dpop_nonce_required,
             dpop_max_age_seconds: args.dpop_max_age,

@@ -114,25 +114,25 @@ pub fn hash_token(token: &str) -> String {
 
 /// Generate cryptographically secure random bytes.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if the system RNG fails, which should never happen on a correctly
-/// functioning system. This is acceptable during request handling as an RNG
-/// failure indicates a critical system problem.
-#[must_use]
-#[allow(clippy::expect_used)]
-pub fn generate_random_bytes(len: usize) -> Vec<u8> {
+/// Returns an error if the system RNG fails, which should never happen on
+/// a correctly functioning system.
+pub fn generate_random_bytes(len: usize) -> Result<Vec<u8>, aws_lc_rs::error::Unspecified> {
     let mut bytes = vec![0u8; len];
-    aws_rand::fill(&mut bytes).expect("RNG failure");
-    bytes
+    aws_rand::fill(&mut bytes)?;
+    Ok(bytes)
 }
 
 /// Generate a 32-byte challenge for WebAuthn.
 ///
 /// This is a convenience wrapper around `generate_random_bytes(32)` for
 /// WebAuthn challenge generation.
-#[must_use]
-pub fn generate_challenge() -> Vec<u8> {
+///
+/// # Errors
+///
+/// Returns an error if the system RNG fails.
+pub fn generate_challenge() -> Result<Vec<u8>, aws_lc_rs::error::Unspecified> {
     generate_random_bytes(32)
 }
 

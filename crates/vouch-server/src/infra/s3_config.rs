@@ -636,12 +636,12 @@ impl ServerConfig {
 
         // SSH CA key
         if let Some(v) = &s3.ssh_ca_key {
-            self.ssh_ca_key = Some(v.clone());
+            self.ssh_ca_key = Some(SecretString::from(v.clone()));
         }
 
         // OIDC signing key
         if let Some(v) = &s3.oidc_signing_key {
-            self.oidc_signing_key = Some(v.clone());
+            self.oidc_signing_key = Some(SecretString::from(v.clone()));
         }
 
         // Cleanup settings

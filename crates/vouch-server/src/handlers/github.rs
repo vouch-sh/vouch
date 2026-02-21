@@ -125,26 +125,30 @@ fn default_flow_type() -> GitHubStateFlowType {
 
 impl GitHubStateToken {
     /// Create a new state token for installation flow (10-minute validity).
-    fn new_for_install(org_id: &str, user_id: &str) -> Self {
+    fn new_for_install(org_id: &str, user_id: &str) -> Result<Self, aws_lc_rs::error::Unspecified> {
         Self::new(org_id, user_id, GitHubStateFlowType::Install)
     }
 
     /// Create a new state token for OAuth link flow (10-minute validity).
-    fn new_for_link(org_id: &str, user_id: &str) -> Self {
+    fn new_for_link(org_id: &str, user_id: &str) -> Result<Self, aws_lc_rs::error::Unspecified> {
         Self::new(org_id, user_id, GitHubStateFlowType::Link)
     }
 
-    fn new(org_id: &str, user_id: &str, flow_type: GitHubStateFlowType) -> Self {
+    fn new(
+        org_id: &str,
+        user_id: &str,
+        flow_type: GitHubStateFlowType,
+    ) -> Result<Self, aws_lc_rs::error::Unspecified> {
         let now = Timestamp::now().as_second();
-        let nonce = URL_SAFE_NO_PAD.encode(crate::handlers::common::generate_random_bytes(16));
-        Self {
+        let nonce = URL_SAFE_NO_PAD.encode(crate::handlers::common::generate_random_bytes(16)?);
+        Ok(Self {
             org_id: org_id.to_string(),
             user_id: user_id.to_string(),
             iat: now,
             exp: now + 600, // 10 minutes
             nonce,
             flow_type,
-        }
+        })
     }
 
     /// Encode as JWT (RFC 8725 §3.11: explicit typ).
@@ -354,7 +358,14 @@ pub async fn github_connect_page(
         .collect();
 
     // Generate state token for installation flow
-    let state_token = GitHubStateToken::new_for_install(org_id, &user.id);
+    let state_token = match GitHubStateToken::new_for_install(org_id, &user.id) {
+        Ok(t) => t,
+        Err(_) => {
+            return error_response(GitHubError::Internal(
+                "Failed to generate secure state token".to_string(),
+            ));
+        }
+    };
     let encoded_state = match state_token.encode(state.config().jwt_secret_bytes()) {
         Ok(s) => s,
         Err(e) => {
@@ -538,7 +549,14 @@ pub async fn github_link_start(State(state): State<Arc<AppState>>, jar: CookieJa
     };
 
     // Generate state token for link flow
-    let state_token = GitHubStateToken::new_for_link(org_id, &user.id);
+    let state_token = match GitHubStateToken::new_for_link(org_id, &user.id) {
+        Ok(t) => t,
+        Err(_) => {
+            return error_response(GitHubError::Internal(
+                "Failed to generate secure state token".to_string(),
+            ));
+        }
+    };
     let encoded_state = match state_token.encode(state.config().jwt_secret_bytes()) {
         Ok(s) => s,
         Err(e) => {
