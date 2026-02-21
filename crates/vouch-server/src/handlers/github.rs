@@ -27,7 +27,7 @@ use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
+use jsonwebtoken::{DecodingKey, EncodingKey, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::ApiError;
@@ -148,9 +148,13 @@ impl GitHubStateToken {
         }
     }
 
-    /// Encode as JWT.
+    /// Encode as JWT (RFC 8725 §3.11: explicit typ).
     fn encode(&self, secret: &[u8]) -> Result<String, jsonwebtoken::errors::Error> {
-        encode(&Header::default(), self, &EncodingKey::from_secret(secret))
+        encode(
+            &crate::jwt::JwtType::GitHubState.to_header(),
+            self,
+            &EncodingKey::from_secret(secret),
+        )
     }
 
     /// Decode from JWT.
@@ -160,6 +164,12 @@ impl GitHubStateToken {
             &DecodingKey::from_secret(secret),
             &Validation::default(),
         )?;
+        // RFC 8725 §3.11: Validate typ header
+        if data.header.typ.as_deref() != Some(crate::jwt::JwtType::GitHubState.as_header_str()) {
+            return Err(jsonwebtoken::errors::Error::from(
+                jsonwebtoken::errors::ErrorKind::InvalidToken,
+            ));
+        }
         Ok(data.claims)
     }
 }

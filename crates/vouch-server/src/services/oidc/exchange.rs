@@ -108,10 +108,12 @@ pub async fn exchange_token(
     }
 
     // Decode and validate the subject token (supports both HS256 and ES256)
+    let config = state.config();
     let subject_decoded = decode_token(
         params.subject_token,
-        state.config().jwt_secret_bytes(),
+        config.jwt_secret_bytes(),
         &state.oidc_key,
+        &config.base_url,
     )
     .ok_or_else(|| {
         ServiceError::oauth(
@@ -159,8 +161,9 @@ pub async fn exchange_token(
         // Decode actor token (supports both HS256 and ES256)
         let actor_decoded = decode_token(
             actor_token,
-            state.config().jwt_secret_bytes(),
+            config.jwt_secret_bytes(),
             &state.oidc_key,
+            &config.base_url,
         )
         .ok_or_else(|| ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid actor token"))?;
 

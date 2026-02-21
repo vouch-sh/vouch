@@ -1197,8 +1197,8 @@ async fn test_id_token_scope_aware() {
 
 #[tokio::test]
 async fn test_backward_compat_token_without_scope() {
-    // Legacy JWTs without scope field should deserialize as None
-    let claims_json = r#"{"sub":"user-id","email":"test@example.com","iat":1700000000,"exp":1700028800,"purpose":"fido2_session"}"#;
+    // JWTs without scope field should deserialize as None
+    let claims_json = r#"{"iss":"https://vouch.example.com","aud":"https://vouch.example.com","sub":"user-id","email":"test@example.com","iat":1700000000,"exp":1700028800,"purpose":"fido2_session"}"#;
     let claims: crate::services::auth::SessionClaims =
         serde_json::from_str(claims_json).expect("Should deserialize without scope");
     assert!(

@@ -7,10 +7,11 @@
 
 use crate::AppState;
 use crate::db::{AccessScope, Authenticator, OAuthClient, Session, User};
+use crate::jwt::JwtType;
 use crate::services::oidc::scope::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::{Span, Timestamp};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, encode};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Validation, encode};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -145,6 +146,10 @@ pub enum AuthorizationSessionState {
 /// verified at the token endpoint (RFC 6749 Section 4.1.3).
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AuthorizationCode {
+    /// RFC 8725 §3.8: Issuer (base_url).
+    pub iss: String,
+    /// RFC 8725 §3.9: Audience (client_id).
+    pub aud: String,
     pub client_id: String,
     pub redirect_uri: String,
     pub user_id: String,
@@ -163,24 +168,44 @@ pub struct AuthorizationCode {
 }
 
 impl AuthorizationCode {
-    /// Encode the authorization code as a JWT.
+    /// Encode the authorization code as a JWT (RFC 8725 §3.11: explicit typ).
     pub fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
         encode(
-            &Header::default(),
+            &JwtType::AuthorizationCode.to_header(),
             self,
             &EncodingKey::from_secret(secret.as_bytes()),
         )
     }
 
     /// Decode an authorization code from a JWT.
-    pub fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        let mut validation = Validation::default();
+    ///
+    /// Validates `typ`, `iss`, and `aud` per RFC 8725.
+    pub fn decode(
+        token: &str,
+        secret: &str,
+        expected_issuer: &str,
+        expected_client_id: &str,
+    ) -> Result<Self, jsonwebtoken::errors::Error> {
+        let mut validation = Validation::new(Algorithm::HS256);
         validation.required_spec_claims.clear();
+        // RFC 8725 §3.8: Validate issuer
+        validation.set_issuer(&[expected_issuer]);
+        // RFC 8725 §3.9: Validate audience (client_id)
+        validation.set_audience(&[expected_client_id]);
+
         let data = jsonwebtoken::decode::<Self>(
             token,
             &DecodingKey::from_secret(secret.as_bytes()),
             &validation,
         )?;
+
+        // RFC 8725 §3.11: Validate typ header
+        if data.header.typ.as_deref() != Some(JwtType::AuthorizationCode.as_header_str()) {
+            return Err(jsonwebtoken::errors::Error::from(
+                jsonwebtoken::errors::ErrorKind::InvalidToken,
+            ));
+        }
+
         Ok(data.claims)
     }
 }
@@ -319,6 +344,8 @@ pub async fn issue_authorization_code(
         .unwrap_or(now.as_second() + 300);
 
     let auth_code = AuthorizationCode {
+        iss: state.config().base_url.clone(),
+        aud: params.client_id.to_string(),
         client_id: params.client_id.to_string(),
         redirect_uri: params.redirect_uri.to_string(),
         user_id: params.user_id.to_string(),
@@ -367,6 +394,7 @@ pub async fn issue_authorization_code(
 /// # Arguments
 /// * `state` - Application state
 /// * `code` - The encoded authorization code
+/// * `client_id` - Expected client_id (RFC 8725 §3.9: audience validation)
 ///
 /// # Returns
 /// The decoded authorization code.
@@ -376,14 +404,20 @@ pub async fn issue_authorization_code(
 pub fn decode_authorization_code(
     state: &Arc<AppState>,
     code: &str,
+    client_id: &str,
 ) -> ServiceResult<AuthorizationCode> {
-    let auth_code = AuthorizationCode::decode(code, state.config().jwt_secret.expose_secret())
-        .map_err(|_| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
-                "Invalid or expired authorization code",
-            )
-        })?;
+    let auth_code = AuthorizationCode::decode(
+        code,
+        state.config().jwt_secret.expose_secret(),
+        &state.config().base_url,
+        client_id,
+    )
+    .map_err(|_| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "Invalid or expired authorization code",
+        )
+    })?;
 
     // Check expiration
     let now = Timestamp::now().as_second();

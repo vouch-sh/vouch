@@ -11,6 +11,7 @@ pub mod db;
 pub mod encrypt_config;
 pub(crate) mod extractors;
 pub mod handlers;
+pub mod jwt;
 pub(crate) mod pem;
 pub mod s3_config;
 pub mod services;

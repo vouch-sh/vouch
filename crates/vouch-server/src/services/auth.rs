@@ -23,7 +23,7 @@ use crate::webauthn_verify;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, encode};
+use jsonwebtoken::{EncodingKey, encode};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -262,6 +262,10 @@ pub struct CreateOAuthTokenParams<'a> {
 /// Session claims for JWT tokens (RFC 7519 Section 4.1).
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionClaims {
+    /// RFC 8725 §3.8 / RFC 7519 §4.1.1: Issuer (base_url).
+    pub iss: String,
+    /// RFC 8725 §3.9 / RFC 7519 §4.1.3: Audience (base_url for sessions).
+    pub aud: String,
     /// RFC 7519 Section 4.1.2: Subject — the user ID.
     pub sub: String,
     /// User email (custom claim).
@@ -321,7 +325,10 @@ pub async fn create_login_session(
         .checked_add(duration)
         .map_err(|_| ServiceError::Internal("Time overflow".to_string()))?;
 
+    let base_url = state.config().base_url.clone();
     let claims = SessionClaims {
+        iss: base_url.clone(),
+        aud: base_url,
         sub: params.user_id.to_string(),
         email: params.email.to_string(),
         authenticator_id: params.authenticator_id.map(String::from),
@@ -332,7 +339,7 @@ pub async fn create_login_session(
     };
 
     let token = encode(
-        &Header::default(),
+        &crate::jwt::JwtType::Session.to_header(),
         &claims,
         &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
@@ -509,51 +516,20 @@ impl DecodedToken {
 
 /// Decode a JWT, routing to the correct claims type based on algorithm.
 ///
-/// Prevents algorithm confusion attacks by pinning each decode path
-/// to a single algorithm via explicit `Validation`. Prevents token
-/// substitution by checking `typ: "at+jwt"` (RFC 9068 Section 2.1)
-/// for ES256 tokens.
+/// This is a convenience wrapper around [`crate::jwt::decode_token`] that
+/// constructs a [`TokenValidationContext`] from individual parameters.
+///
+/// Validates `typ`, `iss`, and `aud` per RFC 8725.
 ///
 /// Returns `None` for invalid, expired, or unsupported tokens.
 pub fn decode_token(
     token: &str,
     jwt_secret: &[u8],
     oidc_key: &OidcSigningKey,
+    expected_issuer: &str,
 ) -> Option<DecodedToken> {
-    // Peek at the header to determine the algorithm
-    let header = jsonwebtoken::decode_header(token).ok()?;
-
-    match header.alg {
-        Algorithm::ES256 => {
-            // Attempt to decode as an RFC 9068 access token
-            let decoding_key = oidc_key.decoding_key();
-            let mut validation = Validation::new(Algorithm::ES256);
-            validation.validate_aud = false;
-
-            let token_data =
-                jsonwebtoken::decode::<AccessTokenClaims>(token, decoding_key, &validation).ok()?;
-
-            // RFC 9068 Section 2.1: Verify typ is "at+jwt" to prevent
-            // ID tokens from being accepted as access tokens (same signing key).
-            if token_data.header.typ.as_deref() != Some("at+jwt") {
-                return None;
-            }
-
-            Some(DecodedToken::AccessToken(token_data.claims))
-        }
-        Algorithm::HS256 => {
-            // Attempt to decode as a FIDO2 session token
-            let decoding_key = DecodingKey::from_secret(jwt_secret);
-            let validation = Validation::new(Algorithm::HS256);
-
-            let token_data =
-                jsonwebtoken::decode::<SessionClaims>(token, &decoding_key, &validation).ok()?;
-
-            Some(DecodedToken::Session(token_data.claims))
-        }
-        // Reject all other algorithms (including "none") to prevent attacks
-        _ => None,
-    }
+    let ctx = crate::jwt::TokenValidationContext::new(jwt_secret, oidc_key, expected_issuer);
+    crate::jwt::decode_token(token, &ctx)
 }
 
 #[cfg(test)]
@@ -568,6 +544,7 @@ mod tests {
     use crate::services::oidc::keys::OidcSigningKey;
 
     const TEST_JWT_SECRET: &[u8] = b"test-jwt-secret-for-unit-tests-only";
+    const TEST_ISSUER: &str = "https://example.com";
 
     fn make_oidc_key() -> OidcSigningKey {
         OidcSigningKey::generate().expect("generate key")
@@ -575,7 +552,7 @@ mod tests {
 
     fn make_access_token(key: &OidcSigningKey) -> String {
         let claims = AccessTokenClaims {
-            iss: "https://example.com".to_string(),
+            iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
             exp: 9_999_999_999,
@@ -595,6 +572,8 @@ mod tests {
 
     fn make_session_token() -> String {
         let claims = SessionClaims {
+            iss: TEST_ISSUER.to_string(),
+            aud: TEST_ISSUER.to_string(),
             sub: "user-456".to_string(),
             email: "session@example.com".to_string(),
             authenticator_id: Some("auth-1".to_string()),
@@ -604,9 +583,9 @@ mod tests {
             scope: None,
         };
         encode(
-            &Header::default(),
+            &crate::jwt::JwtType::Session.to_header(),
             &claims,
-            &EncodingKey::from_secret(TEST_JWT_SECRET),
+            &jsonwebtoken::EncodingKey::from_secret(TEST_JWT_SECRET),
         )
         .expect("encode")
     }
@@ -616,7 +595,7 @@ mod tests {
         let key = make_oidc_key();
         let token = make_access_token(&key);
 
-        let decoded = decode_token(&token, TEST_JWT_SECRET, &key);
+        let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER);
         assert!(decoded.is_some());
         match decoded.unwrap() {
             DecodedToken::AccessToken(c) => {
@@ -633,7 +612,7 @@ mod tests {
         let key = make_oidc_key();
         let token = make_session_token();
 
-        let decoded = decode_token(&token, TEST_JWT_SECRET, &key);
+        let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER);
         assert!(decoded.is_some());
         match decoded.unwrap() {
             DecodedToken::Session(c) => {
@@ -651,7 +630,7 @@ mod tests {
         let key = make_oidc_key();
 
         let claims = AccessTokenClaims {
-            iss: "https://example.com".to_string(),
+            iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
             exp: 9_999_999_999,
@@ -670,16 +649,16 @@ mod tests {
         // Sign as ID token (typ: "JWT", no "at+jwt")
         let token = key.sign_jwt(&claims).expect("sign");
 
-        let decoded = decode_token(&token, TEST_JWT_SECRET, &key);
+        let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER);
         assert!(decoded.is_none(), "ID token should be rejected");
     }
 
     #[test]
     fn test_decode_token_rejects_garbage() {
         let key = make_oidc_key();
-        assert!(decode_token("not.a.jwt", TEST_JWT_SECRET, &key).is_none());
-        assert!(decode_token("", TEST_JWT_SECRET, &key).is_none());
-        assert!(decode_token("abc123", TEST_JWT_SECRET, &key).is_none());
+        assert!(decode_token("not.a.jwt", TEST_JWT_SECRET, &key, TEST_ISSUER).is_none());
+        assert!(decode_token("", TEST_JWT_SECRET, &key, TEST_ISSUER).is_none());
+        assert!(decode_token("abc123", TEST_JWT_SECRET, &key, TEST_ISSUER).is_none());
     }
 
     #[test]
@@ -688,7 +667,7 @@ mod tests {
         let token = make_session_token();
 
         // Decode with wrong secret should fail
-        let decoded = decode_token(&token, b"wrong-secret", &key);
+        let decoded = decode_token(&token, b"wrong-secret", &key, TEST_ISSUER);
         assert!(decoded.is_none());
     }
 
@@ -697,7 +676,7 @@ mod tests {
         let key = make_oidc_key();
 
         let claims = AccessTokenClaims {
-            iss: "https://example.com".to_string(),
+            iss: TEST_ISSUER.to_string(),
             sub: "user-123".to_string(),
             aud: "client-abc".to_string(),
             exp: 1, // Expired in 1970
@@ -714,7 +693,7 @@ mod tests {
         };
 
         let token = key.sign_access_token_jwt(&claims).expect("sign");
-        let decoded = decode_token(&token, TEST_JWT_SECRET, &key);
+        let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER);
         assert!(decoded.is_none(), "Expired token should be rejected");
     }
 
@@ -722,7 +701,7 @@ mod tests {
     fn test_decoded_token_accessors() {
         let key = make_oidc_key();
         let token = make_access_token(&key);
-        let decoded = decode_token(&token, TEST_JWT_SECRET, &key).unwrap();
+        let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER).unwrap();
 
         assert_eq!(decoded.sub(), "user-123");
         assert_eq!(decoded.email(), Some("test@example.com"));
@@ -735,7 +714,7 @@ mod tests {
     fn test_decoded_token_session_accessors() {
         let key = make_oidc_key();
         let token = make_session_token();
-        let decoded = decode_token(&token, TEST_JWT_SECRET, &key).unwrap();
+        let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER).unwrap();
 
         assert_eq!(decoded.sub(), "user-456");
         assert_eq!(decoded.email(), Some("session@example.com"));

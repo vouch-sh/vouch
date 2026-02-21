@@ -100,7 +100,13 @@ pub async fn introspect_token(
     caller_client_id: Option<&str>,
 ) -> ServiceResult<IntrospectionResult> {
     // Decode the token using the dual-decode helper (HS256 or ES256)
-    let decoded = match decode_token(token, state.config().jwt_secret_bytes(), &state.oidc_key) {
+    let config = state.config();
+    let decoded = match decode_token(
+        token,
+        config.jwt_secret_bytes(),
+        &state.oidc_key,
+        &config.base_url,
+    ) {
         Some(d) => d,
         None => {
             return Ok(IntrospectionResult::inactive());
@@ -182,7 +188,13 @@ pub async fn revoke_token(
     _token_type_hint: Option<&str>,
 ) -> RevocationResult {
     // Try to decode to get email for audit logging
-    let decoded = decode_token(token, state.config().jwt_secret_bytes(), &state.oidc_key);
+    let config = state.config();
+    let decoded = decode_token(
+        token,
+        config.jwt_secret_bytes(),
+        &state.oidc_key,
+        &config.base_url,
+    );
 
     let email = decoded.as_ref().and_then(|d| d.email().map(String::from));
 

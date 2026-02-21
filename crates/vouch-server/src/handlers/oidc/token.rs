@@ -196,6 +196,13 @@ async fn handle_authorization_code_grant(
             Err(e) => return e.into_oauth_response().into_response(),
         };
 
+    // Extract client_id for audience validation (RFC 8725 §3.9)
+    let exchange_client_id = credentials
+        .as_ref()
+        .map(|c| c.client_id.as_str())
+        .or(params.client_id.as_deref())
+        .unwrap_or("");
+
     // Exchange the authorization code
     let exchange_params = AuthCodeExchangeParams {
         code,
@@ -203,6 +210,7 @@ async fn handle_authorization_code_grant(
         credentials: credentials.as_ref(),
         code_verifier: params.code_verifier.as_deref(),
         dpop_proof,
+        client_id: exchange_client_id,
     };
 
     match exchange_authorization_code(&state, exchange_params).await {

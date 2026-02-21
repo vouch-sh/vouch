@@ -116,9 +116,12 @@ pub async fn userinfo(
                 // RFC 9449 Section 7.1: If DPoP authorization scheme is used,
                 // the token MUST be DPoP-bound (have a cnf.jkt claim). Reject
                 // non-DPoP-bound tokens presented with the DPoP scheme.
-                if let Some(decoded) =
-                    decode_token(token, state.config().jwt_secret_bytes(), &state.oidc_key)
-                {
+                if let Some(decoded) = decode_token(
+                    token,
+                    state.config().jwt_secret_bytes(),
+                    &state.oidc_key,
+                    &state.config().base_url,
+                ) {
                     match decoded.cnf() {
                         Some(cnf) => {
                             let is_valid: bool =

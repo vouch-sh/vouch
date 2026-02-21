@@ -233,52 +233,16 @@ pub async fn device_token(
                 )
             })?;
 
-            // Generate session token (reuse the auth module's session creation logic)
-            let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
-            let duration = Span::new().hours(session_hours);
-            let session_expires = now.checked_add(duration).map_err(|_| {
-                oauth_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    OAuthError::invalid_grant(),
-                )
-            })?;
-
-            // Create JWT claims
-            let claims = crate::services::auth::SessionClaims {
-                sub: user_id.clone(),
-                email: user_email.clone(),
-                authenticator_id: Some(authenticator_id.clone()),
-                iat: now.as_second(),
-                exp: session_expires.as_second(),
-                purpose: crate::db::SessionPurpose::Fido2Session,
-                scope: None,
-            };
-
-            let token = jsonwebtoken::encode(
-                &jsonwebtoken::Header::default(),
-                &claims,
-                &jsonwebtoken::EncodingKey::from_secret(state.config().jwt_secret_bytes()),
-            )
-            .map_err(|_| {
-                oauth_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    OAuthError::invalid_grant(),
-                )
-            })?;
-
-            // Store session in database
-            let token_hash = {
-                let hash = digest::digest(&SHA256, token.as_bytes());
-                URL_SAFE_NO_PAD.encode(hash.as_ref())
-            };
-
-            db::create_session(
-                &state.db,
-                &user_id,
-                &token_hash,
-                Some(&authenticator_id),
-                &session_expires.to_string(),
-                crate::db::SessionPurpose::Fido2Session.as_str(),
+            // Create session using the shared service function
+            let session_result = crate::services::auth::create_login_session(
+                &state,
+                crate::services::auth::CreateSessionParams {
+                    user_id: &user_id,
+                    email: &user_email,
+                    authenticator_id: Some(&authenticator_id),
+                    purpose: crate::db::SessionPurpose::Fido2Session,
+                    scope: None,
+                },
             )
             .await
             .map_err(|_| {
@@ -288,8 +252,8 @@ pub async fn device_token(
                 )
             })?;
 
-            let expires_in = u64::try_from(session_expires.as_second() - now.as_second())
-                .unwrap_or(state.config().session_hours * 3600);
+            let token = session_result.token;
+            let expires_in = state.config().session_hours * 3600;
 
             tracing::info!(
                 "Device authorization complete for: {}",

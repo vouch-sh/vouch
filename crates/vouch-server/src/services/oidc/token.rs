@@ -41,6 +41,8 @@ pub struct AuthCodeExchangeParams<'a> {
     pub code_verifier: Option<&'a str>,
     /// RFC 9449 Section 5: Validated DPoP proof (if present).
     pub dpop_proof: Option<ValidatedDpopProof>,
+    /// RFC 8725 §3.9: Client ID for audience validation of the authorization code.
+    pub client_id: &'a str,
 }
 
 /// Client credentials for authentication (RFC 6749 Section 2.3).
@@ -167,7 +169,7 @@ pub async fn exchange_authorization_code(
     params: AuthCodeExchangeParams<'_>,
 ) -> ServiceResult<AuthCodeExchangeResult> {
     // Decode and validate the authorization code
-    let auth_code = decode_authorization_code(state, params.code)?;
+    let auth_code = decode_authorization_code(state, params.code, params.client_id)?;
 
     // RFC 6749 Section 10.5: Enforce single-use authorization codes.
     // Try to consume the code; if already consumed this is a replay attack.
@@ -630,7 +632,13 @@ pub async fn validate_session_token(
     token: &str,
 ) -> ServiceResult<Option<OidcValidatedSession>> {
     // Decode the token using the dual-decode helper (HS256 or ES256)
-    let decoded = match decode_token(token, state.config().jwt_secret_bytes(), &state.oidc_key) {
+    let config = state.config();
+    let decoded = match decode_token(
+        token,
+        config.jwt_secret_bytes(),
+        &state.oidc_key,
+        &config.base_url,
+    ) {
         Some(d) => d,
         None => return Ok(None),
     };
@@ -695,6 +703,8 @@ mod tests {
         let expected_challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
         let auth_code = AuthorizationCode {
+            iss: "https://test.example.com".to_string(),
+            aud: "test".to_string(),
             client_id: "test".to_string(),
             redirect_uri: "https://example.com".to_string(),
             user_id: "user1".to_string(),
@@ -716,6 +726,8 @@ mod tests {
     #[test]
     fn test_pkce_invalid_verifier() {
         let auth_code = AuthorizationCode {
+            iss: "https://test.example.com".to_string(),
+            aud: "test".to_string(),
             client_id: "test".to_string(),
             redirect_uri: "https://example.com".to_string(),
             user_id: "user1".to_string(),
@@ -737,6 +749,8 @@ mod tests {
     #[test]
     fn test_pkce_missing_verifier() {
         let auth_code = AuthorizationCode {
+            iss: "https://test.example.com".to_string(),
+            aud: "test".to_string(),
             client_id: "test".to_string(),
             redirect_uri: "https://example.com".to_string(),
             user_id: "user1".to_string(),
@@ -759,6 +773,8 @@ mod tests {
     fn test_pkce_no_challenge() {
         // No PKCE challenge - should succeed
         let auth_code = AuthorizationCode {
+            iss: "https://test.example.com".to_string(),
+            aud: "test".to_string(),
             client_id: "test".to_string(),
             redirect_uri: "https://example.com".to_string(),
             user_id: "user1".to_string(),

@@ -9,10 +9,11 @@ use axum::http::StatusCode;
 use axum_extra::TypedHeader;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use headers::authorization::{Authorization, Bearer};
-use jsonwebtoken::{DecodingKey, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation};
 use time::Duration;
 use vouch_common::{ApiError, extract_aaguid_from_attestation, validate_hardware_attestation};
 
+use crate::jwt::JwtType;
 use crate::services::auth::SessionClaims;
 
 // ============================================================================
@@ -175,20 +176,18 @@ async fn extract_session_from_header(
 
     let token = bearer.token();
 
-    // Validate JWT
-    let claims = jsonwebtoken::decode::<SessionClaims>(
-        token,
-        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
-        &Validation::default(),
-    )
-    .map_err(|_| {
-        json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Invalid or expired token",
-        )
-    })?
-    .claims;
+    // Validate JWT with iss/aud/typ checks (RFC 8725 §3.8, §3.9, §3.11)
+    let config = state.config();
+    let token_data = decode_session_jwt(token, config.jwt_secret_bytes(), &config.base_url)
+        .map_err(|_| {
+            json_error(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "Invalid or expired token",
+            )
+        })?;
+
+    let claims = token_data.claims;
 
     // Verify session exists in database
     let token_hash = hash_token(token);
@@ -247,20 +246,18 @@ pub async fn extract_session_from_cookie(
         )
     })?;
 
-    // Validate JWT
-    let claims = jsonwebtoken::decode::<SessionClaims>(
-        token,
-        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
-        &Validation::default(),
-    )
-    .map_err(|_| {
-        json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Invalid or expired session",
-        )
-    })?
-    .claims;
+    // Validate JWT with iss/aud/typ checks (RFC 8725 §3.8, §3.9, §3.11)
+    let config = state.config();
+    let token_data = decode_session_jwt(token, config.jwt_secret_bytes(), &config.base_url)
+        .map_err(|_| {
+            json_error(
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "Invalid or expired session",
+            )
+        })?;
+
+    let claims = token_data.claims;
 
     // Verify session exists in database
     let token_hash = hash_token(token);
@@ -292,6 +289,36 @@ pub async fn extract_session_from_cookie(
     }
 
     Ok(ValidatedSession { claims, token_hash })
+}
+
+/// Decode and validate a session JWT with iss/aud/typ checks.
+///
+/// RFC 8725 §3.8: Validates issuer.
+/// RFC 8725 §3.9: Validates audience.
+/// RFC 8725 §3.11: Validates typ header.
+pub(crate) fn decode_session_jwt(
+    token: &str,
+    jwt_secret: &[u8],
+    expected_issuer: &str,
+) -> Result<jsonwebtoken::TokenData<SessionClaims>, jsonwebtoken::errors::Error> {
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_issuer(&[expected_issuer]);
+    validation.set_audience(&[expected_issuer]);
+
+    let token_data = jsonwebtoken::decode::<SessionClaims>(
+        token,
+        &DecodingKey::from_secret(jwt_secret),
+        &validation,
+    )?;
+
+    // RFC 8725 §3.11: Validate typ header
+    if token_data.header.typ.as_deref() != Some(JwtType::Session.as_header_str()) {
+        return Err(jsonwebtoken::errors::Error::from(
+            jsonwebtoken::errors::ErrorKind::InvalidToken,
+        ));
+    }
+
+    Ok(token_data)
 }
 
 /// Extract and validate session from Bearer token or cookie.

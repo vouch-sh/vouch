@@ -438,7 +438,7 @@ pub async fn http_delete(
 /// Create a valid test JWT session token.
 pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: &str) -> String {
     use jiff::{Span, Timestamp};
-    use jsonwebtoken::{EncodingKey, Header, encode};
+    use jsonwebtoken::{EncodingKey, encode};
 
     let now = Timestamp::now();
     let exp = now
@@ -446,7 +446,10 @@ pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: 
         .map(|t| t.as_second())
         .unwrap_or(now.as_second() + 28800);
 
+    let base_url = state.config().base_url.clone();
     let claims = crate::services::auth::SessionClaims {
+        iss: base_url.clone(),
+        aud: base_url,
         sub: user_id.to_string(),
         email: email.to_string(),
         authenticator_id: Some(auth_id.to_string()),
@@ -457,7 +460,7 @@ pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: 
     };
 
     encode(
-        &Header::default(),
+        &crate::jwt::JwtType::Session.to_header(),
         &claims,
         &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
@@ -468,11 +471,14 @@ pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: 
 #[allow(dead_code)]
 pub fn create_expired_token(state: &AppState, user_id: &str, email: &str, auth_id: &str) -> String {
     use jiff::Timestamp;
-    use jsonwebtoken::{EncodingKey, Header, encode};
+    use jsonwebtoken::{EncodingKey, encode};
 
     let now = Timestamp::now();
 
+    let base_url = state.config().base_url.clone();
     let claims = crate::services::auth::SessionClaims {
+        iss: base_url.clone(),
+        aud: base_url,
         sub: user_id.to_string(),
         email: email.to_string(),
         authenticator_id: Some(auth_id.to_string()),
@@ -483,7 +489,7 @@ pub fn create_expired_token(state: &AppState, user_id: &str, email: &str, auth_i
     };
 
     encode(
-        &Header::default(),
+        &crate::jwt::JwtType::Session.to_header(),
         &claims,
         &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
