@@ -6,8 +6,8 @@
 //! - RFC 7636 - PKCE (Proof Key for Code Exchange)
 
 use crate::AppState;
-use crate::db::{AccessScope, Authenticator, OAuthClient, Session, User};
 use crate::crypto::jwt::JwtType;
+use crate::db::{AccessScope, Authenticator, OAuthClient, Session, User};
 use crate::services::oidc::scope::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::{Span, Timestamp};

@@ -5,9 +5,9 @@
 //! - WebAuthn Level 2 Section 7.1 — Registering a New Credential
 //! - WebAuthn Level 2 Section 7.2 — Verifying an Authentication Assertion
 
+use super::extractors::ClientInfo;
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
-use super::extractors::ClientInfo;
 use crate::services::auth::{
     AuthenticatorLookupParams, CreateSessionParams, LoginAssertionParams, create_login_session,
     lookup_and_verify_authenticator, verify_login_assertion,

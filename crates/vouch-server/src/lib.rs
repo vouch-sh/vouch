@@ -16,7 +16,9 @@ pub mod test_utils;
 
 // Re-export main types
 pub use config::ServerConfig;
-pub use crypto::webauthn_verify::{CoseVerifier, RealCoseVerifier, VerificationResult, VerifyError};
+pub use crypto::webauthn_verify::{
+    CoseVerifier, RealCoseVerifier, VerificationResult, VerifyError,
+};
 pub use db::User;
 
 #[cfg(any(test, feature = "test-utils"))]

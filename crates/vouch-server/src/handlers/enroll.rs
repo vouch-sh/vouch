@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Enrollment handlers for browser-based device authorization flow.
 
+use super::extractors::ClientInfo;
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
-use super::extractors::ClientInfo;
 use crate::impl_template_response;
 use askama::Template;
 use axum::{

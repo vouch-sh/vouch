@@ -19,15 +19,15 @@
 //! - Single-use challenges
 //! - Session binding to authenticator
 
-use crate::AppState;
-use crate::db::{self, AuthEventParams, AuthEventType};
 use super::extractors::ClientInfo;
+use crate::AppState;
+use crate::crypto::webauthn_verify;
+use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::handlers::common::{
     create_session_cookie, generate_challenge, get_auth_context, json_error,
 };
 use crate::impl_template_response;
 use crate::redact_email;
-use crate::crypto::webauthn_verify;
 use askama::Template;
 use axum::{
     Json,

@@ -14,13 +14,13 @@
 //! The handlers remain thin, focusing on HTTP concerns.
 
 use crate::AppState;
+use crate::crypto::webauthn_verify;
 use crate::db::{self, Authenticator, SessionPurpose, User};
 use crate::handlers::common::hash_token;
 use crate::services::oidc::amr::AuthMethod;
 use crate::services::oidc::dpop::CnfClaim;
 use crate::services::oidc::keys::OidcSigningKey;
 use crate::services::oidc::scope::ScopeSet;
-use crate::crypto::webauthn_verify;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
@@ -541,7 +541,8 @@ pub fn decode_token(
     oidc_key: &OidcSigningKey,
     expected_issuer: &str,
 ) -> Option<DecodedToken> {
-    let ctx = crate::crypto::jwt::TokenValidationContext::new(jwt_secret, oidc_key, expected_issuer);
+    let ctx =
+        crate::crypto::jwt::TokenValidationContext::new(jwt_secret, oidc_key, expected_issuer);
     crate::crypto::jwt::decode_token(token, &ctx)
 }
 
