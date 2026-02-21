@@ -238,17 +238,17 @@ struct BrowserRegistrationState {
 
 impl BrowserRegistrationState {
     fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        crate::jwt::encode_state_token(
+        crate::crypto::jwt::encode_state_token(
             self,
-            crate::jwt::JwtType::BrowserRegistrationState,
+            crate::crypto::jwt::JwtType::BrowserRegistrationState,
             secret.as_bytes(),
         )
     }
 
     fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        crate::jwt::decode_state_token(
+        crate::crypto::jwt::decode_state_token(
             token,
-            crate::jwt::JwtType::BrowserRegistrationState,
+            crate::crypto::jwt::JwtType::BrowserRegistrationState,
             secret.as_bytes(),
         )
     }

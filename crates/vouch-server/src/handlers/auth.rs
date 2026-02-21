@@ -59,17 +59,17 @@ struct RegistrationState {
 
 impl RegistrationState {
     fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        crate::jwt::encode_state_token(
+        crate::crypto::jwt::encode_state_token(
             self,
-            crate::jwt::JwtType::RegistrationState,
+            crate::crypto::jwt::JwtType::RegistrationState,
             secret.as_bytes(),
         )
     }
 
     fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        crate::jwt::decode_state_token(
+        crate::crypto::jwt::decode_state_token(
             token,
-            crate::jwt::JwtType::RegistrationState,
+            crate::crypto::jwt::JwtType::RegistrationState,
             secret.as_bytes(),
         )
     }
@@ -93,17 +93,17 @@ struct AuthenticationState {
 
 impl AuthenticationState {
     fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        crate::jwt::encode_state_token(
+        crate::crypto::jwt::encode_state_token(
             self,
-            crate::jwt::JwtType::AuthenticationState,
+            crate::crypto::jwt::JwtType::AuthenticationState,
             secret.as_bytes(),
         )
     }
 
     fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        crate::jwt::decode_state_token(
+        crate::crypto::jwt::decode_state_token(
             token,
-            crate::jwt::JwtType::AuthenticationState,
+            crate::crypto::jwt::JwtType::AuthenticationState,
             secret.as_bytes(),
         )
     }

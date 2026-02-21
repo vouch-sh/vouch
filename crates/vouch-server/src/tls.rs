@@ -24,10 +24,10 @@ pub async fn reload_tls_config(tls_config: &RustlsConfig) -> Result<()> {
     let cert_env = std::env::var("VOUCH_TLS_CERT").context("VOUCH_TLS_CERT not set")?;
     let key_env = std::env::var("VOUCH_TLS_KEY").context("VOUCH_TLS_KEY not set")?;
 
-    let cert_bytes = crate::pem::decode_base64_pem(&cert_env)
+    let cert_bytes = crate::crypto::pem::decode_base64_pem(&cert_env)
         .context("Failed to decode TLS certificate")?
         .into_bytes();
-    let key_bytes = crate::pem::decode_base64_pem(&key_env)
+    let key_bytes = crate::crypto::pem::decode_base64_pem(&key_env)
         .context("Failed to decode TLS private key")?
         .into_bytes();
 
@@ -49,10 +49,10 @@ pub async fn reload_tls_from_config(
     cert: &str,
     key: &SecretString,
 ) -> Result<()> {
-    let cert_bytes = crate::pem::decode_base64_pem(cert)
+    let cert_bytes = crate::crypto::pem::decode_base64_pem(cert)
         .context("Failed to decode TLS certificate")?
         .into_bytes();
-    let key_bytes = crate::pem::decode_base64_pem(key.expose_secret())
+    let key_bytes = crate::crypto::pem::decode_base64_pem(key.expose_secret())
         .context("Failed to decode TLS private key")?
         .into_bytes();
 
@@ -78,12 +78,12 @@ fn load_cert_and_key(config: &ServerConfig) -> Result<(Vec<u8>, Vec<u8>)> {
         .ok_or_else(|| anyhow::anyhow!("TLS private key not configured"))?;
 
     let cert_was_base64 = !cert_pem.trim().starts_with("-----BEGIN");
-    let cert_bytes = crate::pem::decode_base64_pem(cert_pem)
+    let cert_bytes = crate::crypto::pem::decode_base64_pem(cert_pem)
         .context("Failed to decode TLS certificate")?
         .into_bytes();
 
     let key_was_base64 = !key_secret.expose_secret().trim().starts_with("-----BEGIN");
-    let key_bytes = crate::pem::decode_base64_pem(key_secret.expose_secret())
+    let key_bytes = crate::crypto::pem::decode_base64_pem(key_secret.expose_secret())
         .context("Failed to decode TLS private key")?
         .into_bytes();
 

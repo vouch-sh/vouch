@@ -460,7 +460,7 @@ pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: 
     };
 
     encode(
-        &crate::jwt::JwtType::Session.to_header(),
+        &crate::crypto::jwt::JwtType::Session.to_header(),
         &claims,
         &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
@@ -489,7 +489,7 @@ pub fn create_expired_token(state: &AppState, user_id: &str, email: &str, auth_i
     };
 
     encode(
-        &crate::jwt::JwtType::Session.to_header(),
+        &crate::crypto::jwt::JwtType::Session.to_header(),
         &claims,
         &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )

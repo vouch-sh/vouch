@@ -2526,7 +2526,7 @@ mod encoding_verification {
     #[tokio::test]
     async fn test_typed_verification_functions() {
         use vouch_cli::{FidoDevice, MockFidoDevice};
-        use vouch_server::webauthn_verify::{
+        use vouch_server::crypto::webauthn_verify::{
             TestCoseVerifier, verify_assertion_typed_with_verifier,
         };
 

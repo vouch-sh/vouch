@@ -29,13 +29,13 @@ use tracing_subscriber::EnvFilter;
 
 use vouch_server::{
     AppState, cleanup, config,
+    crypto::{ssh_ca, tpm_decrypt},
     db::{Pool, dsql::DsqlEndpoint, migrations::run_dsql_migrations},
     encrypt_config, handlers, s3_config,
     services::{
         integrations::github::GitHubApp,
         oidc::{OidcSigningKey, dpop},
     },
-    ssh_ca, tpm_decrypt,
 };
 
 // ============================================================================
@@ -270,7 +270,7 @@ async fn run_server(args: config::Args) -> Result<()> {
         config.rp_id,
         config.base_url,
         config.tls_configured(),
-        crate::tpm_decrypt::is_nitro_tpm_available(),
+        tpm_decrypt::is_nitro_tpm_available(),
     );
 
     // Build WebAuthn instance

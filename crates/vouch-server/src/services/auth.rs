@@ -20,7 +20,7 @@ use crate::services::oidc::amr::AuthMethod;
 use crate::services::oidc::dpop::CnfClaim;
 use crate::services::oidc::keys::OidcSigningKey;
 use crate::services::oidc::scope::ScopeSet;
-use crate::webauthn_verify;
+use crate::crypto::webauthn_verify;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
@@ -350,7 +350,7 @@ pub async fn create_login_session(
     };
 
     let token = encode(
-        &crate::jwt::JwtType::Session.to_header(),
+        &crate::crypto::jwt::JwtType::Session.to_header(),
         &claims,
         &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
@@ -529,7 +529,7 @@ impl DecodedToken {
 
 /// Decode a JWT, routing to the correct claims type based on algorithm.
 ///
-/// This is a convenience wrapper around [`crate::jwt::decode_token`] that
+/// This is a convenience wrapper around [`crate::crypto::jwt::decode_token`] that
 /// constructs a [`TokenValidationContext`] from individual parameters.
 ///
 /// Validates `typ`, `iss`, and `aud` per RFC 8725.
@@ -541,8 +541,8 @@ pub fn decode_token(
     oidc_key: &OidcSigningKey,
     expected_issuer: &str,
 ) -> Option<DecodedToken> {
-    let ctx = crate::jwt::TokenValidationContext::new(jwt_secret, oidc_key, expected_issuer);
-    crate::jwt::decode_token(token, &ctx)
+    let ctx = crate::crypto::jwt::TokenValidationContext::new(jwt_secret, oidc_key, expected_issuer);
+    crate::crypto::jwt::decode_token(token, &ctx)
 }
 
 #[cfg(test)]
@@ -598,7 +598,7 @@ mod tests {
             scope: None,
         };
         encode(
-            &crate::jwt::JwtType::Session.to_header(),
+            &crate::crypto::jwt::JwtType::Session.to_header(),
             &claims,
             &jsonwebtoken::EncodingKey::from_secret(TEST_JWT_SECRET),
         )

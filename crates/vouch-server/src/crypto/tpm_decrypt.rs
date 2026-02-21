@@ -35,7 +35,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::ber::DerParser;
+use super::ber::DerParser;
 
 // ============================================================================
 // Encrypted Envelope Format
@@ -63,11 +63,11 @@ pub struct EncryptedEnvelope {
     pub version: u32,
 
     /// TLS config (promoted to wrapper for hot-reload without decryption).
-    pub tls: Option<super::s3_config::S3TlsConfig>,
+    pub tls: Option<crate::s3_config::S3TlsConfig>,
 
     /// ACME config (promoted to wrapper for external certificate renewal processes).
     #[serde(rename = "_acme", default, skip_serializing_if = "Option::is_none")]
-    pub acme: Option<super::s3_config::S3AcmeConfig>,
+    pub acme: Option<crate::s3_config::S3AcmeConfig>,
 }
 
 // Custom Debug that redacts ciphertext fields to prevent accidental log exposure.

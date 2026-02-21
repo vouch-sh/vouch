@@ -27,7 +27,7 @@ use crate::handlers::common::{
 };
 use crate::impl_template_response;
 use crate::redact_email;
-use crate::webauthn_verify;
+use crate::crypto::webauthn_verify;
 use askama::Template;
 use axum::{
     Json,
@@ -89,17 +89,17 @@ struct BrowserAuthenticationState {
 
 impl BrowserAuthenticationState {
     fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        crate::jwt::encode_state_token(
+        crate::crypto::jwt::encode_state_token(
             self,
-            crate::jwt::JwtType::BrowserAuthenticationState,
+            crate::crypto::jwt::JwtType::BrowserAuthenticationState,
             secret.as_bytes(),
         )
     }
 
     fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        crate::jwt::decode_state_token(
+        crate::crypto::jwt::decode_state_token(
             token,
-            crate::jwt::JwtType::BrowserAuthenticationState,
+            crate::crypto::jwt::JwtType::BrowserAuthenticationState,
             secret.as_bytes(),
         )
     }

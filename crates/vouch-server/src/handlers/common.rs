@@ -13,7 +13,7 @@ use jsonwebtoken::DecodingKey;
 use time::Duration;
 use vouch_common::{ApiError, extract_aaguid_from_attestation, validate_hardware_attestation};
 
-use crate::jwt::JwtType;
+use crate::crypto::jwt::JwtType;
 use crate::services::auth::SessionClaims;
 
 // ============================================================================
@@ -301,7 +301,7 @@ pub(crate) fn decode_session_jwt(
     jwt_secret: &[u8],
     expected_issuer: &str,
 ) -> Result<jsonwebtoken::TokenData<SessionClaims>, jsonwebtoken::errors::Error> {
-    let validation = crate::jwt::session_validation(expected_issuer);
+    let validation = crate::crypto::jwt::session_validation(expected_issuer);
 
     let token_data = jsonwebtoken::decode::<SessionClaims>(
         token,

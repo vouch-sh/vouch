@@ -47,7 +47,7 @@ impl RsaPrivateKeyDer {
     /// cat your-key.pem | base64 | tr -d '\n'
     /// ```
     pub fn from_pem(pem_or_base64: &str) -> Result<Self> {
-        let pem = crate::pem::decode_base64_pem(pem_or_base64).context("Invalid key format")?;
+        let pem = crate::crypto::pem::decode_base64_pem(pem_or_base64).context("Invalid key format")?;
         Self::parse_pem(&pem)
     }
 

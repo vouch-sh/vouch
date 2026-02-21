@@ -149,12 +149,12 @@ impl GitHubStateToken {
 
     /// Encode as JWT (RFC 8725 §3.11: explicit typ).
     fn encode(&self, secret: &[u8]) -> Result<String, jsonwebtoken::errors::Error> {
-        crate::jwt::encode_state_token(self, crate::jwt::JwtType::GitHubState, secret)
+        crate::crypto::jwt::encode_state_token(self, crate::crypto::jwt::JwtType::GitHubState, secret)
     }
 
     /// Decode from JWT.
     fn decode(token: &str, secret: &[u8]) -> Result<Self, jsonwebtoken::errors::Error> {
-        crate::jwt::decode_state_token(token, crate::jwt::JwtType::GitHubState, secret)
+        crate::crypto::jwt::decode_state_token(token, crate::crypto::jwt::JwtType::GitHubState, secret)
     }
 }
 

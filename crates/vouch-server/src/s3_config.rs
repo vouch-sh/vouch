@@ -31,7 +31,7 @@ use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 use crate::config::ServerConfig;
-use crate::tpm_decrypt;
+use crate::crypto::tpm_decrypt;
 
 /// S3 configuration source settings.
 #[derive(Debug, Clone)]
