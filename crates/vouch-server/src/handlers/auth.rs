@@ -5,12 +5,12 @@
 //! - WebAuthn Level 2 Section 7.1 — Registering a New Credential
 //! - WebAuthn Level 2 Section 7.2 — Verifying an Authentication Assertion
 
+use super::extractors::ClientInfo;
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
-use crate::extractors::ClientInfo;
 use crate::services::auth::{
-    AuthenticatorLookupParams, CreateSessionParams, LoginAssertionParams, SessionClaims,
-    create_login_session, lookup_and_verify_authenticator, verify_login_assertion,
+    AuthenticatorLookupParams, CreateSessionParams, LoginAssertionParams, create_login_session,
+    lookup_and_verify_authenticator, verify_login_assertion,
 };
 use axum::{
     Json,
@@ -23,7 +23,6 @@ use axum_extra::TypedHeader;
 use axum_extra::extract::cookie::CookieJar;
 use headers::authorization::{Authorization, Bearer};
 use jiff::Timestamp;
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -52,27 +51,27 @@ struct RegistrationState {
     device_name: String,
     challenge: Challenge<Raw>,
     rp_id: String,
+    /// RFC 8725 §3.11: Issued at time for expiration enforcement.
+    iat: i64,
+    /// RFC 8725 §3.11: Expiration time (5 minutes).
+    exp: i64,
 }
 
 impl RegistrationState {
     fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        encode(
-            &Header::default(),
+        crate::crypto::jwt::encode_state_token(
             self,
-            &EncodingKey::from_secret(secret.as_bytes()),
+            crate::crypto::jwt::JwtType::RegistrationState,
+            secret.as_bytes(),
         )
     }
 
     fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        let mut validation = Validation::default();
-        validation.required_spec_claims.clear();
-        validation.validate_exp = false;
-        let data = decode::<Self>(
+        crate::crypto::jwt::decode_state_token(
             token,
-            &DecodingKey::from_secret(secret.as_bytes()),
-            &validation,
-        )?;
-        Ok(data.claims)
+            crate::crypto::jwt::JwtType::RegistrationState,
+            secret.as_bytes(),
+        )
     }
 }
 
@@ -86,27 +85,27 @@ impl RegistrationState {
 struct AuthenticationState {
     challenge: Challenge<Raw>,
     rp_id: String,
+    /// RFC 8725 §3.11: Issued at time for expiration enforcement.
+    iat: i64,
+    /// RFC 8725 §3.11: Expiration time (5 minutes).
+    exp: i64,
 }
 
 impl AuthenticationState {
     fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        encode(
-            &Header::default(),
+        crate::crypto::jwt::encode_state_token(
             self,
-            &EncodingKey::from_secret(secret.as_bytes()),
+            crate::crypto::jwt::JwtType::AuthenticationState,
+            secret.as_bytes(),
         )
     }
 
     fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        let mut validation = Validation::default();
-        validation.required_spec_claims.clear();
-        validation.validate_exp = false;
-        let data = decode::<Self>(
+        crate::crypto::jwt::decode_state_token(
             token,
-            &DecodingKey::from_secret(secret.as_bytes()),
-            &validation,
-        )?;
-        Ok(data.claims)
+            crate::crypto::jwt::JwtType::AuthenticationState,
+            secret.as_bytes(),
+        )
     }
 }
 
@@ -176,12 +175,19 @@ pub async fn register_start(
 
     // Create state token
     let challenge: Challenge<Raw> = challenge.into();
+    let now = Timestamp::now();
+    let exp = now
+        .checked_add(jiff::Span::new().minutes(5))
+        .map(|t| t.as_second())
+        .unwrap_or(now.as_second() + 300);
     let reg_state = RegistrationState {
         user_id,
         user_name: user.email.clone(),
         device_name: req.name,
         challenge: challenge.clone(),
         rp_id: state.config().rp_id.clone(),
+        iat: now.as_second(),
+        exp,
     };
 
     let state_token = reg_state
@@ -313,9 +319,16 @@ pub async fn login_start(
 
     // Create state token (simplified - no user info needed upfront)
     let challenge: Challenge<Raw> = challenge.into();
+    let now = Timestamp::now();
+    let exp = now
+        .checked_add(jiff::Span::new().minutes(5))
+        .map(|t| t.as_second())
+        .unwrap_or(now.as_second() + 300);
     let auth_state = AuthenticationState {
         challenge: challenge.clone(),
         rp_id: state.config().rp_id.clone(),
+        iat: now.as_second(),
+        exp,
     };
 
     let state_token = auth_state
@@ -553,12 +566,10 @@ pub async fn status(
         }));
     };
 
-    // Validate token
-    let claims = match decode::<SessionClaims>(
-        token,
-        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
-        &Validation::default(),
-    ) {
+    // Validate token with iss/aud/typ checks (RFC 8725)
+    let config = state.config();
+    let claims = match super::decode_session_jwt(token, config.jwt_secret_bytes(), &config.base_url)
+    {
         Ok(data) => data.claims,
         Err(_) => {
             return Ok(Json(SessionStatus {

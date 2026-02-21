@@ -9,8 +9,6 @@ use aws_lc_rs::digest::SHA256;
 use axum::http::StatusCode;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jiff::Timestamp;
-use secrecy::ExposeSecret;
 
 // ========================================================================
 // OIDC Discovery Tests (OIDC Core 1.0 Section 4.2)
@@ -401,18 +399,51 @@ async fn test_pkce_s256_validation() {
 
 #[tokio::test]
 async fn test_revoke_valid_token() {
-    // RFC 7009 Section 2.1: Successful revocation returns 200
+    // RFC 7009 Section 2.1: Successful revocation returns 200 and invalidates the token
     let (app, state) = test_app().await;
 
-    // Create a test session
+    // Create a test session and OAuth client for authentication
     let user = create_test_user(&state.db, "revoke@example.com").await;
     let auth_id = create_test_authenticator(&state.db, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let auth_header = client.basic_auth_header();
 
-    let (status, _body) =
-        http_post_form(&app, "/oauth/revoke", &format!("token={}", token), &[]).await;
+    // Verify token works before revocation
+    let (status, _body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {}", token))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Token should work before revocation"
+    );
 
+    // Revoke the token with client authentication (RFC 7009 Section 2.1)
+    let (status, _body) = http_post_form(
+        &app,
+        "/oauth/revoke",
+        &format!("token={}", token),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
+
+    // Verify token no longer works after revocation
+    let (status, _body) = http_get(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("Bearer {}", token))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Token should fail after revocation"
+    );
 }
 
 #[tokio::test]
@@ -602,7 +633,15 @@ async fn test_token_exchange_requires_grant_type() {
 
 #[tokio::test]
 async fn test_token_exchange_valid_token_types() {
-    // RFC 8693 Section 2.1: Valid token type URNs should be accepted
+    // RFC 8693 Section 2.1: All valid subject_token_type URNs should be accepted
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "exchange-types@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
     let valid_types = [
         "urn:ietf:params:oauth:token-type:access_token",
         "urn:ietf:params:oauth:token-type:id_token",
@@ -610,10 +649,29 @@ async fn test_token_exchange_valid_token_types() {
     ];
 
     for token_type in valid_types {
-        // Just verify these are defined correctly
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/token",
+            &format!(
+                "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={}&subject_token_type={}",
+                token, token_type
+            ),
+            &[("Authorization", &auth_header)],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "Token type {} should be accepted, got: {}",
+            token_type,
+            body
+        );
+        let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         assert!(
-            token_type.starts_with("urn:ietf:params:oauth:token-type:"),
-            "Token type URN should have correct prefix"
+            response.get("access_token").is_some(),
+            "Response for {} should contain access_token",
+            token_type
         );
     }
 }
@@ -621,13 +679,17 @@ async fn test_token_exchange_valid_token_types() {
 #[tokio::test]
 async fn test_token_exchange_invalid_subject_token() {
     // RFC 8693: Invalid subject token returns invalid_grant
-    let (app, _state) = test_app().await;
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "exchange-invalid@example.com").await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let auth_header = client.basic_auth_header();
 
     let (status, body) = http_post_form(
         &app,
         "/oauth/token",
         "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token=invalid&subject_token_type=urn:ietf:params:oauth:token-type:access_token",
-        &[],
+        &[("Authorization", &auth_header)],
     )
     .await;
 
@@ -641,10 +703,12 @@ async fn test_token_exchange_successful() {
     // RFC 8693: Successful token exchange
     let (app, state) = test_app().await;
 
-    // Create a valid subject token
+    // Create a valid subject token and client for authentication
     let user = create_test_user(&state.db, "exchange@example.com").await;
     let auth_id = create_test_authenticator(&state.db, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let auth_header = client.basic_auth_header();
 
     let (status, body) = http_post_form(
         &app,
@@ -653,7 +717,7 @@ async fn test_token_exchange_successful() {
             "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={}&subject_token_type=urn:ietf:params:oauth:token-type:access_token",
             token
         ),
-        &[],
+        &[("Authorization", &auth_header)],
     )
     .await;
 
@@ -685,6 +749,8 @@ async fn test_token_exchange_scope_downgrade() {
     let user = create_test_user(&state.db, "exchange-scope@example.com").await;
     let auth_id = create_test_authenticator(&state.db, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let auth_header = client.basic_auth_header();
 
     // Request a subset of scopes
     let (status, body) = http_post_form(
@@ -694,7 +760,7 @@ async fn test_token_exchange_scope_downgrade() {
             "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={}&subject_token_type=urn:ietf:params:oauth:token-type:access_token&scope=openid",
             token
         ),
-        &[],
+        &[("Authorization", &auth_header)],
     )
     .await;
 
@@ -742,7 +808,7 @@ async fn test_client_secret_hash_roundtrip() {
 /// Returns `(access_token, id_token)`.
 async fn issue_oauth_access_token(
     app: &axum::Router,
-    state: &crate::AppState,
+    state: &std::sync::Arc<crate::AppState>,
     user: &crate::db::User,
     auth_id: &str,
     client: &TestOAuthClient,
@@ -751,38 +817,37 @@ async fn issue_oauth_access_token(
 }
 
 /// Create an authorization code with a specific scope and exchange it at `/oauth/token`.
+/// Uses the real `issue_authorization_code()` service function to exercise the full
+/// code path including server-side code storage for single-use enforcement.
 /// Returns `(access_token, id_token)`.
 async fn issue_oauth_access_token_with_scope(
     app: &axum::Router,
-    state: &crate::AppState,
+    state: &std::sync::Arc<crate::AppState>,
     user: &crate::db::User,
     auth_id: &str,
     client: &TestOAuthClient,
     scope: &str,
 ) -> (String, String) {
-    use crate::services::oidc::authorization::AuthorizationCode;
+    use crate::services::oidc::authorization::{AuthorizationCodeParams, issue_authorization_code};
 
-    let now = Timestamp::now();
+    let scope_set = ScopeSet::parse(scope);
 
-    // Build an authorization code JWT
-    let auth_code = AuthorizationCode {
-        client_id: client.client_id.clone(),
-        redirect_uri: "https://example.com/callback".to_string(),
-        user_id: user.id.clone(),
-        email: user.email.clone(),
-        authenticator_id: auth_id.to_string(),
+    let code_params = AuthorizationCodeParams {
+        client_id: &client.client_id,
+        redirect_uri: "https://example.com/callback",
+        user_id: &user.id,
+        email: &user.email,
+        authenticator_id: auth_id,
         aaguid: None,
-        scope: ScopeSet::parse(scope),
+        scope: &scope_set,
         nonce: None,
         code_challenge: None,
         code_challenge_method: None,
-        iat: now.as_second(),
-        exp: now.as_second() + 300,
     };
 
-    let code = auth_code
-        .encode(state.config().jwt_secret.expose_secret())
-        .expect("Failed to encode auth code");
+    let code = issue_authorization_code(state, code_params)
+        .await
+        .expect("Failed to issue authorization code");
 
     let auth_header = client.basic_auth_header();
 
@@ -937,7 +1002,9 @@ async fn test_auth_code_flow_token_revocation() {
 
 #[tokio::test]
 async fn test_oauth_access_token_rejected_at_management_endpoints() {
-    // OAuth access token should be rejected at management endpoints with 403
+    // OAuth access tokens (ES256, RFC 9068) are rejected at management endpoints
+    // because the management endpoint only decodes HS256 FIDO2 session tokens.
+    // The ES256 token fails HS256 decoding, returning 401 (unauthorized).
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.db, "oauth-mgmt@example.com").await;
@@ -955,14 +1022,16 @@ async fn test_oauth_access_token_rejected_at_management_endpoints() {
     )
     .await;
 
+    // ES256 access tokens cannot be decoded by the HS256-only management
+    // endpoint, so they fail at the JWT decode step with 401.
     assert_eq!(
         status,
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "OAuth access token should be rejected at management endpoints: {}",
         body
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["code"], "insufficient_scope");
+    assert_eq!(error["code"], "unauthorized");
 }
 
 #[tokio::test]
@@ -1128,8 +1197,8 @@ async fn test_id_token_scope_aware() {
 
 #[tokio::test]
 async fn test_backward_compat_token_without_scope() {
-    // Legacy JWTs without scope field should deserialize as None
-    let claims_json = r#"{"sub":"user-id","email":"test@example.com","iat":1700000000,"exp":1700028800,"purpose":"fido2_session"}"#;
+    // JWTs without scope field should deserialize as None
+    let claims_json = r#"{"iss":"https://vouch.example.com","aud":"https://vouch.example.com","sub":"user-id","email":"test@example.com","iat":1700000000,"exp":1700028800,"purpose":"fido2_session"}"#;
     let claims: crate::services::auth::SessionClaims =
         serde_json::from_str(claims_json).expect("Should deserialize without scope");
     assert!(
@@ -1151,6 +1220,8 @@ async fn test_token_exchange_uses_subject_scope() {
     let (access_token, _id_token) =
         issue_oauth_access_token_with_scope(&app, &state, &user, &auth_id, &client, "openid").await;
 
+    let auth_header = client.basic_auth_header();
+
     // Exchange and request "openid email" — should only get "openid" (intersection)
     let (status, body) = http_post_form(
         &app,
@@ -1159,7 +1230,7 @@ async fn test_token_exchange_uses_subject_scope() {
             "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={}&subject_token_type=urn:ietf:params:oauth:token-type:access_token&scope=openid email",
             access_token
         ),
-        &[],
+        &[("Authorization", &auth_header)],
     )
     .await;
 
@@ -1169,5 +1240,460 @@ async fn test_token_exchange_uses_subject_scope() {
     assert_eq!(
         scope, "openid",
         "Exchange should intersect with subject token's scope"
+    );
+}
+
+// ========================================================================
+// WWW-Authenticate Header Tests (RFC 6750 Section 3)
+// ========================================================================
+
+#[tokio::test]
+async fn test_userinfo_401_includes_www_authenticate() {
+    // RFC 6750 Section 3: 401 responses MUST include WWW-Authenticate header
+    let (app, _state) = test_app().await;
+
+    // No token — should get 401 with WWW-Authenticate
+    let response = http_get_full(&app, "/oauth/userinfo", &[]).await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+
+    let www_auth = response
+        .headers
+        .get("WWW-Authenticate")
+        .expect("401 response must include WWW-Authenticate header");
+    let www_auth_str = www_auth
+        .to_str()
+        .expect("WWW-Authenticate should be a string");
+    assert!(
+        www_auth_str.starts_with("Bearer"),
+        "WWW-Authenticate should use Bearer scheme, got: {}",
+        www_auth_str
+    );
+    assert!(
+        www_auth_str.contains("error="),
+        "WWW-Authenticate should include error parameter, got: {}",
+        www_auth_str
+    );
+}
+
+#[tokio::test]
+async fn test_userinfo_invalid_token_includes_www_authenticate() {
+    // RFC 6750 Section 3.1: invalid_token error with WWW-Authenticate
+    let (app, _state) = test_app().await;
+
+    let response = http_get_full(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", "Bearer invalid_token_here")],
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    let www_auth = response
+        .headers
+        .get("WWW-Authenticate")
+        .expect("401 response must include WWW-Authenticate header");
+    let www_auth_str = www_auth
+        .to_str()
+        .expect("WWW-Authenticate should be a string");
+    assert!(
+        www_auth_str.contains("invalid_token"),
+        "WWW-Authenticate should include invalid_token error, got: {}",
+        www_auth_str
+    );
+}
+
+#[tokio::test]
+async fn test_userinfo_unsupported_scheme_includes_www_authenticate() {
+    // RFC 6750 Section 3: Unsupported auth scheme should return 401 with WWW-Authenticate
+    let (app, _state) = test_app().await;
+
+    let response = http_get_full(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", "NotBearer token")],
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+    let www_auth = response
+        .headers
+        .get("WWW-Authenticate")
+        .expect("401 response must include WWW-Authenticate header");
+    let www_auth_str = www_auth
+        .to_str()
+        .expect("WWW-Authenticate should be a string");
+    assert!(
+        www_auth_str.starts_with("Bearer"),
+        "WWW-Authenticate should use Bearer scheme"
+    );
+}
+
+// ========================================================================
+// DPoP Integration Tests (RFC 9449)
+// ========================================================================
+
+/// Helper: Generate an EC P-256 key pair and return (signing_key, DPoP JWK header fields).
+fn generate_dpop_key_pair() -> (aws_lc_rs::signature::EcdsaKeyPair, serde_json::Value) {
+    use aws_lc_rs::signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair};
+
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let pkcs8 = EcdsaKeyPair::generate_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &rng)
+        .expect("Failed to generate key");
+    let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, pkcs8.as_ref())
+        .expect("Failed to parse key");
+
+    // Extract x/y coordinates from uncompressed public key (65 bytes: 0x04 || x || y)
+    let pub_bytes = key_pair.public_key().as_ref();
+    let x = URL_SAFE_NO_PAD.encode(&pub_bytes[1..33]);
+    let y = URL_SAFE_NO_PAD.encode(&pub_bytes[33..65]);
+
+    let jwk = serde_json::json!({
+        "kty": "EC",
+        "crv": "P-256",
+        "x": x,
+        "y": y
+    });
+
+    (key_pair, jwk)
+}
+
+/// Helper: Create and sign a DPoP proof JWT for the given method and URI.
+fn create_dpop_proof(
+    key_pair: &aws_lc_rs::signature::EcdsaKeyPair,
+    jwk: &serde_json::Value,
+    method: &str,
+    uri: &str,
+    nonce: Option<&str>,
+    access_token: Option<&str>,
+) -> String {
+    use aws_lc_rs::digest;
+
+    // Build header
+    let header = serde_json::json!({
+        "typ": "dpop+jwt",
+        "alg": "ES256",
+        "jwk": jwk
+    });
+
+    let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&header).unwrap());
+
+    // Build claims
+    let jti = uuid::Uuid::now_v7().to_string();
+    let now = jiff::Timestamp::now().as_second();
+    let mut claims = serde_json::json!({
+        "jti": jti,
+        "htm": method,
+        "htu": uri,
+        "iat": now
+    });
+
+    if let Some(n) = nonce {
+        claims["nonce"] = serde_json::json!(n);
+    }
+
+    if let Some(token) = access_token {
+        // Compute ath (access token hash)
+        let hash = digest::digest(&digest::SHA256, token.as_bytes());
+        let ath = URL_SAFE_NO_PAD.encode(hash.as_ref());
+        claims["ath"] = serde_json::json!(ath);
+    }
+
+    let claims_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&claims).unwrap());
+
+    // Sign with ES256
+    let signing_input = format!("{}.{}", header_b64, claims_b64);
+    let rng = aws_lc_rs::rand::SystemRandom::new();
+    let sig = key_pair
+        .sign(&rng, signing_input.as_bytes())
+        .expect("Failed to sign DPoP proof");
+    let sig_b64 = URL_SAFE_NO_PAD.encode(sig.as_ref());
+
+    format!("{}.{}.{}", header_b64, claims_b64, sig_b64)
+}
+
+#[tokio::test]
+async fn test_dpop_token_exchange_with_proof() {
+    // RFC 9449: Token endpoint should accept DPoP proof and return DPoP-bound token
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "dpop-exchange@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    let (access_token, _id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    // Generate DPoP key pair and proof
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let dpop_proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "POST",
+        &format!("{}/oauth/token", state.config().base_url),
+        None,
+        None,
+    );
+
+    let auth_header = client.basic_auth_header();
+
+    // Token exchange with DPoP proof
+    let response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={}&subject_token_type=urn:ietf:params:oauth:token-type:access_token",
+            access_token
+        ),
+        &[
+            ("Authorization", &auth_header),
+            ("DPoP", &dpop_proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "DPoP token exchange should succeed: {}",
+        response.body
+    );
+    let body: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert!(
+        body.get("access_token").is_some(),
+        "Should return access_token"
+    );
+
+    // RFC 9449 Section 5: token_type should be "DPoP" when DPoP was used
+    let token_type = body["token_type"].as_str().unwrap_or("");
+    assert_eq!(
+        token_type, "DPoP",
+        "Token type should be DPoP when DPoP proof is provided"
+    );
+}
+
+#[tokio::test]
+async fn test_dpop_userinfo_with_dpop_scheme() {
+    // RFC 9449 Section 7.1: UserInfo with DPoP-bound token and DPoP authorization scheme
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "dpop-userinfo@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Generate DPoP key pair
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+
+    // Get an access token with DPoP binding via token exchange
+    let (subject_token, _id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let dpop_proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "POST",
+        &format!("{}/oauth/token", state.config().base_url),
+        None,
+        None,
+    );
+
+    let auth_header = client.basic_auth_header();
+
+    let exchange_response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={}&subject_token_type=urn:ietf:params:oauth:token-type:access_token",
+            subject_token
+        ),
+        &[
+            ("Authorization", &auth_header),
+            ("DPoP", &dpop_proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        exchange_response.status,
+        StatusCode::OK,
+        "Exchange should succeed: {}",
+        exchange_response.body
+    );
+    let exchange_body: serde_json::Value =
+        serde_json::from_str(&exchange_response.body).expect("Valid JSON");
+    let dpop_bound_token = exchange_body["access_token"]
+        .as_str()
+        .expect("access_token present");
+
+    // Now use the DPoP-bound token at userinfo with DPoP scheme
+    let userinfo_proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "GET",
+        &format!("{}/oauth/userinfo", state.config().base_url),
+        None,
+        Some(dpop_bound_token),
+    );
+
+    let response = http_get_full(
+        &app,
+        "/oauth/userinfo",
+        &[
+            ("Authorization", &format!("DPoP {}", dpop_bound_token)),
+            ("DPoP", &userinfo_proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "UserInfo with DPoP scheme should succeed: {}",
+        response.body
+    );
+    let userinfo: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert!(userinfo.get("sub").is_some(), "sub claim must be present");
+}
+
+#[tokio::test]
+async fn test_dpop_userinfo_key_mismatch_rejected() {
+    // RFC 9449 Section 7.1: DPoP proof made with a different key than the token binding
+    // should be rejected.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "dpop-mismatch@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Generate two different DPoP key pairs
+    let (dpop_key1, dpop_jwk1) = generate_dpop_key_pair();
+    let (dpop_key2, dpop_jwk2) = generate_dpop_key_pair();
+
+    // Get a DPoP-bound token using key1
+    let (subject_token, _id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let dpop_proof1 = create_dpop_proof(
+        &dpop_key1,
+        &dpop_jwk1,
+        "POST",
+        &format!("{}/oauth/token", state.config().base_url),
+        None,
+        None,
+    );
+
+    let auth_header = client.basic_auth_header();
+
+    let exchange_response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={}&subject_token_type=urn:ietf:params:oauth:token-type:access_token",
+            subject_token
+        ),
+        &[
+            ("Authorization", &auth_header),
+            ("DPoP", &dpop_proof1),
+        ],
+    )
+    .await;
+
+    assert_eq!(exchange_response.status, StatusCode::OK);
+    let exchange_body: serde_json::Value =
+        serde_json::from_str(&exchange_response.body).expect("Valid JSON");
+    let dpop_bound_token = exchange_body["access_token"]
+        .as_str()
+        .expect("access_token present");
+
+    // Try to use the token with key2 (different key) — should fail
+    let bad_proof = create_dpop_proof(
+        &dpop_key2,
+        &dpop_jwk2,
+        "GET",
+        &format!("{}/oauth/userinfo", state.config().base_url),
+        None,
+        Some(dpop_bound_token),
+    );
+
+    let response = http_get_full(
+        &app,
+        "/oauth/userinfo",
+        &[
+            ("Authorization", &format!("DPoP {}", dpop_bound_token)),
+            ("DPoP", &bad_proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "DPoP with mismatched key should be rejected: {}",
+        response.body
+    );
+}
+
+#[tokio::test]
+async fn test_dpop_scheme_without_proof_rejected() {
+    // RFC 9449: Using DPoP authorization scheme without a DPoP proof header should fail
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "dpop-noproof@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let response = http_get_full(
+        &app,
+        "/oauth/userinfo",
+        &[("Authorization", &format!("DPoP {}", token))],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::BAD_REQUEST,
+        "DPoP scheme without proof should be rejected: {}",
+        response.body
+    );
+}
+
+#[tokio::test]
+async fn test_dpop_non_bound_token_with_dpop_scheme_rejected() {
+    // RFC 9449 Section 7.1: Using DPoP scheme with a non-DPoP-bound token should fail
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "dpop-nonbound@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Get a regular (non-DPoP-bound) access token
+    let (access_token, _id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let dpop_proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "GET",
+        &format!("{}/oauth/userinfo", state.config().base_url),
+        None,
+        Some(&access_token),
+    );
+
+    // Use DPoP scheme with non-DPoP-bound token
+    let response = http_get_full(
+        &app,
+        "/oauth/userinfo",
+        &[
+            ("Authorization", &format!("DPoP {}", access_token)),
+            ("DPoP", &dpop_proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::UNAUTHORIZED,
+        "Non-DPoP-bound token with DPoP scheme should be rejected: {}",
+        response.body
     );
 }

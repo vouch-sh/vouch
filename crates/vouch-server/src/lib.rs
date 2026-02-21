@@ -4,31 +4,25 @@
 //! This crate provides the Vouch identity server with OIDC provider,
 //! WebAuthn authentication, and credential issuance.
 
-pub(crate) mod ber;
-pub mod cleanup;
 pub mod config;
+pub mod crypto;
 pub mod db;
-pub mod encrypt_config;
-pub(crate) mod extractors;
 pub mod handlers;
-pub(crate) mod pem;
-pub mod s3_config;
+pub mod infra;
 pub mod services;
-pub mod ssh_ca;
-pub mod tls;
-pub mod tpm_decrypt;
-pub mod webauthn_verify;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
 
 // Re-export main types
 pub use config::ServerConfig;
+pub use crypto::webauthn_verify::{
+    CoseVerifier, RealCoseVerifier, VerificationResult, VerifyError,
+};
 pub use db::User;
-pub use webauthn_verify::{CoseVerifier, RealCoseVerifier, VerificationResult, VerifyError};
 
 #[cfg(any(test, feature = "test-utils"))]
-pub use webauthn_verify::TestCoseVerifier;
+pub use crypto::webauthn_verify::TestCoseVerifier;
 
 use arc_swap::ArcSwap;
 use axum::{
@@ -74,7 +68,7 @@ pub struct AppState {
     /// WebAuthn instance.
     pub webauthn: webauthn_rs::Webauthn,
     /// SSH Certificate Authority (optional, None if disabled).
-    pub ssh_ca: Option<ssh_ca::SshCa>,
+    pub ssh_ca: Option<crypto::ssh_ca::SshCa>,
     /// RFC 9449 DPoP state (nonce manager, JTI cache).
     pub dpop: services::oidc::dpop::DpopState,
     /// OIDC signing key for ES256 JWT signing.

@@ -104,8 +104,12 @@ pub async fn create_session(
 }
 
 /// Get a session by token hash.
+///
+/// Only returns sessions that have not yet expired. This enforces session
+/// expiration at the database query level independently of JWT `exp` checks.
 pub async fn get_session_by_token_hash(pool: &Pool, token_hash: &str) -> Result<Option<Session>> {
     let db_type = pool.db_type();
+    let now = jiff::Timestamp::now().to_string();
 
     let sql = {
         let query = Query::select()
@@ -119,6 +123,7 @@ pub async fn get_session_by_token_hash(pool: &Pool, token_hash: &str) -> Result<
             ])
             .from(Sessions::Table)
             .and_where(Expr::col(Sessions::TokenHash).eq(token_hash))
+            .and_where(Expr::col(Sessions::ExpiresAt).gt(&now))
             .to_owned();
         query.build_sql(db_type)
     };
@@ -153,6 +158,30 @@ pub async fn delete_expired_sessions(pool: &Pool, now: &str) -> Result<u64> {
         let query = Query::delete()
             .from_table(Sessions::Table)
             .and_where(Expr::col(Sessions::ExpiresAt).lt(now))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
+
+    Ok(result.rows_affected())
+}
+
+/// Delete OAuth access token sessions for a user.
+///
+/// Used by authorization code replay detection (RFC 6749 Section 10.5) to
+/// revoke all access tokens that may have been issued from a compromised code.
+pub async fn delete_oauth_sessions_for_user(pool: &Pool, user_id: &str) -> Result<u64> {
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(Sessions::Table)
+            .and_where(Expr::col(Sessions::UserId).eq(user_id))
+            .and_where(
+                Expr::col(Sessions::SessionType)
+                    .eq(crate::db::SessionPurpose::OAuthAccessToken.as_str()),
+            )
             .to_owned();
         query.build_sql(db_type)
     };

@@ -7,6 +7,7 @@
 
 use crate::AppState;
 use crate::services::ServiceError;
+use crate::services::oidc::amr::ACR_AAL3;
 use crate::services::oidc::scope::OAuthScope;
 use serde::Serialize;
 use std::sync::Arc;
@@ -56,6 +57,9 @@ pub struct OidcDiscoveryDocument {
     /// RFC 9449 Section 5.1: Supported DPoP JWS signing algorithms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dpop_signing_alg_values_supported: Option<Vec<String>>,
+    /// OIDC Discovery 1.0 Section 3: OPTIONAL. Supported ACR values.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acr_values_supported: Option<Vec<String>>,
     /// RFC 9207 Section 3: Authorization Response Issuer Identifier support.
     /// Indicates that the authorization server includes the `iss` parameter
     /// in authorization responses to prevent mix-up attacks.
@@ -113,12 +117,17 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "aud".to_string(),
             "exp".to_string(),
             "iat".to_string(),
+            "auth_time".to_string(),
+            "nonce".to_string(),
+            "at_hash".to_string(),
             "email".to_string(),
             "email_verified".to_string(),
             "hardware_verified".to_string(),
             "hardware_aaguid".to_string(),
+            "amr".to_string(),
+            "acr".to_string(),
         ],
-        code_challenge_methods_supported: vec!["S256".to_string(), "plain".to_string()],
+        code_challenge_methods_supported: vec!["S256".to_string()],
         dpop_signing_alg_values_supported: if state.config().dpop_enabled {
             Some(vec![
                 "ES256".to_string(),
@@ -128,6 +137,7 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         } else {
             None
         },
+        acr_values_supported: Some(vec![ACR_AAL3.to_string()]),
         // RFC 9207: Advertise that we include `iss` in authorization responses
         authorization_response_iss_parameter_supported: true,
     }

@@ -13,6 +13,7 @@
 //! - [RFC 7662 - Token Introspection](https://www.rfc-editor.org/rfc/rfc7662)
 //! - [RFC 8628 - Device Authorization Grant](https://www.rfc-editor.org/rfc/rfc8628)
 //! - [RFC 8693 - Token Exchange](https://www.rfc-editor.org/rfc/rfc8693)
+//! - [RFC 9068 - JWT Profile for OAuth 2.0 Access Tokens](https://www.rfc-editor.org/rfc/rfc9068)
 //! - [RFC 9449 - DPoP](https://www.rfc-editor.org/rfc/rfc9449)
 //!
 //! ## Module Organization
@@ -24,6 +25,7 @@
 //! - [`exchange`] - Token exchange (RFC 8693)
 //! - [`introspection`] - Token introspection and revocation
 
+pub mod amr;
 pub mod authorization;
 pub mod discovery;
 pub mod dpop;

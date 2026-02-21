@@ -211,9 +211,9 @@ fn print_expiry(expires_in: u64) {
     if let Ok(expiry_ts) = now.timestamp().checked_add(duration) {
         let expiry = expiry_ts.to_zoned(now.time_zone().clone());
         let value = if hours > 0 {
-            format!("{} (in {hours}h {mins}m)", expiry.strftime("%H:%M"))
+            format!("{} (in {hours}h {mins}m)", expiry.strftime("%H:%M %Z"))
         } else {
-            format!("{} (in {mins}m)", expiry.strftime("%H:%M"))
+            format!("{} (in {mins}m)", expiry.strftime("%H:%M %Z"))
         };
         println!("  {label:<LABEL_WIDTH$} {}", color_fn(&value));
     } else {

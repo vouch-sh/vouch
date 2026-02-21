@@ -106,6 +106,17 @@ pub async fn run_cleanup(
         }
     }
 
+    // Clean up expired authorization codes (RFC 6749 Section 10.5)
+    match db::delete_expired_authorization_codes(db).await {
+        Ok(count) if count > 0 => {
+            tracing::info!("Cleaned up {count} expired authorization codes");
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!("Failed to clean up expired authorization codes: {e}");
+        }
+    }
+
     // Clean up expired enrollment sessions
     match db::delete_expired_enrollment_sessions(db).await {
         Ok(count) if count > 0 => {

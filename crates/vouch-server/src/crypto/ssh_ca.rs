@@ -29,7 +29,7 @@ impl SshCa {
     /// rather than a file path. Supports both raw PEM and base64-encoded PEM.
     pub fn from_pem(pem_content: &str, rp_id: &str) -> Result<Self> {
         let pem =
-            crate::pem::decode_base64_pem(pem_content).context("Failed to decode SSH CA key")?;
+            super::pem::decode_base64_pem(pem_content).context("Failed to decode SSH CA key")?;
         let private_key = PrivateKey::from_openssh(pem.trim())
             .map_err(|e| anyhow::anyhow!("Failed to parse SSH CA key from PEM: {e}"))?;
 

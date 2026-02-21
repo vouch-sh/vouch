@@ -1179,9 +1179,20 @@ mod token_exchange {
     async fn test_token_exchange_invalid_subject_token() {
         let harness = TestHarness::new().await;
 
+        // Token exchange requires client authentication (RFC 8693)
+        let (user, _auth_id, _token) = harness
+            .create_authenticated_user("exchange-invalid-subj@example.com")
+            .await
+            .expect("Failed to create authenticated user");
+        let client = harness
+            .create_oauth_client(&user.id)
+            .await
+            .expect("Failed to create OAuth client");
+        let auth_header = client.basic_auth_header();
+
         let body = "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token=invalid&subject_token_type=urn:ietf:params:oauth:token-type:access_token";
         let response = harness
-            .post_form("/oauth/token", body)
+            .post_form_with_auth("/oauth/token", body, &auth_header)
             .await
             .expect("Failed to exchange token");
 
@@ -1195,17 +1206,24 @@ mod token_exchange {
     async fn test_token_exchange_valid() {
         let harness = TestHarness::new().await;
 
-        let (_user, _auth_id, token) = harness
+        let (user, _auth_id, token) = harness
             .create_authenticated_user("exchange@example.com")
             .await
             .expect("Failed to create authenticated user");
+
+        // Token exchange requires client authentication (RFC 8693)
+        let client = harness
+            .create_oauth_client(&user.id)
+            .await
+            .expect("Failed to create OAuth client");
+        let auth_header = client.basic_auth_header();
 
         let body = format!(
             "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={}&subject_token_type=urn:ietf:params:oauth:token-type:access_token",
             token
         );
         let response = harness
-            .post_form("/oauth/token", &body)
+            .post_form_with_auth("/oauth/token", &body, &auth_header)
             .await
             .expect("Failed to exchange token");
 
@@ -1228,17 +1246,24 @@ mod token_exchange {
     async fn test_token_exchange_scope_downgrade() {
         let harness = TestHarness::new().await;
 
-        let (_user, _auth_id, token) = harness
+        let (user, _auth_id, token) = harness
             .create_authenticated_user("exchange-scope@example.com")
             .await
             .expect("Failed to create authenticated user");
+
+        // Token exchange requires client authentication (RFC 8693)
+        let client = harness
+            .create_oauth_client(&user.id)
+            .await
+            .expect("Failed to create OAuth client");
+        let auth_header = client.basic_auth_header();
 
         let body = format!(
             "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={}&subject_token_type=urn:ietf:params:oauth:token-type:access_token&scope=openid",
             token
         );
         let response = harness
-            .post_form("/oauth/token", &body)
+            .post_form_with_auth("/oauth/token", &body, &auth_header)
             .await
             .expect("Failed to exchange token");
 
@@ -1255,17 +1280,24 @@ mod token_exchange {
     async fn test_token_exchange_invalid_token_type() {
         let harness = TestHarness::new().await;
 
-        let (_user, _auth_id, token) = harness
+        let (user, _auth_id, token) = harness
             .create_authenticated_user("exchange-bad-type@example.com")
             .await
             .expect("Failed to create authenticated user");
+
+        // Token exchange requires client authentication (RFC 8693)
+        let client = harness
+            .create_oauth_client(&user.id)
+            .await
+            .expect("Failed to create OAuth client");
+        let auth_header = client.basic_auth_header();
 
         let body = format!(
             "grant_type=urn:ietf:params:oauth:grant-type:token-exchange&subject_token={}&subject_token_type=invalid:token:type",
             token
         );
         let response = harness
-            .post_form("/oauth/token", &body)
+            .post_form_with_auth("/oauth/token", &body, &auth_header)
             .await
             .expect("Failed to exchange token");
 
@@ -2494,7 +2526,7 @@ mod encoding_verification {
     #[tokio::test]
     async fn test_typed_verification_functions() {
         use vouch_cli::{FidoDevice, MockFidoDevice};
-        use vouch_server::webauthn_verify::{
+        use vouch_server::crypto::webauthn_verify::{
             TestCoseVerifier, verify_assertion_typed_with_verifier,
         };
 

@@ -10,6 +10,7 @@ pub mod credentials;
 pub mod device;
 pub mod enroll;
 pub mod enroll_keys;
+pub(crate) mod extractors;
 pub mod github;
 pub mod home;
 pub mod install;
@@ -21,7 +22,7 @@ pub mod scim;
 
 // Re-export commonly used utilities
 pub(crate) use common::{
-    clear_session_cookie, create_session_cookie, extract_session, extract_session_from_cookie,
-    extract_session_with_email, generate_challenge, generate_random_bytes, hash_token, json_error,
-    validate_registration_attestation,
+    clear_session_cookie, create_session_cookie, decode_session_jwt, extract_session,
+    extract_session_from_cookie, extract_session_with_email, generate_challenge,
+    generate_random_bytes, hash_token, json_error, validate_registration_attestation,
 };

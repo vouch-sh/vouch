@@ -8,6 +8,7 @@
 use crate::AppState;
 use crate::db::SessionPurpose;
 use crate::services::OAuthErrorCode;
+use crate::services::auth::decode_token;
 use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::dpop::{self, DpopError};
 use crate::services::oidc::scope::OAuthScope;
@@ -15,11 +16,12 @@ use crate::services::oidc::token::validate_session_token;
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 /// User info response (OIDC Core Section 5.3.2).
 ///
@@ -46,7 +48,11 @@ pub struct UserInfoResponse {
 ///
 /// Returns information about the authenticated user.
 /// Supports both `Bearer` and `DPoP` authorization schemes (RFC 9449 Section 7.1).
-pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
+pub async fn userinfo(
+    State(state): State<Arc<AppState>>,
+    method: Method,
+    headers: HeaderMap,
+) -> Response {
     // Extract token and scheme from Authorization header
     let auth_header = match headers
         .get(header::AUTHORIZATION)
@@ -91,7 +97,7 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         match dpop::validate_dpop_at_resource(
             dpop_header,
             token,
-            "GET",
+            method.as_str(),
             &full_uri,
             &state.dpop,
             state.config().dpop_max_age_seconds,
@@ -99,15 +105,45 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         )
         .await
         {
-            Ok(_proof) => {
+            Ok(proof) => {
                 // DPoP proof is valid (signature, ath, jti, nonce all verified).
                 //
-                // TODO(RFC 9449 Section 7.1): Full sender-constrained token validation
-                // requires checking that _proof.jkt matches the cnf.jkt associated with
-                // this access token at issuance time. This requires storing the DPoP
-                // thumbprint in the sessions table (dpop_jkt column) during token exchange.
-                // Currently the ath (access token hash) check provides meaningful protection:
-                // an attacker needs the actual access token to forge a valid proof.
+                // RFC 9449 Section 7.1: Verify sender-constrained token binding by
+                // comparing the proof's jkt against the access token's cnf.jkt claim.
+                // This ensures the DPoP proof was made with the same key that was
+                // bound to the token at issuance time.
+                //
+                // RFC 9449 Section 7.1: If DPoP authorization scheme is used,
+                // the token MUST be DPoP-bound (have a cnf.jkt claim). Reject
+                // non-DPoP-bound tokens presented with the DPoP scheme.
+                if let Some(decoded) = decode_token(
+                    token,
+                    state.config().jwt_secret_bytes(),
+                    &state.oidc_key,
+                    &state.config().base_url,
+                ) {
+                    match decoded.cnf() {
+                        Some(cnf) => {
+                            let is_valid: bool =
+                                proof.jkt.as_bytes().ct_eq(cnf.jkt.as_bytes()).into();
+                            if !is_valid {
+                                return oauth_error(
+                                    StatusCode::UNAUTHORIZED,
+                                    OAuthErrorCode::InvalidDpopProof.as_str(),
+                                    "DPoP proof key does not match token binding",
+                                );
+                            }
+                        }
+                        None => {
+                            // Token is not DPoP-bound but DPoP scheme was used
+                            return oauth_error(
+                                StatusCode::UNAUTHORIZED,
+                                OAuthErrorCode::InvalidDpopProof.as_str(),
+                                "DPoP scheme used but token is not DPoP-bound",
+                            );
+                        }
+                    }
+                }
             }
             Err(DpopError::UseNonce(nonce)) => {
                 return (
@@ -159,26 +195,24 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         }
     };
 
-    let validated = result;
-
     // Determine whether email claims should be returned based on granted scope.
     // Backward compat: legacy OAuth tokens without a scope field are treated as
     // having full scope if they are OAuthAccessToken purpose.
-    let has_email_scope = match &validated.scope {
+    let has_email_scope = match &result.scope {
         Some(scope_set) => scope_set.contains(OAuthScope::Email),
-        None => validated.session.session_type == SessionPurpose::OAuthAccessToken.as_str(),
+        None => result.session.session_type == SessionPurpose::OAuthAccessToken.as_str(),
     };
 
     Json(UserInfoResponse {
-        sub: validated.user.email.clone(),
+        sub: result.user.id.clone(),
         email: if has_email_scope {
-            Some(validated.user.email)
+            Some(result.user.email)
         } else {
             None
         },
         email_verified: if has_email_scope { Some(true) } else { None },
-        hardware_verified: validated.authenticator.is_some(),
-        hardware_aaguid: validated.authenticator.and_then(|a| a.aaguid),
+        hardware_verified: result.authenticator.is_some(),
+        hardware_aaguid: result.authenticator.and_then(|a| a.aaguid),
     })
     .into_response()
 }

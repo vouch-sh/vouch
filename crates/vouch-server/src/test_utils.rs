@@ -134,7 +134,11 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         )
         .route("/oauth/jwks", get(handlers::oidc::jwks))
         .route("/oauth/authorize", get(handlers::oidc::authorize))
-        .route("/oauth/userinfo", get(handlers::oidc::userinfo))
+        // OIDC Core Section 5.3.1: UserInfo MUST support GET and POST
+        .route(
+            "/oauth/userinfo",
+            get(handlers::oidc::userinfo).post(handlers::oidc::userinfo),
+        )
         .route("/oauth/revoke", post(handlers::oidc::revoke))
         .route("/oauth/introspect", post(handlers::oidc::introspect))
         .route("/oauth/token", post(handlers::oidc::token))
@@ -313,9 +317,65 @@ pub async fn http_request(
     (status, body_str)
 }
 
+/// Full response from an HTTP request, including headers.
+pub struct HttpResponse {
+    /// HTTP status code.
+    pub status: StatusCode,
+    /// Response body as a string.
+    pub body: String,
+    /// Response headers.
+    pub headers: axum::http::HeaderMap,
+}
+
+/// Helper for making test HTTP requests that returns full response including headers.
+pub async fn http_request_full(
+    app: &Router,
+    method: &str,
+    uri: &str,
+    body: Option<String>,
+    headers: &[(&str, &str)],
+) -> HttpResponse {
+    let mut req_builder = Request::builder().method(method).uri(uri);
+
+    for (name, value) in headers {
+        req_builder = req_builder.header(*name, *value);
+    }
+
+    let body = match body {
+        Some(b) => Body::from(b),
+        None => Body::empty(),
+    };
+
+    let request = req_builder.body(body).expect("Failed to build request");
+
+    let response: axum::response::Response = app
+        .clone()
+        .oneshot(request)
+        .await
+        .expect("Failed to execute request");
+
+    let status = response.status();
+    let response_headers = response.headers().clone();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .expect("Failed to read response body");
+    let body_str = String::from_utf8_lossy(&body_bytes).to_string();
+
+    HttpResponse {
+        status,
+        body: body_str,
+        headers: response_headers,
+    }
+}
+
 /// Helper for making GET requests.
 pub async fn http_get(app: &Router, uri: &str, headers: &[(&str, &str)]) -> (StatusCode, String) {
     http_request(app, "GET", uri, None, headers).await
+}
+
+/// Helper for making GET requests that returns full response including headers.
+pub async fn http_get_full(app: &Router, uri: &str, headers: &[(&str, &str)]) -> HttpResponse {
+    http_request_full(app, "GET", uri, None, headers).await
 }
 
 /// Helper for making POST requests with form body.
@@ -328,6 +388,18 @@ pub async fn http_post_form(
     let mut all_headers = vec![("Content-Type", "application/x-www-form-urlencoded")];
     all_headers.extend_from_slice(headers);
     http_request(app, "POST", uri, Some(body.to_string()), &all_headers).await
+}
+
+/// Helper for making POST requests with form body that returns full response including headers.
+pub async fn http_post_form_full(
+    app: &Router,
+    uri: &str,
+    body: &str,
+    headers: &[(&str, &str)],
+) -> HttpResponse {
+    let mut all_headers = vec![("Content-Type", "application/x-www-form-urlencoded")];
+    all_headers.extend_from_slice(headers);
+    http_request_full(app, "POST", uri, Some(body.to_string()), &all_headers).await
 }
 
 /// Helper for making POST requests with JSON body.
@@ -366,7 +438,7 @@ pub async fn http_delete(
 /// Create a valid test JWT session token.
 pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: &str) -> String {
     use jiff::{Span, Timestamp};
-    use jsonwebtoken::{EncodingKey, Header, encode};
+    use jsonwebtoken::{EncodingKey, encode};
 
     let now = Timestamp::now();
     let exp = now
@@ -374,7 +446,10 @@ pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: 
         .map(|t| t.as_second())
         .unwrap_or(now.as_second() + 28800);
 
+    let base_url = state.config().base_url.clone();
     let claims = crate::services::auth::SessionClaims {
+        iss: base_url.clone(),
+        aud: base_url,
         sub: user_id.to_string(),
         email: email.to_string(),
         authenticator_id: Some(auth_id.to_string()),
@@ -385,7 +460,7 @@ pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: 
     };
 
     encode(
-        &Header::default(),
+        &crate::crypto::jwt::JwtType::Session.to_header(),
         &claims,
         &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
@@ -396,11 +471,14 @@ pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: 
 #[allow(dead_code)]
 pub fn create_expired_token(state: &AppState, user_id: &str, email: &str, auth_id: &str) -> String {
     use jiff::Timestamp;
-    use jsonwebtoken::{EncodingKey, Header, encode};
+    use jsonwebtoken::{EncodingKey, encode};
 
     let now = Timestamp::now();
 
+    let base_url = state.config().base_url.clone();
     let claims = crate::services::auth::SessionClaims {
+        iss: base_url.clone(),
+        aud: base_url,
         sub: user_id.to_string(),
         email: email.to_string(),
         authenticator_id: Some(auth_id.to_string()),
@@ -411,7 +489,7 @@ pub fn create_expired_token(state: &AppState, user_id: &str, email: &str, auth_i
     };
 
     encode(
-        &Header::default(),
+        &crate::crypto::jwt::JwtType::Session.to_header(),
         &claims,
         &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
@@ -570,4 +648,69 @@ pub async fn create_test_oauth_client(pool: &Pool, user_id: &str) -> TestOAuthCl
         client_id,
         client_secret: secret,
     }
+}
+
+// ============================================================================
+// JWT Test Helpers (shared between crypto::jwt and services::auth tests)
+// ============================================================================
+
+/// JWT secret for unit tests. NOT a real secret.
+pub const TEST_JWT_SECRET: &[u8] = b"test-jwt-secret-for-unit-tests-only";
+
+/// Issuer URL for unit tests.
+pub const TEST_ISSUER: &str = "https://example.com";
+
+/// Generate a fresh OIDC signing key for tests.
+pub fn make_test_oidc_key() -> OidcSigningKey {
+    OidcSigningKey::generate().expect("generate key")
+}
+
+/// Create a test ES256 access token signed by the given OIDC key.
+pub fn make_test_access_token(key: &OidcSigningKey) -> String {
+    use crate::services::auth::AccessTokenClaims;
+    use crate::services::oidc::scope::ScopeSet;
+
+    let claims = AccessTokenClaims {
+        iss: TEST_ISSUER.to_string(),
+        sub: "user-123".to_string(),
+        aud: "client-abc".to_string(),
+        exp: 9_999_999_999,
+        iat: 1_000_000_000,
+        jti: "jti-1".to_string(),
+        client_id: "client-abc".to_string(),
+        scope: Some(ScopeSet::parse("openid email")),
+        email: Some("test@example.com".to_string()),
+        email_verified: Some(true),
+        hardware_verified: true,
+        cnf: None,
+        auth_time: None,
+        act: None,
+        amr: None,
+        acr: None,
+    };
+    key.sign_access_token_jwt(&claims).expect("sign")
+}
+
+/// Create a test HS256 session token.
+pub fn make_test_session_token() -> String {
+    use crate::services::auth::SessionClaims;
+    use jsonwebtoken::{EncodingKey, encode};
+
+    let claims = SessionClaims {
+        iss: TEST_ISSUER.to_string(),
+        aud: TEST_ISSUER.to_string(),
+        sub: "user-456".to_string(),
+        email: "session@example.com".to_string(),
+        authenticator_id: Some("auth-1".to_string()),
+        iat: 1_000_000_000,
+        exp: 9_999_999_999,
+        purpose: crate::db::SessionPurpose::Fido2Session,
+        scope: None,
+    };
+    encode(
+        &crate::crypto::jwt::JwtType::Session.to_header(),
+        &claims,
+        &EncodingKey::from_secret(TEST_JWT_SECRET),
+    )
+    .expect("encode")
 }

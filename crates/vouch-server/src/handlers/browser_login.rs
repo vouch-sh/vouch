@@ -19,16 +19,15 @@
 //! - Single-use challenges
 //! - Session binding to authenticator
 
+use super::extractors::ClientInfo;
 use crate::AppState;
+use crate::crypto::webauthn_verify;
 use crate::db::{self, AuthEventParams, AuthEventType};
-use crate::extractors::ClientInfo;
 use crate::handlers::common::{
-    create_session_cookie, generate_challenge, get_auth_context, hash_token, json_error,
+    create_session_cookie, generate_challenge, get_auth_context, json_error,
 };
 use crate::impl_template_response;
 use crate::redact_email;
-use crate::services::auth::SessionClaims;
-use crate::webauthn_verify;
 use askama::Template;
 use axum::{
     Json,
@@ -40,7 +39,6 @@ use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -91,23 +89,19 @@ struct BrowserAuthenticationState {
 
 impl BrowserAuthenticationState {
     fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        encode(
-            &Header::default(),
+        crate::crypto::jwt::encode_state_token(
             self,
-            &EncodingKey::from_secret(secret.as_bytes()),
+            crate::crypto::jwt::JwtType::BrowserAuthenticationState,
+            secret.as_bytes(),
         )
     }
 
     fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        let mut validation = Validation::default();
-        validation.required_spec_claims.clear();
-        validation.validate_exp = false;
-        let data = decode::<Self>(
+        crate::crypto::jwt::decode_state_token(
             token,
-            &DecodingKey::from_secret(secret.as_bytes()),
-            &validation,
-        )?;
-        Ok(data.claims)
+            crate::crypto::jwt::JwtType::BrowserAuthenticationState,
+            secret.as_bytes(),
+        )
     }
 }
 
@@ -407,65 +401,26 @@ pub async fn browser_login_complete(
             )
         })?;
 
-    // Generate session token
-    let now = Timestamp::now();
-    let session_hours = i64::try_from(state.config().session_hours).map_err(|_| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "time_error",
-            "Invalid session hours",
-        )
-    })?;
-    let duration = Span::new().hours(session_hours);
-    let expires = now.checked_add(duration).map_err(|_| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "time_error",
-            "Time overflow",
-        )
-    })?;
-
-    let claims = SessionClaims {
-        sub: user.id.clone(),
-        email: user.email.clone(),
-        authenticator_id: Some(authenticator.id.clone()),
-        iat: now.as_second(),
-        exp: expires.as_second(),
-        purpose: crate::db::SessionPurpose::Fido2Session,
-        scope: None,
-    };
-
-    let token = encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
-    )
-    .map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "token_error",
-            &e.to_string(),
-        )
-    })?;
-
-    // Store session
-    let token_hash = hash_token(&token);
-    db::create_session(
-        &state.db,
-        &user.id,
-        &token_hash,
-        Some(&authenticator.id),
-        &expires.to_string(),
-        crate::db::SessionPurpose::Fido2Session.as_str(),
+    // Create session using the shared service function
+    let session_result = crate::services::auth::create_login_session(
+        &state,
+        crate::services::auth::CreateSessionParams {
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: Some(&authenticator.id),
+            purpose: crate::db::SessionPurpose::Fido2Session,
+            scope: None,
+        },
     )
     .await
     .map_err(|e| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "db_error",
+            "session_error",
             &e.to_string(),
         )
     })?;
+    let token = session_result.token;
 
     // Log successful login event (fire-and-forget, consistent with failure path)
     let auth_event_params = AuthEventParams {
@@ -494,6 +449,7 @@ pub async fn browser_login_complete(
     );
 
     // Create session cookie
+    let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
     let cookie = create_session_cookie(&token, session_hours * 3600);
 
     // Determine redirect URL
@@ -564,11 +520,12 @@ mod tests {
     #[test]
     fn test_browser_auth_state_encode_decode() {
         let secret = "test-secret";
+        let now = jiff::Timestamp::now().as_second();
         let state = BrowserAuthenticationState {
             challenge: vec![1, 2, 3, 4],
             rp_id: "example.com".to_string(),
-            created_at: 1000,
-            exp: 2000,
+            created_at: now,
+            exp: now + 300,
             pending_auth: Some("pending-123".to_string()),
         };
 
@@ -583,11 +540,12 @@ mod tests {
 
     #[test]
     fn test_browser_auth_state_decode_wrong_secret() {
+        let now = jiff::Timestamp::now().as_second();
         let state = BrowserAuthenticationState {
             challenge: vec![1, 2, 3, 4],
             rp_id: "example.com".to_string(),
-            created_at: 1000,
-            exp: 2000,
+            created_at: now,
+            exp: now + 300,
             pending_auth: None,
         };
 

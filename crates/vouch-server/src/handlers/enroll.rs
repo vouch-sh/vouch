@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Enrollment handlers for browser-based device authorization flow.
 
+use super::extractors::ClientInfo;
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
-use crate::extractors::ClientInfo;
 use crate::impl_template_response;
 use askama::Template;
 use axum::{
@@ -17,7 +17,6 @@ use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -30,7 +29,6 @@ use super::{
     json_error, validate_registration_attestation,
 };
 use crate::redact_email;
-use crate::services::auth::SessionClaims;
 
 // ============================================================================
 // COSE Key Serialization
@@ -232,27 +230,27 @@ struct BrowserRegistrationState {
     user_email: String,
     /// Serialized webauthn-rs PasskeyRegistration state for verification.
     webauthn_state: webauthn_rs::prelude::PasskeyRegistration,
+    /// RFC 8725 §3.11: Issued at time for expiration enforcement.
+    iat: i64,
+    /// RFC 8725 §3.11: Expiration time (5 minutes).
+    exp: i64,
 }
 
 impl BrowserRegistrationState {
     fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        encode(
-            &Header::default(),
+        crate::crypto::jwt::encode_state_token(
             self,
-            &EncodingKey::from_secret(secret.as_bytes()),
+            crate::crypto::jwt::JwtType::BrowserRegistrationState,
+            secret.as_bytes(),
         )
     }
 
     fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        let mut validation = Validation::default();
-        validation.required_spec_claims.clear();
-        validation.validate_exp = false;
-        let data = decode::<Self>(
+        crate::crypto::jwt::decode_state_token(
             token,
-            &DecodingKey::from_secret(secret.as_bytes()),
-            &validation,
-        )?;
-        Ok(data.claims)
+            crate::crypto::jwt::JwtType::BrowserRegistrationState,
+            secret.as_bytes(),
+        )
     }
 }
 
@@ -666,24 +664,21 @@ pub async fn oidc_callback(
         .unwrap_or_default();
     let authenticator_id = existing_auths.first().map(|a| a.id.clone());
 
-    let session_claims = SessionClaims {
-        sub: user.id.clone(),
-        email: user.email.clone(),
-        authenticator_id: authenticator_id.clone(),
-        iat: now.as_second(),
-        exp: expires.as_second(),
-        purpose: crate::db::SessionPurpose::Fido2Session,
-        scope: None,
-    };
-
-    let token = match encode(
-        &Header::default(),
-        &session_claims,
-        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
-    ) {
-        Ok(t) => t,
+    let session_result = match crate::services::auth::create_login_session(
+        &state,
+        crate::services::auth::CreateSessionParams {
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: authenticator_id.as_deref(),
+            purpose: crate::db::SessionPurpose::Fido2Session,
+            scope: None,
+        },
+    )
+    .await
+    {
+        Ok(r) => r,
         Err(e) => {
-            tracing::error!("Failed to create session token: {}", e);
+            tracing::error!("Failed to create session: {}", e);
             return ErrorTemplate {
                 title: "Error".to_string(),
                 message: "Failed to create session".to_string(),
@@ -692,27 +687,8 @@ pub async fn oidc_callback(
             .into_response();
         }
     };
-
-    // Store session in database
+    let token = session_result.token;
     let token_hash = hash_token(&token);
-    if let Err(e) = db::create_session(
-        &state.db,
-        &user.id,
-        &token_hash,
-        authenticator_id.as_deref(),
-        &expires.to_string(),
-        crate::db::SessionPurpose::Fido2Session.as_str(),
-    )
-    .await
-    {
-        tracing::error!("Failed to store session: {}", e);
-        return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "Failed to create session".to_string(),
-            back_url: None,
-        }
-        .into_response();
-    }
 
     // Handle CLI-initiated device auth flow
     let is_cli_flow = !stored_state.device_auth_id.is_empty()
@@ -906,11 +882,18 @@ pub async fn browser_register_start(
         })?;
 
     // Create registration state with webauthn verification state
+    let now = jiff::Timestamp::now();
+    let reg_exp = now
+        .checked_add(jiff::Span::new().minutes(5))
+        .map(|t| t.as_second())
+        .unwrap_or(now.as_second() + 300);
     let reg_state = BrowserRegistrationState {
         device_auth_id,
         user_id,
         user_email: user_email.clone(),
         webauthn_state,
+        iat: now.as_second(),
+        exp: reg_exp,
     };
 
     let state_token = reg_state
@@ -1120,7 +1103,6 @@ pub async fn browser_register_complete(
     );
 
     // Create a session for the browser so the user stays logged in
-    let now = Timestamp::now();
     let session_hours = i64::try_from(state.config().session_hours).map_err(|_| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1128,56 +1110,26 @@ pub async fn browser_register_complete(
             "Invalid session hours",
         )
     })?;
-    let duration = Span::new().hours(session_hours);
-    let expires = now.checked_add(duration).map_err(|_| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "time_error",
-            "Time overflow",
-        )
-    })?;
 
-    let claims = SessionClaims {
-        sub: reg_state.user_id.to_string(),
-        email: reg_state.user_email.clone(),
-        authenticator_id: Some(authenticator_id.clone()),
-        iat: now.as_second(),
-        exp: expires.as_second(),
-        purpose: crate::db::SessionPurpose::Fido2Session,
-        scope: None,
-    };
-
-    let token = encode(
-        &Header::default(),
-        &claims,
-        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
-    )
-    .map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "token_error",
-            &e.to_string(),
-        )
-    })?;
-
-    // Store session in database
-    let token_hash = hash_token(&token);
-    db::create_session(
-        &state.db,
-        &reg_state.user_id.to_string(),
-        &token_hash,
-        Some(&authenticator_id),
-        &expires.to_string(),
-        crate::db::SessionPurpose::Fido2Session.as_str(),
+    let session_result = crate::services::auth::create_login_session(
+        &state,
+        crate::services::auth::CreateSessionParams {
+            user_id: &reg_state.user_id.to_string(),
+            email: &reg_state.user_email,
+            authenticator_id: Some(&authenticator_id),
+            purpose: crate::db::SessionPurpose::Fido2Session,
+            scope: None,
+        },
     )
     .await
     .map_err(|e| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
-            "db_error",
+            "session_error",
             &e.to_string(),
         )
     })?;
+    let token = session_result.token;
 
     // Return success template with session cookie
     let cookie = create_session_cookie(&token, session_hours * 3600);

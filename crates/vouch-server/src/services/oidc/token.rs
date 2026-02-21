@@ -10,16 +10,18 @@ use super::authorization::CodeChallengeMethod;
 use super::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
 use super::scope::{OAuthScope, ScopeSet};
 use crate::AppState;
-use crate::db::{self, Authenticator, OAuthClient, OAuthClientType, Session, SessionPurpose, User};
-use crate::handlers::hash_token;
+use crate::db::{self, Authenticator, OAuthClient, OAuthClientType, Session, User};
+use crate::handlers::common::hash_token;
 use crate::redact_email;
-use crate::services::auth::{CreateSessionParams, SessionClaims, create_login_session};
+use crate::services::auth::{
+    CreateOAuthTokenParams, DecodedToken, create_oauth_access_token, decode_token,
+};
+use crate::services::oidc::amr::AuthMethod;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use aws_lc_rs::digest::{self, SHA256};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
-use jsonwebtoken::{DecodingKey, Validation};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -40,6 +42,8 @@ pub struct AuthCodeExchangeParams<'a> {
     pub code_verifier: Option<&'a str>,
     /// RFC 9449 Section 5: Validated DPoP proof (if present).
     pub dpop_proof: Option<ValidatedDpopProof>,
+    /// RFC 8725 §3.9: Client ID for audience validation of the authorization code.
+    pub client_id: &'a str,
 }
 
 /// Client credentials for authentication (RFC 6749 Section 2.3).
@@ -121,7 +125,7 @@ impl ClientAuthError {
 pub struct IdTokenClaims {
     /// OIDC Core Section 2: Issuer Identifier.
     pub iss: String,
-    /// OIDC Core Section 2: Subject Identifier.
+    /// OIDC Core Section 2: Subject Identifier (stable user ID, not email).
     pub sub: String,
     /// OIDC Core Section 2: Audience(s).
     pub aud: String,
@@ -129,6 +133,9 @@ pub struct IdTokenClaims {
     pub exp: i64,
     /// OIDC Core Section 2: Issued at time.
     pub iat: i64,
+    /// OIDC Core Section 2: Time when the End-User authentication occurred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_time: Option<i64>,
     /// OIDC Core Section 3.1.2.1: Nonce value from the authorization request.
     pub nonce: Option<String>,
     /// OIDC Core Section 5.1: User email.
@@ -144,6 +151,16 @@ pub struct IdTokenClaims {
     /// RFC 9449 Section 6: DPoP token binding confirmation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cnf: Option<CnfClaim>,
+    /// RFC 9068 Section 2.2 / RFC 8176: Authentication methods used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amr: Option<Vec<AuthMethod>>,
+    /// RFC 9068 Section 2.2: Authentication context class reference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acr: Option<String>,
+    /// OIDC Core Section 3.1.3.6: Access Token hash value.
+    /// Base64url encoding of the left half of SHA-256(access_token).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at_hash: Option<String>,
 }
 
 /// Exchange an authorization code for tokens.
@@ -163,7 +180,58 @@ pub async fn exchange_authorization_code(
     params: AuthCodeExchangeParams<'_>,
 ) -> ServiceResult<AuthCodeExchangeResult> {
     // Decode and validate the authorization code
-    let auth_code = decode_authorization_code(state, params.code)?;
+    let auth_code = decode_authorization_code(state, params.code, params.client_id)?;
+
+    // RFC 6749 Section 10.5: Enforce single-use authorization codes.
+    // Try to consume the code; if already consumed this is a replay attack.
+    let code_hash = hash_token(params.code);
+    match db::try_consume_authorization_code(&state.db, &code_hash).await {
+        Ok(true) => { /* First use — proceed */ }
+        Ok(false) => {
+            // Code was already consumed or doesn't exist.
+            // Check if it was consumed (replay) vs never stored (legacy).
+            if let Ok(true) = db::is_authorization_code_consumed(&state.db, &code_hash).await {
+                tracing::warn!(
+                    target: "security",
+                    client_id = %auth_code.client_id,
+                    "Authorization code replay detected — code already consumed"
+                );
+
+                // RFC 6749 Section 10.5: "If the authorization server observes
+                // multiple attempts to exchange an authorization code, the
+                // authorization server SHOULD attempt to revoke all access tokens
+                // already granted based on the compromised authorization code."
+                if let Ok(Some((user_id, _client_id))) =
+                    db::get_authorization_code_owner(&state.db, &code_hash).await
+                {
+                    match db::delete_oauth_sessions_for_user(&state.db, &user_id).await {
+                        Ok(count) if count > 0 => {
+                            tracing::warn!(
+                                target: "security",
+                                user_id = %user_id,
+                                revoked_count = count,
+                                "Revoked OAuth tokens due to authorization code replay"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            tracing::error!("Failed to revoke tokens during replay detection: {e}");
+                        }
+                    }
+                }
+            }
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "Authorization code has already been used",
+            ));
+        }
+        Err(e) => {
+            tracing::error!("Failed to consume authorization code: {}", e);
+            return Err(ServiceError::Internal(
+                "Failed to validate authorization code".to_string(),
+            ));
+        }
+    }
 
     // RFC 6749 Section 4.1.3: Authenticate the client (if credentials provided)
     let authenticated_client = if let Some(creds) = params.credentials {
@@ -238,33 +306,48 @@ pub async fn exchange_authorization_code(
     // Validate PKCE code_verifier if code_challenge was present
     validate_pkce(&auth_code, params.code_verifier)?;
 
-    // Generate access token as a JWT session (stored in DB, validatable by userinfo/introspect)
-    let session_result = create_login_session(
+    // Generate access token as an RFC 9068 JWT (ES256, verifiable via JWKS)
+    let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
+    let session_result = create_oauth_access_token(
         state,
-        CreateSessionParams {
+        CreateOAuthTokenParams {
             user_id: &auth_code.user_id,
             email: &auth_code.email,
             authenticator_id: Some(&auth_code.authenticator_id),
-            purpose: SessionPurpose::OAuthAccessToken,
+            client_id: &auth_code.client_id,
             scope: Some(auth_code.scope.clone()),
+            dpop_jkt,
+            act: None,
+            audience: None,
+            // auth_time is the iat of the authorization code, reflecting when the
+            // FIDO2 session was active at the time of authorization.
+            auth_time: Some(auth_code.iat),
+            amr: Some(AuthMethod::all_fido2().to_vec()),
+            acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
         },
     )
     .await?;
     let access_token = session_result.token;
     let expires_in = state.config().session_hours * 3600;
 
-    // Generate ID token
-    let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
+    // Generate ID token (with at_hash computed from the access token)
     let id_token = generate_id_token(
         state,
         IdTokenParams {
             client_id: &auth_code.client_id,
+            user_id: &auth_code.user_id,
             email: &auth_code.email,
             aaguid: auth_code.aaguid.as_deref(),
             nonce: auth_code.nonce.as_deref(),
             expires_in,
             dpop_jkt,
             scope: &auth_code.scope,
+            // auth_time is the iat of the authorization code, which reflects when
+            // the FIDO2 session was active at the time of authorization.
+            auth_time: Some(auth_code.iat),
+            amr: Some(AuthMethod::all_fido2().to_vec()),
+            acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
+            access_token: Some(&access_token),
         },
     )?;
 
@@ -325,16 +408,15 @@ fn validate_pkce(auth_code: &AuthorizationCode, code_verifier: Option<&str>) -> 
         ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Missing code_verifier")
     })?;
 
-    // RFC 7636 Section 4.6: Compute the challenge from the verifier using the method
-    let method = auth_code
+    // RFC 9700 Section 2.1.1: Only S256 is supported.
+    // Default to S256 for backward compatibility with codes that don't store the method.
+    let _method = auth_code
         .code_challenge_method
-        .unwrap_or(CodeChallengeMethod::Plain);
+        .unwrap_or(CodeChallengeMethod::S256);
 
-    let computed_challenge = if method == CodeChallengeMethod::S256 {
+    let computed_challenge = {
         let hash = digest::digest(&SHA256, code_verifier.as_bytes());
         URL_SAFE_NO_PAD.encode(hash.as_ref())
-    } else {
-        code_verifier.to_string()
     };
 
     // Use constant-time comparison to prevent timing side-channel attacks
@@ -415,15 +497,35 @@ pub async fn authenticate_client(
     }
 }
 
+/// Compute `at_hash` per OIDC Core Section 3.1.3.6.
+///
+/// Returns the base64url encoding (no padding) of the left half of SHA-256
+/// of the access token string. For SHA-256 (32 bytes), the left half is 16 bytes,
+/// producing a 22-character base64url string.
+fn compute_at_hash(access_token: &str) -> Option<String> {
+    let hash = digest::digest(&SHA256, access_token.as_bytes());
+    let left_half = hash.as_ref().get(..16)?;
+    Some(URL_SAFE_NO_PAD.encode(left_half))
+}
+
 /// Parameters for ID token generation.
 struct IdTokenParams<'a> {
     client_id: &'a str,
+    user_id: &'a str,
     email: &'a str,
     aaguid: Option<&'a str>,
     nonce: Option<&'a str>,
     expires_in: u64,
     dpop_jkt: Option<&'a str>,
     scope: &'a ScopeSet,
+    /// Time when the user authenticated (FIDO2 session creation time).
+    auth_time: Option<i64>,
+    /// RFC 8176: Authentication methods reference.
+    amr: Option<Vec<AuthMethod>>,
+    /// RFC 9068 Section 2.2: Authentication context class reference.
+    acr: Option<String>,
+    /// Access token string, used to compute `at_hash` (OIDC Core Section 3.1.3.6).
+    access_token: Option<&'a str>,
 }
 
 /// Generate an OIDC ID token.
@@ -445,10 +547,11 @@ fn generate_id_token(state: &Arc<AppState>, params: IdTokenParams<'_>) -> Servic
 
     let claims = IdTokenClaims {
         iss: state.config().base_url.clone(),
-        sub: params.email.to_string(), // Use email as subject
+        sub: params.user_id.to_string(),
         aud: params.client_id.to_string(),
         exp,
         iat: now.as_second(),
+        auth_time: params.auth_time,
         nonce: params.nonce.map(String::from),
         email: if has_email {
             Some(params.email.to_string())
@@ -459,6 +562,9 @@ fn generate_id_token(state: &Arc<AppState>, params: IdTokenParams<'_>) -> Servic
         hardware_verified: true,
         hardware_aaguid: params.aaguid.map(String::from),
         cnf,
+        amr: params.amr,
+        acr: params.acr,
+        at_hash: params.access_token.and_then(compute_at_hash),
     };
 
     state
@@ -553,18 +659,24 @@ pub struct OidcValidatedSession {
 }
 
 /// Validate a session token and return the user, session, and authenticator.
+///
+/// Supports both HS256 FIDO2 session tokens and ES256 RFC 9068 access tokens
+/// via the dual-decode helper. For access tokens, the `authenticator_id` is
+/// looked up from the server-side session record (not from the JWT).
 pub async fn validate_session_token(
     state: &Arc<AppState>,
     token: &str,
 ) -> ServiceResult<Option<OidcValidatedSession>> {
-    // Try to decode as a JWT session token
-    let claims = match jsonwebtoken::decode::<SessionClaims>(
+    // Decode the token using the dual-decode helper (HS256 or ES256)
+    let config = state.config();
+    let decoded = match decode_token(
         token,
-        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
-        &Validation::default(),
+        config.jwt_secret_bytes(),
+        &state.oidc_key,
+        &config.base_url,
     ) {
-        Ok(data) => data.claims,
-        Err(_) => return Ok(None),
+        Some(d) => d,
+        None => return Ok(None),
     };
 
     // Verify session exists in database
@@ -577,8 +689,8 @@ pub async fn validate_session_token(
         None => return Ok(None),
     };
 
-    // Get user
-    let user = match db::get_user_by_id(&state.db, &claims.sub)
+    // Get user from the sub claim
+    let user = match db::get_user_by_id(&state.db, decoded.sub())
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
     {
@@ -586,10 +698,16 @@ pub async fn validate_session_token(
         None => return Ok(None),
     };
 
-    // Get authenticator if session references one.
-    // If the JWT references an authenticator that no longer exists (deleted/revoked),
+    // Get authenticator — for FIDO2 sessions, from the JWT claim; for access tokens,
+    // from the server-side session record (authenticator_id is not in the JWT).
+    let authenticator_id = match &decoded {
+        DecodedToken::Session(c) => c.authenticator_id.as_deref(),
+        DecodedToken::AccessToken(_) => session.authenticator_id.as_deref(),
+    };
+
+    // If the session references an authenticator that no longer exists (deleted/revoked),
     // the session is invalid — this implements key revocation.
-    let authenticator = match &claims.authenticator_id {
+    let authenticator = match authenticator_id {
         Some(id) => {
             match db::get_authenticator_by_id(&state.db, id)
                 .await
@@ -606,11 +724,12 @@ pub async fn validate_session_token(
         user,
         session,
         authenticator,
-        scope: claims.scope,
+        scope: decoded.scope().cloned(),
     }))
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -621,6 +740,8 @@ mod tests {
         let expected_challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
 
         let auth_code = AuthorizationCode {
+            iss: "https://test.example.com".to_string(),
+            aud: "test".to_string(),
             client_id: "test".to_string(),
             redirect_uri: "https://example.com".to_string(),
             user_id: "user1".to_string(),
@@ -642,6 +763,8 @@ mod tests {
     #[test]
     fn test_pkce_invalid_verifier() {
         let auth_code = AuthorizationCode {
+            iss: "https://test.example.com".to_string(),
+            aud: "test".to_string(),
             client_id: "test".to_string(),
             redirect_uri: "https://example.com".to_string(),
             user_id: "user1".to_string(),
@@ -663,6 +786,8 @@ mod tests {
     #[test]
     fn test_pkce_missing_verifier() {
         let auth_code = AuthorizationCode {
+            iss: "https://test.example.com".to_string(),
+            aud: "test".to_string(),
             client_id: "test".to_string(),
             redirect_uri: "https://example.com".to_string(),
             user_id: "user1".to_string(),
@@ -685,6 +810,8 @@ mod tests {
     fn test_pkce_no_challenge() {
         // No PKCE challenge - should succeed
         let auth_code = AuthorizationCode {
+            iss: "https://test.example.com".to_string(),
+            aud: "test".to_string(),
             client_id: "test".to_string(),
             redirect_uri: "https://example.com".to_string(),
             user_id: "user1".to_string(),
@@ -728,5 +855,43 @@ mod tests {
 
         // Must NOT be hex-encoded (hex would be 64 chars)
         assert_ne!(hash1.len(), 64, "hash must not be hex-encoded");
+    }
+
+    #[test]
+    fn test_compute_at_hash_deterministic() {
+        // at_hash should be deterministic for the same input
+        let token = "eyJhbGciOiJFUzI1NiIsInR5cCI6ImF0K2p3dCJ9.test.sig";
+        let hash1 = compute_at_hash(token);
+        let hash2 = compute_at_hash(token);
+        assert!(hash1.is_some());
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_compute_at_hash_format() {
+        // SHA-256 left half = 16 bytes → base64url-no-pad = 22 characters
+        let token = "some-access-token-string";
+        let hash = compute_at_hash(token).expect("should produce hash");
+        assert_eq!(
+            hash.len(),
+            22,
+            "at_hash should be 22 chars (16 bytes base64url)"
+        );
+        // Must contain only base64url characters (no padding)
+        assert!(
+            hash.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "at_hash must use URL-safe base64 characters only"
+        );
+    }
+
+    #[test]
+    fn test_compute_at_hash_different_tokens() {
+        let hash1 = compute_at_hash("token-a").expect("hash");
+        let hash2 = compute_at_hash("token-b").expect("hash");
+        assert_ne!(
+            hash1, hash2,
+            "different tokens should produce different hashes"
+        );
     }
 }

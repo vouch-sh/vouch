@@ -71,3 +71,4 @@ ssh_ca_key*
 .claude/skills
 .mcp.json
 scripts/*
+.local/

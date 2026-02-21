@@ -223,29 +223,13 @@ pub async fn authorize(
                 code_challenge_method: validated.code_challenge_method,
             };
 
-            match issue_authorization_code(&state, code_params) {
-                Ok(code) => {
-                    // RFC 9207: Include iss parameter in authorization response
-                    let mut redirect_url = format!("{}?code={}", validated.redirect_uri, code);
-                    if let Some(state_param) = &validated.state {
-                        redirect_url
-                            .push_str(&format!("&state={}", urlencoding::encode(state_param)));
-                    }
-                    // RFC 9207: Authorization Server Issuer Identification
-                    redirect_url.push_str(&format!(
-                        "&iss={}",
-                        urlencoding::encode(&state.config().base_url)
-                    ));
-                    Redirect::to(&redirect_url).into_response()
-                }
-                Err(_) => oauth_error_redirect(
-                    &validated.redirect_uri,
-                    "server_error",
-                    "Failed to generate authorization code",
-                    validated.state.as_deref(),
-                    &state.config().base_url,
-                ),
-            }
+            issue_code_and_redirect(
+                &state,
+                code_params,
+                &validated.redirect_uri,
+                validated.state.as_deref(),
+            )
+            .await
         }
         Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
             // No valid session - store OAuth params and redirect to login
@@ -376,29 +360,13 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                     .and_then(CodeChallengeMethod::parse),
             };
 
-            match issue_authorization_code(state, code_params) {
-                Ok(code) => {
-                    // RFC 9207: Include iss parameter in authorization response
-                    let mut redirect_url = format!("{}?code={}", pending.redirect_uri, code);
-                    if let Some(state_param) = &pending.state {
-                        redirect_url
-                            .push_str(&format!("&state={}", urlencoding::encode(state_param)));
-                    }
-                    // RFC 9207: Authorization Server Issuer Identification
-                    redirect_url.push_str(&format!(
-                        "&iss={}",
-                        urlencoding::encode(&state.config().base_url)
-                    ));
-                    Redirect::to(&redirect_url).into_response()
-                }
-                Err(_) => oauth_error_redirect(
-                    &pending.redirect_uri,
-                    "server_error",
-                    "Failed to generate authorization code",
-                    pending.state.as_deref(),
-                    &state.config().base_url,
-                ),
-            }
+            issue_code_and_redirect(
+                state,
+                code_params,
+                &pending.redirect_uri,
+                pending.state.as_deref(),
+            )
+            .await
         }
         Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
             // Still not authenticated - something went wrong
@@ -413,6 +381,59 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
     }
 }
 
+/// Issue an authorization code and build the success redirect response.
+///
+/// Shared helper used by both direct authorization and pending-auth flows.
+async fn issue_code_and_redirect(
+    state: &Arc<AppState>,
+    code_params: AuthorizationCodeParams<'_>,
+    redirect_uri: &str,
+    oauth_state: Option<&str>,
+) -> Response {
+    match issue_authorization_code(state, code_params).await {
+        Ok(code) => {
+            // RFC 9207: Include iss parameter in authorization response
+            let mut params = vec![("code", code.as_str())];
+            let state_owned;
+            if let Some(state_param) = oauth_state {
+                state_owned = state_param.to_string();
+                params.push(("state", &state_owned));
+            }
+            let base_url = state.config().base_url.clone();
+            params.push(("iss", &base_url));
+            build_authorization_redirect(redirect_uri, &params)
+        }
+        Err(_) => oauth_error_redirect(
+            redirect_uri,
+            "server_error",
+            "Failed to generate authorization code",
+            oauth_state,
+            &state.config().base_url,
+        ),
+    }
+}
+
+/// Build an authorization redirect URL with the given query parameters.
+///
+/// Uses `url::Url` for proper encoding instead of manual string concatenation.
+fn build_authorization_redirect(redirect_uri: &str, params: &[(&str, &str)]) -> Response {
+    match url::Url::parse(redirect_uri) {
+        Ok(mut url) => {
+            {
+                let mut query = url.query_pairs_mut();
+                for (key, value) in params {
+                    query.append_pair(key, value);
+                }
+            }
+            Redirect::to(url.as_str()).into_response()
+        }
+        Err(_) => {
+            // Fallback: should not happen since redirect_uri was already validated
+            Redirect::to(redirect_uri).into_response()
+        }
+    }
+}
+
 /// Create an OAuth error redirect response.
 ///
 /// Includes the `iss` parameter per RFC 9207.
@@ -423,18 +444,13 @@ fn oauth_error_redirect(
     state: Option<&str>,
     issuer: &str,
 ) -> Response {
-    let mut url = format!(
-        "{}?error={}&error_description={}",
-        redirect_uri,
-        urlencoding::encode(error),
-        urlencoding::encode(description)
-    );
+    let mut params = vec![("error", error), ("error_description", description)];
     if let Some(state_param) = state {
-        url.push_str(&format!("&state={}", urlencoding::encode(state_param)));
+        params.push(("state", state_param));
     }
     // RFC 9207: Include iss parameter even in error responses
-    url.push_str(&format!("&iss={}", urlencoding::encode(issuer)));
-    Redirect::to(&url).into_response()
+    params.push(("iss", issuer));
+    build_authorization_redirect(redirect_uri, &params)
 }
 
 #[cfg(test)]

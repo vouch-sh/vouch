@@ -13,6 +13,7 @@
 //! Use the `Pool` type alias for database operations to work with either backend.
 
 mod authenticators;
+mod authorization_codes;
 mod config;
 mod credentials;
 mod device_auth;
@@ -45,8 +46,9 @@ pub use users::{upsert_user, upsert_user_with_org};
 
 // Re-export session types and functions
 pub use sessions::{
-    Session, SessionPurpose, create_session, delete_expired_sessions, delete_session_by_token_hash,
-    delete_sessions_for_user, get_session_by_token_hash,
+    Session, SessionPurpose, create_session, delete_expired_sessions,
+    delete_oauth_sessions_for_user, delete_session_by_token_hash, delete_sessions_for_user,
+    get_session_by_token_hash,
 };
 
 // Re-export authenticator types and functions
@@ -128,6 +130,12 @@ pub use pending_oauth::{
     CreatePendingOAuthParams, PendingOAuthAuthorization, consume_pending_oauth_authorization,
     create_pending_oauth_authorization, delete_expired_pending_oauth_authorizations,
     get_pending_oauth_authorization,
+};
+
+// Re-export authorization code functions (RFC 6749 Section 10.5)
+pub use authorization_codes::{
+    delete_expired_authorization_codes, get_authorization_code_owner,
+    is_authorization_code_consumed, store_authorization_code, try_consume_authorization_code,
 };
 
 // Re-export enrollment types and functions

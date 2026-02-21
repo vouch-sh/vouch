@@ -201,6 +201,9 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - OAuth 2.0 Token Revocation (RFC 7009)
 - OAuth 2.0 Token Introspection (RFC 7662)
 - OAuth 2.0 Token Exchange (RFC 8693)
+- Authentication Method Reference Values (RFC 8176)
+- JWT Best Current Practices (RFC 8725) — explicit `typ` headers, issuer/audience validation
+- JWT Profile for OAuth 2.0 Access Tokens (RFC 9068) — including `amr`/`acr` claims
 - OAuth 2.0 Authorization Server Issuer Identification (RFC 9207)
 - SCIM 2.0 (RFC 7643/7644)
 - DPoP (RFC 9449) — Demonstrating Proof of Possession
@@ -246,14 +249,24 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
   "email_verified": true,
   "hardware_verified": true,
   "hardware_aaguid": "2fc0579f-8113-47ea-b116-bb5a8db9202a",
+  "amr": ["hwk", "pin", "user"],
+  "acr": "urn:nist:authentication:assurance-level:aal3",
+  "at_hash": "fUHyO2r2Z3DZ53EsNrWBb0",
   "iat": 1737849600,
   "exp": 1737878400
 }
 ```
 
+**Standard claims (RFC 9068/8176):**
+- `amr` — Authentication methods used: `hwk` (hardware key), `pin`, `user` (presence) per RFC 8176
+- `acr` — Authentication context class: NIST AAL3 (hardware multi-factor)
+- `at_hash` — Access token hash (OIDC Core Section 3.1.3.6), present when issued alongside an access token
+
 **Vouch-specific claims:**
 - `hardware_verified: true` — Indicates hardware authentication was used
 - `hardware_aaguid` — The AAGUID of the authenticator (identifies device model)
+
+**Note:** For access tokens (RFC 9068), `aud` validation is the resource server's responsibility per RFC 9068 Section 4.
 
 **Why OIDC:**
 - Standard protocol, works with any language/framework
