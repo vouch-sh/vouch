@@ -8,6 +8,7 @@
 use crate::AppState;
 use crate::db::SessionPurpose;
 use crate::services::OAuthErrorCode;
+use crate::services::auth::decode_token;
 use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::dpop::{self, DpopError};
 use crate::services::oidc::scope::OAuthScope;
@@ -20,6 +21,7 @@ use axum::{
 };
 use serde::Serialize;
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 /// User info response (OIDC Core Section 5.3.2).
 ///
@@ -99,15 +101,42 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         )
         .await
         {
-            Ok(_proof) => {
+            Ok(proof) => {
                 // DPoP proof is valid (signature, ath, jti, nonce all verified).
                 //
-                // TODO(RFC 9449 Section 7.1): Full sender-constrained token validation
-                // requires checking that _proof.jkt matches the cnf.jkt associated with
-                // this access token at issuance time. This requires storing the DPoP
-                // thumbprint in the sessions table (dpop_jkt column) during token exchange.
-                // Currently the ath (access token hash) check provides meaningful protection:
-                // an attacker needs the actual access token to forge a valid proof.
+                // RFC 9449 Section 7.1: Verify sender-constrained token binding by
+                // comparing the proof's jkt against the access token's cnf.jkt claim.
+                // This ensures the DPoP proof was made with the same key that was
+                // bound to the token at issuance time.
+                //
+                // RFC 9449 Section 7.1: If DPoP authorization scheme is used,
+                // the token MUST be DPoP-bound (have a cnf.jkt claim). Reject
+                // non-DPoP-bound tokens presented with the DPoP scheme.
+                if let Some(decoded) =
+                    decode_token(token, state.config().jwt_secret_bytes(), &state.oidc_key)
+                {
+                    match decoded.cnf() {
+                        Some(cnf) => {
+                            let is_valid: bool =
+                                proof.jkt.as_bytes().ct_eq(cnf.jkt.as_bytes()).into();
+                            if !is_valid {
+                                return oauth_error(
+                                    StatusCode::UNAUTHORIZED,
+                                    OAuthErrorCode::InvalidDpopProof.as_str(),
+                                    "DPoP proof key does not match token binding",
+                                );
+                            }
+                        }
+                        None => {
+                            // Token is not DPoP-bound but DPoP scheme was used
+                            return oauth_error(
+                                StatusCode::UNAUTHORIZED,
+                                OAuthErrorCode::InvalidDpopProof.as_str(),
+                                "DPoP scheme used but token is not DPoP-bound",
+                            );
+                        }
+                    }
+                }
             }
             Err(DpopError::UseNonce(nonce)) => {
                 return (

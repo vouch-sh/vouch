@@ -814,6 +814,7 @@ Despite comprehensive mitigations, the following residual risks remain:
 - [RFC 6749 - OAuth 2.0](https://www.rfc-editor.org/rfc/rfc6749)
 - [RFC 7636 - PKCE](https://www.rfc-editor.org/rfc/rfc7636)
 - [RFC 8628 - Device Authorization Grant](https://www.rfc-editor.org/rfc/rfc8628)
+- [RFC 9068 - JWT Profile for OAuth 2.0 Access Tokens](https://www.rfc-editor.org/rfc/rfc9068)
 - [RFC 9449 - DPoP](https://www.rfc-editor.org/rfc/rfc9449)
 - [RFC 7643/7644 - SCIM 2.0](https://www.rfc-editor.org/rfc/rfc7643)
 

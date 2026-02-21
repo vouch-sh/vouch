@@ -257,6 +257,7 @@ async fn handle_token_exchange_grant(
         audience: params.audience.as_deref(),
         scope: params.scope.as_deref(),
         requested_token_type: params.requested_token_type.as_deref(),
+        client_id: params.client_id.as_deref().unwrap_or("unknown"),
     };
 
     match exchange_token(&state, exchange_params).await {

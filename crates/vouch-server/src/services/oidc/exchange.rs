@@ -8,12 +8,13 @@ use crate::AppState;
 use crate::db;
 use crate::handlers::hash_token;
 use crate::redact_email;
-use crate::services::auth::SessionClaims;
+use crate::services::auth::{
+    ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, create_oauth_access_token,
+    decode_token,
+};
 use crate::services::oidc::scope::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::Timestamp;
-use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, encode};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Token type URNs for RFC 8693.
@@ -43,6 +44,8 @@ pub struct TokenExchangeParams<'a> {
     pub scope: Option<&'a str>,
     /// RFC 8693 Section 2.1: The desired type of the requested security token (OPTIONAL).
     pub requested_token_type: Option<&'a str>,
+    /// OAuth client_id of the requesting client.
+    pub client_id: &'a str,
 }
 
 /// Result of a token exchange (RFC 8693 Section 2.2).
@@ -60,41 +63,10 @@ pub struct TokenExchangeResult {
     pub scope: Option<ScopeSet>,
 }
 
-/// Actor claim for delegation chains (RFC 8693 Section 4.1).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActorClaim {
-    /// RFC 8693 Section 4.1: Subject identifier of the actor.
-    pub sub: String,
-    /// RFC 8693 Section 4.1: Nested actor (for multi-hop delegation).
-    #[serde(rename = "act", skip_serializing_if = "Option::is_none")]
-    pub actor: Option<Box<ActorClaim>>,
-}
-
-/// Claims for exchanged tokens.
-#[derive(Debug, Serialize, Deserialize)]
-struct ExchangedTokenClaims {
-    /// Subject (original user).
-    pub sub: String,
-    /// Issuer.
-    pub iss: String,
-    /// Audience.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub aud: Option<String>,
-    /// Expiration time.
-    pub exp: i64,
-    /// Issued at time.
-    pub iat: i64,
-    /// Scope.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<ScopeSet>,
-    /// Actor claim (for delegation).
-    #[serde(rename = "act", skip_serializing_if = "Option::is_none")]
-    pub actor: Option<ActorClaim>,
-    /// Email from original token.
-    pub email: String,
-}
-
 /// Exchange a token for a new token (RFC 8693).
+///
+/// Supports both HS256 FIDO2 session tokens and ES256 OAuth access tokens
+/// as subject tokens via the dual-decode helper.
 ///
 /// # Arguments
 /// * `state` - Application state
@@ -133,19 +105,18 @@ pub async fn exchange_token(
         ));
     }
 
-    // Decode and validate the subject token
-    let subject_claims = jsonwebtoken::decode::<SessionClaims>(
+    // Decode and validate the subject token (supports both HS256 and ES256)
+    let subject_decoded = decode_token(
         params.subject_token,
-        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
-        &Validation::default(),
+        state.config().jwt_secret_bytes(),
+        &state.oidc_key,
     )
-    .map_err(|_| {
+    .ok_or_else(|| {
         ServiceError::oauth(
             OAuthErrorCode::InvalidGrant,
             "Invalid or expired subject token",
         )
-    })?
-    .claims;
+    })?;
 
     // Verify the subject token's session exists
     let subject_token_hash = hash_token(params.subject_token);
@@ -159,6 +130,18 @@ pub async fn exchange_token(
             )
         })?;
 
+    // Look up the user to get the email for delegation policy checks and
+    // the exchanged token. For access tokens, the email may not be in the
+    // JWT (e.g., when only "openid" scope was granted), so we always use
+    // the canonical email from the user record.
+    let subject_user = db::get_user_by_id(&state.db, &subject_session.user_id)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+        .ok_or_else(|| {
+            ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Subject token user not found")
+        })?;
+    let subject_email = &subject_user.email;
+
     // Handle actor token if present (for delegation chains)
     let actor_claim = if let Some(actor_token) = params.actor_token {
         // Validate actor token type
@@ -171,25 +154,65 @@ pub async fn exchange_token(
             ));
         }
 
-        // Decode actor token
-        let actor_claims = jsonwebtoken::decode::<SessionClaims>(
+        // Decode actor token (supports both HS256 and ES256)
+        let actor_decoded = decode_token(
             actor_token,
-            &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
-            &Validation::default(),
+            state.config().jwt_secret_bytes(),
+            &state.oidc_key,
         )
-        .map_err(|_| ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid actor token"))?;
+        .ok_or_else(|| ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid actor token"))?;
 
-        Some(ActorClaim {
-            sub: actor_claims.claims.email,
-            actor: None, // Could recursively parse nested actors
-        })
+        // Verify the actor token's session exists in the database
+        let actor_token_hash = hash_token(actor_token);
+        if !matches!(
+            db::get_session_by_token_hash(&state.db, &actor_token_hash).await,
+            Ok(Some(_))
+        ) {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "Actor token session not found or revoked",
+            ));
+        }
+
+        // Use email from the token if available, otherwise look up the user
+        let actor_email = if let Some(email) = actor_decoded.email() {
+            email.to_string()
+        } else {
+            let actor_user = db::get_user_by_id(&state.db, actor_decoded.sub())
+                .await
+                .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+                .ok_or_else(|| {
+                    ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Actor token user not found")
+                })?;
+            actor_user.email
+        };
+
+        // Preserve the existing actor chain from the subject token (if any)
+        // to correctly track multi-hop delegation. The new actor wraps the
+        // existing chain from the subject token's `act` claim.
+        let existing_chain = subject_decoded.act().cloned().map(Box::new);
+
+        let actor = ActorClaim {
+            sub: actor_email,
+            actor: existing_chain,
+        };
+
+        // Check delegation depth limit
+        if actor.depth() > MAX_DELEGATION_DEPTH {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Delegation chain exceeds maximum depth",
+            ));
+        }
+
+        Some(actor)
     } else {
         None
     };
 
     // Check delegation policy if audience is specified
     let max_ttl_override = if params.audience.is_some() {
-        let policy = db::check_delegation_policy(&state.db, &subject_claims.email, params.audience)
+        let policy = db::check_delegation_policy(&state.db, subject_email, params.audience)
             .await
             .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?;
 
@@ -198,7 +221,7 @@ pub async fn exchange_token(
                 tracing::debug!(
                     "Token exchange allowed by policy '{}' for {} -> {:?}",
                     p.name,
-                    redact_email(&subject_claims.email),
+                    redact_email(subject_email),
                     params.audience
                 );
                 p.max_ttl_seconds
@@ -224,44 +247,58 @@ pub async fn exchange_token(
         None
     };
 
-    // Calculate granted scope (intersection of requested and available)
-    let granted_scope = calculate_granted_scope(params.scope, subject_claims.scope.as_ref());
+    // Calculate granted scope (intersection of requested and available).
+    // For FIDO2 sessions (scope: None), require explicit scope in the request
+    // rather than defaulting to ScopeSet::all() to prevent scope escalation.
+    let granted_scope = calculate_granted_scope(params.scope, subject_decoded.scope());
 
-    // Generate the exchanged token
-    let now = Timestamp::now();
+    // Calculate expiration with policy TTL limit
     let default_expires_in = state.config().session_hours * 3600;
-
-    // Apply policy TTL limit if specified
     let expires_in = match max_ttl_override {
         Some(max_ttl) => {
-            let max_ttl_u64 = u64::try_from(max_ttl).unwrap_or(default_expires_in);
+            let max_ttl_u64 = u64::try_from(max_ttl).map_err(|_| {
+                ServiceError::Internal("Delegation policy max_ttl is negative".to_string())
+            })?;
             default_expires_in.min(max_ttl_u64)
         }
         None => default_expires_in,
     };
-    let exp = now.as_second() + i64::try_from(expires_in).unwrap_or(28800);
 
-    let exchanged_claims = ExchangedTokenClaims {
-        sub: subject_claims.email.clone(),
-        iss: state.config().base_url.clone(),
-        aud: params.audience.map(String::from),
-        exp,
-        iat: now.as_second(),
-        scope: granted_scope.clone(),
-        actor: actor_claim,
-        email: subject_claims.email.clone(),
-    };
+    // RFC 9068: Audience is the explicit audience param (target resource server),
+    // falling back to client_id if no audience specified.
+    let audience = params.audience;
 
-    let exchanged_token = encode(
-        &Header::default(),
-        &exchanged_claims,
-        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
+    // Get authenticator_id from the session record (server-side, not from JWT)
+    let authenticator_id = subject_session.authenticator_id.as_deref();
+
+    // Generate the exchanged token as an RFC 9068 access token (ES256)
+    let session_result = create_oauth_access_token(
+        state,
+        CreateOAuthTokenParams {
+            user_id: &subject_session.user_id,
+            email: subject_email,
+            authenticator_id,
+            client_id: params.client_id,
+            scope: granted_scope.clone(),
+            dpop_jkt: None,
+            act: actor_claim,
+            audience,
+        },
     )
-    .map_err(|e| ServiceError::Internal(format!("Failed to generate token: {e}")))?;
+    .await?;
 
-    // Log the token exchange for audit
-    let issued_token_hash = hash_token(&exchanged_token);
+    // Log the token exchange for audit (best-effort — failures are non-fatal)
+    let now = Timestamp::now();
+    let issued_token_hash = hash_token(&session_result.token);
     let scope_string = granted_scope.as_ref().map(|s| s.to_space_separated());
+    let expires_at = if let Ok(expires_seconds) = i64::try_from(expires_in)
+        && let Some(exp) = now.as_second().checked_add(expires_seconds)
+        && let Ok(ts) = Timestamp::from_second(exp)
+    {
+        ts.to_string()
+    } else {
+        now.to_string()
+    };
     if let Err(e) = db::insert_token_exchange(
         &state.db,
         &subject_session.user_id,
@@ -270,7 +307,7 @@ pub async fn exchange_token(
         &issued_token_hash,
         params.audience,
         scope_string.as_deref(),
-        &Timestamp::from_second(exp).unwrap_or(now).to_string(),
+        &expires_at,
     )
     .await
     {
@@ -279,12 +316,12 @@ pub async fn exchange_token(
 
     tracing::info!(
         "Token exchanged for user {} (audience: {:?})",
-        redact_email(&subject_claims.email),
+        redact_email(subject_email),
         params.audience
     );
 
     Ok(TokenExchangeResult {
-        access_token: exchanged_token,
+        access_token: session_result.token,
         issued_token_type: token_types::ACCESS_TOKEN.to_string(),
         token_type: "Bearer".to_string(),
         expires_in,
@@ -294,15 +331,30 @@ pub async fn exchange_token(
 
 /// Calculate the granted scope based on requested and available scopes.
 ///
-/// The `available` parameter comes from the subject token's claims. When `None`
-/// (backward compat for tokens issued before scope tracking), defaults to all scopes.
+/// For FIDO2 sessions (available = `None`), require explicit scope in the
+/// exchange request to prevent scope escalation. Only tokens with an
+/// explicit scope set propagate their scope.
 fn calculate_granted_scope(
     requested: Option<&str>,
     available: Option<&ScopeSet>,
 ) -> Option<ScopeSet> {
     let available_set = match available {
         Some(s) => s.clone(),
-        None => ScopeSet::all(), // backward compat default
+        // FIDO2 sessions don't carry scope — intersect request with all known
+        // scopes to prevent escalation beyond what the server supports.
+        None => {
+            if let Some(requested) = requested {
+                let requested_set = ScopeSet::parse(requested);
+                let granted = requested_set.intersection(&ScopeSet::all());
+                return if granted.is_empty() {
+                    None
+                } else {
+                    Some(granted)
+                };
+            }
+            // No scope in subject token and no explicit request — grant openid only
+            return Some(ScopeSet::parse("openid"));
+        }
     };
 
     if let Some(requested) = requested {
@@ -325,26 +377,30 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_calculate_granted_scope_full() {
-        let result = calculate_granted_scope(None, None);
-        assert_eq!(result, Some(ScopeSet::all()));
+    fn test_calculate_granted_scope_with_available() {
+        let available = ScopeSet::parse("openid email");
+        let result = calculate_granted_scope(None, Some(&available));
+        assert_eq!(result, Some(ScopeSet::parse("openid email")));
     }
 
     #[test]
     fn test_calculate_granted_scope_subset() {
-        let result = calculate_granted_scope(Some("openid email"), None);
+        let available = ScopeSet::parse("openid email profile");
+        let result = calculate_granted_scope(Some("openid email"), Some(&available));
         assert_eq!(result, Some(ScopeSet::parse("openid email")));
     }
 
     #[test]
     fn test_calculate_granted_scope_invalid() {
-        let result = calculate_granted_scope(Some("admin superuser"), None);
+        let available = ScopeSet::parse("openid");
+        let result = calculate_granted_scope(Some("admin superuser"), Some(&available));
         assert_eq!(result, None);
     }
 
     #[test]
     fn test_calculate_granted_scope_mixed() {
-        let result = calculate_granted_scope(Some("openid admin email"), None);
+        let available = ScopeSet::parse("openid email");
+        let result = calculate_granted_scope(Some("openid admin email"), Some(&available));
         assert_eq!(result, Some(ScopeSet::parse("openid email")));
     }
 
@@ -360,6 +416,20 @@ mod tests {
         let available = ScopeSet::parse("openid");
         let result = calculate_granted_scope(None, Some(&available));
         assert_eq!(result, Some(ScopeSet::parse("openid")));
+    }
+
+    #[test]
+    fn test_calculate_granted_scope_fido2_no_scope_defaults_openid() {
+        // FIDO2 sessions have no scope — should default to openid
+        let result = calculate_granted_scope(None, None);
+        assert_eq!(result, Some(ScopeSet::parse("openid")));
+    }
+
+    #[test]
+    fn test_calculate_granted_scope_fido2_with_explicit_request() {
+        // FIDO2 sessions with explicit scope request
+        let result = calculate_granted_scope(Some("openid email"), None);
+        assert_eq!(result, Some(ScopeSet::parse("openid email")));
     }
 
     #[test]

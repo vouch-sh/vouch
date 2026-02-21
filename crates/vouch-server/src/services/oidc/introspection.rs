@@ -10,9 +10,8 @@ use crate::db::{self, SessionPurpose};
 use crate::handlers::hash_token;
 use crate::redact_email;
 use crate::services::ServiceResult;
-use crate::services::auth::SessionClaims;
+use crate::services::auth::{DecodedToken, decode_token};
 use crate::services::oidc::scope::ScopeSet;
-use jsonwebtoken::{DecodingKey, Validation};
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -83,6 +82,9 @@ pub struct RevocationResult {
 
 /// Introspect a token (RFC 7662).
 ///
+/// Supports both HS256 FIDO2 session tokens and ES256 RFC 9068 access tokens
+/// via the dual-decode helper.
+///
 /// # Arguments
 /// * `state` - Application state
 /// * `token` - The token to introspect
@@ -97,14 +99,10 @@ pub async fn introspect_token(
     _token_type_hint: Option<&str>,
     caller_client_id: Option<&str>,
 ) -> ServiceResult<IntrospectionResult> {
-    // Try to decode the token as a JWT
-    let claims = match jsonwebtoken::decode::<SessionClaims>(
-        token,
-        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
-        &Validation::default(),
-    ) {
-        Ok(data) => data.claims,
-        Err(_) => {
+    // Decode the token using the dual-decode helper (HS256 or ES256)
+    let decoded = match decode_token(token, state.config().jwt_secret_bytes(), &state.oidc_key) {
+        Some(d) => d,
+        None => {
             return Ok(IntrospectionResult::inactive());
         }
     };
@@ -120,34 +118,56 @@ pub async fn introspect_token(
         return Ok(IntrospectionResult::inactive());
     }
 
-    // Determine scope from claims with backward compat for pre-scope tokens
-    let scope: Option<ScopeSet> = match &claims.scope {
-        Some(s) if !s.is_empty() => Some(s.clone()),
-        Some(_) => None,
-        // Backward compat: OAuth tokens issued before scope tracking
-        None if claims.purpose == SessionPurpose::OAuthAccessToken => Some(ScopeSet::all()),
-        None => None,
-    };
+    // Build the introspection response based on the decoded token type
+    match &decoded {
+        DecodedToken::AccessToken(claims) => {
+            // RFC 9068 access token — populate client_id from the JWT
+            Ok(IntrospectionResult {
+                active: true,
+                scope: claims.scope.clone(),
+                client_id: Some(claims.client_id.clone()),
+                username: claims.email.clone(),
+                token_type: Some("Bearer".to_string()),
+                exp: Some(claims.exp),
+                iat: Some(claims.iat),
+                sub: Some(claims.sub.clone()),
+                aud: Some(claims.aud.clone()),
+                iss: Some(claims.iss.clone()),
+            })
+        }
+        DecodedToken::Session(claims) => {
+            // FIDO2 session token — backward compat
+            let scope: Option<ScopeSet> = match &claims.scope {
+                Some(s) if !s.is_empty() => Some(s.clone()),
+                Some(_) => None,
+                // Backward compat: OAuth tokens issued before scope tracking
+                None if claims.purpose == SessionPurpose::OAuthAccessToken => Some(ScopeSet::all()),
+                None => None,
+            };
 
-    // Token is valid - return active response with claims
-    Ok(IntrospectionResult {
-        active: true,
-        scope,
-        client_id: None, // Session tokens don't track originating client_id
-        username: Some(claims.email.clone()),
-        token_type: Some("Bearer".to_string()),
-        exp: Some(claims.exp),
-        iat: Some(claims.iat),
-        sub: Some(claims.email),
-        aud: caller_client_id.map(String::from),
-        iss: Some(state.config().base_url.clone()),
-    })
+            Ok(IntrospectionResult {
+                active: true,
+                scope,
+                client_id: None, // Session tokens don't track originating client_id
+                username: Some(claims.email.clone()),
+                token_type: Some("Bearer".to_string()),
+                exp: Some(claims.exp),
+                iat: Some(claims.iat),
+                sub: Some(claims.email.clone()),
+                aud: caller_client_id.map(String::from),
+                iss: Some(state.config().base_url.clone()),
+            })
+        }
+    }
 }
 
 /// Revoke a token (RFC 7009).
 ///
 /// RFC 7009 specifies that the endpoint should always return success,
 /// even if the token was invalid, to prevent token oracle attacks.
+///
+/// Supports both HS256 FIDO2 session tokens and ES256 RFC 9068 access tokens.
+/// Per RFC 7009, always attempts hash-based DB deletion even if JWT decode fails.
 ///
 /// # Arguments
 /// * `state` - Application state
@@ -161,35 +181,30 @@ pub async fn revoke_token(
     token: &str,
     _token_type_hint: Option<&str>,
 ) -> RevocationResult {
-    // Try to decode the token as a JWT to get session info
-    let email = if let Ok(data) = jsonwebtoken::decode::<SessionClaims>(
-        token,
-        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
-        &Validation::default(),
-    ) {
-        // Hash the token and delete the session
-        let token_hash = hash_token(token);
-        match db::delete_session_by_token_hash(&state.db, &token_hash).await {
-            Ok(deleted) => {
-                if deleted {
-                    tracing::info!(
-                        "Token revoked for user: {}",
-                        redact_email(&data.claims.email)
-                    );
-                    return RevocationResult {
-                        revoked: true,
-                        user_email: Some(data.claims.email),
-                    };
+    // Try to decode to get email for audit logging
+    let decoded = decode_token(token, state.config().jwt_secret_bytes(), &state.oidc_key);
+
+    let email = decoded.as_ref().and_then(|d| d.email().map(String::from));
+
+    // RFC 7009: Always attempt to delete the session by token hash,
+    // even if JWT decode fails — revocation should be best-effort.
+    let token_hash = hash_token(token);
+    match db::delete_session_by_token_hash(&state.db, &token_hash).await {
+        Ok(deleted) => {
+            if deleted {
+                if let Some(ref email) = email {
+                    tracing::info!("Token revoked for user: {}", redact_email(email));
                 }
-            }
-            Err(e) => {
-                tracing::warn!("Failed to delete session during revocation: {}", e);
+                return RevocationResult {
+                    revoked: true,
+                    user_email: email,
+                };
             }
         }
-        Some(data.claims.email)
-    } else {
-        None
-    };
+        Err(e) => {
+            tracing::warn!("Failed to delete session during revocation: {}", e);
+        }
+    }
 
     // Per RFC 7009, always return success even if nothing was revoked
     RevocationResult {

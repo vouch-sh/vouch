@@ -937,7 +937,9 @@ async fn test_auth_code_flow_token_revocation() {
 
 #[tokio::test]
 async fn test_oauth_access_token_rejected_at_management_endpoints() {
-    // OAuth access token should be rejected at management endpoints with 403
+    // OAuth access tokens (ES256, RFC 9068) are rejected at management endpoints
+    // because the management endpoint only decodes HS256 FIDO2 session tokens.
+    // The ES256 token fails HS256 decoding, returning 401 (unauthorized).
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.db, "oauth-mgmt@example.com").await;
@@ -955,14 +957,16 @@ async fn test_oauth_access_token_rejected_at_management_endpoints() {
     )
     .await;
 
+    // ES256 access tokens cannot be decoded by the HS256-only management
+    // endpoint, so they fail at the JWT decode step with 401.
     assert_eq!(
         status,
-        StatusCode::FORBIDDEN,
+        StatusCode::UNAUTHORIZED,
         "OAuth access token should be rejected at management endpoints: {}",
         body
     );
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["code"], "insufficient_scope");
+    assert_eq!(error["code"], "unauthorized");
 }
 
 #[tokio::test]

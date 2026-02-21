@@ -10,16 +10,17 @@ use super::authorization::CodeChallengeMethod;
 use super::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
 use super::scope::{OAuthScope, ScopeSet};
 use crate::AppState;
-use crate::db::{self, Authenticator, OAuthClient, OAuthClientType, Session, SessionPurpose, User};
+use crate::db::{self, Authenticator, OAuthClient, OAuthClientType, Session, User};
 use crate::handlers::hash_token;
 use crate::redact_email;
-use crate::services::auth::{CreateSessionParams, SessionClaims, create_login_session};
+use crate::services::auth::{
+    CreateOAuthTokenParams, DecodedToken, create_oauth_access_token, decode_token,
+};
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use aws_lc_rs::digest::{self, SHA256};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
-use jsonwebtoken::{DecodingKey, Validation};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -238,15 +239,19 @@ pub async fn exchange_authorization_code(
     // Validate PKCE code_verifier if code_challenge was present
     validate_pkce(&auth_code, params.code_verifier)?;
 
-    // Generate access token as a JWT session (stored in DB, validatable by userinfo/introspect)
-    let session_result = create_login_session(
+    // Generate access token as an RFC 9068 JWT (ES256, verifiable via JWKS)
+    let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
+    let session_result = create_oauth_access_token(
         state,
-        CreateSessionParams {
+        CreateOAuthTokenParams {
             user_id: &auth_code.user_id,
             email: &auth_code.email,
             authenticator_id: Some(&auth_code.authenticator_id),
-            purpose: SessionPurpose::OAuthAccessToken,
+            client_id: &auth_code.client_id,
             scope: Some(auth_code.scope.clone()),
+            dpop_jkt,
+            act: None,
+            audience: None,
         },
     )
     .await?;
@@ -254,7 +259,6 @@ pub async fn exchange_authorization_code(
     let expires_in = state.config().session_hours * 3600;
 
     // Generate ID token
-    let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
     let id_token = generate_id_token(
         state,
         IdTokenParams {
@@ -553,18 +557,18 @@ pub struct OidcValidatedSession {
 }
 
 /// Validate a session token and return the user, session, and authenticator.
+///
+/// Supports both HS256 FIDO2 session tokens and ES256 RFC 9068 access tokens
+/// via the dual-decode helper. For access tokens, the `authenticator_id` is
+/// looked up from the server-side session record (not from the JWT).
 pub async fn validate_session_token(
     state: &Arc<AppState>,
     token: &str,
 ) -> ServiceResult<Option<OidcValidatedSession>> {
-    // Try to decode as a JWT session token
-    let claims = match jsonwebtoken::decode::<SessionClaims>(
-        token,
-        &DecodingKey::from_secret(state.config().jwt_secret_bytes()),
-        &Validation::default(),
-    ) {
-        Ok(data) => data.claims,
-        Err(_) => return Ok(None),
+    // Decode the token using the dual-decode helper (HS256 or ES256)
+    let decoded = match decode_token(token, state.config().jwt_secret_bytes(), &state.oidc_key) {
+        Some(d) => d,
+        None => return Ok(None),
     };
 
     // Verify session exists in database
@@ -577,8 +581,8 @@ pub async fn validate_session_token(
         None => return Ok(None),
     };
 
-    // Get user
-    let user = match db::get_user_by_id(&state.db, &claims.sub)
+    // Get user from the sub claim
+    let user = match db::get_user_by_id(&state.db, decoded.sub())
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
     {
@@ -586,10 +590,16 @@ pub async fn validate_session_token(
         None => return Ok(None),
     };
 
-    // Get authenticator if session references one.
-    // If the JWT references an authenticator that no longer exists (deleted/revoked),
+    // Get authenticator — for FIDO2 sessions, from the JWT claim; for access tokens,
+    // from the server-side session record (authenticator_id is not in the JWT).
+    let authenticator_id = match &decoded {
+        DecodedToken::Session(c) => c.authenticator_id.as_deref(),
+        DecodedToken::AccessToken(_) => session.authenticator_id.as_deref(),
+    };
+
+    // If the session references an authenticator that no longer exists (deleted/revoked),
     // the session is invalid — this implements key revocation.
-    let authenticator = match &claims.authenticator_id {
+    let authenticator = match authenticator_id {
         Some(id) => {
             match db::get_authenticator_by_id(&state.db, id)
                 .await
@@ -606,7 +616,7 @@ pub async fn validate_session_token(
         user,
         session,
         authenticator,
-        scope: claims.scope,
+        scope: decoded.scope().cloned(),
     }))
 }
 

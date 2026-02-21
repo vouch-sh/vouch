@@ -201,6 +201,7 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - OAuth 2.0 Token Revocation (RFC 7009)
 - OAuth 2.0 Token Introspection (RFC 7662)
 - OAuth 2.0 Token Exchange (RFC 8693)
+- JWT Profile for OAuth 2.0 Access Tokens (RFC 9068)
 - OAuth 2.0 Authorization Server Issuer Identification (RFC 9207)
 - SCIM 2.0 (RFC 7643/7644)
 - DPoP (RFC 9449) — Demonstrating Proof of Possession
