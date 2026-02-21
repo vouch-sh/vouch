@@ -554,61 +554,15 @@ pub fn decode_token(
 )]
 mod tests {
     use super::*;
-    use crate::services::oidc::keys::OidcSigningKey;
-
-    const TEST_JWT_SECRET: &[u8] = b"test-jwt-secret-for-unit-tests-only";
-    const TEST_ISSUER: &str = "https://example.com";
-
-    fn make_oidc_key() -> OidcSigningKey {
-        OidcSigningKey::generate().expect("generate key")
-    }
-
-    fn make_access_token(key: &OidcSigningKey) -> String {
-        let claims = AccessTokenClaims {
-            iss: TEST_ISSUER.to_string(),
-            sub: "user-123".to_string(),
-            aud: "client-abc".to_string(),
-            exp: 9_999_999_999,
-            iat: 1_000_000_000,
-            jti: "jti-1".to_string(),
-            client_id: "client-abc".to_string(),
-            scope: Some(ScopeSet::parse("openid email")),
-            email: Some("test@example.com".to_string()),
-            email_verified: Some(true),
-            hardware_verified: true,
-            cnf: None,
-            auth_time: None,
-            act: None,
-            amr: None,
-            acr: None,
-        };
-        key.sign_access_token_jwt(&claims).expect("sign")
-    }
-
-    fn make_session_token() -> String {
-        let claims = SessionClaims {
-            iss: TEST_ISSUER.to_string(),
-            aud: TEST_ISSUER.to_string(),
-            sub: "user-456".to_string(),
-            email: "session@example.com".to_string(),
-            authenticator_id: Some("auth-1".to_string()),
-            iat: 1_000_000_000,
-            exp: 9_999_999_999,
-            purpose: crate::db::SessionPurpose::Fido2Session,
-            scope: None,
-        };
-        encode(
-            &crate::crypto::jwt::JwtType::Session.to_header(),
-            &claims,
-            &jsonwebtoken::EncodingKey::from_secret(TEST_JWT_SECRET),
-        )
-        .expect("encode")
-    }
+    use crate::test_utils::{
+        TEST_ISSUER, TEST_JWT_SECRET, make_test_access_token, make_test_oidc_key,
+        make_test_session_token,
+    };
 
     #[test]
     fn test_decode_token_routes_es256_to_access_token() {
-        let key = make_oidc_key();
-        let token = make_access_token(&key);
+        let key = make_test_oidc_key();
+        let token = make_test_access_token(&key);
 
         let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER);
         assert!(decoded.is_some());
@@ -624,8 +578,8 @@ mod tests {
 
     #[test]
     fn test_decode_token_routes_hs256_to_session() {
-        let key = make_oidc_key();
-        let token = make_session_token();
+        let key = make_test_oidc_key();
+        let token = make_test_session_token();
 
         let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER);
         assert!(decoded.is_some());
@@ -642,7 +596,7 @@ mod tests {
     fn test_decode_token_rejects_id_token_without_at_jwt_typ() {
         // An ES256 JWT signed with the OIDC key but with typ: "JWT" (ID token)
         // should NOT be decoded as an access token.
-        let key = make_oidc_key();
+        let key = make_test_oidc_key();
 
         let claims = AccessTokenClaims {
             iss: TEST_ISSUER.to_string(),
@@ -672,7 +626,7 @@ mod tests {
 
     #[test]
     fn test_decode_token_rejects_garbage() {
-        let key = make_oidc_key();
+        let key = make_test_oidc_key();
         assert!(decode_token("not.a.jwt", TEST_JWT_SECRET, &key, TEST_ISSUER).is_none());
         assert!(decode_token("", TEST_JWT_SECRET, &key, TEST_ISSUER).is_none());
         assert!(decode_token("abc123", TEST_JWT_SECRET, &key, TEST_ISSUER).is_none());
@@ -680,8 +634,8 @@ mod tests {
 
     #[test]
     fn test_decode_token_rejects_wrong_hs256_secret() {
-        let key = make_oidc_key();
-        let token = make_session_token();
+        let key = make_test_oidc_key();
+        let token = make_test_session_token();
 
         // Decode with wrong secret should fail
         let decoded = decode_token(&token, b"wrong-secret", &key, TEST_ISSUER);
@@ -690,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_decode_token_rejects_expired_access_token() {
-        let key = make_oidc_key();
+        let key = make_test_oidc_key();
 
         let claims = AccessTokenClaims {
             iss: TEST_ISSUER.to_string(),
@@ -718,8 +672,8 @@ mod tests {
 
     #[test]
     fn test_decoded_token_accessors() {
-        let key = make_oidc_key();
-        let token = make_access_token(&key);
+        let key = make_test_oidc_key();
+        let token = make_test_access_token(&key);
         let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER).unwrap();
 
         assert_eq!(decoded.sub(), "user-123");
@@ -731,8 +685,8 @@ mod tests {
 
     #[test]
     fn test_decoded_token_session_accessors() {
-        let key = make_oidc_key();
-        let token = make_session_token();
+        let key = make_test_oidc_key();
+        let token = make_test_session_token();
         let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER).unwrap();
 
         assert_eq!(decoded.sub(), "user-456");

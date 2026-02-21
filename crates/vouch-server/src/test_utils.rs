@@ -649,3 +649,68 @@ pub async fn create_test_oauth_client(pool: &Pool, user_id: &str) -> TestOAuthCl
         client_secret: secret,
     }
 }
+
+// ============================================================================
+// JWT Test Helpers (shared between crypto::jwt and services::auth tests)
+// ============================================================================
+
+/// JWT secret for unit tests. NOT a real secret.
+pub const TEST_JWT_SECRET: &[u8] = b"test-jwt-secret-for-unit-tests-only";
+
+/// Issuer URL for unit tests.
+pub const TEST_ISSUER: &str = "https://example.com";
+
+/// Generate a fresh OIDC signing key for tests.
+pub fn make_test_oidc_key() -> OidcSigningKey {
+    OidcSigningKey::generate().expect("generate key")
+}
+
+/// Create a test ES256 access token signed by the given OIDC key.
+pub fn make_test_access_token(key: &OidcSigningKey) -> String {
+    use crate::services::auth::AccessTokenClaims;
+    use crate::services::oidc::scope::ScopeSet;
+
+    let claims = AccessTokenClaims {
+        iss: TEST_ISSUER.to_string(),
+        sub: "user-123".to_string(),
+        aud: "client-abc".to_string(),
+        exp: 9_999_999_999,
+        iat: 1_000_000_000,
+        jti: "jti-1".to_string(),
+        client_id: "client-abc".to_string(),
+        scope: Some(ScopeSet::parse("openid email")),
+        email: Some("test@example.com".to_string()),
+        email_verified: Some(true),
+        hardware_verified: true,
+        cnf: None,
+        auth_time: None,
+        act: None,
+        amr: None,
+        acr: None,
+    };
+    key.sign_access_token_jwt(&claims).expect("sign")
+}
+
+/// Create a test HS256 session token.
+pub fn make_test_session_token() -> String {
+    use crate::services::auth::SessionClaims;
+    use jsonwebtoken::{EncodingKey, encode};
+
+    let claims = SessionClaims {
+        iss: TEST_ISSUER.to_string(),
+        aud: TEST_ISSUER.to_string(),
+        sub: "user-456".to_string(),
+        email: "session@example.com".to_string(),
+        authenticator_id: Some("auth-1".to_string()),
+        iat: 1_000_000_000,
+        exp: 9_999_999_999,
+        purpose: crate::db::SessionPurpose::Fido2Session,
+        scope: None,
+    };
+    encode(
+        &crate::crypto::jwt::JwtType::Session.to_header(),
+        &claims,
+        &EncodingKey::from_secret(TEST_JWT_SECRET),
+    )
+    .expect("encode")
+}

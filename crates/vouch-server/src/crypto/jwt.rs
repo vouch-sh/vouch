@@ -232,67 +232,21 @@ mod tests {
     use super::*;
     use crate::services::auth::{AccessTokenClaims, SessionClaims};
     use crate::services::oidc::keys::OidcSigningKey;
-    use crate::services::oidc::scope::ScopeSet;
+    use crate::test_utils::{
+        TEST_ISSUER, TEST_JWT_SECRET, make_test_access_token, make_test_oidc_key,
+        make_test_session_token,
+    };
     use jsonwebtoken::{EncodingKey, encode};
-
-    const TEST_JWT_SECRET: &[u8] = b"test-jwt-secret-for-unit-tests-only";
-    const TEST_ISSUER: &str = "https://example.com";
-
-    fn make_oidc_key() -> OidcSigningKey {
-        OidcSigningKey::generate().expect("generate key")
-    }
 
     fn make_ctx(key: &OidcSigningKey) -> TokenValidationContext<'_> {
         TokenValidationContext::new(TEST_JWT_SECRET, key, TEST_ISSUER)
     }
 
-    fn make_access_token(key: &OidcSigningKey) -> String {
-        let claims = AccessTokenClaims {
-            iss: TEST_ISSUER.to_string(),
-            sub: "user-123".to_string(),
-            aud: "client-abc".to_string(),
-            exp: 9_999_999_999,
-            iat: 1_000_000_000,
-            jti: "jti-1".to_string(),
-            client_id: "client-abc".to_string(),
-            scope: Some(ScopeSet::parse("openid email")),
-            email: Some("test@example.com".to_string()),
-            email_verified: Some(true),
-            hardware_verified: true,
-            cnf: None,
-            auth_time: None,
-            act: None,
-            amr: None,
-            acr: None,
-        };
-        key.sign_access_token_jwt(&claims).expect("sign")
-    }
-
-    fn make_session_token() -> String {
-        let claims = SessionClaims {
-            iss: TEST_ISSUER.to_string(),
-            aud: TEST_ISSUER.to_string(),
-            sub: "user-456".to_string(),
-            email: "session@example.com".to_string(),
-            authenticator_id: Some("auth-1".to_string()),
-            iat: 1_000_000_000,
-            exp: 9_999_999_999,
-            purpose: crate::db::SessionPurpose::Fido2Session,
-            scope: None,
-        };
-        encode(
-            &JwtType::Session.to_header(),
-            &claims,
-            &EncodingKey::from_secret(TEST_JWT_SECRET),
-        )
-        .expect("encode")
-    }
-
     #[test]
     fn test_decode_token_routes_es256_to_access_token() {
-        let key = make_oidc_key();
+        let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
-        let token = make_access_token(&key);
+        let token = make_test_access_token(&key);
 
         let decoded = decode_token(&token, &ctx);
         assert!(decoded.is_some());
@@ -308,9 +262,9 @@ mod tests {
 
     #[test]
     fn test_decode_token_routes_hs256_to_session() {
-        let key = make_oidc_key();
+        let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
-        let token = make_session_token();
+        let token = make_test_session_token();
 
         let decoded = decode_token(&token, &ctx);
         assert!(decoded.is_some());
@@ -325,7 +279,7 @@ mod tests {
 
     #[test]
     fn test_decode_token_rejects_id_token_without_at_jwt_typ() {
-        let key = make_oidc_key();
+        let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
 
         let claims = AccessTokenClaims {
@@ -355,7 +309,7 @@ mod tests {
 
     #[test]
     fn test_decode_token_rejects_garbage() {
-        let key = make_oidc_key();
+        let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
         assert!(decode_token("not.a.jwt", &ctx).is_none());
         assert!(decode_token("", &ctx).is_none());
@@ -364,8 +318,8 @@ mod tests {
 
     #[test]
     fn test_decode_token_rejects_wrong_hs256_secret() {
-        let key = make_oidc_key();
-        let token = make_session_token();
+        let key = make_test_oidc_key();
+        let token = make_test_session_token();
 
         let ctx = TokenValidationContext::new(b"wrong-secret", &key, TEST_ISSUER);
         let decoded = decode_token(&token, &ctx);
@@ -374,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_decode_token_rejects_expired_access_token() {
-        let key = make_oidc_key();
+        let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
 
         let claims = AccessTokenClaims {
@@ -403,8 +357,8 @@ mod tests {
 
     #[test]
     fn test_decode_token_rejects_wrong_issuer() {
-        let key = make_oidc_key();
-        let token = make_session_token();
+        let key = make_test_oidc_key();
+        let token = make_test_session_token();
 
         // Use a different expected issuer
         let ctx = TokenValidationContext::new(TEST_JWT_SECRET, &key, "https://wrong-issuer.com");
@@ -417,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_decode_token_rejects_wrong_audience() {
-        let key = make_oidc_key();
+        let key = make_test_oidc_key();
 
         // Create a session token with different audience
         let claims = SessionClaims {
@@ -448,7 +402,7 @@ mod tests {
 
     #[test]
     fn test_decode_token_rejects_session_without_typ() {
-        let key = make_oidc_key();
+        let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
 
         // Create a session token without typ header
@@ -479,7 +433,7 @@ mod tests {
 
     #[test]
     fn test_decode_token_rejects_cross_type_substitution() {
-        let key = make_oidc_key();
+        let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
 
         // Create a session token with auth code typ
@@ -540,7 +494,7 @@ mod tests {
 
     #[test]
     fn test_access_token_rejects_wrong_issuer() {
-        let key = make_oidc_key();
+        let key = make_test_oidc_key();
 
         let claims = AccessTokenClaims {
             iss: "https://wrong-issuer.com".to_string(),
