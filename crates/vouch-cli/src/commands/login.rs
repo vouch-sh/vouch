@@ -3,17 +3,16 @@
 
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
-#[cfg(unix)]
-use vouch_agent::{AgentClient, AgentError};
 use vouch_common::{
     ClientContext, LoginCompleteRequest, LoginCompleteResponse, LoginStartRequest,
-    LoginStartResponse, SessionCookie, write_cookie,
+    LoginStartResponse,
 };
 
 use crate::client::VouchClient;
 use crate::commands::credential;
 use crate::config::Config;
 use crate::fido2::{self, YubiKey};
+use crate::session;
 
 /// Run the login command.
 /// Uses discoverable credentials - the YubiKey identifies the user.
@@ -72,7 +71,13 @@ pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
         async {
             #[cfg(unix)]
             {
-                store_session_in_agent(&complete_resp.email, &complete_resp, server).await
+                session::store_session_in_agent(
+                    &complete_resp.token,
+                    &complete_resp.email,
+                    &complete_resp.expires_at,
+                    server,
+                )
+                .await
             }
             #[cfg(not(unix))]
             {
@@ -80,8 +85,18 @@ pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
             }
         },
         async {
-            if let Err(e) = write_session_cookie(server, &complete_resp) {
-                tracing::debug!("Failed to write cookie file: {e}");
+            // Parse expiration time for cookie
+            if let Ok(expires_at) = complete_resp.expires_at.parse::<jiff::Timestamp>() {
+                if let Err(e) =
+                    session::write_session_cookie_file(server, &complete_resp.token, expires_at)
+                {
+                    tracing::debug!("Failed to write cookie file: {e}");
+                }
+            } else {
+                tracing::debug!(
+                    "Failed to parse expiration time: {}",
+                    complete_resp.expires_at
+                );
             }
         },
     );
@@ -102,61 +117,6 @@ pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
         println!("Your identity is stored locally. Check with: vouch status");
     }
 
-    Ok(())
-}
-
-/// Store session in the agent (if running).
-#[cfg(unix)]
-async fn store_session_in_agent(
-    email: &str,
-    response: &LoginCompleteResponse,
-    server: &str,
-) -> bool {
-    match AgentClient::connect().await {
-        Ok(mut agent) => {
-            match agent
-                .store_session(&response.token, email, &response.expires_at, Some(server))
-                .await
-            {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::debug!("Failed to store session in agent: {e}");
-                    false
-                }
-            }
-        }
-        Err(AgentError::NotRunning) => {
-            tracing::debug!("Agent not running, session stored in config only");
-            false
-        }
-        Err(e) => {
-            tracing::debug!("Failed to connect to agent: {e}");
-            false
-        }
-    }
-}
-
-/// Write the session cookie file for CLI tools.
-fn write_session_cookie(server: &str, response: &LoginCompleteResponse) -> Result<()> {
-    // Extract domain from server URL
-    let url = url::Url::parse(server).context("failed to parse server URL")?;
-    let domain = url
-        .host_str()
-        .context("server URL has no host")?
-        .to_string();
-
-    // Parse expiration time
-    let expires_at: jiff::Timestamp = response
-        .expires_at
-        .parse()
-        .context("failed to parse expiration time")?;
-    let expires_unix = expires_at.as_second();
-
-    // Create and write cookie
-    let cookie = SessionCookie::new(&domain, &response.token, expires_unix);
-    write_cookie(&cookie)?;
-
-    tracing::debug!("Cookie written to ~/.vouch/cookie.txt");
     Ok(())
 }
 

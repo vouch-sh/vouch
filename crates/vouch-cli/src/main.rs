@@ -114,6 +114,34 @@ struct Cli {
     command: Commands,
 }
 
+/// Shared CodeArtifact CLI arguments for exec/env commands.
+#[derive(clap::Args)]
+struct CodeArtifactArgs {
+    /// CodeArtifact domain name (required for --type codeartifact unless profile is set).
+    #[arg(long)]
+    ca_domain: Option<String>,
+    /// AWS account ID that owns the CodeArtifact domain (required for --type codeartifact unless profile is set).
+    #[arg(long)]
+    ca_domain_owner: Option<String>,
+    /// AWS region for CodeArtifact (required for --type codeartifact unless profile is set).
+    #[arg(long)]
+    ca_region: Option<String>,
+    /// Named CodeArtifact profile from config (for --type codeartifact).
+    #[arg(long)]
+    ca_profile: Option<String>,
+}
+
+impl CodeArtifactArgs {
+    fn to_options(&self) -> commands::exec::CodeArtifactOptions<'_> {
+        commands::exec::CodeArtifactOptions {
+            domain: self.ca_domain.as_deref(),
+            domain_owner: self.ca_domain_owner.as_deref(),
+            region: self.ca_region.as_deref(),
+            profile: self.ca_profile.as_deref(),
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Enroll with browser-based OIDC + `WebAuthn` (recommended for new users).
@@ -158,18 +186,8 @@ enum Commands {
         /// Session name for AWS assumed role.
         #[arg(long)]
         session_name: Option<String>,
-        /// CodeArtifact domain name (required for --type codeartifact unless profile is set).
-        #[arg(long)]
-        ca_domain: Option<String>,
-        /// AWS account ID that owns the CodeArtifact domain (required for --type codeartifact unless profile is set).
-        #[arg(long)]
-        ca_domain_owner: Option<String>,
-        /// AWS region for CodeArtifact (required for --type codeartifact unless profile is set).
-        #[arg(long)]
-        ca_region: Option<String>,
-        /// Named CodeArtifact profile from config (for --type codeartifact).
-        #[arg(long)]
-        ca_profile: Option<String>,
+        #[command(flatten)]
+        ca: CodeArtifactArgs,
     },
     /// Output a shell hook for ambient auth status.
     ///
@@ -196,18 +214,8 @@ enum Commands {
         /// Session name for the assumed role.
         #[arg(long)]
         session_name: Option<String>,
-        /// CodeArtifact domain name (required for --type codeartifact unless profile is set).
-        #[arg(long)]
-        ca_domain: Option<String>,
-        /// AWS account ID that owns the CodeArtifact domain (required for --type codeartifact unless profile is set).
-        #[arg(long)]
-        ca_domain_owner: Option<String>,
-        /// AWS region for CodeArtifact (required for --type codeartifact unless profile is set).
-        #[arg(long)]
-        ca_region: Option<String>,
-        /// Named CodeArtifact profile from config (for --type codeartifact).
-        #[arg(long)]
-        ca_profile: Option<String>,
+        #[command(flatten)]
+        ca: CodeArtifactArgs,
         /// Command and arguments to execute.
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
@@ -549,24 +557,15 @@ async fn run() -> Result<()> {
             shell,
             role,
             session_name,
-            ca_domain,
-            ca_domain_owner,
-            ca_region,
-            ca_profile,
+            ca,
         } => {
-            let ca_opts = commands::exec::CodeArtifactOptions {
-                domain: ca_domain.as_deref(),
-                domain_owner: ca_domain_owner.as_deref(),
-                region: ca_region.as_deref(),
-                profile: ca_profile.as_deref(),
-            };
             commands::env::run(
                 &server,
                 &credential_type,
                 &shell,
                 role.as_deref(),
                 session_name.as_deref(),
-                ca_opts,
+                ca.to_options(),
             )
             .await
         }
@@ -585,25 +584,16 @@ async fn run() -> Result<()> {
             credential_type,
             role,
             session_name,
-            ca_domain,
-            ca_domain_owner,
-            ca_region,
-            ca_profile,
+            ca,
             command,
         } => {
-            let ca_opts = commands::exec::CodeArtifactOptions {
-                domain: ca_domain.as_deref(),
-                domain_owner: ca_domain_owner.as_deref(),
-                region: ca_region.as_deref(),
-                profile: ca_profile.as_deref(),
-            };
             commands::exec::run(
                 &server,
                 &credential_type,
                 role.as_deref(),
                 session_name.as_deref(),
                 &command,
-                ca_opts,
+                ca.to_options(),
             )
             .await
         }

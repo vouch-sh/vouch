@@ -3,7 +3,6 @@
 
 use anyhow::{Context, Result};
 
-use super::credential::cache;
 use super::exec::CodeArtifactOptions;
 
 /// Shell format for environment variable output.
@@ -44,35 +43,13 @@ async fn print_aws_env(
     session_name: Option<&str>,
     shell: &Shell,
 ) -> Result<()> {
-    let cache_key = format!("aws:{role_arn}");
+    let creds = super::exec::fetch_aws_credentials(server, role_arn, session_name).await?;
 
-    let data = cache::get_or_fetch(&cache_key, "AWS credentials", || async {
-        let output =
-            super::credential::aws::fetch_and_assume(server, role_arn, session_name).await?;
-        let expires_at = output.expiration.clone();
-        let data = serde_json::to_value(&output).context("failed to serialize credentials")?;
-        Ok((data, expires_at))
-    })
-    .await?;
+    print_export(shell, "AWS_ACCESS_KEY_ID", &creds.access_key_id);
+    print_export(shell, "AWS_SECRET_ACCESS_KEY", &creds.secret_access_key);
+    print_export(shell, "AWS_SESSION_TOKEN", &creds.session_token);
 
-    let key_id = data
-        .get("AccessKeyId")
-        .and_then(|v| v.as_str())
-        .context("AWS credentials missing AccessKeyId")?;
-    let secret = data
-        .get("SecretAccessKey")
-        .and_then(|v| v.as_str())
-        .context("AWS credentials missing SecretAccessKey")?;
-    let token = data
-        .get("SessionToken")
-        .and_then(|v| v.as_str())
-        .context("AWS credentials missing SessionToken")?;
-
-    print_export(shell, "AWS_ACCESS_KEY_ID", key_id);
-    print_export(shell, "AWS_SECRET_ACCESS_KEY", secret);
-    print_export(shell, "AWS_SESSION_TOKEN", token);
-
-    if let Some(v) = data.get("Expiration").and_then(|v| v.as_str()) {
+    if let Some(ref v) = creds.expiration {
         print_export(shell, "AWS_CREDENTIAL_EXPIRATION", v);
     }
 
@@ -81,27 +58,10 @@ async fn print_aws_env(
 
 /// Fetch GitHub token (cache-first) and print export statements.
 async fn print_github_env(server: &str, shell: &Shell) -> Result<()> {
-    let cache_key = "github";
+    let gh = super::exec::fetch_github_token_cached(server).await?;
 
-    let data = cache::get_or_fetch(cache_key, "GitHub token", || async {
-        let response = super::exec::fetch_github_token(server).await?;
-        let expires_at = response
-            .get("expires_at")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .unwrap_or_else(cache::default_expiry);
-        Ok((response, expires_at))
-    })
-    .await?;
-
-    let token = data
-        .get("token")
-        .and_then(|v| v.as_str())
-        .context("GitHub credential missing 'token' field")?;
-
-    print_export(shell, "GITHUB_TOKEN", token);
-    print_export(shell, "GH_TOKEN", token);
+    print_export(shell, "GITHUB_TOKEN", &gh.token);
+    print_export(shell, "GH_TOKEN", &gh.token);
 
     Ok(())
 }

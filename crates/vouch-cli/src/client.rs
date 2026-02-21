@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! HTTP client for communicating with vouch server.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use reqwest::Client;
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
-use vouch_common::ApiError;
 
 /// HTTP client wrapper for vouch server API.
 pub struct VouchClient {
@@ -213,21 +212,11 @@ impl VouchClient {
                 .await
                 .context("failed to parse server response")
         } else {
-            // Try to parse as API error for a clean message
             let error_text = response.text().await.unwrap_or_default();
-            if let Ok(api_error) = serde_json::from_str::<ApiError>(&error_text) {
-                bail!("{}", api_error.message);
-            }
-            // Non-JSON error body — provide actionable guidance
-            match status.as_u16() {
-                401 => bail!("not authenticated - run 'vouch login' first"),
-                403 => bail!("permission denied by server"),
-                404 => bail!("server endpoint not found (status 404). Check your server URL."),
-                500..=599 => {
-                    bail!("server error ({status}). Run 'vouch doctor' to check connectivity.")
-                }
-                _ => bail!("unexpected server response ({status})"),
-            }
+            Err(vouch_cli::http::format_http_error(
+                status.as_u16(),
+                &error_text,
+            ))
         }
     }
 }

@@ -20,7 +20,8 @@ use super::sts::StsCredentials;
 /// SigV4-signed credentials for CodeCommit.
 pub struct CodeCommitCredentials {
     /// Username: `{access_key_id}%{session_token}` for temporary credentials.
-    pub username: String,
+    /// Stored as `SecretString` because it may contain the session token.
+    pub username: SecretString,
     /// Password: `{YYYYMMDDTHHMMSSZ}{hex_signature}`.
     pub password: SecretString,
 }
@@ -106,9 +107,9 @@ pub fn sign_request(
     // Username: access_key_id + session token (separated by %)
     let session_token = creds.session_token.expose_secret();
     let username = if session_token.is_empty() {
-        creds.access_key_id.clone()
+        SecretString::from(creds.access_key_id.clone())
     } else {
-        format!("{}%{session_token}", creds.access_key_id)
+        SecretString::from(format!("{}%{session_token}", creds.access_key_id))
     };
 
     // Password: timestamp (no Z) + 'Z' separator + hex signature
@@ -457,8 +458,9 @@ mod tests {
         );
 
         // Username should be access_key%session_token
-        assert!(result.username.starts_with("AKIAIOSFODNN7EXAMPLE%"));
-        assert!(result.username.contains("FwoGZXIvYXdzEBYaDM"));
+        let username = result.username.expose_secret();
+        assert!(username.starts_with("AKIAIOSFODNN7EXAMPLE%"));
+        assert!(username.contains("FwoGZXIvYXdzEBYaDM"));
 
         // Password should be {timestamp}Z{signature} where Z is a separator
         let password = result.password.expose_secret();
@@ -581,7 +583,8 @@ mod tests {
         );
 
         // Without session token, username should be just the access key
-        assert_eq!(result.username, "AKIAIOSFODNN7EXAMPLE");
-        assert!(!result.username.contains('%'));
+        let username = result.username.expose_secret();
+        assert_eq!(username, "AKIAIOSFODNN7EXAMPLE");
+        assert!(!username.contains('%'));
     }
 }

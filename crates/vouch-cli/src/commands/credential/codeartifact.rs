@@ -218,10 +218,16 @@ async fn fetch_token(
     };
     let domain_suffix = get_domain_suffix_for_partition(partition);
 
+    // Create HTTP client once for all AWS API calls
+    let http_client =
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
+
     // Call STS AssumeRoleWithWebIdentity
     let email = get_user_email(server).await;
     let session = email.as_deref().unwrap_or("vouch-codeartifact");
     let sts_response = assume_role_with_web_identity(
+        &http_client,
         &role_arn,
         session,
         &token_response.id_token,
@@ -241,6 +247,7 @@ async fn fetch_token(
     };
 
     let ca_token = get_authorization_token(
+        &http_client,
         &registry,
         &sts_response
             .assume_role_with_web_identity_result

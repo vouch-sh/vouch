@@ -5,7 +5,7 @@
 //! enabling integration testing by injecting an axum router directly
 //! instead of making real network requests.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
 use vouch_common::ApiError;
@@ -99,17 +99,6 @@ impl ReqwestClient {
         .context("failed to create HTTP client")?;
 
         Ok(Self { client })
-    }
-}
-
-impl Default for ReqwestClient {
-    fn default() -> Self {
-        Self::new().unwrap_or_else(|_| Self {
-            client: reqwest::Client::builder()
-                .user_agent(format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-                .build()
-                .unwrap_or_default(),
-        })
     }
 }
 
@@ -245,29 +234,34 @@ pub trait HttpClientExt: HttpClient {
 // Implement HttpClientExt for all HttpClient implementations
 impl<T: HttpClient> HttpClientExt for T {}
 
+/// Convert an HTTP error status and body into an actionable error message.
+///
+/// Shared logic used by both `VouchClient` (reqwest-based) and the
+/// trait-based `HttpClient` to ensure consistent error messages.
+pub fn format_http_error(status: u16, error_text: &str) -> anyhow::Error {
+    // Try to parse as API error for a clean message
+    if let Ok(api_error) = serde_json::from_str::<ApiError>(error_text) {
+        return anyhow::anyhow!("{}", api_error.message);
+    }
+    // Non-JSON error body — provide actionable guidance
+    match status {
+        401 => anyhow::anyhow!("not authenticated - run 'vouch login' first"),
+        403 => anyhow::anyhow!("permission denied by server"),
+        404 => anyhow::anyhow!("server endpoint not found (status 404). Check your server URL."),
+        500..=599 => {
+            anyhow::anyhow!("server error ({status}). Run 'vouch doctor' to check connectivity.")
+        }
+        _ => anyhow::anyhow!("unexpected server response ({status})"),
+    }
+}
+
 /// Handle HTTP response, parsing JSON or error.
 fn handle_response<Resp: DeserializeOwned>(response: HttpResponse) -> Result<Resp> {
     if response.is_success() {
         response.json()
     } else {
-        // Try to parse as API error for a clean message
         let error_text = response.text().unwrap_or_default();
-        if let Ok(api_error) = serde_json::from_str::<ApiError>(&error_text) {
-            bail!("{}", api_error.message);
-        }
-        // Non-JSON error body — provide actionable guidance
-        match response.status {
-            401 => bail!("not authenticated - run 'vouch login' first"),
-            403 => bail!("permission denied by server"),
-            404 => bail!("server endpoint not found (status 404). Check your server URL."),
-            500..=599 => {
-                bail!(
-                    "server error ({}). Run 'vouch doctor' to check connectivity.",
-                    response.status
-                )
-            }
-            _ => bail!("unexpected server response ({})", response.status),
-        }
+        Err(format_http_error(response.status, &error_text))
     }
 }
 

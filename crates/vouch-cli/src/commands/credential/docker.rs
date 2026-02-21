@@ -236,11 +236,17 @@ async fn get_ecr_credential(
         .map(|claims| build_session_tags(&claims))
         .unwrap_or_default();
 
+    // Create HTTP client once for all AWS API calls
+    let http_client =
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
+
     // Call STS AssumeRoleWithWebIdentity using the shared module
     // Use email as session name for CloudTrail visibility
     let email = get_user_email(server).await;
     let session = email.as_deref().unwrap_or("vouch-docker");
     let sts_response = assume_role_with_web_identity(
+        &http_client,
         &role_arn,
         session,
         &token_response.id_token,
@@ -253,6 +259,7 @@ async fn get_ecr_credential(
 
     // Call ECR GetAuthorizationToken
     let ecr_token = get_ecr_authorization_token(
+        &http_client,
         region,
         domain_suffix,
         registry_url,
@@ -271,6 +278,7 @@ async fn get_ecr_credential(
 
 /// Get ECR authorization token using AWS credentials.
 async fn get_ecr_authorization_token(
+    http_client: &reqwest::Client,
     region: &str,
     domain_suffix: &str,
     registry_url: &str,
@@ -289,6 +297,7 @@ async fn get_ecr_authorization_token(
     });
 
     let response_body = sign_and_send_json_rpc(
+        http_client,
         &ecr_endpoint,
         "ecr",
         "AmazonEC2ContainerRegistry_V20150921.GetAuthorizationToken",

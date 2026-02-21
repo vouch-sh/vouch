@@ -48,6 +48,7 @@ secrecy = { workspace = true }
 zeroize = { version = "=1.8.2", default-features = false, features = ["derive"] }
 serde_urlencoded = { version = "=0.7.1", default-features = false }
 serde_yaml = { version = "=0.9.34", default-features = false }
+roxmltree = { version = "=0.21.1", default-features = false, features = ["std"] }
 rust-ini = { version = "=0.21.3", default-features = false }
 toml_edit = { version = "=0.25.3", default-features = false, features = ["parse", "display"] }
 

@@ -89,6 +89,7 @@ pub fn derive_signing_key(
 /// * `creds` - Temporary AWS credentials from STS
 /// * `body` - JSON request body
 pub async fn sign_and_send_json_rpc(
+    http_client: &reqwest::Client,
     endpoint: &str,
     service: &str,
     target: &str,
@@ -96,10 +97,6 @@ pub async fn sign_and_send_json_rpc(
     creds: &StsCredentials,
     body: &serde_json::Value,
 ) -> Result<String> {
-    let http_client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
-
     // Extract host from endpoint URL
     let host = endpoint
         .strip_prefix("https://")
@@ -195,6 +192,7 @@ fn uri_encode(input: &str) -> String {
 /// * `region` - AWS region
 /// * `creds` - Temporary AWS credentials from STS
 pub async fn sign_and_send_rest_post(
+    http_client: &reqwest::Client,
     endpoint: &str,
     path: &str,
     query_params: &[(&str, &str)],
@@ -202,10 +200,6 @@ pub async fn sign_and_send_rest_post(
     region: &str,
     creds: &StsCredentials,
 ) -> Result<String> {
-    let http_client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
-
     // Extract host from endpoint URL
     let host = endpoint
         .strip_prefix("https://")
