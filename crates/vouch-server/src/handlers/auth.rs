@@ -7,7 +7,7 @@
 
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
-use crate::extractors::ClientInfo;
+use super::extractors::ClientInfo;
 use crate::services::auth::{
     AuthenticatorLookupParams, CreateSessionParams, LoginAssertionParams, create_login_session,
     lookup_and_verify_authenticator, verify_login_assertion,

@@ -21,7 +21,7 @@
 
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
-use crate::extractors::ClientInfo;
+use super::extractors::ClientInfo;
 use crate::handlers::common::{
     create_session_cookie, generate_challenge, get_auth_context, json_error,
 };

@@ -3,7 +3,7 @@
 
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
-use crate::extractors::ClientInfo;
+use super::extractors::ClientInfo;
 use crate::impl_template_response;
 use askama::Template;
 use axum::{

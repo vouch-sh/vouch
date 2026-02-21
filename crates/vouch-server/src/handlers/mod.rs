@@ -6,6 +6,7 @@ pub mod applications;
 pub mod auth;
 pub mod browser_login;
 pub(crate) mod common;
+pub(crate) mod extractors;
 pub mod credentials;
 pub mod device;
 pub mod enroll;

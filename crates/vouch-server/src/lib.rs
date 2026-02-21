@@ -7,7 +7,6 @@
 pub mod config;
 pub mod crypto;
 pub mod db;
-pub(crate) mod extractors;
 pub mod handlers;
 pub mod infra;
 pub mod services;
