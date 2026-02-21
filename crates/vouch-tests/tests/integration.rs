@@ -1094,8 +1094,13 @@ mod oidc {
         assert_eq!(response.status, 200);
         let userinfo: serde_json::Value = response.json().expect("Failed to parse response");
         assert!(userinfo.get("sub").is_some(), "Should have sub claim");
-        assert!(userinfo.get("email").is_some(), "Should have email claim");
-        assert_eq!(userinfo["email"], "userinfo@example.com");
+        // FIDO2 sessions don't carry OAuth scopes, so email claims are omitted
+        // per OIDC Core Section 5.4. OAuth access tokens with "email" scope
+        // are tested in the vouch-server unit tests.
+        assert!(
+            userinfo.get("email").is_none(),
+            "FIDO2 session should not include email without email scope"
+        );
         assert!(
             userinfo["hardware_verified"].as_bool().unwrap_or(false),
             "Should be hardware verified"
