@@ -250,6 +250,8 @@ pub async fn device_token(
                 authenticator_id: Some(authenticator_id.clone()),
                 iat: now.as_second(),
                 exp: session_expires.as_second(),
+                purpose: crate::db::SessionPurpose::Fido2Session,
+                scope: None,
             };
 
             let token = jsonwebtoken::encode(
@@ -276,6 +278,7 @@ pub async fn device_token(
                 &token_hash,
                 Some(&authenticator_id),
                 &session_expires.to_string(),
+                crate::db::SessionPurpose::Fido2Session.as_str(),
             )
             .await
             .map_err(|_| {

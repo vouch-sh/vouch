@@ -2,7 +2,7 @@
 //! Shared utilities for HTTP handlers.
 
 use crate::AppState;
-use crate::db;
+use crate::db::{self, SessionPurpose};
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::rand as aws_rand;
 use axum::Json;
@@ -209,6 +209,15 @@ async fn extract_session_from_header(
         ));
     }
 
+    // Gate management endpoints: only FIDO2 sessions are allowed
+    if claims.purpose != SessionPurpose::Fido2Session {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient_scope",
+            "This endpoint requires a FIDO2 session token",
+        ));
+    }
+
     Ok(ValidatedSession { claims, token_hash })
 }
 
@@ -269,6 +278,15 @@ pub async fn extract_session_from_cookie(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
             "Session not found",
+        ));
+    }
+
+    // Gate management endpoints: only FIDO2 sessions are allowed (defense-in-depth)
+    if claims.purpose != SessionPurpose::Fido2Session {
+        return Err(json_error(
+            StatusCode::FORBIDDEN,
+            "insufficient_scope",
+            "This endpoint requires a FIDO2 session token",
         ));
     }
 

@@ -672,6 +672,8 @@ pub async fn oidc_callback(
         authenticator_id: authenticator_id.clone(),
         iat: now.as_second(),
         exp: expires.as_second(),
+        purpose: crate::db::SessionPurpose::Fido2Session,
+        scope: None,
     };
 
     let token = match encode(
@@ -699,6 +701,7 @@ pub async fn oidc_callback(
         &token_hash,
         authenticator_id.as_deref(),
         &expires.to_string(),
+        crate::db::SessionPurpose::Fido2Session.as_str(),
     )
     .await
     {
@@ -1140,6 +1143,8 @@ pub async fn browser_register_complete(
         authenticator_id: Some(authenticator_id.clone()),
         iat: now.as_second(),
         exp: expires.as_second(),
+        purpose: crate::db::SessionPurpose::Fido2Session,
+        scope: None,
     };
 
     let token = encode(
@@ -1163,6 +1168,7 @@ pub async fn browser_register_complete(
         &token_hash,
         Some(&authenticator_id),
         &expires.to_string(),
+        crate::db::SessionPurpose::Fido2Session.as_str(),
     )
     .await
     .map_err(|e| {

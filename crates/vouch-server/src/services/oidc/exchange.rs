@@ -9,11 +9,11 @@ use crate::db;
 use crate::handlers::hash_token;
 use crate::redact_email;
 use crate::services::auth::SessionClaims;
+use crate::services::oidc::scope::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::Timestamp;
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, encode};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::sync::Arc;
 
 /// Token type URNs for RFC 8693.
@@ -57,7 +57,7 @@ pub struct TokenExchangeResult {
     /// The lifetime in seconds of the access token.
     pub expires_in: u64,
     /// RFC 8693 Section 2.2: Granted scope (may be subset of requested).
-    pub scope: Option<String>,
+    pub scope: Option<ScopeSet>,
 }
 
 /// Actor claim for delegation chains (RFC 8693 Section 4.1).
@@ -86,7 +86,7 @@ struct ExchangedTokenClaims {
     pub iat: i64,
     /// Scope.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
+    pub scope: Option<ScopeSet>,
     /// Actor claim (for delegation).
     #[serde(rename = "act", skip_serializing_if = "Option::is_none")]
     pub actor: Option<ActorClaim>,
@@ -225,7 +225,7 @@ pub async fn exchange_token(
     };
 
     // Calculate granted scope (intersection of requested and available)
-    let granted_scope = calculate_granted_scope(params.scope);
+    let granted_scope = calculate_granted_scope(params.scope, subject_claims.scope.as_ref());
 
     // Generate the exchanged token
     let now = Timestamp::now();
@@ -261,6 +261,7 @@ pub async fn exchange_token(
 
     // Log the token exchange for audit
     let issued_token_hash = hash_token(&exchanged_token);
+    let scope_string = granted_scope.as_ref().map(|s| s.to_space_separated());
     if let Err(e) = db::insert_token_exchange(
         &state.db,
         &subject_session.user_id,
@@ -268,7 +269,7 @@ pub async fn exchange_token(
         None, // actor_user_id
         &issued_token_hash,
         params.audience,
-        granted_scope.as_deref(),
+        scope_string.as_deref(),
         &Timestamp::from_second(exp).unwrap_or(now).to_string(),
     )
     .await
@@ -292,23 +293,30 @@ pub async fn exchange_token(
 }
 
 /// Calculate the granted scope based on requested and available scopes.
-fn calculate_granted_scope(requested: Option<&str>) -> Option<String> {
-    let available_scope = "openid email";
+///
+/// The `available` parameter comes from the subject token's claims. When `None`
+/// (backward compat for tokens issued before scope tracking), defaults to all scopes.
+fn calculate_granted_scope(
+    requested: Option<&str>,
+    available: Option<&ScopeSet>,
+) -> Option<ScopeSet> {
+    let available_set = match available {
+        Some(s) => s.clone(),
+        None => ScopeSet::all(), // backward compat default
+    };
 
     if let Some(requested) = requested {
-        // Only grant scopes that are both requested and available
-        let available: HashSet<&str> = available_scope.split_whitespace().collect();
-        let requested_scopes: Vec<&str> = requested
-            .split_whitespace()
-            .filter(|s| available.contains(s))
-            .collect();
-        if requested_scopes.is_empty() {
+        let requested_set = ScopeSet::parse(requested);
+        let granted = requested_set.intersection(&available_set);
+        if granted.is_empty() {
             None
         } else {
-            Some(requested_scopes.join(" "))
+            Some(granted)
         }
+    } else if available_set.is_empty() {
+        None
     } else {
-        Some(available_scope.to_string())
+        Some(available_set)
     }
 }
 
@@ -318,26 +326,40 @@ mod tests {
 
     #[test]
     fn test_calculate_granted_scope_full() {
-        let result = calculate_granted_scope(None);
-        assert_eq!(result, Some("openid email".to_string()));
+        let result = calculate_granted_scope(None, None);
+        assert_eq!(result, Some(ScopeSet::all()));
     }
 
     #[test]
     fn test_calculate_granted_scope_subset() {
-        let result = calculate_granted_scope(Some("openid email"));
-        assert_eq!(result, Some("openid email".to_string()));
+        let result = calculate_granted_scope(Some("openid email"), None);
+        assert_eq!(result, Some(ScopeSet::parse("openid email")));
     }
 
     #[test]
     fn test_calculate_granted_scope_invalid() {
-        let result = calculate_granted_scope(Some("admin superuser"));
+        let result = calculate_granted_scope(Some("admin superuser"), None);
         assert_eq!(result, None);
     }
 
     #[test]
     fn test_calculate_granted_scope_mixed() {
-        let result = calculate_granted_scope(Some("openid admin email"));
-        assert_eq!(result, Some("openid email".to_string()));
+        let result = calculate_granted_scope(Some("openid admin email"), None);
+        assert_eq!(result, Some(ScopeSet::parse("openid email")));
+    }
+
+    #[test]
+    fn test_calculate_granted_scope_respects_available() {
+        let available = ScopeSet::parse("openid");
+        let result = calculate_granted_scope(Some("openid email"), Some(&available));
+        assert_eq!(result, Some(ScopeSet::parse("openid")));
+    }
+
+    #[test]
+    fn test_calculate_granted_scope_no_request_uses_available() {
+        let available = ScopeSet::parse("openid");
+        let result = calculate_granted_scope(None, Some(&available));
+        assert_eq!(result, Some(ScopeSet::parse("openid")));
     }
 
     #[test]

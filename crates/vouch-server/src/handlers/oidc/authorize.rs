@@ -9,6 +9,7 @@
 use crate::AppState;
 use crate::db::{self, CreatePendingOAuthParams};
 use crate::impl_template_response;
+use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization::{
     AuthorizationCodeParams, AuthorizationSessionState, AuthorizeRequestParams,
     CodeChallengeMethod, check_client_access, check_session_for_authorization,
@@ -249,12 +250,13 @@ pub async fn authorize(
         Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
             // No valid session - store OAuth params and redirect to login
             // This prevents parameter tampering per RFC 9700
+            let scope_str = validated.scope.to_space_separated();
             let pending_params = CreatePendingOAuthParams {
                 client_id: &validated.client_id,
                 redirect_uri: &validated.redirect_uri,
                 response_type: "code",
                 state: validated.state.as_deref(),
-                scope: Some(&validated.scope),
+                scope: Some(&scope_str),
                 nonce: validated.nonce.as_deref(),
                 code_challenge: validated.code_challenge.as_deref(),
                 code_challenge_method: validated.code_challenge_method.map(|m| m.as_str()),
@@ -357,6 +359,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
             }
 
             // Issue authorization code using stored parameters
+            let scope_set = ScopeSet::parse(pending.scope.as_deref().unwrap_or("openid"));
             let code_params = AuthorizationCodeParams {
                 client_id: &pending.client_id,
                 redirect_uri: &pending.redirect_uri,
@@ -364,7 +367,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                 email: &user.email,
                 authenticator_id: &authenticator.id,
                 aaguid: authenticator.aaguid.as_deref(),
-                scope: pending.scope.as_deref().unwrap_or("openid"),
+                scope: &scope_set,
                 nonce: pending.nonce.as_deref(),
                 code_challenge: pending.code_challenge.as_deref(),
                 code_challenge_method: pending

@@ -9,7 +9,41 @@ use crate::{db_execute, db_fetch_optional};
 use anyhow::Result;
 use jiff::Timestamp;
 use sea_query::{Expr, Query};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Session purpose — distinguishes FIDO2 login sessions from OAuth access tokens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum SessionPurpose {
+    /// FIDO2 hardware-backed login session (CLI login, device code flow).
+    #[default]
+    #[serde(rename = "fido2_session")]
+    Fido2Session,
+    /// OAuth 2.0 access token issued via authorization code grant.
+    #[serde(rename = "oauth_access_token")]
+    OAuthAccessToken,
+}
+
+impl SessionPurpose {
+    /// Return the string representation for database storage.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Fido2Session => "fido2_session",
+            Self::OAuthAccessToken => "oauth_access_token",
+        }
+    }
+
+    /// Parse from a database string value.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "fido2_session" => Some(Self::Fido2Session),
+            "oauth_access_token" => Some(Self::OAuthAccessToken),
+            _ => None,
+        }
+    }
+}
 
 /// Session record.
 #[derive(Debug, sqlx::FromRow)]
@@ -20,16 +54,19 @@ pub struct Session {
     pub token_hash: String,
     pub authenticator_id: Option<String>,
     pub expires_at: DbTimestamp,
+    pub session_type: String,
 }
 
 /// Create a new session.
 /// `authenticator_id` is optional for OIDC-authenticated users who haven't registered a security key yet.
+/// `session_type` distinguishes FIDO2 login sessions from OAuth access tokens.
 pub async fn create_session(
     pool: &Pool,
     user_id: &str,
     token_hash: &str,
     authenticator_id: Option<&str>,
     expires_at: &str,
+    session_type: &str,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
     let now = Timestamp::now().to_string();
@@ -46,6 +83,7 @@ pub async fn create_session(
                 Sessions::AuthenticatorId,
                 Sessions::ExpiresAt,
                 Sessions::CreatedAt,
+                Sessions::SessionType,
             ])
             .values_panic([
                 id.clone().into(),
@@ -54,6 +92,7 @@ pub async fn create_session(
                 authenticator_id.into(),
                 expires_at.into(),
                 now.as_str().into(),
+                session_type.into(),
             ])
             .to_owned();
         query.build_sql(db_type)
@@ -76,6 +115,7 @@ pub async fn get_session_by_token_hash(pool: &Pool, token_hash: &str) -> Result<
                 Sessions::TokenHash,
                 Sessions::AuthenticatorId,
                 Sessions::ExpiresAt,
+                Sessions::SessionType,
             ])
             .from(Sessions::Table)
             .and_where(Expr::col(Sessions::TokenHash).eq(token_hash))

@@ -431,6 +431,8 @@ pub async fn browser_login_complete(
         authenticator_id: Some(authenticator.id.clone()),
         iat: now.as_second(),
         exp: expires.as_second(),
+        purpose: crate::db::SessionPurpose::Fido2Session,
+        scope: None,
     };
 
     let token = encode(
@@ -454,6 +456,7 @@ pub async fn browser_login_complete(
         &token_hash,
         Some(&authenticator.id),
         &expires.to_string(),
+        crate::db::SessionPurpose::Fido2Session.as_str(),
     )
     .await
     .map_err(|e| {
