@@ -303,6 +303,8 @@ pub async fn exchange_token(
             audience,
             // Token exchange does not carry auth_time from the subject token
             auth_time: None,
+            amr: Some(crate::services::oidc::amr::AuthMethod::all_fido2().to_vec()),
+            acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
         },
     )
     .await?;

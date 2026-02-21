@@ -9,7 +9,7 @@ use axum::http::StatusCode;
 use axum_extra::TypedHeader;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use headers::authorization::{Authorization, Bearer};
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use jsonwebtoken::DecodingKey;
 use time::Duration;
 use vouch_common::{ApiError, extract_aaguid_from_attestation, validate_hardware_attestation};
 
@@ -301,9 +301,7 @@ pub(crate) fn decode_session_jwt(
     jwt_secret: &[u8],
     expected_issuer: &str,
 ) -> Result<jsonwebtoken::TokenData<SessionClaims>, jsonwebtoken::errors::Error> {
-    let mut validation = Validation::new(Algorithm::HS256);
-    validation.set_issuer(&[expected_issuer]);
-    validation.set_audience(&[expected_issuer]);
+    let validation = crate::jwt::session_validation(expected_issuer);
 
     let token_data = jsonwebtoken::decode::<SessionClaims>(
         token,

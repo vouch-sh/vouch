@@ -25,6 +25,7 @@
 //! - [`exchange`] - Token exchange (RFC 8693)
 //! - [`introspection`] - Token introspection and revocation
 
+pub mod amr;
 pub mod authorization;
 pub mod discovery;
 pub mod dpop;

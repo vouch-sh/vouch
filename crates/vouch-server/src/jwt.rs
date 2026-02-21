@@ -13,7 +13,9 @@
 
 use crate::services::auth::{AccessTokenClaims, DecodedToken, SessionClaims};
 use crate::services::oidc::keys::OidcSigningKey;
-use jsonwebtoken::{Algorithm, DecodingKey, Header, Validation};
+use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
+use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 /// JWT token types used in the vouch system.
 ///
@@ -150,11 +152,7 @@ pub fn decode_token(token: &str, ctx: &TokenValidationContext<'_>) -> Option<Dec
         Algorithm::HS256 => {
             // Attempt to decode as a FIDO2 session token
             let decoding_key = DecodingKey::from_secret(ctx.jwt_secret);
-            let mut validation = Validation::new(Algorithm::HS256);
-            // RFC 8725 §3.8: Validate issuer
-            validation.set_issuer(&[ctx.expected_issuer]);
-            // RFC 8725 §3.9: Validate audience (session tokens use base_url as audience)
-            validation.set_audience(&[ctx.expected_issuer]);
+            let validation = session_validation(ctx.expected_issuer);
 
             let token_data =
                 jsonwebtoken::decode::<SessionClaims>(token, &decoding_key, &validation).ok()?;
@@ -169,6 +167,57 @@ pub fn decode_token(token: &str, ctx: &TokenValidationContext<'_>) -> Option<Dec
         // Reject all other algorithms (including "none") to prevent attacks
         _ => None,
     }
+}
+
+/// Build HS256 session validation with issuer and audience set to the expected issuer.
+///
+/// This consolidates the identical validation setup used in [`decode_session_jwt`]
+/// (`handlers/common.rs`) and the HS256 branch of [`decode_token`].
+#[must_use]
+pub(crate) fn session_validation(expected_issuer: &str) -> Validation {
+    let mut validation = Validation::new(Algorithm::HS256);
+    validation.set_issuer(&[expected_issuer]);
+    validation.set_audience(&[expected_issuer]);
+    validation
+}
+
+/// Encode a short-lived state token as a JWT with an explicit `typ` header.
+///
+/// This is a generic helper for the 5 state token types (registration, authentication,
+/// browser registration, browser authentication, GitHub state) that share the same
+/// encode pattern: set `typ` header from [`JwtType`], sign with HS256.
+pub fn encode_state_token<T: Serialize>(
+    claims: &T,
+    jwt_type: JwtType,
+    secret: &[u8],
+) -> Result<String, jsonwebtoken::errors::Error> {
+    jsonwebtoken::encode(
+        &jwt_type.to_header(),
+        claims,
+        &EncodingKey::from_secret(secret),
+    )
+}
+
+/// Decode a short-lived state token, validating the `typ` header.
+///
+/// This is a generic helper for the 5 state token types. It decodes with
+/// default validation (only `exp` check), then validates that the `typ`
+/// header matches the expected [`JwtType`].
+pub fn decode_state_token<T: DeserializeOwned>(
+    token: &str,
+    jwt_type: JwtType,
+    secret: &[u8],
+) -> Result<T, jsonwebtoken::errors::Error> {
+    let mut validation = Validation::default();
+    validation.required_spec_claims.clear();
+    let data = jsonwebtoken::decode::<T>(token, &DecodingKey::from_secret(secret), &validation)?;
+    // RFC 8725 §3.11: Validate typ header
+    if data.header.typ.as_deref() != Some(jwt_type.as_header_str()) {
+        return Err(jsonwebtoken::errors::Error::from(
+            jsonwebtoken::errors::ErrorKind::InvalidToken,
+        ));
+    }
+    Ok(data.claims)
 }
 
 #[cfg(test)]
@@ -212,6 +261,8 @@ mod tests {
             cnf: None,
             auth_time: None,
             act: None,
+            amr: None,
+            acr: None,
         };
         key.sign_access_token_jwt(&claims).expect("sign")
     }
@@ -291,6 +342,8 @@ mod tests {
             cnf: None,
             auth_time: None,
             act: None,
+            amr: None,
+            acr: None,
         };
 
         // Sign as ID token (typ: "JWT", no "at+jwt")
@@ -338,6 +391,8 @@ mod tests {
             cnf: None,
             auth_time: None,
             act: None,
+            amr: None,
+            acr: None,
         };
 
         let token = key.sign_access_token_jwt(&claims).expect("sign");
@@ -501,6 +556,8 @@ mod tests {
             cnf: None,
             auth_time: None,
             act: None,
+            amr: None,
+            acr: None,
         };
 
         let token = key.sign_access_token_jwt(&claims).expect("sign");
@@ -510,5 +567,71 @@ mod tests {
             decoded.is_none(),
             "Access token with wrong issuer should be rejected"
         );
+    }
+
+    // ====================================================================
+    // State token encode/decode helpers
+    // ====================================================================
+
+    #[derive(Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+    struct TestState {
+        data: String,
+        iat: i64,
+        exp: i64,
+    }
+
+    #[test]
+    fn test_state_token_roundtrip() {
+        let state = TestState {
+            data: "hello".to_string(),
+            iat: 1_000_000_000,
+            exp: 9_999_999_999,
+        };
+        let token = encode_state_token(&state, JwtType::RegistrationState, TEST_JWT_SECRET)
+            .expect("encode");
+        let decoded: TestState =
+            decode_state_token(&token, JwtType::RegistrationState, TEST_JWT_SECRET)
+                .expect("decode");
+        assert_eq!(decoded, state);
+    }
+
+    #[test]
+    fn test_state_token_wrong_type_rejected() {
+        let state = TestState {
+            data: "hello".to_string(),
+            iat: 1_000_000_000,
+            exp: 9_999_999_999,
+        };
+        // Encode as RegistrationState, decode as AuthenticationState
+        let token = encode_state_token(&state, JwtType::RegistrationState, TEST_JWT_SECRET)
+            .expect("encode");
+        let result: Result<TestState, _> =
+            decode_state_token(&token, JwtType::AuthenticationState, TEST_JWT_SECRET);
+        assert!(result.is_err(), "Wrong type should be rejected");
+    }
+
+    #[test]
+    fn test_state_token_wrong_secret_rejected() {
+        let state = TestState {
+            data: "hello".to_string(),
+            iat: 1_000_000_000,
+            exp: 9_999_999_999,
+        };
+        let token =
+            encode_state_token(&state, JwtType::GitHubState, TEST_JWT_SECRET).expect("encode");
+        let result: Result<TestState, _> =
+            decode_state_token(&token, JwtType::GitHubState, b"wrong-secret");
+        assert!(result.is_err(), "Wrong secret should be rejected");
+    }
+
+    // ====================================================================
+    // Session validation helper
+    // ====================================================================
+
+    #[test]
+    fn test_session_validation_config() {
+        let validation = session_validation("https://example.com");
+        assert_eq!(validation.algorithms, vec![Algorithm::HS256]);
+        // Issuer and audience are set (internal fields tested via decode behavior)
     }
 }

@@ -23,7 +23,6 @@ use axum_extra::TypedHeader;
 use axum_extra::extract::cookie::CookieJar;
 use headers::authorization::{Authorization, Bearer};
 use jiff::Timestamp;
-use jsonwebtoken::{DecodingKey, EncodingKey, Validation, decode, encode};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -60,30 +59,19 @@ struct RegistrationState {
 
 impl RegistrationState {
     fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        encode(
-            &crate::jwt::JwtType::RegistrationState.to_header(),
+        crate::jwt::encode_state_token(
             self,
-            &EncodingKey::from_secret(secret.as_bytes()),
+            crate::jwt::JwtType::RegistrationState,
+            secret.as_bytes(),
         )
     }
 
     fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        let mut validation = Validation::default();
-        validation.required_spec_claims.clear();
-        let data = decode::<Self>(
+        crate::jwt::decode_state_token(
             token,
-            &DecodingKey::from_secret(secret.as_bytes()),
-            &validation,
-        )?;
-        // RFC 8725 §3.11: Validate typ header
-        if data.header.typ.as_deref()
-            != Some(crate::jwt::JwtType::RegistrationState.as_header_str())
-        {
-            return Err(jsonwebtoken::errors::Error::from(
-                jsonwebtoken::errors::ErrorKind::InvalidToken,
-            ));
-        }
-        Ok(data.claims)
+            crate::jwt::JwtType::RegistrationState,
+            secret.as_bytes(),
+        )
     }
 }
 
@@ -105,30 +93,19 @@ struct AuthenticationState {
 
 impl AuthenticationState {
     fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        encode(
-            &crate::jwt::JwtType::AuthenticationState.to_header(),
+        crate::jwt::encode_state_token(
             self,
-            &EncodingKey::from_secret(secret.as_bytes()),
+            crate::jwt::JwtType::AuthenticationState,
+            secret.as_bytes(),
         )
     }
 
     fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        let mut validation = Validation::default();
-        validation.required_spec_claims.clear();
-        let data = decode::<Self>(
+        crate::jwt::decode_state_token(
             token,
-            &DecodingKey::from_secret(secret.as_bytes()),
-            &validation,
-        )?;
-        // RFC 8725 §3.11: Validate typ header
-        if data.header.typ.as_deref()
-            != Some(crate::jwt::JwtType::AuthenticationState.as_header_str())
-        {
-            return Err(jsonwebtoken::errors::Error::from(
-                jsonwebtoken::errors::ErrorKind::InvalidToken,
-            ));
-        }
-        Ok(data.claims)
+            crate::jwt::JwtType::AuthenticationState,
+            secret.as_bytes(),
+        )
     }
 }
 

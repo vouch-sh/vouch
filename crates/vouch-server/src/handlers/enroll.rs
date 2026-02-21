@@ -17,7 +17,6 @@ use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
-use jsonwebtoken::{DecodingKey, EncodingKey, Validation, decode, encode};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -239,30 +238,19 @@ struct BrowserRegistrationState {
 
 impl BrowserRegistrationState {
     fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        encode(
-            &crate::jwt::JwtType::BrowserRegistrationState.to_header(),
+        crate::jwt::encode_state_token(
             self,
-            &EncodingKey::from_secret(secret.as_bytes()),
+            crate::jwt::JwtType::BrowserRegistrationState,
+            secret.as_bytes(),
         )
     }
 
     fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        let mut validation = Validation::default();
-        validation.required_spec_claims.clear();
-        let data = decode::<Self>(
+        crate::jwt::decode_state_token(
             token,
-            &DecodingKey::from_secret(secret.as_bytes()),
-            &validation,
-        )?;
-        // RFC 8725 §3.11: Validate typ header
-        if data.header.typ.as_deref()
-            != Some(crate::jwt::JwtType::BrowserRegistrationState.as_header_str())
-        {
-            return Err(jsonwebtoken::errors::Error::from(
-                jsonwebtoken::errors::ErrorKind::InvalidToken,
-            ));
-        }
-        Ok(data.claims)
+            crate::jwt::JwtType::BrowserRegistrationState,
+            secret.as_bytes(),
+        )
     }
 }
 

@@ -16,6 +16,7 @@ use crate::redact_email;
 use crate::services::auth::{
     CreateOAuthTokenParams, DecodedToken, create_oauth_access_token, decode_token,
 };
+use crate::services::oidc::amr::AuthMethod;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use aws_lc_rs::digest::{self, SHA256};
 use base64::Engine;
@@ -150,6 +151,16 @@ pub struct IdTokenClaims {
     /// RFC 9449 Section 6: DPoP token binding confirmation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cnf: Option<CnfClaim>,
+    /// RFC 9068 Section 2.2 / RFC 8176: Authentication methods used.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub amr: Option<Vec<AuthMethod>>,
+    /// RFC 9068 Section 2.2: Authentication context class reference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acr: Option<String>,
+    /// OIDC Core Section 3.1.3.6: Access Token hash value.
+    /// Base64url encoding of the left half of SHA-256(access_token).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub at_hash: Option<String>,
 }
 
 /// Exchange an authorization code for tokens.
@@ -311,13 +322,15 @@ pub async fn exchange_authorization_code(
             // auth_time is the iat of the authorization code, reflecting when the
             // FIDO2 session was active at the time of authorization.
             auth_time: Some(auth_code.iat),
+            amr: Some(AuthMethod::all_fido2().to_vec()),
+            acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
         },
     )
     .await?;
     let access_token = session_result.token;
     let expires_in = state.config().session_hours * 3600;
 
-    // Generate ID token
+    // Generate ID token (with at_hash computed from the access token)
     let id_token = generate_id_token(
         state,
         IdTokenParams {
@@ -332,6 +345,9 @@ pub async fn exchange_authorization_code(
             // auth_time is the iat of the authorization code, which reflects when
             // the FIDO2 session was active at the time of authorization.
             auth_time: Some(auth_code.iat),
+            amr: Some(AuthMethod::all_fido2().to_vec()),
+            acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
+            access_token: Some(&access_token),
         },
     )?;
 
@@ -481,6 +497,17 @@ pub async fn authenticate_client(
     }
 }
 
+/// Compute `at_hash` per OIDC Core Section 3.1.3.6.
+///
+/// Returns the base64url encoding (no padding) of the left half of SHA-256
+/// of the access token string. For SHA-256 (32 bytes), the left half is 16 bytes,
+/// producing a 22-character base64url string.
+fn compute_at_hash(access_token: &str) -> Option<String> {
+    let hash = digest::digest(&SHA256, access_token.as_bytes());
+    let left_half = hash.as_ref().get(..16)?;
+    Some(URL_SAFE_NO_PAD.encode(left_half))
+}
+
 /// Parameters for ID token generation.
 struct IdTokenParams<'a> {
     client_id: &'a str,
@@ -493,6 +520,12 @@ struct IdTokenParams<'a> {
     scope: &'a ScopeSet,
     /// Time when the user authenticated (FIDO2 session creation time).
     auth_time: Option<i64>,
+    /// RFC 8176: Authentication methods reference.
+    amr: Option<Vec<AuthMethod>>,
+    /// RFC 9068 Section 2.2: Authentication context class reference.
+    acr: Option<String>,
+    /// Access token string, used to compute `at_hash` (OIDC Core Section 3.1.3.6).
+    access_token: Option<&'a str>,
 }
 
 /// Generate an OIDC ID token.
@@ -529,6 +562,9 @@ fn generate_id_token(state: &Arc<AppState>, params: IdTokenParams<'_>) -> Servic
         hardware_verified: true,
         hardware_aaguid: params.aaguid.map(String::from),
         cnf,
+        amr: params.amr,
+        acr: params.acr,
+        at_hash: params.access_token.and_then(compute_at_hash),
     };
 
     state
@@ -693,6 +729,7 @@ pub async fn validate_session_token(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -818,5 +855,43 @@ mod tests {
 
         // Must NOT be hex-encoded (hex would be 64 chars)
         assert_ne!(hash1.len(), 64, "hash must not be hex-encoded");
+    }
+
+    #[test]
+    fn test_compute_at_hash_deterministic() {
+        // at_hash should be deterministic for the same input
+        let token = "eyJhbGciOiJFUzI1NiIsInR5cCI6ImF0K2p3dCJ9.test.sig";
+        let hash1 = compute_at_hash(token);
+        let hash2 = compute_at_hash(token);
+        assert!(hash1.is_some());
+        assert_eq!(hash1, hash2);
+    }
+
+    #[test]
+    fn test_compute_at_hash_format() {
+        // SHA-256 left half = 16 bytes → base64url-no-pad = 22 characters
+        let token = "some-access-token-string";
+        let hash = compute_at_hash(token).expect("should produce hash");
+        assert_eq!(
+            hash.len(),
+            22,
+            "at_hash should be 22 chars (16 bytes base64url)"
+        );
+        // Must contain only base64url characters (no padding)
+        assert!(
+            hash.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "at_hash must use URL-safe base64 characters only"
+        );
+    }
+
+    #[test]
+    fn test_compute_at_hash_different_tokens() {
+        let hash1 = compute_at_hash("token-a").expect("hash");
+        let hash2 = compute_at_hash("token-b").expect("hash");
+        assert_ne!(
+            hash1, hash2,
+            "different tokens should produce different hashes"
+        );
     }
 }

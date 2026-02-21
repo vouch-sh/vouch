@@ -16,6 +16,7 @@
 use crate::AppState;
 use crate::db::{self, Authenticator, SessionPurpose, User};
 use crate::handlers::common::hash_token;
+use crate::services::oidc::amr::AuthMethod;
 use crate::services::oidc::dpop::CnfClaim;
 use crate::services::oidc::keys::OidcSigningKey;
 use crate::services::oidc::scope::ScopeSet;
@@ -233,6 +234,12 @@ pub struct AccessTokenClaims {
     /// RFC 8693 Section 4.1: Actor claim for delegation chains.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub act: Option<ActorClaim>,
+    /// RFC 9068 Section 2.2 / RFC 8176: Authentication methods used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amr: Option<Vec<AuthMethod>>,
+    /// RFC 9068 Section 2.2: Authentication context class reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acr: Option<String>,
 }
 
 /// Parameters for creating an OAuth access token (RFC 9068).
@@ -257,6 +264,10 @@ pub struct CreateOAuthTokenParams<'a> {
     /// Time when the End-User authentication occurred (Unix timestamp).
     /// Populated from FIDO2 session creation time for authorization code grants.
     pub auth_time: Option<i64>,
+    /// RFC 9068 Section 2.2 / RFC 8176: Authentication methods reference.
+    pub amr: Option<Vec<AuthMethod>>,
+    /// RFC 9068 Section 2.2: Authentication context class reference.
+    pub acr: Option<String>,
 }
 
 /// Session claims for JWT tokens (RFC 7519 Section 4.1).
@@ -422,6 +433,8 @@ pub async fn create_oauth_access_token(
         cnf,
         auth_time: params.auth_time,
         act: params.act,
+        amr: params.amr,
+        acr: params.acr,
     };
 
     let token = state
@@ -566,6 +579,8 @@ mod tests {
             cnf: None,
             auth_time: None,
             act: None,
+            amr: None,
+            acr: None,
         };
         key.sign_access_token_jwt(&claims).expect("sign")
     }
@@ -644,6 +659,8 @@ mod tests {
             cnf: None,
             auth_time: None,
             act: None,
+            amr: None,
+            acr: None,
         };
 
         // Sign as ID token (typ: "JWT", no "at+jwt")
@@ -690,6 +707,8 @@ mod tests {
             cnf: None,
             auth_time: None,
             act: None,
+            amr: None,
+            acr: None,
         };
 
         let token = key.sign_access_token_jwt(&claims).expect("sign");
@@ -786,6 +805,8 @@ mod tests {
             cnf: None,
             auth_time: None,
             act: None,
+            amr: None,
+            acr: None,
         };
 
         let json = serde_json::to_string(&claims).expect("serialize");
@@ -798,6 +819,8 @@ mod tests {
         assert!(parsed.get("cnf").is_none());
         assert!(parsed.get("auth_time").is_none());
         assert!(parsed.get("act").is_none());
+        assert!(parsed.get("amr").is_none());
+        assert!(parsed.get("acr").is_none());
         // Required fields should be present
         assert_eq!(parsed["iss"], "https://example.com");
         assert_eq!(parsed["sub"], "user-123");
