@@ -22,7 +22,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Args;
 use zeroize::Zeroizing;
 
-use crate::s3_config::{S3AcmeConfig, S3Config, S3TlsConfig};
+use super::s3_config::{S3AcmeConfig, S3Config, S3TlsConfig};
 use crate::crypto::tpm_decrypt::{EncryptedEnvelope, aes_256_gcm_encrypt};
 
 /// Encrypt a plain S3Config JSON into a KMS-encrypted envelope.

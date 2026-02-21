@@ -4,16 +4,13 @@
 //! This crate provides the Vouch identity server with OIDC provider,
 //! WebAuthn authentication, and credential issuance.
 
-pub mod cleanup;
 pub mod config;
 pub mod crypto;
 pub mod db;
-pub mod encrypt_config;
 pub(crate) mod extractors;
 pub mod handlers;
-pub mod s3_config;
+pub mod infra;
 pub mod services;
-pub mod tls;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;

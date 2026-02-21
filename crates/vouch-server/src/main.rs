@@ -28,10 +28,11 @@ use tower_http::set_header::SetResponseHeaderLayer;
 use tracing_subscriber::EnvFilter;
 
 use vouch_server::{
-    AppState, cleanup, config,
+    AppState, config,
     crypto::{ssh_ca, tpm_decrypt},
     db::{Pool, dsql::DsqlEndpoint, migrations::run_dsql_migrations},
-    encrypt_config, handlers, s3_config,
+    handlers,
+    infra::{cleanup, encrypt_config, s3_config},
     services::{
         integrations::github::GitHubApp,
         oidc::{OidcSigningKey, dpop},
@@ -610,7 +611,7 @@ async fn run_server(args: config::Args) -> Result<()> {
 
     // Start server with graceful shutdown
     if config.tls_configured() {
-        let tls_config = vouch_server::tls::build_tls_config(&config).await?;
+        let tls_config = vouch_server::infra::tls::build_tls_config(&config).await?;
 
         // TLS mode: always listen on 443 (HTTPS) and 80 (HTTP redirect)
         let https_addr: std::net::SocketAddr =
@@ -674,7 +675,7 @@ async fn run_server(args: config::Args) -> Result<()> {
                 let cfg = config_for_sighup.load();
                 match (&cfg.tls_cert, &cfg.tls_key) {
                     (Some(cert), Some(key)) => {
-                        match vouch_server::tls::reload_tls_from_config(
+                        match vouch_server::infra::tls::reload_tls_from_config(
                             &tls_config_for_reload,
                             cert,
                             key,
