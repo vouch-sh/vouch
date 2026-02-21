@@ -308,11 +308,18 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
 
     // Verify origin
     if client_data.origin != expected_origin {
-        // Allow localhost variations for development
-        let is_localhost_match = (expected_origin.contains("localhost")
-            || expected_origin.contains("127.0.0.1"))
-            && (client_data.origin.contains("localhost")
-                || client_data.origin.contains("127.0.0.1"));
+        // Allow localhost variations for development (e.g. localhost ↔ 127.0.0.1).
+        // Note: this intentionally does not compare ports — the server may listen
+        // on one port while the browser constructs an origin with a different one.
+        let expected_is_local = url::Url::parse(expected_origin)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from))
+            .is_some_and(|h| vouch_common::is_loopback_host(&h));
+        let origin_is_local = url::Url::parse(&client_data.origin)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from))
+            .is_some_and(|h| vouch_common::is_loopback_host(&h));
+        let is_localhost_match = expected_is_local && origin_is_local;
 
         if !is_localhost_match {
             return Err(VerifyError::InvalidOrigin);
@@ -1390,6 +1397,135 @@ mod tests {
             &verifier,
         );
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_client_data_docker_internal_to_localhost_allowed() {
+        let verifier = TestCoseVerifier::always_succeed();
+        let rp_id = "host.docker.internal";
+        let auth_data = make_auth_data(rp_id, 0x05, 1);
+        let client_data =
+            make_client_data_json("webauthn.get", "test-challenge", "http://localhost:3000");
+        let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+
+        // host.docker.internal and localhost are both loopback
+        let result = verify_assertion_with_verifier(
+            &auth_data,
+            &client_data,
+            &[0u8; 64],
+            &cose_key,
+            rp_id,
+            "test-challenge",
+            "http://host.docker.internal:3000",
+            0,
+            false,
+            &verifier,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_client_data_ipv6_loopback_to_localhost_allowed() {
+        let verifier = TestCoseVerifier::always_succeed();
+        let rp_id = "localhost";
+        let auth_data = make_auth_data(rp_id, 0x05, 1);
+        let client_data =
+            make_client_data_json("webauthn.get", "test-challenge", "http://[::1]:3000");
+        let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+
+        // [::1] and localhost are both loopback
+        let result = verify_assertion_with_verifier(
+            &auth_data,
+            &client_data,
+            &[0u8; 64],
+            &cose_key,
+            rp_id,
+            "test-challenge",
+            "http://localhost:3000",
+            0,
+            false,
+            &verifier,
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_client_data_loopback_vs_remote_rejected() {
+        let verifier = TestCoseVerifier::always_succeed();
+        let rp_id = "example.com";
+        let auth_data = make_auth_data(rp_id, 0x05, 1);
+        // Client claims localhost origin, but expected origin is remote
+        let client_data =
+            make_client_data_json("webauthn.get", "test-challenge", "http://localhost:3000");
+        let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+
+        let result = verify_assertion_with_verifier(
+            &auth_data,
+            &client_data,
+            &[0u8; 64],
+            &cose_key,
+            rp_id,
+            "test-challenge",
+            "https://example.com",
+            0,
+            false,
+            &verifier,
+        );
+        assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
+    }
+
+    #[test]
+    fn test_client_data_remote_vs_loopback_rejected() {
+        let verifier = TestCoseVerifier::always_succeed();
+        let rp_id = "localhost";
+        let auth_data = make_auth_data(rp_id, 0x05, 1);
+        // Client claims remote origin, but expected origin is loopback
+        let client_data =
+            make_client_data_json("webauthn.get", "test-challenge", "https://evil.com");
+        let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+
+        let result = verify_assertion_with_verifier(
+            &auth_data,
+            &client_data,
+            &[0u8; 64],
+            &cose_key,
+            rp_id,
+            "test-challenge",
+            "http://localhost:3000",
+            0,
+            false,
+            &verifier,
+        );
+        assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
+    }
+
+    #[test]
+    fn test_client_data_localhost_in_path_not_matched() {
+        // Regression test: an origin like https://evil.com/localhost must NOT
+        // be treated as loopback (the old contains() approach was vulnerable)
+        let verifier = TestCoseVerifier::always_succeed();
+        let rp_id = "localhost";
+        let auth_data = make_auth_data(rp_id, 0x05, 1);
+        let client_data = make_client_data_json(
+            "webauthn.get",
+            "test-challenge",
+            "https://evil.com/localhost",
+        );
+        let cose_key = make_eddsa_cose_key(&[0u8; 32]);
+
+        let result = verify_assertion_with_verifier(
+            &auth_data,
+            &client_data,
+            &[0u8; 64],
+            &cose_key,
+            rp_id,
+            "test-challenge",
+            "http://localhost:3000",
+            0,
+            false,
+            &verifier,
+        );
+        assert!(matches!(result, Err(VerifyError::InvalidOrigin)));
     }
 
     // =========================================================================

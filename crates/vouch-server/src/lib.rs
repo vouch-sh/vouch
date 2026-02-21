@@ -153,9 +153,7 @@ async fn redirect_to_https(
 
 /// Check if the provided hostname is valid for this server.
 fn is_valid_host(hostname: &str, rp_id: &str) -> bool {
-    hostname.eq_ignore_ascii_case(rp_id)
-        || hostname.eq_ignore_ascii_case("localhost")
-        || hostname == "127.0.0.1"
+    hostname.eq_ignore_ascii_case(rp_id) || vouch_common::is_loopback_host(hostname)
 }
 
 #[cfg(test)]

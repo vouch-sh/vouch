@@ -41,4 +41,4 @@ pub use cookie::{
     SessionCookie, clear_cookie, cookie_path, is_cookie_expired, read_cookie, write_cookie,
 };
 pub use error::*;
-pub use url::{UrlSecurity, check_url_security};
+pub use url::{UrlSecurity, check_url_security, is_loopback_host};

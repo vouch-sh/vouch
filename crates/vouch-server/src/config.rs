@@ -329,7 +329,7 @@ impl ServerConfig {
         // Compute base URL (handles both production https and local http)
         let base_url = args.base_url.unwrap_or_else(|| {
             // For local development (localhost/127.0.0.1), use http with port
-            if args.rp_id == "localhost" || args.rp_id == "127.0.0.1" {
+            if vouch_common::is_loopback_host(&args.rp_id) {
                 // Extract port from listen_addr (e.g., "[::]:3000" -> "3000")
                 let port = args.listen_addr.rsplit(':').next().unwrap_or("3000");
                 format!("http://{}:{}", args.rp_id, port)

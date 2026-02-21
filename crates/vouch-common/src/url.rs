@@ -64,8 +64,22 @@ pub fn check_url_security(url: &str) -> UrlSecurity {
 }
 
 /// Check whether a hostname refers to a loopback/localhost address.
-fn is_loopback_host(host: &str) -> bool {
-    if host == "localhost" {
+///
+/// Recognized as loopback:
+/// - `localhost` (case-insensitive, per RFC 4343)
+/// - `host.docker.internal` (case-insensitive, resolves to 127.0.0.1 on the host)
+/// - Any IPv4 in `127.0.0.0/8` (parsed via [`std::net::Ipv4Addr::is_loopback`])
+/// - IPv6 `::1` (with or without brackets)
+///
+/// Hostnames like `127.evil.com` are **not** treated as loopback because
+/// the string is parsed as an IP address first; non-IP hostnames only match
+/// the explicit `localhost` / `host.docker.internal` checks.
+#[must_use]
+pub fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    if host.eq_ignore_ascii_case("host.docker.internal") {
         return true;
     }
     // Use std::net::Ipv4Addr for rigorous 127.0.0.0/8 check
@@ -144,6 +158,14 @@ mod tests {
     }
 
     #[test]
+    fn http_docker_internal_is_secure() {
+        assert_eq!(
+            check_url_security("http://host.docker.internal:3000"),
+            UrlSecurity::Secure
+        );
+    }
+
+    #[test]
     fn http_127_evil_com_is_insecure() {
         // Must not false-exempt hostnames starting with "127."
         assert!(check_url_security("http://127.evil.com").is_insecure());
@@ -153,5 +175,86 @@ mod tests {
     fn unparseable_url_is_secure() {
         assert_eq!(check_url_security("not-a-url"), UrlSecurity::Secure);
         assert_eq!(check_url_security(""), UrlSecurity::Secure);
+    }
+
+    // =========================================================================
+    // is_loopback_host() direct tests
+    // =========================================================================
+
+    #[test]
+    fn loopback_localhost() {
+        assert!(is_loopback_host("localhost"));
+    }
+
+    #[test]
+    fn loopback_localhost_case_insensitive() {
+        assert!(is_loopback_host("Localhost"));
+        assert!(is_loopback_host("LOCALHOST"));
+        assert!(is_loopback_host("LocalHost"));
+    }
+
+    #[test]
+    fn loopback_docker_internal() {
+        assert!(is_loopback_host("host.docker.internal"));
+    }
+
+    #[test]
+    fn loopback_docker_internal_case_insensitive() {
+        assert!(is_loopback_host("HOST.DOCKER.INTERNAL"));
+        assert!(is_loopback_host("Host.Docker.Internal"));
+    }
+
+    #[test]
+    fn loopback_127_0_0_1() {
+        assert!(is_loopback_host("127.0.0.1"));
+    }
+
+    #[test]
+    fn loopback_127_range() {
+        assert!(is_loopback_host("127.0.0.2"));
+        assert!(is_loopback_host("127.255.255.254"));
+    }
+
+    #[test]
+    fn loopback_ipv6_bracketed() {
+        assert!(is_loopback_host("[::1]"));
+    }
+
+    #[test]
+    fn loopback_ipv6_bare() {
+        assert!(is_loopback_host("::1"));
+    }
+
+    #[test]
+    fn not_loopback_example_com() {
+        assert!(!is_loopback_host("example.com"));
+    }
+
+    #[test]
+    fn not_loopback_private_ip() {
+        assert!(!is_loopback_host("10.0.0.1"));
+        assert!(!is_loopback_host("192.168.1.1"));
+    }
+
+    #[test]
+    fn not_loopback_127_evil_hostname() {
+        assert!(!is_loopback_host("127.evil.com"));
+    }
+
+    #[test]
+    fn not_loopback_empty_string() {
+        assert!(!is_loopback_host(""));
+    }
+
+    #[test]
+    fn not_loopback_ipv6_non_loopback() {
+        assert!(!is_loopback_host("[::2]"));
+        assert!(!is_loopback_host("::2"));
+        assert!(!is_loopback_host("[fe80::1]"));
+    }
+
+    #[test]
+    fn not_loopback_localhost_subdomain() {
+        assert!(!is_loopback_host("localhost.evil.com"));
     }
 }
