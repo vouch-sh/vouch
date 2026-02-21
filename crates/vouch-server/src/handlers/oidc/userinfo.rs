@@ -6,9 +6,11 @@
 //! - RFC 9449 Section 7.1 - DPoP-bound access tokens at resource endpoints
 
 use crate::AppState;
+use crate::db::SessionPurpose;
 use crate::services::OAuthErrorCode;
 use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::dpop::{self, DpopError};
+use crate::services::oidc::scope::OAuthScope;
 use crate::services::oidc::token::validate_session_token;
 use axum::{
     Json,
@@ -20,17 +22,23 @@ use serde::Serialize;
 use std::sync::Arc;
 
 /// User info response (OIDC Core Section 5.3.2).
+///
+/// Per OIDC Core Section 5.4, `email` and `email_verified` claims are only
+/// returned when the `email` scope was granted.
 #[derive(Debug, Serialize)]
 pub struct UserInfoResponse {
     /// OIDC Core Section 5.1: Subject Identifier.
     sub: String,
     /// OIDC Core Section 5.1: User email address.
-    email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
     /// OIDC Core Section 5.1: Whether the email has been verified.
-    email_verified: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email_verified: Option<bool>,
     /// Custom claim: Hardware verification flag (FIDO2 presence proof).
     hardware_verified: bool,
     /// Custom claim: Hardware authenticator AAGUID.
+    #[serde(skip_serializing_if = "Option::is_none")]
     hardware_aaguid: Option<String>,
 }
 
@@ -151,14 +159,26 @@ pub async fn userinfo(State(state): State<Arc<AppState>>, headers: HeaderMap) ->
         }
     };
 
-    let (user, _session, authenticator) = result;
+    let validated = result;
+
+    // Determine whether email claims should be returned based on granted scope.
+    // Backward compat: legacy OAuth tokens without a scope field are treated as
+    // having full scope if they are OAuthAccessToken purpose.
+    let has_email_scope = match &validated.scope {
+        Some(scope_set) => scope_set.contains(OAuthScope::Email),
+        None => validated.session.session_type == SessionPurpose::OAuthAccessToken.as_str(),
+    };
 
     Json(UserInfoResponse {
-        sub: user.email.clone(),
-        email: user.email,
-        email_verified: true,
-        hardware_verified: true,
-        hardware_aaguid: authenticator.aaguid,
+        sub: validated.user.email.clone(),
+        email: if has_email_scope {
+            Some(validated.user.email)
+        } else {
+            None
+        },
+        email_verified: if has_email_scope { Some(true) } else { None },
+        hardware_verified: validated.authenticator.is_some(),
+        hardware_aaguid: validated.authenticator.and_then(|a| a.aaguid),
     })
     .into_response()
 }

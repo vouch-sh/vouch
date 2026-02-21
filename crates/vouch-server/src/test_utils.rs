@@ -380,6 +380,8 @@ pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: 
         authenticator_id: Some(auth_id.to_string()),
         iat: now.as_second(),
         exp,
+        purpose: crate::db::SessionPurpose::Fido2Session,
+        scope: None,
     };
 
     encode(
@@ -404,6 +406,8 @@ pub fn create_expired_token(state: &AppState, user_id: &str, email: &str, auth_i
         authenticator_id: Some(auth_id.to_string()),
         iat: now.as_second() - 36000, // 10 hours ago
         exp: now.as_second() - 3600,  // 1 hour ago (expired)
+        purpose: crate::db::SessionPurpose::Fido2Session,
+        scope: None,
     };
 
     encode(
@@ -484,6 +488,7 @@ pub async fn create_test_session(
         &token_hash,
         Some(auth_id),
         &expires.to_string(),
+        crate::db::SessionPurpose::Fido2Session.as_str(),
     )
     .await
     .expect("Failed to create session");

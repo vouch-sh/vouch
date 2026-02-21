@@ -461,6 +461,8 @@ pub async fn login_complete(
             user_id: &user.id,
             email: &user.email,
             authenticator_id: Some(&authenticator.id),
+            purpose: crate::db::SessionPurpose::Fido2Session,
+            scope: None,
         },
     )
     .await

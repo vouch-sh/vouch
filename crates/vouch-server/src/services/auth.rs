@@ -14,8 +14,9 @@
 //! The handlers remain thin, focusing on HTTP concerns.
 
 use crate::AppState;
-use crate::db::{self, Authenticator, User};
+use crate::db::{self, Authenticator, SessionPurpose, User};
 use crate::handlers::common::hash_token;
+use crate::services::oidc::scope::ScopeSet;
 use crate::webauthn_verify;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -161,6 +162,13 @@ pub struct SessionClaims {
     pub iat: i64,
     /// RFC 7519 Section 4.1.4: Expiration Time — Unix timestamp.
     pub exp: i64,
+    /// Session purpose — distinguishes FIDO2 sessions from OAuth access tokens.
+    /// Defaults to `Fido2Session` for backward compatibility with existing JWTs.
+    #[serde(default)]
+    pub purpose: SessionPurpose,
+    /// OAuth 2.0 granted scope. `None` for FIDO2 sessions and legacy tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<ScopeSet>,
 }
 
 /// Parameters for creating a login session.
@@ -171,6 +179,10 @@ pub struct CreateSessionParams<'a> {
     pub email: &'a str,
     /// Authenticator ID (optional for OIDC-only users).
     pub authenticator_id: Option<&'a str>,
+    /// Session purpose (FIDO2 login vs OAuth access token).
+    pub purpose: SessionPurpose,
+    /// OAuth 2.0 granted scope. `None` for FIDO2 sessions.
+    pub scope: Option<ScopeSet>,
 }
 
 /// Result of creating a login session.
@@ -204,6 +216,8 @@ pub async fn create_login_session(
         authenticator_id: params.authenticator_id.map(String::from),
         iat: now.as_second(),
         exp: expires.as_second(),
+        purpose: params.purpose,
+        scope: params.scope,
     };
 
     let token = encode(
@@ -221,6 +235,7 @@ pub async fn create_login_session(
         &token_hash,
         params.authenticator_id,
         &expires.to_string(),
+        params.purpose.as_str(),
     )
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to store session: {e}")))?;

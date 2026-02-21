@@ -5,6 +5,7 @@ use crate::AppState;
 use crate::impl_template_response;
 use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::{
+    ScopeSet,
     exchange::{TokenExchangeParams, exchange_token},
     token::{
         AuthCodeExchangeParams, ClientCredentials, exchange_authorization_code,
@@ -72,7 +73,7 @@ pub struct TokenResponse {
     /// OIDC Core Section 3.1.3.3: The ID Token.
     pub id_token: Option<String>,
     /// RFC 6749 Section 3.3: The scope of the access token.
-    pub scope: Option<String>,
+    pub scope: Option<ScopeSet>,
 }
 
 /// Token request for all grant types (RFC 6749 Section 4.1.3, RFC 8628 Section 3.4, RFC 8693 Section 2.1).
@@ -134,7 +135,7 @@ pub struct TokenExchangeResponse {
     pub expires_in: u64,
     /// RFC 6749 Section 3.3: The scope of the access token.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
+    pub scope: Option<ScopeSet>,
 }
 
 /// POST /oauth/token

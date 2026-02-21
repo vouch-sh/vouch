@@ -62,6 +62,7 @@ pub enum Sessions {
     AuthenticatorId,
     ExpiresAt,
     CreatedAt,
+    SessionType,
 }
 
 /// Device authorization requests table (OAuth 2.0 Device Authorization Grant).

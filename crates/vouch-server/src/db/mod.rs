@@ -45,7 +45,7 @@ pub use users::{upsert_user, upsert_user_with_org};
 
 // Re-export session types and functions
 pub use sessions::{
-    Session, create_session, delete_expired_sessions, delete_session_by_token_hash,
+    Session, SessionPurpose, create_session, delete_expired_sessions, delete_session_by_token_hash,
     delete_sessions_for_user, get_session_by_token_hash,
 };
 

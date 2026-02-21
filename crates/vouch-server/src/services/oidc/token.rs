@@ -8,14 +8,14 @@
 
 use super::authorization::CodeChallengeMethod;
 use super::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
+use super::scope::{OAuthScope, ScopeSet};
 use crate::AppState;
-use crate::db::{self, Authenticator, OAuthClient, OAuthClientType, Session, User};
+use crate::db::{self, Authenticator, OAuthClient, OAuthClientType, Session, SessionPurpose, User};
 use crate::handlers::hash_token;
 use crate::redact_email;
-use crate::services::auth::SessionClaims;
+use crate::services::auth::{CreateSessionParams, SessionClaims, create_login_session};
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use aws_lc_rs::digest::{self, SHA256};
-use aws_lc_rs::rand as aws_rand;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
@@ -69,7 +69,7 @@ pub struct AuthCodeExchangeResult {
     /// The ID token (JWT).
     pub id_token: String,
     /// Granted scope.
-    pub scope: String,
+    pub scope: ScopeSet,
 }
 
 /// Authenticated client information.
@@ -132,8 +132,10 @@ pub struct IdTokenClaims {
     /// OIDC Core Section 3.1.2.1: Nonce value from the authorization request.
     pub nonce: Option<String>,
     /// OIDC Core Section 5.1: User email.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
     /// OIDC Core Section 5.1: Whether the email has been verified.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub email_verified: Option<bool>,
     /// Custom claim: Hardware verification flag (FIDO2 presence proof).
     pub hardware_verified: bool,
@@ -236,21 +238,34 @@ pub async fn exchange_authorization_code(
     // Validate PKCE code_verifier if code_challenge was present
     validate_pkce(&auth_code, params.code_verifier)?;
 
-    // Generate access token (opaque token)
-    let access_token = generate_access_token();
+    // Generate access token as a JWT session (stored in DB, validatable by userinfo/introspect)
+    let session_result = create_login_session(
+        state,
+        CreateSessionParams {
+            user_id: &auth_code.user_id,
+            email: &auth_code.email,
+            authenticator_id: Some(&auth_code.authenticator_id),
+            purpose: SessionPurpose::OAuthAccessToken,
+            scope: Some(auth_code.scope.clone()),
+        },
+    )
+    .await?;
+    let access_token = session_result.token;
     let expires_in = state.config().session_hours * 3600;
 
     // Generate ID token
     let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
     let id_token = generate_id_token(
         state,
-        &auth_code.client_id,
-        &auth_code.user_id,
-        &auth_code.email,
-        auth_code.aaguid.as_deref(),
-        auth_code.nonce.as_deref(),
-        expires_in,
-        dpop_jkt,
+        IdTokenParams {
+            client_id: &auth_code.client_id,
+            email: &auth_code.email,
+            aaguid: auth_code.aaguid.as_deref(),
+            nonce: auth_code.nonce.as_deref(),
+            expires_in,
+            dpop_jkt,
+            scope: &auth_code.scope,
+        },
     )?;
 
     // Record usage event for registered clients
@@ -400,51 +415,49 @@ pub async fn authenticate_client(
     }
 }
 
-/// Generate an opaque access token.
-///
-/// # Panics
-/// Panics if the system RNG fails.
-#[allow(clippy::expect_used)]
-fn generate_access_token() -> String {
-    let mut bytes = [0u8; 32];
-    aws_rand::fill(&mut bytes).expect("RNG failure");
-    format!("vouch_{}", URL_SAFE_NO_PAD.encode(bytes))
+/// Parameters for ID token generation.
+struct IdTokenParams<'a> {
+    client_id: &'a str,
+    email: &'a str,
+    aaguid: Option<&'a str>,
+    nonce: Option<&'a str>,
+    expires_in: u64,
+    dpop_jkt: Option<&'a str>,
+    scope: &'a ScopeSet,
 }
 
 /// Generate an OIDC ID token.
-#[allow(clippy::too_many_arguments)]
-fn generate_id_token(
-    state: &Arc<AppState>,
-    client_id: &str,
-    _user_id: &str,
-    email: &str,
-    aaguid: Option<&str>,
-    nonce: Option<&str>,
-    expires_in: u64,
-    dpop_jkt: Option<&str>,
-) -> ServiceResult<String> {
+fn generate_id_token(state: &Arc<AppState>, params: IdTokenParams<'_>) -> ServiceResult<String> {
     let now = Timestamp::now();
+    let expires_seconds = i64::try_from(params.expires_in)
+        .map_err(|_| ServiceError::Internal("Invalid expires_in value".to_string()))?;
     let exp = now
         .as_second()
-        .checked_add(i64::try_from(expires_in).unwrap_or(28800))
-        .unwrap_or(now.as_second() + 28800);
+        .checked_add(expires_seconds)
+        .ok_or_else(|| ServiceError::Internal("Expiration time overflow".to_string()))?;
 
     // RFC 9449: Include cnf claim if DPoP was used
-    let cnf = dpop_jkt.map(|jkt| CnfClaim {
+    let cnf = params.dpop_jkt.map(|jkt| CnfClaim {
         jkt: jkt.to_string(),
     });
 
+    let has_email = params.scope.contains(OAuthScope::Email);
+
     let claims = IdTokenClaims {
         iss: state.config().base_url.clone(),
-        sub: email.to_string(), // Use email as subject
-        aud: client_id.to_string(),
+        sub: params.email.to_string(), // Use email as subject
+        aud: params.client_id.to_string(),
         exp,
         iat: now.as_second(),
-        nonce: nonce.map(String::from),
-        email: Some(email.to_string()),
-        email_verified: Some(true),
+        nonce: params.nonce.map(String::from),
+        email: if has_email {
+            Some(params.email.to_string())
+        } else {
+            None
+        },
+        email_verified: if has_email { Some(true) } else { None },
         hardware_verified: true,
-        hardware_aaguid: aaguid.map(String::from),
+        hardware_aaguid: params.aaguid.map(String::from),
         cnf,
     };
 
@@ -522,11 +535,28 @@ pub async fn validate_dpop_if_present(
     }
 }
 
+/// Result of validating a session token for OIDC endpoints.
+///
+/// Named `OidcValidatedSession` to avoid collision with
+/// `handlers::common::ValidatedSession`.
+pub struct OidcValidatedSession {
+    /// The authenticated user.
+    pub user: User,
+    /// The database session record.
+    pub session: Session,
+    /// The authenticator used to create the session, if any.
+    /// `None` for OIDC-only enrollment sessions that lack a hardware key.
+    pub authenticator: Option<Authenticator>,
+    /// Granted OAuth scope from the session JWT. `None` for FIDO2 sessions
+    /// and legacy tokens issued before scope tracking.
+    pub scope: Option<ScopeSet>,
+}
+
 /// Validate a session token and return the user, session, and authenticator.
 pub async fn validate_session_token(
     state: &Arc<AppState>,
     token: &str,
-) -> ServiceResult<Option<(User, Session, Authenticator)>> {
+) -> ServiceResult<Option<OidcValidatedSession>> {
     // Try to decode as a JWT session token
     let claims = match jsonwebtoken::decode::<SessionClaims>(
         token,
@@ -556,20 +586,28 @@ pub async fn validate_session_token(
         None => return Ok(None),
     };
 
-    // Get authenticator if session has one
-    let authenticator_id = match &claims.authenticator_id {
-        Some(id) => id,
-        None => return Ok(None), // Session without authenticator can't be validated here
-    };
-    let authenticator = match db::get_authenticator_by_id(&state.db, authenticator_id)
-        .await
-        .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
-    {
-        Some(a) => a,
-        None => return Ok(None),
+    // Get authenticator if session references one.
+    // If the JWT references an authenticator that no longer exists (deleted/revoked),
+    // the session is invalid — this implements key revocation.
+    let authenticator = match &claims.authenticator_id {
+        Some(id) => {
+            match db::get_authenticator_by_id(&state.db, id)
+                .await
+                .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
+            {
+                Some(a) => Some(a),
+                None => return Ok(None), // authenticator revoked → session invalid
+            }
+        }
+        None => None,
     };
 
-    Ok(Some((user, session, authenticator)))
+    Ok(Some(OidcValidatedSession {
+        user,
+        session,
+        authenticator,
+        scope: claims.scope,
+    }))
 }
 
 #[cfg(test)]
@@ -589,7 +627,7 @@ mod tests {
             email: "test@example.com".to_string(),
             authenticator_id: "auth1".to_string(),
             aaguid: None,
-            scope: "openid".to_string(),
+            scope: ScopeSet::parse("openid"),
             nonce: None,
             code_challenge: Some(expected_challenge.to_string()),
             code_challenge_method: Some(CodeChallengeMethod::S256),
@@ -610,7 +648,7 @@ mod tests {
             email: "test@example.com".to_string(),
             authenticator_id: "auth1".to_string(),
             aaguid: None,
-            scope: "openid".to_string(),
+            scope: ScopeSet::parse("openid"),
             nonce: None,
             code_challenge: Some("expected_challenge".to_string()),
             code_challenge_method: Some(CodeChallengeMethod::S256),
@@ -631,7 +669,7 @@ mod tests {
             email: "test@example.com".to_string(),
             authenticator_id: "auth1".to_string(),
             aaguid: None,
-            scope: "openid".to_string(),
+            scope: ScopeSet::parse("openid"),
             nonce: None,
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some(CodeChallengeMethod::S256),
@@ -653,7 +691,7 @@ mod tests {
             email: "test@example.com".to_string(),
             authenticator_id: "auth1".to_string(),
             aaguid: None,
-            scope: "openid".to_string(),
+            scope: ScopeSet::parse("openid"),
             nonce: None,
             code_challenge: None,
             code_challenge_method: None,
@@ -663,13 +701,6 @@ mod tests {
 
         let result = validate_pkce(&auth_code, None);
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_generate_access_token() {
-        let token = generate_access_token();
-        assert!(token.starts_with("vouch_"));
-        assert!(token.len() > 40); // vouch_ prefix + base64 encoded 32 bytes
     }
 
     #[test]

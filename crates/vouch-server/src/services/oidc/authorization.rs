@@ -7,6 +7,7 @@
 
 use crate::AppState;
 use crate::db::{AccessScope, Authenticator, OAuthClient, Session, User};
+use crate::services::oidc::scope::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::{Span, Timestamp};
 use jsonwebtoken::{DecodingKey, EncodingKey, Header, Validation, encode};
@@ -80,7 +81,7 @@ pub struct AuthorizationCodeParams<'a> {
     /// Authenticator AAGUID.
     pub aaguid: Option<&'a str>,
     /// Requested scope.
-    pub scope: &'a str,
+    pub scope: &'a ScopeSet,
     /// OIDC nonce.
     pub nonce: Option<&'a str>,
     /// PKCE code challenge (RFC 7636 Section 4.2).
@@ -119,7 +120,7 @@ pub struct ValidatedAuthRequest {
     /// Redirect URI.
     pub redirect_uri: String,
     /// Requested scope.
-    pub scope: String,
+    pub scope: ScopeSet,
     /// State parameter.
     pub state: Option<String>,
     /// OIDC nonce.
@@ -157,7 +158,7 @@ pub struct AuthorizationCode {
     pub email: String,
     pub authenticator_id: String,
     pub aaguid: Option<String>,
-    pub scope: String,
+    pub scope: ScopeSet,
     /// OIDC nonce — OIDC Core Section 3.1.2.1.
     pub nonce: Option<String>,
     /// PKCE code challenge — RFC 7636 Section 4.2.
@@ -248,10 +249,12 @@ pub fn validate_authorize_request(
         None
     };
 
+    let scope = ScopeSet::parse(&params.scope.unwrap_or_else(|| "openid".to_string()));
+
     Ok(ValidatedAuthRequest {
         client_id: params.client_id,
         redirect_uri: params.redirect_uri,
-        scope: params.scope.unwrap_or_else(|| "openid".to_string()),
+        scope,
         state: params.state,
         nonce: params.nonce,
         code_challenge: params.code_challenge,
@@ -276,11 +279,17 @@ pub async fn check_session_for_authorization(
     };
 
     match validate_session_token(state, token).await? {
-        Some((user, session, authenticator)) => Ok(AuthorizationSessionState::Authenticated {
-            user: Box::new(user),
-            session: Box::new(session),
-            authenticator: Box::new(authenticator),
-        }),
+        Some(validated) => {
+            // Authorization flow requires an authenticator (hardware verification)
+            let Some(authenticator) = validated.authenticator else {
+                return Ok(AuthorizationSessionState::NeedsAuth);
+            };
+            Ok(AuthorizationSessionState::Authenticated {
+                user: Box::new(validated.user),
+                session: Box::new(validated.session),
+                authenticator: Box::new(authenticator),
+            })
+        }
         None => Ok(AuthorizationSessionState::NeedsAuth),
     }
 }
@@ -313,7 +322,7 @@ pub fn issue_authorization_code(
         email: params.email.to_string(),
         authenticator_id: params.authenticator_id.to_string(),
         aaguid: params.aaguid.map(String::from),
-        scope: params.scope.to_string(),
+        scope: params.scope.clone(),
         nonce: params.nonce.map(String::from),
         code_challenge: params.code_challenge.map(String::from),
         code_challenge_method: params.code_challenge_method,
@@ -492,7 +501,7 @@ mod tests {
         assert!(result.is_ok());
         let validated = result.unwrap();
         assert_eq!(validated.client_id, "test-client");
-        assert_eq!(validated.scope, "openid email");
+        assert_eq!(validated.scope, ScopeSet::parse("openid email"));
     }
 
     #[test]
@@ -551,7 +560,7 @@ mod tests {
         let result = validate_authorize_request(params);
         assert!(result.is_ok());
         let validated = result.unwrap();
-        assert_eq!(validated.scope, "openid"); // Default scope
+        assert_eq!(validated.scope, ScopeSet::parse("openid")); // Default scope
     }
 
     // =========================================================================

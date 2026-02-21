@@ -7,6 +7,7 @@
 
 use crate::AppState;
 use crate::services::ServiceError;
+use crate::services::oidc::scope::OAuthScope;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -89,7 +90,10 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         introspection_endpoint: format!("{base_url}/oauth/introspect"),
         device_authorization_endpoint: format!("{base_url}/oauth/device"),
         registration_endpoint: None, // Dynamic registration not supported
-        scopes_supported: vec!["openid".to_string(), "email".to_string()],
+        scopes_supported: OAuthScope::all()
+            .iter()
+            .map(|s| s.as_str().to_string())
+            .collect(),
         response_types_supported: vec!["code".to_string()],
         response_modes_supported: vec!["query".to_string()],
         grant_types_supported: vec![

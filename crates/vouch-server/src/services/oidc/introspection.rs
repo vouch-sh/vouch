@@ -6,11 +6,12 @@
 //! - RFC 7662 - OAuth 2.0 Token Introspection
 
 use crate::AppState;
-use crate::db;
+use crate::db::{self, SessionPurpose};
 use crate::handlers::hash_token;
 use crate::redact_email;
 use crate::services::ServiceResult;
 use crate::services::auth::SessionClaims;
+use crate::services::oidc::scope::ScopeSet;
 use jsonwebtoken::{DecodingKey, Validation};
 use serde::Serialize;
 use std::sync::Arc;
@@ -22,7 +23,7 @@ pub struct IntrospectionResult {
     pub active: bool,
     /// RFC 7662 Section 2.2: Space-separated scope values.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope: Option<String>,
+    pub scope: Option<ScopeSet>,
     /// RFC 7662 Section 2.2: Client identifier for the OAuth 2.0 client that requested this token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_id: Option<String>,
@@ -119,10 +120,19 @@ pub async fn introspect_token(
         return Ok(IntrospectionResult::inactive());
     }
 
+    // Determine scope from claims with backward compat for pre-scope tokens
+    let scope: Option<ScopeSet> = match &claims.scope {
+        Some(s) if !s.is_empty() => Some(s.clone()),
+        Some(_) => None,
+        // Backward compat: OAuth tokens issued before scope tracking
+        None if claims.purpose == SessionPurpose::OAuthAccessToken => Some(ScopeSet::all()),
+        None => None,
+    };
+
     // Token is valid - return active response with claims
     Ok(IntrospectionResult {
         active: true,
-        scope: Some("openid email".to_string()),
+        scope,
         client_id: None, // Session tokens don't track originating client_id
         username: Some(claims.email.clone()),
         token_type: Some("Bearer".to_string()),
