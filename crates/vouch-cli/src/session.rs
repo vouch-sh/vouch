@@ -3,6 +3,9 @@
 
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
+#[cfg(unix)]
+use vouch_agent::{AgentClient, AgentError};
+use vouch_common::{SessionCookie, write_cookie};
 
 use crate::client::VouchClient;
 use crate::config::Config;
@@ -91,6 +94,60 @@ pub async fn resolve_token() -> Result<SecretString> {
         .token()
         .context("not authenticated - run 'vouch login' first")?;
     Ok(SecretString::from(token.expose_secret().to_string()))
+}
+
+/// Store session in the agent (if running).
+///
+/// Returns `true` if the session was successfully stored, `false` otherwise.
+/// This is a best-effort operation — agent not running is not an error.
+#[cfg(unix)]
+pub async fn store_session_in_agent(
+    token: &str,
+    email: &str,
+    expires_at: &str,
+    server: &str,
+) -> bool {
+    match AgentClient::connect().await {
+        Ok(mut agent) => {
+            match agent
+                .store_session(token, email, expires_at, Some(server))
+                .await
+            {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::debug!("Failed to store session in agent: {e}");
+                    false
+                }
+            }
+        }
+        Err(AgentError::NotRunning) => {
+            tracing::debug!("Agent not running, session stored in config only");
+            false
+        }
+        Err(e) => {
+            tracing::debug!("Failed to connect to agent: {e}");
+            false
+        }
+    }
+}
+
+/// Write the session cookie file for CLI tools.
+pub fn write_session_cookie_file(
+    server: &str,
+    token: &str,
+    expires_at: jiff::Timestamp,
+) -> Result<()> {
+    let url = url::Url::parse(server).context("failed to parse server URL")?;
+    let domain = url
+        .host_str()
+        .context("server URL has no host")?
+        .to_string();
+
+    let cookie = SessionCookie::new(&domain, token, expires_at.as_second());
+    write_cookie(&cookie)?;
+
+    tracing::debug!("Cookie written to ~/.vouch/cookie.txt");
+    Ok(())
 }
 
 /// Get user email for AWS session name default.

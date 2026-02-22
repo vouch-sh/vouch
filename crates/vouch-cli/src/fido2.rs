@@ -100,11 +100,21 @@ impl Drop for SuppressStdout {
 }
 
 /// Run a closure with stdout suppressed (to hide ctap-hid-fido2 println noise).
+///
+/// # Safety invariant
+///
+/// Must not be called from within an async context (tokio runtime), as fd-level
+/// stdout redirection would affect all concurrent tasks. FIDO2 operations are
+/// synchronous HID communication and should always run on a blocking thread.
 #[cfg(unix)]
 fn with_suppressed_stdout<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,
 {
+    debug_assert!(
+        tokio::runtime::Handle::try_current().is_err(),
+        "FIDO2 operations must not be called from async contexts"
+    );
     let _guard = SuppressStdout::new();
     f()
 }
@@ -885,7 +895,7 @@ impl FidoDevice for MockFidoDevice {
 
 /// Build a COSE OKP (Octet Key Pair) key for Ed25519.
 #[cfg(any(test, feature = "test-utils"))]
-#[allow(dead_code)]
+#[allow(dead_code, clippy::expect_used)]
 fn build_cose_okp_key(public_key: &[u8; 32]) -> Vec<u8> {
     use ciborium::Value;
 
@@ -904,7 +914,7 @@ fn build_cose_okp_key(public_key: &[u8; 32]) -> Vec<u8> {
     ]);
 
     let mut buf = Vec::new();
-    ciborium::into_writer(&cose_key, &mut buf).unwrap_or_default();
+    ciborium::into_writer(&cose_key, &mut buf).expect("CBOR encoding of COSE key must succeed");
     buf
 }
 

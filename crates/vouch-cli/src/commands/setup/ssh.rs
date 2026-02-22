@@ -207,7 +207,7 @@ Host *
 }
 
 /// Add a @cert-authority entry to known_hosts for the given host patterns.
-fn add_trusted_ca_to_known_hosts(ca_path: &PathBuf, host_patterns: &str) -> Result<()> {
+fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str) -> Result<()> {
     let known_hosts_path = known_hosts_path()?;
     let ca_pub_key = fs::read_to_string(ca_path)?;
     // Extract "algorithm base64key" from the first line (strip comment, trailing newline)

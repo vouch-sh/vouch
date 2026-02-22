@@ -52,6 +52,7 @@ impl std::fmt::Debug for StsCredentials {
 /// * `region` - AWS region (e.g., "us-east-1", "cn-north-1")
 /// * `domain_suffix` - AWS domain suffix (e.g., "amazonaws.com", "amazonaws.cn")
 pub async fn assume_role_with_web_identity(
+    http_client: &reqwest::Client,
     role_arn: &str,
     role_session_name: &str,
     web_identity_token: &str,
@@ -59,10 +60,6 @@ pub async fn assume_role_with_web_identity(
     domain_suffix: &str,
     tags: &[(String, String)],
 ) -> Result<AssumeRoleWithWebIdentityResponse> {
-    let http_client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
-
     // Use regional STS endpoint for the appropriate partition
     // e.g., "sts.us-east-1.amazonaws.com" or "sts.cn-north-1.amazonaws.cn"
     let sts_url = format!("https://sts.{region}.{domain_suffix}/");
@@ -117,28 +114,29 @@ fn append_tag_form_params(params: &mut Vec<(String, String)>, tags: &[(String, S
     }
 }
 
-/// Parse AWS STS XML response.
+/// Parse AWS STS XML response using `roxmltree`.
 fn parse_sts_xml_response(xml: &str) -> Result<AssumeRoleWithWebIdentityResponse> {
-    fn extract_tag(xml: &str, tag: &str) -> Option<String> {
-        let start_tag = format!("<{tag}>");
-        let end_tag = format!("</{tag}>");
-        let start = xml.find(&start_tag)? + start_tag.len();
-        let end = xml.find(&end_tag)?;
-        if start < end {
-            Some(xml.get(start..end)?.to_string())
-        } else {
-            None
-        }
-    }
+    let doc = roxmltree::Document::parse(xml).context("failed to parse STS XML response")?;
 
-    let access_key_id =
-        extract_tag(xml, "AccessKeyId").context("missing AccessKeyId in STS response")?;
-    let secret_access_key =
-        extract_tag(xml, "SecretAccessKey").context("missing SecretAccessKey in STS response")?;
-    let session_token =
-        extract_tag(xml, "SessionToken").context("missing SessionToken in STS response")?;
-    let expiration =
-        extract_tag(xml, "Expiration").context("missing Expiration in STS response")?;
+    // Find the Credentials element anywhere in the document
+    let credentials_node = doc
+        .descendants()
+        .find(|n| n.has_tag_name("Credentials"))
+        .context("missing Credentials element in STS response")?;
+
+    let extract_child_text = |parent: roxmltree::Node, tag: &str| -> Result<String> {
+        parent
+            .children()
+            .find(|n| n.has_tag_name(tag))
+            .and_then(|n| n.text())
+            .map(String::from)
+            .with_context(|| format!("missing {tag} in STS response"))
+    };
+
+    let access_key_id = extract_child_text(credentials_node, "AccessKeyId")?;
+    let secret_access_key = extract_child_text(credentials_node, "SecretAccessKey")?;
+    let session_token = extract_child_text(credentials_node, "SessionToken")?;
+    let expiration = extract_child_text(credentials_node, "Expiration")?;
 
     Ok(AssumeRoleWithWebIdentityResponse {
         assume_role_with_web_identity_result: AssumeRoleResult {
@@ -152,10 +150,39 @@ fn parse_sts_xml_response(xml: &str) -> Result<AssumeRoleWithWebIdentityResponse
     })
 }
 
-/// Extract region from an AWS role ARN.
+/// Validate that a role ARN has the expected format.
+///
+/// Expected format: `arn:{partition}:iam::{account-id}:role/{role-name}`
+///
+/// # Errors
+///
+/// Returns an error if the ARN does not match the expected format.
+pub fn validate_role_arn(role_arn: &str) -> Result<()> {
+    let parts: Vec<&str> = role_arn.split(':').collect();
+    // A valid IAM role ARN has exactly 6 colon-separated parts:
+    // arn : partition : iam : (empty region) : account-id : role/role-name
+    if parts.len() < 6
+        || parts.first() != Some(&"arn")
+        || parts.get(2) != Some(&"iam")
+        || !parts
+            .get(5)
+            .is_some_and(|s| s.starts_with("role/") && s.len() > 5)
+    {
+        anyhow::bail!(
+            "Invalid role ARN format: {role_arn}\n\
+             Expected: arn:<partition>:iam::<account-id>:role/<role-name>\n\
+             Example:  arn:aws:iam::123456789012:role/MyRole"
+        );
+    }
+    Ok(())
+}
+
+/// Extract partition from an AWS role ARN.
 ///
 /// Role ARNs are region-agnostic (IAM is global), but we can infer the partition
 /// from the ARN and use an appropriate default region.
+///
+/// The ARN must be validated with [`validate_role_arn`] before calling this.
 ///
 /// Returns `None` if the ARN doesn't have enough information to determine a region.
 #[must_use]
@@ -276,6 +303,23 @@ mod tests {
         // Non-sensitive data should still be visible
         assert!(debug.contains("AKIAIOSFODNN7EXAMPLE"));
         assert!(debug.contains("2024-01-15T18:30:45Z"));
+    }
+
+    #[test]
+    fn test_validate_role_arn_valid() {
+        assert!(validate_role_arn("arn:aws:iam::123456789012:role/MyRole").is_ok());
+        assert!(validate_role_arn("arn:aws-cn:iam::123456789012:role/MyRole").is_ok());
+        assert!(validate_role_arn("arn:aws-us-gov:iam::123456789012:role/MyRole").is_ok());
+        assert!(validate_role_arn("arn:aws:iam::123456789012:role/path/to/MyRole").is_ok());
+    }
+
+    #[test]
+    fn test_validate_role_arn_invalid() {
+        assert!(validate_role_arn("invalid").is_err());
+        assert!(validate_role_arn("").is_err());
+        assert!(validate_role_arn("arn:aws:s3:::my-bucket").is_err());
+        assert!(validate_role_arn("arn:aws:iam::123456789012:user/MyUser").is_err());
+        assert!(validate_role_arn("arn:aws:iam::123456789012:role/").is_err());
     }
 
     #[test]

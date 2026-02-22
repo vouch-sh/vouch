@@ -26,6 +26,89 @@ pub struct CodeArtifactOptions<'a> {
     pub profile: Option<&'a str>,
 }
 
+/// Cached AWS credentials extracted from `serde_json::Value`.
+pub struct AwsEnvCredentials {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: String,
+    pub expiration: Option<String>,
+}
+
+/// Fetch AWS credentials (cache-first) and extract environment variable values.
+pub async fn fetch_aws_credentials(
+    server: &str,
+    role_arn: &str,
+    session_name: Option<&str>,
+) -> Result<AwsEnvCredentials> {
+    let cache_key = format!("aws:{role_arn}");
+
+    let data = cache::get_or_fetch(&cache_key, "AWS credentials", || async {
+        let output =
+            super::credential::aws::fetch_and_assume(server, role_arn, session_name).await?;
+        let expires_at = output.expiration.clone();
+        let data = serde_json::to_value(&output).context("failed to serialize credentials")?;
+        Ok((data, expires_at))
+    })
+    .await?;
+
+    let access_key_id = data
+        .get("AccessKeyId")
+        .and_then(|v| v.as_str())
+        .context("AWS credentials missing AccessKeyId")?
+        .to_string();
+    let secret_access_key = data
+        .get("SecretAccessKey")
+        .and_then(|v| v.as_str())
+        .context("AWS credentials missing SecretAccessKey")?
+        .to_string();
+    let session_token = data
+        .get("SessionToken")
+        .and_then(|v| v.as_str())
+        .context("AWS credentials missing SessionToken")?
+        .to_string();
+    let expiration = data
+        .get("Expiration")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    Ok(AwsEnvCredentials {
+        access_key_id,
+        secret_access_key,
+        session_token,
+        expiration,
+    })
+}
+
+/// Cached GitHub token extracted from `serde_json::Value`.
+pub struct GitHubEnvToken {
+    pub token: String,
+}
+
+/// Fetch a GitHub token (cache-first) and extract the token value.
+pub async fn fetch_github_token_cached(server: &str) -> Result<GitHubEnvToken> {
+    let cache_key = "github";
+
+    let data = cache::get_or_fetch(cache_key, "GitHub token", || async {
+        let response = fetch_github_token(server).await?;
+        let expires_at = response
+            .get("expires_at")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+            .unwrap_or_else(cache::default_expiry);
+        Ok((response, expires_at))
+    })
+    .await?;
+
+    let token = data
+        .get("token")
+        .and_then(serde_json::Value::as_str)
+        .context("GitHub credential missing 'token' field")?
+        .to_string();
+
+    Ok(GitHubEnvToken { token })
+}
+
 /// Run a command with credentials injected as environment variables.
 pub async fn run(
     server: &str,
@@ -90,35 +173,13 @@ async fn inject_aws_credentials(
     role_arn: &str,
     session_name: Option<&str>,
 ) -> Result<()> {
-    let cache_key = format!("aws:{role_arn}");
+    let creds = fetch_aws_credentials(server, role_arn, session_name).await?;
 
-    let data = cache::get_or_fetch(&cache_key, "AWS credentials", || async {
-        let output =
-            super::credential::aws::fetch_and_assume(server, role_arn, session_name).await?;
-        let expires_at = output.expiration.clone();
-        let data = serde_json::to_value(&output).context("failed to serialize credentials")?;
-        Ok((data, expires_at))
-    })
-    .await?;
+    cmd.env("AWS_ACCESS_KEY_ID", &creds.access_key_id);
+    cmd.env("AWS_SECRET_ACCESS_KEY", &creds.secret_access_key);
+    cmd.env("AWS_SESSION_TOKEN", &creds.session_token);
 
-    let key_id = data
-        .get("AccessKeyId")
-        .and_then(|v| v.as_str())
-        .context("AWS credentials missing AccessKeyId")?;
-    let secret = data
-        .get("SecretAccessKey")
-        .and_then(|v| v.as_str())
-        .context("AWS credentials missing SecretAccessKey")?;
-    let token = data
-        .get("SessionToken")
-        .and_then(|v| v.as_str())
-        .context("AWS credentials missing SessionToken")?;
-
-    cmd.env("AWS_ACCESS_KEY_ID", key_id);
-    cmd.env("AWS_SECRET_ACCESS_KEY", secret);
-    cmd.env("AWS_SESSION_TOKEN", token);
-
-    if let Some(v) = data.get("Expiration").and_then(|v| v.as_str()) {
+    if let Some(ref v) = creds.expiration {
         cmd.env("AWS_CREDENTIAL_EXPIRATION", v);
     }
 
@@ -127,27 +188,10 @@ async fn inject_aws_credentials(
 
 /// Fetch a GitHub token (cache-first) and inject it into the environment.
 async fn inject_github_credentials(cmd: &mut Command, server: &str) -> Result<()> {
-    let cache_key = "github";
+    let gh = fetch_github_token_cached(server).await?;
 
-    let data = cache::get_or_fetch(cache_key, "GitHub token", || async {
-        let response = fetch_github_token(server).await?;
-        let expires_at = response
-            .get("expires_at")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(String::from)
-            .unwrap_or_else(cache::default_expiry);
-        Ok((response, expires_at))
-    })
-    .await?;
-
-    let token = data
-        .get("token")
-        .and_then(serde_json::Value::as_str)
-        .context("GitHub credential missing 'token' field")?;
-
-    cmd.env("GITHUB_TOKEN", token);
-    cmd.env("GH_TOKEN", token);
+    cmd.env("GITHUB_TOKEN", &gh.token);
+    cmd.env("GH_TOKEN", &gh.token);
 
     Ok(())
 }

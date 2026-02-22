@@ -2,17 +2,13 @@
 //! Enroll command - RFC 8628 Device Authorization Grant.
 
 use anyhow::{Context, Result};
-use std::io::{Write, stdout};
-#[cfg(unix)]
-use vouch_agent::{AgentClient, AgentError};
-use vouch_common::{
-    DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, OAuthError, SessionCookie,
-    write_cookie,
-};
+use std::io::{IsTerminal, Write, stdout};
+use vouch_common::{DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, OAuthError};
 
 use crate::client::VouchClient;
 use crate::commands::credential;
 use crate::config::Config;
+use crate::session;
 
 /// Response from device token endpoint.
 #[derive(serde::Deserialize, zeroize::ZeroizeOnDrop)]
@@ -90,7 +86,7 @@ pub async fn run(server: &str) -> Result<()> {
 
     // Step 6: Store session in agent (if running)
     #[cfg(unix)]
-    let agent_stored = store_session_in_agent(
+    let agent_stored = session::store_session_in_agent(
         &token_response.access_token,
         &token_response.email,
         &expires_at_str,
@@ -101,7 +97,9 @@ pub async fn run(server: &str) -> Result<()> {
     let agent_stored = false;
 
     // Step 7: Write cookie file for CLI tools
-    if let Err(e) = write_session_cookie(server, &token_response.access_token, expires_at) {
+    if let Err(e) =
+        session::write_session_cookie_file(server, &token_response.access_token, expires_at)
+    {
         tracing::debug!("Failed to write cookie file: {e}");
     }
 
@@ -126,48 +124,6 @@ pub async fn run(server: &str) -> Result<()> {
     println!("Or add a backup key:");
     println!("  vouch login && vouch register --name \"Backup Key\"");
 
-    Ok(())
-}
-
-/// Store session in the agent (if running).
-#[cfg(unix)]
-async fn store_session_in_agent(token: &str, email: &str, expires_at: &str, server: &str) -> bool {
-    match AgentClient::connect().await {
-        Ok(mut agent) => {
-            match agent
-                .store_session(token, email, expires_at, Some(server))
-                .await
-            {
-                Ok(()) => true,
-                Err(e) => {
-                    tracing::debug!("Failed to store session in agent: {e}");
-                    false
-                }
-            }
-        }
-        Err(AgentError::NotRunning) => {
-            tracing::debug!("Agent not running, session stored in config only");
-            false
-        }
-        Err(e) => {
-            tracing::debug!("Failed to connect to agent: {e}");
-            false
-        }
-    }
-}
-
-/// Write the session cookie file for CLI tools.
-fn write_session_cookie(server: &str, token: &str, expires_at: jiff::Timestamp) -> Result<()> {
-    let url = url::Url::parse(server).context("failed to parse server URL")?;
-    let domain = url
-        .host_str()
-        .context("server URL has no host")?
-        .to_string();
-
-    let cookie = SessionCookie::new(&domain, token, expires_at.as_second());
-    write_cookie(&cookie)?;
-
-    tracing::debug!("Cookie written to ~/.vouch/cookie.txt");
     Ok(())
 }
 
@@ -196,11 +152,13 @@ async fn poll_for_token(
         // Wait before polling
         tokio::time::sleep(interval).await;
 
-        // Show progress
-        dots = (dots + 1) % 4;
-        print!("\rWaiting for browser authorization{}", ".".repeat(dots));
-        print!("{}", " ".repeat(3 - dots));
-        stdout().flush().ok();
+        // Show progress (only on interactive terminals)
+        if stdout().is_terminal() {
+            dots = (dots + 1) % 4;
+            print!("\rWaiting for browser authorization{}", ".".repeat(dots));
+            print!("{}", " ".repeat(3 - dots));
+            stdout().flush().ok();
+        }
 
         // Poll for token
         match poll_once(client, &request).await {

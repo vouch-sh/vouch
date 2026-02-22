@@ -117,7 +117,10 @@ fn get_symlink_path() -> Result<PathBuf> {
 }
 
 /// Create the docker-credential-vouch symlink or wrapper script.
-fn create_credential_helper_symlink(vouch_path: &PathBuf, symlink_path: &PathBuf) -> Result<()> {
+fn create_credential_helper_symlink(
+    vouch_path: &std::path::Path,
+    symlink_path: &std::path::Path,
+) -> Result<()> {
     // Ensure parent directory exists
     if let Some(parent) = symlink_path.parent()
         && !parent.exists()

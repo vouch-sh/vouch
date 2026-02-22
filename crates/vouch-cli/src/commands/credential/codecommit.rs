@@ -79,7 +79,7 @@ async fn get_credential() -> Result<()> {
 
     writeln!(out, "protocol={protocol}")?;
     writeln!(out, "host={host}")?;
-    writeln!(out, "username={}", signed.username)?;
+    writeln!(out, "username={}", signed.username.expose_secret())?;
     writeln!(out, "password={}", signed.password.expose_secret())?;
     writeln!(out)?;
 
@@ -114,7 +114,7 @@ pub async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()> {
     let signed = sign_request(&creds, &hostname, &path, &region);
 
     // Percent-encode credentials for URL embedding
-    let encoded_username = percent_encode(&signed.username);
+    let encoded_username = percent_encode(signed.username.expose_secret());
     let encoded_password = percent_encode(signed.password.expose_secret());
 
     let signed_url = format!("https://{encoded_username}:{encoded_password}@{hostname}{path}");

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::client::VouchClient;
 use crate::integrations::aws::sts::{
     assume_role_with_web_identity, extract_partition_from_role_arn,
-    get_default_region_for_partition, get_domain_suffix_for_partition,
+    get_default_region_for_partition, get_domain_suffix_for_partition, validate_role_arn,
 };
 use crate::session::get_user_email;
 
@@ -137,16 +137,21 @@ pub(crate) async fn fetch_and_assume(
         .map(|claims| build_session_tags(&claims))
         .unwrap_or_default();
 
-    // Determine region and domain suffix from role ARN partition
+    // Validate and determine region and domain suffix from role ARN partition
+    validate_role_arn(role_arn)?;
     let partition = extract_partition_from_role_arn(role_arn).unwrap_or("aws");
     let region = get_default_region_for_partition(partition);
     let domain_suffix = get_domain_suffix_for_partition(partition);
 
     // Call AWS STS AssumeRoleWithWebIdentity
     // Use email as default session name for CloudTrail visibility
+    let http_client =
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
     let email = get_user_email(server).await;
     let session = session_name.or(email.as_deref()).unwrap_or("vouch-session");
     let sts_response = assume_role_with_web_identity(
+        &http_client,
         role_arn,
         session,
         &token_response.id_token,

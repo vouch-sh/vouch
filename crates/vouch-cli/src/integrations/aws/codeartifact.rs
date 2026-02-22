@@ -116,6 +116,7 @@ struct GetAuthorizationTokenResponse {
 /// * `registry` - CodeArtifact registry details (domain, owner, region)
 /// * `creds` - Temporary AWS credentials from STS
 pub async fn get_authorization_token(
+    http_client: &reqwest::Client,
     registry: &CodeArtifactRegistry,
     creds: &StsCredentials,
 ) -> Result<CodeArtifactToken> {
@@ -130,6 +131,7 @@ pub async fn get_authorization_token(
     ];
 
     let response_body = sign_and_send_rest_post(
+        http_client,
         &endpoint,
         "/v1/authorization-token",
         &query_params,
