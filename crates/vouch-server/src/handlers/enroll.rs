@@ -696,7 +696,7 @@ pub async fn oidc_callback(
         }
     };
     let token = session_result.token;
-    let token_hash = hash_token(&token);
+    let token_hash = hash_token(token.expose_secret());
 
     // Handle CLI-initiated device auth flow
     let is_cli_flow = !stored_state.device_auth_id.is_empty()
@@ -744,7 +744,7 @@ pub async fn oidc_callback(
     tracing::debug!("Setting vouch_session cookie and redirecting to /enroll/keys");
 
     // Create session cookie and redirect to keys page
-    let cookie = create_session_cookie(&token, session_hours * 3600);
+    let cookie = create_session_cookie(token.expose_secret(), session_hours * 3600);
 
     Response::builder()
         .status(StatusCode::SEE_OTHER)
@@ -1140,7 +1140,7 @@ pub async fn browser_register_complete(
     let token = session_result.token;
 
     // Return success template with session cookie
-    let cookie = create_session_cookie(&token, session_hours * 3600);
+    let cookie = create_session_cookie(token.expose_secret(), session_hours * 3600);
     let html = SuccessTemplate.render().map_err(|e| {
         tracing::error!("Template render error: {}", e);
         json_error(

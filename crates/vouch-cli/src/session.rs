@@ -2,7 +2,7 @@
 //! Session utilities for credential commands.
 
 use anyhow::{Context, Result};
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::SecretString;
 #[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError};
 use vouch_common::{SessionCookie, write_cookie};
@@ -28,18 +28,14 @@ async fn try_agent_session() -> Option<ResolvedSession> {
     let session_info = agent.get_session().await.ok()?;
     let server_url = session_info.server_url?;
     let token = agent.get_token().await.ok()?;
-    Some(ResolvedSession {
-        server_url,
-        token: SecretString::from(token),
-    })
+    Some(ResolvedSession { server_url, token })
 }
 
 /// Try to get the authentication token from the agent.
 #[cfg(unix)]
 async fn try_agent_token() -> Option<SecretString> {
     let mut agent = vouch_agent::AgentClient::connect().await.ok()?;
-    let token = agent.get_token().await.ok()?;
-    Some(SecretString::from(token))
+    agent.get_token().await.ok()
 }
 
 /// Resolve the current session (server URL + token).
@@ -67,8 +63,8 @@ pub async fn resolve_session() -> Result<ResolvedSession> {
     let token = config
         .token()
         .ok_or(crate::exit_code::CliError::NotAuthenticated)?;
-    // Clone the secret string value before config is dropped
-    let token = SecretString::from(token.expose_secret().to_string());
+    // Clone the secret string before config is dropped
+    let token = token.clone();
 
     Ok(ResolvedSession {
         server_url: server,
@@ -95,7 +91,7 @@ pub async fn resolve_token() -> Result<SecretString> {
     let token = config
         .token()
         .ok_or(crate::exit_code::CliError::NotAuthenticated)?;
-    Ok(SecretString::from(token.expose_secret().to_string()))
+    Ok(token.clone())
 }
 
 /// Store session in the agent (if running).

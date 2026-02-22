@@ -345,7 +345,7 @@ pub async fn exchange_authorization_code(
             auth_time: Some(auth_code.iat),
             amr: Some(AuthMethod::all_fido2().to_vec()),
             acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
-            access_token: Some(&access_token),
+            access_token: Some(access_token.expose_secret()),
         },
     )?;
 
@@ -385,7 +385,7 @@ pub async fn exchange_authorization_code(
     }
 
     Ok(AuthCodeExchangeResult {
-        access_token,
+        access_token: access_token.expose_secret().to_string(),
         token_type: token_type.to_string(),
         expires_in,
         id_token,

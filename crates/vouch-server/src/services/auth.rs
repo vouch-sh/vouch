@@ -25,6 +25,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
 use jsonwebtoken::{EncodingKey, encode};
+use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -314,7 +315,7 @@ pub struct CreateSessionParams<'a> {
 /// Result of creating a login session.
 pub struct CreateSessionResult {
     /// The JWT token.
-    pub token: String,
+    pub token: SecretString,
     /// When the session expires (ISO 8601 string).
     pub expires_at: String,
 }
@@ -370,7 +371,7 @@ pub async fn create_login_session(
     .map_err(|e| ServiceError::Internal(format!("Failed to store session: {e}")))?;
 
     Ok(CreateSessionResult {
-        token,
+        token: SecretString::from(token),
         expires_at: expires.to_string(),
     })
 }
@@ -456,7 +457,7 @@ pub async fn create_oauth_access_token(
     .map_err(|e| ServiceError::Internal(format!("Failed to store session: {e}")))?;
 
     Ok(CreateSessionResult {
-        token,
+        token: SecretString::from(token),
         expires_at: expires.to_string(),
     })
 }

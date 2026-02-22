@@ -11,6 +11,7 @@ use crate::state::CachedCredential;
 use crate::state::SessionInfo;
 use crate::wire;
 
+use secrecy::SecretString;
 use tokio::net::UnixStream;
 
 /// Map a JSON-RPC auth-related error code to the appropriate `AgentError`.
@@ -164,7 +165,7 @@ impl AgentClient {
     ///
     /// Returns `AgentError::NotAuthenticated` if no session exists.
     /// Returns `AgentError::SessionExpired` if the session has expired.
-    pub async fn get_token(&mut self) -> Result<String> {
+    pub async fn get_token(&mut self) -> Result<SecretString> {
         let response = self.call("get_token", None).await?;
 
         if let Some(error) = &response.error {
@@ -177,7 +178,7 @@ impl AgentClient {
 
         result
             .as_str()
-            .map(ToString::to_string)
+            .map(|s| SecretString::from(s.to_string()))
             .ok_or_else(|| AgentError::Protocol("invalid token".to_string()))
     }
 

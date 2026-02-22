@@ -222,7 +222,7 @@ pub struct DeviceTokenRequest {
 }
 
 /// Response containing access token.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct DeviceTokenResponse {
     /// JWT access token.
     pub access_token: String,
@@ -232,6 +232,18 @@ pub struct DeviceTokenResponse {
     pub expires_in: u64,
     /// User's email address.
     pub email: String,
+}
+
+// Custom Debug that redacts access_token to prevent accidental log exposure.
+impl std::fmt::Debug for DeviceTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DeviceTokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("email", &self.email)
+            .finish()
+    }
 }
 
 /// OAuth 2.0 error response.

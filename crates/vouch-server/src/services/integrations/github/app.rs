@@ -134,12 +134,24 @@ pub struct GitHubRepository {
 }
 
 /// Response from GitHub's installation token endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct InstallationTokenResponse {
     token: String,
     expires_at: String,
     permissions: HashMap<String, String>,
     repositories: Option<Vec<GitHubRepository>>,
+}
+
+// Custom Debug that redacts token to prevent accidental log exposure.
+impl std::fmt::Debug for InstallationTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstallationTokenResponse")
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field("permissions", &self.permissions)
+            .field("repositories", &self.repositories)
+            .finish()
+    }
 }
 
 /// Response from GitHub's installation details endpoint.
@@ -500,7 +512,7 @@ pub async fn get_github_user(
 }
 
 /// Response from GitHub OAuth token endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct GitHubOAuthTokenResponse {
     /// Access token for API calls.
     pub access_token: String,
@@ -518,6 +530,20 @@ pub struct GitHubOAuthTokenResponse {
     /// Refresh token expiration in seconds (6 months for GitHub Apps).
     #[allow(dead_code)]
     pub refresh_token_expires_in: Option<u64>,
+}
+
+// Custom Debug that redacts tokens to prevent accidental log exposure.
+impl std::fmt::Debug for GitHubOAuthTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubOAuthTokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("scope", &self.scope)
+            .field("refresh_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .field("refresh_token_expires_in", &self.refresh_token_expires_in)
+            .finish()
+    }
 }
 
 /// Exchange an OAuth authorization code for access and refresh tokens.

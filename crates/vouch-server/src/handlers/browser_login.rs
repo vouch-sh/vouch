@@ -429,6 +429,7 @@ pub async fn browser_login_complete(
     let token = session_result.token;
 
     // Log successful login event (fire-and-forget, consistent with failure path)
+
     let auth_event_params = AuthEventParams {
         user_id: user.id.clone(),
         event_type: AuthEventType::LoginSuccess,
@@ -456,7 +457,7 @@ pub async fn browser_login_complete(
 
     // Create session cookie
     let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
-    let cookie = create_session_cookie(&token, session_hours * 3600);
+    let cookie = create_session_cookie(token.expose_secret(), session_hours * 3600);
 
     // Determine redirect URL
     let redirect_url = if let Some(pending_id) = auth_state.pending_auth {

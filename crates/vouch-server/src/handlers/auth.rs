@@ -534,7 +534,7 @@ pub async fn login_complete(
     tracing::info!("Login successful for user: {}", redact_email(&user.email));
 
     Ok(Json(LoginCompleteResponse {
-        token: session_result.token,
+        token: session_result.token.expose_secret().to_string(),
         expires_at: session_result.expires_at,
         email: user.email,
     }))

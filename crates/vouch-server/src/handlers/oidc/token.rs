@@ -49,7 +49,7 @@ impl std::str::FromStr for OAuthGrantType {
 }
 
 /// Token response (RFC 6749 Section 5.1).
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct TokenResponse {
     /// The access token issued by the authorization server.
     pub access_token: String,
@@ -63,8 +63,21 @@ pub struct TokenResponse {
     pub scope: Option<ScopeSet>,
 }
 
+// Custom Debug that redacts tokens to prevent accidental log exposure.
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("id_token", &"[REDACTED]")
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
 /// Token request for all grant types (RFC 6749 Section 4.1.3, RFC 8628 Section 3.4, RFC 8693 Section 2.1).
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct TokenRequest {
     /// RFC 6749 Section 4.1.3: The grant type.
     pub grant_type: String,
@@ -109,8 +122,30 @@ pub struct TokenRequest {
     pub requested_token_type: Option<String>,
 }
 
+// Custom Debug that redacts secrets to prevent accidental log exposure.
+impl std::fmt::Debug for TokenRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenRequest")
+            .field("grant_type", &self.grant_type)
+            .field("code", &self.code)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("code_verifier", &"[REDACTED]")
+            .field("device_code", &self.device_code)
+            .field("subject_token", &"[REDACTED]")
+            .field("subject_token_type", &self.subject_token_type)
+            .field("actor_token", &"[REDACTED]")
+            .field("actor_token_type", &self.actor_token_type)
+            .field("audience", &self.audience)
+            .field("scope", &self.scope)
+            .field("requested_token_type", &self.requested_token_type)
+            .finish()
+    }
+}
+
 /// Token exchange response (RFC 8693 Section 2.2).
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 pub struct TokenExchangeResponse {
     /// The security token issued by the authorization server.
     pub access_token: String,
@@ -123,6 +158,19 @@ pub struct TokenExchangeResponse {
     /// RFC 6749 Section 3.3: The scope of the access token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<ScopeSet>,
+}
+
+// Custom Debug that redacts access_token to prevent accidental log exposure.
+impl std::fmt::Debug for TokenExchangeResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenExchangeResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("issued_token_type", &self.issued_token_type)
+            .field("token_type", &self.token_type)
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 /// POST /oauth/token
