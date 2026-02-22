@@ -16,6 +16,7 @@ use super::types::{
 };
 use crate::AppState;
 use crate::db;
+use crate::db::ScimScope;
 use crate::redact_email;
 
 /// GET /scim/v2/Users (RFC 7644 Section 3.4.2).
@@ -31,7 +32,7 @@ pub async fn list_users(
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
-    if let Err((status, json)) = auth.require_scope("users:read") {
+    if let Err((status, json)) = auth.require_scope(ScimScope::UsersRead) {
         return (status, json).into_response();
     }
 
@@ -101,7 +102,7 @@ pub async fn create_user(
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
-    if let Err((status, json)) = auth.require_scope("users:write") {
+    if let Err((status, json)) = auth.require_scope(ScimScope::UsersWrite) {
         return (status, json).into_response();
     }
 
@@ -191,7 +192,7 @@ pub async fn get_user(
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
-    if let Err((status, json)) = auth.require_scope("users:read") {
+    if let Err((status, json)) = auth.require_scope(ScimScope::UsersRead) {
         return (status, json).into_response();
     }
 
@@ -234,7 +235,7 @@ pub async fn patch_user(
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
-    if let Err((status, json)) = auth.require_scope("users:write") {
+    if let Err((status, json)) = auth.require_scope(ScimScope::UsersWrite) {
         return (status, json).into_response();
     }
 
@@ -422,7 +423,7 @@ pub async fn delete_user(
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
-    if let Err((status, json)) = auth.require_scope("users:write") {
+    if let Err((status, json)) = auth.require_scope(ScimScope::UsersWrite) {
         return (status, json).into_response();
     };
 

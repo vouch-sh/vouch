@@ -23,6 +23,7 @@ use axum::{
 
 use crate::AppState;
 use crate::db;
+use crate::db::{ScimScope, ScimScopeSet};
 
 // Re-export types for convenience (used by tests via `use super::*`)
 pub use types::*;
@@ -40,21 +41,21 @@ pub use users::{create_user, delete_user, get_user, list_users, patch_user};
 pub struct ScimAuth {
     /// Token ID.
     pub token_id: String,
-    /// Comma-separated scope string.
-    pub scope: String,
+    /// Parsed scope set.
+    pub scope: ScimScopeSet,
 }
 
 impl ScimAuth {
     /// Check if the token has the required scope.
-    pub fn require_scope(&self, required: &str) -> Result<(), (StatusCode, Json<ScimError>)> {
-        if self.scope.split(',').any(|p| p.trim() == required) {
+    pub fn require_scope(&self, required: ScimScope) -> Result<(), (StatusCode, Json<ScimError>)> {
+        if self.scope.contains(required) {
             Ok(())
         } else {
             Err((
                 StatusCode::FORBIDDEN,
                 Json(ScimError::new(
                     403,
-                    format!("Token lacks required scope: {required}"),
+                    format!("Token lacks required scope: {}", required.as_str()),
                 )),
             ))
         }
@@ -113,9 +114,20 @@ pub async fn authenticate_scim(
         tracing::warn!("Failed to update SCIM token last_used_at: {e}");
     }
 
+    let scope = ScimScopeSet::parse(&token_record.scope).ok_or_else(|| {
+        tracing::error!(
+            "Invalid SCIM token scope in database: {}",
+            token_record.scope
+        );
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ScimError::new(500, "Invalid token scope")),
+        )
+    })?;
+
     Ok(ScimAuth {
         token_id: token_record.id,
-        scope: token_record.scope,
+        scope,
     })
 }
 

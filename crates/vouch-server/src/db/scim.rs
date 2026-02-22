@@ -15,8 +15,98 @@ use uuid::Uuid;
 // SCIM Tokens
 // ============================================================================
 
-/// Default scope for new SCIM tokens: full access.
-pub const SCIM_DEFAULT_SCOPE: &str = "users:read,users:write,groups:read,groups:write";
+/// Individual SCIM permission scope.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScimScope {
+    /// Read access to user resources.
+    UsersRead,
+    /// Write access to user resources.
+    UsersWrite,
+    /// Read access to group resources.
+    GroupsRead,
+    /// Write access to group resources.
+    GroupsWrite,
+}
+
+impl ScimScope {
+    /// Return the string representation for database storage.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::UsersRead => "users:read",
+            Self::UsersWrite => "users:write",
+            Self::GroupsRead => "groups:read",
+            Self::GroupsWrite => "groups:write",
+        }
+    }
+
+    /// Parse from a database string value.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "users:read" => Some(Self::UsersRead),
+            "users:write" => Some(Self::UsersWrite),
+            "groups:read" => Some(Self::GroupsRead),
+            "groups:write" => Some(Self::GroupsWrite),
+            _ => None,
+        }
+    }
+}
+
+/// A set of SCIM permission scopes, stored as comma-separated in the database.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScimScopeSet {
+    scopes: Vec<ScimScope>,
+}
+
+impl ScimScopeSet {
+    /// Create a scope set containing all four scopes (full access).
+    #[must_use]
+    pub fn all() -> Self {
+        Self {
+            scopes: vec![
+                ScimScope::UsersRead,
+                ScimScope::UsersWrite,
+                ScimScope::GroupsRead,
+                ScimScope::GroupsWrite,
+            ],
+        }
+    }
+
+    /// Parse a comma-separated scope string from the database.
+    ///
+    /// Returns `None` if any scope component is invalid.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        let scopes: Option<Vec<ScimScope>> = s
+            .split(',')
+            .map(|part| ScimScope::parse(part.trim()))
+            .collect();
+        scopes.map(|s| Self { scopes: s })
+    }
+
+    /// Serialize to a comma-separated string for database storage.
+    #[must_use]
+    pub fn as_db_string(&self) -> String {
+        self.scopes
+            .iter()
+            .map(ScimScope::as_str)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// Check if this set contains a specific scope.
+    #[must_use]
+    pub fn contains(&self, scope: ScimScope) -> bool {
+        self.scopes.contains(&scope)
+    }
+}
+
+impl Default for ScimScopeSet {
+    fn default() -> Self {
+        Self::all()
+    }
+}
 
 /// SCIM token record.
 #[derive(Debug, sqlx::FromRow)]
@@ -86,12 +176,13 @@ pub async fn create_scim_token(
     description: Option<&str>,
     expires_at: Option<&str>,
     org_id: Option<&str>,
-    scope: Option<&str>,
+    scope: Option<&ScimScopeSet>,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
     let db_type = pool.db_type();
     let now = Timestamp::now().to_string();
-    let scope_val = scope.unwrap_or(SCIM_DEFAULT_SCOPE);
+    let default_scope = ScimScopeSet::default();
+    let scope_val = scope.unwrap_or(&default_scope).as_db_string();
 
     let sql = {
         let query = Query::insert()
@@ -112,7 +203,7 @@ pub async fn create_scim_token(
                 description.into(),
                 expires_at.into(),
                 now.as_str().into(),
-                scope_val.into(),
+                scope_val.as_str().into(),
             ])
             .to_owned();
         query.build_sql(db_type)

@@ -108,7 +108,7 @@ async fn test_session_lifecycle() {
         token_hash,
         Some(&auth_id),
         "2099-12-31T23:59:59Z",
-        "fido2_session",
+        SessionPurpose::Fido2Session,
     )
     .await
     .expect("Failed to create session");
@@ -804,7 +804,7 @@ async fn test_scim_session_invalidation_on_deactivation() {
         "scim_token_hash",
         Some(&auth_id),
         "2099-12-31T23:59:59Z",
-        "fido2_session",
+        SessionPurpose::Fido2Session,
     )
     .await
     .expect("Failed to create session");
@@ -1179,7 +1179,7 @@ async fn test_user_cascade_delete() {
         "cascade_token",
         Some(&auth_id),
         "2099-12-31T23:59:59Z",
-        "fido2_session",
+        SessionPurpose::Fido2Session,
     )
     .await
     .expect("Failed to create session");
@@ -1457,4 +1457,72 @@ async fn test_cloud_integration_org_isolation() {
         .expect("Failed to get config")
         .expect("Org2 config should still exist");
     assert_eq!(gcp2.config, config2);
+}
+
+// ========================================================================
+// SCIM Scope Tests
+// ========================================================================
+
+#[test]
+fn test_scim_scope_round_trip() {
+    for scope in [
+        ScimScope::UsersRead,
+        ScimScope::UsersWrite,
+        ScimScope::GroupsRead,
+        ScimScope::GroupsWrite,
+    ] {
+        let s = scope.as_str();
+        let parsed = ScimScope::parse(s).expect("Should parse valid scope");
+        assert_eq!(parsed, scope);
+    }
+}
+
+#[test]
+fn test_scim_scope_parse_invalid() {
+    assert!(ScimScope::parse("invalid").is_none());
+    assert!(ScimScope::parse("").is_none());
+    assert!(ScimScope::parse("users:admin").is_none());
+    assert!(ScimScope::parse("Users:Read").is_none());
+}
+
+#[test]
+fn test_scim_scope_set_round_trip() {
+    let set = ScimScopeSet::all();
+    let db_string = set.as_db_string();
+    let parsed = ScimScopeSet::parse(&db_string).expect("Should parse valid scope set");
+    assert_eq!(parsed, set);
+}
+
+#[test]
+fn test_scim_scope_set_parse_subset() {
+    let parsed = ScimScopeSet::parse("users:read,groups:write").expect("Should parse valid subset");
+    assert!(parsed.contains(ScimScope::UsersRead));
+    assert!(!parsed.contains(ScimScope::UsersWrite));
+    assert!(!parsed.contains(ScimScope::GroupsRead));
+    assert!(parsed.contains(ScimScope::GroupsWrite));
+}
+
+#[test]
+fn test_scim_scope_set_parse_rejects_invalid() {
+    assert!(ScimScopeSet::parse("users:read,invalid").is_none());
+    assert!(ScimScopeSet::parse("bad").is_none());
+    assert!(ScimScopeSet::parse("").is_none());
+}
+
+#[test]
+fn test_scim_scope_set_contains() {
+    let all = ScimScopeSet::all();
+    assert!(all.contains(ScimScope::UsersRead));
+    assert!(all.contains(ScimScope::UsersWrite));
+    assert!(all.contains(ScimScope::GroupsRead));
+    assert!(all.contains(ScimScope::GroupsWrite));
+
+    let partial = ScimScopeSet::parse("users:read").expect("valid");
+    assert!(partial.contains(ScimScope::UsersRead));
+    assert!(!partial.contains(ScimScope::UsersWrite));
+}
+
+#[test]
+fn test_scim_scope_set_default_is_all() {
+    assert_eq!(ScimScopeSet::default(), ScimScopeSet::all());
 }

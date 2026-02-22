@@ -16,6 +16,7 @@ use super::types::{
 };
 use crate::AppState;
 use crate::db;
+use crate::db::ScimScope;
 
 /// GET /scim/v2/Groups (RFC 7644 Section 3.4.2).
 ///
@@ -30,7 +31,7 @@ pub async fn list_groups(
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
-    if let Err((status, json)) = auth.require_scope("groups:read") {
+    if let Err((status, json)) = auth.require_scope(ScimScope::GroupsRead) {
         return (status, json).into_response();
     }
 
@@ -101,7 +102,7 @@ pub async fn create_group(
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
-    if let Err((status, json)) = auth.require_scope("groups:write") {
+    if let Err((status, json)) = auth.require_scope(ScimScope::GroupsWrite) {
         return (status, json).into_response();
     }
 
@@ -173,7 +174,7 @@ pub async fn get_group(
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
-    if let Err((status, json)) = auth.require_scope("groups:read") {
+    if let Err((status, json)) = auth.require_scope(ScimScope::GroupsRead) {
         return (status, json).into_response();
     }
 
@@ -217,7 +218,7 @@ pub async fn patch_group(
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
-    if let Err((status, json)) = auth.require_scope("groups:write") {
+    if let Err((status, json)) = auth.require_scope(ScimScope::GroupsWrite) {
         return (status, json).into_response();
     }
 
@@ -383,7 +384,7 @@ pub async fn delete_group(
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
-    if let Err((status, json)) = auth.require_scope("groups:write") {
+    if let Err((status, json)) = auth.require_scope(ScimScope::GroupsWrite) {
         return (status, json).into_response();
     }
 
