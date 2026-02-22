@@ -6,8 +6,11 @@ use crate::socket::bind_socket;
 use crate::wire;
 use std::sync::Arc;
 use tokio::net::UnixStream;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 use tracing::{debug, error, info, warn};
+
+/// Maximum number of concurrent SSH agent connections.
+const MAX_SSH_CONNECTIONS: usize = 64;
 
 use super::provisioning::{handle_request_identities, handle_sign_request};
 use super::state::SshAgentState;
@@ -57,18 +60,27 @@ impl SshAgentServer {
         info!("SSH agent listening on {}", path.display());
 
         let mut shutdown = self.shutdown_rx.clone();
+        let semaphore = Arc::new(Semaphore::new(MAX_SSH_CONNECTIONS));
 
         loop {
             tokio::select! {
                 result = listener.accept() => {
                     match result {
                         Ok((stream, _)) => {
+                            let permit = match Arc::clone(&semaphore).try_acquire_owned() {
+                                Ok(permit) => permit,
+                                Err(_) => {
+                                    warn!("SSH connection limit reached ({MAX_SSH_CONNECTIONS}), rejecting");
+                                    continue;
+                                }
+                            };
                             let state = Arc::clone(&self.state);
                             let agent_state = self.agent_state.clone();
                             tokio::spawn(async move {
                                 if let Err(e) = handle_ssh_connection(stream, state, agent_state).await {
                                     debug!("SSH agent connection error: {e}");
                                 }
+                                drop(permit);
                             });
                         }
                         Err(e) => {

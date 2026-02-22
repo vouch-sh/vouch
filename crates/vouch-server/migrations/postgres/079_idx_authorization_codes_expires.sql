@@ -1,1 +1,1 @@
-CREATE INDEX IF NOT EXISTS idx_authorization_codes_expires ON authorization_codes(expires_at);
+CREATE INDEX ASYNC idx_authorization_codes_expires ON authorization_codes(expires_at);

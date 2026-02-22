@@ -35,21 +35,19 @@ pub fn socket_path() -> Result<PathBuf> {
 /// Returns `AgentError::SocketPath` if the directory cannot be created or permissions cannot be set.
 pub(crate) fn ensure_vouch_dir() -> Result<()> {
     let dir = vouch_dir()?;
-    if !dir.exists() {
-        std::fs::create_dir_all(&dir).map_err(|e| {
-            AgentError::SocketPath(format!("failed to create {}: {e}", dir.display()))
-        })?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| AgentError::SocketPath(format!("failed to create {}: {e}", dir.display())))?;
 
-        // Set directory permissions to 0700
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o700);
-        std::fs::set_permissions(&dir, perms).map_err(|e| {
-            AgentError::SocketPath(format!(
-                "failed to set permissions on {}: {e}",
-                dir.display()
-            ))
-        })?;
-    }
+    // Always set directory permissions to 0700, even if the directory already existed
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(0o700);
+    std::fs::set_permissions(&dir, perms).map_err(|e| {
+        AgentError::SocketPath(format!(
+            "failed to set permissions on {}: {e}",
+            dir.display()
+        ))
+    })?;
+
     Ok(())
 }
 

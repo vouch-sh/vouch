@@ -87,6 +87,7 @@ url = { version = "=2.5.8", default-features = false }
 
 # Secrets (zeroize on drop)
 secrecy = { version = "=0.10.3", default-features = false, features = ["serde"] }
+zeroize = { version = "=1.8.2", default-features = false }
 
 # SSH keys and certificates
 ssh-key = { version = "=0.6.7", default-features = false, features = ["std", "ed25519", "encryption", "rand_core", "getrandom"] }

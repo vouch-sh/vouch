@@ -5,6 +5,7 @@ use crate::error::{AgentError, Result};
 use crate::wire;
 use ssh_key::PrivateKey;
 use tracing::debug;
+use zeroize::Zeroizing;
 
 use super::credentials::SshCredentials;
 use super::{SSH_AGENT_IDENTITIES_ANSWER, SSH_AGENT_SIGN_RESPONSE};
@@ -69,7 +70,11 @@ pub(super) fn parse_sign_request(buf: &[u8]) -> Result<Vec<u8>> {
 
     // Read key blob (skip it)
     let key_blob_len = wire::read_u32(buf, &mut offset)?;
-    let key_blob_end = offset + key_blob_len as usize;
+    let key_blob_usize = usize::try_from(key_blob_len)
+        .map_err(|_| AgentError::Protocol("key blob length overflow".to_string()))?;
+    let key_blob_end = offset
+        .checked_add(key_blob_usize)
+        .ok_or_else(|| AgentError::Protocol("key blob offset overflow".to_string()))?;
     if key_blob_end > buf.len() {
         return Err(AgentError::Protocol("invalid key blob length".to_string()));
     }
@@ -77,7 +82,11 @@ pub(super) fn parse_sign_request(buf: &[u8]) -> Result<Vec<u8>> {
 
     // Read data to sign
     let data_len = wire::read_u32(buf, &mut offset)?;
-    let data_end = offset + data_len as usize;
+    let data_usize = usize::try_from(data_len)
+        .map_err(|_| AgentError::Protocol("data length overflow".to_string()))?;
+    let data_end = offset
+        .checked_add(data_usize)
+        .ok_or_else(|| AgentError::Protocol("data offset overflow".to_string()))?;
     let data = buf
         .get(offset..data_end)
         .ok_or_else(|| AgentError::Protocol("invalid data length".to_string()))?;
@@ -93,13 +102,19 @@ pub(super) fn sign_data(private_key: &PrivateKey, data: &[u8]) -> Result<Vec<u8>
     let (alg_name, sig_bytes) = match private_key.key_data() {
         ssh_key::private::KeypairData::Ed25519(keypair) => {
             // Get the signing key bytes and create a signature
-            let signing_key_bytes = keypair.private.to_bytes();
+            let signing_key_bytes = Zeroizing::new(keypair.private.to_bytes());
             let public_key_bytes = keypair.public.0;
 
             // Combine private + public for ed25519-dalek format (64 bytes)
-            let mut full_key = [0u8; 64];
-            full_key[..32].copy_from_slice(&signing_key_bytes);
-            full_key[32..].copy_from_slice(&public_key_bytes);
+            let mut full_key = Zeroizing::new([0u8; 64]);
+            full_key
+                .get_mut(..32)
+                .ok_or_else(|| AgentError::Protocol("key buffer too small".to_string()))?
+                .copy_from_slice(&*signing_key_bytes);
+            full_key
+                .get_mut(32..)
+                .ok_or_else(|| AgentError::Protocol("key buffer too small".to_string()))?
+                .copy_from_slice(&public_key_bytes);
 
             // Use ed25519 signing
             use ed25519_dalek::{Signer, SigningKey};

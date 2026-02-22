@@ -2,6 +2,7 @@
 //! SSH credential provisioning and refresh.
 
 use crate::error::{AgentError, Result};
+use secrecy::ExposeSecret;
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -58,9 +59,9 @@ pub(super) async fn handle_sign_request(
     }
 
     let creds = state
-        .get_credentials()
+        .get_valid_credentials()
         .await
-        .ok_or_else(|| AgentError::Protocol("no credentials loaded".to_string()))?;
+        .ok_or_else(|| AgentError::Protocol("no valid credentials available".to_string()))?;
 
     let data = parse_sign_request(buf)?;
 
@@ -203,7 +204,7 @@ fn spawn_lazy_provision(
 
         let response = match client
             .post(format!("{server_url}/v1/credentials/ssh"))
-            .bearer_auth(token)
+            .bearer_auth(token.expose_secret())
             .json(&request)
             .send()
             .await
@@ -235,6 +236,12 @@ fn spawn_lazy_provision(
         if let Err(e) = std::fs::write(&cert_path, format!("{}\n", cert_response.certificate)) {
             debug!("Failed to write lazy-provisioned certificate: {e}");
             return;
+        }
+        // Set certificate file permissions to 0600 (owner read/write only)
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&cert_path, std::fs::Permissions::from_mode(0o600))
+        {
+            debug!("Failed to set certificate permissions: {e}");
         }
 
         // Load credentials into agent state
@@ -292,7 +299,7 @@ pub(super) async fn refresh_certificate(
 
     let response = client
         .post(format!("{}/v1/credentials/ssh", server_url))
-        .bearer_auth(token)
+        .bearer_auth(token.expose_secret())
         .json(&request)
         .send()
         .await
@@ -314,6 +321,10 @@ pub(super) async fn refresh_certificate(
     let cert_path = &creds.metadata.cert_path;
     std::fs::write(cert_path, format!("{}\n", cert_response.certificate))
         .map_err(|e| AgentError::Protocol(format!("failed to write refreshed certificate: {e}")))?;
+    // Set certificate file permissions to 0600 (owner read/write only)
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(cert_path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| AgentError::Protocol(format!("failed to set certificate permissions: {e}")))?;
 
     // Reload credentials from files
     let new_creds = SshCredentials::load(&creds.metadata.key_path, cert_path)?;

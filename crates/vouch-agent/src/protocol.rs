@@ -2,6 +2,7 @@
 //! JSON-RPC 2.0 protocol types for agent IPC.
 
 use serde::{Deserialize, Serialize};
+use tracing::warn;
 
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Serialize, Deserialize)]
@@ -30,11 +31,18 @@ impl Request {
 
     /// Create a new request with parameters.
     pub fn with_params<T: Serialize>(id: u64, method: &str, params: T) -> Self {
+        let params = match serde_json::to_value(params) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("Failed to serialize request params for '{method}': {e}");
+                serde_json::Value::Null
+            }
+        };
         Self {
             jsonrpc: "2.0".to_string(),
             id,
             method: method.to_string(),
-            params: Some(serde_json::to_value(params).unwrap_or(serde_json::Value::Null)),
+            params: Some(params),
         }
     }
 }
@@ -57,10 +65,17 @@ pub struct Response {
 impl Response {
     /// Create a successful response.
     pub fn success<T: Serialize>(id: u64, result: T) -> Self {
+        let result = match serde_json::to_value(result) {
+            Ok(v) => v,
+            Err(e) => {
+                warn!("Failed to serialize response result: {e}");
+                serde_json::Value::Null
+            }
+        };
         Self {
             jsonrpc: "2.0".to_string(),
             id,
-            result: Some(serde_json::to_value(result).unwrap_or(serde_json::Value::Null)),
+            result: Some(result),
             error: None,
         }
     }

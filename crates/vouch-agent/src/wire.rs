@@ -49,6 +49,7 @@ pub async fn write_message<W: AsyncWrite + Unpin>(writer: &mut W, data: &[u8]) -
         .map_err(|_| AgentError::Protocol("message too large".to_string()))?;
     writer.write_all(&len.to_be_bytes()).await?;
     writer.write_all(data).await?;
+    writer.flush().await?;
     Ok(())
 }
 

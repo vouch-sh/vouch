@@ -11,7 +11,7 @@ use vouch_agent::protocol::{
 use vouch_agent::state::{AgentState, Session, SessionInfo};
 
 use jiff::Timestamp;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 
 /// Helper: create a timestamp N seconds from now.
 fn future_timestamp(seconds: i64) -> Timestamp {
@@ -111,7 +111,7 @@ mod session_lifecycle {
 
         let token = state.get_token().await;
         assert!(token.is_some());
-        assert_eq!(token.unwrap(), "my_secret_jwt");
+        assert_eq!(token.unwrap().expose_secret(), "my_secret_jwt");
     }
 
     /// Token not accessible when no session.

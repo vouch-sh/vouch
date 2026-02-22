@@ -9,6 +9,12 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::warn;
 
+/// Maximum number of entries in the credential cache.
+const MAX_CACHE_ENTRIES: usize = 128;
+
+/// Maximum length of a credential type key.
+const MAX_CREDENTIAL_TYPE_LEN: usize = 256;
+
 /// Session information stored by the agent.
 #[derive(Debug, Clone)]
 pub struct Session {
@@ -261,8 +267,41 @@ impl AgentState {
     }
 
     /// Store a credential in the cache.
+    ///
+    /// Rejects keys longer than 256 bytes and caps the cache at 128 entries,
+    /// evicting the oldest expired entry (or the oldest entry) when full.
+    #[allow(clippy::map_entry)] // Entry API not viable: eviction needs map access between check and insert
     pub async fn cache_credential(&self, credential_type: String, credential: CachedCredential) {
+        if credential_type.len() > MAX_CREDENTIAL_TYPE_LEN {
+            warn!(
+                "Rejecting credential cache key: length {} exceeds maximum {MAX_CREDENTIAL_TYPE_LEN}",
+                credential_type.len()
+            );
+            return;
+        }
+
         let mut guard = self.credential_cache.write().await;
+
+        // Evict if at capacity and this is a new key
+        let is_new_key = !guard.contains_key(&credential_type);
+        if is_new_key && guard.len() >= MAX_CACHE_ENTRIES {
+            // Try to evict an expired entry first, then fall back to oldest
+            let evict_key = guard
+                .iter()
+                .find(|(_, v)| !v.is_valid())
+                .map(|(k, _)| k.clone());
+            let evict_key = evict_key.or_else(|| {
+                guard
+                    .iter()
+                    .min_by_key(|(_, v)| v.expires_at())
+                    .map(|(k, _)| k.clone())
+            });
+
+            if let Some(key) = evict_key {
+                guard.remove(&key);
+            }
+        }
+
         guard.insert(credential_type, credential);
     }
 
@@ -287,12 +326,10 @@ impl AgentState {
     }
 
     /// Get the raw token (if session is valid).
-    pub async fn get_token(&self) -> Option<String> {
+    pub async fn get_token(&self) -> Option<SecretString> {
         let guard = self.session.read().await;
         match guard.as_ref() {
-            Some(session) if !session.is_expired() => {
-                Some(session.token.expose_secret().to_string())
-            }
+            Some(session) if !session.is_expired() => Some(session.token.clone()),
             _ => None,
         }
     }
@@ -431,7 +468,7 @@ mod tests {
         // Get token
         let retrieved_token = state.get_token().await;
         assert!(retrieved_token.is_some());
-        assert_eq!(retrieved_token.unwrap(), "secret_jwt_token");
+        assert_eq!(retrieved_token.unwrap().expose_secret(), "secret_jwt_token");
     }
 
     #[tokio::test]

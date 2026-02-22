@@ -13,6 +13,15 @@ use crate::wire;
 
 use tokio::net::UnixStream;
 
+/// Map a JSON-RPC auth-related error code to the appropriate `AgentError`.
+fn check_auth_error(error: &crate::protocol::RpcError) -> AgentError {
+    match error.code {
+        NOT_AUTHENTICATED => AgentError::NotAuthenticated,
+        SESSION_EXPIRED => AgentError::SessionExpired,
+        _ => AgentError::Protocol(error.message.clone()),
+    }
+}
+
 /// Client for communicating with the agent.
 pub struct AgentClient {
     stream: UnixStream,
@@ -93,12 +102,8 @@ impl AgentClient {
     pub async fn get_session(&mut self) -> Result<SessionInfo> {
         let response = self.call("get_session", None).await?;
 
-        if let Some(error) = response.error {
-            return match error.code {
-                NOT_AUTHENTICATED => Err(AgentError::NotAuthenticated),
-                SESSION_EXPIRED => Err(AgentError::SessionExpired),
-                _ => Err(AgentError::Protocol(error.message)),
-            };
+        if let Some(error) = &response.error {
+            return Err(check_auth_error(error));
         }
 
         let result = response
@@ -162,12 +167,8 @@ impl AgentClient {
     pub async fn get_token(&mut self) -> Result<String> {
         let response = self.call("get_token", None).await?;
 
-        if let Some(error) = response.error {
-            return match error.code {
-                NOT_AUTHENTICATED => Err(AgentError::NotAuthenticated),
-                SESSION_EXPIRED => Err(AgentError::SessionExpired),
-                _ => Err(AgentError::Protocol(error.message)),
-            };
+        if let Some(error) = &response.error {
+            return Err(check_auth_error(error));
         }
 
         let result = response

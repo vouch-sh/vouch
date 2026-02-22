@@ -11,13 +11,17 @@ use crate::socket::{bind_socket, ensure_vouch_dir, remove_socket, socket_path};
 use crate::ssh_agent::{SshAgentState, SshCredentials};
 use crate::state::{AgentState, CachedCredential, Session, SessionInfo};
 use crate::wire;
+use serde::de::DeserializeOwned;
 
 use jiff::Timestamp;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use tokio::net::UnixStream;
-use tokio::sync::watch;
+use tokio::sync::{Semaphore, watch};
 use tracing::{debug, error, info, warn};
+
+/// Maximum number of concurrent IPC connections.
+const MAX_CONNECTIONS: usize = 64;
 
 /// Agent server with graceful shutdown support.
 pub struct AgentServer {
@@ -61,18 +65,27 @@ impl AgentServer {
         info!("Agent listening on {}", path.display());
 
         let mut shutdown = self.shutdown_rx.clone();
+        let semaphore = Arc::new(Semaphore::new(MAX_CONNECTIONS));
 
         loop {
             tokio::select! {
                 result = listener.accept() => {
                     match result {
                         Ok((stream, _)) => {
+                            let permit = match Arc::clone(&semaphore).try_acquire_owned() {
+                                Ok(permit) => permit,
+                                Err(_) => {
+                                    warn!("Connection limit reached ({MAX_CONNECTIONS}), rejecting");
+                                    continue;
+                                }
+                            };
                             let state = Arc::clone(&self.state);
                             let ssh_state = Arc::clone(&self.ssh_state);
                             tokio::spawn(async move {
                                 if let Err(e) = handle_connection(stream, state, ssh_state).await {
                                     debug!("Connection error: {e}");
                                 }
+                                drop(permit);
                             });
                         }
                         Err(e) => {
@@ -145,6 +158,14 @@ async fn handle_request(
     }
 }
 
+/// Extract and deserialize parameters from a JSON-RPC request.
+///
+/// Returns the error `Response` directly so callers can return it to the client.
+fn extract_params<T: DeserializeOwned>(request: &Request) -> Option<T> {
+    let value = request.params.as_ref()?;
+    serde_json::from_value(value.clone()).ok()
+}
+
 /// Handle ping request (health check).
 fn handle_ping(request: &Request) -> Response {
     Response::success(request.id, "pong")
@@ -173,12 +194,8 @@ async fn handle_store_session(
     state: &Arc<AgentState>,
     ssh_state: &Arc<SshAgentState>,
 ) -> Response {
-    let params: StoreSessionParams = match &request.params {
-        Some(p) => match serde_json::from_value(p.clone()) {
-            Ok(params) => params,
-            Err(e) => return Response::invalid_params(request.id, &e.to_string()),
-        },
-        None => return Response::invalid_params(request.id, "missing params"),
+    let Some(params): Option<StoreSessionParams> = extract_params(request) else {
+        return Response::invalid_params(request.id, "missing or invalid params");
     };
 
     // Parse expiration timestamp
@@ -251,7 +268,7 @@ async fn handle_clear_session(
 /// Handle `get_token` request.
 async fn handle_get_token(request: &Request, state: &Arc<AgentState>) -> Response {
     match state.get_token().await {
-        Some(token) => Response::success(request.id, token),
+        Some(token) => Response::success(request.id, token.expose_secret()),
         None => Response::not_authenticated(request.id),
     }
 }
@@ -261,12 +278,8 @@ async fn handle_store_ssh_credentials(
     request: &Request,
     ssh_state: &Arc<SshAgentState>,
 ) -> Response {
-    let params: StoreSshCredentialsParams = match &request.params {
-        Some(p) => match serde_json::from_value(p.clone()) {
-            Ok(params) => params,
-            Err(e) => return Response::invalid_params(request.id, &e.to_string()),
-        },
-        None => return Response::invalid_params(request.id, "missing params"),
+    let Some(params): Option<StoreSshCredentialsParams> = extract_params(request) else {
+        return Response::invalid_params(request.id, "missing or invalid params");
     };
 
     // Load credentials from files
@@ -318,12 +331,8 @@ async fn handle_has_ssh_credentials(request: &Request, ssh_state: &Arc<SshAgentS
 
 /// Handle `cache_credential` request.
 async fn handle_cache_credential(request: &Request, state: &Arc<AgentState>) -> Response {
-    let params: CacheCredentialParams = match &request.params {
-        Some(p) => match serde_json::from_value(p.clone()) {
-            Ok(params) => params,
-            Err(e) => return Response::invalid_params(request.id, &e.to_string()),
-        },
-        None => return Response::invalid_params(request.id, "missing params"),
+    let Some(params): Option<CacheCredentialParams> = extract_params(request) else {
+        return Response::invalid_params(request.id, "missing or invalid params");
     };
 
     // Parse expiration timestamp
@@ -346,12 +355,8 @@ async fn handle_cache_credential(request: &Request, state: &Arc<AgentState>) -> 
 
 /// Handle `get_cached_credential` request.
 async fn handle_get_cached_credential(request: &Request, state: &Arc<AgentState>) -> Response {
-    let params: GetCachedCredentialParams = match &request.params {
-        Some(p) => match serde_json::from_value(p.clone()) {
-            Ok(params) => params,
-            Err(e) => return Response::invalid_params(request.id, &e.to_string()),
-        },
-        None => return Response::invalid_params(request.id, "missing params"),
+    let Some(params): Option<GetCachedCredentialParams> = extract_params(request) else {
+        return Response::invalid_params(request.id, "missing or invalid params");
     };
 
     match state.get_cached_credential(&params.credential_type).await {

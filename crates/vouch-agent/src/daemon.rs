@@ -93,7 +93,10 @@ fn is_process_running(_pid: i32) -> bool {
     false
 }
 
-/// Write the current PID to the PID file.
+/// Write the current PID to the PID file atomically.
+///
+/// Writes to a temporary file first, then renames to the final path
+/// to prevent TOCTOU races with concurrent readers.
 pub fn write_pid_file() -> Result<()> {
     let pid_path = pid_file_path()?;
 
@@ -104,11 +107,17 @@ pub fn write_pid_file() -> Result<()> {
     }
 
     let pid = process::id();
-    let mut file = fs::File::create(&pid_path)
-        .map_err(|e| AgentError::Config(format!("Failed to create PID file: {e}")))?;
+
+    // Write to a temp file in the same directory, then rename atomically
+    let tmp_path = pid_path.with_extension("tmp");
+    let mut file = fs::File::create(&tmp_path)
+        .map_err(|e| AgentError::Config(format!("Failed to create temp PID file: {e}")))?;
 
     write!(file, "{pid}")
-        .map_err(|e| AgentError::Config(format!("Failed to write PID file: {e}")))?;
+        .map_err(|e| AgentError::Config(format!("Failed to write temp PID file: {e}")))?;
+
+    fs::rename(&tmp_path, &pid_path)
+        .map_err(|e| AgentError::Config(format!("Failed to rename PID file: {e}")))?;
 
     Ok(())
 }
@@ -194,9 +203,15 @@ pub fn daemonize() -> Result<DaemonizeResult> {
     // Redirect file descriptors
     // SAFETY: dup2() is a standard Unix API for duplicating file descriptors
     unsafe {
-        libc::dup2(dev_null.as_raw_fd(), libc::STDIN_FILENO);
-        libc::dup2(log_file.as_raw_fd(), libc::STDOUT_FILENO);
-        libc::dup2(log_file.as_raw_fd(), libc::STDERR_FILENO);
+        if libc::dup2(dev_null.as_raw_fd(), libc::STDIN_FILENO) < 0 {
+            return Err(AgentError::Config("dup2 stdin failed".to_string()));
+        }
+        if libc::dup2(log_file.as_raw_fd(), libc::STDOUT_FILENO) < 0 {
+            return Err(AgentError::Config("dup2 stdout failed".to_string()));
+        }
+        if libc::dup2(log_file.as_raw_fd(), libc::STDERR_FILENO) < 0 {
+            return Err(AgentError::Config("dup2 stderr failed".to_string()));
+        }
     }
 
     // Write PID file
