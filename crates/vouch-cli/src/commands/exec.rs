@@ -51,13 +51,7 @@ pub async fn fetch_aws_credentials(
         let output =
             super::credential::aws::fetch_and_assume(server, role_arn, session_name).await?;
         let expires_at = output.expiration.clone();
-        let data = serde_json::json!({
-            "AccessKeyId": output.access_key_id,
-            "SecretAccessKey": output.secret_access_key.expose_secret(),
-            "SessionToken": output.session_token.expose_secret(),
-            "Expiration": output.expiration,
-        });
-        Ok((data, expires_at))
+        Ok((output.to_json(), expires_at))
     })
     .await?;
 

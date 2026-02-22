@@ -36,6 +36,18 @@ struct DockerCredential {
     secret: SecretString,
 }
 
+impl DockerCredential {
+    /// Serialize to the JSON format expected by Docker.
+    ///
+    /// Field names MUST be PascalCase: `Username`, `Secret`.
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "Username": self.username,
+            "Secret": self.secret.expose_secret(),
+        })
+    }
+}
+
 impl std::fmt::Debug for DockerCredential {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DockerCredential")
@@ -197,11 +209,8 @@ async fn get_credential() -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    let json = serde_json::json!({
-        "Username": credential.username,
-        "Secret": credential.secret.expose_secret(),
-    });
-    let json_str = serde_json::to_string(&json).context("failed to serialize credentials")?;
+    let json_str =
+        serde_json::to_string(&credential.to_json()).context("failed to serialize credentials")?;
     writeln!(out, "{json_str}")?;
 
     Ok(())
@@ -387,7 +396,7 @@ async fn get_ghcr_credential(server: &str, token: &SecretString) -> Result<Docke
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -507,5 +516,37 @@ mod tests {
         let invalid = "not-valid-base64!!!";
         let result = base64_decode(invalid);
         assert!(result.is_err());
+    }
+
+    /// Verify the Docker credential helper JSON matches the format Docker expects.
+    /// Field names must be PascalCase: `Username`, `Secret`.
+    /// See: https://docs.docker.com/engine/reference/commandline/login/#credential-helper-protocol
+    #[test]
+    fn test_docker_credential_json_format() {
+        let cred = DockerCredential {
+            username: "AWS".to_string(),
+            secret: SecretString::from("docker-password-here".to_string()),
+        };
+
+        let json = cred.to_json();
+
+        assert_eq!(json["Username"], "AWS");
+        assert_eq!(json["Secret"], "docker-password-here");
+        // Must have exactly 2 fields
+        assert_eq!(json.as_object().unwrap().len(), 2);
+    }
+
+    /// Verify GHCR credential uses the correct username.
+    #[test]
+    fn test_docker_credential_ghcr_format() {
+        let cred = DockerCredential {
+            username: "x-access-token".to_string(),
+            secret: SecretString::from("ghu_example_token".to_string()),
+        };
+
+        let json = cred.to_json();
+
+        assert_eq!(json["Username"], "x-access-token");
+        assert_eq!(json["Secret"], "ghu_example_token");
     }
 }

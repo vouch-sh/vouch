@@ -26,6 +26,24 @@ pub(crate) struct CredentialProcessOutput {
     pub(crate) expiration: String,
 }
 
+impl CredentialProcessOutput {
+    /// Serialize to the JSON format expected by AWS credential_process consumers.
+    ///
+    /// See: <https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html>
+    ///
+    /// Field names MUST be PascalCase to match the AWS SDK expectation:
+    /// `Version`, `AccessKeyId`, `SecretAccessKey`, `SessionToken`, `Expiration`.
+    pub(crate) fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "Version": self.version,
+            "AccessKeyId": self.access_key_id,
+            "SecretAccessKey": self.secret_access_key.expose_secret(),
+            "SessionToken": self.session_token.expose_secret(),
+            "Expiration": self.expiration,
+        })
+    }
+}
+
 impl std::fmt::Debug for CredentialProcessOutput {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CredentialProcessOutput")
@@ -106,14 +124,7 @@ pub async fn run(server: &str, role_arn: &str, session_name: Option<&str>) -> Re
     let data = super::cache::get_or_fetch(&cache_key, "AWS credentials", || async {
         let output = fetch_and_assume(server, role_arn, session_name).await?;
         let expires_at = output.expiration.clone();
-        let data = serde_json::json!({
-            "Version": output.version,
-            "AccessKeyId": output.access_key_id,
-            "SecretAccessKey": output.secret_access_key.expose_secret(),
-            "SessionToken": output.session_token.expose_secret(),
-            "Expiration": output.expiration,
-        });
-        Ok((data, expires_at))
+        Ok((output.to_json(), expires_at))
     })
     .await?;
 
@@ -271,5 +282,70 @@ mod tests {
         });
         let tags = build_session_tags(&claims);
         assert!(tags.is_empty());
+    }
+
+    /// Verify the credential_process JSON output matches the format expected by
+    /// AWS CLI and SDKs. Field names must be PascalCase.
+    /// See: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html
+    #[test]
+    fn test_credential_process_output_json_format() {
+        let output = CredentialProcessOutput {
+            version: 1,
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: SecretString::from(
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            ),
+            session_token: SecretString::from("FwoGZXIvYXdzEBYaDH...EXAMPLETOKEN".to_string()),
+            expiration: "2024-01-14T18:00:00Z".to_string(),
+        };
+
+        let json = output.to_json();
+
+        // AWS credential_process requires exactly these PascalCase field names
+        assert_eq!(json["Version"], 1);
+        assert_eq!(json["AccessKeyId"], "AKIAIOSFODNN7EXAMPLE");
+        assert_eq!(
+            json["SecretAccessKey"],
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        );
+        assert_eq!(json["SessionToken"], "FwoGZXIvYXdzEBYaDH...EXAMPLETOKEN");
+        assert_eq!(json["Expiration"], "2024-01-14T18:00:00Z");
+
+        // Must have exactly 5 fields — no extra fields allowed
+        assert_eq!(json.as_object().unwrap().len(), 5);
+    }
+
+    /// Verify the cached credential JSON can be round-tripped through the
+    /// extraction code used by exec.rs and codecommit.rs.
+    #[test]
+    fn test_credential_process_output_cache_round_trip() {
+        let output = CredentialProcessOutput {
+            version: 1,
+            access_key_id: "AKIAEXAMPLE".to_string(),
+            secret_access_key: SecretString::from("secret-key".to_string()),
+            session_token: SecretString::from("session-token".to_string()),
+            expiration: "2024-01-14T18:00:00Z".to_string(),
+        };
+
+        let data = output.to_json();
+
+        // These are the exact field names used by exec.rs and codecommit.rs
+        // to extract credentials from cache
+        assert_eq!(
+            data.get("AccessKeyId").unwrap().as_str().unwrap(),
+            "AKIAEXAMPLE"
+        );
+        assert_eq!(
+            data.get("SecretAccessKey").unwrap().as_str().unwrap(),
+            "secret-key"
+        );
+        assert_eq!(
+            data.get("SessionToken").unwrap().as_str().unwrap(),
+            "session-token"
+        );
+        assert_eq!(
+            data.get("Expiration").unwrap().as_str().unwrap(),
+            "2024-01-14T18:00:00Z"
+        );
     }
 }

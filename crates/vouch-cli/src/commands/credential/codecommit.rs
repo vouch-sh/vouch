@@ -147,13 +147,7 @@ async fn get_sts_credentials(_region: &str) -> Result<StsCredentials> {
         let output =
             super::aws::fetch_and_assume(&server, &role_arn, Some("vouch-codecommit")).await?;
         let expires_at = output.expiration.clone();
-        let data = serde_json::json!({
-            "AccessKeyId": output.access_key_id,
-            "SecretAccessKey": output.secret_access_key.expose_secret(),
-            "SessionToken": output.session_token.expose_secret(),
-            "Expiration": output.expiration,
-        });
-        Ok((data, expires_at))
+        Ok((output.to_json(), expires_at))
     })
     .await?;
 
