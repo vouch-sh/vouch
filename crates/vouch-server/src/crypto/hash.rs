@@ -1,0 +1,42 @@
+// SPDX-License-Identifier: BUSL-1.1
+//! Cryptographic hashing and random byte generation utilities.
+
+use aws_lc_rs::rand as aws_rand;
+
+/// Hash a token for storage/lookup using SHA-256.
+///
+/// Returns a base64url-encoded hash of the token. This is used to store
+/// tokens securely in the database without keeping the raw token value.
+#[must_use]
+pub fn hash_token(token: &str) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let hash = digest::digest(&SHA256, token.as_bytes());
+    URL_SAFE_NO_PAD.encode(hash.as_ref())
+}
+
+/// Generate cryptographically secure random bytes.
+///
+/// # Errors
+///
+/// Returns an error if the system RNG fails, which should never happen on
+/// a correctly functioning system.
+pub fn generate_random_bytes(len: usize) -> Result<Vec<u8>, aws_lc_rs::error::Unspecified> {
+    let mut bytes = vec![0u8; len];
+    aws_rand::fill(&mut bytes)?;
+    Ok(bytes)
+}
+
+/// Generate a 32-byte challenge for WebAuthn.
+///
+/// This is a convenience wrapper around `generate_random_bytes(32)` for
+/// WebAuthn challenge generation.
+///
+/// # Errors
+///
+/// Returns an error if the system RNG fails.
+pub fn generate_challenge() -> Result<Vec<u8>, aws_lc_rs::error::Unspecified> {
+    generate_random_bytes(32)
+}

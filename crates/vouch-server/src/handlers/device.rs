@@ -31,7 +31,7 @@ fn oauth_error(status: StatusCode, error: OAuthError) -> (StatusCode, Json<OAuth
 ///
 /// Returns an error if the system RNG fails.
 fn generate_device_code() -> Result<String, aws_lc_rs::error::Unspecified> {
-    let bytes = super::common::generate_random_bytes(32)?;
+    let bytes = crate::crypto::generate_random_bytes(32)?;
     Ok(URL_SAFE_NO_PAD.encode(&bytes))
 }
 
@@ -41,7 +41,7 @@ fn generate_device_code() -> Result<String, aws_lc_rs::error::Unspecified> {
 ///
 /// Returns an error if the system RNG fails.
 fn generate_user_code() -> Result<String, aws_lc_rs::error::Unspecified> {
-    let bytes = super::common::generate_random_bytes(8)?;
+    let bytes = crate::crypto::generate_random_bytes(8)?;
 
     let chars: Vec<char> = bytes
         .iter()

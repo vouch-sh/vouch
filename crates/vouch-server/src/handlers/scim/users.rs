@@ -26,11 +26,14 @@ pub async fn list_users(
     headers: HeaderMap,
     Query(query): Query<ScimListQuery>,
 ) -> Response {
-    // Authenticate
-    let token_id = match authenticate_scim(&state, &headers).await {
-        Ok(id) => id,
+    // Authenticate and check scope
+    let auth = match authenticate_scim(&state, &headers).await {
+        Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
+    if let Err((status, json)) = auth.require_scope("users:read") {
+        return (status, json).into_response();
+    }
 
     let start_index = query.start_index.unwrap_or(1);
     let count = query.count.unwrap_or(100).min(100);
@@ -66,7 +69,7 @@ pub async fn list_users(
         "list",
         "User",
         "*",
-        Some(&token_id),
+        Some(&auth.token_id),
         Some(&format!("{{\"count\": {}}}", resources.len())),
     )
     .await
@@ -93,11 +96,14 @@ pub async fn create_user(
     headers: HeaderMap,
     Json(user): Json<ScimUser>,
 ) -> Response {
-    // Authenticate
-    let token_id = match authenticate_scim(&state, &headers).await {
-        Ok(id) => id,
+    // Authenticate and check scope
+    let auth = match authenticate_scim(&state, &headers).await {
+        Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
+    if let Err((status, json)) = auth.require_scope("users:write") {
+        return (status, json).into_response();
+    }
 
     // Extract email from userName or emails
     let email = if user.user_name.contains('@') {
@@ -158,7 +164,7 @@ pub async fn create_user(
         "create",
         "User",
         &db_user.id,
-        Some(&token_id),
+        Some(&auth.token_id),
         Some(&serde_json::json!({"email": email}).to_string()),
     )
     .await
@@ -181,7 +187,11 @@ pub async fn get_user(
     Path(id): Path<String>,
 ) -> Response {
     // Authenticate
-    if let Err((status, json)) = authenticate_scim(&state, &headers).await {
+    let auth = match authenticate_scim(&state, &headers).await {
+        Ok(auth) => auth,
+        Err((status, json)) => return (status, json).into_response(),
+    };
+    if let Err((status, json)) = auth.require_scope("users:read") {
         return (status, json).into_response();
     }
 
@@ -219,11 +229,14 @@ pub async fn patch_user(
     Path(id): Path<String>,
     Json(patch): Json<ScimPatchRequest>,
 ) -> Response {
-    // Authenticate
-    let token_id = match authenticate_scim(&state, &headers).await {
-        Ok(id) => id,
+    // Authenticate and check scope
+    let auth = match authenticate_scim(&state, &headers).await {
+        Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
+    if let Err((status, json)) = auth.require_scope("users:write") {
+        return (status, json).into_response();
+    }
 
     // Get existing user
     let user = match db::get_scim_user(&state.db, &id).await {
@@ -371,7 +384,7 @@ pub async fn patch_user(
         "update",
         "User",
         &id,
-        Some(&token_id),
+        Some(&auth.token_id),
         Some(&serde_json::json!({"active": active, "deactivated": deactivated}).to_string()),
     )
     .await
@@ -404,10 +417,13 @@ pub async fn delete_user(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    // Authenticate
-    let token_id = match authenticate_scim(&state, &headers).await {
-        Ok(id) => id,
+    // Authenticate and check scope
+    let auth = match authenticate_scim(&state, &headers).await {
+        Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
+    };
+    if let Err((status, json)) = auth.require_scope("users:write") {
+        return (status, json).into_response();
     };
 
     // Check user exists
@@ -468,7 +484,7 @@ pub async fn delete_user(
         "delete",
         "User",
         &id,
-        Some(&token_id),
+        Some(&auth.token_id),
         Some(&serde_json::json!({"email": user.email}).to_string()),
     )
     .await

@@ -6,8 +6,11 @@
 //! TPM/KMS envelope decryption, and encoding utilities.
 
 pub(crate) mod ber;
+pub mod hash;
 pub(crate) mod jwt;
 pub(crate) mod pem;
 pub mod ssh_ca;
 pub mod tpm_decrypt;
 pub mod webauthn_verify;
+
+pub use hash::{generate_challenge, generate_random_bytes, hash_token};

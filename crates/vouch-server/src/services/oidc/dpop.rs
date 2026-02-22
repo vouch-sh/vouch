@@ -16,7 +16,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Timestamp, ToSpan};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use tokio::sync::RwLock;
 
@@ -324,19 +323,22 @@ impl Default for JtiCache {
 }
 
 /// Thread-safe DPoP state.
+///
+/// Since `AppState.dpop` wraps this in `Arc<DpopState>`, the inner fields
+/// only need `RwLock` — no redundant `Arc` wrapping.
 pub struct DpopState {
     /// Nonce manager.
-    pub nonce_manager: Arc<RwLock<DpopNonceManager>>,
+    pub nonce_manager: RwLock<DpopNonceManager>,
     /// JTI cache.
-    pub jti_cache: Arc<RwLock<JtiCache>>,
+    pub jti_cache: RwLock<JtiCache>,
 }
 
 impl DpopState {
     /// Create new DPoP state.
     pub fn new() -> Self {
         Self {
-            nonce_manager: Arc::new(RwLock::new(DpopNonceManager::default())),
-            jti_cache: Arc::new(RwLock::new(JtiCache::default())),
+            nonce_manager: RwLock::new(DpopNonceManager::default()),
+            jti_cache: RwLock::new(JtiCache::default()),
         }
     }
 }
@@ -565,21 +567,18 @@ fn build_decoding_key(jwk: &DpopJwk, alg: &str) -> Result<jsonwebtoken::Decoding
     }
 }
 
-/// Fully validate a DPoP proof, including signature verification.
+/// Shared DPoP validation logic for both token and resource endpoints.
 ///
-/// This is the main entry point for DPoP validation. It:
-/// 1. Parses the JWT header and verifies the signature in a single pass
-/// 2. Validates all claims (method, URI, timestamp, etc.)
-/// 3. Checks for replay (JTI)
-///
-/// Returns the validated proof information including the JWK thumbprint.
-pub async fn validate_dpop_proof(
+/// Handles: signature verification, JTI replay check, nonce requirement,
+/// claims validation, nonce manager validation, and thumbprint extraction.
+async fn validate_dpop_common(
     proof: &str,
     expected_method: &str,
     expected_uri: &str,
     dpop_state: &DpopState,
     config_max_age: i64,
     require_nonce: bool,
+    expected_ath: Option<&str>,
 ) -> Result<ValidatedDpopProof, DpopError> {
     // Parse header, verify signature, and extract claims in a single pass
     let (header, claims) = parse_and_verify_dpop_proof(proof)?;
@@ -592,38 +591,32 @@ pub async fn validate_dpop_proof(
         }
     }
 
-    // Validate claims
-    // Note: Nonce validation is handled by the nonce manager below (lines 579-586).
-    // We pass None here to avoid a redundant self-comparison of the client's own nonce.
-    let expected_nonce: Option<&str> = if require_nonce {
-        // Generate a nonce if required but not provided
-        if claims.nonce.is_none() {
-            let mut nonce_manager = dpop_state.nonce_manager.write().await;
-            let new_nonce = nonce_manager
-                .generate_nonce()
-                .ok_or_else(|| DpopError::InvalidFormat("nonce generation failed".to_string()))?;
-            return Err(DpopError::UseNonce(new_nonce));
-        }
-        None
-    } else {
-        None
-    };
+    // Nonce requirement check: generate a nonce if required but not provided
+    if require_nonce && claims.nonce.is_none() {
+        let mut nonce_manager = dpop_state.nonce_manager.write().await;
+        let new_nonce = nonce_manager
+            .generate_nonce()
+            .ok_or_else(|| DpopError::InvalidFormat("nonce generation failed".to_string()))?;
+        return Err(DpopError::UseNonce(new_nonce));
+    }
 
+    // Validate claims (method, URI, timestamp, nonce inline, ath)
+    // Pass None for expected_nonce to skip redundant self-comparison;
+    // nonce manager validation happens below.
     validate_dpop_claims(
         &claims,
         expected_method,
         expected_uri,
         config_max_age,
         require_nonce,
-        expected_nonce,
-        None, // No access token hash for token endpoint
+        None,
+        expected_ath,
     )?;
 
-    // Validate nonce if provided
+    // Validate nonce via nonce manager if provided
     if let Some(nonce) = &claims.nonce {
         let mut nonce_manager = dpop_state.nonce_manager.write().await;
         if !nonce_manager.validate_nonce(nonce) {
-            // Generate a new nonce for the client
             let new_nonce = nonce_manager
                 .generate_nonce()
                 .ok_or_else(|| DpopError::InvalidFormat("nonce generation failed".to_string()))?;
@@ -631,7 +624,6 @@ pub async fn validate_dpop_proof(
         }
     }
 
-    // Return validated proof info
     let jkt = header.jwk.thumbprint()?;
     Ok(ValidatedDpopProof {
         jkt,
@@ -640,11 +632,37 @@ pub async fn validate_dpop_proof(
     })
 }
 
+/// Fully validate a DPoP proof, including signature verification.
+///
+/// This is the main entry point for DPoP validation at the token endpoint.
+/// It parses, verifies the signature, validates claims, and checks for replay.
+///
+/// Returns the validated proof information including the JWK thumbprint.
+pub async fn validate_dpop_proof(
+    proof: &str,
+    expected_method: &str,
+    expected_uri: &str,
+    dpop_state: &DpopState,
+    config_max_age: i64,
+    require_nonce: bool,
+) -> Result<ValidatedDpopProof, DpopError> {
+    validate_dpop_common(
+        proof,
+        expected_method,
+        expected_uri,
+        dpop_state,
+        config_max_age,
+        require_nonce,
+        None, // No access token hash for token endpoint
+    )
+    .await
+}
+
 /// Validate a DPoP proof at a resource endpoint (e.g., userinfo).
 ///
-/// This is similar to `validate_dpop_proof` but also validates the `ath` claim
-/// (access token hash) per RFC 9449 Section 7.1. Resource endpoints MUST verify
-/// that the DPoP proof binds to the specific access token being used.
+/// This also validates the `ath` claim (access token hash) per RFC 9449
+/// Section 7.1. Resource endpoints MUST verify that the DPoP proof binds
+/// to the specific access token being used.
 ///
 /// # Arguments
 /// * `proof` - The DPoP proof JWT from the `DPoP` header
@@ -663,63 +681,17 @@ pub async fn validate_dpop_at_resource(
     config_max_age: i64,
     require_nonce: bool,
 ) -> Result<ValidatedDpopProof, DpopError> {
-    // Parse header, verify signature, and extract claims in a single pass
-    let (header, claims) = parse_and_verify_dpop_proof(proof)?;
-
-    // Check for replay (JTI must be unique)
-    {
-        let mut jti_cache = dpop_state.jti_cache.write().await;
-        if !jti_cache.check_and_record(&claims.jti) {
-            return Err(DpopError::ReplayDetected);
-        }
-    }
-
-    // Compute the expected access token hash
     let expected_ath = compute_access_token_hash(access_token);
-
-    // Handle nonce: pass None to skip redundant self-comparison in validate_dpop_claims
-    let expected_nonce: Option<&str> = if require_nonce {
-        if claims.nonce.is_none() {
-            let mut nonce_manager = dpop_state.nonce_manager.write().await;
-            let new_nonce = nonce_manager
-                .generate_nonce()
-                .ok_or_else(|| DpopError::InvalidFormat("nonce generation failed".to_string()))?;
-            return Err(DpopError::UseNonce(new_nonce));
-        }
-        None
-    } else {
-        None
-    };
-
-    // Validate claims including the access token hash
-    validate_dpop_claims(
-        &claims,
+    validate_dpop_common(
+        proof,
         method,
         uri,
+        dpop_state,
         config_max_age,
         require_nonce,
-        expected_nonce,
         Some(&expected_ath),
-    )?;
-
-    // Validate nonce via nonce manager if provided
-    if let Some(nonce) = &claims.nonce {
-        let mut nonce_manager = dpop_state.nonce_manager.write().await;
-        if !nonce_manager.validate_nonce(nonce) {
-            let new_nonce = nonce_manager
-                .generate_nonce()
-                .ok_or_else(|| DpopError::InvalidFormat("nonce generation failed".to_string()))?;
-            return Err(DpopError::UseNonce(new_nonce));
-        }
-    }
-
-    // Return validated proof info
-    let jkt = header.jwk.thumbprint()?;
-    Ok(ValidatedDpopProof {
-        jkt,
-        jwk: header.jwk,
-        jti: claims.jti,
-    })
+    )
+    .await
 }
 
 #[cfg(test)]

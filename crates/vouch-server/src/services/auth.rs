@@ -14,9 +14,9 @@
 //! The handlers remain thin, focusing on HTTP concerns.
 
 use crate::AppState;
+use crate::crypto::hash_token;
 use crate::crypto::webauthn_verify;
 use crate::db::{self, Authenticator, SessionPurpose, User};
-use crate::handlers::common::hash_token;
 use crate::services::oidc::amr::AuthMethod;
 use crate::services::oidc::dpop::CnfClaim;
 use crate::services::oidc::keys::OidcSigningKey;
@@ -532,7 +532,9 @@ impl DecodedToken {
 /// This is a convenience wrapper around [`crate::crypto::jwt::decode_token`] that
 /// constructs a [`TokenValidationContext`] from individual parameters.
 ///
-/// Validates `typ`, `iss`, and `aud` per RFC 8725.
+/// Validates `typ`, `iss`, and optionally `aud` per RFC 8725.
+/// Pass `expected_audience` for endpoints that require audience binding (e.g., userinfo).
+/// Pass `None` for endpoints that accept tokens for any audience (introspection, revocation).
 ///
 /// Returns `None` for invalid, expired, or unsupported tokens.
 pub fn decode_token(

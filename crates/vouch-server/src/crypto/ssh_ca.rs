@@ -196,12 +196,16 @@ impl SshCa {
             bail!("Could not extract valid principals from email");
         }
 
-        // Generate serial number from current timestamp
+        // Generate serial number: timestamp in upper 32 bits, random in lower 32
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let serial = now;
+        let mut rand_bytes = [0u8; 4];
+        aws_lc_rs::rand::fill(&mut rand_bytes)
+            .map_err(|_| anyhow::anyhow!("Failed to generate random serial bytes"))?;
+        let rand_part = u32::from_be_bytes(rand_bytes) as u64;
+        let serial = (now << 32) | rand_part;
 
         // Calculate validity period
         let valid_after = now;

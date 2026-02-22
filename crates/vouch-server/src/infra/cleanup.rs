@@ -18,6 +18,21 @@ use jiff::{Timestamp, ToSpan};
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
+/// Log cleanup results: info on deletions, warn on errors, silent on zero.
+macro_rules! cleanup_and_log {
+    ($op:expr, $desc:expr) => {
+        match $op.await {
+            Ok(count) if count > 0 => {
+                tracing::info!("Cleaned up {count} {}", $desc);
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("Failed to clean up {}: {e}", $desc);
+            }
+        }
+    };
+}
+
 /// Start the background cleanup task.
 ///
 /// Returns a handle to the spawned task for graceful shutdown.
@@ -62,139 +77,70 @@ pub async fn run_cleanup(
     let now = Timestamp::now();
     let now_str = now.to_string();
 
-    // Clean up expired sessions
-    match db::delete_expired_sessions(db, &now_str).await {
-        Ok(count) if count > 0 => {
-            tracing::info!("Cleaned up {count} expired sessions");
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!("Failed to clean up expired sessions: {e}");
-        }
-    }
+    // Clean up expired data
+    cleanup_and_log!(
+        db::delete_expired_sessions(db, &now_str),
+        "expired sessions"
+    );
+    cleanup_and_log!(
+        db::delete_expired_device_auth_requests(db, &now_str),
+        "expired device auth requests"
+    );
+    cleanup_and_log!(
+        db::delete_expired_oidc_states(db, &now_str),
+        "expired OIDC states"
+    );
+    cleanup_and_log!(
+        db::delete_expired_pending_oauth_authorizations(db, &now_str),
+        "expired pending OAuth authorizations"
+    );
+    cleanup_and_log!(
+        db::delete_expired_authorization_codes(db),
+        "expired authorization codes"
+    );
+    cleanup_and_log!(
+        db::delete_expired_enrollment_sessions(db),
+        "expired enrollment sessions"
+    );
 
-    // Clean up expired device auth requests
-    match db::delete_expired_device_auth_requests(db, &now_str).await {
-        Ok(count) if count > 0 => {
-            tracing::info!("Cleaned up {count} expired device auth requests");
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!("Failed to clean up expired device auth requests: {e}");
-        }
-    }
-
-    // Clean up expired OIDC states
-    match db::delete_expired_oidc_states(db, &now_str).await {
-        Ok(count) if count > 0 => {
-            tracing::info!("Cleaned up {count} expired OIDC states");
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!("Failed to clean up expired OIDC states: {e}");
-        }
-    }
-
-    // Clean up expired pending OAuth authorizations (RFC 6749 browser login flow)
-    match db::delete_expired_pending_oauth_authorizations(db, &now_str).await {
-        Ok(count) if count > 0 => {
-            tracing::info!("Cleaned up {count} expired pending OAuth authorizations");
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!("Failed to clean up expired pending OAuth authorizations: {e}");
-        }
-    }
-
-    // Clean up expired authorization codes (RFC 6749 Section 10.5)
-    match db::delete_expired_authorization_codes(db).await {
-        Ok(count) if count > 0 => {
-            tracing::info!("Cleaned up {count} expired authorization codes");
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!("Failed to clean up expired authorization codes: {e}");
-        }
-    }
-
-    // Clean up expired enrollment sessions
-    match db::delete_expired_enrollment_sessions(db).await {
-        Ok(count) if count > 0 => {
-            tracing::info!("Cleaned up {count} expired enrollment sessions");
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!("Failed to clean up expired enrollment sessions: {e}");
-        }
-    }
-
-    // Clean up old auth events
+    // Clean up old events with retention cutoffs
     if let Ok(cutoff) = now.checked_sub(auth_events_retention_days.days()) {
         let cutoff_str = cutoff.to_string();
-        match db::delete_old_auth_events(db, &cutoff_str).await {
-            Ok(count) if count > 0 => {
-                tracing::info!("Cleaned up {count} old auth events");
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("Failed to clean up old auth events: {e}");
-            }
-        }
+        cleanup_and_log!(
+            db::delete_old_auth_events(db, &cutoff_str),
+            "old auth events"
+        );
     }
 
-    // Clean up old OAuth usage events
     if let Ok(cutoff) = now.checked_sub(oauth_events_retention_days.days()) {
         let cutoff_str = cutoff.to_string();
-        match db::delete_old_oauth_usage_events(db, &cutoff_str).await {
-            Ok(count) if count > 0 => {
-                tracing::info!("Cleaned up {count} old OAuth usage events");
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("Failed to clean up old OAuth usage events: {e}");
-            }
-        }
+        cleanup_and_log!(
+            db::delete_old_oauth_usage_events(db, &cutoff_str),
+            "old OAuth usage events"
+        );
     }
 
-    // Clean up old GitHub credential events
     if let Ok(cutoff) = now.checked_sub(oauth_events_retention_days.days()) {
-        match db::delete_old_github_credential_events(db, &cutoff).await {
-            Ok(count) if count > 0 => {
-                tracing::info!("Cleaned up {count} old GitHub credential events");
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("Failed to clean up old GitHub credential events: {e}");
-            }
-        }
+        cleanup_and_log!(
+            db::delete_old_github_credential_events(db, &cutoff),
+            "old GitHub credential events"
+        );
     }
 
-    // Clean up old SCIM audit logs
     if let Ok(cutoff) = now.checked_sub(auth_events_retention_days.days()) {
         let cutoff_str = cutoff.to_string();
-        match db::delete_old_scim_audit_logs(db, &cutoff_str).await {
-            Ok(count) if count > 0 => {
-                tracing::info!("Cleaned up {count} old SCIM audit logs");
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("Failed to clean up old SCIM audit logs: {e}");
-            }
-        }
+        cleanup_and_log!(
+            db::delete_old_scim_audit_logs(db, &cutoff_str),
+            "old SCIM audit logs"
+        );
     }
 
-    // Clean up old token exchange records
     if let Ok(cutoff) = now.checked_sub(oauth_events_retention_days.days()) {
         let cutoff_str = cutoff.to_string();
-        match db::delete_old_token_exchanges(db, &cutoff_str).await {
-            Ok(count) if count > 0 => {
-                tracing::info!("Cleaned up {count} old token exchange records");
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!("Failed to clean up old token exchange records: {e}");
-            }
-        }
+        cleanup_and_log!(
+            db::delete_old_token_exchanges(db, &cutoff_str),
+            "old token exchange records"
+        );
     }
 
     // Clean up DPoP nonces
@@ -204,15 +150,10 @@ pub async fn run_cleanup(
     }
 
     // Clean up expired SSH certificate revocations
-    match db::delete_expired_ssh_revocations(db).await {
-        Ok(count) if count > 0 => {
-            tracing::info!("Cleaned up {count} expired SSH certificate revocations");
-        }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!("Failed to clean up expired SSH revocations: {e}");
-        }
-    }
+    cleanup_and_log!(
+        db::delete_expired_ssh_revocations(db),
+        "expired SSH certificate revocations"
+    );
 
     tracing::debug!("Background cleanup tasks complete");
 }

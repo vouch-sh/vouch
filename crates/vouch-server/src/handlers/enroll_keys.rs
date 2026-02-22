@@ -18,8 +18,8 @@ use vouch_common::{
     lookup_device_model,
 };
 
-use super::common::extract_session_from_cookie;
 use super::json_error;
+use super::session::extract_session_from_cookie;
 
 /// Data extracted from session.
 #[derive(Debug)]

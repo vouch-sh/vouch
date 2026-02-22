@@ -30,7 +30,6 @@
 //! }
 //! ```
 
-use crate::config::ServerConfig;
 use crate::db::{self, Authenticator, Pool};
 use crate::redact_email;
 use crate::services::oidc::OidcSigningKey;
@@ -68,86 +67,71 @@ pub struct AwsTokenResult {
     pub expires_in: u64,
 }
 
-/// AWS integration service.
+/// Issue an OIDC ID token for AWS STS.
 ///
-/// Provides OIDC token issuance for AWS STS `AssumeRoleWithWebIdentity`.
-pub struct AwsService<'a> {
-    db: &'a Pool,
-    config: &'a ServerConfig,
-    oidc_key: &'a OidcSigningKey,
+/// The token can be used with `AssumeRoleWithWebIdentity` to get temporary
+/// AWS credentials. The token includes:
+/// - `sub`: User email
+/// - `aud`: Vouch issuer URL (AWS matches against the OIDC provider)
+/// - `iss`: Vouch issuer URL
+/// - `hardware_aaguid`: FIDO2 authenticator AAGUID (for hardware key verification)
+/// - `hd`: Google Workspace hosted domain (for domain-based access control)
+///
+/// # Arguments
+/// * `db` - Database pool
+/// * `base_url` - Server base URL (issuer)
+/// * `session_hours` - Session duration in hours
+/// * `oidc_key` - OIDC signing key
+/// * `user_email` - The authenticated user's email
+/// * `authenticator_id` - The authenticator ID from the session (for AAGUID lookup)
+/// * `hd` - The user's organization domain (Google Workspace hosted domain)
+pub async fn issue_aws_token(
+    db: &Pool,
+    base_url: &str,
+    session_hours: u64,
+    oidc_key: &OidcSigningKey,
+    user_email: &str,
+    authenticator_id: Option<&str>,
+    hd: Option<String>,
+) -> AwsResult<AwsTokenResult> {
+    // Get authenticator info for AAGUID
+    let authenticator = get_authenticator(db, authenticator_id).await?;
+
+    // Token validity matches session duration
+    let expires_in = session_hours * 3600;
+
+    // Build OIDC claims
+    // For AWS, the audience is the issuer URL (AWS matches against the OIDC provider)
+    let id_claims = OidcIdTokenClaimsBuilder::for_aws(base_url, user_email)
+        .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
+        .hd(hd)
+        .valid_for_seconds(expires_in)
+        .build()
+        .map_err(|e| AwsError::ClaimsBuild(e.to_string()))?;
+
+    // Sign the token with ES256
+    let id_token = oidc_key
+        .sign_jwt(&id_claims)
+        .map_err(|e| AwsError::TokenSign(e.to_string()))?;
+
+    tracing::info!("Issued AWS OIDC token for {}", redact_email(user_email));
+
+    Ok(AwsTokenResult {
+        id_token,
+        expires_in,
+    })
 }
 
-impl<'a> AwsService<'a> {
-    /// Create a new AWS service instance.
-    #[must_use]
-    pub fn new(db: &'a Pool, config: &'a ServerConfig, oidc_key: &'a OidcSigningKey) -> Self {
-        Self {
-            db,
-            config,
-            oidc_key,
-        }
-    }
+/// Get authenticator info for AAGUID lookup.
+async fn get_authenticator(
+    db: &Pool,
+    authenticator_id: Option<&str>,
+) -> AwsResult<Option<Authenticator>> {
+    let Some(id) = authenticator_id else {
+        return Err(AwsError::NoAuthenticator);
+    };
 
-    /// Issue an OIDC ID token for AWS STS.
-    ///
-    /// The token can be used with `AssumeRoleWithWebIdentity` to get temporary
-    /// AWS credentials. The token includes:
-    /// - `sub`: User email
-    /// - `aud`: Vouch issuer URL (AWS matches against the OIDC provider)
-    /// - `iss`: Vouch issuer URL
-    /// - `hardware_aaguid`: FIDO2 authenticator AAGUID (for hardware key verification)
-    /// - `hd`: Google Workspace hosted domain (for domain-based access control)
-    ///
-    /// # Arguments
-    /// * `user_email` - The authenticated user's email
-    /// * `authenticator_id` - The authenticator ID from the session (for AAGUID lookup)
-    /// * `hd` - The user's organization domain (Google Workspace hosted domain)
-    pub async fn issue_token(
-        &self,
-        user_email: &str,
-        authenticator_id: Option<&str>,
-        hd: Option<String>,
-    ) -> AwsResult<AwsTokenResult> {
-        // Get authenticator info for AAGUID
-        let authenticator = self.get_authenticator(authenticator_id).await?;
-
-        // Token validity matches session duration
-        let expires_in = self.config.session_hours * 3600;
-
-        // Build OIDC claims
-        // For AWS, the audience is the issuer URL (AWS matches against the OIDC provider)
-        let id_claims = OidcIdTokenClaimsBuilder::for_aws(&self.config.base_url, user_email)
-            .hardware_aaguid(authenticator.and_then(|a| a.aaguid))
-            .hd(hd)
-            .valid_for_seconds(expires_in)
-            .build()
-            .map_err(|e| AwsError::ClaimsBuild(e.to_string()))?;
-
-        // Sign the token with ES256
-        let id_token = self
-            .oidc_key
-            .sign_jwt(&id_claims)
-            .map_err(|e| AwsError::TokenSign(e.to_string()))?;
-
-        tracing::info!("Issued AWS OIDC token for {}", redact_email(user_email));
-
-        Ok(AwsTokenResult {
-            id_token,
-            expires_in,
-        })
-    }
-
-    /// Get authenticator info for AAGUID lookup.
-    async fn get_authenticator(
-        &self,
-        authenticator_id: Option<&str>,
-    ) -> AwsResult<Option<Authenticator>> {
-        let Some(id) = authenticator_id else {
-            return Err(AwsError::NoAuthenticator);
-        };
-
-        db::get_authenticator_by_id(self.db, id)
-            .await
-            .map_err(AwsError::Database)
-    }
+    db::get_authenticator_by_id(db, id)
+        .await
+        .map_err(AwsError::Database)
 }

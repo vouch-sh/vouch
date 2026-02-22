@@ -11,7 +11,7 @@
 //! - GET/PUT/DELETE /v1/integrations/aws
 
 use crate::db;
-use crate::handlers::common::{AuthContext, extract_session, get_auth_context};
+use crate::handlers::session::{AuthContext, extract_session, get_auth_context};
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::Json;
@@ -69,7 +69,7 @@ pub async fn integrations_page(State(state): State<Arc<AppState>>, jar: CookieJa
     let github_accounts = if auth.has_org {
         // We need to get the user's org_id to fetch installations
         if let Ok(session) =
-            crate::handlers::common::extract_session_from_cookie(&state, &jar).await
+            crate::handlers::session::extract_session_from_cookie(&state, &jar).await
         {
             if let Ok(Some(user)) = db::get_user_by_id(&state.db, &session.claims.sub).await {
                 if let Some(org_id) = &user.org_id {

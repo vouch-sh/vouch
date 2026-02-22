@@ -10,8 +10,8 @@ use super::authorization::CodeChallengeMethod;
 use super::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
 use super::scope::{OAuthScope, ScopeSet};
 use crate::AppState;
+use crate::crypto::hash_token;
 use crate::db::{self, Authenticator, OAuthClient, OAuthClientType, Session, User};
-use crate::handlers::common::hash_token;
 use crate::redact_email;
 use crate::services::auth::{
     CreateOAuthTokenParams, DecodedToken, create_oauth_access_token, decode_token,
@@ -189,8 +189,10 @@ pub async fn exchange_authorization_code(
         Ok(true) => { /* First use — proceed */ }
         Ok(false) => {
             // Code was already consumed or doesn't exist.
-            // Check if it was consumed (replay) vs never stored (legacy).
-            if let Ok(true) = db::is_authorization_code_consumed(&state.db, &code_hash).await {
+            // Single atomic query combines consumed check + owner lookup
+            if let Ok(Some((user_id, _client_id))) =
+                db::get_consumed_code_owner(&state.db, &code_hash).await
+            {
                 tracing::warn!(
                     target: "security",
                     client_id = %auth_code.client_id,
@@ -201,22 +203,18 @@ pub async fn exchange_authorization_code(
                 // multiple attempts to exchange an authorization code, the
                 // authorization server SHOULD attempt to revoke all access tokens
                 // already granted based on the compromised authorization code."
-                if let Ok(Some((user_id, _client_id))) =
-                    db::get_authorization_code_owner(&state.db, &code_hash).await
-                {
-                    match db::delete_oauth_sessions_for_user(&state.db, &user_id).await {
-                        Ok(count) if count > 0 => {
-                            tracing::warn!(
-                                target: "security",
-                                user_id = %user_id,
-                                revoked_count = count,
-                                "Revoked OAuth tokens due to authorization code replay"
-                            );
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            tracing::error!("Failed to revoke tokens during replay detection: {e}");
-                        }
+                match db::delete_oauth_sessions_for_user(&state.db, &user_id).await {
+                    Ok(count) if count > 0 => {
+                        tracing::warn!(
+                            target: "security",
+                            user_id = %user_id,
+                            revoked_count = count,
+                            "Revoked OAuth tokens due to authorization code replay"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!("Failed to revoke tokens during replay detection: {e}");
                     }
                 }
             }
@@ -644,7 +642,7 @@ pub async fn validate_dpop_if_present(
 /// Result of validating a session token for OIDC endpoints.
 ///
 /// Named `OidcValidatedSession` to avoid collision with
-/// `handlers::common::ValidatedSession`.
+/// `handlers::session::ValidatedSession`.
 pub struct OidcValidatedSession {
     /// The authenticated user.
     pub user: User,

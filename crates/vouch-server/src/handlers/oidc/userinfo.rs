@@ -116,11 +116,15 @@ pub async fn userinfo(
                 // RFC 9449 Section 7.1: If DPoP authorization scheme is used,
                 // the token MUST be DPoP-bound (have a cnf.jkt claim). Reject
                 // non-DPoP-bound tokens presented with the DPoP scheme.
+                // Decode the access token to extract DPoP binding (cnf claim).
+                // Note: audience is NOT validated here because the userinfo endpoint
+                // receives tokens from any client (aud = client_id per RFC 9068).
+                let config = state.config();
                 if let Some(decoded) = decode_token(
                     token,
-                    state.config().jwt_secret_bytes(),
+                    config.jwt_secret_bytes(),
                     &state.oidc_key,
-                    &state.config().base_url,
+                    &config.base_url,
                 ) {
                     match decoded.cnf() {
                         Some(cnf) => {

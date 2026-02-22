@@ -20,6 +20,20 @@ use sea_query::{Expr, Query};
 #[cfg(any(test, feature = "test-utils"))]
 use uuid::Uuid;
 
+/// Standard set of columns for `SELECT ... FROM users` queries.
+///
+/// Used by all user-fetching functions to ensure consistent field lists.
+const USER_SELECT_COLUMNS: [Users; 8] = [
+    Users::Id,
+    Users::Email,
+    Users::Name,
+    Users::OrgId,
+    Users::IsOrgAdmin,
+    Users::GitHubId,
+    Users::GitHubLogin,
+    Users::GitHubRefreshToken,
+];
+
 /// User record.
 #[derive(Debug, sqlx::FromRow)]
 pub struct User {
@@ -72,16 +86,7 @@ pub async fn upsert_user(pool: &Pool, email: &str, name: Option<&str>) -> Result
     // Fetch the user
     let fetch_sql = {
         let query = Query::select()
-            .columns([
-                Users::Id,
-                Users::Email,
-                Users::Name,
-                Users::OrgId,
-                Users::IsOrgAdmin,
-                Users::GitHubId,
-                Users::GitHubLogin,
-                Users::GitHubRefreshToken,
-            ])
+            .columns(USER_SELECT_COLUMNS)
             .from(Users::Table)
             .and_where(Expr::col(Users::Email).eq(email))
             .to_owned();
@@ -141,16 +146,7 @@ pub async fn upsert_user_with_org(
     // Fetch the user
     let fetch_sql = {
         let query = Query::select()
-            .columns([
-                Users::Id,
-                Users::Email,
-                Users::Name,
-                Users::OrgId,
-                Users::IsOrgAdmin,
-                Users::GitHubId,
-                Users::GitHubLogin,
-                Users::GitHubRefreshToken,
-            ])
+            .columns(USER_SELECT_COLUMNS)
             .from(Users::Table)
             .and_where(Expr::col(Users::Email).eq(email))
             .to_owned();
@@ -169,16 +165,7 @@ pub async fn get_user_by_email(pool: &Pool, email: &str) -> Result<Option<User>>
 
     let sql = {
         let query = Query::select()
-            .columns([
-                Users::Id,
-                Users::Email,
-                Users::Name,
-                Users::OrgId,
-                Users::IsOrgAdmin,
-                Users::GitHubId,
-                Users::GitHubLogin,
-                Users::GitHubRefreshToken,
-            ])
+            .columns(USER_SELECT_COLUMNS)
             .from(Users::Table)
             .and_where(Expr::col(Users::Email).eq(email))
             .to_owned();
@@ -196,16 +183,7 @@ pub async fn get_user_by_id(pool: &Pool, user_id: &str) -> Result<Option<User>> 
 
     let sql = {
         let query = Query::select()
-            .columns([
-                Users::Id,
-                Users::Email,
-                Users::Name,
-                Users::OrgId,
-                Users::IsOrgAdmin,
-                Users::GitHubId,
-                Users::GitHubLogin,
-                Users::GitHubRefreshToken,
-            ])
+            .columns(USER_SELECT_COLUMNS)
             .from(Users::Table)
             .and_where(Expr::col(Users::Id).eq(user_id))
             .to_owned();

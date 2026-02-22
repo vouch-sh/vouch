@@ -6,8 +6,8 @@
 //! - RFC 7662 - OAuth 2.0 Token Introspection
 
 use crate::AppState;
+use crate::crypto::hash_token;
 use crate::db::{self, SessionPurpose};
-use crate::handlers::common::hash_token;
 use crate::redact_email;
 use crate::services::ServiceResult;
 use crate::services::auth::{DecodedToken, decode_token};

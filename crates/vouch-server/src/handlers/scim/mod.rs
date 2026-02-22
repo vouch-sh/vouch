@@ -36,14 +36,40 @@ pub use users::{create_user, delete_user, get_user, list_users, patch_user};
 // Authentication
 // ============================================================================
 
+/// Authenticated SCIM token information.
+pub struct ScimAuth {
+    /// Token ID.
+    pub token_id: String,
+    /// Comma-separated scope string.
+    pub scope: String,
+}
+
+impl ScimAuth {
+    /// Check if the token has the required scope.
+    pub fn require_scope(&self, required: &str) -> Result<(), (StatusCode, Json<ScimError>)> {
+        if self.scope.split(',').any(|p| p.trim() == required) {
+            Ok(())
+        } else {
+            Err((
+                StatusCode::FORBIDDEN,
+                Json(ScimError::new(
+                    403,
+                    format!("Token lacks required scope: {required}"),
+                )),
+            ))
+        }
+    }
+}
+
 /// Extract and validate SCIM bearer token (RFC 7644 Section 2).
 ///
 /// SCIM endpoints require authentication via OAuth 2.0 Bearer Token
 /// (RFC 6750). The token is validated against the SCIM token store.
+/// Returns the token ID and scope for authorization checks.
 pub async fn authenticate_scim(
     state: &AppState,
     headers: &HeaderMap,
-) -> Result<String, (StatusCode, Json<ScimError>)> {
+) -> Result<ScimAuth, (StatusCode, Json<ScimError>)> {
     let auth_header = headers
         .get("authorization")
         .and_then(|v| v.to_str().ok())
@@ -87,7 +113,10 @@ pub async fn authenticate_scim(
         tracing::warn!("Failed to update SCIM token last_used_at: {e}");
     }
 
-    Ok(token_record.id)
+    Ok(ScimAuth {
+        token_id: token_record.id,
+        scope: token_record.scope,
+    })
 }
 
 #[cfg(test)]

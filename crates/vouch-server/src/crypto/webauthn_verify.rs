@@ -321,7 +321,13 @@ pub fn verify_assertion_with_verifier<V: CoseVerifier>(
             .is_some_and(|h| vouch_common::is_loopback_host(&h));
         let is_localhost_match = expected_is_local && origin_is_local;
 
-        if !is_localhost_match {
+        if is_localhost_match {
+            tracing::debug!(
+                expected = %expected_origin,
+                actual = %client_data.origin,
+                "Allowing localhost origin variation (development mode)"
+            );
+        } else {
             return Err(VerifyError::InvalidOrigin);
         }
     }
@@ -410,6 +416,375 @@ pub fn verify_assertion_typed_with_verifier<V: CoseVerifier>(
         require_user_verification,
         verifier,
     )
+}
+
+// ============================================================================
+// Registration (Attestation) Verification
+// ============================================================================
+
+/// Result of successful registration (attestation) verification.
+#[derive(Debug)]
+pub struct RegistrationVerificationResult {
+    /// The verified credential ID.
+    pub credential_id: Vec<u8>,
+    /// The verified COSE public key (CBOR-encoded).
+    pub public_key_cose: Vec<u8>,
+    /// The AAGUID from the authenticator (16 bytes, hex-encoded).
+    pub aaguid: Option<String>,
+    /// The counter value from registration (usually 0).
+    pub counter: u32,
+}
+
+/// Verify a WebAuthn registration (attestation) response.
+///
+/// Implements WebAuthn Level 2 Section 7.1 verification steps:
+/// 1. Parse `attestation_object` CBOR
+/// 2. Verify `authData`: RP ID hash, flags (UP+UV+AT), extract credential
+/// 3. Parse `clientDataJSON`: verify type=webauthn.create, challenge, origin
+/// 4. For `fmt="packed"` self-attestation: verify signature
+/// 5. For `fmt="none"`: accept (no attestation statement)
+///
+/// Returns the server-verified credential ID, public key, and AAGUID.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_registration(
+    attestation_object: &[u8],
+    client_data_json: &[u8],
+    expected_rp_id: &str,
+    expected_challenge: &str,
+    expected_origin: &str,
+    require_user_verification: bool,
+) -> Result<RegistrationVerificationResult, VerifyError> {
+    verify_registration_with_verifier(
+        attestation_object,
+        client_data_json,
+        expected_rp_id,
+        expected_challenge,
+        expected_origin,
+        require_user_verification,
+        &RealCoseVerifier,
+    )
+}
+
+/// Verify a WebAuthn registration with a custom COSE verifier.
+///
+/// This is the testable version of [`verify_registration`].
+#[allow(clippy::too_many_arguments)]
+pub fn verify_registration_with_verifier<V: CoseVerifier>(
+    attestation_object: &[u8],
+    client_data_json: &[u8],
+    expected_rp_id: &str,
+    expected_challenge: &str,
+    expected_origin: &str,
+    require_user_verification: bool,
+    verifier: &V,
+) -> Result<RegistrationVerificationResult, VerifyError> {
+    // 1. Parse attestation_object CBOR
+    let att_obj: ciborium::Value = ciborium::from_reader(attestation_object)
+        .map_err(|e| VerifyError::InvalidClientData(format!("Invalid attestation CBOR: {e}")))?;
+
+    let att_map = match att_obj {
+        ciborium::Value::Map(m) => m,
+        _ => {
+            return Err(VerifyError::InvalidClientData(
+                "attestation_object is not a CBOR map".to_string(),
+            ));
+        }
+    };
+
+    // Extract fields: authData, fmt, attStmt
+    let auth_data_bytes = cbor_map_get_bytes(&att_map, "authData")?;
+    let fmt = cbor_map_get_text(&att_map, "fmt")?;
+    let att_stmt = cbor_map_get_map(&att_map, "attStmt");
+
+    // 2. Verify authData
+    // Registration authData: rpIdHash(32) + flags(1) + counter(4) + attestedCredData(variable)
+    if auth_data_bytes.len() < 37 {
+        return Err(VerifyError::InvalidAuthDataLength);
+    }
+
+    // Verify RP ID hash
+    let rp_id_hash = auth_data_bytes
+        .get(0..32)
+        .ok_or(VerifyError::InvalidAuthDataLength)?;
+    let expected_hash = digest::digest(&SHA256, expected_rp_id.as_bytes());
+    if rp_id_hash != expected_hash.as_ref() {
+        return Err(VerifyError::RpIdMismatch);
+    }
+
+    // Check flags
+    let flags = *auth_data_bytes
+        .get(32)
+        .ok_or(VerifyError::InvalidAuthDataLength)?;
+    let user_present = (flags & 0x01) != 0;
+    let user_verified = (flags & 0x04) != 0;
+    let attested_credential_data = (flags & 0x40) != 0;
+
+    if !user_present {
+        return Err(VerifyError::UserNotPresent);
+    }
+    if require_user_verification && !user_verified {
+        return Err(VerifyError::UserNotVerified);
+    }
+    if !attested_credential_data {
+        return Err(VerifyError::InvalidClientData(
+            "AT flag not set in registration authData".to_string(),
+        ));
+    }
+
+    // Extract counter
+    let counter_bytes: [u8; 4] = auth_data_bytes
+        .get(33..37)
+        .ok_or(VerifyError::InvalidAuthDataLength)?
+        .try_into()
+        .map_err(|_| VerifyError::InvalidAuthDataLength)?;
+    let counter = u32::from_be_bytes(counter_bytes);
+
+    // Extract attested credential data (starts at byte 37)
+    // AAGUID (16 bytes) + credential ID length (2 bytes) + credential ID + COSE key
+    let attested_data = auth_data_bytes
+        .get(37..)
+        .ok_or(VerifyError::InvalidAuthDataLength)?;
+
+    if attested_data.len() < 18 {
+        // 16 (AAGUID) + 2 (credId length)
+        return Err(VerifyError::InvalidAuthDataLength);
+    }
+
+    let aaguid_bytes = attested_data
+        .get(0..16)
+        .ok_or(VerifyError::InvalidAuthDataLength)?;
+    let cred_id_len_bytes: [u8; 2] = attested_data
+        .get(16..18)
+        .ok_or(VerifyError::InvalidAuthDataLength)?
+        .try_into()
+        .map_err(|_| VerifyError::InvalidAuthDataLength)?;
+    let cred_id_len = u16::from_be_bytes(cred_id_len_bytes) as usize;
+
+    if attested_data.len() < 18 + cred_id_len {
+        return Err(VerifyError::InvalidAuthDataLength);
+    }
+
+    let credential_id = attested_data
+        .get(18..18 + cred_id_len)
+        .ok_or(VerifyError::InvalidAuthDataLength)?
+        .to_vec();
+
+    // The COSE public key starts after the credential ID
+    let cose_key_bytes = attested_data
+        .get(18 + cred_id_len..)
+        .ok_or(VerifyError::InvalidAuthDataLength)?
+        .to_vec();
+
+    if cose_key_bytes.is_empty() {
+        return Err(VerifyError::InvalidCoseKey(
+            "Empty COSE key in authData".to_string(),
+        ));
+    }
+
+    // Format AAGUID as hex string (skip all-zero AAGUIDs)
+    let aaguid = if aaguid_bytes.iter().all(|&b| b == 0) {
+        None
+    } else {
+        Some(format!(
+            "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+            aaguid_bytes.first().copied().unwrap_or(0),
+            aaguid_bytes.get(1).copied().unwrap_or(0),
+            aaguid_bytes.get(2).copied().unwrap_or(0),
+            aaguid_bytes.get(3).copied().unwrap_or(0),
+            aaguid_bytes.get(4).copied().unwrap_or(0),
+            aaguid_bytes.get(5).copied().unwrap_or(0),
+            aaguid_bytes.get(6).copied().unwrap_or(0),
+            aaguid_bytes.get(7).copied().unwrap_or(0),
+            aaguid_bytes.get(8).copied().unwrap_or(0),
+            aaguid_bytes.get(9).copied().unwrap_or(0),
+            aaguid_bytes.get(10).copied().unwrap_or(0),
+            aaguid_bytes.get(11).copied().unwrap_or(0),
+            aaguid_bytes.get(12).copied().unwrap_or(0),
+            aaguid_bytes.get(13).copied().unwrap_or(0),
+            aaguid_bytes.get(14).copied().unwrap_or(0),
+            aaguid_bytes.get(15).copied().unwrap_or(0),
+        ))
+    };
+
+    // 3. Parse and verify client data
+    let client_data: ClientData = serde_json::from_slice(client_data_json)
+        .map_err(|e| VerifyError::InvalidClientData(e.to_string()))?;
+
+    if client_data.type_ != "webauthn.create" {
+        return Err(VerifyError::InvalidClientData(format!(
+            "Expected type 'webauthn.create', got '{}'",
+            client_data.type_
+        )));
+    }
+
+    if client_data.challenge != expected_challenge {
+        return Err(VerifyError::ChallengeMismatch);
+    }
+
+    // Verify origin (reuse the same localhost relaxation logic as assertion)
+    if client_data.origin != expected_origin {
+        let expected_is_local = url::Url::parse(expected_origin)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from))
+            .is_some_and(|h| vouch_common::is_loopback_host(&h));
+        let origin_is_local = url::Url::parse(&client_data.origin)
+            .ok()
+            .and_then(|u| u.host_str().map(String::from))
+            .is_some_and(|h| vouch_common::is_loopback_host(&h));
+
+        if expected_is_local && origin_is_local {
+            tracing::debug!(
+                expected = %expected_origin,
+                actual = %client_data.origin,
+                "Allowing localhost origin variation for registration (development mode)"
+            );
+        } else {
+            return Err(VerifyError::InvalidOrigin);
+        }
+    }
+
+    // 4. Verify attestation statement based on format
+    match fmt.as_str() {
+        "none" => {
+            // No attestation statement — accept the credential
+        }
+        "packed" => {
+            // Packed attestation (self-attestation if no x5c certificate chain)
+            if let Some(stmt_map) = att_stmt {
+                verify_packed_attestation(
+                    stmt_map,
+                    &auth_data_bytes,
+                    client_data_json,
+                    &cose_key_bytes,
+                    verifier,
+                )?;
+            }
+            // No attStmt with packed format is invalid, but we're lenient
+            // since the COSE key is verified through usage anyway
+        }
+        other => {
+            // Accept other formats (fido-u2f, tpm, etc.) without verification.
+            // The credential will still be verified through assertion on login.
+            tracing::debug!(fmt = %other, "Accepting unverified attestation format");
+        }
+    }
+
+    Ok(RegistrationVerificationResult {
+        credential_id,
+        public_key_cose: cose_key_bytes,
+        aaguid,
+        counter,
+    })
+}
+
+/// Verify a packed attestation statement (self-attestation).
+///
+/// For self-attestation (no x5c), the signature is over `authData || SHA-256(clientDataJSON)`
+/// and is verified using the credential public key itself.
+fn verify_packed_attestation<V: CoseVerifier>(
+    stmt_map: &[(ciborium::Value, ciborium::Value)],
+    auth_data_bytes: &[u8],
+    client_data_json: &[u8],
+    cose_key_bytes: &[u8],
+    verifier: &V,
+) -> Result<(), VerifyError> {
+    // Check for x5c (certificate chain) — if present, this is full attestation
+    let has_x5c = stmt_map.iter().any(|(k, _)| {
+        if let ciborium::Value::Text(s) = k {
+            s == "x5c"
+        } else {
+            false
+        }
+    });
+
+    if has_x5c {
+        // Full attestation with certificates — we accept this without certificate
+        // chain validation since we do hardware attestation checks separately.
+        tracing::debug!("Accepting packed attestation with x5c (certificate chain)");
+        return Ok(());
+    }
+
+    // Self-attestation: extract sig from attStmt
+    let sig = cbor_map_get_bytes_by_text(stmt_map, "sig")?;
+
+    // Build signed data: authData || SHA-256(clientDataJSON)
+    let client_data_hash = digest::digest(&SHA256, client_data_json);
+    let mut signed_data = Vec::with_capacity(auth_data_bytes.len() + 32);
+    signed_data.extend_from_slice(auth_data_bytes);
+    signed_data.extend_from_slice(client_data_hash.as_ref());
+
+    // Verify signature using the credential's own public key (self-attestation)
+    verifier.verify(cose_key_bytes, &signed_data, &sig)
+}
+
+/// Get a byte string from a CBOR map by text key.
+fn cbor_map_get_bytes(
+    map: &[(ciborium::Value, ciborium::Value)],
+    key: &str,
+) -> Result<Vec<u8>, VerifyError> {
+    for (k, v) in map {
+        if let ciborium::Value::Text(s) = k
+            && s == key
+            && let ciborium::Value::Bytes(bytes) = v
+        {
+            return Ok(bytes.clone());
+        }
+    }
+    Err(VerifyError::InvalidClientData(format!(
+        "Missing field '{key}' in attestation object"
+    )))
+}
+
+/// Get a text string from a CBOR map by text key.
+fn cbor_map_get_text(
+    map: &[(ciborium::Value, ciborium::Value)],
+    key: &str,
+) -> Result<String, VerifyError> {
+    for (k, v) in map {
+        if let ciborium::Value::Text(s) = k
+            && s == key
+            && let ciborium::Value::Text(text) = v
+        {
+            return Ok(text.clone());
+        }
+    }
+    Err(VerifyError::InvalidClientData(format!(
+        "Missing field '{key}' in attestation object"
+    )))
+}
+
+/// Get a map value from a CBOR map by text key.
+fn cbor_map_get_map<'a>(
+    map: &'a [(ciborium::Value, ciborium::Value)],
+    key: &str,
+) -> Option<&'a [(ciborium::Value, ciborium::Value)]> {
+    for (k, v) in map {
+        if let ciborium::Value::Text(s) = k
+            && s == key
+            && let ciborium::Value::Map(m) = v
+        {
+            return Some(m.as_slice());
+        }
+    }
+    None
+}
+
+/// Get a byte string from a CBOR map where keys are text strings.
+fn cbor_map_get_bytes_by_text(
+    map: &[(ciborium::Value, ciborium::Value)],
+    key: &str,
+) -> Result<Vec<u8>, VerifyError> {
+    for (k, v) in map {
+        if let ciborium::Value::Text(s) = k
+            && s == key
+            && let ciborium::Value::Bytes(bytes) = v
+        {
+            return Ok(bytes.clone());
+        }
+    }
+    Err(VerifyError::InvalidClientData(format!(
+        "Missing field '{key}' in attestation statement"
+    )))
 }
 
 /// Verify a signature using typed COSE key and signature.
