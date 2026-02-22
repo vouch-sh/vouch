@@ -11,7 +11,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// A session cookie in Netscape format.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SessionCookie {
     /// Domain for the cookie (e.g., "vouch.example.com").
     pub domain: String,
@@ -27,6 +27,21 @@ pub struct SessionCookie {
     pub name: String,
     /// Cookie value (the session token).
     pub value: String,
+}
+
+// Custom Debug that redacts value to prevent accidental log exposure.
+impl std::fmt::Debug for SessionCookie {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SessionCookie")
+            .field("domain", &self.domain)
+            .field("include_subdomains", &self.include_subdomains)
+            .field("path", &self.path)
+            .field("secure", &self.secure)
+            .field("expires", &self.expires)
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 impl SessionCookie {

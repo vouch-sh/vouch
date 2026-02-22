@@ -18,10 +18,9 @@
 //! Or use `vouch setup docker --configure` to set this up automatically.
 
 use anyhow::{Context, Result};
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
-
-use secrecy::SecretString;
 
 use crate::client::VouchClient;
 use crate::commands::credential::aws::{OidcTokenResponse, build_session_tags, decode_jwt_payload};
@@ -32,11 +31,21 @@ use crate::session::{get_user_email, resolve_session};
 
 /// Docker credential helper output format.
 /// See: https://docs.docker.com/engine/reference/commandline/login/#credential-helper-protocol
-#[derive(Serialize, zeroize::ZeroizeOnDrop)]
-#[serde(rename_all = "PascalCase")]
 struct DockerCredential {
     username: String,
-    secret: String,
+    secret: SecretString,
+}
+
+impl DockerCredential {
+    /// Serialize to the JSON format expected by Docker.
+    ///
+    /// Field names MUST be PascalCase: `Username`, `Secret`.
+    fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "Username": self.username,
+            "Secret": self.secret.expose_secret(),
+        })
+    }
 }
 
 impl std::fmt::Debug for DockerCredential {
@@ -65,9 +74,9 @@ pub enum RegistryType {
 }
 
 /// Response from Vouch GitHub token endpoint.
-#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
+#[derive(Deserialize)]
 struct GitHubTokenResponse {
-    token: String,
+    token: SecretString,
 }
 
 impl std::fmt::Debug for GitHubTokenResponse {
@@ -200,8 +209,9 @@ async fn get_credential() -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    let json = serde_json::to_string(&credential).context("failed to serialize credentials")?;
-    writeln!(out, "{json}")?;
+    let json_str =
+        serde_json::to_string(&credential.to_json()).context("failed to serialize credentials")?;
+    writeln!(out, "{json_str}")?;
 
     Ok(())
 }
@@ -232,7 +242,8 @@ async fn get_ecr_credential(
     })?;
 
     // Decode JWT to extract claims for session tags (ABAC)
-    let tags = decode_jwt_payload(&token_response.id_token)
+    let id_token = token_response.id_token.expose_secret();
+    let tags = decode_jwt_payload(id_token)
         .map(|claims| build_session_tags(&claims))
         .unwrap_or_default();
 
@@ -249,7 +260,7 @@ async fn get_ecr_credential(
         &http_client,
         &role_arn,
         session,
-        &token_response.id_token,
+        id_token,
         region,
         domain_suffix,
         &tags,
@@ -283,7 +294,7 @@ async fn get_ecr_authorization_token(
     domain_suffix: &str,
     registry_url: &str,
     creds: &StsCredentials,
-) -> Result<String> {
+) -> Result<SecretString> {
     // Extract account ID from registry URL
     let account_id = registry_url
         .split('.')
@@ -319,7 +330,7 @@ async fn get_ecr_authorization_token(
         .context("no authorization data in ECR response")?;
 
     // Decode base64 to get "AWS:password"
-    let decoded = base64_decode(&auth_data.authorization_token)
+    let decoded = base64_decode(auth_data.authorization_token.expose_secret())
         .context("failed to decode ECR authorization token")?;
     let decoded_str =
         String::from_utf8(decoded).context("ECR authorization token is not valid UTF-8")?;
@@ -330,7 +341,7 @@ async fn get_ecr_authorization_token(
         .map(|(_, p)| p.to_string())
         .unwrap_or(decoded_str);
 
-    Ok(password)
+    Ok(SecretString::from(password))
 }
 
 /// ECR GetAuthorizationToken response.
@@ -340,10 +351,10 @@ struct EcrAuthorizationResponse {
     authorization_data: Vec<EcrAuthorizationData>,
 }
 
-#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EcrAuthorizationData {
-    authorization_token: String,
+    authorization_token: SecretString,
 }
 
 impl std::fmt::Debug for EcrAuthorizationData {
@@ -385,7 +396,7 @@ async fn get_ghcr_credential(server: &str, token: &SecretString) -> Result<Docke
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -505,5 +516,37 @@ mod tests {
         let invalid = "not-valid-base64!!!";
         let result = base64_decode(invalid);
         assert!(result.is_err());
+    }
+
+    /// Verify the Docker credential helper JSON matches the format Docker expects.
+    /// Field names must be PascalCase: `Username`, `Secret`.
+    /// See: https://docs.docker.com/engine/reference/commandline/login/#credential-helper-protocol
+    #[test]
+    fn test_docker_credential_json_format() {
+        let cred = DockerCredential {
+            username: "AWS".to_string(),
+            secret: SecretString::from("docker-password-here".to_string()),
+        };
+
+        let json = cred.to_json();
+
+        assert_eq!(json["Username"], "AWS");
+        assert_eq!(json["Secret"], "docker-password-here");
+        // Must have exactly 2 fields
+        assert_eq!(json.as_object().unwrap().len(), 2);
+    }
+
+    /// Verify GHCR credential uses the correct username.
+    #[test]
+    fn test_docker_credential_ghcr_format() {
+        let cred = DockerCredential {
+            username: "x-access-token".to_string(),
+            secret: SecretString::from("ghu_example_token".to_string()),
+        };
+
+        let json = cred.to_json();
+
+        assert_eq!(json["Username"], "x-access-token");
+        assert_eq!(json["Secret"], "ghu_example_token");
     }
 }

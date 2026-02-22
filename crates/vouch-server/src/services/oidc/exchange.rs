@@ -15,6 +15,7 @@ use crate::services::auth::{
 use crate::services::oidc::scope::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::Timestamp;
+use secrecy::ExposeSecret;
 use std::sync::Arc;
 
 /// Token type URNs for RFC 8693.
@@ -313,7 +314,7 @@ pub async fn exchange_token(
 
     // Log the token exchange for audit (best-effort — failures are non-fatal)
     let now = Timestamp::now();
-    let issued_token_hash = hash_token(&session_result.token);
+    let issued_token_hash = hash_token(session_result.token.expose_secret());
     let scope_string = granted_scope.as_ref().map(|s| s.to_space_separated());
     let expires_at = if let Ok(expires_seconds) = i64::try_from(expires_in)
         && let Some(exp) = now.as_second().checked_add(expires_seconds)
@@ -352,7 +353,7 @@ pub async fn exchange_token(
     };
 
     Ok(TokenExchangeResult {
-        access_token: session_result.token,
+        access_token: session_result.token.expose_secret().to_string(),
         issued_token_type: token_types::ACCESS_TOKEN.to_string(),
         token_type: token_type.to_string(),
         expires_in,

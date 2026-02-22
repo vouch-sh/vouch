@@ -16,7 +16,7 @@
 //!   credential-provider = ["vouch", "credential", "cargo", "--"]
 
 use anyhow::{Context, Result};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use std::io::{BufRead, Write};
 
@@ -107,12 +107,12 @@ enum Operation {
 }
 
 /// Login options from Cargo.
-#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
+#[derive(Deserialize)]
 struct LoginOptions {
     /// Token provided by user (if any).
     /// We don't use this - vouch manages its own authentication.
     #[allow(dead_code)]
-    token: Option<String>,
+    token: Option<SecretString>,
     /// URL for browser-based login (if any).
     #[serde(rename = "login-url")]
     #[allow(dead_code)]
@@ -128,20 +128,24 @@ impl std::fmt::Debug for LoginOptions {
     }
 }
 
+/// Serialize a `SecretString` by exposing its secret value.
+fn serialize_secret<S: serde::Serializer>(secret: &SecretString, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(secret.expose_secret())
+}
+
 /// Response from credential provider to Cargo.
-#[derive(Serialize, zeroize::ZeroizeOnDrop)]
+#[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 enum CredentialResponse {
     /// Successful get response.
     Get {
         /// The authentication token.
-        token: String,
+        #[serde(serialize_with = "serialize_secret")]
+        token: SecretString,
         /// Cache control for the token.
-        #[zeroize(skip)]
         cache: CacheControl,
         /// Whether the token is independent of the operation.
         #[serde(rename = "operation-independent")]
-        #[zeroize(skip)]
         operation_independent: bool,
     },
     /// Successful login response.
@@ -265,8 +269,7 @@ async fn handle_get(registry: &RegistryInfo) -> Result<()> {
     });
 
     let response = CredentialResponse::Get {
-        // Token is exposed here because Cargo requires it in the JSON output
-        token: token_str.to_string(),
+        token: SecretString::from(token_str.to_string()),
         cache,
         // Token works for any operation (read, publish, yank, etc.)
         operation_independent: true,
@@ -311,8 +314,7 @@ async fn handle_get_codeartifact(registry: &codeartifact::CodeArtifactRegistry) 
     };
 
     let response = CredentialResponse::Get {
-        // Token is exposed here because Cargo requires it in the JSON output
-        token: result.authorization_token.expose_secret().to_string(),
+        token: result.authorization_token,
         cache: CacheControl::Expires {
             expiration: result.expiration,
         },
@@ -423,7 +425,7 @@ mod tests {
     #[test]
     fn test_get_response_serialization() {
         let response = CredentialResponse::Get {
-            token: "secret".to_string(),
+            token: SecretString::from("secret".to_string()),
             cache: CacheControl::Session,
             operation_independent: true,
         };
@@ -515,7 +517,12 @@ mod tests {
         let request: CredentialRequest = serde_json::from_str(json).unwrap();
         match request.action {
             Action::Login(opts) => {
-                assert_eq!(opts.token.as_deref(), Some("secret-token"));
+                assert_eq!(
+                    opts.token
+                        .as_ref()
+                        .map(secrecy::ExposeSecret::expose_secret),
+                    Some("secret-token")
+                );
             }
             _ => panic!("expected Login"),
         }

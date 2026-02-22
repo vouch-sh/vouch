@@ -48,16 +48,26 @@ pub struct CodeArtifactProfile {
 
 /// Intermediate type for serialization/deserialization.
 /// `SecretString` doesn't implement Serialize/Deserialize, so we use this.
-/// Implements `ZeroizeOnDrop` to clear sensitive data from memory.
-#[derive(Debug, Default, Serialize, Deserialize, zeroize::ZeroizeOnDrop)]
+/// This is a short-lived bridge between JSON on disk and the `Config` type
+/// (which wraps the token in `SecretString`).
+#[derive(Default, Serialize, Deserialize)]
 struct ConfigFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     server_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     token: Option<String>,
-    #[zeroize(skip)]
     #[serde(default, skip_serializing_if = "Option::is_none")]
     codeartifact: Option<CodeArtifactConfig>,
+}
+
+impl std::fmt::Debug for ConfigFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ConfigFile")
+            .field("server_url", &self.server_url)
+            .field("token", &self.token.as_ref().map(|_| "[REDACTED]"))
+            .field("codeartifact", &self.codeartifact)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for Config {
@@ -213,9 +223,6 @@ impl Config {
 
 impl From<ConfigFile> for Config {
     fn from(mut file: ConfigFile) -> Self {
-        // Use std::mem::take to move values out while leaving defaults behind.
-        // This works with ZeroizeOnDrop because the struct will still be dropped
-        // but with default (empty) values that will be zeroed.
         Self {
             server_url: std::mem::take(&mut file.server_url),
             token: std::mem::take(&mut file.token).map(SecretString::from),

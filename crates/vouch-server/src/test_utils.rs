@@ -93,6 +93,7 @@ pub fn test_config() -> ServerConfig {
         s3_config_key: "config/vouch-server.json".to_string(),
         s3_config_region: None,
         s3_config_poll_interval: 60,
+        http_local_address: None,
     }
 }
 
@@ -119,6 +120,7 @@ pub async fn test_app_state() -> Arc<AppState> {
         dpop: Arc::new(DpopState::new()),
         oidc_key,
         github_app: None,
+        http_client: reqwest::Client::new(),
     })
 }
 

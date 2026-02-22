@@ -2,6 +2,7 @@
 //! Enroll command - RFC 8628 Device Authorization Grant.
 
 use anyhow::{Context, Result};
+use secrecy::{ExposeSecret, SecretString};
 use std::io::{IsTerminal, Write, stdout};
 use vouch_common::{DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, OAuthError};
 
@@ -11,9 +12,9 @@ use crate::config::Config;
 use crate::session;
 
 /// Response from device token endpoint.
-#[derive(serde::Deserialize, zeroize::ZeroizeOnDrop)]
+#[derive(serde::Deserialize)]
 struct DeviceTokenResponse {
-    access_token: String,
+    access_token: SecretString,
     expires_in: u64,
     email: String,
 }
@@ -73,7 +74,7 @@ pub async fn run(server: &str) -> Result<()> {
     // Step 4: Save server URL and token (single atomic write)
     let mut config = Config::load()?;
     config.set_server_url(server);
-    config.set_token(&token_response.access_token);
+    config.set_token(token_response.access_token.expose_secret());
     config.save()?;
 
     // Step 5: Compute expiration timestamp from expires_in
@@ -87,7 +88,7 @@ pub async fn run(server: &str) -> Result<()> {
     // Step 6: Store session in agent (if running)
     #[cfg(unix)]
     let agent_stored = session::store_session_in_agent(
-        &token_response.access_token,
+        token_response.access_token.expose_secret(),
         &token_response.email,
         &expires_at_str,
         server,
@@ -97,9 +98,11 @@ pub async fn run(server: &str) -> Result<()> {
     let agent_stored = false;
 
     // Step 7: Write cookie file for CLI tools
-    if let Err(e) =
-        session::write_session_cookie_file(server, &token_response.access_token, expires_at)
-    {
+    if let Err(e) = session::write_session_cookie_file(
+        server,
+        token_response.access_token.expose_secret(),
+        expires_at,
+    ) {
         tracing::debug!("Failed to write cookie file: {e}");
     }
 

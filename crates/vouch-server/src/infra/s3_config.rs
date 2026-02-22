@@ -47,12 +47,22 @@ pub struct S3ConfigSource {
 }
 
 /// Nested TLS configuration from S3.
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+#[derive(Clone, Deserialize, Serialize, Default)]
 pub struct S3TlsConfig {
     /// Base64-encoded PEM certificate.
     pub cert: Option<String>,
     /// Base64-encoded PEM private key.
     pub key: Option<String>,
+}
+
+// Custom Debug that redacts private key to prevent accidental log exposure.
+impl std::fmt::Debug for S3TlsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3TlsConfig")
+            .field("cert", &self.cert)
+            .field("key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Nested ACME (Let's Encrypt) configuration from S3.
@@ -79,7 +89,7 @@ impl std::fmt::Debug for S3AcmeConfig {
 }
 
 /// Nested OIDC configuration from S3.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Deserialize, Default)]
 pub struct S3OidcConfig {
     /// OIDC issuer URL.
     pub issuer_url: Option<String>,
@@ -87,6 +97,17 @@ pub struct S3OidcConfig {
     pub client_id: Option<String>,
     /// OIDC client secret.
     pub client_secret: Option<String>,
+}
+
+// Custom Debug that redacts client_secret to prevent accidental log exposure.
+impl std::fmt::Debug for S3OidcConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3OidcConfig")
+            .field("issuer_url", &self.issuer_url)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Nested DPoP configuration from S3.
@@ -101,7 +122,7 @@ pub struct S3DpopConfig {
 }
 
 /// Nested GitHub App configuration from S3.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Deserialize, Default)]
 pub struct S3GithubConfig {
     /// GitHub App ID.
     pub app_id: Option<u64>,
@@ -117,11 +138,25 @@ pub struct S3GithubConfig {
     pub client_secret: Option<String>,
 }
 
+// Custom Debug that redacts secrets to prevent accidental log exposure.
+impl std::fmt::Debug for S3GithubConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3GithubConfig")
+            .field("app_id", &self.app_id)
+            .field("app_name", &self.app_name)
+            .field("app_key", &"[REDACTED]")
+            .field("webhook_secret", &"[REDACTED]")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .finish()
+    }
+}
+
 /// Parsed S3 configuration.
 ///
 /// All fields are optional to allow partial configuration updates.
 /// Fields present in S3 config override environment variables.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Deserialize, Default)]
 pub struct S3Config {
     /// Config version (for future compatibility).
     pub version: Option<u32>,
@@ -207,6 +242,53 @@ pub struct S3Config {
     pub device_code_expires_seconds: Option<u64>,
     /// Device code polling interval in seconds.
     pub device_poll_interval_seconds: Option<u64>,
+}
+
+// Custom Debug that redacts secrets to prevent accidental log exposure.
+impl std::fmt::Debug for S3Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3Config")
+            .field("version", &self.version)
+            .field("listen_addr", &self.listen_addr)
+            .field("rp_id", &self.rp_id)
+            .field("rp_name", &self.rp_name)
+            .field("base_url", &self.base_url)
+            .field("database_url", &self.database_url)
+            .field("dsql_endpoints", &self.dsql_endpoints)
+            .field("jwt_secret", &"[REDACTED]")
+            .field("session_hours", &self.session_hours)
+            .field("oidc", &self.oidc)
+            .field("tls", &self.tls)
+            .field("acme", &self.acme)
+            .field("allowed_domains", &self.allowed_domains)
+            .field("org_name", &self.org_name)
+            .field("dpop", &self.dpop)
+            .field("cors_origins", &self.cors_origins)
+            .field("github", &self.github)
+            .field("ssh_ca_key", &"[REDACTED]")
+            .field("oidc_signing_key", &"[REDACTED]")
+            .field("cleanup_interval_minutes", &self.cleanup_interval_minutes)
+            .field(
+                "auth_events_retention_days",
+                &self.auth_events_retention_days,
+            )
+            .field(
+                "oauth_events_retention_days",
+                &self.oauth_events_retention_days,
+            )
+            .field("cli_download_macos", &self.cli_download_macos)
+            .field("cli_download_linux", &self.cli_download_linux)
+            .field("cli_download_windows", &self.cli_download_windows)
+            .field(
+                "device_code_expires_seconds",
+                &self.device_code_expires_seconds,
+            )
+            .field(
+                "device_poll_interval_seconds",
+                &self.device_poll_interval_seconds,
+            )
+            .finish()
+    }
 }
 
 /// Fetch raw bytes and ETag from S3.

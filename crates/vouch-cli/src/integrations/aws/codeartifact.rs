@@ -97,12 +97,20 @@ pub fn parse_codeartifact_url(url: &str) -> Option<CodeArtifactRegistry> {
 }
 
 /// Response from CodeArtifact `GetAuthorizationToken` API.
-#[derive(serde::Deserialize, zeroize::ZeroizeOnDrop)]
+#[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct GetAuthorizationTokenResponse {
-    authorization_token: String,
-    #[zeroize(skip)]
+    authorization_token: SecretString,
     expiration: f64,
+}
+
+impl std::fmt::Debug for GetAuthorizationTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GetAuthorizationTokenResponse")
+            .field("authorization_token", &"[REDACTED]")
+            .field("expiration", &self.expiration)
+            .finish()
+    }
 }
 
 /// Get a CodeArtifact authorization token via SigV4-signed REST API call.
@@ -142,17 +150,14 @@ pub async fn get_authorization_token(
     .await
     .context("failed to call CodeArtifact GetAuthorizationToken")?;
 
-    let mut ca_response: GetAuthorizationTokenResponse =
+    let ca_response: GetAuthorizationTokenResponse =
         serde_json::from_str(&response_body).context("failed to parse CodeArtifact response")?;
 
     #[allow(clippy::cast_possible_truncation)]
     let expiration = ca_response.expiration as i64;
 
-    // Take the token out, leaving an empty string that ZeroizeOnDrop will handle
-    let token = std::mem::take(&mut ca_response.authorization_token);
-
     Ok(CodeArtifactToken {
-        authorization_token: SecretString::from(token),
+        authorization_token: ca_response.authorization_token,
         expiration,
     })
 }

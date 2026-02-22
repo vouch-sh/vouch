@@ -8,6 +8,7 @@ use axum::{Json, extract::State, http::StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
+use secrecy::ExposeSecret;
 use std::sync::Arc;
 use vouch_common::{
     ApiError, DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse,
@@ -270,7 +271,7 @@ pub async fn device_token(
             );
 
             Ok(Json(DeviceTokenResponse {
-                access_token: token,
+                access_token: token.expose_secret().to_string(),
                 token_type: "Bearer".to_string(),
                 expires_in,
                 email: user_email,

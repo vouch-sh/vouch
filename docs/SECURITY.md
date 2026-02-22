@@ -683,7 +683,6 @@ For sensitive data handling:
 
 ```rust
 use secrecy::{ExposeSecret, SecretString};
-use zeroize::ZeroizeOnDrop;
 
 // Session tokens wrapped in SecretString
 let session_token: SecretString = fetch_session_token()?;
@@ -691,12 +690,11 @@ let session_token: SecretString = fetch_session_token()?;
 // Automatically zeroized when dropped
 // Debug output shows "[REDACTED]"
 
-// Credential structures use ZeroizeOnDrop derive macro
-#[derive(Serialize, zeroize::ZeroizeOnDrop)]
+// Credential structures use SecretString for sensitive fields
 struct CredentialProcessOutput {
     access_key_id: String,
-    secret_access_key: String,  // Zeroized on drop
-    session_token: String,      // Zeroized on drop
+    secret_access_key: SecretString,  // Zeroized on drop, redacted in Debug
+    session_token: SecretString,      // Zeroized on drop, redacted in Debug
 }
 ```
 

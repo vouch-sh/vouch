@@ -2,6 +2,7 @@
 //! Exec command - run a command with Vouch-provided credentials in the environment.
 
 use anyhow::{Context, Result, bail};
+use secrecy::{ExposeSecret, SecretString};
 use std::process::Command;
 
 use super::CredentialType;
@@ -18,15 +19,26 @@ pub struct CodeArtifactOptions<'a> {
 
 /// Cached AWS credentials extracted from `serde_json::Value`.
 ///
-/// Derives `ZeroizeOnDrop` to clear secret key material from memory when dropped.
-/// `expiration` is not sensitive and is skipped.
-#[derive(zeroize::ZeroizeOnDrop)]
+/// `access_key_id` is a plain `String` because AWS access key IDs are semi-public
+/// identifiers (they appear in CloudTrail logs, IAM consoles, etc.).
+/// Only `secret_access_key` and `session_token` are wrapped in `SecretString`
+/// for automatic zeroization on drop and redacted `Debug` output.
 pub struct AwsEnvCredentials {
     pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: String,
-    #[zeroize(skip)]
+    pub secret_access_key: SecretString,
+    pub session_token: SecretString,
     pub expiration: Option<String>,
+}
+
+impl std::fmt::Debug for AwsEnvCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwsEnvCredentials")
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"[REDACTED]")
+            .field("session_token", &"[REDACTED]")
+            .field("expiration", &self.expiration)
+            .finish()
+    }
 }
 
 /// Fetch AWS credentials (cache-first) and extract environment variable values.
@@ -41,8 +53,7 @@ pub async fn fetch_aws_credentials(
         let output =
             super::credential::aws::fetch_and_assume(server, role_arn, session_name).await?;
         let expires_at = output.expiration.clone();
-        let data = serde_json::to_value(&output).context("failed to serialize credentials")?;
-        Ok((data, expires_at))
+        Ok((output.to_json(), expires_at))
     })
     .await?;
 
@@ -51,16 +62,18 @@ pub async fn fetch_aws_credentials(
         .and_then(|v| v.as_str())
         .context("AWS credentials missing AccessKeyId")?
         .to_string();
-    let secret_access_key = data
-        .get("SecretAccessKey")
-        .and_then(|v| v.as_str())
-        .context("AWS credentials missing SecretAccessKey")?
-        .to_string();
-    let session_token = data
-        .get("SessionToken")
-        .and_then(|v| v.as_str())
-        .context("AWS credentials missing SessionToken")?
-        .to_string();
+    let secret_access_key = SecretString::from(
+        data.get("SecretAccessKey")
+            .and_then(|v| v.as_str())
+            .context("AWS credentials missing SecretAccessKey")?
+            .to_string(),
+    );
+    let session_token = SecretString::from(
+        data.get("SessionToken")
+            .and_then(|v| v.as_str())
+            .context("AWS credentials missing SessionToken")?
+            .to_string(),
+    );
     let expiration = data
         .get("Expiration")
         .and_then(|v| v.as_str())
@@ -76,10 +89,18 @@ pub async fn fetch_aws_credentials(
 
 /// Cached GitHub token extracted from `serde_json::Value`.
 ///
-/// Derives `ZeroizeOnDrop` to clear the token from memory when dropped.
-#[derive(zeroize::ZeroizeOnDrop)]
+/// Token is wrapped in `SecretString` for automatic zeroization on drop
+/// and redacted `Debug` output.
 pub struct GitHubEnvToken {
-    pub token: String,
+    pub token: SecretString,
+}
+
+impl std::fmt::Debug for GitHubEnvToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubEnvToken")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Fetch a GitHub token (cache-first) and extract the token value.
@@ -98,11 +119,12 @@ pub async fn fetch_github_token_cached(server: &str) -> Result<GitHubEnvToken> {
     })
     .await?;
 
-    let token = data
-        .get("token")
-        .and_then(serde_json::Value::as_str)
-        .context("GitHub credential missing 'token' field")?
-        .to_string();
+    let token = SecretString::from(
+        data.get("token")
+            .and_then(serde_json::Value::as_str)
+            .context("GitHub credential missing 'token' field")?
+            .to_string(),
+    );
 
     Ok(GitHubEnvToken { token })
 }
@@ -165,6 +187,11 @@ pub async fn run(
 }
 
 /// Fetch AWS STS credentials (cache-first) and inject them into the environment.
+///
+/// Also sets `AWS_EXECUTION_ENV` so that AWS SDK calls include Vouch in
+/// the CloudTrail user-agent string.
+///
+/// See: <https://hackingthe.cloud/aws/general-knowledge/aws_cli_tips_and_tricks/#modifying-the-cloudtrail-log-user-agent-with-aws_execution_env>
 async fn inject_aws_credentials(
     cmd: &mut Command,
     server: &str,
@@ -174,12 +201,20 @@ async fn inject_aws_credentials(
     let creds = fetch_aws_credentials(server, role_arn, session_name).await?;
 
     cmd.env("AWS_ACCESS_KEY_ID", &creds.access_key_id);
-    cmd.env("AWS_SECRET_ACCESS_KEY", &creds.secret_access_key);
-    cmd.env("AWS_SESSION_TOKEN", &creds.session_token);
+    cmd.env(
+        "AWS_SECRET_ACCESS_KEY",
+        creds.secret_access_key.expose_secret(),
+    );
+    cmd.env("AWS_SESSION_TOKEN", creds.session_token.expose_secret());
 
     if let Some(ref v) = creds.expiration {
         cmd.env("AWS_CREDENTIAL_EXPIRATION", v);
     }
+
+    cmd.env(
+        "AWS_EXECUTION_ENV",
+        format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")),
+    );
 
     Ok(())
 }
@@ -188,8 +223,8 @@ async fn inject_aws_credentials(
 async fn inject_github_credentials(cmd: &mut Command, server: &str) -> Result<()> {
     let gh = fetch_github_token_cached(server).await?;
 
-    cmd.env("GITHUB_TOKEN", &gh.token);
-    cmd.env("GH_TOKEN", &gh.token);
+    cmd.env("GITHUB_TOKEN", gh.token.expose_secret());
+    cmd.env("GH_TOKEN", gh.token.expose_secret());
 
     Ok(())
 }
@@ -209,7 +244,6 @@ async fn inject_codeartifact_credentials(
     server: &str,
     opts: &CodeArtifactOptions<'_>,
 ) -> Result<()> {
-    use secrecy::ExposeSecret;
     let (domain, domain_owner, region) =
         super::credential::codeartifact::resolve_codeartifact_params(
             opts.domain,
@@ -228,4 +262,79 @@ async fn inject_codeartifact_credentials(
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::commands::credential::aws::CredentialProcessOutput;
+
+    /// Verify that `AwsEnvCredentials` can be extracted from the JSON produced
+    /// by `CredentialProcessOutput::to_json()`. This tests the contract between
+    /// the serialization in `aws.rs` and the extraction in `exec.rs`.
+    #[test]
+    fn test_aws_env_credentials_from_cached_json() {
+        let output = CredentialProcessOutput {
+            version: 1,
+            access_key_id: "AKIAEXAMPLE".to_string(),
+            secret_access_key: SecretString::from("secret-key".to_string()),
+            session_token: SecretString::from("session-token".to_string()),
+            expiration: "2024-01-14T18:00:00Z".to_string(),
+        };
+
+        let data = output.to_json();
+
+        // Extract using the same logic as fetch_aws_credentials
+        let access_key_id = data
+            .get("AccessKeyId")
+            .and_then(|v| v.as_str())
+            .expect("AccessKeyId must be present");
+        let secret_access_key = data
+            .get("SecretAccessKey")
+            .and_then(|v| v.as_str())
+            .expect("SecretAccessKey must be present");
+        let session_token = data
+            .get("SessionToken")
+            .and_then(|v| v.as_str())
+            .expect("SessionToken must be present");
+        let expiration = data
+            .get("Expiration")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        assert_eq!(access_key_id, "AKIAEXAMPLE");
+        assert_eq!(secret_access_key, "secret-key");
+        assert_eq!(session_token, "session-token");
+        assert_eq!(expiration.as_deref(), Some("2024-01-14T18:00:00Z"));
+    }
+
+    /// Verify the `GitHubEnvToken` Debug impl redacts the token.
+    #[test]
+    fn test_github_env_token_debug_redacts() {
+        let gh = GitHubEnvToken {
+            token: SecretString::from("ghu_secret_token".to_string()),
+        };
+        let debug = format!("{gh:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("ghu_secret_token"));
+    }
+
+    /// Verify the `AwsEnvCredentials` Debug impl redacts secrets but shows access_key_id.
+    #[test]
+    fn test_aws_env_credentials_debug_redacts() {
+        let creds = AwsEnvCredentials {
+            access_key_id: "AKIAEXAMPLE".to_string(),
+            secret_access_key: SecretString::from("wJalrXUtnFEMI".to_string()),
+            session_token: SecretString::from("FwoGZXIvYXdz".to_string()),
+            expiration: Some("2024-01-14T18:00:00Z".to_string()),
+        };
+        let debug = format!("{creds:?}");
+        assert!(debug.contains("[REDACTED]"));
+        // access_key_id is semi-public and should be visible in debug output
+        assert!(debug.contains("AKIAEXAMPLE"));
+        // secret fields must not appear
+        assert!(!debug.contains("wJalrXUtnFEMI"));
+        assert!(!debug.contains("FwoGZXIvYXdz"));
+    }
 }

@@ -134,12 +134,24 @@ pub struct GitHubRepository {
 }
 
 /// Response from GitHub's installation token endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 struct InstallationTokenResponse {
     token: String,
     expires_at: String,
     permissions: HashMap<String, String>,
     repositories: Option<Vec<GitHubRepository>>,
+}
+
+// Custom Debug that redacts token to prevent accidental log exposure.
+impl std::fmt::Debug for InstallationTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InstallationTokenResponse")
+            .field("token", &"[REDACTED]")
+            .field("expires_at", &self.expires_at)
+            .field("permissions", &self.permissions)
+            .field("repositories", &self.repositories)
+            .finish()
+    }
 }
 
 /// Response from GitHub's installation details endpoint.
@@ -189,7 +201,11 @@ pub struct GitHubApp {
 
 impl GitHubApp {
     /// Load GitHub App from configuration if all required values are present.
-    pub fn load(config: &ServerConfig) -> Result<Option<Self>> {
+    ///
+    /// # Arguments
+    /// * `config` - Server configuration
+    /// * `http_client` - Shared HTTP client (configured with appropriate local address)
+    pub fn load(config: &ServerConfig, http_client: reqwest::Client) -> Result<Option<Self>> {
         let app_id = match config.github_app_id {
             Some(id) => GitHubAppId(id),
             None => {
@@ -227,12 +243,6 @@ impl GitHubApp {
                 anyhow::bail!("GitHub App private key failed validation: {e:?}");
             }
         }
-
-        let http_client = vouch_common::http::server_client(&format!(
-            "vouch-server/{}",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .context("Failed to create HTTP client for GitHub App")?;
 
         tracing::info!("GitHub App loaded: app_id={}", app_id.0);
 
@@ -502,7 +512,7 @@ pub async fn get_github_user(
 }
 
 /// Response from GitHub OAuth token endpoint.
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 pub struct GitHubOAuthTokenResponse {
     /// Access token for API calls.
     pub access_token: String,
@@ -522,18 +532,37 @@ pub struct GitHubOAuthTokenResponse {
     pub refresh_token_expires_in: Option<u64>,
 }
 
+// Custom Debug that redacts tokens to prevent accidental log exposure.
+impl std::fmt::Debug for GitHubOAuthTokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubOAuthTokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("token_type", &self.token_type)
+            .field("scope", &self.scope)
+            .field("refresh_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .field("refresh_token_expires_in", &self.refresh_token_expires_in)
+            .finish()
+    }
+}
+
 /// Exchange an OAuth authorization code for access and refresh tokens.
+///
+/// Per RFC 6749 Section 4.1.3, `redirect_uri` MUST be included in the token
+/// request when it was included in the authorization request.
 ///
 /// # Arguments
 /// * `http_client` - HTTP client to use
 /// * `client_id` - GitHub App Client ID
 /// * `client_secret` - GitHub App Client Secret
 /// * `code` - Authorization code from OAuth callback
+/// * `redirect_uri` - The same redirect URI used in the authorization request
 pub async fn exchange_oauth_code(
     http_client: &reqwest::Client,
     client_id: &str,
     client_secret: &str,
     code: &str,
+    redirect_uri: &str,
 ) -> Result<GitHubOAuthTokenResponse> {
     let response = http_client
         .post("https://github.com/login/oauth/access_token")
@@ -542,6 +571,7 @@ pub async fn exchange_oauth_code(
             ("client_id", client_id),
             ("client_secret", client_secret),
             ("code", code),
+            ("redirect_uri", redirect_uri),
         ])
         .send()
         .await

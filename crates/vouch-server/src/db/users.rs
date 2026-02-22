@@ -35,7 +35,7 @@ const USER_SELECT_COLUMNS: [Users; 8] = [
 ];
 
 /// User record.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(sqlx::FromRow)]
 pub struct User {
     pub id: String,
     pub email: String,
@@ -52,6 +52,22 @@ pub struct User {
     /// GitHub OAuth refresh token (for getting new access tokens).
     #[allow(dead_code)]
     pub github_refresh_token: Option<String>,
+}
+
+// Custom Debug that redacts github_refresh_token to prevent accidental log exposure.
+impl std::fmt::Debug for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("User")
+            .field("id", &self.id)
+            .field("email", &self.email)
+            .field("name", &self.name)
+            .field("org_id", &self.org_id)
+            .field("is_org_admin", &self.is_org_admin)
+            .field("github_id", &self.github_id)
+            .field("github_login", &self.github_login)
+            .field("github_refresh_token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Create or get a user by email.

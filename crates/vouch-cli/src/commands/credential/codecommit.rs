@@ -16,7 +16,6 @@
 
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
-use std::io::Write;
 
 use crate::commands::credential::git_protocol::read_credential_input;
 use crate::integrations::aws::codecommit::{
@@ -77,11 +76,13 @@ async fn get_credential() -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    writeln!(out, "protocol={protocol}")?;
-    writeln!(out, "host={host}")?;
-    writeln!(out, "username={}", signed.username.expose_secret())?;
-    writeln!(out, "password={}", signed.password.expose_secret())?;
-    writeln!(out)?;
+    super::git_protocol::write_credential_output(
+        &mut out,
+        protocol,
+        host,
+        signed.username.expose_secret(),
+        signed.password.expose_secret(),
+    )?;
 
     Ok(())
 }
@@ -147,8 +148,7 @@ async fn get_sts_credentials(_region: &str) -> Result<StsCredentials> {
         let output =
             super::aws::fetch_and_assume(&server, &role_arn, Some("vouch-codecommit")).await?;
         let expires_at = output.expiration.clone();
-        let data = serde_json::to_value(&output).context("failed to serialize credentials")?;
-        Ok((data, expires_at))
+        Ok((output.to_json(), expires_at))
     })
     .await?;
 
