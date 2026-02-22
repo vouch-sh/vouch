@@ -831,15 +831,32 @@ pub async fn browser_register_start(
     let device_auth_id = match jar.get("vouch_session").map(|c| c.value()) {
         Some(token) => {
             let token_hash = hash_token(token);
-            db::get_enrollment_session_by_token_hash(&state.db, &token_hash)
-                .await
-                .ok()
-                .flatten()
+            let enrollment_session =
+                db::get_enrollment_session_by_token_hash(&state.db, &token_hash)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("Failed to look up enrollment session: {}", e);
+                        json_error(
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            "db_error",
+                            "Failed to look up enrollment session",
+                        )
+                    })?;
+            enrollment_session
                 .and_then(|es| es.device_auth_id)
                 .unwrap_or_default()
         }
         None => String::new(),
     };
+
+    tracing::debug!(
+        "browser_register_start: resolved device_auth_id='{}'",
+        if device_auth_id.is_empty() {
+            "(empty)"
+        } else {
+            &device_auth_id
+        }
+    );
 
     // Get any existing credentials for this user to exclude them
     let existing_auths = db::get_authenticators_for_user(&state.db, &session.claims.sub)
@@ -1065,22 +1082,34 @@ pub async fn browser_register_complete(
         )
     })?;
 
-    // Mark device authorization as complete
-    db::authorize_device_auth(
-        &state.db,
-        &reg_state.device_auth_id,
-        &reg_state.user_id.to_string(),
-        &reg_state.user_email,
-        &authenticator_id,
-    )
-    .await
-    .map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db_error",
-            &e.to_string(),
+    // Mark device authorization as complete (only for CLI-initiated flows)
+    if reg_state.device_auth_id.is_empty() {
+        tracing::debug!(
+            "browser_register_complete: no device_auth_id, skipping device auth authorization \
+             (direct browser enrollment)"
+        );
+    } else {
+        db::authorize_device_auth(
+            &state.db,
+            &reg_state.device_auth_id,
+            &reg_state.user_id.to_string(),
+            &reg_state.user_email,
+            &authenticator_id,
         )
-    })?;
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to authorize device auth '{}': {}",
+                reg_state.device_auth_id,
+                e
+            );
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                &e.to_string(),
+            )
+        })?;
+    }
 
     // Log enrollment event (fire-and-forget)
     let auth_event_params = AuthEventParams {
