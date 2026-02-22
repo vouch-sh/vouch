@@ -8,5 +8,6 @@ CREATE TABLE sessions (
     token_hash TEXT UNIQUE NOT NULL,
     authenticator_id TEXT,  -- references authenticators(id)
     expires_at TIMESTAMPTZ NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL
+    created_at TIMESTAMPTZ NOT NULL,
+    session_type TEXT NOT NULL CHECK (session_type IN ('fido2_session', 'oauth_access_token'))
 );

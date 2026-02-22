@@ -8,5 +8,6 @@ CREATE TABLE scim_tokens (
     description TEXT,
     created_at TIMESTAMPTZ NOT NULL,
     last_used_at TIMESTAMPTZ,
-    expires_at TIMESTAMPTZ
+    expires_at TIMESTAMPTZ,
+    scope TEXT NOT NULL
 );

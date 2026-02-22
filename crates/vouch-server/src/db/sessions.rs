@@ -66,7 +66,7 @@ pub async fn create_session(
     token_hash: &str,
     authenticator_id: Option<&str>,
     expires_at: &str,
-    session_type: &str,
+    session_type: SessionPurpose,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
     let now = Timestamp::now().to_string();
@@ -92,7 +92,7 @@ pub async fn create_session(
                 authenticator_id.into(),
                 expires_at.into(),
                 now.as_str().into(),
-                session_type.into(),
+                session_type.as_str().into(),
             ])
             .to_owned();
         query.build_sql(db_type)

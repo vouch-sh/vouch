@@ -566,7 +566,7 @@ pub async fn create_test_session(
         &token_hash,
         Some(auth_id),
         &expires.to_string(),
-        crate::db::SessionPurpose::Fido2Session.as_str(),
+        crate::db::SessionPurpose::Fido2Session,
     )
     .await
     .expect("Failed to create session");

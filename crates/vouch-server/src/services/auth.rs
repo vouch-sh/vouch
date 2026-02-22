@@ -364,7 +364,7 @@ pub async fn create_login_session(
         &token_hash,
         params.authenticator_id,
         &expires.to_string(),
-        params.purpose.as_str(),
+        params.purpose,
     )
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to store session: {e}")))?;
@@ -450,7 +450,7 @@ pub async fn create_oauth_access_token(
         &token_hash,
         params.authenticator_id,
         &expires.to_string(),
-        SessionPurpose::OAuthAccessToken.as_str(),
+        SessionPurpose::OAuthAccessToken,
     )
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to store session: {e}")))?;
