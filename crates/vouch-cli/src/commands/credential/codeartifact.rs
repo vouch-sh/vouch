@@ -194,7 +194,8 @@ async fn fetch_token(
     })?;
 
     // Decode JWT to extract claims for session tags (ABAC)
-    let tags = match decode_jwt_payload(&token_response.id_token) {
+    let id_token = token_response.id_token.expose_secret();
+    let tags = match decode_jwt_payload(id_token) {
         Ok(claims) => build_session_tags(&claims),
         Err(err) => {
             tracing::debug!(
@@ -230,7 +231,7 @@ async fn fetch_token(
         &http_client,
         &role_arn,
         session,
-        &token_response.id_token,
+        id_token,
         region,
         domain_suffix,
         &tags,

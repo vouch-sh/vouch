@@ -6,8 +6,8 @@
 use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use secrecy::ExposeSecret;
-use serde::{Deserialize, Serialize};
+use secrecy::{ExposeSecret, SecretString};
+use serde::Deserialize;
 
 use crate::client::VouchClient;
 use crate::integrations::aws::sts::{
@@ -18,13 +18,11 @@ use crate::session::get_user_email;
 
 /// AWS credential process output format.
 /// See: https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sourcing-external.html
-#[derive(Serialize, zeroize::ZeroizeOnDrop)]
-#[serde(rename_all = "PascalCase")]
 pub(crate) struct CredentialProcessOutput {
-    version: u32,
-    access_key_id: String,
-    secret_access_key: String,
-    session_token: String,
+    pub(crate) version: u32,
+    pub(crate) access_key_id: String,
+    pub(crate) secret_access_key: SecretString,
+    pub(crate) session_token: SecretString,
     pub(crate) expiration: String,
 }
 
@@ -44,9 +42,9 @@ impl std::fmt::Debug for CredentialProcessOutput {
 ///
 /// Shared by all credential commands that exchange a Vouch session for an
 /// AWS OIDC ID token (`aws`, `codeartifact`, `docker`).
-#[derive(Deserialize, zeroize::ZeroizeOnDrop)]
+#[derive(Deserialize)]
 pub(crate) struct OidcTokenResponse {
-    pub(crate) id_token: String,
+    pub(crate) id_token: SecretString,
 }
 
 impl std::fmt::Debug for OidcTokenResponse {
@@ -108,7 +106,13 @@ pub async fn run(server: &str, role_arn: &str, session_name: Option<&str>) -> Re
     let data = super::cache::get_or_fetch(&cache_key, "AWS credentials", || async {
         let output = fetch_and_assume(server, role_arn, session_name).await?;
         let expires_at = output.expiration.clone();
-        let data = serde_json::to_value(&output).context("failed to serialize credentials")?;
+        let data = serde_json::json!({
+            "Version": output.version,
+            "AccessKeyId": output.access_key_id,
+            "SecretAccessKey": output.secret_access_key.expose_secret(),
+            "SessionToken": output.session_token.expose_secret(),
+            "Expiration": output.expiration,
+        });
         Ok((data, expires_at))
     })
     .await?;
@@ -133,7 +137,8 @@ pub(crate) async fn fetch_and_assume(
         .context("failed to get OIDC token from Vouch server")?;
 
     // Decode JWT to extract claims for session tags (ABAC)
-    let tags = decode_jwt_payload(&token_response.id_token)
+    let id_token = token_response.id_token.expose_secret();
+    let tags = decode_jwt_payload(id_token)
         .map(|claims| build_session_tags(&claims))
         .unwrap_or_default();
 
@@ -154,7 +159,7 @@ pub(crate) async fn fetch_and_assume(
         &http_client,
         role_arn,
         session,
-        &token_response.id_token,
+        id_token,
         region,
         domain_suffix,
         &tags,
@@ -168,8 +173,8 @@ pub(crate) async fn fetch_and_assume(
     Ok(CredentialProcessOutput {
         version: 1,
         access_key_id: creds.access_key_id.clone(),
-        secret_access_key: creds.secret_access_key.expose_secret().to_string(),
-        session_token: creds.session_token.expose_secret().to_string(),
+        secret_access_key: creds.secret_access_key.clone(),
+        session_token: creds.session_token.clone(),
         expiration: creds.expiration.to_string(),
     })
 }

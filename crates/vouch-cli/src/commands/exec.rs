@@ -2,6 +2,7 @@
 //! Exec command - run a command with Vouch-provided credentials in the environment.
 
 use anyhow::{Context, Result, bail};
+use secrecy::{ExposeSecret, SecretString};
 use std::process::Command;
 
 use super::CredentialType;
@@ -18,15 +19,24 @@ pub struct CodeArtifactOptions<'a> {
 
 /// Cached AWS credentials extracted from `serde_json::Value`.
 ///
-/// Derives `ZeroizeOnDrop` to clear secret key material from memory when dropped.
-/// `expiration` is not sensitive and is skipped.
-#[derive(zeroize::ZeroizeOnDrop)]
+/// Secret fields are wrapped in `SecretString` for automatic zeroization on drop
+/// and redacted `Debug` output.
 pub struct AwsEnvCredentials {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: String,
-    #[zeroize(skip)]
+    pub access_key_id: SecretString,
+    pub secret_access_key: SecretString,
+    pub session_token: SecretString,
     pub expiration: Option<String>,
+}
+
+impl std::fmt::Debug for AwsEnvCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AwsEnvCredentials")
+            .field("access_key_id", &"[REDACTED]")
+            .field("secret_access_key", &"[REDACTED]")
+            .field("session_token", &"[REDACTED]")
+            .field("expiration", &self.expiration)
+            .finish()
+    }
 }
 
 /// Fetch AWS credentials (cache-first) and extract environment variable values.
@@ -41,26 +51,34 @@ pub async fn fetch_aws_credentials(
         let output =
             super::credential::aws::fetch_and_assume(server, role_arn, session_name).await?;
         let expires_at = output.expiration.clone();
-        let data = serde_json::to_value(&output).context("failed to serialize credentials")?;
+        let data = serde_json::json!({
+            "AccessKeyId": output.access_key_id,
+            "SecretAccessKey": output.secret_access_key.expose_secret(),
+            "SessionToken": output.session_token.expose_secret(),
+            "Expiration": output.expiration,
+        });
         Ok((data, expires_at))
     })
     .await?;
 
-    let access_key_id = data
-        .get("AccessKeyId")
-        .and_then(|v| v.as_str())
-        .context("AWS credentials missing AccessKeyId")?
-        .to_string();
-    let secret_access_key = data
-        .get("SecretAccessKey")
-        .and_then(|v| v.as_str())
-        .context("AWS credentials missing SecretAccessKey")?
-        .to_string();
-    let session_token = data
-        .get("SessionToken")
-        .and_then(|v| v.as_str())
-        .context("AWS credentials missing SessionToken")?
-        .to_string();
+    let access_key_id = SecretString::from(
+        data.get("AccessKeyId")
+            .and_then(|v| v.as_str())
+            .context("AWS credentials missing AccessKeyId")?
+            .to_string(),
+    );
+    let secret_access_key = SecretString::from(
+        data.get("SecretAccessKey")
+            .and_then(|v| v.as_str())
+            .context("AWS credentials missing SecretAccessKey")?
+            .to_string(),
+    );
+    let session_token = SecretString::from(
+        data.get("SessionToken")
+            .and_then(|v| v.as_str())
+            .context("AWS credentials missing SessionToken")?
+            .to_string(),
+    );
     let expiration = data
         .get("Expiration")
         .and_then(|v| v.as_str())
@@ -76,10 +94,18 @@ pub async fn fetch_aws_credentials(
 
 /// Cached GitHub token extracted from `serde_json::Value`.
 ///
-/// Derives `ZeroizeOnDrop` to clear the token from memory when dropped.
-#[derive(zeroize::ZeroizeOnDrop)]
+/// Token is wrapped in `SecretString` for automatic zeroization on drop
+/// and redacted `Debug` output.
 pub struct GitHubEnvToken {
-    pub token: String,
+    pub token: SecretString,
+}
+
+impl std::fmt::Debug for GitHubEnvToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GitHubEnvToken")
+            .field("token", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Fetch a GitHub token (cache-first) and extract the token value.
@@ -98,11 +124,12 @@ pub async fn fetch_github_token_cached(server: &str) -> Result<GitHubEnvToken> {
     })
     .await?;
 
-    let token = data
-        .get("token")
-        .and_then(serde_json::Value::as_str)
-        .context("GitHub credential missing 'token' field")?
-        .to_string();
+    let token = SecretString::from(
+        data.get("token")
+            .and_then(serde_json::Value::as_str)
+            .context("GitHub credential missing 'token' field")?
+            .to_string(),
+    );
 
     Ok(GitHubEnvToken { token })
 }
@@ -173,9 +200,12 @@ async fn inject_aws_credentials(
 ) -> Result<()> {
     let creds = fetch_aws_credentials(server, role_arn, session_name).await?;
 
-    cmd.env("AWS_ACCESS_KEY_ID", &creds.access_key_id);
-    cmd.env("AWS_SECRET_ACCESS_KEY", &creds.secret_access_key);
-    cmd.env("AWS_SESSION_TOKEN", &creds.session_token);
+    cmd.env("AWS_ACCESS_KEY_ID", creds.access_key_id.expose_secret());
+    cmd.env(
+        "AWS_SECRET_ACCESS_KEY",
+        creds.secret_access_key.expose_secret(),
+    );
+    cmd.env("AWS_SESSION_TOKEN", creds.session_token.expose_secret());
 
     if let Some(ref v) = creds.expiration {
         cmd.env("AWS_CREDENTIAL_EXPIRATION", v);
@@ -188,8 +218,8 @@ async fn inject_aws_credentials(
 async fn inject_github_credentials(cmd: &mut Command, server: &str) -> Result<()> {
     let gh = fetch_github_token_cached(server).await?;
 
-    cmd.env("GITHUB_TOKEN", &gh.token);
-    cmd.env("GH_TOKEN", &gh.token);
+    cmd.env("GITHUB_TOKEN", gh.token.expose_secret());
+    cmd.env("GH_TOKEN", gh.token.expose_secret());
 
     Ok(())
 }
@@ -209,7 +239,6 @@ async fn inject_codeartifact_credentials(
     server: &str,
     opts: &CodeArtifactOptions<'_>,
 ) -> Result<()> {
-    use secrecy::ExposeSecret;
     let (domain, domain_owner, region) =
         super::credential::codeartifact::resolve_codeartifact_params(
             opts.domain,

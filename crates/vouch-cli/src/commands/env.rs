@@ -2,6 +2,7 @@
 //! Env command - output credential environment variables for the current shell.
 
 use anyhow::{Context, Result};
+use secrecy::ExposeSecret;
 
 use super::CredentialType;
 use super::exec::CodeArtifactOptions;
@@ -45,9 +46,21 @@ async fn print_aws_env(
 ) -> Result<()> {
     let creds = super::exec::fetch_aws_credentials(server, role_arn, session_name).await?;
 
-    print_export(shell, "AWS_ACCESS_KEY_ID", &creds.access_key_id);
-    print_export(shell, "AWS_SECRET_ACCESS_KEY", &creds.secret_access_key);
-    print_export(shell, "AWS_SESSION_TOKEN", &creds.session_token);
+    print_export(
+        shell,
+        "AWS_ACCESS_KEY_ID",
+        creds.access_key_id.expose_secret(),
+    );
+    print_export(
+        shell,
+        "AWS_SECRET_ACCESS_KEY",
+        creds.secret_access_key.expose_secret(),
+    );
+    print_export(
+        shell,
+        "AWS_SESSION_TOKEN",
+        creds.session_token.expose_secret(),
+    );
 
     if let Some(ref v) = creds.expiration {
         print_export(shell, "AWS_CREDENTIAL_EXPIRATION", v);
@@ -60,8 +73,8 @@ async fn print_aws_env(
 async fn print_github_env(server: &str, shell: &Shell) -> Result<()> {
     let gh = super::exec::fetch_github_token_cached(server).await?;
 
-    print_export(shell, "GITHUB_TOKEN", &gh.token);
-    print_export(shell, "GH_TOKEN", &gh.token);
+    print_export(shell, "GITHUB_TOKEN", gh.token.expose_secret());
+    print_export(shell, "GH_TOKEN", gh.token.expose_secret());
 
     Ok(())
 }
@@ -72,7 +85,6 @@ async fn print_codeartifact_env(
     opts: &CodeArtifactOptions<'_>,
     shell: &Shell,
 ) -> Result<()> {
-    use secrecy::ExposeSecret;
     let (domain, domain_owner, region) =
         super::credential::codeartifact::resolve_codeartifact_params(
             opts.domain,
