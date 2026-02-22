@@ -6,7 +6,7 @@ use super::schema::{DeviceAuthRequests, OidcStates};
 use super::types::BuildSql;
 use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_optional, tx_execute};
-use anyhow::Result;
+use anyhow::{Result, bail};
 use jiff::Timestamp;
 use sea_query::{Expr, Query};
 use uuid::Uuid;
@@ -203,6 +203,9 @@ pub async fn get_device_auth_by_id(pool: &Pool, id: &str) -> Result<Option<Devic
 }
 
 /// Authorize a device auth request (mark as authorized with user info).
+///
+/// # Errors
+/// Returns an error if `id` is empty or if no matching row was found to update.
 pub async fn authorize_device_auth(
     pool: &Pool,
     id: &str,
@@ -210,6 +213,10 @@ pub async fn authorize_device_auth(
     user_email: &str,
     authenticator_id: &str,
 ) -> Result<()> {
+    if id.is_empty() {
+        bail!("authorize_device_auth called with empty id");
+    }
+
     let db_type = pool.db_type();
 
     let sql = {
@@ -224,7 +231,14 @@ pub async fn authorize_device_auth(
         query.build_sql(db_type)
     };
 
-    db_execute!(pool, sqlx::query(&sql))?;
+    let result = db_execute!(pool, sqlx::query(&sql))?;
+
+    if result.rows_affected() == 0 {
+        bail!(
+            "authorize_device_auth: no device auth request found with id '{}'",
+            id
+        );
+    }
 
     Ok(())
 }
