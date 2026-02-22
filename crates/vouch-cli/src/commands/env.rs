@@ -38,6 +38,11 @@ pub async fn run(
 }
 
 /// Fetch AWS credentials (cache-first) and print export statements.
+///
+/// Also sets `AWS_EXECUTION_ENV` so that AWS SDK calls include Vouch in
+/// the CloudTrail user-agent string.
+///
+/// See: <https://hackingthe.cloud/aws/general-knowledge/aws_cli_tips_and_tricks/#modifying-the-cloudtrail-log-user-agent-with-aws_execution_env>
 async fn print_aws_env(
     server: &str,
     role_arn: &str,
@@ -46,11 +51,7 @@ async fn print_aws_env(
 ) -> Result<()> {
     let creds = super::exec::fetch_aws_credentials(server, role_arn, session_name).await?;
 
-    print_export(
-        shell,
-        "AWS_ACCESS_KEY_ID",
-        creds.access_key_id.expose_secret(),
-    );
+    print_export(shell, "AWS_ACCESS_KEY_ID", &creds.access_key_id);
     print_export(
         shell,
         "AWS_SECRET_ACCESS_KEY",
@@ -65,6 +66,12 @@ async fn print_aws_env(
     if let Some(ref v) = creds.expiration {
         print_export(shell, "AWS_CREDENTIAL_EXPIRATION", v);
     }
+
+    print_export(
+        shell,
+        "AWS_EXECUTION_ENV",
+        &format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")),
+    );
 
     Ok(())
 }
@@ -206,5 +213,14 @@ mod tests {
     fn test_aws_env_variable_names_fish() {
         let key_id = format_export(&Shell::Fish, "AWS_ACCESS_KEY_ID", "AKIAEXAMPLE");
         assert_eq!(key_id, "set -gx AWS_ACCESS_KEY_ID 'AKIAEXAMPLE';");
+    }
+
+    /// Verify AWS_EXECUTION_ENV format matches our user-agent string.
+    #[test]
+    fn test_aws_execution_env_format() {
+        let value = format!("vouch-cli/{}", env!("CARGO_PKG_VERSION"));
+        let export = format_export(&Shell::Bash, "AWS_EXECUTION_ENV", &value);
+        assert!(export.starts_with("export AWS_EXECUTION_ENV='vouch-cli/"));
+        assert!(export.ends_with("';"));
     }
 }

@@ -19,10 +19,12 @@ pub struct CodeArtifactOptions<'a> {
 
 /// Cached AWS credentials extracted from `serde_json::Value`.
 ///
-/// Secret fields are wrapped in `SecretString` for automatic zeroization on drop
-/// and redacted `Debug` output.
+/// `access_key_id` is a plain `String` because AWS access key IDs are semi-public
+/// identifiers (they appear in CloudTrail logs, IAM consoles, etc.).
+/// Only `secret_access_key` and `session_token` are wrapped in `SecretString`
+/// for automatic zeroization on drop and redacted `Debug` output.
 pub struct AwsEnvCredentials {
-    pub access_key_id: SecretString,
+    pub access_key_id: String,
     pub secret_access_key: SecretString,
     pub session_token: SecretString,
     pub expiration: Option<String>,
@@ -31,7 +33,7 @@ pub struct AwsEnvCredentials {
 impl std::fmt::Debug for AwsEnvCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AwsEnvCredentials")
-            .field("access_key_id", &"[REDACTED]")
+            .field("access_key_id", &self.access_key_id)
             .field("secret_access_key", &"[REDACTED]")
             .field("session_token", &"[REDACTED]")
             .field("expiration", &self.expiration)
@@ -55,12 +57,11 @@ pub async fn fetch_aws_credentials(
     })
     .await?;
 
-    let access_key_id = SecretString::from(
-        data.get("AccessKeyId")
-            .and_then(|v| v.as_str())
-            .context("AWS credentials missing AccessKeyId")?
-            .to_string(),
-    );
+    let access_key_id = data
+        .get("AccessKeyId")
+        .and_then(|v| v.as_str())
+        .context("AWS credentials missing AccessKeyId")?
+        .to_string();
     let secret_access_key = SecretString::from(
         data.get("SecretAccessKey")
             .and_then(|v| v.as_str())
@@ -186,6 +187,11 @@ pub async fn run(
 }
 
 /// Fetch AWS STS credentials (cache-first) and inject them into the environment.
+///
+/// Also sets `AWS_EXECUTION_ENV` so that AWS SDK calls include Vouch in
+/// the CloudTrail user-agent string.
+///
+/// See: <https://hackingthe.cloud/aws/general-knowledge/aws_cli_tips_and_tricks/#modifying-the-cloudtrail-log-user-agent-with-aws_execution_env>
 async fn inject_aws_credentials(
     cmd: &mut Command,
     server: &str,
@@ -194,7 +200,7 @@ async fn inject_aws_credentials(
 ) -> Result<()> {
     let creds = fetch_aws_credentials(server, role_arn, session_name).await?;
 
-    cmd.env("AWS_ACCESS_KEY_ID", creds.access_key_id.expose_secret());
+    cmd.env("AWS_ACCESS_KEY_ID", &creds.access_key_id);
     cmd.env(
         "AWS_SECRET_ACCESS_KEY",
         creds.secret_access_key.expose_secret(),
@@ -204,6 +210,11 @@ async fn inject_aws_credentials(
     if let Some(ref v) = creds.expiration {
         cmd.env("AWS_CREDENTIAL_EXPIRATION", v);
     }
+
+    cmd.env(
+        "AWS_EXECUTION_ENV",
+        format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")),
+    );
 
     Ok(())
 }
@@ -309,18 +320,20 @@ mod tests {
         assert!(!debug.contains("ghu_secret_token"));
     }
 
-    /// Verify the `AwsEnvCredentials` Debug impl redacts all secrets.
+    /// Verify the `AwsEnvCredentials` Debug impl redacts secrets but shows access_key_id.
     #[test]
     fn test_aws_env_credentials_debug_redacts() {
         let creds = AwsEnvCredentials {
-            access_key_id: SecretString::from("AKIAEXAMPLE".to_string()),
+            access_key_id: "AKIAEXAMPLE".to_string(),
             secret_access_key: SecretString::from("wJalrXUtnFEMI".to_string()),
             session_token: SecretString::from("FwoGZXIvYXdz".to_string()),
             expiration: Some("2024-01-14T18:00:00Z".to_string()),
         };
         let debug = format!("{creds:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("AKIAEXAMPLE"));
+        // access_key_id is semi-public and should be visible in debug output
+        assert!(debug.contains("AKIAEXAMPLE"));
+        // secret fields must not appear
         assert!(!debug.contains("wJalrXUtnFEMI"));
         assert!(!debug.contains("FwoGZXIvYXdz"));
     }
