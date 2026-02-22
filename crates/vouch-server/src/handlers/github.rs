@@ -461,7 +461,10 @@ async fn handle_oauth_callback(
         .await
     {
         Ok(_) => Redirect::to("/github/connect").into_response(),
-        Err(e) => error_response(e),
+        Err(e) => {
+            tracing::error!(user_id = %token.user_id, "GitHub OAuth account linking failed: {e}");
+            error_response(e)
+        }
     }
 }
 
@@ -515,7 +518,14 @@ async fn handle_installation_callback(
             urlencoding::encode(&result.account_login)
         ))
         .into_response(),
-        Err(e) => error_response(e),
+        Err(e) => {
+            tracing::error!(
+                user_id = %token.user_id,
+                installation_id,
+                "GitHub installation connection failed: {e}"
+            );
+            error_response(e)
+        }
     }
 }
 
@@ -626,7 +636,14 @@ pub async fn github_reconnect(
             urlencoding::encode(&result.account_login)
         ))
         .into_response(),
-        Err(e) => error_response(e),
+        Err(e) => {
+            tracing::error!(
+                user_id = %user.id,
+                installation_id = form.installation_id,
+                "GitHub installation reconnect failed: {e}"
+            );
+            error_response(e)
+        }
     }
 }
 

@@ -48,16 +48,22 @@ impl GitHubService<'_> {
         let client_id = self.oauth_client_id()?;
         let client_secret = self.oauth_client_secret()?;
 
-        // Exchange code for tokens
-        let token_response =
-            exchange_oauth_code(app.http_client(), client_id, client_secret, params.code)
-                .await
-                .map_err(|e| GitHubError::GitHubApi(e.to_string()))?;
+        // Exchange code for tokens (RFC 6749 §4.1.3: redirect_uri MUST match authorization request)
+        let redirect_uri = format!("{}/github/callback", self.config.base_url);
+        let token_response = exchange_oauth_code(
+            app.http_client(),
+            client_id,
+            client_secret,
+            params.code,
+            &redirect_uri,
+        )
+        .await
+        .map_err(|e| GitHubError::GitHubApi(format!("{e:#}")))?;
 
         // Get GitHub user info
         let github_user = get_github_user(app.http_client(), &token_response.access_token)
             .await
-            .map_err(|e| GitHubError::GitHubApi(e.to_string()))?;
+            .map_err(|e| GitHubError::GitHubApi(format!("{e:#}")))?;
 
         // Update user's GitHub identity
         db::update_user_github_identity(
@@ -101,7 +107,7 @@ impl GitHubService<'_> {
         let token_response =
             refresh_oauth_token(app.http_client(), client_id, client_secret, &refresh_token)
                 .await
-                .map_err(|e| GitHubError::GitHubApi(e.to_string()))?;
+                .map_err(|e| GitHubError::GitHubApi(format!("{e:#}")))?;
 
         // Update the refresh token if a new one was issued
         if let Some(new_refresh_token) = &token_response.refresh_token

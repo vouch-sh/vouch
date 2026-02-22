@@ -322,8 +322,19 @@ async fn run_server(args: config::Args) -> Result<()> {
         config.oidc_signing_key.as_ref().map(|s| s.expose_secret()),
     )?;
 
+    // Build shared HTTP client for outbound API calls (GitHub, OIDC, etc.)
+    // Respects VOUCH_HTTP_LOCAL_ADDRESS for IPv6-only environments.
+    let http_client = vouch_common::http::server_client(
+        &format!("vouch-server/{}", env!("CARGO_PKG_VERSION")),
+        config.http_local_address,
+    )
+    .context("Failed to create shared HTTP client")?;
+    if let Some(addr) = config.http_local_address {
+        tracing::info!("HTTP client local address: {addr}");
+    }
+
     // Initialize GitHub App if configured
-    let github_app = match GitHubApp::load(&config) {
+    let github_app = match GitHubApp::load(&config, http_client.clone()) {
         Ok(Some(app)) => Some(Arc::new(app)),
         Ok(None) => None,
         Err(e) => {
@@ -347,6 +358,7 @@ async fn run_server(args: config::Args) -> Result<()> {
         dpop: Arc::clone(&dpop_state),
         oidc_key,
         github_app,
+        http_client,
     });
 
     // Start background cleanup task if enabled

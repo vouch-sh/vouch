@@ -189,7 +189,11 @@ pub struct GitHubApp {
 
 impl GitHubApp {
     /// Load GitHub App from configuration if all required values are present.
-    pub fn load(config: &ServerConfig) -> Result<Option<Self>> {
+    ///
+    /// # Arguments
+    /// * `config` - Server configuration
+    /// * `http_client` - Shared HTTP client (configured with appropriate local address)
+    pub fn load(config: &ServerConfig, http_client: reqwest::Client) -> Result<Option<Self>> {
         let app_id = match config.github_app_id {
             Some(id) => GitHubAppId(id),
             None => {
@@ -227,12 +231,6 @@ impl GitHubApp {
                 anyhow::bail!("GitHub App private key failed validation: {e:?}");
             }
         }
-
-        let http_client = vouch_common::http::server_client(&format!(
-            "vouch-server/{}",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .context("Failed to create HTTP client for GitHub App")?;
 
         tracing::info!("GitHub App loaded: app_id={}", app_id.0);
 
@@ -524,16 +522,21 @@ pub struct GitHubOAuthTokenResponse {
 
 /// Exchange an OAuth authorization code for access and refresh tokens.
 ///
+/// Per RFC 6749 Section 4.1.3, `redirect_uri` MUST be included in the token
+/// request when it was included in the authorization request.
+///
 /// # Arguments
 /// * `http_client` - HTTP client to use
 /// * `client_id` - GitHub App Client ID
 /// * `client_secret` - GitHub App Client Secret
 /// * `code` - Authorization code from OAuth callback
+/// * `redirect_uri` - The same redirect URI used in the authorization request
 pub async fn exchange_oauth_code(
     http_client: &reqwest::Client,
     client_id: &str,
     client_secret: &str,
     code: &str,
+    redirect_uri: &str,
 ) -> Result<GitHubOAuthTokenResponse> {
     let response = http_client
         .post("https://github.com/login/oauth/access_token")
@@ -542,6 +545,7 @@ pub async fn exchange_oauth_code(
             ("client_id", client_id),
             ("client_secret", client_secret),
             ("code", code),
+            ("redirect_uri", redirect_uri),
         ])
         .send()
         .await
