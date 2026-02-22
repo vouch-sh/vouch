@@ -106,17 +106,22 @@ async fn print_codeartifact_env(
     Ok(())
 }
 
-/// Print a single shell export statement with proper quoting.
+/// Format a single shell export statement with proper quoting.
 ///
 /// Values are single-quoted to prevent shell injection. Any embedded single
 /// quotes are escaped using the `'\''` idiom (end quote, escaped quote, start
 /// quote).
-fn print_export(shell: &Shell, key: &str, value: &str) {
+fn format_export(shell: &Shell, key: &str, value: &str) -> String {
     let escaped = value.replace('\'', "'\\''");
     match shell {
-        Shell::Bash => println!("export {key}='{escaped}';"),
-        Shell::Fish => println!("set -gx {key} '{escaped}';"),
+        Shell::Bash => format!("export {key}='{escaped}';"),
+        Shell::Fish => format!("set -gx {key} '{escaped}';"),
     }
+}
+
+/// Print a single shell export statement with proper quoting.
+fn print_export(shell: &Shell, key: &str, value: &str) {
+    println!("{}", format_export(shell, key, value));
 }
 
 #[cfg(test)]
@@ -124,30 +129,82 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_print_export_bash_simple() {
-        // Just verify it doesn't panic - output goes to stdout
-        print_export(&Shell::Bash, "FOO", "bar");
+    fn test_format_export_bash() {
+        assert_eq!(
+            format_export(&Shell::Bash, "FOO", "bar"),
+            "export FOO='bar';"
+        );
     }
 
     #[test]
-    fn test_print_export_fish_simple() {
-        print_export(&Shell::Fish, "FOO", "bar");
+    fn test_format_export_fish() {
+        assert_eq!(
+            format_export(&Shell::Fish, "FOO", "bar"),
+            "set -gx FOO 'bar';"
+        );
     }
 
     #[test]
     fn test_shell_quoting_escapes_single_quotes() {
-        // The value contains a single quote which must be escaped
         let value = "it's a test";
-        let escaped = value.replace('\'', "'\\''");
-        assert_eq!(escaped, "it'\\''s a test");
+        assert_eq!(
+            format_export(&Shell::Bash, "X", value),
+            "export X='it'\\''s a test';"
+        );
     }
 
     #[test]
     fn test_shell_quoting_preserves_special_chars() {
-        // Verify that shell metacharacters are safely contained within single quotes
+        // Shell metacharacters are safely contained within single quotes
         let value = "$(whoami) `id` ; rm -rf /";
-        let escaped = value.replace('\'', "'\\''");
-        // No single quotes in input, so no escaping needed - single quotes protect everything
-        assert_eq!(escaped, value);
+        assert_eq!(
+            format_export(&Shell::Bash, "X", value),
+            "export X='$(whoami) `id` ; rm -rf /';"
+        );
+    }
+
+    /// Verify exact AWS environment variable names used by AWS CLI/SDKs.
+    #[test]
+    fn test_aws_env_variable_names_bash() {
+        let key_id = format_export(&Shell::Bash, "AWS_ACCESS_KEY_ID", "AKIAEXAMPLE");
+        let secret = format_export(&Shell::Bash, "AWS_SECRET_ACCESS_KEY", "secret");
+        let token = format_export(&Shell::Bash, "AWS_SESSION_TOKEN", "token");
+        let expiration = format_export(
+            &Shell::Bash,
+            "AWS_CREDENTIAL_EXPIRATION",
+            "2024-01-14T18:00:00Z",
+        );
+
+        assert_eq!(key_id, "export AWS_ACCESS_KEY_ID='AKIAEXAMPLE';");
+        assert_eq!(secret, "export AWS_SECRET_ACCESS_KEY='secret';");
+        assert_eq!(token, "export AWS_SESSION_TOKEN='token';");
+        assert_eq!(
+            expiration,
+            "export AWS_CREDENTIAL_EXPIRATION='2024-01-14T18:00:00Z';"
+        );
+    }
+
+    /// Verify exact GitHub environment variable names.
+    #[test]
+    fn test_github_env_variable_names_bash() {
+        let github = format_export(&Shell::Bash, "GITHUB_TOKEN", "ghu_example");
+        let gh = format_export(&Shell::Bash, "GH_TOKEN", "ghu_example");
+
+        assert_eq!(github, "export GITHUB_TOKEN='ghu_example';");
+        assert_eq!(gh, "export GH_TOKEN='ghu_example';");
+    }
+
+    /// Verify exact CodeArtifact environment variable name.
+    #[test]
+    fn test_codeartifact_env_variable_name_bash() {
+        let ca = format_export(&Shell::Bash, "CODEARTIFACT_AUTH_TOKEN", "ca-token");
+        assert_eq!(ca, "export CODEARTIFACT_AUTH_TOKEN='ca-token';");
+    }
+
+    /// Verify Fish shell format with AWS variable names.
+    #[test]
+    fn test_aws_env_variable_names_fish() {
+        let key_id = format_export(&Shell::Fish, "AWS_ACCESS_KEY_ID", "AKIAEXAMPLE");
+        assert_eq!(key_id, "set -gx AWS_ACCESS_KEY_ID 'AKIAEXAMPLE';");
     }
 }

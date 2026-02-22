@@ -11,7 +11,6 @@
 //! Or use `vouch setup github --configure` to set this up automatically.
 
 use anyhow::Result;
-use std::io::Write;
 use vouch_common::{GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse};
 
 use crate::client::VouchClient;
@@ -101,11 +100,13 @@ async fn get_credential() -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    writeln!(out, "protocol={protocol}")?;
-    writeln!(out, "host={host}")?;
-    writeln!(out, "username=x-access-token")?;
-    writeln!(out, "password={}", response.token)?;
-    writeln!(out)?;
+    super::git_protocol::write_credential_output(
+        &mut out,
+        protocol,
+        host,
+        "x-access-token",
+        &response.token,
+    )?;
 
     Ok(())
 }

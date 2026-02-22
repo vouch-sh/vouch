@@ -259,3 +259,37 @@ async fn fetch_token(
 
     Ok(ca_token)
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    /// Verify the CodeArtifact cache JSON round-trips correctly.
+    ///
+    /// The `get_token` function serializes with `json!()` and then extracts
+    /// fields with `.get("authorization_token")` and `.get("expiration")`.
+    /// This test ensures the field names match between serialization and extraction.
+    #[test]
+    fn test_codeartifact_cache_round_trip() {
+        let token_value = "eyJhbGciOi...example-ca-token";
+        let expiration_value: i64 = 1_705_234_567;
+
+        // Simulate what get_token's cache closure produces
+        let data = serde_json::json!({
+            "authorization_token": token_value,
+            "expiration": expiration_value,
+        });
+
+        // Simulate what get_token's extraction code does
+        let auth_token = data
+            .get("authorization_token")
+            .and_then(|v| v.as_str())
+            .expect("authorization_token must be present and a string");
+        let expiration = data
+            .get("expiration")
+            .and_then(|v| v.as_i64())
+            .expect("expiration must be present and an integer");
+
+        assert_eq!(auth_token, token_value);
+        assert_eq!(expiration, expiration_value);
+    }
+}

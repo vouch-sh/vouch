@@ -252,3 +252,76 @@ async fn inject_codeartifact_credentials(
 
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::commands::credential::aws::CredentialProcessOutput;
+
+    /// Verify that `AwsEnvCredentials` can be extracted from the JSON produced
+    /// by `CredentialProcessOutput::to_json()`. This tests the contract between
+    /// the serialization in `aws.rs` and the extraction in `exec.rs`.
+    #[test]
+    fn test_aws_env_credentials_from_cached_json() {
+        let output = CredentialProcessOutput {
+            version: 1,
+            access_key_id: "AKIAEXAMPLE".to_string(),
+            secret_access_key: SecretString::from("secret-key".to_string()),
+            session_token: SecretString::from("session-token".to_string()),
+            expiration: "2024-01-14T18:00:00Z".to_string(),
+        };
+
+        let data = output.to_json();
+
+        // Extract using the same logic as fetch_aws_credentials
+        let access_key_id = data
+            .get("AccessKeyId")
+            .and_then(|v| v.as_str())
+            .expect("AccessKeyId must be present");
+        let secret_access_key = data
+            .get("SecretAccessKey")
+            .and_then(|v| v.as_str())
+            .expect("SecretAccessKey must be present");
+        let session_token = data
+            .get("SessionToken")
+            .and_then(|v| v.as_str())
+            .expect("SessionToken must be present");
+        let expiration = data
+            .get("Expiration")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        assert_eq!(access_key_id, "AKIAEXAMPLE");
+        assert_eq!(secret_access_key, "secret-key");
+        assert_eq!(session_token, "session-token");
+        assert_eq!(expiration.as_deref(), Some("2024-01-14T18:00:00Z"));
+    }
+
+    /// Verify the `GitHubEnvToken` Debug impl redacts the token.
+    #[test]
+    fn test_github_env_token_debug_redacts() {
+        let gh = GitHubEnvToken {
+            token: SecretString::from("ghu_secret_token".to_string()),
+        };
+        let debug = format!("{gh:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("ghu_secret_token"));
+    }
+
+    /// Verify the `AwsEnvCredentials` Debug impl redacts all secrets.
+    #[test]
+    fn test_aws_env_credentials_debug_redacts() {
+        let creds = AwsEnvCredentials {
+            access_key_id: SecretString::from("AKIAEXAMPLE".to_string()),
+            secret_access_key: SecretString::from("wJalrXUtnFEMI".to_string()),
+            session_token: SecretString::from("FwoGZXIvYXdz".to_string()),
+            expiration: Some("2024-01-14T18:00:00Z".to_string()),
+        };
+        let debug = format!("{creds:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("AKIAEXAMPLE"));
+        assert!(!debug.contains("wJalrXUtnFEMI"));
+        assert!(!debug.contains("FwoGZXIvYXdz"));
+    }
+}

@@ -16,7 +16,6 @@
 
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
-use std::io::Write;
 
 use crate::commands::credential::git_protocol::read_credential_input;
 use crate::integrations::aws::codecommit::{
@@ -77,11 +76,13 @@ async fn get_credential() -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
-    writeln!(out, "protocol={protocol}")?;
-    writeln!(out, "host={host}")?;
-    writeln!(out, "username={}", signed.username.expose_secret())?;
-    writeln!(out, "password={}", signed.password.expose_secret())?;
-    writeln!(out)?;
+    super::git_protocol::write_credential_output(
+        &mut out,
+        protocol,
+        host,
+        signed.username.expose_secret(),
+        signed.password.expose_secret(),
+    )?;
 
     Ok(())
 }
