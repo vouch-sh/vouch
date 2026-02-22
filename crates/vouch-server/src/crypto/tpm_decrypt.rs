@@ -492,10 +492,23 @@ fn aes_256_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Zeroi
 // AES-256-GCM Decryption (for config payload)
 // ============================================================================
 
+/// AAD version tag for context-binding.
+///
+/// Prevents ciphertext from being moved between envelopes. The version byte
+/// can be extended with additional context (e.g., KMS key ARN) in future versions.
+const AAD_VERSION: u8 = 1;
+
+/// Build the AAD (Additional Authenticated Data) for AES-256-GCM operations.
+fn build_aad() -> [u8; 1] {
+    [AAD_VERSION]
+}
+
 /// AES-256-GCM decrypt the config payload.
 ///
 /// The encrypted data format is: `nonce (12 bytes) || ciphertext || tag (16 bytes)`.
 /// This is the format produced by the provisioning tool when encrypting the S3Config JSON.
+///
+/// Uses a version-tagged AAD to bind ciphertext to its envelope context.
 fn aes_256_gcm_decrypt(key: &[u8], encrypted_data: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     const NONCE_LEN: usize = 12;
     const TAG_LEN: usize = 16;
@@ -527,9 +540,10 @@ fn aes_256_gcm_decrypt(key: &[u8], encrypted_data: &[u8]) -> Result<Zeroizing<Ve
 
     let opening_key = aead::LessSafeKey::new(unbound_key);
 
+    let aad = build_aad();
     let mut in_out = ciphertext_and_tag.to_vec();
     let plaintext = opening_key
-        .open_in_place(nonce, aead::Aad::empty(), &mut in_out)
+        .open_in_place(nonce, aead::Aad::from(&aad), &mut in_out)
         .map_err(|_| {
             anyhow::anyhow!("AES-256-GCM decryption failed (wrong key or tampered data)")
         })?;
@@ -540,6 +554,8 @@ fn aes_256_gcm_decrypt(key: &[u8], encrypted_data: &[u8]) -> Result<Zeroizing<Ve
 /// AES-256-GCM encrypt data (for provisioning/testing).
 ///
 /// Returns `nonce (12 bytes) || ciphertext || tag (16 bytes)`.
+///
+/// Uses a version-tagged AAD to bind ciphertext to its envelope context.
 pub fn aes_256_gcm_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
     use aws_lc_rs::rand as aws_rand;
 
@@ -561,9 +577,10 @@ pub fn aes_256_gcm_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
 
     let sealing_key = aead::LessSafeKey::new(unbound_key);
 
+    let aad = build_aad();
     let mut in_out = plaintext.to_vec();
     sealing_key
-        .seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut in_out)
+        .seal_in_place_append_tag(nonce, aead::Aad::from(&aad), &mut in_out)
         .map_err(|_| anyhow::anyhow!("AES-256-GCM encryption failed"))?;
 
     // Prepend nonce

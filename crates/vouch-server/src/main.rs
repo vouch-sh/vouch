@@ -275,6 +275,16 @@ async fn run_server(args: config::Args) -> Result<()> {
         tpm_decrypt::is_nitro_tpm_available(),
     );
 
+    // Warn if rp_id is localhost but TLS is configured (likely production)
+    if vouch_common::is_loopback_host(&config.rp_id) && config.tls_configured() {
+        tracing::warn!(
+            target: "security",
+            "rp_id is '{}' but TLS is configured — \
+             this allows WebAuthn origin relaxation in what appears to be a production deployment",
+            config.rp_id,
+        );
+    }
+
     // Build WebAuthn instance
     // Use base_url as origin (handles localhost with http and port correctly)
     let rp_origin = url::Url::parse(&config.base_url)?;

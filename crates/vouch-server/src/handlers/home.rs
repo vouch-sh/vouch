@@ -6,7 +6,7 @@
 //! If the user is already authenticated, it shows a "Manage Security Keys"
 //! button instead.
 
-use crate::handlers::common::{AuthContext, get_auth_context};
+use crate::handlers::session::{AuthContext, get_auth_context};
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::{extract::State, response::IntoResponse};

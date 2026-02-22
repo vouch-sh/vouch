@@ -21,11 +21,11 @@
 
 use super::extractors::ClientInfo;
 use crate::AppState;
+use crate::crypto::generate_challenge;
 use crate::crypto::webauthn_verify;
 use crate::db::{self, AuthEventParams, AuthEventType};
-use crate::handlers::common::{
-    create_session_cookie, generate_challenge, get_auth_context, json_error,
-};
+use crate::handlers::errors::json_error;
+use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
 use crate::redact_email;
 use askama::Template;
@@ -63,7 +63,7 @@ pub struct LoginTemplate {
     /// Relying Party ID for WebAuthn.
     pub rp_id: String,
     /// Authentication context for header.
-    pub auth: crate::handlers::common::AuthContext,
+    pub auth: crate::handlers::session::AuthContext,
 }
 
 impl_template_response!(LoginTemplate);

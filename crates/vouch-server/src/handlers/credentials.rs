@@ -3,7 +3,7 @@
 
 use crate::AppState;
 use crate::db::{self, GitHubCredentialEventParams};
-use crate::services::integrations::aws::{AwsError, AwsService};
+use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
 use axum::{Json, extract::State, http::StatusCode};
 use axum_extra::TypedHeader;
@@ -18,7 +18,7 @@ use vouch_common::{
     SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
 };
 
-use super::common::extract_session;
+use super::session::extract_session;
 use super::{extract_session_with_email, json_error};
 use crate::redact_email;
 
@@ -217,32 +217,38 @@ pub async fn get_aws_token(
     // Get user's organization domain (hd claim) if they belong to an org
     let hd = get_user_org_domain(&state, &claims.sub).await?;
 
-    // Create AWS service and issue token
+    // Issue AWS token
     let config = state.config();
-    let aws_service = AwsService::new(&state.db, &config, &state.oidc_key);
-    let result = aws_service
-        .issue_token(&user_email, claims.authenticator_id.as_deref(), hd)
-        .await
-        .map_err(|e| match e {
-            AwsError::NoAuthenticator => {
-                json_error(StatusCode::FORBIDDEN, "no_authenticator", &e.to_string())
-            }
-            AwsError::Database(ref err) => json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &err.to_string(),
-            ),
-            AwsError::ClaimsBuild(_) => json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "claims_error",
-                &e.to_string(),
-            ),
-            AwsError::TokenSign(_) => json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "token_error",
-                &e.to_string(),
-            ),
-        })?;
+    let result = issue_aws_token(
+        &state.db,
+        &config.base_url,
+        config.session_hours,
+        &state.oidc_key,
+        &user_email,
+        claims.authenticator_id.as_deref(),
+        hd,
+    )
+    .await
+    .map_err(|e| match e {
+        AwsError::NoAuthenticator => {
+            json_error(StatusCode::FORBIDDEN, "no_authenticator", &e.to_string())
+        }
+        AwsError::Database(ref err) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "db_error",
+            &err.to_string(),
+        ),
+        AwsError::ClaimsBuild(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "claims_error",
+            &e.to_string(),
+        ),
+        AwsError::TokenSign(_) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "token_error",
+            &e.to_string(),
+        ),
+    })?;
 
     Ok(Json(AwsTokenResponse {
         id_token: result.id_token,
@@ -497,7 +503,13 @@ pub async fn get_github_token(
     let permissions = minimal_git_permissions();
     let token = github_app
         .get_installation_token(
-            GitHubInstallationId(installation.installation_id as u64),
+            GitHubInstallationId(u64::try_from(installation.installation_id).map_err(|_| {
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "invalid_installation",
+                    "Invalid installation ID",
+                )
+            })?),
             request.repositories.as_deref(),
             Some(&permissions),
         )
@@ -517,10 +529,13 @@ pub async fn get_github_token(
         })?;
 
     // Calculate expires_in from expires_at
-    let expires_at_ts: Timestamp = token
-        .expires_at
-        .parse()
-        .unwrap_or_else(|_| Timestamp::now());
+    let expires_at_ts: Timestamp = token.expires_at.parse().unwrap_or_else(|e| {
+        tracing::warn!(
+            "Failed to parse token expires_at '{}': {e}",
+            token.expires_at
+        );
+        Timestamp::now()
+    });
     let now = Timestamp::now();
     let expires_in = expires_at_ts
         .as_second()

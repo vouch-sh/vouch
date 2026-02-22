@@ -134,7 +134,7 @@ pub use pending_oauth::{
 
 // Re-export authorization code functions (RFC 6749 Section 10.5)
 pub use authorization_codes::{
-    delete_expired_authorization_codes, get_authorization_code_owner,
+    delete_expired_authorization_codes, get_authorization_code_owner, get_consumed_code_owner,
     is_authorization_code_consumed, store_authorization_code, try_consume_authorization_code,
 };
 

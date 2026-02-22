@@ -10,7 +10,8 @@
 //! - GET /github/success - Success page after connection
 
 use crate::db;
-use crate::handlers::common::{AuthContext, json_error};
+use crate::handlers::errors::json_error;
+use crate::handlers::session::AuthContext;
 use crate::services::integrations::github::{
     ConnectInstallationParams, GitHubError, GitHubService, LinkAccountParams,
     ReconnectInstallationParams, installations::validate_org_admin, webhooks::WebhookEvent,
@@ -140,7 +141,7 @@ impl GitHubStateToken {
         flow_type: GitHubStateFlowType,
     ) -> Result<Self, aws_lc_rs::error::Unspecified> {
         let now = Timestamp::now().as_second();
-        let nonce = URL_SAFE_NO_PAD.encode(crate::handlers::common::generate_random_bytes(16)?);
+        let nonce = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(16)?);
         Ok(Self {
             org_id: org_id.to_string(),
             user_id: user_id.to_string(),
@@ -319,7 +320,7 @@ pub async fn github_connect_page(
     }
 
     // Extract session from cookie (browser UI)
-    let session = match crate::handlers::common::extract_session_from_cookie(&state, &jar).await {
+    let session = match crate::handlers::session::extract_session_from_cookie(&state, &jar).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
@@ -529,7 +530,7 @@ pub async fn github_link_start(State(state): State<Arc<AppState>>, jar: CookieJa
     }
 
     // Extract session from cookie
-    let session = match crate::handlers::common::extract_session_from_cookie(&state, &jar).await {
+    let session = match crate::handlers::session::extract_session_from_cookie(&state, &jar).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
@@ -592,7 +593,7 @@ pub async fn github_reconnect(
     }
 
     // Extract session from cookie
-    let session = match crate::handlers::common::extract_session_from_cookie(&state, &jar).await {
+    let session = match crate::handlers::session::extract_session_from_cookie(&state, &jar).await {
         Ok(s) => s,
         Err(_) => {
             return Redirect::to("/enroll/start").into_response();
@@ -635,7 +636,7 @@ pub async fn github_success_page(
     jar: CookieJar,
     Query(params): Query<GitHubSuccessParams>,
 ) -> impl IntoResponse {
-    let auth = crate::handlers::common::get_auth_context(&state, &jar).await;
+    let auth = crate::handlers::session::get_auth_context(&state, &jar).await;
 
     GitHubSuccessTemplate {
         org_name: state.config().get_org_display_name().to_string(),

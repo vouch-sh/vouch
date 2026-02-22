@@ -22,8 +22,8 @@ use serde::Deserialize;
 use std::sync::Arc;
 use vouch_common::{ApiError, AuthEventInfo, ListAuthEventsResponse};
 
-use super::common::extract_session;
 use super::json_error;
+use super::session::extract_session;
 
 // ============================================================================
 // Org Admin Extraction
@@ -238,6 +238,7 @@ pub async fn create_scim_token(
         req.description.as_deref(),
         Some(&expires_at),
         Some(&org_id),
+        None, // Default scope: full access
     )
     .await
     .map_err(|e| {

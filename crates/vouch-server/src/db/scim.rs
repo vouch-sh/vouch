@@ -15,6 +15,9 @@ use uuid::Uuid;
 // SCIM Tokens
 // ============================================================================
 
+/// Default scope for new SCIM tokens: full access.
+pub const SCIM_DEFAULT_SCOPE: &str = "users:read,users:write,groups:read,groups:write";
+
 /// SCIM token record.
 #[derive(Debug, sqlx::FromRow)]
 #[allow(dead_code)]
@@ -26,6 +29,7 @@ pub struct ScimToken {
     pub created_at: DbTimestamp,
     pub last_used_at: Option<DbTimestamp>,
     pub expires_at: Option<DbTimestamp>,
+    pub scope: String,
 }
 
 /// Get a SCIM token by its hash.
@@ -42,6 +46,7 @@ pub async fn get_scim_token_by_hash(pool: &Pool, token_hash: &str) -> Result<Opt
                 ScimTokens::CreatedAt,
                 ScimTokens::LastUsedAt,
                 ScimTokens::ExpiresAt,
+                ScimTokens::Scope,
             ])
             .from(ScimTokens::Table)
             .and_where(Expr::col(ScimTokens::TokenHash).eq(token_hash))
@@ -81,10 +86,12 @@ pub async fn create_scim_token(
     description: Option<&str>,
     expires_at: Option<&str>,
     org_id: Option<&str>,
+    scope: Option<&str>,
 ) -> Result<String> {
     let id = Uuid::now_v7().to_string();
     let db_type = pool.db_type();
     let now = Timestamp::now().to_string();
+    let scope_val = scope.unwrap_or(SCIM_DEFAULT_SCOPE);
 
     let sql = {
         let query = Query::insert()
@@ -96,6 +103,7 @@ pub async fn create_scim_token(
                 ScimTokens::Description,
                 ScimTokens::ExpiresAt,
                 ScimTokens::CreatedAt,
+                ScimTokens::Scope,
             ])
             .values_panic([
                 id.clone().into(),
@@ -104,6 +112,7 @@ pub async fn create_scim_token(
                 description.into(),
                 expires_at.into(),
                 now.as_str().into(),
+                scope_val.into(),
             ])
             .to_owned();
         query.build_sql(db_type)
@@ -169,6 +178,7 @@ pub async fn list_scim_tokens(pool: &Pool, org_id: Option<&str>) -> Result<Vec<S
                     ScimTokens::CreatedAt,
                     ScimTokens::LastUsedAt,
                     ScimTokens::ExpiresAt,
+                    ScimTokens::Scope,
                 ])
                 .from(ScimTokens::Table)
                 .and_where(Expr::col(ScimTokens::OrgId).eq(org_id))
@@ -188,6 +198,7 @@ pub async fn list_scim_tokens(pool: &Pool, org_id: Option<&str>) -> Result<Vec<S
                     ScimTokens::CreatedAt,
                     ScimTokens::LastUsedAt,
                     ScimTokens::ExpiresAt,
+                    ScimTokens::Scope,
                 ])
                 .from(ScimTokens::Table)
                 .order_by(ScimTokens::CreatedAt, Order::Desc)

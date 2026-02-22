@@ -94,6 +94,13 @@ pub struct TokenValidationContext<'a> {
     pub(crate) oidc_key: &'a OidcSigningKey,
     /// Expected issuer (base_url).
     pub(crate) expected_issuer: &'a str,
+    /// Optional expected audience for access tokens.
+    ///
+    /// When `Some`, the `aud` claim of ES256 access tokens is validated
+    /// against this value (RFC 8725 Section 3.9). When `None`, audience
+    /// validation is skipped (for introspection/revocation endpoints that
+    /// accept tokens for any audience).
+    pub(crate) expected_audience: Option<&'a str>,
 }
 
 impl<'a> TokenValidationContext<'a> {
@@ -111,7 +118,19 @@ impl<'a> TokenValidationContext<'a> {
             jwt_secret,
             oidc_key,
             expected_issuer,
+            expected_audience: None,
         }
+    }
+
+    /// Set the expected audience for access token validation.
+    ///
+    /// Infrastructure for resource servers that know their audience.
+    /// Currently unused — the userinfo endpoint accepts tokens for any client.
+    #[must_use]
+    #[allow(dead_code)]
+    pub fn with_audience(mut self, audience: &'a str) -> Self {
+        self.expected_audience = Some(audience);
+        self
     }
 }
 
@@ -135,7 +154,13 @@ pub fn decode_token(token: &str, ctx: &TokenValidationContext<'_>) -> Option<Dec
             // Attempt to decode as an RFC 9068 access token
             let decoding_key = ctx.oidc_key.decoding_key();
             let mut validation = Validation::new(Algorithm::ES256);
-            validation.validate_aud = false;
+            // Validate audience when caller specifies one (RFC 8725 §3.9)
+            if let Some(aud) = ctx.expected_audience {
+                validation.set_audience(&[aud]);
+                validation.validate_aud = true;
+            } else {
+                validation.validate_aud = false;
+            }
             // RFC 8725 §3.8: Validate issuer
             validation.set_issuer(&[ctx.expected_issuer]);
 

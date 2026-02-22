@@ -136,6 +136,34 @@ pub async fn get_authorization_code_owner(
     Ok(result)
 }
 
+/// Check if a code was previously consumed and return owner info for revocation.
+///
+/// Combines `is_authorization_code_consumed` + `get_authorization_code_owner` into a single
+/// atomic query to reduce the TOCTOU window during replay detection.
+///
+/// # Errors
+///
+/// Returns an error if the database operation fails.
+pub async fn get_consumed_code_owner(
+    pool: &Pool,
+    code_hash: &str,
+) -> Result<Option<(String, String)>> {
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::select()
+            .columns([AuthorizationCodes::UserId, AuthorizationCodes::ClientId])
+            .from(AuthorizationCodes::Table)
+            .and_where(Expr::col(AuthorizationCodes::CodeHash).eq(code_hash))
+            .and_where(Expr::col(AuthorizationCodes::ConsumedAt).is_not_null())
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result: Option<(String, String)> = db_fetch_optional!(pool, sqlx::query_as(&sql))?;
+    Ok(result)
+}
+
 /// Delete expired authorization codes.
 ///
 /// # Errors

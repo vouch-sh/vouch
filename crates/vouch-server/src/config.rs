@@ -43,12 +43,6 @@ fn parse_bool_default_true(s: &str) -> bool {
     lower != "false" && s != "0"
 }
 
-/// Parse a boolean value that defaults to false (true only if "true" or "1").
-fn parse_bool_default_false(s: &str) -> bool {
-    let lower = s.to_lowercase();
-    lower == "true" || s == "1"
-}
-
 // ============================================================================
 // Command Line Arguments
 // ============================================================================
@@ -279,7 +273,7 @@ pub struct ServerConfig {
     pub oidc_signing_key: Option<SecretString>,
     /// Enable RFC 9449 DPoP support (default: true).
     pub dpop_enabled: bool,
-    /// Require DPoP nonce in proofs (default: false).
+    /// Require DPoP nonce in proofs (default: true per RFC 9449 Section 8).
     pub dpop_nonce_required: bool,
     /// Maximum age of DPoP proofs in seconds (default: 300).
     pub dpop_max_age_seconds: i64,
@@ -351,10 +345,11 @@ impl ServerConfig {
             .map(|s| parse_bool_default_true(&s))
             .unwrap_or(true);
 
+        // Default to requiring DPoP nonces per RFC 9449 Section 8
         let dpop_nonce_required = args
             .dpop_nonce_required
-            .map(|s| parse_bool_default_false(&s))
-            .unwrap_or(false);
+            .map(|s| parse_bool_default_true(&s))
+            .unwrap_or(true);
 
         // Parse CORS origins
         let cors_origins = args

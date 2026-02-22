@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Install page handler.
 
-use crate::handlers::common::{AuthContext, get_auth_context};
+use crate::handlers::session::{AuthContext, get_auth_context};
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::{extract::State, response::IntoResponse};

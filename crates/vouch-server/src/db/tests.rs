@@ -833,9 +833,16 @@ async fn test_scim_audit_logging() {
     let pool = test_db().await;
 
     // Create a SCIM token first (required for foreign key constraint)
-    let token_id = create_scim_token(&pool, "test_token_hash", Some("Test token"), None, None)
-        .await
-        .expect("Failed to create SCIM token");
+    let token_id = create_scim_token(
+        &pool,
+        "test_token_hash",
+        Some("Test token"),
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect("Failed to create SCIM token");
 
     // Insert audit log with token reference
     let audit_id = insert_scim_audit(
@@ -1069,9 +1076,16 @@ async fn test_scim_token_management() {
 
     // Create SCIM token with org
     let token_hash = "hashed_scim_token";
-    let token_id = create_scim_token(&pool, token_hash, Some("Admin token"), None, Some(org_id))
-        .await
-        .expect("Failed to create SCIM token");
+    let token_id = create_scim_token(
+        &pool,
+        token_hash,
+        Some("Admin token"),
+        None,
+        Some(org_id),
+        None,
+    )
+    .await
+    .expect("Failed to create SCIM token");
 
     assert!(!token_id.is_empty());
 

@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::ApiError;
 
-use super::common::{AuthContext, extract_session};
+use super::session::{AuthContext, extract_session};
 use super::{extract_session_from_cookie, hash_token, json_error};
 
 // ============================================================================

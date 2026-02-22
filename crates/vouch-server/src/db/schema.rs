@@ -133,6 +133,7 @@ pub enum ScimTokens {
     CreatedAt,
     LastUsedAt,
     ExpiresAt,
+    Scope,
 }
 
 /// SCIM audit log.

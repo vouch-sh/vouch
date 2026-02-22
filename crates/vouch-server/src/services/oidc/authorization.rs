@@ -107,22 +107,62 @@ pub struct AuthorizeRequestParams {
 }
 
 /// Validated authorization request ready for code issuance.
+///
+/// Fields are private to ensure this struct can only be constructed via
+/// [`validate_authorize_request()`], guaranteeing all invariants are met.
 #[derive(Debug)]
 pub struct ValidatedAuthRequest {
+    client_id: String,
+    redirect_uri: String,
+    scope: ScopeSet,
+    state: Option<String>,
+    nonce: Option<String>,
+    code_challenge: Option<String>,
+    code_challenge_method: Option<CodeChallengeMethod>,
+}
+
+impl ValidatedAuthRequest {
     /// Client ID.
-    pub client_id: String,
+    #[must_use]
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
     /// Redirect URI.
-    pub redirect_uri: String,
+    #[must_use]
+    pub fn redirect_uri(&self) -> &str {
+        &self.redirect_uri
+    }
+
     /// Requested scope.
-    pub scope: ScopeSet,
+    #[must_use]
+    pub fn scope(&self) -> &ScopeSet {
+        &self.scope
+    }
+
     /// State parameter.
-    pub state: Option<String>,
+    #[must_use]
+    pub fn state(&self) -> Option<&str> {
+        self.state.as_deref()
+    }
+
     /// OIDC nonce.
-    pub nonce: Option<String>,
-    /// PKCE code challenge — RFC 7636 Section 4.2.
-    pub code_challenge: Option<String>,
-    /// PKCE code challenge method — RFC 7636 Section 4.2.
-    pub code_challenge_method: Option<CodeChallengeMethod>,
+    #[must_use]
+    pub fn nonce(&self) -> Option<&str> {
+        self.nonce.as_deref()
+    }
+
+    /// PKCE code challenge (RFC 7636 Section 4.2).
+    #[must_use]
+    pub fn code_challenge(&self) -> Option<&str> {
+        self.code_challenge.as_deref()
+    }
+
+    /// PKCE code challenge method (RFC 7636 Section 4.2).
+    #[must_use]
+    pub fn code_challenge_method(&self) -> Option<CodeChallengeMethod> {
+        self.code_challenge_method
+    }
 }
 
 /// Result of checking session state for authorization.
@@ -368,7 +408,7 @@ pub async fn issue_authorization_code(
         })?;
 
     // RFC 6749 Section 10.5: Store code hash for single-use enforcement.
-    let code_hash = crate::handlers::common::hash_token(&code);
+    let code_hash = crate::crypto::hash_token(&code);
     let expires_at = Timestamp::from_second(exp).unwrap_or(now).to_string();
 
     if let Err(e) = crate::db::store_authorization_code(
@@ -558,8 +598,8 @@ mod tests {
         let result = validate_authorize_request(params);
         assert!(result.is_ok());
         let validated = result.unwrap();
-        assert_eq!(validated.client_id, "test-client");
-        assert_eq!(validated.scope, ScopeSet::parse("openid email"));
+        assert_eq!(validated.client_id(), "test-client");
+        assert_eq!(*validated.scope(), ScopeSet::parse("openid email"));
     }
 
     #[test]
@@ -618,7 +658,7 @@ mod tests {
         let result = validate_authorize_request(params);
         assert!(result.is_ok());
         let validated = result.unwrap();
-        assert_eq!(validated.scope, ScopeSet::parse("openid")); // Default scope
+        assert_eq!(*validated.scope(), ScopeSet::parse("openid")); // Default scope
     }
 
     #[test]

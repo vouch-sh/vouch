@@ -25,11 +25,14 @@ pub async fn list_groups(
     headers: HeaderMap,
     Query(query): Query<ScimListQuery>,
 ) -> Response {
-    // Authenticate
-    let token_id = match authenticate_scim(&state, &headers).await {
-        Ok(id) => id,
+    // Authenticate and check scope
+    let auth = match authenticate_scim(&state, &headers).await {
+        Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
+    if let Err((status, json)) = auth.require_scope("groups:read") {
+        return (status, json).into_response();
+    }
 
     let start_index = query.start_index.unwrap_or(1);
     let count = query.count.unwrap_or(100).min(100);
@@ -66,7 +69,7 @@ pub async fn list_groups(
         "list",
         "Group",
         "*",
-        Some(&token_id),
+        Some(&auth.token_id),
         Some(&format!("{{\"count\": {}}}", resources.len())),
     )
     .await
@@ -93,11 +96,14 @@ pub async fn create_group(
     headers: HeaderMap,
     Json(group): Json<ScimGroup>,
 ) -> Response {
-    // Authenticate
-    let token_id = match authenticate_scim(&state, &headers).await {
-        Ok(id) => id,
+    // Authenticate and check scope
+    let auth = match authenticate_scim(&state, &headers).await {
+        Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
+    if let Err((status, json)) = auth.require_scope("groups:write") {
+        return (status, json).into_response();
+    }
 
     // Create group
     let db_group =
@@ -136,7 +142,7 @@ pub async fn create_group(
         "create",
         "Group",
         &db_group.id,
-        Some(&token_id),
+        Some(&auth.token_id),
         Some(&format!(
             "{{\"displayName\": \"{}\"}}",
             db_group.display_name
@@ -163,7 +169,11 @@ pub async fn get_group(
     Path(id): Path<String>,
 ) -> Response {
     // Authenticate
-    if let Err((status, json)) = authenticate_scim(&state, &headers).await {
+    let auth = match authenticate_scim(&state, &headers).await {
+        Ok(auth) => auth,
+        Err((status, json)) => return (status, json).into_response(),
+    };
+    if let Err((status, json)) = auth.require_scope("groups:read") {
         return (status, json).into_response();
     }
 
@@ -202,11 +212,14 @@ pub async fn patch_group(
     Path(id): Path<String>,
     Json(patch): Json<ScimPatchRequest>,
 ) -> Response {
-    // Authenticate
-    let token_id = match authenticate_scim(&state, &headers).await {
-        Ok(id) => id,
+    // Authenticate and check scope
+    let auth = match authenticate_scim(&state, &headers).await {
+        Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
+    if let Err((status, json)) = auth.require_scope("groups:write") {
+        return (status, json).into_response();
+    }
 
     // Get existing group
     let group = match db::get_scim_group(&state.db, &id).await {
@@ -326,8 +339,15 @@ pub async fn patch_group(
     }
 
     // Audit log
-    if let Err(e) =
-        db::insert_scim_audit(&state.db, "update", "Group", &id, Some(&token_id), None).await
+    if let Err(e) = db::insert_scim_audit(
+        &state.db,
+        "update",
+        "Group",
+        &id,
+        Some(&auth.token_id),
+        None,
+    )
+    .await
     {
         tracing::warn!("Failed to record SCIM audit: {e}");
     }
@@ -358,11 +378,14 @@ pub async fn delete_group(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
-    // Authenticate
-    let token_id = match authenticate_scim(&state, &headers).await {
-        Ok(id) => id,
+    // Authenticate and check scope
+    let auth = match authenticate_scim(&state, &headers).await {
+        Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
+    if let Err((status, json)) = auth.require_scope("groups:write") {
+        return (status, json).into_response();
+    }
 
     // Check group exists
     let group = match db::get_scim_group(&state.db, &id).await {
@@ -400,7 +423,7 @@ pub async fn delete_group(
         "delete",
         "Group",
         &id,
-        Some(&token_id),
+        Some(&auth.token_id),
         Some(&format!("{{\"displayName\": \"{}\"}}", group.display_name)),
     )
     .await

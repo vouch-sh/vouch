@@ -590,7 +590,7 @@ pub async fn create_test_scim_token(pool: &Pool, description: &str) -> String {
     let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
 
     // Store in database
-    crate::db::create_scim_token(pool, &token_hash, Some(description), None, None)
+    crate::db::create_scim_token(pool, &token_hash, Some(description), None, None, None)
         .await
         .expect("Failed to create SCIM token");
 

@@ -37,7 +37,9 @@ use super::{
     clear_session_cookie, generate_challenge, hash_token, json_error,
     validate_registration_attestation,
 };
+use crate::crypto::webauthn_verify;
 use crate::redact_email;
+use base64::Engine;
 
 // ============================================================================
 // Registration State (stored temporarily)
@@ -231,26 +233,34 @@ pub async fn register_complete(
         RegistrationState::decode(&req.state, state.config().jwt_secret.expose_secret())
             .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
 
-    // For now, we do basic validation and trust the CLI's local verification
-    // In production, use webauthn-rs to verify the attestation
-    if req.credential_id.is_empty() {
-        return Err(json_error(
+    // Server-side WebAuthn attestation verification
+    // Verify the attestation object, client data, RP ID, challenge, and origin
+    let config = state.config();
+    let challenge_b64 =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(reg_state.challenge.as_bytes());
+    let verified = webauthn_verify::verify_registration(
+        req.attestation_object.as_bytes(),
+        req.client_data_json.as_bytes(),
+        &reg_state.rp_id,
+        &challenge_b64,
+        &config.base_url,
+        true, // require user verification
+    )
+    .map_err(|e| {
+        tracing::warn!("Registration attestation verification failed: {e}");
+        json_error(
             StatusCode::BAD_REQUEST,
-            "invalid_credential",
-            "credential_id is empty",
-        ));
-    }
+            "invalid_attestation",
+            &e.to_string(),
+        )
+    })?;
 
-    if req.public_key.is_empty() {
-        return Err(json_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_credential",
-            "public_key is empty",
-        ));
-    }
+    // Use server-verified credential_id from authData (not from request body)
+    let verified_cred_id: vouch_common::fido2_types::CredentialId<Raw> =
+        verified.credential_id.into();
 
     // Check for duplicate credential registration
-    if let Some(_existing) = db::get_authenticator_by_credential_id(&state.db, &req.credential_id)
+    if let Some(_existing) = db::get_authenticator_by_credential_id(&state.db, &verified_cred_id)
         .await
         .map_err(|e| {
             json_error(
@@ -274,6 +284,13 @@ pub async fn register_complete(
     // Validate attestation (hardware-only, extract device info)
     let validated = validate_registration_attestation(&req.attestation_object)?;
 
+    // Use server-verified AAGUID if available, fall back to client-provided
+    let aaguid = verified.aaguid.or(validated.aaguid);
+
+    // Use server-verified public key from authData
+    let verified_public_key: vouch_common::fido2_types::CoseKey<Raw> =
+        verified.public_key_cose.into();
+
     // Store the authenticator
     // user_handle is the user_id as bytes (for discoverable credentials)
     let user_handle = reg_state.user_id.as_bytes().to_vec();
@@ -281,9 +298,9 @@ pub async fn register_complete(
         &state.db,
         &reg_state.user_id.to_string(),
         &reg_state.device_name,
-        &req.credential_id,
-        &req.public_key,
-        validated.aaguid.as_deref(),
+        &verified_cred_id,
+        &verified_public_key,
+        aaguid.as_deref(),
         Some(&user_handle),
     )
     .await

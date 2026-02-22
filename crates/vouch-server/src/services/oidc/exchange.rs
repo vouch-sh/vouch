@@ -5,8 +5,8 @@
 //! - RFC 8693 - OAuth 2.0 Token Exchange
 
 use crate::AppState;
+use crate::crypto::hash_token;
 use crate::db;
-use crate::handlers::common::hash_token;
 use crate::redact_email;
 use crate::services::auth::{
     ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, create_oauth_access_token,

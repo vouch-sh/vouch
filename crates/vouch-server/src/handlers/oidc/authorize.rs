@@ -149,7 +149,7 @@ pub async fn authorize(
     // RFC 6749 Section 4.1.2.1: If the client identifier is invalid, the authorization
     // server MUST NOT automatically redirect the user-agent to the invalid redirection URI.
     let oauth_client =
-        match db::get_oauth_client_by_client_id(&state.db, &validated.client_id).await {
+        match db::get_oauth_client_by_client_id(&state.db, validated.client_id()).await {
             Ok(Some(client)) => client,
             Ok(None) => {
                 return AuthorizeDeniedTemplate {
@@ -171,11 +171,11 @@ pub async fn authorize(
 
     // RFC 6749 Section 10.6: Validate redirect_uri against registered URIs
     // This prevents attackers from redirecting authorization codes to malicious endpoints
-    if !oauth_client.is_valid_redirect_uri(&validated.redirect_uri) {
+    if !oauth_client.is_valid_redirect_uri(validated.redirect_uri()) {
         tracing::warn!(
             "Invalid redirect_uri '{}' for client '{}'. Registered URIs: {:?}",
-            validated.redirect_uri,
-            validated.client_id,
+            validated.redirect_uri(),
+            validated.client_id(),
             oauth_client.get_redirect_uris()
         );
         // Show error page instead of redirecting to unregistered URI
@@ -211,39 +211,39 @@ pub async fn authorize(
 
             // Access granted - issue authorization code
             let code_params = AuthorizationCodeParams {
-                client_id: &validated.client_id,
-                redirect_uri: &validated.redirect_uri,
+                client_id: validated.client_id(),
+                redirect_uri: validated.redirect_uri(),
                 user_id: &user.id,
                 email: &user.email,
                 authenticator_id: &authenticator.id,
                 aaguid: authenticator.aaguid.as_deref(),
-                scope: &validated.scope,
-                nonce: validated.nonce.as_deref(),
-                code_challenge: validated.code_challenge.as_deref(),
-                code_challenge_method: validated.code_challenge_method,
+                scope: validated.scope(),
+                nonce: validated.nonce(),
+                code_challenge: validated.code_challenge(),
+                code_challenge_method: validated.code_challenge_method(),
             };
 
             issue_code_and_redirect(
                 &state,
                 code_params,
-                &validated.redirect_uri,
-                validated.state.as_deref(),
+                validated.redirect_uri(),
+                validated.state(),
             )
             .await
         }
         Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
             // No valid session - store OAuth params and redirect to login
             // This prevents parameter tampering per RFC 9700
-            let scope_str = validated.scope.to_space_separated();
+            let scope_str = validated.scope().to_space_separated();
             let pending_params = CreatePendingOAuthParams {
-                client_id: &validated.client_id,
-                redirect_uri: &validated.redirect_uri,
+                client_id: validated.client_id(),
+                redirect_uri: validated.redirect_uri(),
                 response_type: "code",
-                state: validated.state.as_deref(),
+                state: validated.state(),
                 scope: Some(&scope_str),
-                nonce: validated.nonce.as_deref(),
-                code_challenge: validated.code_challenge.as_deref(),
-                code_challenge_method: validated.code_challenge_method.map(|m| m.as_str()),
+                nonce: validated.nonce(),
+                code_challenge: validated.code_challenge(),
+                code_challenge_method: validated.code_challenge_method().map(|m| m.as_str()),
             };
 
             match db::create_pending_oauth_authorization(&state.db, pending_params).await {
@@ -258,10 +258,10 @@ pub async fn authorize(
                 Err(e) => {
                     tracing::error!("Failed to create pending OAuth authorization: {}", e);
                     oauth_error_redirect(
-                        &validated.redirect_uri,
+                        validated.redirect_uri(),
                         "server_error",
                         "Failed to initiate login",
-                        validated.state.as_deref(),
+                        validated.state(),
                         &state.config().base_url,
                     )
                 }
