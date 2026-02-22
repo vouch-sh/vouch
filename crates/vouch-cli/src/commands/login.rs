@@ -1,5 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Login command - authenticate with your `YubiKey`.
+//!
+//! The flow is structured so that all async I/O (server calls) happens on the
+//! tokio runtime while all FIDO2 device operations run on a plain OS thread
+//! via [`crate::fido2::spawn_fido2`]. See the module-level docs in
+//! [`crate::fido2`] for why this separation is required.
 
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
@@ -15,14 +20,19 @@ use crate::fido2::{self, YubiKey};
 use crate::session;
 
 /// Run the login command.
+///
 /// Uses discoverable credentials - the YubiKey identifies the user.
+///
+/// The execution order is intentional:
+/// 1. Contact the server first (async) — fail fast if unreachable
+/// 2. All FIDO2 device work on a plain OS thread (wait, PIN, authenticate)
+/// 3. Complete authentication with the server (async)
 pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
     println!("Logging in...\n");
 
-    // Step 1: Wait for YubiKey to be inserted
-    let key = YubiKey::wait_for_device(timeout_secs)?;
-
-    // Step 2: Start authentication with server (no email needed)
+    // Step 1: Start authentication with server (async, no YubiKey needed yet).
+    // This fails fast if the server is unreachable, before the user inserts
+    // their key.
     print!("Contacting server ({server})... ");
     let client = VouchClient::unauthenticated(server)?;
     let start_resp: LoginStartResponse = client
@@ -31,18 +41,22 @@ pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
         .context("failed to start login")?;
     println!("ok");
 
-    // Step 3: Ensure PIN is configured and get it
-    let pin = fido2::ensure_pin_configured(&key)?;
+    // Step 2: All FIDO2 operations on a plain OS thread.
+    //
+    // SAFETY INVARIANT: FIDO2 calls use `with_suppressed_stdout` which mutates
+    // the process-global stdout fd. They must not run on a tokio runtime thread.
+    // `spawn_fido2` creates a dedicated `std::thread` with no tokio context.
+    let rp_id = start_resp.rp_id.clone();
+    let challenge = start_resp.challenge.clone();
+    let result = fido2::spawn_fido2(move || {
+        let key = YubiKey::wait_for_device(timeout_secs)?;
+        let pin = fido2::ensure_pin_configured(&key)?;
+        println!("\nTouch your YubiKey...");
+        key.authenticate(&rp_id, &challenge, pin.expose_secret())
+    })
+    .await?;
 
-    // Step 4: Perform FIDO2 authentication using discoverable credential
-    println!("\nTouch your YubiKey...");
-    let result = key.authenticate(
-        &start_resp.rp_id,
-        &start_resp.challenge,
-        pin.expose_secret(),
-    )?;
-
-    // Step 5: Complete authentication with server
+    // Step 3: Complete authentication with server (async)
     let complete_resp: LoginCompleteResponse = client
         .post(
             "/v1/auth/login/complete",
@@ -59,7 +73,7 @@ pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
         .await
         .context("failed to complete login")?;
 
-    // Step 6: Store session in config, agent, and cookie file
+    // Step 4: Store session in config, agent, and cookie file
     // Config save is fast local I/O, do it first
     let mut config = Config::load()?;
     config.set_server_url(server);
@@ -107,7 +121,7 @@ pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
         format_expiry(&complete_resp.expires_at)
     );
 
-    // Step 8: Auto-provision SSH certificate
+    // Step 5: Auto-provision SSH certificate
     credential::ssh::auto_provision(server, &complete_resp.expires_at).await;
 
     if agent_stored {

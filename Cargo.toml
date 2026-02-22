@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.2.37"
+version = "2026.2.38"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.93.1"
@@ -66,7 +66,7 @@ tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
 tracing-subscriber = { version = "=0.3.22", default-features = false, features = ["std", "fmt", "env-filter"] }
 
 # Time
-jiff = { version = "=0.2.20", default-features = false, features = ["std", "serde", "tz-system"] }
+jiff = { version = "=0.2.21", default-features = false, features = ["std", "serde", "tz-system"] }
 
 # IDs
 uuid = { version = "=1.21.0", default-features = false, features = ["v7", "serde", "std"] }

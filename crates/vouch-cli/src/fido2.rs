@@ -4,6 +4,18 @@
 //! This module provides a trait-based abstraction over FIDO2 devices, enabling
 //! integration testing without requiring physical hardware.
 //!
+//! # Threading requirements
+//!
+//! FIDO2 operations **must not** run on tokio runtime threads. The
+//! `with_suppressed_stdout` helper uses `libc::dup2` to redirect fd 1 to
+//! `/dev/null`, which is a **process-global** mutation that would corrupt
+//! output from all concurrent async tasks.
+//!
+//! Use [`spawn_fido2`] to run FIDO2 work on a plain OS thread from async code.
+//! `tokio::task::spawn_blocking` is **not** sufficient because its threads still
+//! have a tokio `Handle` attached, which would trip the `debug_assert!` in
+//! `with_suppressed_stdout`.
+//!
 //! # Testability
 //!
 //! The [`FidoDevice`] trait allows injecting mock implementations for testing.
@@ -105,7 +117,10 @@ impl Drop for SuppressStdout {
 ///
 /// Must not be called from within an async context (tokio runtime), as fd-level
 /// stdout redirection would affect all concurrent tasks. FIDO2 operations are
-/// synchronous HID communication and should always run on a blocking thread.
+/// synchronous HID communication and must run on a plain OS thread.
+///
+/// The `debug_assert!` below enforces this invariant. If it fires, the fix is to
+/// wrap the calling code in [`spawn_fido2`] — do **not** remove the assertion.
 #[cfg(unix)]
 fn with_suppressed_stdout<F, R>(f: F) -> R
 where
@@ -125,6 +140,42 @@ where
     F: FnOnce() -> R,
 {
     f()
+}
+
+/// Run a FIDO2 closure on a plain OS thread, returning the result to async code.
+///
+/// FIDO2 operations use [`with_suppressed_stdout`] which mutates the process-global
+/// stdout file descriptor. Running them on a tokio runtime thread would corrupt
+/// output for all concurrent tasks. This helper spawns a dedicated `std::thread`
+/// with no tokio context attached, sidestepping the problem.
+///
+/// `tokio::task::spawn_blocking` is **not** sufficient: its threads still carry a
+/// tokio `Handle`, so `Handle::try_current()` returns `Ok` and the `debug_assert!`
+/// in `with_suppressed_stdout` fires.
+///
+/// # Usage
+///
+/// All `YubiKey` operations (wait, PIN, authenticate/register) must happen inside
+/// a single `spawn_fido2` call because `YubiKey` is `!Send` — it cannot be moved
+/// across thread boundaries after construction.
+///
+/// ```ignore
+/// let result = spawn_fido2(move || {
+///     let key = YubiKey::wait_for_device(30)?;
+///     let pin = fido2::ensure_pin_configured(&key)?;
+///     key.authenticate(&rp_id, &challenge, pin.expose_secret())
+/// }).await?;
+/// ```
+pub async fn spawn_fido2<F, R>(f: F) -> Result<R>
+where
+    F: FnOnce() -> Result<R> + Send + 'static,
+    R: Send + 'static,
+{
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+    });
+    rx.await.context("FIDO2 thread panicked")?
 }
 use vouch_common::fido2_types::{
     AttestationObject, AuthData, ClientDataJson, CoseKey, CredentialId, Signature, UserHandle,
@@ -943,6 +994,27 @@ fn build_none_attestation_object(auth_data: &[u8]) -> Result<Vec<u8>> {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
+
+    #[tokio::test]
+    async fn test_spawn_fido2_runs_outside_tokio() {
+        // Verify the closure runs on a thread with no tokio runtime context
+        let has_runtime = spawn_fido2(|| Ok(tokio::runtime::Handle::try_current().is_ok())).await;
+        assert!(matches!(has_runtime, Ok(false)));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_fido2_propagates_result() {
+        let value = spawn_fido2(|| Ok(42u64)).await;
+        assert!(matches!(value, Ok(42)));
+    }
+
+    #[tokio::test]
+    async fn test_spawn_fido2_propagates_error() {
+        let result = spawn_fido2(|| Err::<(), _>(anyhow::anyhow!("test error"))).await;
+        assert!(result.is_err());
+        let err_msg = result.err().map(|e| e.to_string());
+        assert!(err_msg.as_deref().is_some_and(|s| s.contains("test error")));
+    }
 
     #[cfg(feature = "test-utils")]
     #[test]
