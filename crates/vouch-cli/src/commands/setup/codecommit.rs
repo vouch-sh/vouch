@@ -221,77 +221,13 @@ fn create_remote_helper_symlink(
     vouch_path: &std::path::Path,
     symlink_path: &std::path::Path,
 ) -> Result<()> {
-    // Ensure parent directory exists
-    if let Some(parent) = symlink_path.parent()
-        && !parent.exists()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory {}", parent.display()))?;
-        println!("Created directory: {}", parent.display());
-    }
-
-    #[cfg(unix)]
-    {
-        // Remove existing symlink if present
-        if symlink_path.exists() || symlink_path.is_symlink() {
-            std::fs::remove_file(symlink_path)
-                .with_context(|| format!("failed to remove existing {}", symlink_path.display()))?;
-        }
-
-        std::os::unix::fs::symlink(vouch_path, symlink_path)
-            .with_context(|| format!("failed to create symlink at {}", symlink_path.display()))?;
-
-        println!(
-            "Created symlink: {} -> {}",
-            symlink_path.display(),
-            vouch_path.display()
-        );
-
-        // Check if the symlink directory is in PATH
-        if let Some(parent) = symlink_path.parent()
-            && let Ok(path_var) = std::env::var("PATH")
-            && !std::env::split_paths(&path_var).any(|p| p == parent)
-        {
-            println!();
-            println!("Note: {} is not in your PATH.", parent.display());
-            println!("Add it to your shell profile:");
-            println!("  export PATH=\"$PATH:{}\"", parent.display());
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        // On Windows, create a batch file wrapper
-        let bat_path = symlink_path.with_extension("bat");
-
-        if bat_path.exists() {
-            std::fs::remove_file(&bat_path)
-                .with_context(|| format!("failed to remove existing {}", bat_path.display()))?;
-        }
-
-        // The batch file sets VOUCH_GIT_REMOTE_CODECOMMIT=1 so vouch can detect
-        // it was invoked as a remote helper (argv[0] detection doesn't work through .bat)
-        let batch_content = format!(
-            "@echo off\r\nset VOUCH_GIT_REMOTE_CODECOMMIT=1\r\n\"{}\" %*\r\n",
-            vouch_path.display()
-        );
-        crate::utils::atomic_write(&bat_path, batch_content.as_bytes())
-            .with_context(|| format!("failed to create {}", bat_path.display()))?;
-
-        println!("Created: {}", bat_path.display());
-
-        if let Some(parent) = bat_path.parent() {
-            if let Ok(path_var) = std::env::var("PATH")
-                && !std::env::split_paths(&path_var).any(|p| p == parent)
-            {
-                println!();
-                println!("Note: {} is not in your PATH.", parent.display());
-                println!("Add it to your system PATH environment variable.");
-            }
-        }
-    }
-
-    Ok(())
+    // The batch file sets VOUCH_GIT_REMOTE_CODECOMMIT=1 so vouch can detect
+    // it was invoked as a remote helper (argv[0] detection doesn't work through .bat)
+    let batch_content = format!(
+        "@echo off\r\nset VOUCH_GIT_REMOTE_CODECOMMIT=1\r\n\"{}\" %*\r\n",
+        vouch_path.display()
+    );
+    crate::utils::create_symlink_with_fallback(vouch_path, symlink_path, &batch_content)
 }
 
 /// Detect credential helpers that may conflict with Vouch.

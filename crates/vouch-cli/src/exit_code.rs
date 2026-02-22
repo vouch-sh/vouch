@@ -24,12 +24,61 @@ pub const PERMISSION_DENIED: u8 = 5;
 /// Configuration error (missing or invalid config).
 pub const CONFIG_ERROR: u8 = 6;
 
+/// Typed CLI errors that map directly to exit codes.
+///
+/// Use these at error sites instead of ad-hoc `anyhow::bail!()` calls
+/// so that `classify()` can match on the type rather than parsing strings.
+///
+/// These can be wrapped in `anyhow::Error` transparently:
+/// ```ignore
+/// use crate::exit_code::CliError;
+/// Err(CliError::NotAuthenticated)?
+/// ```
+// Variants are adopted incrementally — some are only exercised via tests for now.
+#[allow(dead_code)]
+#[derive(Debug, thiserror::Error)]
+pub enum CliError {
+    /// User is not authenticated — session missing or expired.
+    #[error("not authenticated — run 'vouch login' first")]
+    NotAuthenticated,
+
+    /// Hardware security key not found or timed out.
+    #[error("{0}")]
+    HardwareNotFound(String),
+
+    /// Network or server connectivity failure.
+    #[error("{0}")]
+    NetworkError(String),
+
+    /// Server denied the request (401/403).
+    #[error("permission denied")]
+    PermissionDenied,
+
+    /// Configuration is missing or invalid.
+    #[error("{0}")]
+    ConfigError(String),
+}
+
 /// Classify an `anyhow::Error` into an appropriate exit code.
 ///
-/// Inspects the error chain for known types (`AgentError`, `reqwest::Error`)
-/// and falls back to message-pattern matching for errors wrapped by `anyhow`.
+/// Inspects the error chain for known types (`CliError`, `AgentError`,
+/// `reqwest::Error`) and falls back to message-pattern matching for
+/// errors wrapped by `anyhow`.
 pub fn classify(err: &anyhow::Error) -> ExitCode {
-    // Check for agent-specific error types in the chain
+    // 1. Check for CliError first (typed, most reliable)
+    for cause in err.chain() {
+        if let Some(cli_err) = cause.downcast_ref::<CliError>() {
+            return match cli_err {
+                CliError::NotAuthenticated => ExitCode::from(NOT_AUTHENTICATED),
+                CliError::HardwareNotFound(_) => ExitCode::from(HARDWARE_NOT_FOUND),
+                CliError::NetworkError(_) => ExitCode::from(NETWORK_ERROR),
+                CliError::PermissionDenied => ExitCode::from(PERMISSION_DENIED),
+                CliError::ConfigError(_) => ExitCode::from(CONFIG_ERROR),
+            };
+        }
+    }
+
+    // 2. Check for agent-specific error types in the chain
     #[cfg(unix)]
     if let Some(agent_err) = err.downcast_ref::<vouch_agent::AgentError>() {
         return match agent_err {
@@ -43,7 +92,7 @@ pub fn classify(err: &anyhow::Error) -> ExitCode {
         };
     }
 
-    // Check for reqwest errors (network / HTTP)
+    // 3. Check for reqwest errors (network / HTTP)
     if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
         if reqwest_err.is_connect() || reqwest_err.is_timeout() {
             return ExitCode::from(NETWORK_ERROR);
@@ -56,7 +105,7 @@ pub fn classify(err: &anyhow::Error) -> ExitCode {
         }
     }
 
-    // Fall back to message-based classification for anyhow-wrapped errors
+    // 4. Fall back to message-based classification for anyhow-wrapped errors
     let msg = format!("{err:#}");
     classify_message(&msg)
 }
@@ -191,5 +240,44 @@ mod tests {
             code_value(classify_message("some unknown error happened")),
             GENERAL
         );
+    }
+
+    #[test]
+    fn test_classify_cli_error_not_authenticated() {
+        let err: anyhow::Error = CliError::NotAuthenticated.into();
+        assert_eq!(code_value(classify(&err)), NOT_AUTHENTICATED);
+    }
+
+    #[test]
+    fn test_classify_cli_error_hardware() {
+        let err: anyhow::Error =
+            CliError::HardwareNotFound("YubiKey not detected".to_string()).into();
+        assert_eq!(code_value(classify(&err)), HARDWARE_NOT_FOUND);
+    }
+
+    #[test]
+    fn test_classify_cli_error_network() {
+        let err: anyhow::Error = CliError::NetworkError("connection refused".to_string()).into();
+        assert_eq!(code_value(classify(&err)), NETWORK_ERROR);
+    }
+
+    #[test]
+    fn test_classify_cli_error_permission() {
+        let err: anyhow::Error = CliError::PermissionDenied.into();
+        assert_eq!(code_value(classify(&err)), PERMISSION_DENIED);
+    }
+
+    #[test]
+    fn test_classify_cli_error_config() {
+        let err: anyhow::Error = CliError::ConfigError("missing server URL".to_string()).into();
+        assert_eq!(code_value(classify(&err)), CONFIG_ERROR);
+    }
+
+    #[test]
+    fn test_classify_cli_error_wrapped_in_anyhow_context() {
+        // CliError wrapped with anyhow context should still be found via chain()
+        let err =
+            anyhow::Error::new(CliError::NotAuthenticated).context("failed to get credentials");
+        assert_eq!(code_value(classify(&err)), NOT_AUTHENTICATED);
     }
 }

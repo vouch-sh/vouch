@@ -4837,6 +4837,7 @@ dependencies = [
  "serde_yaml",
  "ssh-key",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "toml_edit",
  "tower",

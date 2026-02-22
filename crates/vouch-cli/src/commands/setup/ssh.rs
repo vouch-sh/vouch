@@ -207,6 +207,10 @@ Host *
 }
 
 /// Add a @cert-authority entry to known_hosts for the given host patterns.
+///
+/// Uses advisory file locking (`flock`) on Unix to prevent concurrent
+/// modifications from corrupting the file. The lock is held for the
+/// entire read-modify-write cycle.
 fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str) -> Result<()> {
     let known_hosts_path = known_hosts_path()?;
     let ca_pub_key = fs::read_to_string(ca_path)?;
@@ -226,7 +230,30 @@ fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str)
     // Create entry
     let entry = format!("@cert-authority {} {}\n", host_patterns, ca_pub_key);
 
-    // Read existing known_hosts
+    // Ensure .ssh directory exists
+    if let Some(parent) = known_hosts_path.parent() {
+        ensure_secure_dir(parent)?;
+    }
+
+    // Acquire advisory lock for the read-modify-write cycle
+    let lock_path = known_hosts_path.with_extension("lock");
+    let lock_file = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&lock_path)
+        .with_context(|| format!("failed to open lock file {}", lock_path.display()))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600));
+    }
+
+    #[cfg(unix)]
+    crate::utils::flock_exclusive(&lock_file).context("failed to acquire known_hosts lock")?;
+
+    // Read existing known_hosts under the lock
     let existing = if known_hosts_path.exists() {
         fs::read_to_string(&known_hosts_path)?
     } else {
@@ -236,12 +263,18 @@ fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str)
     // Check if entry already exists
     if existing.contains(&ca_pub_key) {
         println!("CA already trusted in known_hosts");
+        // Lock released on drop
+        drop(lock_file);
         return Ok(());
     }
 
     // Append entry
     let new_content = format!("{existing}{entry}");
     atomic_write_secure(&known_hosts_path, new_content.as_bytes())?;
+
+    // Lock released on drop
+    drop(lock_file);
+
     println!("Added CA to known_hosts for hosts: {}", host_patterns);
 
     Ok(())

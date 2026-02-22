@@ -447,7 +447,7 @@ mod tests {
                 "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
             ),
             session_token: SecretString::from("FwoGZXIvYXdzEBYaDM".to_string()),
-            expiration: "2024-01-15T18:30:45Z".to_string(),
+            expiration: "2024-01-15T18:30:45Z".parse().unwrap(),
         };
 
         let result = sign_request(
@@ -572,7 +572,7 @@ mod tests {
             access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
             secret_access_key: SecretString::from("secret".to_string()),
             session_token: SecretString::from(String::new()),
-            expiration: "2024-01-15T18:30:45Z".to_string(),
+            expiration: "2024-01-15T18:30:45Z".parse().unwrap(),
         };
 
         let result = sign_request(

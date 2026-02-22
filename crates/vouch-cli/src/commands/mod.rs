@@ -15,3 +15,14 @@ pub mod logout;
 pub mod register;
 pub mod setup;
 pub mod status;
+
+/// Credential type to inject into the subprocess environment.
+#[derive(Clone, Debug, clap::ValueEnum)]
+pub enum CredentialType {
+    /// AWS temporary credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN).
+    Aws,
+    /// GitHub token (GITHUB_TOKEN, GH_TOKEN).
+    Github,
+    /// CodeArtifact authorization token (CODEARTIFACT_AUTH_TOKEN).
+    Codeartifact,
+}

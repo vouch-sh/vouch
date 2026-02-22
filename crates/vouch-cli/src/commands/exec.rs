@@ -4,18 +4,8 @@
 use anyhow::{Context, Result, bail};
 use std::process::Command;
 
+use super::CredentialType;
 use super::credential::cache;
-
-/// Credential type to inject into the subprocess environment.
-#[derive(Clone, Debug, clap::ValueEnum)]
-pub enum CredentialType {
-    /// AWS temporary credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN).
-    Aws,
-    /// GitHub token (GITHUB_TOKEN, GH_TOKEN).
-    Github,
-    /// CodeArtifact authorization token (CODEARTIFACT_AUTH_TOKEN).
-    Codeartifact,
-}
 
 /// CodeArtifact-specific options for exec/env commands.
 #[derive(Default)]
@@ -27,10 +17,15 @@ pub struct CodeArtifactOptions<'a> {
 }
 
 /// Cached AWS credentials extracted from `serde_json::Value`.
+///
+/// Derives `ZeroizeOnDrop` to clear secret key material from memory when dropped.
+/// `expiration` is not sensitive and is skipped.
+#[derive(zeroize::ZeroizeOnDrop)]
 pub struct AwsEnvCredentials {
     pub access_key_id: String,
     pub secret_access_key: String,
     pub session_token: String,
+    #[zeroize(skip)]
     pub expiration: Option<String>,
 }
 
@@ -80,6 +75,9 @@ pub async fn fetch_aws_credentials(
 }
 
 /// Cached GitHub token extracted from `serde_json::Value`.
+///
+/// Derives `ZeroizeOnDrop` to clear the token from memory when dropped.
+#[derive(zeroize::ZeroizeOnDrop)]
 pub struct GitHubEnvToken {
     pub token: String,
 }

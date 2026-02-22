@@ -126,5 +126,99 @@ pub fn write_secure_file(path: &Path, content: &str) -> Result<()> {
     atomic_write_secure(path, content.as_bytes())
 }
 
+/// Create a symlink (Unix) or batch file wrapper (Windows) pointing to the vouch binary.
+///
+/// On Unix: creates a symlink at `symlink_path` → `vouch_path`, checks PATH.
+/// On Windows: creates a `.bat` wrapper with the given `windows_batch_content`,
+/// checks PATH using `split_paths`.
+///
+/// Both platforms: ensures the parent directory exists, removes existing files,
+/// and warns if the directory is not in PATH.
+pub(crate) fn create_symlink_with_fallback(
+    vouch_path: &Path,
+    symlink_path: &Path,
+    #[allow(unused_variables)] windows_batch_content: &str,
+) -> Result<()> {
+    // Ensure parent directory exists
+    if let Some(parent) = symlink_path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+        println!("Created directory: {}", parent.display());
+    }
+
+    #[cfg(unix)]
+    {
+        // Remove existing symlink if present
+        if symlink_path.exists() || symlink_path.is_symlink() {
+            fs::remove_file(symlink_path)
+                .with_context(|| format!("failed to remove existing {}", symlink_path.display()))?;
+        }
+
+        std::os::unix::fs::symlink(vouch_path, symlink_path)
+            .with_context(|| format!("failed to create symlink at {}", symlink_path.display()))?;
+
+        println!(
+            "Created symlink: {} -> {}",
+            symlink_path.display(),
+            vouch_path.display()
+        );
+
+        // Check if the symlink directory is in PATH
+        if let Some(parent) = symlink_path.parent()
+            && let Ok(path_var) = std::env::var("PATH")
+            && !std::env::split_paths(&path_var).any(|p| p == parent)
+        {
+            println!();
+            println!("Note: {} is not in your PATH.", parent.display());
+            println!("Add it to your shell profile:");
+            println!("  export PATH=\"$PATH:{}\"", parent.display());
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        let bat_path = symlink_path.with_extension("bat");
+
+        if bat_path.exists() {
+            fs::remove_file(&bat_path)
+                .with_context(|| format!("failed to remove existing {}", bat_path.display()))?;
+        }
+
+        atomic_write(&bat_path, windows_batch_content.as_bytes())
+            .with_context(|| format!("failed to create {}", bat_path.display()))?;
+
+        println!("Created: {}", bat_path.display());
+
+        if let Some(parent) = bat_path.parent() {
+            if let Ok(path_var) = std::env::var("PATH")
+                && !std::env::split_paths(&path_var).any(|p| p == parent)
+            {
+                println!();
+                println!("Note: {} is not in your PATH.", parent.display());
+                println!("Add it to your system PATH environment variable.");
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Acquire an exclusive advisory lock on a file using `flock(2)`.
+///
+/// This is the only `unsafe` call in the CLI crate. `flock` is a well-defined
+/// POSIX API and the file descriptor is guaranteed valid by the borrow of `File`.
+#[cfg(unix)]
+#[allow(unsafe_code)]
+pub(crate) fn flock_exclusive(file: &fs::File) -> Result<(), std::io::Error> {
+    use std::os::unix::io::{AsFd, AsRawFd};
+    let ret = unsafe { libc::flock(file.as_fd().as_raw_fd(), libc::LOCK_EX) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 // Tests for these utilities are in vouch-tests integration tests
 // since they require filesystem access with tempfile.

@@ -60,11 +60,13 @@ pub async fn resolve_session() -> Result<ResolvedSession> {
     let config = Config::load().context("failed to load config")?;
     let server = config
         .server_url()
-        .context("not configured - run 'vouch enroll' first")?
+        .ok_or(crate::exit_code::CliError::ConfigError(
+            "not configured — run 'vouch enroll' first".to_string(),
+        ))?
         .to_string();
     let token = config
         .token()
-        .context("not authenticated - run 'vouch login' first")?;
+        .ok_or(crate::exit_code::CliError::NotAuthenticated)?;
     // Clone the secret string value before config is dropped
     let token = SecretString::from(token.expose_secret().to_string());
 
@@ -92,7 +94,7 @@ pub async fn resolve_token() -> Result<SecretString> {
     let config = Config::load().context("failed to load config")?;
     let token = config
         .token()
-        .context("not authenticated - run 'vouch login' first")?;
+        .ok_or(crate::exit_code::CliError::NotAuthenticated)?;
     Ok(SecretString::from(token.expose_secret().to_string()))
 }
 
