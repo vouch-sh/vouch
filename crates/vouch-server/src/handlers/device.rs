@@ -4,7 +4,6 @@
 use crate::AppState;
 use crate::db::{self, DeviceAuthStatus};
 use aws_lc_rs::digest::{self, SHA256};
-use aws_lc_rs::rand as aws_rand;
 use axum::{Json, extract::State, http::StatusCode};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -28,23 +27,21 @@ fn oauth_error(status: StatusCode, error: OAuthError) -> (StatusCode, Json<OAuth
 
 /// Generate a random device code (32 bytes, base64url encoded).
 ///
-/// # Panics
-/// Panics if the system RNG fails.
-#[allow(clippy::expect_used)]
-fn generate_device_code() -> String {
-    let mut bytes = vec![0u8; 32];
-    aws_rand::fill(&mut bytes).expect("RNG failure");
-    URL_SAFE_NO_PAD.encode(&bytes)
+/// # Errors
+///
+/// Returns an error if the system RNG fails.
+fn generate_device_code() -> Result<String, aws_lc_rs::error::Unspecified> {
+    let bytes = super::common::generate_random_bytes(32)?;
+    Ok(URL_SAFE_NO_PAD.encode(&bytes))
 }
 
 /// Generate a user-friendly code in XXXX-XXXX format.
 ///
-/// # Panics
-/// Panics if the system RNG fails.
-#[allow(clippy::expect_used)]
-fn generate_user_code() -> String {
-    let mut bytes = vec![0u8; 8];
-    aws_rand::fill(&mut bytes).expect("RNG failure");
+/// # Errors
+///
+/// Returns an error if the system RNG fails.
+fn generate_user_code() -> Result<String, aws_lc_rs::error::Unspecified> {
+    let bytes = super::common::generate_random_bytes(8)?;
 
     let chars: Vec<char> = bytes
         .iter()
@@ -54,11 +51,11 @@ fn generate_user_code() -> String {
         })
         .collect();
 
-    format!(
+    Ok(format!(
         "{}-{}",
         chars.iter().take(4).collect::<String>(),
         chars.iter().skip(4).collect::<String>()
-    )
+    ))
 }
 
 /// Hash a device code for storage.
@@ -80,8 +77,20 @@ pub async fn device_code(
     tracing::info!("Device authorization request");
 
     // Generate codes
-    let device_code = generate_device_code();
-    let user_code = generate_user_code();
+    let device_code = generate_device_code().map_err(|_| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "rng_error",
+            "Failed to generate device code",
+        )
+    })?;
+    let user_code = generate_user_code().map_err(|_| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "rng_error",
+            "Failed to generate user code",
+        )
+    })?;
     let device_code_hash = hash_device_code(&device_code);
 
     // Calculate expiration

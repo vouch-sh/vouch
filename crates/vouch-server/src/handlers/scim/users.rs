@@ -159,7 +159,7 @@ pub async fn create_user(
         "User",
         &db_user.id,
         Some(&token_id),
-        Some(&format!("{{\"email\": \"{}\"}}", email)),
+        Some(&serde_json::json!({"email": email}).to_string()),
     )
     .await
     {
@@ -372,10 +372,7 @@ pub async fn patch_user(
         "User",
         &id,
         Some(&token_id),
-        Some(&format!(
-            "{{\"active\": {}, \"deactivated\": {}}}",
-            active, deactivated
-        )),
+        Some(&serde_json::json!({"active": active, "deactivated": deactivated}).to_string()),
     )
     .await
     {
@@ -472,7 +469,7 @@ pub async fn delete_user(
         "User",
         &id,
         Some(&token_id),
-        Some(&format!("{{\"email\": \"{}\"}}", user.email)),
+        Some(&serde_json::json!({"email": user.email}).to_string()),
     )
     .await
     {

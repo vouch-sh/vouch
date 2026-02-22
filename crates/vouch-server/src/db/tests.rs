@@ -1061,9 +1061,15 @@ async fn test_authenticator_count() {
 async fn test_scim_token_management() {
     let pool = test_db().await;
 
-    // Create SCIM token
+    // Create org for SCIM token
+    let org = create_organization(&pool, "test.com", Some("Test Org"), None)
+        .await
+        .expect("Failed to create org");
+    let org_id = &org.id;
+
+    // Create SCIM token with org
     let token_hash = "hashed_scim_token";
-    let token_id = create_scim_token(&pool, token_hash, Some("Admin token"), None, None)
+    let token_id = create_scim_token(&pool, token_hash, Some("Admin token"), None, Some(org_id))
         .await
         .expect("Failed to create SCIM token");
 
@@ -1097,10 +1103,29 @@ async fn test_scim_token_management() {
 
     assert_eq!(tokens.len(), 1);
 
-    // Delete token
-    delete_scim_token(&pool, &token_id)
+    // Attempt delete with wrong org (should not delete)
+    let deleted = delete_scim_token(&pool, &token_id, "wrong-org")
+        .await
+        .expect("Query should succeed");
+    assert!(
+        !deleted,
+        "Should not delete token belonging to different org"
+    );
+
+    // Verify token still exists
+    let token = get_scim_token_by_hash(&pool, token_hash)
+        .await
+        .expect("Query should succeed");
+    assert!(
+        token.is_some(),
+        "Token should still exist after wrong-org delete"
+    );
+
+    // Delete token with correct org
+    let deleted = delete_scim_token(&pool, &token_id, org_id)
         .await
         .expect("Failed to delete token");
+    assert!(deleted, "Should delete token belonging to correct org");
 
     let token = get_scim_token_by_hash(&pool, token_hash)
         .await

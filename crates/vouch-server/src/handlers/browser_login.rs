@@ -178,7 +178,13 @@ pub async fn browser_login_start(
     tracing::info!("Browser login start (discoverable credential flow)");
 
     // Generate challenge
-    let challenge = generate_challenge();
+    let challenge = generate_challenge().map_err(|_| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "rng_error",
+            "Failed to generate challenge",
+        )
+    })?;
     let now = Timestamp::now();
     let exp = now
         .checked_add(Span::new().minutes(5))

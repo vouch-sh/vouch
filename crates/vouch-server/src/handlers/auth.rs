@@ -171,7 +171,13 @@ pub async fn register_start(
         .collect();
 
     // Generate challenge
-    let challenge = generate_challenge();
+    let challenge = generate_challenge().map_err(|_| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "rng_error",
+            "Failed to generate challenge",
+        )
+    })?;
 
     // Create state token
     let challenge: Challenge<Raw> = challenge.into();
@@ -315,7 +321,13 @@ pub async fn login_start(
     tracing::info!("Login start (discoverable credential flow)");
 
     // Generate challenge
-    let challenge = generate_challenge();
+    let challenge = generate_challenge().map_err(|_| {
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "rng_error",
+            "Failed to generate challenge",
+        )
+    })?;
 
     // Create state token (simplified - no user info needed upfront)
     let challenge: Challenge<Raw> = challenge.into();

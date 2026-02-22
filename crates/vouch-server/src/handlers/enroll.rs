@@ -324,7 +324,18 @@ pub async fn device_verify_submit(
     if !state.config().oidc_configured() {
         // No OIDC configured - go directly to WebAuthn registration
         // Generate state token for WebAuthn
-        let oidc_state = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
+        let random_bytes = match generate_random_bytes(32) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                return ErrorTemplate {
+                    title: "Error".to_string(),
+                    message: "Failed to generate secure random state".to_string(),
+                    back_url: None,
+                }
+                .into_response();
+            }
+        };
+        let oidc_state = URL_SAFE_NO_PAD.encode(random_bytes);
 
         // Store state
         let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
@@ -362,8 +373,19 @@ pub async fn device_verify_submit(
     let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
 
     // Generate state and nonce
-    let oidc_state = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
-    let nonce = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
+    let (state_bytes, nonce_bytes) = match (generate_random_bytes(32), generate_random_bytes(32)) {
+        (Ok(s), Ok(n)) => (s, n),
+        _ => {
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to generate secure random state".to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
+    };
+    let oidc_state = URL_SAFE_NO_PAD.encode(state_bytes);
+    let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
 
     // Store state
     let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
@@ -1187,12 +1209,23 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
 
     // Generate unique codes for this direct enrollment attempt
     // user_code needs to be unique per the database constraint
-    let unique_suffix = URL_SAFE_NO_PAD.encode(generate_random_bytes(8));
+    let (suffix_bytes, hash_bytes) = match (generate_random_bytes(8), generate_random_bytes(16)) {
+        (Ok(s), Ok(h)) => (s, h),
+        _ => {
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to generate secure random codes".to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
+    };
+    let unique_suffix = URL_SAFE_NO_PAD.encode(suffix_bytes);
     let user_code = format!("{}{}", DIRECT_ENROLL_PREFIX, unique_suffix);
     let device_code_hash = format!(
         "{}{}",
         DIRECT_ENROLL_PREFIX,
-        URL_SAFE_NO_PAD.encode(generate_random_bytes(16))
+        URL_SAFE_NO_PAD.encode(hash_bytes)
     );
 
     let device_auth_id = match db::create_device_auth_request(
@@ -1222,8 +1255,19 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
     let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
 
     // Generate state and nonce
-    let oidc_state = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
-    let nonce = URL_SAFE_NO_PAD.encode(generate_random_bytes(32));
+    let (state_bytes, nonce_bytes) = match (generate_random_bytes(32), generate_random_bytes(32)) {
+        (Ok(s), Ok(n)) => (s, n),
+        _ => {
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to generate secure random state".to_string(),
+                back_url: None,
+            }
+            .into_response();
+        }
+    };
+    let oidc_state = URL_SAFE_NO_PAD.encode(state_bytes);
+    let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
 
     // Store state
     let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);

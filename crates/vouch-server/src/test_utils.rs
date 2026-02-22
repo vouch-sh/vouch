@@ -116,7 +116,7 @@ pub async fn test_app_state() -> Arc<AppState> {
         config: Arc::new(ArcSwap::from_pointee(config)),
         webauthn,
         ssh_ca: None,
-        dpop: DpopState::new(),
+        dpop: Arc::new(DpopState::new()),
         oidc_key,
         github_app: None,
     })

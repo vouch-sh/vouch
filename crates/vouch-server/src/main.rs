@@ -20,6 +20,7 @@ use axum::{
 use axum_server::accept::NoDelayAcceptor;
 use clap::Parser;
 use rust_embed::Embed;
+use secrecy::ExposeSecret;
 use std::sync::Arc;
 use tokio::signal;
 use tokio_util::sync::CancellationToken;
@@ -284,7 +285,7 @@ async fn run_server(args: config::Args) -> Result<()> {
     // Initialize SSH CA if configured
     // Priority: PEM content (VOUCH_SSH_CA_KEY) > file path (VOUCH_SSH_CA_KEY_PATH)
     let ssh_ca = match ssh_ca::SshCa::load(
-        config.ssh_ca_key.as_deref(),
+        config.ssh_ca_key.as_ref().map(|s| s.expose_secret()),
         config.ssh_ca_key_path.as_deref(),
         &config.rp_id,
     ) {
@@ -307,7 +308,9 @@ async fn run_server(args: config::Args) -> Result<()> {
     };
 
     // Initialize OIDC signing key (ES256 for AWS and OIDC ID tokens)
-    let oidc_key = OidcSigningKey::load_or_generate(config.oidc_signing_key.as_deref())?;
+    let oidc_key = OidcSigningKey::load_or_generate(
+        config.oidc_signing_key.as_ref().map(|s| s.expose_secret()),
+    )?;
 
     // Initialize GitHub App if configured
     let github_app = match GitHubApp::load(&config) {
@@ -319,7 +322,7 @@ async fn run_server(args: config::Args) -> Result<()> {
         }
     };
 
-    // Create DPoP state
+    // Create DPoP state (single instance shared between AppState and cleanup task)
     let dpop_state = Arc::new(dpop::DpopState::new());
 
     // Wrap config in ArcSwap for dynamic updates
@@ -331,7 +334,7 @@ async fn run_server(args: config::Args) -> Result<()> {
         config: config_swap.clone(),
         webauthn,
         ssh_ca,
-        dpop: dpop::DpopState::new(),
+        dpop: Arc::clone(&dpop_state),
         oidc_key,
         github_app,
     });

@@ -114,13 +114,16 @@ pub async fn create_scim_token(
     Ok(id)
 }
 
-/// Delete a SCIM token.
+/// Delete a SCIM token, scoped to the given organization.
 ///
 /// Performs application-level SET NULL for DSQL compatibility:
 /// 1. Set scim_audit_log.actor_token_id to NULL for this token
-/// 2. Delete the token
+/// 2. Delete the token (only if it belongs to the specified org)
+///
+/// Returns `Ok(true)` if a token was deleted, `Ok(false)` if no matching
+/// token was found for the given org (prevents cross-org deletion).
 #[allow(dead_code)]
-pub async fn delete_scim_token(pool: &Pool, token_id: &str) -> Result<()> {
+pub async fn delete_scim_token(pool: &Pool, token_id: &str, org_id: &str) -> Result<bool> {
     let mut tx = pool.begin().await?;
     let db_type = tx.db_type();
 
@@ -135,18 +138,19 @@ pub async fn delete_scim_token(pool: &Pool, token_id: &str) -> Result<()> {
     };
     tx_execute!(tx, sqlx::query(&sql1))?;
 
-    // 2. Delete the token
+    // 2. Delete the token (scoped to org to prevent cross-org deletion)
     let sql2 = {
         let query = Query::delete()
             .from_table(ScimTokens::Table)
             .and_where(Expr::col(ScimTokens::Id).eq(token_id))
+            .and_where(Expr::col(ScimTokens::OrgId).eq(org_id))
             .to_owned();
         query.build_sql(db_type)
     };
-    tx_execute!(tx, sqlx::query(&sql2))?;
+    let result = tx_execute!(tx, sqlx::query(&sql2))?;
 
     tx.commit().await?;
-    Ok(())
+    Ok(result.rows_affected() > 0)
 }
 
 /// List SCIM tokens, optionally filtered by organization.
