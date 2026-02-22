@@ -11,7 +11,7 @@ use crate::ssh_agent::SshAgentState;
 use crate::state::{AgentState, Session};
 
 use jiff::Timestamp;
-use secrecy::SecretString;
+use secrecy::{ExposeSecret, SecretString};
 use std::sync::Arc;
 use tracing::{debug, info};
 
@@ -39,11 +39,11 @@ async fn try_recover_inner(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // Try to read token and server URL from config.json
     let (token, server_url) = match read_credentials_from_config()? {
-        Some(creds) => creds,
+        Some((t, url)) => (SecretString::from(t), url),
         None => {
             // Fall back to cookie.txt
             match read_credentials_from_cookie()? {
-                Some(creds) => creds,
+                Some((t, url)) => (SecretString::from(t), url),
                 None => {
                     debug!("No persisted credentials found for recovery");
                     return Ok(false);
@@ -74,7 +74,7 @@ async fn try_recover_inner(
 
     let response = client
         .get(format!("{server_url}/v1/auth/status"))
-        .bearer_auth(&token)
+        .bearer_auth(token.expose_secret())
         .send()
         .await?;
 
@@ -101,12 +101,15 @@ async fn try_recover_inner(
 
     // Compute expiration
     let expires_in = status.expires_in_seconds.unwrap_or(0);
-    let expires_at =
-        Timestamp::from_second(Timestamp::now().as_second() + i64::from(expires_in as u32))
-            .unwrap_or_else(|_| Timestamp::now());
+    let expires_in_i64 = i64::try_from(expires_in).unwrap_or(0);
+    let expires_at = Timestamp::now()
+        .as_second()
+        .checked_add(expires_in_i64)
+        .and_then(|s| Timestamp::from_second(s).ok())
+        .unwrap_or_else(Timestamp::now);
 
     // Store session in agent state
-    let session = Session::new(SecretString::from(token), email.clone(), expires_at);
+    let session = Session::new(token, email.clone(), expires_at);
     state.store_session(session).await;
 
     // Store server URL in SSH agent state (enables lazy loading)
@@ -160,6 +163,28 @@ fn read_credentials_from_cookie() -> Result<Option<(String, String)>, Box<dyn st
         return Ok(None);
     }
 
+    // Validate the domain is safe to use in a URL (no path traversal, credentials, etc.)
     let server_url = format!("https://{}", cookie.domain);
+    let parsed = url::Url::parse(&server_url).map_err(|e| {
+        Box::new(std::io::Error::other(format!(
+            "invalid cookie domain '{}': {e}",
+            cookie.domain
+        ))) as Box<dyn std::error::Error>
+    })?;
+
+    // Ensure the URL only has a host (no path, credentials, query, or fragment)
+    if parsed.path() != "/"
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        debug!(
+            "Cookie domain '{}' produced a URL with unexpected components, skipping",
+            cookie.domain
+        );
+        return Ok(None);
+    }
+
     Ok(Some((cookie.value, server_url)))
 }

@@ -5,6 +5,7 @@ use crate::error::{AgentError, Result};
 use jiff::Timestamp;
 use ssh_key::{PrivateKey, certificate::Certificate};
 use std::path::PathBuf;
+use zeroize::Zeroizing;
 
 use super::REFRESH_THRESHOLD_SECONDS;
 
@@ -121,9 +122,11 @@ impl SshCredentials {
 
     /// Load credentials from files.
     pub fn load(key_path: &std::path::Path, cert_path: &std::path::Path) -> Result<Self> {
-        // Load private key
-        let key_data = std::fs::read_to_string(key_path)
-            .map_err(|e| AgentError::Protocol(format!("failed to read private key: {e}")))?;
+        // Load private key (zeroized on drop to prevent lingering in memory)
+        let key_data = Zeroizing::new(
+            std::fs::read_to_string(key_path)
+                .map_err(|e| AgentError::Protocol(format!("failed to read private key: {e}")))?,
+        );
         let private_key = PrivateKey::from_openssh(&key_data)
             .map_err(|e| AgentError::Protocol(format!("failed to parse private key: {e}")))?;
 
