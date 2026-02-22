@@ -8,21 +8,6 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
-/// Acquire an exclusive advisory lock on a file using `flock(2)`.
-///
-/// This is the only `unsafe` call in the CLI crate. `flock` is a well-defined
-/// POSIX API and the file descriptor is guaranteed valid by the borrow of `File`.
-#[cfg(unix)]
-#[allow(unsafe_code)]
-fn flock_exclusive(file: &fs::File) -> Result<(), std::io::Error> {
-    use std::os::unix::io::{AsFd, AsRawFd};
-    let ret = unsafe { libc::flock(file.as_fd().as_raw_fd(), libc::LOCK_EX) };
-    if ret != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 /// CLI configuration stored in ~/.vouch/config.json
 ///
 /// Note: The token is stored as a plain string in the file for serialization purposes.
@@ -148,7 +133,7 @@ impl Config {
         }
 
         // Acquire exclusive advisory lock (blocks until available)
-        flock_exclusive(&lock_file).context("failed to acquire config file lock")?;
+        crate::utils::flock_exclusive(&lock_file).context("failed to acquire config file lock")?;
 
         // Load, modify, save under the lock
         let mut config = Self::load()?;

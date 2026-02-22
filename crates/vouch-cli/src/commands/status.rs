@@ -15,6 +15,13 @@ use crate::integrations::{
 };
 use crate::style;
 
+/// Output mode for the status command.
+enum OutputMode {
+    Human,
+    Json,
+    Shell,
+}
+
 /// JSON output for `vouch status --json`.
 #[derive(Serialize)]
 struct StatusJson {
@@ -33,8 +40,47 @@ fn print_json<T: Serialize>(value: &T) {
     }
 }
 
+/// Print shell-evaluable key=value pairs to stdout.
+///
+/// Output format:
+/// ```text
+/// VOUCH_AUTHENTICATED=1
+/// VOUCH_EMAIL=user@example.com
+/// VOUCH_EXPIRES_IN=28800
+/// ```
+///
+/// Or when not authenticated:
+/// ```text
+/// VOUCH_AUTHENTICATED=0
+/// ```
+pub(crate) fn print_shell(
+    authenticated: bool,
+    email: Option<&str>,
+    expires_in_seconds: Option<u64>,
+) {
+    if authenticated {
+        println!("VOUCH_AUTHENTICATED=1");
+        if let Some(email) = email {
+            println!("VOUCH_EMAIL={email}");
+        }
+        if let Some(expires_in) = expires_in_seconds {
+            println!("VOUCH_EXPIRES_IN={expires_in}");
+        }
+    } else {
+        println!("VOUCH_AUTHENTICATED=0");
+    }
+}
+
 /// Run the status command.
-pub async fn run(server: &str, json: bool) -> Result<()> {
+pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
+    let mode = if json {
+        OutputMode::Json
+    } else if shell {
+        OutputMode::Shell
+    } else {
+        OutputMode::Human
+    };
+
     // First, try to get session from agent (Unix only)
     #[cfg(unix)]
     match get_session_from_agent().await {
@@ -42,17 +88,27 @@ pub async fn run(server: &str, json: bool) -> Result<()> {
             // Prefer the server URL from the agent (it knows the real server),
             // falling back to the CLI-resolved server URL.
             let effective_server = session.server_url.as_deref().unwrap_or(server);
-            if json {
-                print_json(&StatusJson {
-                    authenticated: true,
-                    email: Some(session.user_email.clone()),
-                    expires_in_seconds: Some(session.expires_in_seconds),
-                    agent_running: true,
-                });
-            } else {
-                print_agent_session(effective_server, &session);
-                println!();
-                print_all_integrations(effective_server).await;
+            match mode {
+                OutputMode::Json => {
+                    print_json(&StatusJson {
+                        authenticated: true,
+                        email: Some(session.user_email.clone()),
+                        expires_in_seconds: Some(session.expires_in_seconds),
+                        agent_running: true,
+                    });
+                }
+                OutputMode::Shell => {
+                    print_shell(
+                        true,
+                        Some(&session.user_email),
+                        Some(session.expires_in_seconds),
+                    );
+                }
+                OutputMode::Human => {
+                    print_agent_session(effective_server, &session);
+                    println!();
+                    print_all_integrations(effective_server).await;
+                }
             }
             return Ok(());
         }
@@ -60,30 +116,42 @@ pub async fn run(server: &str, json: bool) -> Result<()> {
             tracing::debug!("Agent not running, checking server");
         }
         Err(AgentError::NotAuthenticated) => {
-            if json {
-                print_json(&StatusJson {
-                    authenticated: false,
-                    email: None,
-                    expires_in_seconds: None,
-                    agent_running: true,
-                });
-            } else {
-                println!("{}", style::bold_red("Not authenticated."));
-                println!("\n{}", style::dim("Run 'vouch login' to authenticate."));
+            match mode {
+                OutputMode::Json => {
+                    print_json(&StatusJson {
+                        authenticated: false,
+                        email: None,
+                        expires_in_seconds: None,
+                        agent_running: true,
+                    });
+                }
+                OutputMode::Shell => {
+                    print_shell(false, None, None);
+                }
+                OutputMode::Human => {
+                    println!("{}", style::bold_red("Not authenticated."));
+                    println!("\n{}", style::dim("Run 'vouch login' to authenticate."));
+                }
             }
             return Ok(());
         }
         Err(AgentError::SessionExpired) => {
-            if json {
-                print_json(&StatusJson {
-                    authenticated: false,
-                    email: None,
-                    expires_in_seconds: Some(0),
-                    agent_running: true,
-                });
-            } else {
-                println!("{}", style::bold_red("Session expired."));
-                println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
+            match mode {
+                OutputMode::Json => {
+                    print_json(&StatusJson {
+                        authenticated: false,
+                        email: None,
+                        expires_in_seconds: Some(0),
+                        agent_running: true,
+                    });
+                }
+                OutputMode::Shell => {
+                    print_shell(false, None, None);
+                }
+                OutputMode::Human => {
+                    println!("{}", style::bold_red("Session expired."));
+                    println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
+                }
             }
             return Ok(());
         }
@@ -96,16 +164,22 @@ pub async fn run(server: &str, json: bool) -> Result<()> {
     let config = Config::load()?;
 
     if config.token().is_none() {
-        if json {
-            print_json(&StatusJson {
-                authenticated: false,
-                email: None,
-                expires_in_seconds: None,
-                agent_running: false,
-            });
-        } else {
-            println!("{}", style::bold_red("Not authenticated."));
-            println!("\n{}", style::dim("Run 'vouch login' to authenticate."));
+        match mode {
+            OutputMode::Json => {
+                print_json(&StatusJson {
+                    authenticated: false,
+                    email: None,
+                    expires_in_seconds: None,
+                    agent_running: false,
+                });
+            }
+            OutputMode::Shell => {
+                print_shell(false, None, None);
+            }
+            OutputMode::Human => {
+                println!("{}", style::bold_red("Not authenticated."));
+                println!("\n{}", style::dim("Run 'vouch login' to authenticate."));
+            }
         }
         return Ok(());
     }
@@ -116,56 +190,70 @@ pub async fn run(server: &str, json: bool) -> Result<()> {
         .get_authenticated::<SessionStatus>("/v1/auth/status")
         .await
     {
-        Ok(status) => {
-            if json {
+        Ok(status) => match mode {
+            OutputMode::Json => {
                 print_json(&StatusJson {
                     authenticated: status.authenticated,
                     email: status.email.clone(),
                     expires_in_seconds: status.expires_in_seconds,
                     agent_running: false,
                 });
-            } else if status.authenticated {
-                println!("{} ({server})", style::bold_green("Authenticated"));
-                if let Some(email) = &status.email {
-                    println!("  {:LABEL_WIDTH$} {email}", "Email:");
-                }
-                if let Some(device) = &status.device_name {
-                    println!("  {:LABEL_WIDTH$} {device}", "Device:");
-                }
-                if let Some(expires_in) = status.expires_in_seconds {
-                    print_expiry(expires_in);
-                }
-                println!(
-                    "  {:LABEL_WIDTH$} {}",
-                    "Agent:",
-                    style::yellow("not running")
-                );
-                println!();
-                print_all_integrations(server).await;
-                println!(
-                    "\n{}",
-                    style::dim(
-                        "Hint: Start the agent for faster status checks: vouch-agent --foreground"
-                    )
-                );
-            } else {
-                println!("{}", style::bold_red("Session expired."));
-                println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
             }
-        }
-        Err(e) => {
-            if json {
+            OutputMode::Shell => {
+                print_shell(
+                    status.authenticated,
+                    status.email.as_deref(),
+                    status.expires_in_seconds,
+                );
+            }
+            OutputMode::Human => {
+                if status.authenticated {
+                    println!("{} ({server})", style::bold_green("Authenticated"));
+                    if let Some(email) = &status.email {
+                        println!("  {:LABEL_WIDTH$} {email}", "Email:");
+                    }
+                    if let Some(device) = &status.device_name {
+                        println!("  {:LABEL_WIDTH$} {device}", "Device:");
+                    }
+                    if let Some(expires_in) = status.expires_in_seconds {
+                        print_expiry(expires_in);
+                    }
+                    println!(
+                        "  {:LABEL_WIDTH$} {}",
+                        "Agent:",
+                        style::yellow("not running")
+                    );
+                    println!();
+                    print_all_integrations(server).await;
+                    println!(
+                        "\n{}",
+                        style::dim(
+                            "Hint: Start the agent for faster status checks: vouch-agent --foreground"
+                        )
+                    );
+                } else {
+                    println!("{}", style::bold_red("Session expired."));
+                    println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
+                }
+            }
+        },
+        Err(e) => match mode {
+            OutputMode::Json => {
                 print_json(&StatusJson {
                     authenticated: false,
                     email: None,
                     expires_in_seconds: None,
                     agent_running: false,
                 });
-            } else {
+            }
+            OutputMode::Shell => {
+                print_shell(false, None, None);
+            }
+            OutputMode::Human => {
                 println!("{}: {e}", style::bold_red("Session invalid"));
                 println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
             }
-        }
+        },
     }
 
     Ok(())
@@ -187,14 +275,25 @@ fn print_agent_session(server: &str, session: &SessionInfo) {
     println!("  {:LABEL_WIDTH$} {}", "Agent:", style::green("running"));
 }
 
-/// Print expiry time with wall-clock time and remaining duration.
+/// Format the remaining time as a human-readable string.
 ///
-/// Color: green (>1 h), yellow (<=1 h), red (<=15 min).
-fn print_expiry(expires_in: u64) {
+/// Returns `"in Xh Ym"` or `"in Ym"` depending on whether hours > 0.
+pub(crate) fn format_remaining_time(expires_in: u64) -> String {
     let remaining_mins = expires_in / 60;
     let hours = remaining_mins / 60;
     let mins = remaining_mins % 60;
 
+    if hours > 0 {
+        format!("in {hours}h {mins}m")
+    } else {
+        format!("in {mins}m")
+    }
+}
+
+/// Print expiry time with wall-clock time and remaining duration.
+///
+/// Color: green (>1 h), yellow (<=1 h), red (<=15 min).
+fn print_expiry(expires_in: u64) {
     let label = "Expires:";
 
     // Color based on remaining time
@@ -206,23 +305,16 @@ fn print_expiry(expires_in: u64) {
         style::red
     };
 
+    let remaining = format_remaining_time(expires_in);
+
     let duration = jiff::SignedDuration::from_secs(expires_in as i64);
     let now = jiff::Zoned::now();
     if let Ok(expiry_ts) = now.timestamp().checked_add(duration) {
         let expiry = expiry_ts.to_zoned(now.time_zone().clone());
-        let value = if hours > 0 {
-            format!("{} (in {hours}h {mins}m)", expiry.strftime("%H:%M %Z"))
-        } else {
-            format!("{} (in {mins}m)", expiry.strftime("%H:%M %Z"))
-        };
+        let value = format!("{} ({remaining})", expiry.strftime("%H:%M %Z"));
         println!("  {label:<LABEL_WIDTH$} {}", color_fn(&value));
     } else {
-        let value = if hours > 0 {
-            format!("in {hours}h {mins}m")
-        } else {
-            format!("in {mins}m")
-        };
-        println!("  {label:<LABEL_WIDTH$} {}", color_fn(&value));
+        println!("  {label:<LABEL_WIDTH$} {}", color_fn(&remaining));
     }
 }
 
@@ -245,4 +337,24 @@ async fn print_all_integrations(server: &str) {
 
     // Now await the GitHub result
     github_future.await;
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_remaining_time_hours_and_minutes() {
+        assert_eq!(format_remaining_time(7200), "in 2h 0m");
+        assert_eq!(format_remaining_time(3661), "in 1h 1m");
+        assert_eq!(format_remaining_time(28800), "in 8h 0m");
+    }
+
+    #[test]
+    fn test_format_remaining_time_minutes_only() {
+        assert_eq!(format_remaining_time(300), "in 5m");
+        assert_eq!(format_remaining_time(59), "in 0m");
+        assert_eq!(format_remaining_time(0), "in 0m");
+    }
 }

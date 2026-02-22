@@ -167,6 +167,9 @@ enum Commands {
         /// Output as JSON.
         #[arg(long)]
         json: bool,
+        /// Output shell-evaluable key=value pairs for use in shell hooks.
+        #[arg(long, conflicts_with = "json")]
+        shell: bool,
     },
     /// End your current session.
     Logout,
@@ -176,7 +179,7 @@ enum Commands {
     Env {
         /// Credential type to export.
         #[arg(long = "type")]
-        credential_type: commands::exec::CredentialType,
+        credential_type: commands::CredentialType,
         /// Shell syntax to emit.
         #[arg(long, default_value = "bash")]
         shell: commands::env::Shell,
@@ -207,7 +210,7 @@ enum Commands {
     Exec {
         /// Credential type to inject.
         #[arg(long = "type", value_enum)]
-        credential_type: commands::exec::CredentialType,
+        credential_type: commands::CredentialType,
         /// AWS IAM role ARN (required for --type aws).
         #[arg(long)]
         role: Option<String>,
@@ -550,7 +553,7 @@ async fn run() -> Result<()> {
             commands::register::run(&server, name.as_deref(), timeout).await
         }
         Commands::Login { timeout } => commands::login::run(&server, timeout).await,
-        Commands::Status { json } => commands::status::run(&server, json).await,
+        Commands::Status { json, shell } => commands::status::run(&server, json, shell).await,
         Commands::Logout => commands::logout::run().await,
         Commands::Env {
             credential_type,

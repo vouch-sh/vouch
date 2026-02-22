@@ -170,7 +170,7 @@ pub(crate) async fn fetch_and_assume(
         access_key_id: creds.access_key_id.clone(),
         secret_access_key: creds.secret_access_key.expose_secret().to_string(),
         session_token: creds.session_token.expose_secret().to_string(),
-        expiration: creds.expiration.clone(),
+        expiration: creds.expiration.to_string(),
     })
 }
 

@@ -168,11 +168,13 @@ async fn get_sts_credentials(_region: &str) -> Result<StsCredentials> {
         .and_then(serde_json::Value::as_str)
         .context("missing SessionToken in cached credentials")?
         .to_string();
-    let expiration = data
+    let expiration_str = data
         .get("Expiration")
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("")
-        .to_string();
+        .unwrap_or("");
+    let expiration: jiff::Timestamp = expiration_str
+        .parse()
+        .with_context(|| format!("failed to parse cached Expiration: {expiration_str}"))?;
 
     Ok(StsCredentials {
         access_key_id,

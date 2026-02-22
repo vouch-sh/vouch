@@ -121,84 +121,11 @@ fn create_credential_helper_symlink(
     vouch_path: &std::path::Path,
     symlink_path: &std::path::Path,
 ) -> Result<()> {
-    // Ensure parent directory exists
-    if let Some(parent) = symlink_path.parent()
-        && !parent.exists()
-    {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create directory {}", parent.display()))?;
-        println!("Created directory: {}", parent.display());
-    }
-
-    #[cfg(unix)]
-    {
-        // Remove existing symlink if present
-        if symlink_path.exists() || symlink_path.is_symlink() {
-            std::fs::remove_file(symlink_path)
-                .with_context(|| format!("failed to remove existing {}", symlink_path.display()))?;
-        }
-
-        // Create symlink
-        std::os::unix::fs::symlink(vouch_path, symlink_path)
-            .with_context(|| format!("failed to create symlink at {}", symlink_path.display()))?;
-
-        println!(
-            "Created symlink: {} -> {}",
-            symlink_path.display(),
-            vouch_path.display()
-        );
-
-        // Check if the symlink directory is in PATH
-        if let Some(parent) = symlink_path.parent() {
-            let parent_str = parent.to_string_lossy().to_string();
-            if let Ok(path) = std::env::var("PATH")
-                && !path.contains(&parent_str)
-            {
-                println!();
-                println!("Note: {} is not in your PATH.", parent.display());
-                println!("Add it to your shell profile:");
-                println!("  export PATH=\"$PATH:{}\"", parent.display());
-            }
-        }
-    }
-
-    #[cfg(windows)]
-    {
-        // On Windows, create a batch file wrapper
-        // Docker looks for docker-credential-vouch.exe or docker-credential-vouch.bat
-        let bat_path = symlink_path.with_extension("bat");
-
-        // Remove existing batch file if present
-        if bat_path.exists() {
-            std::fs::remove_file(&bat_path)
-                .with_context(|| format!("failed to remove existing {}", bat_path.display()))?;
-        }
-
-        // Create batch file that calls vouch with the docker credential subcommand
-        let batch_content = format!(
-            "@echo off\r\n\"{}\" credential docker %1\r\n",
-            vouch_path.display()
-        );
-        crate::utils::atomic_write(&bat_path, batch_content.as_bytes())
-            .with_context(|| format!("failed to create {}", bat_path.display()))?;
-
-        println!("Created: {}", bat_path.display());
-
-        // Check if the directory is in PATH
-        if let Some(parent) = bat_path.parent() {
-            let parent_str = parent.to_string_lossy().to_string();
-            if let Ok(path) = std::env::var("PATH") {
-                // Windows PATH uses semicolons
-                if !path.split(';').any(|p| p.eq_ignore_ascii_case(&parent_str)) {
-                    println!();
-                    println!("Note: {} is not in your PATH.", parent.display());
-                    println!("Add it to your system PATH environment variable.");
-                }
-            }
-        }
-    }
-
-    Ok(())
+    let batch_content = format!(
+        "@echo off\r\n\"{}\" credential docker %1\r\n",
+        vouch_path.display()
+    );
+    crate::utils::create_symlink_with_fallback(vouch_path, symlink_path, &batch_content)
 }
 
 /// Configure ~/.docker/config.json with the credential helper.

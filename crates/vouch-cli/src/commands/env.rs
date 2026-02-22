@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 
+use super::CredentialType;
 use super::exec::CodeArtifactOptions;
 
 /// Shell format for environment variable output.
@@ -17,13 +18,12 @@ pub enum Shell {
 /// Run the env command - output shell-evaluable credential exports.
 pub async fn run(
     server: &str,
-    credential_type: &super::exec::CredentialType,
+    credential_type: &CredentialType,
     shell: &Shell,
     role: Option<&str>,
     session_name: Option<&str>,
     ca_opts: CodeArtifactOptions<'_>,
 ) -> Result<()> {
-    use super::exec::CredentialType;
     match credential_type {
         CredentialType::Aws => {
             let role_arn = role.context(

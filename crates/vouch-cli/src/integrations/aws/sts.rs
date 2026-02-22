@@ -5,6 +5,7 @@
 //! credential fields protected using `SecretString`.
 
 use anyhow::{Context, Result};
+use jiff::Timestamp;
 use secrecy::SecretString;
 
 /// AWS STS `AssumeRoleWithWebIdentity` response.
@@ -26,7 +27,7 @@ pub struct StsCredentials {
     pub access_key_id: String,
     pub secret_access_key: SecretString,
     pub session_token: SecretString,
-    pub expiration: String,
+    pub expiration: Timestamp,
 }
 
 impl std::fmt::Debug for StsCredentials {
@@ -136,7 +137,10 @@ fn parse_sts_xml_response(xml: &str) -> Result<AssumeRoleWithWebIdentityResponse
     let access_key_id = extract_child_text(credentials_node, "AccessKeyId")?;
     let secret_access_key = extract_child_text(credentials_node, "SecretAccessKey")?;
     let session_token = extract_child_text(credentials_node, "SessionToken")?;
-    let expiration = extract_child_text(credentials_node, "Expiration")?;
+    let expiration_str = extract_child_text(credentials_node, "Expiration")?;
+    let expiration = expiration_str
+        .parse::<Timestamp>()
+        .with_context(|| format!("failed to parse STS Expiration: {expiration_str}"))?;
 
     Ok(AssumeRoleWithWebIdentityResponse {
         assume_role_with_web_identity_result: AssumeRoleResult {
@@ -256,7 +260,10 @@ mod tests {
         let result = parse_sts_xml_response(xml).expect("valid XML");
         let creds = &result.assume_role_with_web_identity_result.credentials;
         assert_eq!(creds.access_key_id, "AKIAIOSFODNN7EXAMPLE");
-        assert_eq!(creds.expiration, "2024-01-15T18:30:45Z");
+        assert_eq!(
+            creds.expiration,
+            "2024-01-15T18:30:45Z".parse::<Timestamp>().unwrap()
+        );
 
         // Verify SecretString fields work correctly
         use secrecy::ExposeSecret;
@@ -293,7 +300,7 @@ mod tests {
             access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
             secret_access_key: SecretString::from("wJalrXUtnFEMI/K7MDENG".to_string()),
             session_token: SecretString::from("FwoGZXIvYXdzEBYaDM".to_string()),
-            expiration: "2024-01-15T18:30:45Z".to_string(),
+            expiration: "2024-01-15T18:30:45Z".parse().unwrap(),
         };
         let debug = format!("{:?}", creds);
         // Verify sensitive data is not exposed in Debug output
@@ -302,7 +309,7 @@ mod tests {
         assert!(debug.contains("[REDACTED]"));
         // Non-sensitive data should still be visible
         assert!(debug.contains("AKIAIOSFODNN7EXAMPLE"));
-        assert!(debug.contains("2024-01-15T18:30:45Z"));
+        assert!(debug.contains("2024-01-15T18:30:45"));
     }
 
     #[test]
