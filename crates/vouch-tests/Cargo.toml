@@ -17,11 +17,12 @@ indexing_slicing = "allow"
 unsafe_code = "deny"
 
 [dependencies]
-vouch-common = { path = "../vouch-common", features = ["test-utils"] }
+vouch-common = { path = "../vouch-common" }
 vouch-cli = { path = "../vouch-cli", features = ["test-utils"] }
 vouch-server = { path = "../vouch-server", features = ["test-utils"] }
 vouch-agent = { path = "../vouch-agent", features = ["test-utils"] }
 
+thiserror = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

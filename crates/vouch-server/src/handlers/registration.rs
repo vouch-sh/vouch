@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! WebAuthn registration attestation validation.
 
+use crate::attestation::{extract_aaguid_from_attestation, validate_hardware_attestation};
 use axum::Json;
 use axum::http::StatusCode;
-use vouch_common::{ApiError, extract_aaguid_from_attestation, validate_hardware_attestation};
+use vouch_common::ApiError;
 
 use super::errors::json_error;
 

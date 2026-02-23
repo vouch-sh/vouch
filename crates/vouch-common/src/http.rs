@@ -17,9 +17,9 @@ pub mod timeouts {
     pub const CREDENTIAL_CONNECT: Duration = Duration::from_secs(5);
 
     /// Total timeout for interactive CLI operations.
-    pub const INTERACTIVE_TOTAL: Duration = Duration::from_secs(30);
+    pub const INTERACTIVE_TOTAL: Duration = Duration::from_secs(45);
     /// Connection timeout for interactive CLI operations.
-    pub const INTERACTIVE_CONNECT: Duration = Duration::from_secs(10);
+    pub const INTERACTIVE_CONNECT: Duration = Duration::from_secs(15);
 
     /// Total timeout for agent background operations.
     pub const AGENT_TOTAL: Duration = Duration::from_secs(5);
@@ -27,9 +27,9 @@ pub mod timeouts {
     pub const AGENT_CONNECT: Duration = Duration::from_secs(3);
 
     /// Total timeout for server-side API calls.
-    pub const SERVER_TOTAL: Duration = Duration::from_secs(15);
+    pub const SERVER_TOTAL: Duration = Duration::from_secs(30);
     /// Connection timeout for server-side API calls.
-    pub const SERVER_CONNECT: Duration = Duration::from_secs(5);
+    pub const SERVER_CONNECT: Duration = Duration::from_secs(10);
 }
 
 /// Create an HTTP client for credential helper operations.
@@ -55,7 +55,7 @@ pub fn credential_client(user_agent: &str) -> Result<reqwest::Client, reqwest::E
 
 /// Create an HTTP client for interactive CLI operations.
 ///
-/// Uses longer timeouts (30s total, 10s connect) since users expect
+/// Uses longer timeouts (45s total, 15s connect) since users expect
 /// some latency for interactive commands.
 ///
 /// # Arguments
@@ -95,8 +95,9 @@ pub fn agent_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error>
 
 /// Create an HTTP client for server-side API calls.
 ///
-/// Uses moderate timeouts (15s total, 5s connect) since external
-/// APIs may be slower but we still want to fail reasonably fast.
+/// Uses moderate timeouts (30s total, 10s connect) to accommodate
+/// IPv6 connections that may traverse longer network paths (NAT64,
+/// different routing) while still failing reasonably fast.
 ///
 /// # Arguments
 ///

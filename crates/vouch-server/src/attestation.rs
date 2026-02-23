@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: Apache-2.0 OR MIT
+// SPDX-License-Identifier: BUSL-1.1
 //! Attestation format extraction and validation for WebAuthn credentials.
 //!
 //! This module provides utilities to extract and classify attestation formats
@@ -160,7 +160,7 @@ pub fn extract_aaguid_from_attestation(attestation: &[u8]) -> Option<String> {
     })?;
 
     // Extract AAGUID from authenticator data
-    crate::extract_aaguid_from_auth_data(auth_data)
+    vouch_common::extract_aaguid_from_auth_data(auth_data)
 }
 
 /// Result of validating an attestation format for hardware-only authentication.

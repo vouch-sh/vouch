@@ -10,7 +10,7 @@ workspace = true
 
 [features]
 default = []
-test-utils = ["vouch-common/test-utils", "tower"]
+test-utils = ["tower"]
 
 [lib]
 path = "src/lib.rs"

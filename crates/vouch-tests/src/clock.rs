@@ -36,7 +36,6 @@ impl SystemClock {
 /// Test clock that can be set to any time and advanced manually.
 ///
 /// This is useful for testing time-dependent behavior like session expiration.
-#[cfg(any(test, feature = "test-utils"))]
 pub struct TestClock {
     /// Current timestamp in seconds since Unix epoch.
     now: std::sync::atomic::AtomicI64,
@@ -44,7 +43,6 @@ pub struct TestClock {
     nanos: std::sync::atomic::AtomicI32,
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 impl TestClock {
     /// Create a new test clock set to the given timestamp.
     #[must_use]
@@ -102,7 +100,6 @@ impl TestClock {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 impl Clock for TestClock {
     fn now(&self) -> Timestamp {
         let secs = self.now.load(std::sync::atomic::Ordering::SeqCst);
@@ -112,14 +109,12 @@ impl Clock for TestClock {
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 impl Default for TestClock {
     fn default() -> Self {
         Self::now_clock()
     }
 }
 
-#[cfg(any(test, feature = "test-utils"))]
 impl std::fmt::Debug for TestClock {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("TestClock")
