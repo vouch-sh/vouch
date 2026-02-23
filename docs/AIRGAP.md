@@ -1,6 +1,6 @@
 # Air-Gapped Deployment Guide
 
-> **Status: Planned** — This document describes the air-gapped deployment architecture for Vouch. Server and CLI packages are available from [packages.vouch.sh](https://packages.vouch.sh), and the core components (SSH CA, FIDO2 authentication) exist today. However, air-gap-specific CLI commands (e.g., `vouch enroll --airgap`) and automation scripts are not yet implemented (see [ROADMAP.md](ROADMAP.md), v0.8).
+> **Status: Planned** — This document describes the air-gapped deployment architecture for Vouch. Server and CLI packages are available from [packages.vouch.sh](https://packages.vouch.sh), and the core components (SSH CA, FIDO2 authentication) exist today. However, air-gap-specific CLI commands (e.g., `vouch enroll --airgap`) and automation scripts are not yet implemented.
 
 This guide covers deploying Vouch in environments with no internet connectivity, such as defense contractors, government agencies, financial services, and critical infrastructure.
 
@@ -17,58 +17,58 @@ Vouch's built-in SSH CA and local-first architecture make it well-suited for the
 ## Architecture
 
 ```
-+---------------------------------------------------------------------------+
-|                           AIR-GAPPED ENCLAVE                               |
-|                                                                            |
-|  +----------------------------------------------------------------------+  |
-|  |                      On-Premises Vouch Stack                         |  |
-|  |                                                                      |  |
-|  |  +--------------+  +----------------+  +--------------------------+  |  |
-|  |  |   Vouch      |  |   Built-in     |  |         SQLite           |  |  |
-|  |  |   Server     |  |   SSH CA       |  |                          |  |  |
-|  |  |              |  |                |  |  * Users & credentials     | |  |
-|  |  |  * WebAuthn  |  |  * Ed25519 CA  |  |  * Sessions                | |  |
-|  |  |  * OIDC      |  |  * SSH certs   |  |  * Audit logs              | |  |
-|  |  |  * Sessions  |  |  * 8hr TTL     |  |                            | |  |
-|  |  +--------------+  +----------------+  +----------------------------+ |  |
-|  |         |                  |                        |                 |  |
-|  |         +------------------+------------------------+                 |  |
-|  |                            |                                          |  |
-|  +----------------------------+------------------------------------------+  |
-|                               |                                             |
-|                               | Internal Network Only                       |
-|                               v                                             |
-|  +----------------------------------------------------------------------+  |
-|  |                         Workstations                                  |  |
-|  |                                                                       |  |
-|  |  +--------------+  +--------------+  +------------------------------+ |  |
-|  |  | Workstation  |  | Workstation  |  |    Protected Resources       | |  |
-|  |  |              |  |              |  |                              | |  |
-|  |  | * vouch CLI  |  | * vouch CLI  |  |  * SSH servers               | |  |
-|  |  | * YubiKey    |  | * YubiKey    |  |  * Internal apps             | |  |
-|  |  | * Certs      |  | * Certs      |  |  * Databases                 | |  |
-|  |  +--------------+  +--------------+  +------------------------------+ |  |
-|  |                                                                       |  |
-|  +-----------------------------------------------------------------------+  |
-|                                                                             |
-|  +-----------------------------------------------------------------------+  |
-|  |                        Time Infrastructure                            |  |
-|  |  +------------+     +-----------------+                               |  |
-|  |  | GPS Time   |---->|  Internal NTP   |----> All hosts                |  |
-|  |  | Receiver   |     |  (stratum 1)    |                               |  |
-|  |  +------------+     +-----------------+                               |  |
-|  +-----------------------------------------------------------------------+  |
-+---------------------------------------------------------------------------+
++--------------------------------------------------------------------------+
+|                          AIR-GAPPED ENCLAVE                              |
+|                                                                          |
+|  +--------------------------------------------------------------------+  |
+|  |                     On-Premises Vouch Stack                        |  |
+|  |                                                                    |  |
+|  |  +--------------+  +----------------+  +-----------------------+   |  |
+|  |  |   Vouch      |  |   Built-in     |  |       SQLite          |   |  |
+|  |  |   Server     |  |   SSH CA       |  |                       |   |  |
+|  |  |              |  |                |  |  * Users & credentials |   |  |
+|  |  |  * WebAuthn  |  |  * Ed25519 CA  |  |  * Sessions           |   |  |
+|  |  |  * OIDC      |  |  * SSH certs   |  |  * Audit logs         |   |  |
+|  |  |  * Sessions  |  |  * 8hr TTL     |  |                       |   |  |
+|  |  +--------------+  +----------------+  +-----------------------+   |  |
+|  |         |                  |                      |                |  |
+|  |         +------------------+----------------------+                |  |
+|  |                            |                                       |  |
+|  +----------------------------+---------------------------------------+  |
+|                               |                                          |
+|                               | Internal Network Only                    |
+|                               v                                          |
+|  +--------------------------------------------------------------------+  |
+|  |                        Workstations                                |  |
+|  |                                                                    |  |
+|  |  +--------------+  +--------------+  +-------------------------+   |  |
+|  |  | Workstation  |  | Workstation  |  |   Protected Resources   |   |  |
+|  |  |              |  |              |  |                         |   |  |
+|  |  | * vouch CLI  |  | * vouch CLI  |  |  * SSH servers          |   |  |
+|  |  | * YubiKey    |  | * YubiKey    |  |  * Internal apps        |   |  |
+|  |  | * Certs      |  | * Certs      |  |  * Databases            |   |  |
+|  |  +--------------+  +--------------+  +-------------------------+   |  |
+|  |                                                                    |  |
+|  +--------------------------------------------------------------------+  |
+|                                                                          |
+|  +--------------------------------------------------------------------+  |
+|  |                       Time Infrastructure                          |  |
+|  |  +------------+     +-----------------+                            |  |
+|  |  | GPS Time   |---->|  Internal NTP   |----> All hosts             |  |
+|  |  | Receiver   |     |  (stratum 1)    |                            |  |
+|  |  +------------+     +-----------------+                            |  |
+|  +--------------------------------------------------------------------+  |
++--------------------------------------------------------------------------+
                                     |
                                     | Air Gap (sneakernet)
                                     v
-+---------------------------------------------------------------------------+
-|                          CONNECTED ENVIRONMENT                             |
-|                                                                            |
-|  * Signed software packages (from packages.vouch.sh)                      |
-|  * CA certificate updates                                                  |
-|  * (Optional) Audit log export                                             |
-+---------------------------------------------------------------------------+
++--------------------------------------------------------------------------+
+|                         CONNECTED ENVIRONMENT                            |
+|                                                                          |
+|  * Signed software packages (from packages.vouch.sh)                     |
+|  * CA certificate updates                                                |
+|  * (Optional) Audit log export                                           |
++--------------------------------------------------------------------------+
 ```
 
 ## Prerequisites
@@ -517,7 +517,7 @@ services:
       # Override or add environment variables here
       VOUCH_DATABASE_URL: sqlite:/data/vouch.db?mode=rwc
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:443/health"]
+      test: ["CMD", "wget", "-q", "--spider", "--no-check-certificate", "https://localhost/health"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -679,11 +679,7 @@ For truly isolated networks without GPS:
 2. Set time on NTP server manually
 3. Document time sync in audit log
 
-```toml
-# Adjust vouch config for larger clock skew
-[time]
-allowed_skew_seconds = 600  # 10 minutes
-```
+Vouch server configuration is done via environment variables (see [Step 6](#step-6-configure-vouch-server)). JWT clock skew tolerance is handled automatically.
 
 ## Software Updates
 
@@ -767,13 +763,7 @@ Air-gapped environments still need audit trails for compliance.
 +-----------------+     +-------------+     +-----------------+
 ```
 
-Configure syslog export:
-```toml
-[audit]
-syslog_enabled = true
-syslog_address = "diode.internal:514"
-syslog_protocol = "udp"
-```
+Syslog export is planned but not yet implemented. Currently, use the periodic export method below.
 
 ### Periodic Export
 

@@ -1,6 +1,32 @@
 # Security Model
 
-This document describes Vouch's security architecture, threat model, and incident response procedures.
+This document describes Vouch's security architecture, controls, and incident response procedures.
+
+## Table of Contents
+
+1. [Security Philosophy](#security-philosophy)
+2. [Threat Model](#threat-model)
+3. [Security Controls](#security-controls)
+   - [Authentication Layer](#authentication-layer)
+   - [PIN Requirements](#pin-requirements)
+   - [Hardware-Bound Enforcement](#hardware-bound-enforcement)
+   - [Discoverable Credentials](#discoverable-credentials)
+   - [Enrollment Security](#enrollment-security-rfc-8628)
+   - [Key Registration Security](#key-registration-security)
+   - [Transport Layer](#transport-layer)
+   - [Credential Layer](#credential-layer)
+   - [Audit Layer](#audit-layer)
+4. [S3 Configuration Security](#s3-configuration-security)
+5. [Session Storage Security](#session-storage-security)
+6. [SCIM Security](#scim-security)
+7. [Client Credential Security](#client-credential-security)
+8. [Memory Safety](#memory-safety)
+9. [Supply Chain Security](#supply-chain-security)
+10. [Residual Risks](#residual-risks)
+11. [Incident Response](#incident-response)
+12. [Vulnerability Disclosure](#vulnerability-disclosure)
+13. [Security Hardening Guide](#security-hardening-guide)
+14. [Security Contacts](#security-contacts)
 
 ## Security Philosophy
 
@@ -37,43 +63,7 @@ Vouch is designed around three core principles:
 | **Malware stealing session after login** | Session token in memory | 8-hour session lifetime, endpoint protection | EDR solutions, anomalous session usage patterns |
 | **Supply chain attacks on CLI** | Compromised binary | Reproducible builds, code signing, open source auditing | Security researcher engagement, build provenance verification |
 
-### Attacker Profiles
-
-#### Script Kiddie
-- **Capabilities**: Automated scanning, credential stuffing, phishing kits
-- **Vouch defense**: No passwords, origin-bound hardware auth, short-lived creds
-
-#### Sophisticated Attacker
-- **Capabilities**: Targeted phishing, malware, network interception
-- **Vouch defense**: Hardware attestation (format validation), hardware-bound only policy, audit logging
-
-#### Nation-State
-- **Capabilities**: Zero-days, supply chain compromise, physical access
-- **Vouch defense**: Air-gapped deployment (planned), reproducible builds
-
-### Trust Boundaries
-
-| Boundary | Description | Protection |
-|----------|-------------|------------|
-| **Internet ↔ Server** | Public network to Vouch server | TLS 1.3, certificate validation |
-| **Server ↔ Workstation** | Server to user machine | TLS 1.3, JWT validation |
-| **CLI ↔ Agent** | User commands to daemon | Unix socket permissions (0700) |
-| **Agent ↔ Hardware Authenticator** | Software to hardware | CTAP2 protocol, PIN verification |
-
-### Security Assumptions
-
-Vouch's security model relies on the following assumptions. If any assumption is violated, the corresponding security properties may be compromised.
-
-| ID | Assumption | Rationale | If Violated |
-|----|------------|-----------|-------------|
-| **A-01** | **Hardware Authenticator Integrity**: Hardware FIDO2 authenticators correctly implement FIDO2/CTAP2 and protect private keys from extraction | Leading hardware authenticator vendors (Yubico, etc.) have undergone independent security audits. Secure elements prevent key extraction even with physical access. | Attackers could clone authenticator credentials, defeating hardware-bound authentication |
-| **A-02** | **TLS Implementation Correctness**: The TLS 1.3 implementation (rustls) correctly encrypts communications and validates certificates | rustls is a well-audited, memory-safe TLS implementation with no OpenSSL dependencies | Network attackers could intercept or modify communications between components |
-| **A-03** | **Cryptographic Primitive Security**: Ed25519 and SHA-256 provide their claimed security properties; TLS ciphers (AES-GCM, ChaCha20-Poly1305) are handled by rustls | These are widely reviewed, standardized algorithms implemented by aws-lc-rs (FIPS-validated) | Signature forgery, token hash reversal, or TLS decryption could occur |
-| **A-04** | **Operating System Isolation**: The operating system provides process isolation and file permission enforcement | Unix socket permissions (0700) and file permissions (0600) are enforced by the kernel | Malicious processes could access agent sockets or credential files |
-| **A-05** | **User PIN Confidentiality**: Users protect their hardware authenticator PIN and do not share it | PIN is verified on-device and never transmitted to servers | PIN + physical authenticator access enables impersonation |
-| **A-06** | **Server Infrastructure Security**: The Vouch server runs on secure, patched infrastructure with appropriate access controls | Server-side vulnerabilities are outside application scope but critical to overall security | Database access, CA key theft, or session injection could occur |
-| **A-07** | **External IdP Trustworthiness**: External identity providers (Google Workspace, Entra ID) correctly verify user identities | These are enterprise-grade identity providers with their own security models | Unauthorized users could enroll by compromising external IdP accounts |
-| **A-08** | **Clock Synchronization**: All systems maintain reasonably accurate time (within minutes) | JWT expiration and certificate validity depend on timestamp comparison | Expired tokens could be accepted or valid tokens rejected |
+For detailed attacker profiles, trust boundaries, and security assumptions, see [THREAT_MODEL.md](THREAT_MODEL.md#threat-actors).
 
 ## Security Controls
 
@@ -292,7 +282,7 @@ Certificate:
     Signing CA: vouch-ca (built-in Ed25519)
     Key ID: user@example.com@vouch.example.com
     Serial: 1705234567
-    Valid: 2024-01-14T10:00:00 to 2024-01-14T18:00:00 (8 hours)
+    Valid: 2026-01-14T10:00:00 to 2026-01-14T18:00:00 (8 hours)
     Principals: user@example.com, user
     Critical Options: (none)
     Extensions:
@@ -600,6 +590,7 @@ struct OAuthClient {
     client_id: String,
     allowed_scopes: Vec<Scope>,        // Maximum scopes client can request
     allowed_redirect_uris: Vec<Url>,   // Validated redirect destinations
+    allowed_resource_uris: Vec<Url>,   // Validated resource indicators (RFC 8707)
     token_lifetime: Duration,           // Maximum token lifetime
 }
 ```
@@ -607,7 +598,38 @@ struct OAuthClient {
 **Enforcement:**
 - Token requests cannot exceed `allowed_scopes`
 - Redirect URIs must exactly match registered values (no wildcards)
+- Resource URIs must match a pre-registered value (closed by default)
 - Tokens cannot exceed `token_lifetime` even if requested
+
+### Resource Indicators (RFC 8707)
+
+Vouch supports audience-restricted tokens via RFC 8707 Resource Indicators. When a client includes the `resource` parameter in an authorization or token request, the access token's `aud` claim is set to the target resource server URI instead of the `client_id`.
+
+**Token Misdirection Prevention:**
+
+Resource indicators prevent the confused deputy problem — where a malicious resource server replays a bearer token at a different service. With audience-restricted tokens, each token is bound to a specific resource server.
+
+| Control | Description |
+|---------|-------------|
+| Pre-registration required | Resource URIs must be registered on the OAuth client before use |
+| URI validation | Resource URIs must be absolute URIs without fragment components |
+| Single resource per request | Only one `resource` value per request (prevents multi-audience tokens) |
+| No scope widening at token time | The `resource` parameter at token exchange cannot differ from the authorization grant |
+| `invalid_target` error | Unregistered or malformed resource URIs return a specific OAuth error code |
+
+**Resource Narrowing Rules:**
+
+| Authorization `resource` | Token `resource` | Result |
+|--------------------------|------------------|--------|
+| `https://api.example.com` | (omitted) | `aud` = `https://api.example.com` |
+| `https://api.example.com` | `https://api.example.com` | `aud` = `https://api.example.com` |
+| `https://api.example.com` | `https://other.example.com` | Error: `invalid_target` |
+| (omitted) | `https://api.example.com` | Error: `invalid_target` |
+| (omitted) | (omitted) | `aud` = `client_id` (default) |
+
+**Open Policy for Unregistered Clients:**
+
+If an OAuth client has no resource URIs registered, the `resource` parameter is not validated against a list — any valid URI is accepted. This allows gradual adoption without breaking existing clients. Register resource URIs to enforce a closed allowlist.
 
 ### Audit Logging
 

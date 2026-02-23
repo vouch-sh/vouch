@@ -583,6 +583,25 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 ---
 
+#### T-15a: Token Misdirection (Confused Deputy)
+
+**Threat Statement**: A **sophisticated attacker** with **a malicious resource server that receives a valid bearer token** can **replay the token at a different resource server** which leads to **no unauthorized access due to audience-restricted tokens**, negatively impacting **nothing (attack fails when resource indicators are used)**.
+
+**Likelihood**: Medium (attempt)
+**Impact**: None (when resource indicators are used)
+**Risk**: Mitigated
+
+**Mitigations**:
+| ID | Mitigation | Status |
+|----|------------|--------|
+| M-60a | RFC 8707 resource indicators bind tokens to target resource server (`aud` claim) | Implemented |
+| M-60b | Resource URIs must be pre-registered on the OAuth client | Implemented |
+| M-60c | Single resource value per request prevents multi-audience tokens | Implemented |
+| M-60d | Resource cannot be widened at token exchange time | Implemented |
+| M-60e | `invalid_target` error for unregistered or malformed resource URIs | Implemented |
+
+---
+
 ### Network Threats
 
 #### T-16: Man-in-the-Middle Attack
@@ -739,7 +758,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 | Status | Count | Mitigations |
 |--------|-------|-------------|
-| **Implemented** | 78 | M-01 through M-89 (most), M-41a, M-41g |
+| **Implemented** | 83 | M-01 through M-89 (most), M-41a, M-41g, M-60a through M-60e |
 | **Partial** | 1 | M-87 (slow_down implemented; per-IP rate limits planned) |
 | **Planned** | 10 | M-02, M-30, M-32, M-33, M-48a, M-52, M-64, M-70, M-71, M-80 |
 | **Hardware** | 2 | M-09, M-10 (authenticator enforced) |
@@ -765,43 +784,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 ## Residual Risks
 
-Despite comprehensive mitigations, the following residual risks remain:
-
-### RR-01: Physical Authenticator Theft with PIN Knowledge
-
-**Risk**: If an attacker obtains both physical possession of a hardware authenticator and knowledge of the PIN, they can authenticate as the user.
-
-**Residual Impact**: Medium
-**Acceptance Rationale**: This requires two independent factors to be compromised. The 8-hour session limit bounds the impact. Biometric authenticators (e.g., YubiKey Bio series) can eliminate the PIN knowledge factor.
-
-**Monitoring**: Audit logs track all authentication events. Anomaly detection can flag unusual access patterns.
-
-### RR-02: Compromised Vouch Server
-
-**Risk**: A sophisticated attacker with server access could potentially extract the SSH CA key or manipulate authentication logic.
-
-**Residual Impact**: High
-**Acceptance Rationale**: Self-hosted deployment shifts this risk to the organization. Air-gapped deployment (planned) provides additional protection. Audit logs provide detection capability.
-
-**Monitoring**: Server integrity monitoring, audit log analysis, and anomaly detection.
-
-### RR-03: Session Token Theft via Advanced Malware
-
-**Risk**: Sophisticated malware with root/admin access could potentially extract session tokens from memory despite protections.
-
-**Residual Impact**: Medium
-**Acceptance Rationale**: 8-hour session lifetime limits the window. This risk exists for any authentication system and is mitigated by endpoint security.
-
-**Monitoring**: Endpoint detection and response (EDR) solutions, anomalous session usage patterns.
-
-### RR-04: Supply Chain Compromise Before Detection
-
-**Risk**: A supply chain attack could potentially affect users between compromise and detection.
-
-**Residual Impact**: Medium-High
-**Acceptance Rationale**: Open source code enables community review. Reproducible builds and SLSA attestations further reduce this risk.
-
-**Monitoring**: Security researcher engagement, automated vulnerability scanning, build provenance verification.
+For accepted residual risks and their monitoring strategies, see [SECURITY.md](SECURITY.md#residual-risks).
 
 ---
 
@@ -814,6 +797,7 @@ Despite comprehensive mitigations, the following residual risks remain:
 - [RFC 6749 - OAuth 2.0](https://www.rfc-editor.org/rfc/rfc6749)
 - [RFC 7636 - PKCE](https://www.rfc-editor.org/rfc/rfc7636)
 - [RFC 8628 - Device Authorization Grant](https://www.rfc-editor.org/rfc/rfc8628)
+- [RFC 8707 - Resource Indicators for OAuth 2.0](https://www.rfc-editor.org/rfc/rfc8707)
 - [RFC 9068 - JWT Profile for OAuth 2.0 Access Tokens](https://www.rfc-editor.org/rfc/rfc9068)
 - [RFC 9449 - DPoP](https://www.rfc-editor.org/rfc/rfc9449)
 - [RFC 7643/7644 - SCIM 2.0](https://www.rfc-editor.org/rfc/rfc7643)
@@ -822,7 +806,7 @@ Despite comprehensive mitigations, the following residual risks remain:
 
 - [AWS Threat Composer](https://github.com/awslabs/threat-composer)
 - [AWS Security Blog - Threat Modeling](https://aws.amazon.com/blogs/security/threat-modeling-your-generative-ai-workload-to-evaluate-security-risk/)
-- [STRIDE Threat Model](https://docs.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats)
+- [STRIDE Threat Model](https://learn.microsoft.com/en-us/azure/security/develop/threat-modeling-tool-threats)
 - [OWASP Threat Modeling](https://owasp.org/www-community/Threat_Modeling)
 
 ### Related Documentation

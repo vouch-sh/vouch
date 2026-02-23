@@ -82,6 +82,8 @@ pub struct AuthorizationCodeParams<'a> {
     pub code_challenge: Option<&'a str>,
     /// PKCE code challenge method (RFC 7636 Section 4.2).
     pub code_challenge_method: Option<CodeChallengeMethod>,
+    /// RFC 8707: Target resource indicator.
+    pub resource: Option<&'a str>,
 }
 
 /// Authorization request parameters (from query string).
@@ -104,6 +106,8 @@ pub struct AuthorizeRequestParams {
     /// PKCE code challenge method (raw string from request, validated into enum).
     /// RFC 7636 Section 4.3.
     pub code_challenge_method: Option<String>,
+    /// RFC 8707 Section 2: Target resource indicator.
+    pub resource: Option<String>,
 }
 
 /// Validated authorization request ready for code issuance.
@@ -119,6 +123,8 @@ pub struct ValidatedAuthRequest {
     nonce: Option<String>,
     code_challenge: Option<String>,
     code_challenge_method: Option<CodeChallengeMethod>,
+    /// RFC 8707: Validated resource indicator.
+    resource: Option<String>,
 }
 
 impl ValidatedAuthRequest {
@@ -163,6 +169,12 @@ impl ValidatedAuthRequest {
     pub fn code_challenge_method(&self) -> Option<CodeChallengeMethod> {
         self.code_challenge_method
     }
+
+    /// RFC 8707: Resource indicator.
+    #[must_use]
+    pub fn resource(&self) -> Option<&str> {
+        self.resource.as_deref()
+    }
 }
 
 /// Result of checking session state for authorization.
@@ -203,6 +215,9 @@ pub struct AuthorizationCode {
     pub code_challenge: Option<String>,
     /// PKCE code challenge method — RFC 7636 Section 4.2.
     pub code_challenge_method: Option<CodeChallengeMethod>,
+    /// RFC 8707: Resource indicator from authorization request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource: Option<String>,
     pub iat: i64,
     pub exp: i64,
 }
@@ -316,6 +331,17 @@ pub fn validate_authorize_request(
 
     let scope = ScopeSet::parse(&params.scope.unwrap_or_else(|| "openid".to_string()));
 
+    // RFC 8707 Section 2: Validate resource parameter if present
+    if let Some(ref resource) = params.resource {
+        use super::resource::ResourceUri;
+        if ResourceUri::parse(resource).is_err() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidTarget,
+                "Invalid resource parameter: must be an absolute URI without a fragment",
+            ));
+        }
+    }
+
     Ok(ValidatedAuthRequest {
         client_id: params.client_id,
         redirect_uri: params.redirect_uri,
@@ -324,6 +350,7 @@ pub fn validate_authorize_request(
         nonce: params.nonce,
         code_challenge: params.code_challenge,
         code_challenge_method: parsed_method,
+        resource: params.resource,
     })
 }
 
@@ -396,6 +423,7 @@ pub async fn issue_authorization_code(
         nonce: params.nonce.map(String::from),
         code_challenge: params.code_challenge.map(String::from),
         code_challenge_method: params.code_challenge_method,
+        resource: params.resource.map(String::from),
         iat: now.as_second(),
         exp,
     };
@@ -566,6 +594,7 @@ mod tests {
             last_used_at: None,
             access_scope,
             org_id: org_id.map(String::from),
+            resource_uris: "[]".to_string(),
         }
     }
 
@@ -594,6 +623,7 @@ mod tests {
             nonce: Some("nonce123".to_string()),
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some("S256".to_string()),
+            resource: None,
         };
 
         let result = validate_authorize_request(params);
@@ -614,6 +644,7 @@ mod tests {
             nonce: None,
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some("S256".to_string()),
+            resource: None,
         };
 
         let result = validate_authorize_request(params);
@@ -637,6 +668,7 @@ mod tests {
             nonce: None,
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some("S256".to_string()),
+            resource: None,
         };
 
         let result = validate_authorize_request(params);
@@ -654,6 +686,7 @@ mod tests {
             nonce: None,
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some("S256".to_string()),
+            resource: None,
         };
 
         let result = validate_authorize_request(params);
@@ -674,6 +707,7 @@ mod tests {
             nonce: None,
             code_challenge: None,
             code_challenge_method: None,
+            resource: None,
         };
 
         let result = validate_authorize_request(params);
@@ -698,6 +732,7 @@ mod tests {
             nonce: None,
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some("plain".to_string()),
+            resource: None,
         };
 
         let result = validate_authorize_request(params);

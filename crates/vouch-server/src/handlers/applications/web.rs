@@ -21,9 +21,11 @@ use super::types::{
     UsageStat,
 };
 use super::{
-    extract_auth_from_cookie, generate_client_secret, parse_redirect_uris, validate_redirect_uris,
+    extract_auth_from_cookie, generate_client_secret, parse_redirect_uris, parse_resource_uris,
+    validate_redirect_uris,
 };
 use crate::handlers::hash_token;
+use crate::services::oidc::ResourceUri;
 
 /// List user's applications.
 /// GET /applications
@@ -155,6 +157,23 @@ pub async fn create_application_form(
         .into_response();
     }
 
+    // RFC 8707: Parse and validate resource URIs from form (if provided).
+    let resource_uris = parse_resource_uris(form.resource_uris.as_deref());
+
+    for uri in &resource_uris {
+        if let Err(e) = ResourceUri::parse(uri) {
+            return ApplicationErrorTemplate {
+                title: "Invalid Input".to_string(),
+                message: format!(
+                    "Invalid resource URI '{uri}': {e}. \
+                     Resource URIs must be absolute URIs without fragment components."
+                ),
+                back_url: "/applications/new".to_string(),
+            }
+            .into_response();
+        }
+    }
+
     // Create the application
     let (client, client_id) = match db::create_oauth_client(
         &state.db,
@@ -165,6 +184,7 @@ pub async fn create_application_form(
         &redirect_uris,
         access_scope,
         org_id,
+        &resource_uris,
     )
     .await
     {
@@ -383,6 +403,23 @@ pub async fn update_application_form(
         .into_response();
     }
 
+    // RFC 8707: Parse and validate resource URIs from form (if provided).
+    let resource_uris = parse_resource_uris(form.resource_uris.as_deref());
+
+    for uri in &resource_uris {
+        if let Err(e) = ResourceUri::parse(uri) {
+            return ApplicationErrorTemplate {
+                title: "Invalid Input".to_string(),
+                message: format!(
+                    "Invalid resource URI '{uri}': {e}. \
+                     Resource URIs must be absolute URIs without fragment components."
+                ),
+                back_url: format!("/applications/{}", app_id),
+            }
+            .into_response();
+        }
+    }
+
     // Update the application
     if let Err(e) = db::update_oauth_client(
         &state.db,
@@ -392,6 +429,7 @@ pub async fn update_application_form(
         &redirect_uris,
         access_scope,
         org_id,
+        &resource_uris,
     )
     .await
     {

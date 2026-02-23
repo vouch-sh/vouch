@@ -23,6 +23,7 @@ use super::types::{
 };
 use super::{generate_client_secret, validate_redirect_uris};
 use crate::handlers::{extract_session, hash_token, json_error};
+use crate::services::oidc::ResourceUri;
 
 /// List user's applications (API).
 /// GET /api/v1/applications
@@ -137,6 +138,20 @@ pub async fn create_application_api(
         ));
     }
 
+    // RFC 8707: Resource URIs default to empty if not provided.
+    let resource_uris = req.resource_uris.as_deref().unwrap_or(&[]);
+
+    // Validate resource URIs per RFC 8707 (absolute URI, no fragment).
+    for uri in resource_uris {
+        if let Err(e) = ResourceUri::parse(uri) {
+            return Err(json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_resource_uri",
+                &format!("Invalid resource URI '{uri}': {e}"),
+            ));
+        }
+    }
+
     // Create the application
     let (client, client_id) = db::create_oauth_client(
         &state.db,
@@ -147,6 +162,7 @@ pub async fn create_application_api(
         &req.redirect_uris,
         access_scope,
         org_id,
+        resource_uris,
     )
     .await
     .map_err(|e| {
@@ -194,6 +210,7 @@ pub async fn create_application_api(
         name: name.to_string(),
         application_type: req.application_type,
         access_scope: access_scope.as_str().to_string(),
+        resource_uris: resource_uris.to_vec(),
     }))
 }
 
@@ -329,6 +346,24 @@ pub async fn update_application_api(
         ));
     }
 
+    // RFC 8707: Resource URIs default to existing if not provided.
+    let resource_uris = req
+        .resource_uris
+        .as_deref()
+        .map(|u| u.to_vec())
+        .unwrap_or_else(|| client.get_resource_uris());
+
+    // Validate resource URIs per RFC 8707 (absolute URI, no fragment).
+    for uri in &resource_uris {
+        if let Err(e) = ResourceUri::parse(uri) {
+            return Err(json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_resource_uri",
+                &format!("Invalid resource URI '{uri}': {e}"),
+            ));
+        }
+    }
+
     db::update_oauth_client(
         &state.db,
         &app_id,
@@ -337,6 +372,7 @@ pub async fn update_application_api(
         &redirect_uris,
         access_scope,
         org_id,
+        &resource_uris,
     )
     .await
     .map_err(|e| {

@@ -89,6 +89,20 @@ fn parse_redirect_uris(input: &str) -> Vec<String> {
         .collect()
 }
 
+/// Parse resource URIs from form input (newline or comma separated).
+/// Returns an empty vec if the input is `None` or empty.
+fn parse_resource_uris(input: Option<&str>) -> Vec<String> {
+    match input {
+        Some(s) if !s.trim().is_empty() => s
+            .lines()
+            .flat_map(|line| line.split(','))
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 /// Validate that all redirect URIs are valid URLs with proper schemes.
 ///
 /// Per RFC 8252 Section 7.3 and RFC 9700 Section 4.1.3:

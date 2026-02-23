@@ -401,6 +401,7 @@ async fn test_oauth_client_crud() {
         &redirect_uris,
         AccessScope::default(),
         None,
+        &[],
     )
     .await
     .expect("Failed to create OAuth client");
@@ -437,6 +438,7 @@ async fn test_oauth_client_crud() {
         &new_redirect_uris,
         None,
         None,
+        &[],
     )
     .await
     .expect("Failed to update client");
@@ -485,6 +487,7 @@ async fn test_oauth_client_types() {
             &[],
             AccessScope::default(),
             None,
+            &[],
         )
         .await
         .expect("Failed to create client");
@@ -522,6 +525,7 @@ async fn test_oauth_client_list_for_user() {
             &[],
             AccessScope::default(),
             None,
+            &[],
         )
         .await
         .expect("Failed to create client");
@@ -537,6 +541,7 @@ async fn test_oauth_client_list_for_user() {
         &[],
         AccessScope::default(),
         None,
+        &[],
     )
     .await
     .expect("Failed to create client");
@@ -571,6 +576,7 @@ async fn test_oauth_client_secret_management() {
         &[],
         AccessScope::default(),
         None,
+        &[],
     )
     .await
     .expect("Failed to create client");
@@ -622,6 +628,7 @@ async fn test_oauth_usage_recording() {
         &[],
         AccessScope::default(),
         None,
+        &[],
     )
     .await
     .expect("Failed to create client");
@@ -1236,6 +1243,7 @@ async fn test_oauth_client_cascade_delete() {
         &[],
         AccessScope::default(),
         None,
+        &[],
     )
     .await
     .expect("Failed to create client");

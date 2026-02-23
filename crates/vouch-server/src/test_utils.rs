@@ -631,6 +631,7 @@ pub async fn create_test_oauth_client(pool: &Pool, user_id: &str) -> TestOAuthCl
         &["https://example.com/callback".to_string()],
         crate::db::AccessScope::Public,
         None,
+        &[],
     )
     .await
     .expect("Failed to create test OAuth client");

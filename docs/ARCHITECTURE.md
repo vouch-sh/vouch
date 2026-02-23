@@ -2,6 +2,29 @@
 
 Vouch is a **hardware-backed authentication system** that issues short-lived credentials after verifying human presence via hardware FIDO2 keys.
 
+## Table of Contents
+
+1. [Product Vision](#product-vision)
+2. [Design Principles](#design-principles)
+3. [Security Proposition](#security-proposition)
+4. [System Overview](#system-overview)
+5. [Vouch Cloud](#vouch-cloud)
+6. [Core Components](#core-components)
+   - [vouch CLI](#vouch-cli-vouch-cli)
+   - [vouch-agent](#vouch-agent)
+   - [Vouch Server](#vouch-server)
+7. [Authentication Flows](#authentication-flows)
+   - [Enrollment](#enrollment-one-time-browser-required)
+   - [Daily Login](#daily-login-cli-only-no-browser)
+   - [Adding Additional Keys](#adding-additional-keys-cli-requires-login)
+   - [Credential Request](#credential-request-transparent)
+8. [Integration Architecture](#integration-architecture)
+9. [Data Model](#data-model)
+10. [Server Configuration](#server-configuration)
+11. [Technology Stack](#technology-stack)
+12. [Session Storage](#session-storage)
+13. [Security Properties](#security-properties)
+
 ## Product Vision
 
 **"No credential without proven human presence."**
@@ -206,6 +229,7 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - JWT Profile for OAuth 2.0 Access Tokens (RFC 9068) — including `amr`/`acr` claims
 - OAuth 2.0 Authorization Server Issuer Identification (RFC 9207)
 - SCIM 2.0 (RFC 7643/7644)
+- Resource Indicators for OAuth 2.0 (RFC 8707) — audience-restricted tokens
 - DPoP (RFC 9449) — Demonstrating Proof of Possession
 - OAuth 2.0 Security Best Current Practice (RFC 9700) — followed
 
@@ -267,6 +291,16 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - `hardware_aaguid` — The AAGUID of the authenticator (identifies device model)
 
 **Note:** For access tokens (RFC 9068), `aud` validation is the resource server's responsibility per RFC 9068 Section 4.
+
+**Resource Indicators (RFC 8707):**
+
+When a client includes the `resource` parameter in the authorization request, the resulting access token's `aud` claim is set to the target resource server URI instead of the `client_id`. This enables audience-restricted tokens — tokens that can only be used at the intended resource server, preventing token misdirection across services.
+
+- Resource URIs must be absolute URIs without fragment components
+- Resource URIs must be pre-registered on the OAuth client (closed by default)
+- A single `resource` value per request is supported
+- The `resource` parameter can be included at authorization time and optionally repeated at token exchange time (it cannot be widened, only confirmed)
+- Discovery metadata advertises `resource_indicators_supported: true`
 
 **Why OIDC:**
 - Standard protocol, works with any language/framework
@@ -355,6 +389,7 @@ Web Portal → My Applications → Register New Application
    - Application name (human-readable identifier)
    - Application type (web, native, SPA, service)
    - Redirect URIs (for authorization_code flow)
+   - Resource URIs (optional, for audience-restricted tokens per RFC 8707)
    - Requested scopes
 5. **Receive Credentials** — Vouch generates:
    - `client_id` — Public identifier for OAuth flows
@@ -716,7 +751,7 @@ How it works:
   credential-provider = ["vouch", "credential", "cargo", "--"]
 
 How it works:
-1. Cargo invokes vouch as credential provider (RFC 2730/3139 protocol)
+1. Cargo invokes vouch as credential provider (Cargo credential provider protocol)
 2. vouch sends Hello message with supported protocol versions
 3. Cargo sends JSON request with registry info and action (get/login/logout)
 4. vouch returns session token for registry authentication
@@ -1033,75 +1068,6 @@ vouch.example.com	FALSE	/	TRUE	1737849600	vouch_session	<token>
 5. **Audit trail** — Every credential issuance logged with session attestation
 6. **Compromise recovery** — Revoke authenticator registration, all sessions invalidated
 
-## Differences from Amazon Midway
+## Positioning
 
-Vouch is inspired by Amazon's internal Midway system but differs in several ways:
-
-| Aspect | Midway (Amazon Internal) | Vouch |
-|--------|-------------------------|-------|
-| Deployment | Internal only | SaaS + self-hosted |
-| Hardware | Amazon-issued Yubikeys | BYOD hardware FIDO2 keys |
-| Login | Email required | Discoverable credential (no email) |
-| CA | External PKI | Built-in Ed25519 CA |
-| IdP | Internal | Google Workspace (extensible) |
-| Open source | No | CLI is open source |
-
-## Competitive Positioning
-
-### Vouch vs WorkOS
-
-| Aspect | WorkOS | Vouch |
-|--------|--------|-------|
-| **Target Customer** | B2B SaaS vendors | Enterprises (internal use) |
-| **Purpose** | "Make your app enterprise-ready" | "Secure internal access with hardware auth" |
-| **IdP Role** | Integrates with customer's IdP | IS the IdP |
-| **Direction** | Your app → customer's Okta/Entra | Your employees → Vouch → your apps |
-| **Hardware Focus** | None specific | Hardware FIDO2 key required |
-
-**Summary**: Not competitors. WorkOS helps SaaS companies add SSO/SCIM to sell to enterprises. Vouch IS the enterprise authentication system.
-
-- WorkOS customer: "I'm building a SaaS product and need to support customer SSO."
-- Vouch customer: "I'm an enterprise and need to secure my employees' access to internal tools."
-
-### Vouch vs AWS Verified Access
-
-| Aspect | AWS Verified Access | Vouch |
-|--------|---------------------|-------|
-| **What it is** | Zero-trust access gateway | Hardware-backed identity provider |
-| **Authentication** | Integrates with IdPs | IS the IdP |
-| **Where it runs** | AWS-hosted (network layer) | Self-hosted or cloud |
-| **Access Model** | Per-request evaluation | Session + short-lived credentials |
-| **Device Trust** | Via MDM integration | Via hardware FIDO2 key |
-| **VPN** | Replaces VPN | Complements/replaces VPN |
-
-**Summary**: Complementary, not competitive. AWS Verified Access needs an IdP to authenticate users — Vouch can be that IdP. Different layers: Vouch = identity layer, AWS VA = access layer.
-
-### Vouch vs Traditional IdPs (Okta, Auth0, etc.)
-
-| Feature | Vouch | Okta/Auth0/etc. | Platform Passkeys |
-|---------|-------|-----------------|-------------------|
-| Hardware required | Yes | Optional | No |
-| Syncable credentials | No | Yes | Yes |
-| Built-in SSH CA | Yes | No | No |
-| Discoverable login | Yes | No | Yes |
-| 8-hour sessions | Yes | Configurable | N/A |
-| Self-hosted | Yes | No | N/A |
-
-**Core differentiator**: Most identity systems allow platform passkeys (Touch ID, Windows Hello), TOTP/SMS, and push notifications. Vouch requires hardware FIDO2 keys only — hardware-bound, non-extractable, presence required.
-
-### Positioning Summary
-
-```
-                    Hardware Required
-                          │
-          Vouch ◄─────────┼─────────► Platform Passkeys
-   (hardware keys only)   │          (Touch ID, Windows Hello)
-                          │
-    Amazon Midway         │          Most IdPs
-    (internal only)       │          (Okta, Auth0, etc.)
-                          │
-                          │
-                    Software Optional
-```
-
-**Target customers**: Organizations where credential theft is an existential risk (finance, healthcare, critical infrastructure), compliance requires hardware tokens (SOC 2, FedRAMP, HIPAA), remote work makes "trust the network" obsolete, or platform passkeys are too risky (syncable = exfiltrable).
+For competitive positioning, comparisons with Amazon Midway, and target customer analysis, see [POSITIONING.md](POSITIONING.md).

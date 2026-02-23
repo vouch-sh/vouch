@@ -2,6 +2,22 @@
 
 > **Status: Planned** — This document describes the planned agent delegation feature for Vouch. The commands and APIs described here are not yet implemented.
 
+## Table of Contents
+
+1. [Why Delegation](#why-delegation)
+2. [Design Principles](#design-principles)
+3. [Agent Taxonomy](#agent-taxonomy)
+4. [Architecture](#architecture)
+5. [CIBA Implementation](#ciba-implementation)
+6. [Scope Specification](#scope-specification)
+7. [Delegation Lifecycle](#delegation-lifecycle)
+8. [Token Delivery](#token-delivery)
+9. [Security Model](#security-model)
+10. [Audit Trail](#audit-trail)
+11. [Organization Policies](#organization-policies)
+12. [FAQ](#faq)
+13. [Alternatives Considered](#alternatives-considered)
+
 Vouch's delegation system allows humans to grant scoped, time-limited credentials to AI coding assistants and automation tools. Every delegated credential traces back to a YubiKey touch -- no stored secrets, no long-lived keys.
 
 The protocol layer is [CIBA (Client Initiated Backchannel Authentication)](https://openid.net/specs/openid-client-initiated-backchannel-authentication-core-1_0.html), a finalized OpenID Connect specification. CIBA was designed for exactly this pattern: the device requesting credentials (the agent) is different from the device approving them (the human's machine with the YubiKey). Vouch's contribution is making the YubiKey touch the approval mechanism.
@@ -362,7 +378,7 @@ Delegation created:
   ID:      del_abc123
   Grantee: claude-code
   Scope:   github:myorg/repo:contents:write
-  Expires: 2025-01-14T14:00:00Z
+  Expires: 2026-01-14T14:00:00Z
 
 The agent can now use: VOUCH_DELEGATION_TOKEN=eyJ...
 
@@ -410,8 +426,8 @@ $ vouch delegation show del_abc123
 Delegation: del_abc123
   Grantee:    claude-code
   Scope:      github:myorg/repo:contents:write
-  Created:    2025-01-14T12:00:00Z
-  Expires:    2025-01-14T14:00:00Z
+  Created:    2026-01-14T12:00:00Z
+  Expires:    2026-01-14T14:00:00Z
   Initiated:  CIBA (auth_req_id: 1c266114-...)
   Reason:     Implementing feature X
 
@@ -450,7 +466,9 @@ jobs:
     steps:
       - name: Get deployment credentials
         run: |
-          # CI bot has a pre-configured delegation with limited scope
+          # CI bot has a pre-configured delegation with limited scope.
+          # CI_DELEGATION_TOKEN is provisioned via `vouch delegate` and stored
+          # as a GitHub Actions secret by an administrator.
           export GITHUB_TOKEN=$(vouch credential github --delegation $CI_DELEGATION_TOKEN)
 ```
 
@@ -475,10 +493,10 @@ Returns scoped GitHub token directly to agent
 
 This avoids exposing the delegation token in the process environment. The agent process authenticates via the Unix socket's file permissions (same mechanism vouch-agent uses for CLI IPC today).
 
-### Custom Integrations
+### Custom Integrations (Illustrative)
 
 ```python
-import vouch
+import vouch  # SDK planned, not yet available
 
 # Agent code
 client = vouch.Client(delegation_token=os.environ["VOUCH_DELEGATION_TOKEN"])
@@ -570,7 +588,7 @@ Every delegated action is logged with full provenance:
 
 ```json
 {
-  "timestamp": "2025-01-14T12:32:15.123Z",
+  "timestamp": "2026-01-14T12:32:15.123Z",
   "event_type": "credential_issued",
 
   "actor": {
@@ -585,7 +603,7 @@ Every delegated action is logged with full provenance:
     "session_id": "sess_abc123",
     "session_attestation": {
       "authenticator_aaguid": "2fc0579f-8113-47ea-b116-bb5a8db9202a",
-      "authenticated_at": "2025-01-14T10:00:00Z"
+      "authenticated_at": "2026-01-14T10:00:00Z"
     }
   },
 
@@ -593,13 +611,13 @@ Every delegated action is logged with full provenance:
     "type": "github_token",
     "scope": "contents:write",
     "repository": "myorg/myrepo",
-    "expires_at": "2025-01-14T13:32:15Z"
+    "expires_at": "2026-01-14T13:32:15Z"
   },
 
   "delegation": {
     "id": "del_abc123",
-    "created_at": "2025-01-14T12:00:00Z",
-    "expires_at": "2025-01-14T14:00:00Z",
+    "created_at": "2026-01-14T12:00:00Z",
+    "expires_at": "2026-01-14T14:00:00Z",
     "scope": "github:myorg/myrepo:contents:write",
     "initiated_by": "ciba",
     "auth_req_id": "1c266114-a1be-4252-8ad1-04986c5b9ac1",
@@ -617,7 +635,7 @@ This audit record proves:
 
 ## Organization Policies
 
-Admins can configure delegation policies:
+Admins can configure delegation policies. The policy format below is illustrative and subject to change:
 
 ```yaml
 # Organization delegation policy
