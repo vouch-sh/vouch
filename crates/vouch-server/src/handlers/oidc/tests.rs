@@ -843,6 +843,7 @@ async fn issue_oauth_access_token_with_scope(
         nonce: None,
         code_challenge: None,
         code_challenge_method: None,
+        resource: None,
     };
 
     let code = issue_authorization_code(state, code_params)

@@ -44,6 +44,8 @@ pub struct AuthCodeExchangeParams<'a> {
     pub dpop_proof: Option<ValidatedDpopProof>,
     /// RFC 8725 §3.9: Client ID for audience validation of the authorization code.
     pub client_id: &'a str,
+    /// RFC 8707 Section 2: Target resource indicator (OPTIONAL).
+    pub resource: Option<&'a str>,
 }
 
 /// Client credentials for authentication (RFC 6749 Section 2.3).
@@ -301,6 +303,27 @@ pub async fn exchange_authorization_code(
     // Validate PKCE code_verifier if code_challenge was present
     validate_pkce(&auth_code, params.code_verifier)?;
 
+    // RFC 8707: Resource narrowing — determine the audience for the access token.
+    // The resource from the auth code (granted at authorization time) takes precedence.
+    let audience = match (auth_code.resource.as_deref(), params.resource) {
+        // Both present: must match
+        (Some(granted), Some(requested)) if granted != requested => {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidTarget,
+                "Resource parameter does not match the value from the authorization request",
+            ));
+        }
+        (Some(granted), _) => Some(granted),
+        // Can't add resource at token time if not granted during authorization
+        (None, Some(_)) => {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidTarget,
+                "Resource was not requested during authorization",
+            ));
+        }
+        (None, None) => None,
+    };
+
     // Generate access token as an RFC 9068 JWT (ES256, verifiable via JWKS)
     let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
     let session_result = create_oauth_access_token(
@@ -313,7 +336,7 @@ pub async fn exchange_authorization_code(
             scope: Some(auth_code.scope.clone()),
             dpop_jkt,
             act: None,
-            audience: None,
+            audience,
             // auth_time is the iat of the authorization code, reflecting when the
             // FIDO2 session was active at the time of authorization.
             auth_time: Some(auth_code.iat),
@@ -746,6 +769,7 @@ mod tests {
             nonce: None,
             code_challenge: Some(expected_challenge.to_string()),
             code_challenge_method: Some(CodeChallengeMethod::S256),
+            resource: None,
             iat: 0,
             exp: i64::MAX,
         };
@@ -769,6 +793,7 @@ mod tests {
             nonce: None,
             code_challenge: Some("expected_challenge".to_string()),
             code_challenge_method: Some(CodeChallengeMethod::S256),
+            resource: None,
             iat: 0,
             exp: i64::MAX,
         };
@@ -792,6 +817,7 @@ mod tests {
             nonce: None,
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some(CodeChallengeMethod::S256),
+            resource: None,
             iat: 0,
             exp: i64::MAX,
         };
@@ -816,6 +842,7 @@ mod tests {
             nonce: None,
             code_challenge: None,
             code_challenge_method: None,
+            resource: None,
             iat: 0,
             exp: i64::MAX,
         };

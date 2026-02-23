@@ -186,6 +186,8 @@ pub enum OAuthClients {
     LastUsedAt,
     AccessScope,
     OrgId,
+    /// RFC 8707: JSON array of registered resource URIs.
+    ResourceUris,
 }
 
 /// OAuth client secrets table.
@@ -236,6 +238,8 @@ pub enum PendingOAuthAuthorizations {
     CreatedAt,
     ExpiresAt,
     ConsumedAt,
+    /// RFC 8707: Resource indicator from authorization request.
+    Resource,
 }
 
 /// Token exchanges table (RFC 8693).

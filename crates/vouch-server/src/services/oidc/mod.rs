@@ -33,6 +33,7 @@ pub mod dpop;
 pub mod exchange;
 pub mod introspection;
 pub mod keys;
+pub mod resource;
 pub mod scope;
 pub mod token;
 
@@ -43,6 +44,7 @@ pub use discovery::{OidcDiscoveryDocument, build_discovery_document, build_jwks}
 pub use exchange::{TokenExchangeParams, TokenExchangeResult};
 pub use introspection::{IntrospectionResult, RevocationResult};
 pub use keys::{EcJwk, OidcSigningKey};
+pub use resource::ResourceUri;
 pub use scope::{OAuthScope, ScopeSet};
 pub use token::{
     AuthCodeExchangeParams, AuthCodeExchangeResult, AuthenticatedClient, ClientAuthError,

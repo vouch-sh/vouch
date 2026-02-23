@@ -80,6 +80,15 @@ http://localhost:3000/callback"></textarea>
             </div>
 
             <div>
+                <label for="resource_uris" class="block text-sm font-medium text-gray-300">Resource URIs (optional)</label>
+                <textarea name="resource_uris" id="resource_uris" rows="2"
+                    class="input-field mt-1 font-mono"
+                    placeholder="https://api.example.com
+https://data.example.com"></textarea>
+                <p class="mt-1 text-sm text-gray-500">One URI per line. Target resource servers that will receive access tokens (RFC 8707). Leave empty to allow any resource.</p>
+            </div>
+
+            <div>
                 <label class="block text-sm font-medium text-gray-300 mb-2">Who can use this application?</label>
                 <div class="space-y-3">
                     {% if user_has_org %}

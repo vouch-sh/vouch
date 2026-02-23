@@ -116,6 +116,8 @@ pub enum OAuthErrorCode {
     InvalidDpopProof,
     /// RFC 9449 Section 5.1: DPoP nonce required.
     UseDpopNonce,
+    /// RFC 8707 Section 2: The target resource is invalid, unknown, or malformed.
+    InvalidTarget,
 }
 
 impl std::fmt::Display for OAuthErrorCode {
@@ -129,9 +131,10 @@ impl OAuthErrorCode {
     #[must_use]
     pub fn status_code(&self) -> StatusCode {
         match self {
-            Self::InvalidRequest | Self::InvalidScope | Self::InvalidDpopProof => {
-                StatusCode::BAD_REQUEST
-            }
+            Self::InvalidRequest
+            | Self::InvalidScope
+            | Self::InvalidDpopProof
+            | Self::InvalidTarget => StatusCode::BAD_REQUEST,
             Self::InvalidClient | Self::UnauthorizedClient => StatusCode::UNAUTHORIZED,
             Self::InvalidGrant
             | Self::UnsupportedGrantType
@@ -164,6 +167,7 @@ impl OAuthErrorCode {
             Self::AccessDenied => "access_denied",
             Self::InvalidDpopProof => "invalid_dpop_proof",
             Self::UseDpopNonce => "use_dpop_nonce",
+            Self::InvalidTarget => "invalid_target",
         }
     }
 }

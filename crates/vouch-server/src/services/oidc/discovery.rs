@@ -64,6 +64,9 @@ pub struct OidcDiscoveryDocument {
     /// Indicates that the authorization server includes the `iss` parameter
     /// in authorization responses to prevent mix-up attacks.
     pub authorization_response_iss_parameter_supported: bool,
+    /// RFC 8707 Section 2: Indicates support for the `resource` parameter.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resource_indicators_supported: Option<bool>,
 }
 
 /// JSON Web Key Set response (RFC 7517 Section 5).
@@ -140,6 +143,8 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         acr_values_supported: Some(vec![ACR_AAL3.to_string()]),
         // RFC 9207: Advertise that we include `iss` in authorization responses
         authorization_response_iss_parameter_supported: true,
+        // RFC 8707: Advertise resource indicator support
+        resource_indicators_supported: Some(true),
     }
 }
 

@@ -270,7 +270,7 @@ cargo test --features yubikey-tests -- --ignored
 Before implementing a feature:
 1. Does this require new dependencies? Can we avoid them?
 2. Does this touch sensitive data? Use appropriate wrappers.
-3. Is this in scope for MVP? Check `docs/ROADMAP.md`.
+3. Is this in scope for MVP?
 4. Does this change the security model? Document in `docs/SECURITY.md`.
 
 ## External Resources
@@ -286,6 +286,7 @@ Before implementing a feature:
 - [RFC 8414 - OAuth 2.0 Authorization Server Metadata](https://www.rfc-editor.org/rfc/rfc8414)
 - [RFC 8628 - Device Authorization Grant](https://www.rfc-editor.org/rfc/rfc8628)
 - [RFC 8693 - Token Exchange](https://www.rfc-editor.org/rfc/rfc8693)
+- [RFC 8707 - Resource Indicators for OAuth 2.0](https://www.rfc-editor.org/rfc/rfc8707)
 - [RFC 8725 - JWT Best Current Practices](https://www.rfc-editor.org/rfc/rfc8725)
 - [RFC 9068 - JWT Profile for OAuth 2.0 Access Tokens](https://www.rfc-editor.org/rfc/rfc9068)
 - [RFC 9207 - OAuth 2.0 Authorization Server Issuer Identification](https://www.rfc-editor.org/rfc/rfc9207)

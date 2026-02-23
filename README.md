@@ -41,21 +41,21 @@ Vouch requires **physical presence** for every credential issuance:
 ### How It Works
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Your Machine                             │
-│                                                                  │
-│  ┌──────────┐     ┌──────────┐     ┌──────────────────────────┐ │
-│  │ YubiKey  │────▶│  vouch   │────▶│ Short-lived credentials  │ │
-│  │ (touch)  │     │  login   │     │ managed by vouch agent   │ │
-│  └──────────┘     └──────────┘     └──────────────────────────┘ │
-│                         │                      │                 │
-│                         ▼                      ▼                 │
-│                   ┌──────────┐          ┌──────────────┐        │
-│                   │  vouch   │          │ Native tools │        │
-│                   │  server  │          │ (ssh, aws)   │        │
-│                   │  (OIDC)  │          │              │        │
-│                   └──────────┘          └──────────────┘        │
-└─────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────────────┐
+│                           Your Machine                             │
+│                                                                    │
+│  ┌──────────┐     ┌──────────┐     ┌──────────────────────────┐   │
+│  │ YubiKey  │────▶│  vouch   │────▶│ Short-lived credentials  │   │
+│  │ (touch)  │     │  login   │     │ managed by vouch agent   │   │
+│  └──────────┘     └──────────┘     └──────────────────────────┘   │
+│                         │                      │                   │
+│                         ▼                      ▼                   │
+│                   ┌──────────┐          ┌──────────────┐          │
+│                   │  vouch   │          │ Native tools │          │
+│                   │  server  │          │ (ssh, aws)   │          │
+│                   │  (OIDC)  │          │              │          │
+│                   └──────────┘          └──────────────┘          │
+└────────────────────────────────────────────────────────────────────┘
 ```
 
 1. **`vouch login`** — Touch YubiKey, enter PIN, get 8-hour session
@@ -142,6 +142,7 @@ Vouch consists of:
 |-----------|-------------|--------|
 | `vouch` CLI | User-facing commands, credential helpers | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
 | `vouch-agent` | Background daemon, session management | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
+| `vouch-common` | Shared types, FIDO2 helpers, API client | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
 | Vouch Server | OIDC provider, certificate authority | [BSL 1.1](crates/vouch-server/LICENSE) (converts to Apache-2.0) |
 
 The CLI is fully open source for security auditing. The server source is available under the Business Source License 1.1, which converts to Apache-2.0 after two years.
@@ -156,12 +157,13 @@ Vouch is designed for high-security environments:
 - **Short-lived credentials** — Minimize blast radius of compromise
 - **Audit trail** — Every credential issuance logged with attestation
 
-See [SECURITY.md](docs/SECURITY.md) for our threat model and responsible disclosure policy.
+See [SECURITY.md](docs/SECURITY.md) for our security model and responsible disclosure policy. For the threat model, see [THREAT_MODEL.md](docs/THREAT_MODEL.md).
 
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) — System design and data flows
-- [Security Model](docs/SECURITY.md) — Threat model and controls
+- [Security Model](docs/SECURITY.md) — Security controls and incident response
+- [Threat Model](docs/THREAT_MODEL.md) — STRIDE analysis and mitigations
 - [Air-Gap Deployment](docs/AIRGAP.md) — On-premises installation guide
 - [Agent Delegation](docs/DELEGATION.md) — AI assistant credential management
 

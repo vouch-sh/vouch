@@ -120,6 +120,9 @@ pub struct TokenRequest {
     /// RFC 8693 Section 2.1: The desired type of the requested security token (OPTIONAL).
     #[serde(default)]
     pub requested_token_type: Option<String>,
+    /// RFC 8707 Section 2: Target resource indicator (OPTIONAL).
+    #[serde(default)]
+    pub resource: Option<String>,
 }
 
 // Custom Debug that redacts secrets to prevent accidental log exposure.
@@ -140,6 +143,7 @@ impl std::fmt::Debug for TokenRequest {
             .field("audience", &self.audience)
             .field("scope", &self.scope)
             .field("requested_token_type", &self.requested_token_type)
+            .field("resource", &self.resource)
             .finish()
     }
 }
@@ -259,6 +263,7 @@ async fn handle_authorization_code_grant(
         code_verifier: params.code_verifier.as_deref(),
         dpop_proof,
         client_id: exchange_client_id,
+        resource: params.resource.as_deref(),
     };
 
     match exchange_authorization_code(&state, exchange_params).await {
@@ -327,12 +332,28 @@ async fn handle_token_exchange_grant(
 
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.clone());
 
+    // RFC 8707: If resource is present, use it as audience (unless audience is explicitly set).
+    // If both are present, they must match.
+    let effective_audience = match (params.audience.as_deref(), params.resource.as_deref()) {
+        (Some(aud), Some(res)) if aud != res => {
+            return ServiceError::oauth(
+                OAuthErrorCode::InvalidTarget,
+                "resource and audience parameters must match when both are provided",
+            )
+            .into_oauth_response()
+            .into_response();
+        }
+        (Some(aud), _) => Some(aud),
+        (None, Some(res)) => Some(res),
+        (None, None) => None,
+    };
+
     let exchange_params = TokenExchangeParams {
         subject_token: params.subject_token.as_deref().unwrap_or_default(),
         subject_token_type: params.subject_token_type.as_deref().unwrap_or_default(),
         actor_token: params.actor_token.as_deref(),
         actor_token_type: params.actor_token_type.as_deref(),
-        audience: params.audience.as_deref(),
+        audience: effective_audience,
         scope: params.scope.as_deref(),
         requested_token_type: params.requested_token_type.as_deref(),
         client_id: &authenticated_client.client.client_id,

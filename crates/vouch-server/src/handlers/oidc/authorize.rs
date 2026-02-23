@@ -55,6 +55,9 @@ pub struct AuthorizeQuery {
     code_challenge_method: Option<String>,
     /// Pending OAuth authorization ID (when returning from login).
     pending_auth: Option<String>,
+    /// RFC 8707 Section 2: Target resource indicator.
+    #[serde(default)]
+    resource: Option<String>,
 }
 
 /// GET /oauth/authorize
@@ -113,6 +116,7 @@ pub async fn authorize(
         nonce: params.nonce.clone(),
         code_challenge: params.code_challenge.clone(),
         code_challenge_method: params.code_challenge_method.clone(),
+        resource: params.resource.clone(),
     };
 
     let validated = match validate_authorize_request(request_params) {
@@ -209,6 +213,19 @@ pub async fn authorize(
                 .into_response();
             }
 
+            // RFC 8707: Validate resource parameter against registered URIs
+            if let Some(resource) = validated.resource()
+                && !oauth_client.is_valid_resource_uri(resource)
+            {
+                return oauth_error_redirect(
+                    validated.redirect_uri(),
+                    "invalid_target",
+                    "The requested resource is not registered for this client",
+                    validated.state(),
+                    &state.config().base_url,
+                );
+            }
+
             // Access granted - issue authorization code
             let code_params = AuthorizationCodeParams {
                 client_id: validated.client_id(),
@@ -221,6 +238,7 @@ pub async fn authorize(
                 nonce: validated.nonce(),
                 code_challenge: validated.code_challenge(),
                 code_challenge_method: validated.code_challenge_method(),
+                resource: validated.resource(),
             };
 
             issue_code_and_redirect(
@@ -244,6 +262,7 @@ pub async fn authorize(
                 nonce: validated.nonce(),
                 code_challenge: validated.code_challenge(),
                 code_challenge_method: validated.code_challenge_method().map(|m| m.as_str()),
+                resource: validated.resource(),
             };
 
             match db::create_pending_oauth_authorization(&state.db, pending_params).await {
@@ -358,6 +377,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                     .code_challenge_method
                     .as_deref()
                     .and_then(CodeChallengeMethod::parse),
+                resource: pending.resource.as_deref(),
             };
 
             issue_code_and_redirect(

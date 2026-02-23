@@ -93,6 +93,18 @@
                 {% endif %}
             </div>
 
+            <!-- Resource URIs (RFC 8707) -->
+            {% if !app.resource_uris.is_empty() %}
+            <div class="border-t border-vouch-border pt-4">
+                <label class="block text-sm text-gray-400 mb-2">Resource URIs</label>
+                <ul class="bg-vouch-raised border border-vouch-border rounded-md px-3 py-2 space-y-0.5">
+                    {% for uri in app.resource_uris %}
+                    <li class="font-mono text-sm text-gray-300 break-all">{{ uri }}</li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% endif %}
+
             <!-- Client Secret Section (for confidential clients) -->
             {% if app.application_type == "web" || app.application_type == "service" %}
             <div class="border-t border-vouch-border pt-4">
@@ -148,6 +160,14 @@
                     class="input-field mt-1 font-mono">{% for uri in app.redirect_uris %}{{ uri }}
 {% endfor %}</textarea>
                 <p class="mt-1 text-sm text-gray-500">One URI per line</p>
+            </div>
+
+            <div>
+                <label for="resource_uris" class="block text-sm font-medium text-gray-300">Resource URIs (optional)</label>
+                <textarea name="resource_uris" id="resource_uris" rows="2"
+                    class="input-field mt-1 font-mono">{% for uri in app.resource_uris %}{{ uri }}
+{% endfor %}</textarea>
+                <p class="mt-1 text-sm text-gray-500">One URI per line. Target resource servers for audience-restricted tokens (RFC 8707).</p>
             </div>
 
             <div>

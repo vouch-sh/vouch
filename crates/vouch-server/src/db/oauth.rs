@@ -144,6 +144,8 @@ pub struct OAuthClient {
     pub access_scope: AccessScope,
     /// Organization ID for organization-scoped apps.
     pub org_id: Option<String>,
+    /// RFC 8707: JSON array of registered resource URIs.
+    pub resource_uris: String,
 }
 
 impl OAuthClient {
@@ -158,6 +160,26 @@ impl OAuthClient {
     pub fn is_valid_redirect_uri(&self, uri: &str) -> bool {
         self.get_redirect_uris().iter().any(|u| u == uri)
     }
+
+    /// Get resource URIs as a vector (RFC 8707).
+    #[must_use]
+    pub fn get_resource_uris(&self) -> Vec<String> {
+        serde_json::from_str(&self.resource_uris).unwrap_or_default()
+    }
+
+    /// Check if a resource URI is registered for this client (RFC 8707).
+    ///
+    /// Returns `true` if the URI matches one of the registered resource URIs,
+    /// or if no resource URIs are registered (open policy).
+    #[must_use]
+    pub fn is_valid_resource_uri(&self, uri: &str) -> bool {
+        let uris = self.get_resource_uris();
+        if uris.is_empty() {
+            // No resource URIs registered — allow any resource
+            return true;
+        }
+        uris.iter().any(|u| u == uri)
+    }
 }
 
 /// Create a new OAuth client application.
@@ -171,10 +193,12 @@ pub async fn create_oauth_client(
     redirect_uris: &[String],
     access_scope: AccessScope,
     org_id: Option<&str>,
+    resource_uris: &[String],
 ) -> Result<(OAuthClient, String)> {
     let id = Uuid::now_v7().to_string();
     let client_id = Uuid::now_v7().to_string();
     let redirect_uris_json = serde_json::to_string(redirect_uris)?;
+    let resource_uris_json = serde_json::to_string(resource_uris)?;
     let db_type = pool.db_type();
     let now = Timestamp::now().to_string();
 
@@ -191,6 +215,7 @@ pub async fn create_oauth_client(
                 OAuthClients::RedirectUris,
                 OAuthClients::AccessScope,
                 OAuthClients::OrgId,
+                OAuthClients::ResourceUris,
                 OAuthClients::CreatedAt,
                 OAuthClients::UpdatedAt,
             ])
@@ -204,6 +229,7 @@ pub async fn create_oauth_client(
                 redirect_uris_json.into(),
                 access_scope.as_str().into(),
                 org_id.into(),
+                resource_uris_json.into(),
                 now.as_str().into(),
                 now.as_str().into(),
             ])
@@ -240,6 +266,7 @@ pub async fn get_oauth_client_by_id(pool: &Pool, id: &str) -> Result<Option<OAut
                 OAuthClients::LastUsedAt,
                 OAuthClients::AccessScope,
                 OAuthClients::OrgId,
+                OAuthClients::ResourceUris,
             ])
             .from(OAuthClients::Table)
             .and_where(Expr::col(OAuthClients::Id).eq(id))
@@ -275,6 +302,7 @@ pub async fn get_oauth_client_by_client_id(
                 OAuthClients::LastUsedAt,
                 OAuthClients::AccessScope,
                 OAuthClients::OrgId,
+                OAuthClients::ResourceUris,
             ])
             .from(OAuthClients::Table)
             .and_where(Expr::col(OAuthClients::ClientId).eq(client_id))
@@ -307,6 +335,7 @@ pub async fn get_oauth_clients_for_user(pool: &Pool, user_id: &str) -> Result<Ve
                 OAuthClients::LastUsedAt,
                 OAuthClients::AccessScope,
                 OAuthClients::OrgId,
+                OAuthClients::ResourceUris,
             ])
             .from(OAuthClients::Table)
             .and_where(Expr::col(OAuthClients::UserId).eq(user_id))
@@ -321,6 +350,7 @@ pub async fn get_oauth_clients_for_user(pool: &Pool, user_id: &str) -> Result<Ve
 }
 
 /// Update an OAuth client.
+#[allow(clippy::too_many_arguments)]
 pub async fn update_oauth_client(
     pool: &Pool,
     id: &str,
@@ -329,8 +359,10 @@ pub async fn update_oauth_client(
     redirect_uris: &[String],
     access_scope: Option<AccessScope>,
     org_id: Option<&str>,
+    resource_uris: &[String],
 ) -> Result<()> {
     let redirect_uris_json = serde_json::to_string(redirect_uris)?;
+    let resource_uris_json = serde_json::to_string(resource_uris)?;
     let db_type = pool.db_type();
     let now = Timestamp::now().to_string();
 
@@ -340,6 +372,7 @@ pub async fn update_oauth_client(
             .value(OAuthClients::Name, name)
             .value(OAuthClients::Description, description)
             .value(OAuthClients::RedirectUris, redirect_uris_json.as_str())
+            .value(OAuthClients::ResourceUris, resource_uris_json.as_str())
             .value(OAuthClients::UpdatedAt, now.as_str())
             .to_owned();
 

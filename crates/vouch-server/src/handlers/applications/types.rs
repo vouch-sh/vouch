@@ -41,11 +41,14 @@ pub struct ApplicationInfo {
     pub last_used_at: Option<String>,
     pub access_scope: AccessScope,
     pub org_id: Option<String>,
+    /// RFC 8707: Registered resource URIs.
+    pub resource_uris: Vec<String>,
 }
 
 impl From<OAuthClient> for ApplicationInfo {
     fn from(client: OAuthClient) -> Self {
         let redirect_uris = client.get_redirect_uris();
+        let resource_uris = client.get_resource_uris();
         Self {
             id: client.id,
             client_id: client.client_id,
@@ -58,6 +61,7 @@ impl From<OAuthClient> for ApplicationInfo {
             last_used_at: client.last_used_at.map(|ts| ts.to_jiff().to_string()),
             access_scope: client.access_scope,
             org_id: client.org_id,
+            resource_uris,
         }
     }
 }
@@ -166,6 +170,9 @@ pub struct CreateApplicationForm {
     pub application_type: String,
     pub redirect_uris: String,
     pub access_scope: String,
+    /// RFC 8707: Resource URIs (newline or comma separated, optional).
+    #[serde(default)]
+    pub resource_uris: Option<String>,
 }
 
 /// Form data for updating an application.
@@ -175,6 +182,9 @@ pub struct UpdateApplicationForm {
     pub description: Option<String>,
     pub redirect_uris: String,
     pub access_scope: Option<String>,
+    /// RFC 8707: Resource URIs (newline or comma separated, optional).
+    #[serde(default)]
+    pub resource_uris: Option<String>,
 }
 
 /// API request for creating an application.
@@ -185,6 +195,9 @@ pub struct CreateApplicationRequest {
     pub application_type: String,
     pub redirect_uris: Vec<String>,
     pub access_scope: Option<String>,
+    /// RFC 8707: Resource URIs for audience-restricted tokens.
+    #[serde(default)]
+    pub resource_uris: Option<Vec<String>>,
 }
 
 /// API request for updating an application.
@@ -194,6 +207,9 @@ pub struct UpdateApplicationRequest {
     pub description: Option<String>,
     pub redirect_uris: Option<Vec<String>>,
     pub access_scope: Option<String>,
+    /// RFC 8707: Resource URIs for audience-restricted tokens.
+    #[serde(default)]
+    pub resource_uris: Option<Vec<String>>,
 }
 
 /// API response for a created application.
@@ -205,6 +221,8 @@ pub struct CreateApplicationResponse {
     pub name: String,
     pub application_type: String,
     pub access_scope: String,
+    /// RFC 8707: Registered resource URIs.
+    pub resource_uris: Vec<String>,
 }
 
 /// API response for application details.
@@ -222,11 +240,14 @@ pub struct ApplicationResponse {
     pub last_used_at: Option<String>,
     pub access_scope: String,
     pub org_id: Option<String>,
+    /// RFC 8707: Registered resource URIs.
+    pub resource_uris: Vec<String>,
 }
 
 impl From<OAuthClient> for ApplicationResponse {
     fn from(client: OAuthClient) -> Self {
         let redirect_uris = client.get_redirect_uris();
+        let resource_uris = client.get_resource_uris();
         Self {
             id: client.id,
             client_id: client.client_id,
@@ -240,6 +261,7 @@ impl From<OAuthClient> for ApplicationResponse {
             last_used_at: client.last_used_at.map(|ts| ts.to_jiff().to_string()),
             access_scope: client.access_scope.as_str().to_string(),
             org_id: client.org_id,
+            resource_uris,
         }
     }
 }

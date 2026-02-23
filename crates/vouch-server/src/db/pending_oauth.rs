@@ -32,6 +32,8 @@ pub struct PendingOAuthAuthorization {
     pub created_at: DbTimestamp,
     pub expires_at: DbTimestamp,
     pub consumed_at: Option<DbTimestamp>,
+    /// RFC 8707: Resource indicator from authorization request.
+    pub resource: Option<String>,
 }
 
 /// Parameters for creating a pending OAuth authorization.
@@ -45,6 +47,8 @@ pub struct CreatePendingOAuthParams<'a> {
     pub nonce: Option<&'a str>,
     pub code_challenge: Option<&'a str>,
     pub code_challenge_method: Option<&'a str>,
+    /// RFC 8707: Resource indicator from authorization request.
+    pub resource: Option<&'a str>,
 }
 
 /// Create a pending OAuth authorization.
@@ -81,6 +85,7 @@ pub async fn create_pending_oauth_authorization(
                 PendingOAuthAuthorizations::Nonce,
                 PendingOAuthAuthorizations::CodeChallenge,
                 PendingOAuthAuthorizations::CodeChallengeMethod,
+                PendingOAuthAuthorizations::Resource,
                 PendingOAuthAuthorizations::CreatedAt,
                 PendingOAuthAuthorizations::ExpiresAt,
             ])
@@ -94,6 +99,7 @@ pub async fn create_pending_oauth_authorization(
                 params.nonce.into(),
                 params.code_challenge.into(),
                 params.code_challenge_method.into(),
+                params.resource.into(),
                 created_at.as_str().into(),
                 expires_at.as_str().into(),
             ])
@@ -131,6 +137,7 @@ pub async fn get_pending_oauth_authorization(
                 PendingOAuthAuthorizations::CreatedAt,
                 PendingOAuthAuthorizations::ExpiresAt,
                 PendingOAuthAuthorizations::ConsumedAt,
+                PendingOAuthAuthorizations::Resource,
             ])
             .from(PendingOAuthAuthorizations::Table)
             .and_where(Expr::col(PendingOAuthAuthorizations::Id).eq(id))
@@ -198,6 +205,7 @@ pub async fn consume_pending_oauth_authorization(
                 PendingOAuthAuthorizations::CreatedAt,
                 PendingOAuthAuthorizations::ExpiresAt,
                 PendingOAuthAuthorizations::ConsumedAt,
+                PendingOAuthAuthorizations::Resource,
             ])
             .from(PendingOAuthAuthorizations::Table)
             .and_where(Expr::col(PendingOAuthAuthorizations::Id).eq(id))
@@ -261,6 +269,7 @@ mod tests {
             nonce: Some("nonce456"),
             code_challenge: Some("challenge789"),
             code_challenge_method: Some("S256"),
+            resource: None,
         };
 
         let id = create_pending_oauth_authorization(&pool, params)
@@ -290,6 +299,7 @@ mod tests {
             nonce: None,
             code_challenge: None,
             code_challenge_method: None,
+            resource: None,
         };
 
         let id = create_pending_oauth_authorization(&pool, params)
