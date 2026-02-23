@@ -21,15 +21,21 @@
 //! `tower-governor` handles its own internal state cleanup via the governor
 //! crate's GCRA algorithm, so no external cleanup task is required.
 
-use governor::clock::QuantaInstant;
-use governor::middleware::NoOpMiddleware;
+use governor::middleware::StateInformationMiddleware;
 use tower_governor::GovernorLayer;
 use tower_governor::governor::{GovernorConfig, GovernorConfigBuilder};
 use tower_governor::key_extractor::PeerIpKeyExtractor;
 
 /// Type alias for the fully-specified rate limiting layer.
+///
+/// Uses `StateInformationMiddleware` to include standard rate limit headers
+/// in every response:
+/// - `x-ratelimit-limit`: request quota
+/// - `x-ratelimit-remaining`: remaining requests in the current window
+/// - `x-ratelimit-after`: seconds until quota resets (on 429 responses)
+/// - `retry-after`: same as `x-ratelimit-after` (on 429 responses)
 pub type RateLimitLayer =
-    GovernorLayer<PeerIpKeyExtractor, NoOpMiddleware<QuantaInstant>, axum::body::Body>;
+    GovernorLayer<PeerIpKeyExtractor, StateInformationMiddleware, axum::body::Body>;
 
 /// Build a rate limiting layer for authentication endpoints.
 ///
@@ -54,6 +60,7 @@ pub fn build_credential_rate_limiter() -> RateLimitLayer {
     let config = GovernorConfigBuilder::default()
         .per_second(2)
         .burst_size(5)
+        .use_headers()
         .finish()
         .unwrap_or_else(GovernorConfig::secure);
     GovernorLayer::new(config)
@@ -69,6 +76,7 @@ pub fn build_general_rate_limiter() -> RateLimitLayer {
     let config = GovernorConfigBuilder::default()
         .per_second(1)
         .burst_size(20)
+        .use_headers()
         .finish()
         .unwrap_or_else(GovernorConfig::secure);
     GovernorLayer::new(config)
