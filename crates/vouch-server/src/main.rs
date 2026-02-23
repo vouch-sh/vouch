@@ -775,7 +775,7 @@ async fn run_server(args: config::Args) -> Result<()> {
         axum_server::bind_rustls(https_addr, tls_config)
             .map(|acceptor| acceptor.acceptor(NoDelayAcceptor::new()))
             .handle(handle)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await?;
 
         // Wait for HTTP redirect server to finish
@@ -804,9 +804,12 @@ async fn run_server(args: config::Args) -> Result<()> {
                 tracing::trace!("failed to set TCP_NODELAY on incoming connection: {err:#}");
             }
         });
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     }
 
     // Clean up background tasks
