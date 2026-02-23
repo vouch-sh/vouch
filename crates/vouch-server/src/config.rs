@@ -514,11 +514,36 @@ impl ServerConfig {
     /// Validate that all required configuration is present.
     /// Call this after all config sources (env, S3) have been merged.
     pub fn validate(&self) -> Result<()> {
-        if self.jwt_secret.expose_secret().len() < 32 {
+        let secret = self.jwt_secret.expose_secret();
+        if secret.len() < 32 {
             anyhow::bail!(
                 "VOUCH_JWT_SECRET must be at least 32 characters (set via env var or S3 config)"
             );
         }
+
+        // Reject degenerate secrets (e.g., all same character like "aaaaa...").
+        let bytes = secret.as_bytes();
+        let first = bytes.first().copied().unwrap_or(0);
+        let all_same = bytes.iter().all(|&b| b == first);
+        if all_same {
+            anyhow::bail!("VOUCH_JWT_SECRET must not consist of a single repeated character");
+        }
+
+        // Warn if the secret has low entropy (fewer than 8 unique bytes).
+        let mut unique = std::collections::HashSet::new();
+        for &b in bytes {
+            unique.insert(b);
+        }
+        if unique.len() < 8 {
+            tracing::warn!(
+                target: "security",
+                "VOUCH_JWT_SECRET has low entropy ({} unique bytes out of {}). \
+                 Consider using a stronger secret with more character variety.",
+                unique.len(),
+                bytes.len(),
+            );
+        }
+
         Ok(())
     }
 }

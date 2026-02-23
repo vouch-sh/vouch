@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use axum::{
     Router,
-    extract::Path,
+    extract::{DefaultBodyLimit, Path},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post},
@@ -26,6 +26,7 @@ use tokio::signal;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::CorsLayer;
 use tower_http::set_header::SetResponseHeaderLayer;
+use tower_http::timeout::TimeoutLayer;
 use tracing_subscriber::EnvFilter;
 
 use vouch_server::{
@@ -340,9 +341,13 @@ async fn run_server(args: config::Args) -> Result<()> {
     // Create DPoP state (single instance shared between AppState and cleanup task)
     let dpop_state = Arc::new(dpop::DpopState::new());
 
-    // Create rate limiter for auth/token endpoints.
-    // Uses GovernorConfig::secure() preset: burst of 2, replenish 1 every 4s per IP.
+    // Create rate limiters for different endpoint tiers.
+    // Auth: burst of 2, replenish 1 every 4s per IP (brute-force protection).
     let auth_rate_limiter = rate_limit::build_auth_rate_limiter();
+    // Credential: burst of 5, replenish 1 every 2s per IP.
+    let credential_rate_limiter = rate_limit::build_credential_rate_limiter();
+    // General: burst of 20, replenish 1 per second per IP.
+    let general_rate_limiter = rate_limit::build_general_rate_limiter();
 
     // Wrap config in ArcSwap for dynamic updates
     let config_swap = Arc::new(ArcSwap::from_pointee(config.clone()));
@@ -404,69 +409,27 @@ async fn run_server(args: config::Args) -> Result<()> {
         .route("/oauth/device", post(handlers::device::device_code))
         .layer(auth_rate_limiter);
 
-    let api_routes = Router::new()
-        // OIDC Provider endpoints
-        .route(
-            "/.well-known/openid-configuration",
-            get(handlers::oidc::discovery),
-        )
-        .route("/oauth/jwks", get(handlers::oidc::jwks))
-        .route("/oauth/authorize", get(handlers::oidc::authorize))
-        // OIDC Core Section 5.3.1: UserInfo MUST support GET and POST
-        .route(
-            "/oauth/userinfo",
-            get(handlers::oidc::userinfo).post(handlers::oidc::userinfo),
-        )
-        .route("/oauth/revoke", post(handlers::oidc::revoke))
-        .route("/oauth/introspect", post(handlers::oidc::introspect))
-        .route("/oauth/callback", get(handlers::enroll::oidc_callback))
-        // Auth endpoints
-        .route("/v1/auth/status", get(handlers::auth::status))
-        // Merge rate-limited routes
-        .merge(rate_limited_routes)
-        // Key management (authenticated API)
-        .route("/v1/keys", get(handlers::keys::list_keys))
-        .route(
-            "/v1/keys/{id}",
-            patch(handlers::keys::rename_key).delete(handlers::keys::delete_key),
-        )
-        // Credential issuance
+    // Rate-limited credential issuance routes.
+    let credential_routes = Router::new()
         .route(
             "/v1/credentials/ssh",
             post(handlers::credentials::issue_ssh_certificate),
         )
         .route(
-            "/v1/credentials/ssh/ca",
-            get(handlers::credentials::get_ssh_ca_public_key),
-        )
-        .route(
-            "/v1/credentials/ssh/krl",
-            get(handlers::credentials::get_ssh_krl),
-        )
-        .route(
-            "/v1/credentials/ssh/krl/{serial}",
-            get(handlers::credentials::check_ssh_revocation),
-        )
-        .route(
             "/v1/credentials/aws/token",
             get(handlers::credentials::get_aws_token),
-        )
-        // GitHub credential endpoints
-        .route(
-            "/v1/credentials/github/status",
-            get(handlers::credentials::get_github_status),
         )
         .route(
             "/v1/credentials/github/token",
             post(handlers::credentials::get_github_token),
         )
-        // Cloud integration config API
-        .route(
-            "/v1/integrations/aws",
-            get(handlers::integrations::get_aws_integration)
-                .put(handlers::integrations::set_aws_integration)
-                .delete(handlers::integrations::delete_aws_integration),
-        )
+        .layer(credential_rate_limiter)
+        // SSH public key is ~500 bytes; credential requests are small
+        .layer(DefaultBodyLimit::max(8 * 1024));
+
+    // Rate-limited general routes (SCIM, admin, authorize).
+    let general_limited_routes = Router::new()
+        .route("/oauth/authorize", get(handlers::oidc::authorize))
         // Org admin API (JSON, JWT Bearer auth)
         .route(
             "/api/v1/org/auth-events",
@@ -479,31 +442,6 @@ async fn run_server(args: config::Args) -> Result<()> {
         .route(
             "/api/v1/org/scim-tokens/{id}",
             delete(handlers::admin::delete_scim_token),
-        )
-        // GitHub webhook API
-        .route(
-            "/api/webhooks/github",
-            post(handlers::github::github_webhook),
-        )
-        // Applications API (JSON)
-        .route(
-            "/api/v1/applications",
-            get(handlers::applications::list_applications_api)
-                .post(handlers::applications::create_application_api),
-        )
-        .route(
-            "/api/v1/applications/{id}",
-            get(handlers::applications::get_application_api)
-                .patch(handlers::applications::update_application_api)
-                .delete(handlers::applications::delete_application_api),
-        )
-        .route(
-            "/api/v1/applications/{id}/rotate",
-            post(handlers::applications::rotate_secret_api),
-        )
-        .route(
-            "/api/v1/applications/{id}/revoke",
-            post(handlers::applications::revoke_tokens_api),
         )
         // SCIM 2.0 endpoints (RFC 7643/7644)
         .route(
@@ -534,6 +472,87 @@ async fn run_server(args: config::Args) -> Result<()> {
             get(handlers::scim::get_group)
                 .patch(handlers::scim::patch_group)
                 .delete(handlers::scim::delete_group),
+        )
+        .layer(general_rate_limiter)
+        // SCIM payloads are moderate; authorize query strings are small
+        .layer(DefaultBodyLimit::max(64 * 1024));
+
+    let api_routes = Router::new()
+        // OIDC Provider endpoints
+        .route(
+            "/.well-known/openid-configuration",
+            get(handlers::oidc::discovery),
+        )
+        .route("/oauth/jwks", get(handlers::oidc::jwks))
+        // OIDC Core Section 5.3.1: UserInfo MUST support GET and POST
+        .route(
+            "/oauth/userinfo",
+            get(handlers::oidc::userinfo).post(handlers::oidc::userinfo),
+        )
+        .route("/oauth/revoke", post(handlers::oidc::revoke))
+        .route("/oauth/introspect", post(handlers::oidc::introspect))
+        .route("/oauth/callback", get(handlers::enroll::oidc_callback))
+        // Auth endpoints
+        .route("/v1/auth/status", get(handlers::auth::status))
+        // Merge rate-limited route groups
+        .merge(rate_limited_routes)
+        .merge(credential_routes)
+        .merge(general_limited_routes)
+        // Key management (authenticated API)
+        .route("/v1/keys", get(handlers::keys::list_keys))
+        .route(
+            "/v1/keys/{id}",
+            patch(handlers::keys::rename_key).delete(handlers::keys::delete_key),
+        )
+        // Credential read-only endpoints (no rate limit needed)
+        .route(
+            "/v1/credentials/ssh/ca",
+            get(handlers::credentials::get_ssh_ca_public_key),
+        )
+        .route(
+            "/v1/credentials/ssh/krl",
+            get(handlers::credentials::get_ssh_krl),
+        )
+        .route(
+            "/v1/credentials/ssh/krl/{serial}",
+            get(handlers::credentials::check_ssh_revocation),
+        )
+        // GitHub credential status (read-only)
+        .route(
+            "/v1/credentials/github/status",
+            get(handlers::credentials::get_github_status),
+        )
+        // Cloud integration config API
+        .route(
+            "/v1/integrations/aws",
+            get(handlers::integrations::get_aws_integration)
+                .put(handlers::integrations::set_aws_integration)
+                .delete(handlers::integrations::delete_aws_integration),
+        )
+        // GitHub webhook API (payloads can be large)
+        .route(
+            "/api/webhooks/github",
+            post(handlers::github::github_webhook).layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
+        // Applications API (JSON)
+        .route(
+            "/api/v1/applications",
+            get(handlers::applications::list_applications_api)
+                .post(handlers::applications::create_application_api),
+        )
+        .route(
+            "/api/v1/applications/{id}",
+            get(handlers::applications::get_application_api)
+                .patch(handlers::applications::update_application_api)
+                .delete(handlers::applications::delete_application_api),
+        )
+        .route(
+            "/api/v1/applications/{id}/rotate",
+            post(handlers::applications::rotate_secret_api),
+        )
+        .route(
+            "/api/v1/applications/{id}/revoke",
+            post(handlers::applications::revoke_tokens_api),
         )
         .layer(build_api_cors_layer())
         .layer(SetResponseHeaderLayer::if_not_present(
@@ -638,6 +657,13 @@ async fn run_server(args: config::Args) -> Result<()> {
         .layer(build_ui_cors_layer(&config));
 
     let app = apply_security_layers(api_routes.merge(ui_routes), &config)
+        // Global request timeout: 30 seconds.
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            std::time::Duration::from_secs(30),
+        ))
+        // Global body size limit: 256 KB (per-route overrides above are more restrictive).
+        .layer(DefaultBodyLimit::max(256 * 1024))
         .layer(request_id::propagate_request_id_layer())
         .layer(request_id::set_request_id_layer())
         .with_state(state.clone());
@@ -930,7 +956,7 @@ fn apply_security_layers(
         .layer(SetResponseHeaderLayer::overriding(
             HeaderName::from_static("content-security-policy"),
             HeaderValue::from_static(
-                "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+                "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
             ),
         ));
 

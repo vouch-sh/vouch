@@ -15,12 +15,18 @@
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceUri(String);
 
+/// Maximum length for resource URIs (URL practical limit).
+const MAX_RESOURCE_URI_LEN: usize = 2048;
+
 /// Errors from parsing a resource URI.
 #[derive(Debug, thiserror::Error)]
 pub enum ResourceError {
     /// The URI string was empty.
     #[error("resource URI must not be empty")]
     Empty,
+    /// The URI exceeds the maximum allowed length.
+    #[error("resource URI exceeds maximum length of {MAX_RESOURCE_URI_LEN}")]
+    TooLong,
     /// The URI is not an absolute URI (missing scheme).
     #[error("resource URI must be an absolute URI with a scheme")]
     NotAbsolute,
@@ -39,6 +45,10 @@ impl ResourceUri {
     pub fn parse(s: &str) -> Result<Self, ResourceError> {
         if s.is_empty() {
             return Err(ResourceError::Empty);
+        }
+
+        if s.len() > MAX_RESOURCE_URI_LEN {
+            return Err(ResourceError::TooLong);
         }
 
         let url = url::Url::parse(s).map_err(|_| ResourceError::NotAbsolute)?;
