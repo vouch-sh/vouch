@@ -95,15 +95,6 @@ pub enum OidcStates {
     CreatedAt,
 }
 
-/// Server configuration table.
-#[derive(Iden)]
-pub enum ServerConfig {
-    Table,
-    Key,
-    Value,
-    UpdatedAt,
-}
-
 /// Authentication events for audit logging.
 #[derive(Iden)]
 pub enum AuthEvents {

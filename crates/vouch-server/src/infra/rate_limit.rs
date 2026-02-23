@@ -62,7 +62,12 @@ pub fn build_credential_rate_limiter() -> RateLimitLayer {
         .burst_size(5)
         .use_headers()
         .finish()
-        .unwrap_or_else(GovernorConfig::secure);
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "Failed to build credential rate limiter config, falling back to secure defaults"
+            );
+            GovernorConfig::secure()
+        });
     GovernorLayer::new(config)
 }
 
@@ -78,6 +83,11 @@ pub fn build_general_rate_limiter() -> RateLimitLayer {
         .burst_size(20)
         .use_headers()
         .finish()
-        .unwrap_or_else(GovernorConfig::secure);
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "Failed to build general rate limiter config, falling back to secure defaults"
+            );
+            GovernorConfig::secure()
+        });
     GovernorLayer::new(config)
 }
