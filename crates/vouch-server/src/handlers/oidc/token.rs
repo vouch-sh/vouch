@@ -199,27 +199,42 @@ pub async fn token(
     if let Some(ref v) = params.code_verifier
         && v.len() > MAX_CODE_VERIFIER_LEN
     {
-        return token_error_response("invalid_request", "code_verifier exceeds maximum length");
+        return token_error_response(
+            "invalid_request",
+            &format!("code_verifier exceeds maximum length of {MAX_CODE_VERIFIER_LEN}"),
+        );
     }
     if let Some(ref v) = params.redirect_uri
         && v.len() > MAX_TOKEN_REDIRECT_URI_LEN
     {
-        return token_error_response("invalid_request", "redirect_uri exceeds maximum length");
+        return token_error_response(
+            "invalid_request",
+            &format!("redirect_uri exceeds maximum length of {MAX_TOKEN_REDIRECT_URI_LEN}"),
+        );
     }
     if let Some(ref v) = params.client_id
         && v.len() > MAX_TOKEN_CLIENT_ID_LEN
     {
-        return token_error_response("invalid_request", "client_id exceeds maximum length");
+        return token_error_response(
+            "invalid_request",
+            &format!("client_id exceeds maximum length of {MAX_TOKEN_CLIENT_ID_LEN}"),
+        );
     }
     if let Some(ref v) = params.scope
         && v.len() > MAX_TOKEN_SCOPE_LEN
     {
-        return token_error_response("invalid_request", "scope exceeds maximum length");
+        return token_error_response(
+            "invalid_request",
+            &format!("scope exceeds maximum length of {MAX_TOKEN_SCOPE_LEN}"),
+        );
     }
     if let Some(ref v) = params.resource
         && v.len() > MAX_TOKEN_RESOURCE_LEN
     {
-        return token_error_response("invalid_request", "resource exceeds maximum length");
+        return token_error_response(
+            "invalid_request",
+            &format!("resource exceeds maximum length of {MAX_TOKEN_RESOURCE_LEN}"),
+        );
     }
 
     // RFC 6749 Section 5.2: Return unsupported_grant_type error for unknown grants

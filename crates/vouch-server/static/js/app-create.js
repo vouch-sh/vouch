@@ -1,10 +1,12 @@
-// Application creation form: redirect URI validation, app type toggling.
+// Application creation form: redirect URI validation, resource URI validation, app type toggling.
 
 (function() {
     document.addEventListener('DOMContentLoaded', function() {
         var redirectSection = document.getElementById('redirect-uris-section');
         var redirectTextarea = document.getElementById('redirect_uris');
         var redirectError = document.getElementById('redirect-uri-error');
+        var resourceTextarea = document.getElementById('resource_uris');
+        var resourceError = document.getElementById('resource-uri-error');
         var nameInput = document.getElementById('name');
         var form = document.querySelector('form');
 
@@ -46,6 +48,47 @@
             return null;
         }
 
+        // Validate resource URIs per RFC 8707 and return error message (or null if valid).
+        // Rules: must be an absolute URI (has a scheme), must not contain a fragment (#),
+        // max 2048 characters each.
+        function validateResourceUris() {
+            var uris = resourceTextarea.value.trim().split('\n').filter(function(line) {
+                return line.trim();
+            });
+
+            // Resource URIs are optional — empty is fine
+            if (uris.length === 0) {
+                return null;
+            }
+
+            var errors = [];
+            for (var i = 0; i < uris.length; i++) {
+                var trimmed = uris[i].trim();
+
+                if (trimmed.length > 2048) {
+                    errors.push(trimmed.substring(0, 40) + '... (exceeds maximum length of 2048)');
+                    continue;
+                }
+
+                if (trimmed.indexOf('#') !== -1) {
+                    errors.push(trimmed + ' (must not contain a fragment)');
+                    continue;
+                }
+
+                try {
+                    new URL(trimmed);
+                } catch (e) {
+                    errors.push(trimmed + ' (must be an absolute URI with a scheme)');
+                }
+            }
+
+            if (errors.length > 0) {
+                return 'Invalid resource URI(s): ' + errors.join('; ') + '.';
+            }
+
+            return null;
+        }
+
         // Show/hide redirect URI error
         function showRedirectError(message) {
             if (message) {
@@ -55,6 +98,18 @@
             } else {
                 redirectError.classList.add('hidden');
                 redirectTextarea.classList.remove('border-vouch-error');
+            }
+        }
+
+        // Show/hide resource URI error
+        function showResourceError(message) {
+            if (message) {
+                resourceError.textContent = message;
+                resourceError.classList.remove('hidden');
+                resourceTextarea.classList.add('border-vouch-error');
+            } else {
+                resourceError.classList.add('hidden');
+                resourceTextarea.classList.remove('border-vouch-error');
             }
         }
 
@@ -78,16 +133,32 @@
 
         // Validate redirect URIs on blur
         redirectTextarea.addEventListener('blur', function() {
-            var error = validateRedirectUris();
-            showRedirectError(error);
+            showRedirectError(validateRedirectUris());
         });
 
-        // Clear error styling when user starts typing
+        // Clear redirect error styling when user starts typing
         redirectTextarea.addEventListener('input', function() {
             if (redirectTextarea.classList.contains('border-vouch-error')) {
                 clearTimeout(redirectTextarea.validateTimeout);
                 redirectTextarea.validateTimeout = setTimeout(function() {
                     showRedirectError(validateRedirectUris());
+                }, 500);
+            }
+        });
+
+        // Validate resource URIs on blur
+        resourceTextarea.addEventListener('blur', function() {
+            if (resourceTextarea.value.trim()) {
+                showResourceError(validateResourceUris());
+            }
+        });
+
+        // Clear resource error styling when user starts typing
+        resourceTextarea.addEventListener('input', function() {
+            if (resourceTextarea.classList.contains('border-vouch-error')) {
+                clearTimeout(resourceTextarea.validateTimeout);
+                resourceTextarea.validateTimeout = setTimeout(function() {
+                    showResourceError(validateResourceUris());
                 }, 500);
             }
         });
@@ -114,6 +185,17 @@
                 showRedirectError(redirectUriError);
                 redirectTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
                 redirectTextarea.focus();
+                hasError = true;
+            }
+
+            var resourceUriError = validateResourceUris();
+            if (resourceUriError) {
+                e.preventDefault();
+                showResourceError(resourceUriError);
+                if (!hasError) {
+                    resourceTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    resourceTextarea.focus();
+                }
                 hasError = true;
             }
 

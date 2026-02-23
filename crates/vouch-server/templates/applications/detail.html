@@ -160,6 +160,7 @@
                     class="input-field mt-1 font-mono">{% for uri in app.redirect_uris %}{{ uri }}
 {% endfor %}</textarea>
                 <p class="mt-1 text-sm text-gray-500">One URI per line</p>
+                <div id="redirect-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
             </div>
 
             <div>
@@ -168,6 +169,7 @@
                     class="input-field mt-1 font-mono">{% for uri in app.resource_uris %}{{ uri }}
 {% endfor %}</textarea>
                 <p class="mt-1 text-sm text-gray-500">One URI per line. Target resource servers for audience-restricted tokens (RFC 8707).</p>
+                <div id="resource-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
             </div>
 
             <div>
