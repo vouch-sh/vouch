@@ -10,7 +10,6 @@ pub mod crypto;
 pub mod db;
 pub mod handlers;
 pub mod infra;
-pub mod oidc;
 pub mod services;
 
 #[cfg(any(test, feature = "test-utils"))]

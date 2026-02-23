@@ -31,8 +31,8 @@
 //! ```
 
 use crate::db::{self, Authenticator, Pool};
-use crate::oidc::OidcIdTokenClaimsBuilder;
 use crate::redact_email;
+use crate::services::oidc::OidcIdTokenClaimsBuilder;
 use crate::services::oidc::OidcSigningKey;
 
 /// Error types for AWS integration operations.

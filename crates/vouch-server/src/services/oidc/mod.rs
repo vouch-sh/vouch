@@ -27,6 +27,7 @@
 
 pub mod amr;
 pub mod authorization;
+pub mod claims;
 pub mod discovery;
 pub mod dpop;
 pub mod exchange;
@@ -37,6 +38,7 @@ pub mod token;
 
 // Re-export commonly used types
 pub use authorization::{AuthorizationCodeParams, ValidatedAuthRequest, check_client_access};
+pub use claims::{OidcIdTokenClaims, OidcIdTokenClaimsBuilder};
 pub use discovery::{OidcDiscoveryDocument, build_discovery_document, build_jwks};
 pub use exchange::{TokenExchangeParams, TokenExchangeResult};
 pub use introspection::{IntrospectionResult, RevocationResult};
