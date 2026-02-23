@@ -37,10 +37,11 @@ pub async fn list_applications_api(
     let applications = db::get_oauth_clients_for_user(&state.db, &claims.sub)
         .await
         .map_err(|e| {
+            tracing::error!("Failed to list applications: {e}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?
         .into_iter()
@@ -90,10 +91,11 @@ pub async fn create_application_api(
     let user = db::get_user_by_id(&state.db, &claims.sub)
         .await
         .map_err(|e| {
+            tracing::error!("Failed to get user: {e}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
@@ -148,10 +150,11 @@ pub async fn create_application_api(
     )
     .await
     .map_err(|e| {
+        tracing::error!("Failed to create OAuth client: {e}");
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_error",
-            &e.to_string(),
+            "Internal database error",
         )
     })?;
 
@@ -169,10 +172,11 @@ pub async fn create_application_api(
         )
         .await
         .map_err(|e| {
+            tracing::error!("Failed to create client secret: {e}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?;
 
@@ -207,10 +211,11 @@ pub async fn get_application_api(
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
         .await
         .map_err(|e| {
+            tracing::error!("Failed to get application: {e}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
@@ -243,10 +248,11 @@ pub async fn update_application_api(
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
         .await
         .map_err(|e| {
+            tracing::error!("Failed to get application for update: {e}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
@@ -272,10 +278,11 @@ pub async fn update_application_api(
             db::get_user_by_id(&state.db, &claims.sub)
                 .await
                 .map_err(|e| {
+                    tracing::error!("Failed to get user for scope validation: {e}");
                     json_error(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "db_error",
-                        &e.to_string(),
+                        "Internal database error",
                     )
                 })?
                 .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "User not found"))?,
@@ -333,10 +340,11 @@ pub async fn update_application_api(
     )
     .await
     .map_err(|e| {
+        tracing::error!("Failed to update OAuth client: {e}");
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_error",
-            &e.to_string(),
+            "Internal database error",
         )
     })?;
 
@@ -344,10 +352,11 @@ pub async fn update_application_api(
     let updated = db::get_oauth_client_by_id(&state.db, &app_id)
         .await
         .map_err(|e| {
+            tracing::error!("Failed to fetch updated application: {e}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
@@ -372,10 +381,11 @@ pub async fn delete_application_api(
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
         .await
         .map_err(|e| {
+            tracing::error!("Failed to get application for deletion: {e}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
@@ -391,10 +401,11 @@ pub async fn delete_application_api(
     db::delete_oauth_client(&state.db, &app_id)
         .await
         .map_err(|e| {
+            tracing::error!("Failed to delete OAuth client: {e}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?;
 
@@ -418,10 +429,11 @@ pub async fn rotate_secret_api(
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
         .await
         .map_err(|e| {
+            tracing::error!("Failed to get application for secret rotation: {e}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
@@ -459,10 +471,11 @@ pub async fn rotate_secret_api(
     db::revoke_all_oauth_client_secrets(&state.db, &app_id)
         .await
         .map_err(|e| {
+            tracing::error!("Failed to revoke old secrets: {e}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?;
 
@@ -476,10 +489,11 @@ pub async fn rotate_secret_api(
     )
     .await
     .map_err(|e| {
+        tracing::error!("Failed to create rotated secret: {e}");
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_error",
-            &e.to_string(),
+            "Internal database error",
         )
     })?;
 
@@ -507,10 +521,11 @@ pub async fn revoke_tokens_api(
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
         .await
         .map_err(|e| {
+            tracing::error!("Failed to get application for token revocation: {e}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
@@ -527,10 +542,11 @@ pub async fn revoke_tokens_api(
     db::revoke_all_oauth_client_secrets(&state.db, &app_id)
         .await
         .map_err(|e| {
+            tracing::error!("Failed to revoke all secrets: {e}");
             json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?;
 

@@ -392,6 +392,14 @@ async fn run_server(args: config::Args) -> Result<()> {
             "/v1/auth/login/complete",
             post(handlers::auth::login_complete),
         )
+        .route(
+            "/v1/auth/register/start",
+            post(handlers::auth::register_start),
+        )
+        .route(
+            "/v1/auth/register/complete",
+            post(handlers::auth::register_complete),
+        )
         .route("/oauth/token", post(handlers::oidc::token))
         .route("/oauth/device", post(handlers::device::device_code))
         .layer(auth_rate_limiter);
@@ -413,14 +421,6 @@ async fn run_server(args: config::Args) -> Result<()> {
         .route("/oauth/introspect", post(handlers::oidc::introspect))
         .route("/oauth/callback", get(handlers::enroll::oidc_callback))
         // Auth endpoints
-        .route(
-            "/v1/auth/register/start",
-            post(handlers::auth::register_start),
-        )
-        .route(
-            "/v1/auth/register/complete",
-            post(handlers::auth::register_complete),
-        )
         .route("/v1/auth/status", get(handlers::auth::status))
         // Merge rate-limited routes
         .merge(rate_limited_routes)

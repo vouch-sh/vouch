@@ -966,10 +966,11 @@ pub async fn browser_register_complete(
     let cose_key = passkey.get_public_key();
 
     let public_key_cbor = crate::crypto::cose::cose_key_to_cbor(cose_key).map_err(|e| {
+        tracing::error!("Failed to serialize COSE key to CBOR: {e}");
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cbor_error",
-            &e.to_string(),
+            "Failed to serialize key",
         )
     })?;
 

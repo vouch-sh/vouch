@@ -175,7 +175,7 @@ pub async fn delete_key(
         ServiceError::Internal("Failed to delete key".to_string())
     })?;
 
-    let sessions = u64::try_from(sessions_revoked).unwrap_or(0);
+    let sessions = u64::try_from(sessions_revoked).unwrap_or_default();
     tracing::info!("Deleted key {key_id} for user {user_id}, revoked {sessions} sessions");
 
     Ok((authenticator.name, sessions))
