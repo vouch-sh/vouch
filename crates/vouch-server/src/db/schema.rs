@@ -8,6 +8,7 @@ use sea_query::Iden;
 
 /// Organizations table for domain-based multi-tenancy.
 #[derive(Iden)]
+#[allow(dead_code)]
 pub enum Organizations {
     Table,
     Id,
