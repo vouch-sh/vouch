@@ -53,7 +53,7 @@
             <div class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Enroll via Command Line</div>
             <div class="code-block relative">
                 <span class="text-gray-500 mr-2">$</span>vouch enroll --server {{ server_url }}
-                <button onclick="copyCommand(this, 'vouch enroll --server {{ server_url }}')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                <button data-copy-text="vouch enroll --server {{ server_url }}" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
             </div>
         </div>
 
@@ -84,7 +84,7 @@
             <div class="text-sm font-semibold text-gray-400 uppercase tracking-wide mb-3">Already Enrolled?</div>
             <div class="code-block relative">
                 <span class="text-gray-500 mr-2">$</span>vouch login --server {{ server_url }}
-                <button onclick="copyCommand(this, 'vouch login --server {{ server_url }}')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                <button data-copy-text="vouch login --server {{ server_url }}" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
             </div>
         </div>
 
@@ -107,17 +107,5 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
-    function copyCommand(btn, text) {
-        navigator.clipboard.writeText(text).then(() => {
-            const original = btn.textContent;
-            btn.textContent = 'Copied!';
-            btn.classList.add('text-vouch-success');
-            setTimeout(() => {
-                btn.textContent = original;
-                btn.classList.remove('text-vouch-success');
-            }, 2000);
-        });
-    }
-</script>
+<script src="/static/js/common.js"></script>
 {% endblock %}
