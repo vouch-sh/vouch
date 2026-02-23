@@ -18,7 +18,8 @@ use uuid::Uuid;
 /// Access scope for OAuth applications.
 ///
 /// Controls who can authenticate with the application.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, sqlx::Type)]
+#[sqlx(rename_all = "lowercase")]
 pub enum AccessScope {
     /// Only users in the same organization can authenticate.
     Organization,
@@ -30,7 +31,7 @@ pub enum AccessScope {
 }
 
 impl AccessScope {
-    /// Convert to database string.
+    /// Return the string representation for sea-query values.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -40,7 +41,7 @@ impl AccessScope {
         }
     }
 
-    /// Parse from database string (case-insensitive).
+    /// Parse from a string (case-insensitive). Used for form/request parsing.
     #[must_use]
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
@@ -74,7 +75,8 @@ impl AccessScope {
 }
 
 /// OAuth application type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(rename_all = "lowercase")]
 pub enum OAuthClientType {
     Web,
     Native,
@@ -83,7 +85,7 @@ pub enum OAuthClientType {
 }
 
 impl OAuthClientType {
-    /// Convert to database string.
+    /// Return the string representation for sea-query values.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -94,7 +96,7 @@ impl OAuthClientType {
         }
     }
 
-    /// Parse from database string (case-insensitive).
+    /// Parse from a string (case-insensitive). Used for form/request parsing.
     #[must_use]
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
@@ -132,31 +134,19 @@ pub struct OAuthClient {
     pub client_id: String,
     pub name: String,
     pub description: Option<String>,
-    pub application_type: String,
+    pub application_type: OAuthClientType,
     pub redirect_uris: String,
     pub active: bool,
     pub created_at: DbTimestamp,
     pub updated_at: DbTimestamp,
     pub last_used_at: Option<DbTimestamp>,
     /// Access scope controlling who can use this application.
-    pub access_scope: String,
+    pub access_scope: AccessScope,
     /// Organization ID for organization-scoped apps.
     pub org_id: Option<String>,
 }
 
 impl OAuthClient {
-    /// Get the application type as enum.
-    #[must_use]
-    pub fn client_type(&self) -> Option<OAuthClientType> {
-        OAuthClientType::from_str(&self.application_type)
-    }
-
-    /// Get the access scope as enum.
-    #[must_use]
-    pub fn get_access_scope(&self) -> AccessScope {
-        AccessScope::from_str(&self.access_scope).unwrap_or_default()
-    }
-
     /// Get redirect URIs as a vector.
     #[must_use]
     pub fn get_redirect_uris(&self) -> Vec<String> {

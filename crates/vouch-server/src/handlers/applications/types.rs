@@ -46,18 +46,17 @@ pub struct ApplicationInfo {
 impl From<OAuthClient> for ApplicationInfo {
     fn from(client: OAuthClient) -> Self {
         let redirect_uris = client.get_redirect_uris();
-        let access_scope = client.get_access_scope();
         Self {
             id: client.id,
             client_id: client.client_id,
             name: client.name,
             description: client.description,
-            application_type: client.application_type,
+            application_type: client.application_type.as_str().to_string(),
             redirect_uris,
             active: client.active,
             created_at: client.created_at.to_jiff().to_string(),
             last_used_at: client.last_used_at.map(|ts| ts.to_jiff().to_string()),
-            access_scope,
+            access_scope: client.access_scope,
             org_id: client.org_id,
         }
     }
@@ -228,19 +227,18 @@ pub struct ApplicationResponse {
 impl From<OAuthClient> for ApplicationResponse {
     fn from(client: OAuthClient) -> Self {
         let redirect_uris = client.get_redirect_uris();
-        let access_scope = client.get_access_scope();
         Self {
             id: client.id,
             client_id: client.client_id,
             name: client.name,
             description: client.description,
-            application_type: client.application_type,
+            application_type: client.application_type.as_str().to_string(),
             redirect_uris,
             active: client.active,
             created_at: client.created_at.to_jiff().to_string(),
             updated_at: client.updated_at.to_jiff().to_string(),
             last_used_at: client.last_used_at.map(|ts| ts.to_jiff().to_string()),
-            access_scope: access_scope.as_str().to_string(),
+            access_scope: client.access_scope.as_str().to_string(),
             org_id: client.org_id,
         }
     }

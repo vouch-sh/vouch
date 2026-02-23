@@ -478,16 +478,7 @@ pub async fn rotate_secret_form(
     };
 
     // Check if this client type supports secrets
-    let Some(app_type) = client.client_type() else {
-        return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "Invalid application type.".to_string(),
-            back_url: format!("/applications/{}", app_id),
-        }
-        .into_response();
-    };
-
-    if !app_type.requires_secret() {
+    if !client.application_type.requires_secret() {
         return ApplicationErrorTemplate {
             title: "Error".to_string(),
             message: "This application type does not use client secrets.".to_string(),

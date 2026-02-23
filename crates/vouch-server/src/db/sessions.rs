@@ -13,34 +13,26 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Session purpose — distinguishes FIDO2 login sessions from OAuth access tokens.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, sqlx::Type)]
 pub enum SessionPurpose {
     /// FIDO2 hardware-backed login session (CLI login, device code flow).
     #[default]
     #[serde(rename = "fido2_session")]
+    #[sqlx(rename = "fido2_session")]
     Fido2Session,
     /// OAuth 2.0 access token issued via authorization code grant.
     #[serde(rename = "oauth_access_token")]
+    #[sqlx(rename = "oauth_access_token")]
     OAuthAccessToken,
 }
 
 impl SessionPurpose {
-    /// Return the string representation for database storage.
+    /// Return the string representation for database storage and sea-query values.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Fido2Session => "fido2_session",
             Self::OAuthAccessToken => "oauth_access_token",
-        }
-    }
-
-    /// Parse from a database string value.
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        match s {
-            "fido2_session" => Some(Self::Fido2Session),
-            "oauth_access_token" => Some(Self::OAuthAccessToken),
-            _ => None,
         }
     }
 }
@@ -54,7 +46,7 @@ pub struct Session {
     pub token_hash: String,
     pub authenticator_id: Option<String>,
     pub expires_at: DbTimestamp,
-    pub session_type: String,
+    pub session_type: SessionPurpose,
 }
 
 /// Create a new session.

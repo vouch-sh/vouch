@@ -11,7 +11,7 @@ use super::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
 use super::scope::{OAuthScope, ScopeSet};
 use crate::AppState;
 use crate::crypto::hash_token;
-use crate::db::{self, Authenticator, OAuthClient, OAuthClientType, Session, User};
+use crate::db::{self, Authenticator, OAuthClient, Session, User};
 use crate::redact_email;
 use crate::services::auth::{
     CreateOAuthTokenParams, DecodedToken, create_oauth_access_token, decode_token,
@@ -249,11 +249,8 @@ pub async fn exchange_authorization_code(
                 }
 
                 // RFC 7636 Section 4: Require PKCE for public clients and client types that mandate it
-                let pkce_required = client.is_public
-                    || client
-                        .client
-                        .client_type()
-                        .is_some_and(|t| t.requires_pkce());
+                let pkce_required =
+                    client.is_public || client.client.application_type.requires_pkce();
                 if pkce_required && auth_code.code_challenge.is_none() {
                     tracing::warn!(
                         "Client {} requires PKCE but no code_challenge was present",
@@ -454,8 +451,7 @@ pub async fn authenticate_client(
     }
 
     // Determine if this client type requires a secret
-    let client_type = client.client_type().unwrap_or(OAuthClientType::Web);
-    let requires_secret = client_type.requires_secret();
+    let requires_secret = client.application_type.requires_secret();
 
     if requires_secret {
         // Secret is required - validate it

@@ -447,15 +447,7 @@ pub async fn rotate_secret_api(
     }
 
     // Check if this client type supports secrets
-    let app_type = client.client_type().ok_or_else(|| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "invalid_type",
-            "Invalid application type",
-        )
-    })?;
-
-    if !app_type.requires_secret() {
+    if !client.application_type.requires_secret() {
         return Err(json_error(
             StatusCode::BAD_REQUEST,
             "no_secret",
