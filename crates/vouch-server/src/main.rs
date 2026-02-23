@@ -323,15 +323,9 @@ async fn run_server(args: config::Args) -> Result<()> {
     )?;
 
     // Build shared HTTP client for outbound API calls (GitHub, OIDC, etc.)
-    // Respects VOUCH_HTTP_LOCAL_ADDRESS for IPv6-only environments.
-    let http_client = vouch_common::http::server_client(
-        &format!("vouch-server/{}", env!("CARGO_PKG_VERSION")),
-        config.http_local_address,
-    )
-    .context("Failed to create shared HTTP client")?;
-    if let Some(addr) = config.http_local_address {
-        tracing::info!("HTTP client local address: {addr}");
-    }
+    let http_client =
+        vouch_common::http::server_client(&format!("vouch-server/{}", env!("CARGO_PKG_VERSION")))
+            .context("Failed to create shared HTTP client")?;
 
     // Initialize GitHub App if configured
     let github_app = match GitHubApp::load(&config, http_client.clone()) {

@@ -219,12 +219,6 @@ pub struct Args {
     /// S3 config polling interval in seconds.
     #[arg(long, env = "VOUCH_S3_CONFIG_POLL_INTERVAL", default_value = "60")]
     pub s3_config_poll_interval: u64,
-
-    /// Local IP address for outbound HTTP connections.
-    /// Set to "::" to force IPv6-only outbound (for IPv6-only environments),
-    /// or "0.0.0.0" to force IPv4-only. Unset lets the OS decide.
-    #[arg(long, env = "VOUCH_HTTP_LOCAL_ADDRESS")]
-    pub http_local_address: Option<String>,
 }
 
 // ============================================================================
@@ -318,9 +312,6 @@ pub struct ServerConfig {
     pub s3_config_region: Option<String>,
     /// S3 config poll interval in seconds.
     pub s3_config_poll_interval: u64,
-    /// Local IP address for outbound HTTP connections.
-    /// Set to `::` for IPv6-only environments.
-    pub http_local_address: Option<std::net::IpAddr>,
 }
 
 impl ServerConfig {
@@ -364,18 +355,6 @@ impl ServerConfig {
         let cors_origins = args
             .cors_origins
             .map(|s| parse_comma_list_preserve_case(&s));
-
-        // Parse HTTP local address for outbound connections
-        let http_local_address = args
-            .http_local_address
-            .as_deref()
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                s.parse::<std::net::IpAddr>().context(
-                    "Invalid VOUCH_HTTP_LOCAL_ADDRESS (expected IP address like '::' or '0.0.0.0')",
-                )
-            })
-            .transpose()?;
 
         // Handle SSH CA key path (empty string = disabled)
         let ssh_ca_key_path = if args.ssh_ca_key_path.is_empty() {
@@ -424,7 +403,6 @@ impl ServerConfig {
             s3_config_key: args.s3_config_key,
             s3_config_region: args.s3_config_region,
             s3_config_poll_interval: args.s3_config_poll_interval,
-            http_local_address,
         })
     }
 

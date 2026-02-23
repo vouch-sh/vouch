@@ -78,7 +78,6 @@ pub struct AppState {
     /// GitHub App for credential issuance (optional, None if not configured).
     pub github_app: Option<std::sync::Arc<services::integrations::github::GitHubApp>>,
     /// Shared HTTP client for outbound server-side API calls.
-    /// Configured with `VOUCH_HTTP_LOCAL_ADDRESS` for IPv6-only environments.
     pub http_client: reqwest::Client,
 }
 
@@ -208,7 +207,6 @@ mod redirect_tests {
             s3_config_key: "config/vouch-server.json".to_string(),
             s3_config_region: None,
             s3_config_poll_interval: 60,
-            http_local_address: None,
         };
         let webauthn = webauthn_rs::WebauthnBuilder::new(
             rp_id,
