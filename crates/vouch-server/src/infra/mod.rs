@@ -6,5 +6,7 @@
 
 pub mod cleanup;
 pub mod encrypt_config;
+pub mod rate_limit;
+pub mod request_id;
 pub mod s3_config;
 pub mod tls;

@@ -3,6 +3,7 @@
 
 use crate::AppState;
 use crate::db::{self, GitHubCredentialEventParams};
+use crate::services::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
 use axum::{Json, extract::State, http::StatusCode};
@@ -13,12 +14,12 @@ use jiff::Timestamp;
 use serde::Serialize;
 use std::sync::Arc;
 use vouch_common::{
-    ApiError, AwsTokenResponse, GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse,
+    AwsTokenResponse, GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse,
     SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
 };
 
+use super::extract_session_with_email;
 use super::session::extract_session;
-use super::{extract_session_with_email, json_error};
 use crate::redact_email;
 
 /// Issue an SSH certificate for the authenticated user.
@@ -32,13 +33,13 @@ pub async fn issue_ssh_certificate(
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     jar: CookieJar,
     Json(request): Json<SshCertificateRequest>,
-) -> Result<Json<SshCertificateResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<SshCertificateResponse>, ServiceError> {
     // Validate session
     let (_claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
 
     // Get SSH CA
     let ssh_ca = state.ssh_ca.as_ref().ok_or_else(|| {
-        json_error(
+        ServiceError::http(
             StatusCode::SERVICE_UNAVAILABLE,
             "ssh_ca_not_configured",
             "SSH Certificate Authority is not configured",
@@ -57,10 +58,10 @@ pub async fn issue_ssh_certificate(
                 redact_email(&user_email),
                 e
             );
-            json_error(
+            ServiceError::http(
                 StatusCode::BAD_REQUEST,
                 "signing_failed",
-                &format!("Failed to sign certificate: {e}"),
+                "Failed to sign certificate",
             )
         })?;
 
@@ -87,9 +88,9 @@ pub async fn issue_ssh_certificate(
 /// to SSH server configurations to trust certificates signed by this CA.
 pub async fn get_ssh_ca_public_key(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<SshCaPublicKeyResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<SshCaPublicKeyResponse>, ServiceError> {
     let ssh_ca = state.ssh_ca.as_ref().ok_or_else(|| {
-        json_error(
+        ServiceError::http(
             StatusCode::SERVICE_UNAVAILABLE,
             "ssh_ca_not_configured",
             "SSH Certificate Authority is not configured",
@@ -97,10 +98,11 @@ pub async fn get_ssh_ca_public_key(
     })?;
 
     let public_key = ssh_ca.public_key().map_err(|e| {
-        json_error(
+        tracing::error!("Failed to get CA public key: {e}");
+        ServiceError::http(
             StatusCode::INTERNAL_SERVER_ERROR,
             "key_error",
-            &format!("Failed to get CA public key: {e}"),
+            "Failed to get CA public key",
         )
     })?;
 
@@ -136,15 +138,16 @@ pub struct SshKrlResponse {
 /// to check revocation status without needing credentials.
 pub async fn get_ssh_krl(
     State(state): State<Arc<AppState>>,
-) -> Result<Json<SshKrlResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<SshKrlResponse>, ServiceError> {
     // Get all revoked certificates
     let certs = db::get_revoked_ssh_certificates(&state.db)
         .await
         .map_err(|e| {
-            json_error(
+            tracing::error!("Failed to get revoked certificates: {e}");
+            ServiceError::http(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &format!("Failed to get revoked certificates: {e}"),
+                "Failed to retrieve revoked certificates",
             )
         })?;
 
@@ -166,14 +169,15 @@ pub async fn get_ssh_krl(
 pub async fn check_ssh_revocation(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(serial): axum::extract::Path<String>,
-) -> Result<Json<SshRevocationCheckResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<SshRevocationCheckResponse>, ServiceError> {
     let revoked = db::is_ssh_certificate_revoked(&state.db, &serial)
         .await
         .map_err(|e| {
-            json_error(
+            tracing::error!("Failed to check revocation status: {e}");
+            ServiceError::http(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &format!("Failed to check revocation: {e}"),
+                "Failed to check revocation status",
             )
         })?;
 
@@ -209,7 +213,7 @@ pub async fn get_aws_token(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     jar: CookieJar,
-) -> Result<Json<AwsTokenResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<AwsTokenResponse>, ServiceError> {
     // Validate session
     let (claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
 
@@ -230,23 +234,32 @@ pub async fn get_aws_token(
     .await
     .map_err(|e| match e {
         AwsError::NoAuthenticator => {
-            json_error(StatusCode::FORBIDDEN, "no_authenticator", &e.to_string())
+            ServiceError::http(StatusCode::FORBIDDEN, "no_authenticator", e.to_string())
         }
-        AwsError::Database(ref err) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db_error",
-            &err.to_string(),
-        ),
-        AwsError::ClaimsBuild(_) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "claims_error",
-            &e.to_string(),
-        ),
-        AwsError::TokenSign(_) => json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "token_error",
-            &e.to_string(),
-        ),
+        AwsError::Database(ref err) => {
+            tracing::error!("AWS token database error: {err}");
+            ServiceError::http(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        }
+        AwsError::ClaimsBuild(ref err) => {
+            tracing::error!("AWS token claims build error: {err}");
+            ServiceError::http(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "claims_error",
+                "Failed to build token claims",
+            )
+        }
+        AwsError::TokenSign(ref err) => {
+            tracing::error!("AWS token signing error: {err}");
+            ServiceError::http(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "token_error",
+                "Failed to sign token",
+            )
+        }
     })?;
 
     Ok(Json(AwsTokenResponse {
@@ -266,13 +279,14 @@ pub async fn get_aws_token(
 async fn get_user_org_domain(
     state: &AppState,
     user_id: &str,
-) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
+) -> Result<Option<String>, ServiceError> {
     // Get user to find their org_id
     let user = db::get_user_by_id(&state.db, user_id).await.map_err(|e| {
-        json_error(
+        tracing::error!("Failed to get user by ID: {e}");
+        ServiceError::http(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_error",
-            &e.to_string(),
+            "Internal database error",
         )
     })?;
 
@@ -283,10 +297,11 @@ async fn get_user_org_domain(
         let domain = db::get_organization_domain(&state.db, &org_id)
             .await
             .map_err(|e| {
-                json_error(
+                tracing::error!("Failed to get organization domain: {e}");
+                ServiceError::http(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "db_error",
-                    &e.to_string(),
+                    "Internal database error",
                 )
             })?;
         return Ok(domain);
@@ -308,7 +323,7 @@ pub async fn get_github_status(
     State(state): State<Arc<AppState>>,
     auth_header: Option<TypedHeader<Authorization<Bearer>>>,
     jar: CookieJar,
-) -> Result<Json<GitHubStatusResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<GitHubStatusResponse>, ServiceError> {
     // Validate session
     let session = extract_session(&state, auth_header, &jar).await?;
 
@@ -316,13 +331,16 @@ pub async fn get_github_status(
     let user = db::get_user_by_id(&state.db, &session.claims.sub)
         .await
         .map_err(|e| {
-            json_error(
+            tracing::error!("Failed to get user by ID: {e}");
+            ServiceError::http(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
+        .ok_or_else(|| {
+            ServiceError::http(StatusCode::NOT_FOUND, "user_not_found", "User not found")
+        })?;
 
     // Check if GitHub App is configured
     let configured = state.github_app.is_some();
@@ -331,6 +349,9 @@ pub async fn get_github_status(
     let github_accounts = if let Some(org_id) = &user.org_id {
         db::get_github_installations_by_org(&state.db, org_id)
             .await
+            .map_err(|e| {
+                tracing::error!("Failed to get GitHub installations for org {org_id}: {e}");
+            })
             .unwrap_or_default()
             .into_iter()
             .map(|i| {
@@ -373,7 +394,7 @@ pub async fn get_github_token(
     jar: CookieJar,
     headers: axum::http::HeaderMap,
     Json(request): Json<GitHubTokenRequest>,
-) -> Result<Json<GitHubTokenResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<GitHubTokenResponse>, ServiceError> {
     // Validate session
     let session = extract_session(&state, auth_header, &jar).await?;
 
@@ -381,13 +402,16 @@ pub async fn get_github_token(
     let user = db::get_user_by_id(&state.db, &session.claims.sub)
         .await
         .map_err(|e| {
-            json_error(
+            tracing::error!("Failed to get user by ID: {e}");
+            ServiceError::http(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
-                &e.to_string(),
+                "Internal database error",
             )
         })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
+        .ok_or_else(|| {
+            ServiceError::http(StatusCode::NOT_FOUND, "user_not_found", "User not found")
+        })?;
 
     // Get client info for audit log
     let ip_address = headers
@@ -401,7 +425,7 @@ pub async fn get_github_token(
 
     // Verify GitHub App is configured
     let github_app = state.github_app.as_ref().ok_or_else(|| {
-        json_error(
+        ServiceError::http(
             StatusCode::SERVICE_UNAVAILABLE,
             "github_not_configured",
             "GitHub App is not configured",
@@ -410,7 +434,7 @@ pub async fn get_github_token(
 
     // Verify user has an organization
     let org_id = user.org_id.as_ref().ok_or_else(|| {
-        json_error(
+        ServiceError::http(
             StatusCode::FORBIDDEN,
             "org_required",
             "GitHub requires organizational membership",
@@ -434,17 +458,20 @@ pub async fn get_github_token(
         db::get_github_installation_by_org_and_account(&state.db, org_id, owner)
             .await
             .map_err(|e| {
-                json_error(
+                tracing::error!(
+                    "Failed to get GitHub installation for org {org_id} account {owner}: {e}"
+                );
+                ServiceError::http(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "db_error",
-                    &e.to_string(),
+                    "Internal database error",
                 )
             })?
             .ok_or_else(|| {
-                json_error(
+                ServiceError::http(
                     StatusCode::NOT_FOUND,
                     "github_not_connected",
-                    &format!("GitHub account '{}' is not connected", owner),
+                    format!("GitHub account '{}' is not connected", owner),
                 )
             })?
     } else {
@@ -452,22 +479,23 @@ pub async fn get_github_token(
         let installations = db::get_github_installations_by_org(&state.db, org_id)
             .await
             .map_err(|e| {
-                json_error(
+                tracing::error!("Failed to get GitHub installations for org {org_id}: {e}");
+                ServiceError::http(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "db_error",
-                    &e.to_string(),
+                    "Internal database error",
                 )
             })?;
 
         if installations.is_empty() {
-            return Err(json_error(
+            return Err(ServiceError::http(
                 StatusCode::NOT_FOUND,
                 "github_not_connected",
                 "Organization has not connected GitHub",
             ));
         } else if installations.len() == 1 {
             installations.into_iter().next().ok_or_else(|| {
-                json_error(
+                ServiceError::http(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal_error",
                     "Unexpected empty installations",
@@ -478,10 +506,10 @@ pub async fn get_github_token(
                 .iter()
                 .map(|i| i.github_account_login.as_str())
                 .collect();
-            return Err(json_error(
+            return Err(ServiceError::http(
                 StatusCode::BAD_REQUEST,
                 "owner_required",
-                &format!(
+                format!(
                     "Multiple GitHub accounts connected. Specify 'owner': {}",
                     accounts.join(", ")
                 ),
@@ -491,7 +519,7 @@ pub async fn get_github_token(
 
     // Check if installation is suspended
     if installation.suspended_at.is_some() {
-        return Err(json_error(
+        return Err(ServiceError::http(
             StatusCode::FORBIDDEN,
             "installation_suspended",
             "GitHub installation is suspended",
@@ -503,7 +531,7 @@ pub async fn get_github_token(
     let token = github_app
         .get_installation_token(
             GitHubInstallationId(u64::try_from(installation.installation_id).map_err(|_| {
-                json_error(
+                ServiceError::http(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "invalid_installation",
                     "Invalid installation ID",
@@ -520,7 +548,7 @@ pub async fn get_github_token(
                 org_id,
                 e
             );
-            json_error(
+            ServiceError::http(
                 StatusCode::BAD_GATEWAY,
                 "github_error",
                 "Failed to get GitHub token",
