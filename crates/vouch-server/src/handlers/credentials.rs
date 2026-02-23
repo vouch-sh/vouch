@@ -10,7 +10,6 @@ use axum_extra::TypedHeader;
 use axum_extra::extract::cookie::CookieJar;
 use headers::authorization::{Authorization, Bearer};
 use jiff::Timestamp;
-use secrecy::ExposeSecret;
 use serde::Serialize;
 use std::sync::Arc;
 use vouch_common::{
@@ -587,7 +586,7 @@ pub async fn get_github_token(
         .map(|repos| repos.into_iter().map(|r| r.full_name).collect());
 
     Ok(Json(GitHubTokenResponse {
-        token: token.token.expose_secret().to_string(),
+        token: token.token,
         expires_at: token.expires_at,
         expires_in,
         permissions: token.permissions,

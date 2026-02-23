@@ -14,8 +14,6 @@ use vouch_common::{
 };
 
 use crate::client::VouchClient;
-use crate::commands::credential;
-use crate::config::Config;
 use crate::fido2::{self, YubiKey};
 use crate::session;
 
@@ -73,56 +71,21 @@ pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
         .await
         .context("failed to complete login")?;
 
-    // Step 4: Store session in config, agent, and cookie file
-    // Config save is fast local I/O, do it first
-    let mut config = Config::load()?;
-    config.set_server_url(server);
-    config.set_token(&complete_resp.token);
-    config.save()?;
-
-    // Agent IPC and cookie write are independent — run concurrently
-    let (agent_stored, _) = tokio::join!(
-        async {
-            #[cfg(unix)]
-            {
-                session::store_session_in_agent(
-                    &complete_resp.token,
-                    &complete_resp.email,
-                    &complete_resp.expires_at,
-                    server,
-                )
-                .await
-            }
-            #[cfg(not(unix))]
-            {
-                false
-            }
-        },
-        async {
-            // Parse expiration time for cookie
-            if let Ok(expires_at) = complete_resp.expires_at.parse::<jiff::Timestamp>() {
-                if let Err(e) =
-                    session::write_session_cookie_file(server, &complete_resp.token, expires_at)
-                {
-                    tracing::debug!("Failed to write cookie file: {e}");
-                }
-            } else {
-                tracing::debug!(
-                    "Failed to parse expiration time: {}",
-                    complete_resp.expires_at
-                );
-            }
-        },
-    );
+    // Step 4: Store session, cookie, and auto-provision SSH
+    let agent_stored = session::store_and_finalize(
+        server,
+        &complete_resp.token,
+        &complete_resp.email,
+        &complete_resp.expires_at,
+        None,
+    )
+    .await?;
 
     println!("Login successful as {}!", complete_resp.email);
     println!(
         "Session expires: {}",
         format_expiry(&complete_resp.expires_at)
     );
-
-    // Step 5: Auto-provision SSH certificate
-    credential::ssh::auto_provision(server, &complete_resp.expires_at).await;
 
     if agent_stored {
         println!("\nYour identity is now available. Check with: vouch status");

@@ -7,8 +7,6 @@ use std::io::{IsTerminal, Write, stdout};
 use vouch_common::{DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, OAuthError};
 
 use crate::client::VouchClient;
-use crate::commands::credential;
-use crate::config::Config;
 use crate::session;
 
 /// Response from device token endpoint.
@@ -71,13 +69,7 @@ pub async fn run(server: &str) -> Result<()> {
     // Step 3: Poll for token
     let token_response = poll_for_token(&client, &device_response).await?;
 
-    // Step 4: Save server URL and token (single atomic write)
-    let mut config = Config::load()?;
-    config.set_server_url(server);
-    config.set_token(token_response.access_token.expose_secret());
-    config.save()?;
-
-    // Step 5: Compute expiration timestamp from expires_in
+    // Step 4: Compute expiration timestamp from expires_in
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(
             i64::try_from(token_response.expires_in).unwrap_or(28800) - 30,
@@ -85,32 +77,18 @@ pub async fn run(server: &str) -> Result<()> {
         .unwrap_or_else(|_| jiff::Timestamp::now());
     let expires_at_str = expires_at.to_string();
 
-    // Step 6: Store session in agent (if running)
-    #[cfg(unix)]
-    let agent_stored = session::store_session_in_agent(
+    // Step 5: Store session, cookie, and auto-provision SSH
+    let agent_stored = session::store_and_finalize(
+        server,
         token_response.access_token.expose_secret(),
         &token_response.email,
         &expires_at_str,
-        server,
+        Some(expires_at),
     )
-    .await;
-    #[cfg(not(unix))]
-    let agent_stored = false;
-
-    // Step 7: Write cookie file for CLI tools
-    if let Err(e) = session::write_session_cookie_file(
-        server,
-        token_response.access_token.expose_secret(),
-        expires_at,
-    ) {
-        tracing::debug!("Failed to write cookie file: {e}");
-    }
+    .await?;
 
     println!("\nEnrollment successful!");
     println!("Enrolled as: {}", token_response.email);
-
-    // Step 8: Auto-provision SSH certificate
-    credential::ssh::auto_provision(server, &expires_at_str).await;
 
     if agent_stored {
         println!("\nYour identity is now available. Check with: vouch status");
