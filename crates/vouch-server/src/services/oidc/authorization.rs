@@ -489,7 +489,7 @@ pub fn decode_authorization_code(
 /// - **Personal**: Only the application creator can access
 /// - **Organization**: Only users in the same organization can access
 pub fn check_client_access(client: &OAuthClient, user: &User) -> ServiceResult<()> {
-    let access_scope = client.get_access_scope();
+    let access_scope = client.access_scope;
 
     match access_scope {
         AccessScope::Public => {
@@ -546,10 +546,11 @@ pub fn check_client_access(client: &OAuthClient, user: &User) -> ServiceResult<(
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+    use crate::db::OAuthClientType;
     use jiff_sqlx::ToSqlx;
 
     // Helper to create a test OAuthClient
-    fn test_client(user_id: &str, access_scope: &str, org_id: Option<&str>) -> OAuthClient {
+    fn test_client(user_id: &str, access_scope: AccessScope, org_id: Option<&str>) -> OAuthClient {
         let ts = jiff::Timestamp::now().to_sqlx();
         OAuthClient {
             id: "client-1".to_string(),
@@ -557,13 +558,13 @@ mod tests {
             client_id: "test-client-id".to_string(),
             name: "Test App".to_string(),
             description: None,
-            application_type: "web".to_string(),
+            application_type: OAuthClientType::Web,
             redirect_uris: "[]".to_string(),
             active: true,
             created_at: ts,
             updated_at: ts,
             last_used_at: None,
-            access_scope: access_scope.to_string(),
+            access_scope,
             org_id: org_id.map(String::from),
         }
     }
@@ -715,7 +716,7 @@ mod tests {
 
     #[test]
     fn test_access_check_public_allows_anyone() {
-        let client = test_client("user-1", "public", None);
+        let client = test_client("user-1", AccessScope::Public, None);
         let user = test_user("user-2", None); // Different user
 
         let result = check_client_access(&client, &user);
@@ -724,7 +725,7 @@ mod tests {
 
     #[test]
     fn test_access_check_personal_allows_only_creator() {
-        let client = test_client("user-1", "personal", None);
+        let client = test_client("user-1", AccessScope::Personal, None);
         let creator = test_user("user-1", None);
 
         let result = check_client_access(&client, &creator);
@@ -733,7 +734,7 @@ mod tests {
 
     #[test]
     fn test_access_check_personal_denies_others() {
-        let client = test_client("user-1", "personal", None);
+        let client = test_client("user-1", AccessScope::Personal, None);
         let other_user = test_user("user-2", None);
 
         let result = check_client_access(&client, &other_user);
@@ -748,7 +749,7 @@ mod tests {
 
     #[test]
     fn test_access_check_organization_allows_same_org() {
-        let client = test_client("user-1", "organization", Some("org-1"));
+        let client = test_client("user-1", AccessScope::Organization, Some("org-1"));
         let same_org_user = test_user("user-2", Some("org-1"));
 
         let result = check_client_access(&client, &same_org_user);
@@ -757,7 +758,7 @@ mod tests {
 
     #[test]
     fn test_access_check_organization_denies_different_org() {
-        let client = test_client("user-1", "organization", Some("org-1"));
+        let client = test_client("user-1", AccessScope::Organization, Some("org-1"));
         let diff_org_user = test_user("user-2", Some("org-2"));
 
         let result = check_client_access(&client, &diff_org_user);
@@ -772,7 +773,7 @@ mod tests {
 
     #[test]
     fn test_access_check_organization_denies_no_org_user() {
-        let client = test_client("user-1", "organization", Some("org-1"));
+        let client = test_client("user-1", AccessScope::Organization, Some("org-1"));
         let no_org_user = test_user("user-2", None);
 
         let result = check_client_access(&client, &no_org_user);
@@ -788,7 +789,7 @@ mod tests {
     #[test]
     fn test_access_check_organization_creator_in_same_org() {
         // Creator should also have access if they're in the same org
-        let client = test_client("user-1", "organization", Some("org-1"));
+        let client = test_client("user-1", AccessScope::Organization, Some("org-1"));
         let creator = test_user("user-1", Some("org-1"));
 
         let result = check_client_access(&client, &creator);

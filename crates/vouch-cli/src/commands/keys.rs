@@ -2,6 +2,7 @@
 //! Key management commands - list, rename, and remove registered security keys.
 
 use anyhow::{Result, bail};
+use clap::Subcommand;
 use inquire::{
     Confirm, Select,
     ui::{RenderConfig, Styled},
@@ -11,6 +12,32 @@ use vouch_common::{
 };
 
 use crate::client::VouchClient;
+
+/// Keys subcommands.
+#[derive(Subcommand)]
+pub enum KeysCommands {
+    /// List all registered keys (non-interactive).
+    List {
+        /// Output as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove a registered key (non-interactive).
+    Remove {
+        /// Key ID to remove.
+        id: String,
+        /// Skip confirmation prompt.
+        #[arg(short, long)]
+        force: bool,
+    },
+    /// Rename a registered key.
+    Rename {
+        /// Key ID to rename.
+        id: String,
+        /// New name for the key.
+        name: String,
+    },
+}
 
 /// Interactive key management.
 pub async fn interactive(server: &str) -> Result<()> {

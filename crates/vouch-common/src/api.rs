@@ -616,7 +616,8 @@ pub struct GitHubTokenRequest {
 #[derive(Serialize, Deserialize)]
 pub struct GitHubTokenResponse {
     /// Installation access token (use as password with username "x-access-token").
-    pub token: String,
+    #[serde(serialize_with = "serialize_secret_string")]
+    pub token: secrecy::SecretString,
     /// ISO 8601 expiration timestamp.
     pub expires_at: String,
     /// Seconds until expiration.
@@ -626,6 +627,24 @@ pub struct GitHubTokenResponse {
     /// Repositories the token can access (if scoped).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub repositories: Option<Vec<String>>,
+}
+
+/// Serialize a `SecretString` by exposing its value.
+///
+/// This is intentionally used only for wire-protocol serialization (server → client).
+/// The `secrecy` crate omits `Serialize` on purpose to prevent accidental logging;
+/// this explicit serializer makes the exposure deliberate and auditable.
+///
+/// Use with `#[serde(serialize_with = "vouch_common::serialize_secret_string")]`.
+pub fn serialize_secret_string<S>(
+    secret: &secrecy::SecretString,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    use secrecy::ExposeSecret;
+    serializer.serialize_str(secret.expose_secret())
 }
 
 impl std::fmt::Debug for GitHubTokenResponse {

@@ -128,11 +128,6 @@ impl std::fmt::Debug for LoginOptions {
     }
 }
 
-/// Serialize a `SecretString` by exposing its secret value.
-fn serialize_secret<S: serde::Serializer>(secret: &SecretString, s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_str(secret.expose_secret())
-}
-
 /// Response from credential provider to Cargo.
 #[derive(Serialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -140,7 +135,7 @@ enum CredentialResponse {
     /// Successful get response.
     Get {
         /// The authentication token.
-        #[serde(serialize_with = "serialize_secret")]
+        #[serde(serialize_with = "vouch_common::serialize_secret_string")]
         token: SecretString,
         /// Cache control for the token.
         cache: CacheControl,

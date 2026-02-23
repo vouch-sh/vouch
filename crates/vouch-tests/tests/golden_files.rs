@@ -163,7 +163,7 @@ fn test_contract_validation_with_fixture() {
         return;
     };
 
-    use vouch_common::contracts::*;
+    use vouch_tests::contracts::*;
 
     // Validate COSE key
     let cose_key = fixture.public_key_cose().unwrap();

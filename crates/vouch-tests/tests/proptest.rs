@@ -394,7 +394,7 @@ proptest! {
     /// COSE key validation should never panic on arbitrary input
     #[test]
     fn prop_cose_key_validation_no_panic(data: Vec<u8>) {
-        use vouch_common::contracts::validate_cose_key;
+        use vouch_tests::contracts::validate_cose_key;
 
         // Should not panic - errors are expected for random data
         let _ = validate_cose_key(&data);
@@ -406,7 +406,7 @@ proptest! {
         keys in prop::collection::vec(any::<i32>(), 0..10),
         values in prop::collection::vec(any::<i32>(), 0..10),
     ) {
-        use vouch_common::contracts::validate_cose_key;
+        use vouch_tests::contracts::validate_cose_key;
 
         // Create a random CBOR map
         let map_entries: Vec<_> = keys.iter().zip(values.iter())
@@ -432,7 +432,7 @@ proptest! {
     /// Authenticator data validation should never panic on arbitrary input
     #[test]
     fn prop_authenticator_data_validation_no_panic(data: Vec<u8>) {
-        use vouch_common::contracts::validate_authenticator_data;
+        use vouch_tests::contracts::validate_authenticator_data;
 
         // Should not panic
         let _ = validate_authenticator_data(&data);
@@ -464,7 +464,7 @@ proptest! {
     /// Attestation object validation should never panic on arbitrary input
     #[test]
     fn prop_attestation_object_validation_no_panic(data: Vec<u8>) {
-        use vouch_common::contracts::validate_attestation_object;
+        use vouch_tests::contracts::validate_attestation_object;
 
         // Should not panic
         let _ = validate_attestation_object(&data);
@@ -476,7 +476,7 @@ proptest! {
         fmt in "[a-z]{0,10}",
         auth_data in prop::collection::vec(any::<u8>(), 0..100),
     ) {
-        use vouch_common::contracts::validate_attestation_object;
+        use vouch_tests::contracts::validate_attestation_object;
 
         let obj = ciborium::Value::Map(vec![
             (
@@ -536,7 +536,7 @@ proptest! {
     /// Client data JSON validation should never panic on arbitrary bytes
     #[test]
     fn prop_client_data_json_validation_no_panic(data: Vec<u8>) {
-        use vouch_common::contracts::validate_client_data_json;
+        use vouch_tests::contracts::validate_client_data_json;
 
         // Should not panic
         let _ = validate_client_data_json(&data);
@@ -549,7 +549,7 @@ proptest! {
         challenge in "[A-Za-z0-9_-]{0,64}",
         origin in "https?://[a-z.]{0,20}",
     ) {
-        use vouch_common::contracts::validate_client_data_json;
+        use vouch_tests::contracts::validate_client_data_json;
 
         let json = format!(
             r#"{{"type":"{}","challenge":"{}","origin":"{}"}}"#,
@@ -567,7 +567,7 @@ proptest! {
     /// Credential ID validation should never panic on arbitrary input
     #[test]
     fn prop_credential_id_validation_no_panic(data: Vec<u8>) {
-        use vouch_common::contracts::validate_credential_id;
+        use vouch_tests::contracts::validate_credential_id;
 
         // Should not panic
         let _ = validate_credential_id(&data);
@@ -580,7 +580,7 @@ proptest! {
     /// Challenge validation should never panic on arbitrary input
     #[test]
     fn prop_challenge_validation_no_panic(data: Vec<u8>) {
-        use vouch_common::contracts::validate_challenge;
+        use vouch_tests::contracts::validate_challenge;
 
         // Should not panic
         let _ = validate_challenge(&data);
@@ -593,7 +593,7 @@ proptest! {
     /// Signature validation should never panic on arbitrary input
     #[test]
     fn prop_signature_validation_no_panic(data: Vec<u8>) {
-        use vouch_common::contracts::validate_signature;
+        use vouch_tests::contracts::validate_signature;
 
         // Should not panic
         let _ = validate_signature(&data);
@@ -619,7 +619,7 @@ proptest! {
 
 #[test]
 fn test_cose_key_truncated_cbor_no_panic() {
-    use vouch_common::contracts::validate_cose_key;
+    use vouch_tests::contracts::validate_cose_key;
 
     // Various truncated/malformed CBOR inputs
     let inputs = [
@@ -641,7 +641,7 @@ fn test_cose_key_truncated_cbor_no_panic() {
 #[test]
 fn test_auth_data_boundary_conditions_no_panic() {
     use vouch_common::aaguid::extract_aaguid_from_auth_data;
-    use vouch_common::contracts::validate_authenticator_data;
+    use vouch_tests::contracts::validate_authenticator_data;
 
     // Test various boundary lengths
     for len in [0, 1, 32, 36, 37, 38, 52, 53, 54, 55, 56, 100, 1000] {
@@ -701,7 +701,7 @@ fn test_base64url_special_characters_no_panic() {
 
 #[test]
 fn test_client_data_json_malformed_no_panic() {
-    use vouch_common::contracts::validate_client_data_json;
+    use vouch_tests::contracts::validate_client_data_json;
 
     // Various malformed JSON inputs
     let inputs: &[&[u8]] = &[
@@ -728,7 +728,7 @@ fn test_client_data_json_malformed_no_panic() {
 
 #[test]
 fn test_attestation_malformed_cbor_no_panic() {
-    use vouch_common::contracts::validate_attestation_object;
+    use vouch_tests::contracts::validate_attestation_object;
 
     // Various malformed CBOR inputs
     let inputs: &[&[u8]] = &[

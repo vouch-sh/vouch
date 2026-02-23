@@ -19,8 +19,9 @@
 
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::io::{BufRead, Write};
+use vouch_common::{GitHubTokenRequest, GitHubTokenResponse};
 
 use crate::client::VouchClient;
 use crate::commands::credential::aws::{OidcTokenResponse, build_session_tags, decode_jwt_payload};
@@ -71,27 +72,6 @@ pub enum RegistryType {
     Ghcr,
     /// Unknown registry type
     Unknown,
-}
-
-/// Response from Vouch GitHub token endpoint.
-#[derive(Deserialize)]
-struct GitHubTokenResponse {
-    token: SecretString,
-}
-
-impl std::fmt::Debug for GitHubTokenResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("GitHubTokenResponse")
-            .field("token", &"[REDACTED]")
-            .finish()
-    }
-}
-
-/// GitHub token request.
-#[derive(Debug, Serialize)]
-struct GitHubTokenRequest {
-    owner: Option<String>,
-    repositories: Option<Vec<String>>,
 }
 
 /// Run the Docker credential helper.
@@ -227,7 +207,7 @@ async fn get_ecr_credential(
     let mut client = VouchClient::unauthenticated(server)?;
     client.set_token(token.clone());
 
-    // First, get OIDC token from Vouch server
+    // Get OIDC token from Vouch server
     let token_response: OidcTokenResponse = client
         .get_authenticated("/v1/credentials/aws/token")
         .await
@@ -379,10 +359,7 @@ async fn get_ghcr_credential(server: &str, token: &SecretString) -> Result<Docke
     client.set_token(token.clone());
 
     // Request token from server (no specific owner/repo for GHCR)
-    let request = GitHubTokenRequest {
-        owner: None,
-        repositories: None,
-    };
+    let request = GitHubTokenRequest::default();
 
     let response: GitHubTokenResponse = client
         .post_authenticated("/v1/credentials/github/token", &request)

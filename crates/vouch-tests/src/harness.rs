@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+use crate::clock::TestClock;
 use vouch_cli::{HttpClient, TestHttpClient};
-use vouch_common::TestClock;
 use vouch_server::{AppState, db, test_utils};
 
 /// Unified test harness for integration tests.

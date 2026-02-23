@@ -100,6 +100,14 @@ impl ReqwestClient {
 
         Ok(Self { client })
     }
+
+    /// Get a reference to the underlying reqwest client.
+    ///
+    /// Used by code that needs the raw client for non-standard requests
+    /// (e.g., AWS SigV4 signing).
+    pub fn inner(&self) -> &reqwest::Client {
+        &self.client
+    }
 }
 
 impl HttpClient for ReqwestClient {
@@ -356,6 +364,7 @@ mod test_utils {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -375,7 +384,7 @@ mod tests {
     #[test]
     fn test_http_response_json() {
         let response = HttpResponse::new(200, b"{\"key\": \"value\"}".to_vec());
-        let parsed: serde_json::Value = response.json().ok().unwrap_or(serde_json::Value::Null);
+        let parsed: serde_json::Value = response.json().unwrap();
         assert_eq!(parsed.get("key").and_then(|v| v.as_str()), Some("value"));
     }
 
@@ -383,6 +392,112 @@ mod tests {
     fn test_http_response_text() {
         let response = HttpResponse::new(200, b"hello world".to_vec());
         assert_eq!(response.text().ok(), Some("hello world".to_string()));
+    }
+
+    #[test]
+    fn test_http_response_boundary_status_codes() {
+        assert!(HttpResponse::new(200, vec![]).is_success());
+        assert!(HttpResponse::new(201, vec![]).is_success());
+        assert!(HttpResponse::new(204, vec![]).is_success());
+        assert!(HttpResponse::new(299, vec![]).is_success());
+        assert!(!HttpResponse::new(199, vec![]).is_success());
+        assert!(!HttpResponse::new(300, vec![]).is_success());
+        assert!(!HttpResponse::new(400, vec![]).is_success());
+        assert!(!HttpResponse::new(500, vec![]).is_success());
+    }
+
+    #[test]
+    fn test_http_response_invalid_utf8() {
+        let response = HttpResponse::new(200, vec![0xFF, 0xFE]);
+        assert!(response.text().is_err());
+    }
+
+    #[test]
+    fn test_http_response_json_invalid() {
+        let response = HttpResponse::new(200, b"not json".to_vec());
+        let result: Result<serde_json::Value> = response.json();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_format_http_error_401() {
+        let err = format_http_error(401, "");
+        assert!(err.to_string().contains("not authenticated"));
+    }
+
+    #[test]
+    fn test_format_http_error_403() {
+        let err = format_http_error(403, "");
+        assert!(err.to_string().contains("permission denied"));
+    }
+
+    #[test]
+    fn test_format_http_error_404() {
+        let err = format_http_error(404, "");
+        assert!(err.to_string().contains("not found"));
+    }
+
+    #[test]
+    fn test_format_http_error_500() {
+        let err = format_http_error(500, "");
+        assert!(err.to_string().contains("server error"));
+    }
+
+    #[test]
+    fn test_format_http_error_502() {
+        let err = format_http_error(502, "");
+        assert!(err.to_string().contains("server error"));
+    }
+
+    #[test]
+    fn test_format_http_error_unknown_status() {
+        let err = format_http_error(418, "");
+        assert!(err.to_string().contains("unexpected server response"));
+    }
+
+    #[test]
+    fn test_format_http_error_with_api_error_json() {
+        let body = r#"{"code":"bad_request","message":"Invalid role ARN format"}"#;
+        let err = format_http_error(400, body);
+        assert_eq!(err.to_string(), "Invalid role ARN format");
+    }
+
+    #[test]
+    fn test_format_http_error_with_malformed_json() {
+        let body = r#"{"not_an_api_error": true}"#;
+        // Should fall through to status-based message since it can't parse as ApiError
+        let err = format_http_error(400, body);
+        assert!(err.to_string().contains("unexpected server response"));
+    }
+
+    #[test]
+    fn test_handle_response_success() {
+        let response = HttpResponse::new(200, br#"{"key":"value"}"#.to_vec());
+        let result: Result<serde_json::Value> = handle_response(response);
+        assert!(result.is_ok());
+        let val = result.unwrap();
+        assert_eq!(val.get("key").and_then(|v| v.as_str()), Some("value"));
+    }
+
+    #[test]
+    fn test_handle_response_success_invalid_json() {
+        let response = HttpResponse::new(200, b"not json".to_vec());
+        let result: Result<serde_json::Value> = handle_response(response);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_handle_response_error_status() {
+        let response = HttpResponse::new(401, b"{}".to_vec());
+        let result: Result<serde_json::Value> = handle_response(response);
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("not authenticated")
+        );
     }
 
     #[cfg(feature = "test-utils")]
@@ -404,19 +519,14 @@ mod tests {
         let router = Router::new().route("/test", get(handler));
         let client = TestHttpClient::new(router);
 
-        let response = client
+        let resp = client
             .request("GET", "http://test.local/test", None, None, None)
-            .await;
+            .await
+            .unwrap();
 
-        assert!(response.is_ok());
-        let resp = response.ok();
-        assert!(resp.is_some());
-        let resp = resp.unwrap_or_else(|| HttpResponse::new(500, vec![]));
         assert_eq!(resp.status, 200);
 
-        let parsed: TestResponse = resp.json().ok().unwrap_or(TestResponse {
-            message: String::new(),
-        });
+        let parsed: TestResponse = resp.json().unwrap();
         assert_eq!(parsed.message, "hello");
     }
 }

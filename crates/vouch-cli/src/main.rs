@@ -12,6 +12,7 @@ mod config;
 mod exit_code;
 mod fido2;
 mod integrations;
+mod server_url;
 mod session;
 mod style;
 mod utils;
@@ -164,12 +165,9 @@ enum Commands {
     },
     /// Show current session status.
     Status {
-        /// Output as JSON.
-        #[arg(long)]
-        json: bool,
-        /// Output shell-evaluable key=value pairs for use in shell hooks.
-        #[arg(long, conflicts_with = "json")]
-        shell: bool,
+        /// Output format.
+        #[arg(long, value_enum)]
+        format: Option<commands::status::OutputFormat>,
     },
     /// End your current session.
     Logout,
@@ -259,230 +257,9 @@ impl Commands {
     }
 }
 
-#[derive(Subcommand)]
-enum KeysCommands {
-    /// List all registered keys (non-interactive).
-    List {
-        /// Output as JSON.
-        #[arg(long)]
-        json: bool,
-    },
-    /// Remove a registered key (non-interactive).
-    Remove {
-        /// Key ID to remove.
-        id: String,
-        /// Skip confirmation prompt.
-        #[arg(short, long)]
-        force: bool,
-    },
-    /// Rename a registered key.
-    Rename {
-        /// Key ID to rename.
-        id: String,
-        /// New name for the key.
-        name: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum CredentialCommands {
-    /// Obtain temporary AWS credentials.
-    Aws {
-        /// AWS IAM role ARN to assume.
-        #[arg(long)]
-        role: String,
-        /// Session name for the assumed role.
-        #[arg(long)]
-        session_name: Option<String>,
-    },
-    /// Obtain an SSH certificate.
-    Ssh {
-        /// Path to SSH private key (default: ~/.ssh/id_ed25519_vouch).
-        #[arg(long)]
-        key: Option<String>,
-    },
-    /// Git credential helper for GitHub.
-    ///
-    /// This is used by git as a credential helper. Users should not call this directly.
-    /// Instead, use `vouch setup github` to configure git.
-    #[command(hide = true)]
-    Github {
-        /// Git credential operation (get, store, erase).
-        operation: String,
-    },
-    /// Docker credential helper for container registries.
-    ///
-    /// This is used by Docker as a credential helper. Users should not call this directly.
-    /// Instead, use `vouch setup docker` to configure Docker.
-    #[command(hide = true)]
-    Docker {
-        /// Docker credential operation (get, store, erase, list).
-        operation: String,
-    },
-    /// Cargo credential provider for private registries.
-    ///
-    /// This implements Cargo's credential provider protocol.
-    /// Users should not call this directly.
-    /// Instead, use `vouch setup cargo` to configure Cargo.
-    #[command(hide = true)]
-    Cargo {
-        /// Cargo plugin marker (always passed by Cargo).
-        #[arg(long = "cargo-plugin", hide = true)]
-        _cargo_plugin: bool,
-    },
-    /// Git credential helper for AWS CodeCommit.
-    ///
-    /// This is used by git as a credential helper. Users should not call this directly.
-    /// Instead, use `vouch setup codecommit` to configure git.
-    #[command(hide = true)]
-    Codecommit {
-        /// Git credential operation (get, store, erase).
-        operation: String,
-    },
-    /// pip keyring credential helper for CodeArtifact.
-    ///
-    /// Implements the keyring CLI protocol (`keyring get/set/del`) so pip can
-    /// dynamically fetch fresh CodeArtifact tokens. This command is called by
-    /// pip when `keyring-provider = subprocess` is configured.
-    ///
-    /// Users should not call this directly.
-    /// Run `vouch setup codeartifact --tool pip` to configure pip.
-    #[command(hide = true)]
-    Pip {
-        /// Keyring operation (get, set, del).
-        operation: String,
-        /// Service URL passed by pip (the CodeArtifact index URL).
-        service_url: Option<String>,
-        /// Username passed by pip (typically "aws").
-        username: Option<String>,
-    },
-    /// Obtain a CodeArtifact authorization token.
-    Codeartifact {
-        /// CodeArtifact domain name (or use --profile / saved default).
-        #[arg(long)]
-        domain: Option<String>,
-        /// AWS account ID that owns the domain.
-        #[arg(long)]
-        domain_owner: Option<String>,
-        /// AWS region.
-        #[arg(long)]
-        region: Option<String>,
-        /// Named CodeArtifact profile from config.
-        #[arg(long)]
-        profile: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
-enum SetupCommands {
-    /// Configure AWS CLI/SDK to use Vouch credentials.
-    Aws {
-        /// AWS profile name to configure. Defaults to "vouch" if not specified.
-        #[arg(long)]
-        profile: Option<String>,
-        /// AWS IAM role ARN to assume.
-        #[arg(long)]
-        role: String,
-    },
-    /// Configure SSH to use Vouch certificates.
-    Ssh {
-        /// Host patterns to trust with this CA (e.g., "*.example.com").
-        /// If specified, adds entry to ~/.ssh/known_hosts.
-        #[arg(long)]
-        hosts: Option<String>,
-    },
-    /// Configure Git to use Vouch for GitHub credentials.
-    Github {
-        /// GitHub host to configure (default: github.com).
-        #[arg(long, default_value = "github.com")]
-        host: String,
-        /// Automatically configure git (otherwise just show instructions).
-        #[arg(long)]
-        configure: bool,
-    },
-    /// Configure kubectl to use Vouch credentials for Amazon EKS clusters.
-    Eks {
-        /// EKS cluster name.
-        #[arg(long)]
-        cluster: String,
-        /// AWS region (auto-detected from AWS profile or environment if not specified).
-        #[arg(long)]
-        region: Option<String>,
-        /// AWS profile to use (defaults to auto-detected vouch profile).
-        #[arg(long)]
-        profile: Option<String>,
-        /// Path to kubeconfig file (defaults to ~/.kube/config).
-        #[arg(long)]
-        kubeconfig: Option<String>,
-    },
-    /// Configure Docker to use Vouch for container registry authentication.
-    Docker {
-        /// Container registries to configure (e.g., ghcr.io).
-        #[arg(trailing_var_arg = true)]
-        registries: Vec<String>,
-        /// Automatically configure Docker (otherwise just show instructions).
-        #[arg(long)]
-        configure: bool,
-    },
-    /// Configure Cargo to use Vouch for private registry authentication.
-    Cargo {
-        /// Registry name to configure (if not specified, configures global provider).
-        #[arg(long)]
-        registry: Option<String>,
-        /// Write the configuration (otherwise just show instructions).
-        #[arg(long)]
-        configure: bool,
-    },
-    /// Configure Git to use Vouch for AWS CodeCommit credentials.
-    Codecommit {
-        /// AWS region (default: wildcard matching all regions).
-        #[arg(long)]
-        region: Option<String>,
-        /// AWS profile to use (defaults to auto-detected vouch profile).
-        #[arg(long)]
-        profile: Option<String>,
-        /// Automatically configure git (otherwise just show instructions).
-        #[arg(long)]
-        configure: bool,
-    },
-    /// Configure SSH for AWS Systems Manager Session Manager.
-    Ssm {
-        /// AWS profile to use (defaults to auto-detected vouch profile).
-        #[arg(long)]
-        profile: Option<String>,
-        /// AWS region (auto-detected from AWS profile or environment if not specified).
-        #[arg(long)]
-        region: Option<String>,
-        /// SSH host patterns for SSM proxying (i-* = EC2 instances, mi-* = managed
-        /// instances).
-        #[arg(long, default_value = crate::commands::setup::ssm::DEFAULT_HOST_PATTERN)]
-        hosts: String,
-        /// Replace existing Vouch SSM configuration if present.
-        #[arg(long)]
-        force: bool,
-    },
-    /// Configure a package manager for AWS CodeArtifact.
-    Codeartifact {
-        /// Package manager to configure (cargo, pip, npm).
-        #[arg(long)]
-        tool: crate::commands::setup::codeartifact::Tool,
-        /// CodeArtifact domain name (or use --profile / saved default).
-        #[arg(long)]
-        domain: Option<String>,
-        /// AWS account ID that owns the domain.
-        #[arg(long)]
-        domain_owner: Option<String>,
-        /// AWS region.
-        #[arg(long)]
-        region: Option<String>,
-        /// CodeArtifact repository name.
-        #[arg(long)]
-        repository: String,
-        /// Named CodeArtifact profile to use / save.
-        #[arg(long)]
-        profile: Option<String>,
-    },
-}
+use commands::credential::CredentialCommands;
+use commands::keys::KeysCommands;
+use commands::setup::SetupCommands;
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -519,41 +296,31 @@ async fn run() -> Result<()> {
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
-    // Load config
+    // Load config and resolve server URL
     let config = config::Config::load()?;
-    let server = cli
+    let server_raw = cli
         .server
         .or_else(|| config.server_url().map(String::from))
         .unwrap_or_else(|| "http://localhost:3000".to_string());
 
-    // Enforce HTTPS for non-localhost servers
-    if cli.command.uses_server() {
-        match vouch_common::check_url_security(&server) {
-            vouch_common::UrlSecurity::Secure => {}
-            vouch_common::UrlSecurity::InsecureHttp { url } => {
-                if cli.allow_insecure {
-                    eprintln!(
-                        "WARNING: Using insecure HTTP connection to {url}.\n\
-                         Credentials will be transmitted in plaintext.\n"
-                    );
-                } else {
-                    anyhow::bail!(
-                        "Server URL uses plain HTTP ({url}).\n\
-                         Credentials would be sent in plaintext.\n\n\
-                         Use an https:// URL, or set --allow-insecure / VOUCH_ALLOW_INSECURE=1 for development."
-                    );
-                }
-            }
-        }
-    }
+    // Validate and normalize URL for commands that contact the server.
+    // Offline commands (completions, init, logout, diag) skip validation
+    // but still normalize for consistency.
+    let server = server_url::ServerUrl::parse(
+        &server_raw,
+        cli.allow_insecure || !cli.command.uses_server(),
+    )?;
+    let server = server.as_str();
 
     match cli.command {
-        Commands::Enroll => commands::enroll::run(&server).await,
+        Commands::Enroll => commands::enroll::run(server).await,
         Commands::Register { name, timeout } => {
-            commands::register::run(&server, name.as_deref(), timeout).await
+            commands::register::run(server, name.as_deref(), timeout).await
         }
-        Commands::Login { timeout } => commands::login::run(&server, timeout).await,
-        Commands::Status { json, shell } => commands::status::run(&server, json, shell).await,
+        Commands::Login { timeout } => commands::login::run(server, timeout).await,
+        Commands::Status { format } => {
+            commands::status::run(server, format.unwrap_or_default()).await
+        }
         Commands::Logout => commands::logout::run().await,
         Commands::Env {
             credential_type,
@@ -563,7 +330,7 @@ async fn run() -> Result<()> {
             ca,
         } => {
             commands::env::run(
-                &server,
+                server,
                 &credential_type,
                 &shell,
                 role.as_deref(),
@@ -574,13 +341,13 @@ async fn run() -> Result<()> {
         }
         Commands::Init { shell } => commands::init::run(&shell),
         Commands::Keys { command } => match command {
-            None => commands::keys::interactive(&server).await,
-            Some(KeysCommands::List { json }) => commands::keys::list(&server, json).await,
+            None => commands::keys::interactive(server).await,
+            Some(KeysCommands::List { json }) => commands::keys::list(server, json).await,
             Some(KeysCommands::Remove { id, force }) => {
-                commands::keys::remove(&server, &id, force).await
+                commands::keys::remove(server, &id, force).await
             }
             Some(KeysCommands::Rename { id, name }) => {
-                commands::keys::rename(&server, &id, &name).await
+                commands::keys::rename(server, &id, &name).await
             }
         },
         Commands::Exec {
@@ -591,7 +358,7 @@ async fn run() -> Result<()> {
             command,
         } => {
             commands::exec::run(
-                &server,
+                server,
                 &credential_type,
                 role.as_deref(),
                 session_name.as_deref(),
@@ -602,10 +369,10 @@ async fn run() -> Result<()> {
         }
         Commands::Credential { command } => match command {
             CredentialCommands::Aws { role, session_name } => {
-                commands::credential::aws::run(&server, &role, session_name.as_deref()).await
+                commands::credential::aws::run(server, &role, session_name.as_deref()).await
             }
             CredentialCommands::Ssh { key } => {
-                commands::credential::ssh::run(&server, key.as_deref()).await
+                commands::credential::ssh::run(server, key.as_deref()).await
             }
             CredentialCommands::Github { operation } => {
                 commands::credential::github::run(&operation).await
@@ -636,7 +403,7 @@ async fn run() -> Result<()> {
                 profile,
             } => {
                 commands::credential::codeartifact::run(
-                    &server,
+                    server,
                     domain.as_deref(),
                     domain_owner.as_deref(),
                     region.as_deref(),
@@ -650,7 +417,7 @@ async fn run() -> Result<()> {
                 commands::setup::aws::run(profile.as_deref(), &role).await
             }
             SetupCommands::Ssh { hosts } => {
-                commands::setup::ssh::run(&server, hosts.as_deref()).await
+                commands::setup::ssh::run(server, hosts.as_deref()).await
             }
             SetupCommands::Github { host, configure } => {
                 commands::setup::github::run(&host, configure).await
@@ -703,7 +470,7 @@ async fn run() -> Result<()> {
                 profile,
             } => {
                 commands::setup::codeartifact::run(
-                    &server,
+                    server,
                     tool,
                     domain.as_deref(),
                     domain_owner.as_deref(),
@@ -719,7 +486,7 @@ async fn run() -> Result<()> {
             commands::completions::run(&args, &mut cmd);
             Ok(())
         }
-        Commands::Doctor { quiet, json } => commands::doctor::run(&server, quiet, json).await,
+        Commands::Doctor { quiet, json } => commands::doctor::run(server, quiet, json).await,
         Commands::Diag(args) => commands::diag::run(args),
     }
 }

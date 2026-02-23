@@ -12,8 +12,8 @@
 //!
 //! # Example
 //!
-//! ```rust
-//! use vouch_common::contracts::{validate_cose_key, validate_authenticator_data, validate_credential_id};
+//! ```rust,ignore
+//! use vouch_tests::contracts::{validate_cose_key, validate_authenticator_data, validate_credential_id};
 //!
 //! // Validate a COSE key before using it for verification
 //! fn verify_registration(public_key: &[u8], auth_data: &[u8], cred_id: &[u8]) -> anyhow::Result<()> {

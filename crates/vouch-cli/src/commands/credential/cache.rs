@@ -96,19 +96,11 @@ where
 }
 
 /// Check if an error is a network/connectivity error that warrants cache fallback.
+///
+/// Delegates to [`crate::exit_code::classify`] which checks for `reqwest::Error`,
+/// `CliError::NetworkError`, and message-based patterns in a single place.
 pub fn is_network_error(err: &anyhow::Error) -> bool {
-    // Check for reqwest connection/timeout errors
-    if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
-        return reqwest_err.is_connect() || reqwest_err.is_timeout();
-    }
-
-    // Check error message for common network failure patterns
-    let msg = format!("{err:#}").to_lowercase();
-    msg.contains("failed to connect")
-        || msg.contains("connection refused")
-        || msg.contains("server unreachable")
-        || msg.contains("dns error")
-        || msg.contains("timed out")
+    crate::exit_code::classify(err) == std::process::ExitCode::from(crate::exit_code::NETWORK_ERROR)
 }
 
 /// Build a default expiry timestamp (1 hour from now) for tokens that don't

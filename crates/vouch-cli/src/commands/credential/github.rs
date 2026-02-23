@@ -11,6 +11,7 @@
 //! Or use `vouch setup github --configure` to set this up automatically.
 
 use anyhow::Result;
+use secrecy::ExposeSecret;
 use vouch_common::{GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse};
 
 use crate::client::VouchClient;
@@ -73,11 +74,10 @@ async fn get_credential() -> Result<()> {
     })?;
 
     // Create authenticated client
-    let mut client = VouchClient::unauthenticated(&session.server_url).map_err(|e| {
+    let client = VouchClient::from_session(&session).map_err(|e| {
         eprintln!("vouch: failed to create client: {e}");
         e
     })?;
-    client.set_token(session.token);
 
     // Extract owner from path (e.g., "acme-corp/my-repo.git" -> "acme-corp")
     let owner = extract_owner(input.path.as_deref());
@@ -105,7 +105,7 @@ async fn get_credential() -> Result<()> {
         protocol,
         host,
         "x-access-token",
-        &response.token,
+        response.token.expose_secret(),
     )?;
 
     Ok(())

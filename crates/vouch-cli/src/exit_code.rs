@@ -141,6 +141,7 @@ fn classify_message(msg: &str) -> ExitCode {
         || lower.contains("connection refused")
         || lower.contains("dns error")
         || lower.contains("network")
+        || lower.contains("timed out")
     {
         return ExitCode::from(NETWORK_ERROR);
     }

@@ -407,7 +407,7 @@ async fn test_oauth_client_crud() {
 
     assert!(!client_id.is_empty());
     assert_eq!(client.name, "My App");
-    assert_eq!(client.application_type, "web");
+    assert_eq!(client.application_type, OAuthClientType::Web);
     assert!(client.active);
 
     // Get by ID
@@ -489,7 +489,7 @@ async fn test_oauth_client_types() {
         .await
         .expect("Failed to create client");
 
-        assert_eq!(client.client_type(), Some(app_type));
+        assert_eq!(client.application_type, app_type);
 
         // Check requires_secret
         let requires_secret = app_type.requires_secret();

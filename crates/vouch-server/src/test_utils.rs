@@ -93,7 +93,6 @@ pub fn test_config() -> ServerConfig {
         s3_config_key: "config/vouch-server.json".to_string(),
         s3_config_region: None,
         s3_config_poll_interval: 60,
-        http_local_address: None,
     }
 }
 

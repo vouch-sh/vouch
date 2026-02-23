@@ -47,6 +47,7 @@
 pub(crate) mod auth;
 pub(crate) mod error;
 pub mod integrations;
+pub(crate) mod keys;
 pub mod oidc;
 
 // Protocol modules will be added here as they are implemented:

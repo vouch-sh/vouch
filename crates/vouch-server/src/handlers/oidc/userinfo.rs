@@ -204,7 +204,7 @@ pub async fn userinfo(
     // having full scope if they are OAuthAccessToken purpose.
     let has_email_scope = match &result.scope {
         Some(scope_set) => scope_set.contains(OAuthScope::Email),
-        None => result.session.session_type == SessionPurpose::OAuthAccessToken.as_str(),
+        None => result.session.session_type == SessionPurpose::OAuthAccessToken,
     };
 
     Json(UserInfoResponse {

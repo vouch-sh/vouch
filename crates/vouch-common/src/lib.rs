@@ -3,17 +3,13 @@
 
 pub mod aaguid;
 pub(crate) mod api;
-pub(crate) mod attestation;
-pub(crate) mod clock;
 pub(crate) mod config;
-pub mod contracts;
 pub(crate) mod cookie;
 pub mod encoding;
 pub(crate) mod error;
 pub mod fido2_types;
 pub mod fixtures;
 pub mod http;
-pub mod oidc;
 pub(crate) mod url;
 
 #[cfg(test)]
@@ -29,13 +25,6 @@ pub use aaguid::{
     extract_public_key_from_auth_data, lookup_device_model,
 };
 pub use api::*;
-pub use attestation::{
-    AttestationFormat, AttestationValidation, extract_aaguid_from_attestation,
-    extract_attestation_format, validate_hardware_attestation,
-};
-#[cfg(any(test, feature = "test-utils"))]
-pub use clock::TestClock;
-pub use clock::{Clock, SystemClock};
 pub use config::{VouchConfig, config_path, read_config};
 pub use cookie::{
     SessionCookie, clear_cookie, cookie_path, is_cookie_expired, read_cookie, write_cookie,

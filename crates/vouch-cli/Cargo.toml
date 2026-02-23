@@ -11,7 +11,7 @@ workspace = true
 
 [features]
 default = []
-test-utils = ["vouch-common/test-utils", "ed25519-dalek/rand_core", "axum", "tower", "http"]
+test-utils = ["ed25519-dalek/rand_core", "axum", "tower", "http"]
 
 [lib]
 path = "src/lib.rs"

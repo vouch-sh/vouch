@@ -6,6 +6,7 @@
 //! TPM/KMS envelope decryption, and encoding utilities.
 
 pub(crate) mod ber;
+pub mod cose;
 pub mod hash;
 pub(crate) mod jwt;
 pub(crate) mod pem;

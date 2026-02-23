@@ -15,10 +15,15 @@ use crate::integrations::{
 };
 use crate::style;
 
-/// Output mode for the status command.
-enum OutputMode {
+/// Output format for the status command.
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable output (default).
+    #[default]
     Human,
+    /// JSON output.
     Json,
+    /// Shell-evaluable key=value pairs for use in shell hooks.
     Shell,
 }
 
@@ -72,15 +77,7 @@ pub(crate) fn print_shell(
 }
 
 /// Run the status command.
-pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
-    let mode = if json {
-        OutputMode::Json
-    } else if shell {
-        OutputMode::Shell
-    } else {
-        OutputMode::Human
-    };
-
+pub async fn run(server: &str, mode: OutputFormat) -> Result<()> {
     // First, try to get session from agent (Unix only)
     #[cfg(unix)]
     match get_session_from_agent().await {
@@ -89,7 +86,7 @@ pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
             // falling back to the CLI-resolved server URL.
             let effective_server = session.server_url.as_deref().unwrap_or(server);
             match mode {
-                OutputMode::Json => {
+                OutputFormat::Json => {
                     print_json(&StatusJson {
                         authenticated: true,
                         email: Some(session.user_email.clone()),
@@ -97,14 +94,14 @@ pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
                         agent_running: true,
                     });
                 }
-                OutputMode::Shell => {
+                OutputFormat::Shell => {
                     print_shell(
                         true,
                         Some(&session.user_email),
                         Some(session.expires_in_seconds),
                     );
                 }
-                OutputMode::Human => {
+                OutputFormat::Human => {
                     print_agent_session(effective_server, &session);
                     println!();
                     print_all_integrations(effective_server).await;
@@ -117,7 +114,7 @@ pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
         }
         Err(AgentError::NotAuthenticated) => {
             match mode {
-                OutputMode::Json => {
+                OutputFormat::Json => {
                     print_json(&StatusJson {
                         authenticated: false,
                         email: None,
@@ -125,10 +122,10 @@ pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
                         agent_running: true,
                     });
                 }
-                OutputMode::Shell => {
+                OutputFormat::Shell => {
                     print_shell(false, None, None);
                 }
-                OutputMode::Human => {
+                OutputFormat::Human => {
                     println!("{}", style::bold_red("Not authenticated."));
                     println!("\n{}", style::dim("Run 'vouch login' to authenticate."));
                 }
@@ -137,7 +134,7 @@ pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
         }
         Err(AgentError::SessionExpired) => {
             match mode {
-                OutputMode::Json => {
+                OutputFormat::Json => {
                     print_json(&StatusJson {
                         authenticated: false,
                         email: None,
@@ -145,10 +142,10 @@ pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
                         agent_running: true,
                     });
                 }
-                OutputMode::Shell => {
+                OutputFormat::Shell => {
                     print_shell(false, None, None);
                 }
-                OutputMode::Human => {
+                OutputFormat::Human => {
                     println!("{}", style::bold_red("Session expired."));
                     println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
                 }
@@ -165,7 +162,7 @@ pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
 
     if config.token().is_none() {
         match mode {
-            OutputMode::Json => {
+            OutputFormat::Json => {
                 print_json(&StatusJson {
                     authenticated: false,
                     email: None,
@@ -173,10 +170,10 @@ pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
                     agent_running: false,
                 });
             }
-            OutputMode::Shell => {
+            OutputFormat::Shell => {
                 print_shell(false, None, None);
             }
-            OutputMode::Human => {
+            OutputFormat::Human => {
                 println!("{}", style::bold_red("Not authenticated."));
                 println!("\n{}", style::dim("Run 'vouch login' to authenticate."));
             }
@@ -191,7 +188,7 @@ pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
         .await
     {
         Ok(status) => match mode {
-            OutputMode::Json => {
+            OutputFormat::Json => {
                 print_json(&StatusJson {
                     authenticated: status.authenticated,
                     email: status.email.clone(),
@@ -199,14 +196,14 @@ pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
                     agent_running: false,
                 });
             }
-            OutputMode::Shell => {
+            OutputFormat::Shell => {
                 print_shell(
                     status.authenticated,
                     status.email.as_deref(),
                     status.expires_in_seconds,
                 );
             }
-            OutputMode::Human => {
+            OutputFormat::Human => {
                 if status.authenticated {
                     println!("{} ({server})", style::bold_green("Authenticated"));
                     if let Some(email) = &status.email {
@@ -238,7 +235,7 @@ pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
             }
         },
         Err(e) => match mode {
-            OutputMode::Json => {
+            OutputFormat::Json => {
                 print_json(&StatusJson {
                     authenticated: false,
                     email: None,
@@ -246,10 +243,10 @@ pub async fn run(server: &str, json: bool, shell: bool) -> Result<()> {
                     agent_running: false,
                 });
             }
-            OutputMode::Shell => {
+            OutputFormat::Shell => {
                 print_shell(false, None, None);
             }
-            OutputMode::Human => {
+            OutputFormat::Human => {
                 println!("{}: {e}", style::bold_red("Session invalid"));
                 println!("\n{}", style::dim("Run 'vouch login' to re-authenticate."));
             }

@@ -33,7 +33,7 @@ use vouch_server::{
     crypto::{ssh_ca, tpm_decrypt},
     db::{Pool, dsql::DsqlEndpoint, migrations::run_dsql_migrations},
     handlers,
-    infra::{cleanup, encrypt_config, s3_config},
+    infra::{cleanup, encrypt_config, rate_limit, request_id, s3_config},
     services::{
         integrations::github::GitHubApp,
         oidc::{OidcSigningKey, dpop},
@@ -323,15 +323,9 @@ async fn run_server(args: config::Args) -> Result<()> {
     )?;
 
     // Build shared HTTP client for outbound API calls (GitHub, OIDC, etc.)
-    // Respects VOUCH_HTTP_LOCAL_ADDRESS for IPv6-only environments.
-    let http_client = vouch_common::http::server_client(
-        &format!("vouch-server/{}", env!("CARGO_PKG_VERSION")),
-        config.http_local_address,
-    )
-    .context("Failed to create shared HTTP client")?;
-    if let Some(addr) = config.http_local_address {
-        tracing::info!("HTTP client local address: {addr}");
-    }
+    let http_client =
+        vouch_common::http::server_client(&format!("vouch-server/{}", env!("CARGO_PKG_VERSION")))
+            .context("Failed to create shared HTTP client")?;
 
     // Initialize GitHub App if configured
     let github_app = match GitHubApp::load(&config, http_client.clone()) {
@@ -345,6 +339,10 @@ async fn run_server(args: config::Args) -> Result<()> {
 
     // Create DPoP state (single instance shared between AppState and cleanup task)
     let dpop_state = Arc::new(dpop::DpopState::new());
+
+    // Create rate limiter for auth/token endpoints.
+    // Uses GovernorConfig::secure() preset: burst of 2, replenish 1 every 4s per IP.
+    let auth_rate_limiter = rate_limit::build_auth_rate_limiter();
 
     // Wrap config in ArcSwap for dynamic updates
     let config_swap = Arc::new(ArcSwap::from_pointee(config.clone()));
@@ -386,6 +384,26 @@ async fn run_server(args: config::Args) -> Result<()> {
     // - API routes: permissive CORS (Access-Control-Allow-Origin: *) for OIDC/SCIM integration
     // - UI routes: restrictive same-origin CORS (or configured via VOUCH_CORS_ORIGINS)
 
+    // Rate-limited auth/token routes.
+    // These endpoints are brute-force targets so rate limiting is critical.
+    let rate_limited_routes = Router::new()
+        .route("/v1/auth/login/start", post(handlers::auth::login_start))
+        .route(
+            "/v1/auth/login/complete",
+            post(handlers::auth::login_complete),
+        )
+        .route(
+            "/v1/auth/register/start",
+            post(handlers::auth::register_start),
+        )
+        .route(
+            "/v1/auth/register/complete",
+            post(handlers::auth::register_complete),
+        )
+        .route("/oauth/token", post(handlers::oidc::token))
+        .route("/oauth/device", post(handlers::device::device_code))
+        .layer(auth_rate_limiter);
+
     let api_routes = Router::new()
         // OIDC Provider endpoints
         .route(
@@ -401,24 +419,11 @@ async fn run_server(args: config::Args) -> Result<()> {
         )
         .route("/oauth/revoke", post(handlers::oidc::revoke))
         .route("/oauth/introspect", post(handlers::oidc::introspect))
-        .route("/oauth/device", post(handlers::device::device_code))
-        .route("/oauth/token", post(handlers::oidc::token))
         .route("/oauth/callback", get(handlers::enroll::oidc_callback))
-        // Legacy auth endpoints
-        .route(
-            "/v1/auth/register/start",
-            post(handlers::auth::register_start),
-        )
-        .route(
-            "/v1/auth/register/complete",
-            post(handlers::auth::register_complete),
-        )
-        .route("/v1/auth/login/start", post(handlers::auth::login_start))
-        .route(
-            "/v1/auth/login/complete",
-            post(handlers::auth::login_complete),
-        )
+        // Auth endpoints
         .route("/v1/auth/status", get(handlers::auth::status))
+        // Merge rate-limited routes
+        .merge(rate_limited_routes)
         // Key management (authenticated API)
         .route("/v1/keys", get(handlers::keys::list_keys))
         .route(
@@ -531,7 +536,7 @@ async fn run_server(args: config::Args) -> Result<()> {
                 .delete(handlers::scim::delete_group),
         )
         .layer(build_api_cors_layer())
-        .layer(SetResponseHeaderLayer::overriding(
+        .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
             HeaderValue::from_static("no-cache, no-store, must-revalidate"),
         ))
@@ -632,7 +637,10 @@ async fn run_server(args: config::Args) -> Result<()> {
         .route("/favicon.ico", get(favicon_handler))
         .layer(build_ui_cors_layer(&config));
 
-    let app = apply_security_layers(api_routes.merge(ui_routes), &config).with_state(state.clone());
+    let app = apply_security_layers(api_routes.merge(ui_routes), &config)
+        .layer(request_id::propagate_request_id_layer())
+        .layer(request_id::set_request_id_layer())
+        .with_state(state.clone());
 
     // Start server with graceful shutdown
     if config.tls_configured() {
@@ -767,7 +775,7 @@ async fn run_server(args: config::Args) -> Result<()> {
         axum_server::bind_rustls(https_addr, tls_config)
             .map(|acceptor| acceptor.acceptor(NoDelayAcceptor::new()))
             .handle(handle)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await?;
 
         // Wait for HTTP redirect server to finish
@@ -796,9 +804,12 @@ async fn run_server(args: config::Args) -> Result<()> {
                 tracing::trace!("failed to set TCP_NODELAY on incoming connection: {err:#}");
             }
         });
-        axum::serve(listener, app)
-            .with_graceful_shutdown(shutdown_signal())
-            .await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     }
 
     // Clean up background tasks

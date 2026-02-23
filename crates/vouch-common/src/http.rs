@@ -4,7 +4,6 @@
 //! Provides pre-configured HTTP clients for different contexts, ensuring
 //! consistent timeout behavior across the codebase.
 
-use std::net::IpAddr;
 use std::time::Duration;
 
 /// Timeout values for different contexts.
@@ -101,25 +100,16 @@ pub fn agent_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error>
 /// # Arguments
 ///
 /// * `user_agent` - The User-Agent header value for outgoing requests.
-/// * `local_address` - Optional local address to bind outgoing connections to.
-///   Set to `::` (IPv6 unspecified) to force IPv6-only outbound connections,
-///   or `0.0.0.0` to force IPv4-only. `None` lets the OS decide via Happy Eyeballs.
 ///
 /// # Errors
 ///
 /// Returns an error if the client cannot be built.
-pub fn server_client(
-    user_agent: &str,
-    local_address: Option<IpAddr>,
-) -> Result<reqwest::Client, reqwest::Error> {
-    let mut builder = reqwest::Client::builder()
+pub fn server_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
         .user_agent(user_agent)
         .timeout(timeouts::SERVER_TOTAL)
-        .connect_timeout(timeouts::SERVER_CONNECT);
-    if let Some(addr) = local_address {
-        builder = builder.local_address(addr);
-    }
-    builder.build()
+        .connect_timeout(timeouts::SERVER_CONNECT)
+        .build()
 }
 
 #[cfg(test)]
@@ -146,21 +136,7 @@ mod tests {
 
     #[test]
     fn test_server_client_builds() {
-        let client = server_client("test-agent", None);
-        assert!(client.is_ok());
-    }
-
-    #[test]
-    fn test_server_client_with_ipv6_local_address() {
-        let addr = IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED);
-        let client = server_client("test-agent", Some(addr));
-        assert!(client.is_ok());
-    }
-
-    #[test]
-    fn test_server_client_with_ipv4_local_address() {
-        let addr = IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED);
-        let client = server_client("test-agent", Some(addr));
+        let client = server_client("test-agent");
         assert!(client.is_ok());
     }
 
