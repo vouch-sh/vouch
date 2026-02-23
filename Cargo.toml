@@ -37,76 +37,75 @@ indexing_slicing = "deny"
 string_slice = "warn"
 
 [workspace.dependencies]
-# Async runtime (exact version, minimal features)
-tokio = { version = "=1.49.0", default-features = false, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
-
-# CLI
-clap = { version = "=4.5.60", default-features = false, features = ["std", "derive", "env", "help", "usage", "error-context"] }
-
-# Serialization
-serde = { version = "=1.0.228", default-features = false, features = ["std", "derive"] }
-serde_json = { version = "=1.0.149", default-features = false, features = ["std"] }
-ciborium = { version = "=0.2.2", default-features = false }
-
-# Unix system calls (daemon support)
-libc = { version = "=0.2.182", default-features = false }
-
-# HTTP client (CLI and Server for OIDC)
-reqwest = { version = "=0.13.2", default-features = false, features = ["json", "rustls", "form"] }
-
-# HTTP server
-axum = { version = "=0.8.8", default-features = false, features = ["json", "tokio", "http1", "form", "query"] }
-
-# Error handling
-thiserror = { version = "=2.0.18", default-features = false }
-anyhow = { version = "=1.0.102", default-features = false, features = ["std"] }
-
-# Logging
-tracing = { version = "=0.1.44", default-features = false, features = ["std"] }
-tracing-subscriber = { version = "=0.3.22", default-features = false, features = ["std", "fmt", "env-filter"] }
-
-# Time
-jiff = { version = "=0.2.21", default-features = false, features = ["std", "serde", "tz-system"] }
-
-# IDs
-uuid = { version = "=1.21.0", default-features = false, features = ["v7", "serde", "std"] }
-
-# Config paths (CLI)
-dirs = { version = "=6.0.0", default-features = false }
-
-# TLS
-rustls = { version = "=0.23.36", default-features = false, features = ["aws-lc-rs", "std", "tls12", "prefer-post-quantum"] }
-
-# Crypto
+anyhow = { version = "=1.0.102", default-features = false }
+arc-swap = { version = "=1.8.2", default-features = false }
+askama = { version = "=0.15.4", default-features = false }
+aws-config = { version = "=1.8.14", default-features = false }
 aws-lc-rs = { version = "=1.16.0", default-features = false }
-base64 = { version = "=0.22.1", default-features = false, features = ["std"] }
-hex = { version = "=0.4.3", default-features = false, features = ["std"] }
-
-# URL parsing
-url = { version = "=2.5.8", default-features = false }
-
-# Secrets (zeroize on drop)
-secrecy = { version = "=0.10.3", default-features = false, features = ["serde"] }
-zeroize = { version = "=1.8.2", default-features = false }
-
-# SSH keys and certificates
-ssh-key = { version = "=0.6.7", default-features = false, features = ["std", "ed25519", "encryption", "rand_core", "getrandom"] }
-
-# Ed25519 signing (for SSH agent)
-ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
-
-# Tower middleware
-tower = { version = "=0.5.3", default-features = false, features = ["util"] }
-
-# HTTP types
+aws-sdk-dsql = { version = "=1.52.0", default-features = false }
+aws-sdk-kms = { version = "=1.102.0", default-features = false }
+aws-sdk-s3 = { version = "=1.124.0", default-features = false }
+aws-smithy-types = { version = "=1.4.5", default-features = false }
+axum = { version = "=0.8.8", default-features = false }
+axum-extra = { version = "=0.12.5", default-features = false }
+axum-server = { version = "=0.8.0", default-features = false }
+base64 = { version = "=0.22.1", default-features = false }
+ciborium = { version = "=0.2.2", default-features = false }
+clap = { version = "=4.5.60", default-features = false }
+clap_complete = { version = "=4.5.66", default-features = false }
+ctap-hid-fido2 = { version = "=3.5.8", default-features = false }
+dirs = { version = "=6.0.0", default-features = false }
+dotenvy = { version = "=0.15.7", default-features = false }
+ed25519-dalek = { version = "=2.2.0", default-features = false }
+gethostname = { version = "=1.1.0", default-features = false }
+governor = { version = "=0.10.4", default-features = false }
+headers = { version = "=0.4.1", default-features = false }
+hex = { version = "=0.4.3", default-features = false }
 http = { version = "=1.4.0", default-features = false }
-
-# Testing
+inquire = { version = "=0.9.3", default-features = false }
+jiff = { version = "=0.2.21", default-features = false }
+jiff-sqlx = { version = "0.1", default-features = false }
+jsonwebtoken = { version = "=10.3.0", default-features = false }
+libc = { version = "=0.2.182", default-features = false }
+mime_guess = { version = "=2.0.5", default-features = false }
+mimalloc = { version = "=0.1.48", default-features = false }
+open = { version = "=5.3.3", default-features = false }
+proptest = { version = "=1.10.0", default-features = false }
+reqwest = { version = "=0.13.2", default-features = false }
+roxmltree = { version = "=0.21.1", default-features = false }
+rpassword = { version = "=7.4.0", default-features = false }
+rust-embed = { version = "=8.11.0", default-features = false }
+rust-ini = { version = "=0.21.3", default-features = false }
+rustls = { version = "=0.23.36", default-features = false }
+rustls-pemfile = { version = "=2.2.0", default-features = false }
+sea-query = { version = "=0.32.7", default-features = false }
+secrecy = { version = "=0.10.3", default-features = false }
+serde = { version = "=1.0.228", default-features = false }
+serde_json = { version = "=1.0.149", default-features = false }
+serde_urlencoded = { version = "=0.7.1", default-features = false }
+serde_yaml = { version = "=0.9.34", default-features = false }
+sqlx = { version = "=0.8.6", default-features = false }
+ssh-key = { version = "=0.6.7", default-features = false }
+subtle = { version = "=2.6.1", default-features = false }
 tempfile = { version = "=3.25.0", default-features = false }
-
-# Internal
-vouch-common = { path = "crates/vouch-common" }
+thiserror = { version = "=2.0.18", default-features = false }
+time = { version = "=0.3.47", default-features = false }
+tokio = { version = "=1.49.0", default-features = false }
+tokio-util = { version = "=0.7.18", default-features = false }
+toml_edit = { version = "=0.25.3", default-features = false }
+tower = { version = "=0.5.3", default-features = false }
+tower-http = { version = "=0.6.8", default-features = false }
+tower_governor = { version = "=0.8.0", default-features = false }
+tracing = { version = "=0.1.44", default-features = false }
+tracing-subscriber = { version = "=0.3.22", default-features = false }
+url = { version = "=2.5.8", default-features = false }
+urlencoding = { version = "=2.1.3", default-features = false }
+uuid = { version = "=1.21.0", default-features = false }
 vouch-agent = { path = "crates/vouch-agent" }
+vouch-common = { path = "crates/vouch-common" }
+webauthn-rs = { version = "=0.5.4", default-features = false }
+webauthn-rs-proto = { version = "=0.5.4", default-features = false }
+zeroize = { version = "=1.8.2", default-features = false }
 
 [profile.release]
 strip = true      # Automatically strip symbols from the binary

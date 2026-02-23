@@ -45,7 +45,7 @@
                 <label class="block text-sm font-medium text-gray-300 mb-1">Client ID</label>
                 <div class="flex">
                     <code class="flex-1 bg-vouch-raised border border-vouch-border p-3 rounded-l-md font-mono text-sm text-gray-300 break-all">{{ client_id }}</code>
-                    <button onclick="copyToClipboard('{{ client_id }}')" class="px-3 bg-vouch-raised border border-l-0 border-vouch-border hover:bg-vouch-border rounded-r-md transition-colors" title="Copy">
+                    <button data-copy-text="{{ client_id }}" class="px-3 bg-vouch-raised border border-l-0 border-vouch-border hover:bg-vouch-border rounded-r-md transition-colors" title="Copy">
                         <svg class="h-5 w-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
                         </svg>
@@ -60,7 +60,7 @@
                 <label class="block text-sm font-medium text-gray-300 mb-1">Client Secret</label>
                 <div class="flex">
                     <code class="flex-1 bg-vouch-raised border border-vouch-border p-3 rounded-l-md font-mono text-sm text-gray-300 break-all">{{ secret }}</code>
-                    <button onclick="copyToClipboard('{{ secret }}')" class="px-3 bg-vouch-raised border border-l-0 border-vouch-border hover:bg-vouch-border rounded-r-md transition-colors" title="Copy">
+                    <button data-copy-text="{{ secret }}" class="px-3 bg-vouch-raised border border-l-0 border-vouch-border hover:bg-vouch-border rounded-r-md transition-colors" title="Copy">
                         <svg class="h-5 w-5 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/>
                         </svg>
@@ -84,12 +84,8 @@
         </div>
     </div>
 </div>
+{% endblock %}
 
-<script>
-function copyToClipboard(text) {
-    navigator.clipboard.writeText(text).then(() => {
-        // Could add a toast notification here
-    });
-}
-</script>
+{% block scripts %}
+<script src="/static/js/common.js"></script>
 {% endblock %}

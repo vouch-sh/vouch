@@ -4688,6 +4688,7 @@ dependencies = [
  "http-body 1.0.1",
  "iri-string",
  "pin-project-lite",
+ "tokio",
  "tower",
  "tower-layer",
  "tower-service",
@@ -4925,6 +4926,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 name = "vouch-agent"
 version = "2026.2.39"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "clap",
  "dirs",
@@ -5032,6 +5034,7 @@ dependencies = [
  "governor",
  "headers",
  "hex",
+ "http 1.4.0",
  "jiff",
  "jiff-sqlx",
  "jsonwebtoken",

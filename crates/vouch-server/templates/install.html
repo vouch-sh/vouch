@@ -30,16 +30,16 @@
             </div>
             <div class="ml-11">
                 <div class="flex gap-2 mb-2">
-                    <button class="tab tab-active" onclick="showTab('macos')">macOS</button>
-                    <button class="tab" onclick="showTab('apt')">Debian / Ubuntu</button>
-                    <button class="tab" onclick="showTab('rpm')">Fedora / RHEL</button>
-                    <button class="tab" onclick="showTab('windows')">Windows</button>
+                    <button class="tab tab-active" data-tab="macos">macOS</button>
+                    <button class="tab" data-tab="apt">Debian / Ubuntu</button>
+                    <button class="tab" data-tab="rpm">Fedora / RHEL</button>
+                    <button class="tab" data-tab="windows">Windows</button>
                 </div>
 
                 <div id="macos-tab" class="tab-content">
                     <div class="code-block relative">
                         <span class="text-gray-500 mr-2">$</span>brew install vouch-sh/tap/vouch
-                        <button onclick="copyCommand('brew install vouch-sh/tap/vouch')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                        <button data-copy-text="brew install vouch-sh/tap/vouch" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
                     </div>
                 </div>
 
@@ -136,7 +136,7 @@
             <div class="ml-11">
                 <div class="code-block relative" data-server-url="{{ server_url }}">
                     <span class="text-gray-500 mr-2">$</span><span id="step2-command">vouch enroll --server {{ server_url }}</span>
-                    <button id="step2-copy-btn" onclick="copyCommand('vouch enroll --server {{ server_url }}')" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
+                    <button id="step2-copy-btn" data-copy-text="vouch enroll --server {{ server_url }}" class="absolute right-3 top-1/2 -translate-y-1/2 px-2.5 py-1.5 bg-vouch-raised text-gray-400 rounded text-xs hover:bg-vouch-border hover:text-white transition-colors">Copy</button>
                 </div>
                 <p class="mt-2 text-sm text-gray-400">This opens a browser to verify your identity and register your YubiKey.</p>
             </div>
@@ -164,42 +164,6 @@
 {% endblock %}
 
 {% block scripts %}
-<script>
-    function showTab(tab) {
-        document.querySelectorAll('.tab').forEach(el => {
-            el.classList.remove('tab-active');
-        });
-        event.target.classList.add('tab-active');
-
-        document.querySelectorAll('.tab-content').forEach(el => {
-            el.classList.add('hidden');
-        });
-        document.getElementById(tab + '-tab').classList.remove('hidden');
-
-        // Update command names for Windows vs other platforms
-        const isWindows = tab === 'windows';
-        const cmd = isWindows ? 'vouch.exe' : 'vouch';
-        const serverUrl = document.querySelector('[data-server-url]').dataset.serverUrl;
-
-        // Update step 2 command
-        const step2Cmd = document.getElementById('step2-command');
-        const step2CopyBtn = document.getElementById('step2-copy-btn');
-        const enrollCommand = cmd + ' enroll --server ' + serverUrl;
-        step2Cmd.textContent = enrollCommand;
-        step2CopyBtn.onclick = function() { copyCommand(enrollCommand); };
-
-        // Update step 3 command
-        const step3Cmd = document.getElementById('step3-command');
-        step3Cmd.textContent = cmd + ' login';
-    }
-
-    function copyCommand(text) {
-        navigator.clipboard.writeText(text).then(() => {
-            const btn = event.target;
-            const original = btn.textContent;
-            btn.textContent = 'Copied!';
-            setTimeout(() => btn.textContent = original, 2000);
-        });
-    }
-</script>
+<script src="/static/js/common.js"></script>
+<script src="/static/js/install.js"></script>
 {% endblock %}

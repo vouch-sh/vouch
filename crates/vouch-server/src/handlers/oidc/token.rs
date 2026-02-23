@@ -177,6 +177,13 @@ impl std::fmt::Debug for TokenExchangeResponse {
     }
 }
 
+// Maximum lengths for token request parameters.
+const MAX_CODE_VERIFIER_LEN: usize = 128;
+const MAX_TOKEN_REDIRECT_URI_LEN: usize = 2048;
+const MAX_TOKEN_CLIENT_ID_LEN: usize = 256;
+const MAX_TOKEN_SCOPE_LEN: usize = 512;
+const MAX_TOKEN_RESOURCE_LEN: usize = 2048;
+
 /// POST /oauth/token
 ///
 /// Unified token endpoint (RFC 6749 Section 3.2) that handles:
@@ -188,6 +195,48 @@ pub async fn token(
     headers: HeaderMap,
     axum::Form(params): axum::Form<TokenRequest>,
 ) -> Response {
+    // Input length validation — reject oversized parameters early.
+    if let Some(ref v) = params.code_verifier
+        && v.len() > MAX_CODE_VERIFIER_LEN
+    {
+        return token_error_response(
+            "invalid_request",
+            &format!("code_verifier exceeds maximum length of {MAX_CODE_VERIFIER_LEN}"),
+        );
+    }
+    if let Some(ref v) = params.redirect_uri
+        && v.len() > MAX_TOKEN_REDIRECT_URI_LEN
+    {
+        return token_error_response(
+            "invalid_request",
+            &format!("redirect_uri exceeds maximum length of {MAX_TOKEN_REDIRECT_URI_LEN}"),
+        );
+    }
+    if let Some(ref v) = params.client_id
+        && v.len() > MAX_TOKEN_CLIENT_ID_LEN
+    {
+        return token_error_response(
+            "invalid_request",
+            &format!("client_id exceeds maximum length of {MAX_TOKEN_CLIENT_ID_LEN}"),
+        );
+    }
+    if let Some(ref v) = params.scope
+        && v.len() > MAX_TOKEN_SCOPE_LEN
+    {
+        return token_error_response(
+            "invalid_request",
+            &format!("scope exceeds maximum length of {MAX_TOKEN_SCOPE_LEN}"),
+        );
+    }
+    if let Some(ref v) = params.resource
+        && v.len() > MAX_TOKEN_RESOURCE_LEN
+    {
+        return token_error_response(
+            "invalid_request",
+            &format!("resource exceeds maximum length of {MAX_TOKEN_RESOURCE_LEN}"),
+        );
+    }
+
     // RFC 6749 Section 5.2: Return unsupported_grant_type error for unknown grants
     let Ok(grant_type) = params.grant_type.parse::<OAuthGrantType>() else {
         return (
@@ -412,4 +461,17 @@ pub fn extract_client_credentials(
         client_id: id.to_string(),
         client_secret: client_secret_param,
     })
+}
+
+/// Build an OAuth error response for parameter validation failures.
+fn token_error_response(error: &str, description: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(OAuthErrorResponse {
+            error: error.to_string(),
+            error_description: Some(description.to_string()),
+            error_uri: None,
+        }),
+    )
+        .into_response()
 }

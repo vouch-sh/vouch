@@ -28,8 +28,8 @@
                 {% endif %}
             </div>
             <div class="flex items-center gap-4">
-                <button type="button" id="edit-btn" onclick="toggleEditForm()" class="text-vouch-accent hover:text-vouch-accent-hover text-sm font-medium">Edit</button>
-                <form action="/applications/{{ app.id }}/delete" method="POST" onsubmit="return confirm('Are you sure you want to delete this application? This action cannot be undone.');">
+                <button type="button" id="edit-btn" class="text-vouch-accent hover:text-vouch-accent-hover text-sm font-medium">Edit</button>
+                <form action="/applications/{{ app.id }}/delete" method="POST" data-confirm="Are you sure you want to delete this application? This action cannot be undone.">
                     <button type="submit" class="text-vouch-error hover:opacity-80 text-sm font-medium">Delete</button>
                 </form>
             </div>
@@ -114,7 +114,7 @@
                         <span class="text-xs text-gray-500 ml-2">({{ secrets_count }} active)</span>
                     </div>
                     <form action="/applications/{{ app.id }}/rotate" method="POST">
-                        <button type="submit" onclick="return confirm('Rotate secret? Old secret will be revoked immediately.');"
+                        <button type="submit" data-confirm="Rotate secret? Old secret will be revoked immediately."
                             class="px-3 py-1.5 bg-vouch-warning text-white rounded text-xs font-medium hover:opacity-90 transition-colors">
                             Rotate Secret
                         </button>
@@ -160,6 +160,7 @@
                     class="input-field mt-1 font-mono">{% for uri in app.redirect_uris %}{{ uri }}
 {% endfor %}</textarea>
                 <p class="mt-1 text-sm text-gray-500">One URI per line</p>
+                <div id="redirect-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
             </div>
 
             <div>
@@ -168,6 +169,7 @@
                     class="input-field mt-1 font-mono">{% for uri in app.resource_uris %}{{ uri }}
 {% endfor %}</textarea>
                 <p class="mt-1 text-sm text-gray-500">One URI per line. Target resource servers for audience-restricted tokens (RFC 8707).</p>
+                <div id="resource-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
             </div>
 
             <div>
@@ -203,7 +205,7 @@
             </div>
 
             <div class="flex justify-end gap-3">
-                <button type="button" onclick="toggleEditForm()" class="px-4 py-2 text-gray-400 hover:text-gray-200 text-sm font-medium transition-colors">
+                <button type="button" id="cancel-edit-btn" class="px-4 py-2 text-gray-400 hover:text-gray-200 text-sm font-medium transition-colors">
                     Cancel
                 </button>
                 <button type="submit" class="px-4 py-2 bg-vouch-accent hover:bg-vouch-accent-hover text-[#0a0a0a] rounded-md text-sm font-medium transition-colors">
@@ -213,21 +215,9 @@
         </form>
     </div>
 </div>
+{% endblock %}
 
-<script>
-function toggleEditForm() {
-    const viewMode = document.getElementById('view-mode');
-    const editMode = document.getElementById('edit-mode');
-    const editBtn = document.getElementById('edit-btn');
-
-    viewMode.classList.toggle('hidden');
-    editMode.classList.toggle('hidden');
-    editBtn.classList.toggle('hidden');
-}
-
-// Auto-open edit form if ?edit=1 is in URL
-if (new URLSearchParams(window.location.search).get('edit') === '1') {
-    toggleEditForm();
-}
-</script>
+{% block scripts %}
+<script src="/static/js/common.js"></script>
+<script src="/static/js/app-detail.js"></script>
 {% endblock %}

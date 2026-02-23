@@ -2,80 +2,14 @@
 //! Server configuration and authentication event database operations.
 
 use super::Pool;
-use super::schema::{AuthEvents, ServerConfig};
+use super::schema::AuthEvents;
 use super::types::BuildSql;
 use super::types::DbTimestamp;
-use crate::{db_execute, db_fetch_all, db_fetch_optional};
+use crate::{db_execute, db_fetch_all};
 use anyhow::Result;
 use jiff::Timestamp;
-use sea_query::{Expr, OnConflict, Order, Query};
+use sea_query::{Expr, Order, Query};
 use uuid::Uuid;
-
-// ============================================================================
-// Server Configuration
-// ============================================================================
-
-/// Server config record.
-#[derive(Debug, sqlx::FromRow)]
-pub struct ServerConfigRow {
-    #[allow(dead_code)]
-    pub key: String,
-    pub value: String,
-    #[allow(dead_code)]
-    pub updated_at: DbTimestamp,
-}
-
-/// Get a config value by key.
-pub async fn get_config(pool: &Pool, key: &str) -> Result<Option<String>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .columns([
-                ServerConfig::Key,
-                ServerConfig::Value,
-                ServerConfig::UpdatedAt,
-            ])
-            .from(ServerConfig::Table)
-            .and_where(Expr::col(ServerConfig::Key).eq(key))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let row = db_fetch_optional!(pool, sqlx::query_as::<_, ServerConfigRow>(&sql))?;
-
-    Ok(row.map(|r| r.value))
-}
-
-/// Set a config value.
-pub async fn set_config(pool: &Pool, key: &str, value: &str) -> Result<()> {
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
-
-    // Build upsert query using sea-query
-    // Build SQL in a block to ensure query is dropped before await
-    let sql = {
-        let query = Query::insert()
-            .into_table(ServerConfig::Table)
-            .columns([
-                ServerConfig::Key,
-                ServerConfig::Value,
-                ServerConfig::UpdatedAt,
-            ])
-            .values_panic([key.into(), value.into(), now.as_str().into()])
-            .on_conflict(
-                OnConflict::column(ServerConfig::Key)
-                    .update_columns([ServerConfig::Value, ServerConfig::UpdatedAt])
-                    .to_owned(),
-            )
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(())
-}
 
 // ============================================================================
 // Authentication Events

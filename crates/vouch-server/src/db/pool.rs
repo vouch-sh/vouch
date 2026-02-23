@@ -452,6 +452,34 @@ macro_rules! tx_fetch_optional {
 }
 
 // ============================================================================
+// Database URL Utilities
+// ============================================================================
+
+/// Redact the password from a database URL for safe logging.
+///
+/// - `postgres://user:secret@host/db` -> `postgres://user:***@host/db`
+/// - `sqlite:path.db` -> `sqlite:path.db` (no password to redact)
+pub(crate) fn redact_database_url(url: &str) -> String {
+    // SQLite URLs use "sqlite:" prefix and never contain passwords
+    if url.starts_with("sqlite:") {
+        return url.to_string();
+    }
+
+    // Try to parse as a standard URL (postgres://, postgresql://)
+    match url::Url::parse(url) {
+        Ok(mut parsed) => {
+            if parsed.password().is_some() {
+                // url::Url::set_password returns Result<(), ()>
+                let _ = parsed.set_password(Some("***"));
+            }
+            parsed.to_string()
+        }
+        // If parsing fails, return the URL with a generic redaction
+        Err(_) => url.to_string(),
+    }
+}
+
+// ============================================================================
 // DSQL Token Refresh
 // ============================================================================
 
@@ -471,6 +499,11 @@ fn spawn_token_refresh(pool: sqlx::PgPool, dsql: DsqlEndpoint, user: String, is_
         // Refresh every 10 minutes (tokens expire after 15 min by default)
         let refresh_interval = Duration::from_secs(10 * 60);
         let region = dsql.region().to_string();
+
+        tracing::info!(
+            "DSQL token refresh task started (region={}, refresh_interval=10m)",
+            region,
+        );
 
         loop {
             tokio::time::sleep(refresh_interval).await;
@@ -562,5 +595,31 @@ mod tests {
     async fn test_pool_connect_sqlite() {
         let pool = Pool::connect("sqlite::memory:").await.unwrap();
         assert_eq!(pool.db_type(), DatabaseType::Sqlite);
+    }
+
+    #[test]
+    fn test_redact_database_url_sqlite() {
+        assert_eq!(redact_database_url("sqlite::memory:"), "sqlite::memory:");
+        assert_eq!(redact_database_url("sqlite:test.db"), "sqlite:test.db");
+    }
+
+    #[test]
+    fn test_redact_database_url_postgres_with_password() {
+        let redacted = redact_database_url("postgres://user:secret@host/db");
+        assert!(redacted.contains("***"));
+        assert!(!redacted.contains("secret"));
+    }
+
+    #[test]
+    fn test_redact_database_url_postgres_without_password() {
+        let url = "postgres://user@host/db";
+        let redacted = redact_database_url(url);
+        assert!(!redacted.contains("***"));
+    }
+
+    #[test]
+    fn test_redact_database_url_invalid() {
+        // Invalid URLs are returned as-is
+        assert_eq!(redact_database_url("not-a-url"), "not-a-url");
     }
 }

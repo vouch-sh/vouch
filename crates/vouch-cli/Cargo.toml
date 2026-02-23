@@ -21,48 +21,56 @@ name = "vouch"
 path = "src/main.rs"
 
 [dependencies]
-vouch-common = { workspace = true }
-tokio = { workspace = true }
-clap = { workspace = true }
-clap_complete = { version = "=4.5.66", default-features = false }
-reqwest = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-anyhow = { workspace = true }
-tracing = { workspace = true }
-tracing-subscriber = { workspace = true }
-ctap-hid-fido2 = { version = "=3.5.8", default-features = false }
-rpassword = { version = "=7.4.0", default-features = false }
-inquire = { version = "=0.9.3", default-features = false, features = ["crossterm"] }
-dirs = { workspace = true }
-open = { version = "=5.3.3", default-features = false }
-base64 = { workspace = true }
+anyhow = { workspace = true, features = ["std"] }
 aws-lc-rs = { workspace = true }
-jiff = { workspace = true }
-url = { workspace = true }
-ssh-key = { workspace = true }
+base64 = { workspace = true, features = ["std"] }
 ciborium = { workspace = true }
-ed25519-dalek = { workspace = true }
-hex = { workspace = true }
-secrecy = { workspace = true }
+clap = { workspace = true, features = ["std", "derive", "env", "help", "usage", "error-context"] }
+clap_complete = { workspace = true }
+ctap-hid-fido2 = { workspace = true }
+dirs = { workspace = true }
+ed25519-dalek = { workspace = true, features = ["std"] }
+hex = { workspace = true, features = ["std"] }
+inquire = { workspace = true, features = ["crossterm"] }
+jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
+open = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls", "form"] }
+roxmltree = { workspace = true, features = ["std"] }
+rpassword = { workspace = true }
+rust-ini = { workspace = true }
+secrecy = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+serde_urlencoded = { workspace = true }
+serde_yaml = { workspace = true }
+ssh-key = { workspace = true, features = ["std", "ed25519", "encryption", "rand_core", "getrandom"] }
+tempfile = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
+toml_edit = { workspace = true, features = ["parse", "display"] }
+tracing = { workspace = true, features = ["std"] }
+tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter"] }
+url = { workspace = true }
+vouch-common = { workspace = true }
 zeroize = { workspace = true }
-serde_urlencoded = { version = "=0.7.1", default-features = false }
-serde_yaml = { version = "=0.9.34", default-features = false }
-roxmltree = { version = "=0.21.1", default-features = false, features = ["std"] }
-rust-ini = { version = "=0.21.3", default-features = false }
-toml_edit = { version = "=0.25.3", default-features = false, features = ["parse", "display"] }
 
 [target.'cfg(unix)'.dependencies]
-vouch-agent = { workspace = true }
 libc = { workspace = true }
+vouch-agent = { workspace = true }
 
 # Optional dependencies for test-utils feature
-axum = { workspace = true, optional = true }
-tower = { workspace = true, optional = true }
-http = { workspace = true, optional = true }
-
-[dependencies.tempfile]
+[dependencies.axum]
 workspace = true
+features = ["json", "tokio", "http1", "form", "query"]
+optional = true
+
+[dependencies.http]
+workspace = true
+optional = true
+
+[dependencies.tower]
+workspace = true
+features = ["util"]
+optional = true
 
 [dev-dependencies]

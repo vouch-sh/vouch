@@ -138,42 +138,6 @@ async fn test_session_lifecycle() {
     assert!(session.is_none());
 }
 
-#[tokio::test]
-async fn test_config_storage() {
-    let pool = test_db().await;
-
-    // Initially no config
-    let value = get_config(&pool, "test_key")
-        .await
-        .expect("Failed to get config");
-    assert!(value.is_none());
-
-    // Set config
-    set_config(&pool, "test_key", "test_value")
-        .await
-        .expect("Failed to set config");
-
-    // Get config
-    let value = get_config(&pool, "test_key")
-        .await
-        .expect("Failed to get config")
-        .expect("Config should exist");
-
-    assert_eq!(value, "test_value");
-
-    // Update config
-    set_config(&pool, "test_key", "updated_value")
-        .await
-        .expect("Failed to update config");
-
-    let value = get_config(&pool, "test_key")
-        .await
-        .expect("Failed to get config")
-        .expect("Config should exist");
-
-    assert_eq!(value, "updated_value");
-}
-
 // ========================================================================
 // RFC 8628 - Device Authorization Grant Tests
 // ========================================================================

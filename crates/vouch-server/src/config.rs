@@ -6,17 +6,6 @@ use clap::Parser;
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
 
-use crate::db::{self, Pool};
-
-/// Configuration keys used in the database.
-pub mod config_keys {
-    pub const ALLOWED_DOMAINS: &str = "allowed_domains";
-    pub const ORG_NAME: &str = "org_name";
-    pub const CLI_DOWNLOAD_MACOS: &str = "cli_download_macos";
-    pub const CLI_DOWNLOAD_LINUX: &str = "cli_download_linux";
-    pub const CLI_DOWNLOAD_WINDOWS: &str = "cli_download_windows";
-}
-
 // ============================================================================
 // Custom Value Parsers
 // ============================================================================
@@ -321,17 +310,20 @@ impl ServerConfig {
         // to allow these values to come from S3 config.
 
         // Compute base URL (handles both production https and local http)
-        let base_url = args.base_url.unwrap_or_else(|| {
-            // For local development (localhost/127.0.0.1), use http with port
-            if vouch_common::is_loopback_host(&args.rp_id) {
-                // Extract port from listen_addr (e.g., "[::]:3000" -> "3000")
+        let base_url = if let Some(url) = args.base_url {
+            url
+        } else {
+            let derived = if vouch_common::is_loopback_host(&args.rp_id) {
+                // For local development (localhost/127.0.0.1), use http with port
                 let port = args.listen_addr.rsplit(':').next().unwrap_or("3000");
                 format!("http://{}:{}", args.rp_id, port)
             } else {
                 // Production: use https without port (assumes standard 443)
                 format!("https://{}", args.rp_id)
-            }
-        });
+            };
+            tracing::debug!("VOUCH_BASE_URL not set, derived from rp_id: {}", derived);
+            derived
+        };
 
         // Parse allowed domains
         let allowed_domains = args
@@ -406,44 +398,6 @@ impl ServerConfig {
         })
     }
 
-    /// Load additional configuration from database (overrides env vars where set).
-    ///
-    /// Returns the list of config keys that were found in the database.
-    pub async fn load_from_db(&mut self, pool: &Pool) -> Result<Vec<&'static str>> {
-        let mut loaded = Vec::new();
-
-        // Allowed domains (DB overrides env vars)
-        if let Some(domains) = db::get_config(pool, config_keys::ALLOWED_DOMAINS).await? {
-            let parsed = parse_comma_list(&domains);
-            if parsed.is_empty() {
-                self.allowed_domains = None;
-            } else {
-                self.allowed_domains = Some(parsed);
-                loaded.push(config_keys::ALLOWED_DOMAINS);
-            }
-        }
-
-        // Branding (DB overrides env vars)
-        if let Some(org_name) = db::get_config(pool, config_keys::ORG_NAME).await? {
-            self.org_name = Some(org_name);
-            loaded.push(config_keys::ORG_NAME);
-        }
-        if let Some(url) = db::get_config(pool, config_keys::CLI_DOWNLOAD_MACOS).await? {
-            self.cli_download_macos = Some(url);
-            loaded.push(config_keys::CLI_DOWNLOAD_MACOS);
-        }
-        if let Some(url) = db::get_config(pool, config_keys::CLI_DOWNLOAD_LINUX).await? {
-            self.cli_download_linux = Some(url);
-            loaded.push(config_keys::CLI_DOWNLOAD_LINUX);
-        }
-        if let Some(url) = db::get_config(pool, config_keys::CLI_DOWNLOAD_WINDOWS).await? {
-            self.cli_download_windows = Some(url);
-            loaded.push(config_keys::CLI_DOWNLOAD_WINDOWS);
-        }
-
-        Ok(loaded)
-    }
-
     /// Check if OIDC is configured (all required fields present).
     #[must_use]
     pub fn oidc_configured(&self) -> bool {
@@ -514,11 +468,36 @@ impl ServerConfig {
     /// Validate that all required configuration is present.
     /// Call this after all config sources (env, S3) have been merged.
     pub fn validate(&self) -> Result<()> {
-        if self.jwt_secret.expose_secret().len() < 32 {
+        let secret = self.jwt_secret.expose_secret();
+        if secret.len() < 32 {
             anyhow::bail!(
                 "VOUCH_JWT_SECRET must be at least 32 characters (set via env var or S3 config)"
             );
         }
+
+        // Reject degenerate secrets (e.g., all same character like "aaaaa...").
+        let bytes = secret.as_bytes();
+        let first = bytes.first().copied().unwrap_or(0);
+        let all_same = bytes.iter().all(|&b| b == first);
+        if all_same {
+            anyhow::bail!("VOUCH_JWT_SECRET must not consist of a single repeated character");
+        }
+
+        // Warn if the secret has low entropy (fewer than 8 unique bytes).
+        let mut unique = std::collections::HashSet::new();
+        for &b in bytes {
+            unique.insert(b);
+        }
+        if unique.len() < 8 {
+            tracing::warn!(
+                target: "security",
+                "VOUCH_JWT_SECRET has low entropy ({} unique bytes out of {}). \
+                 Consider using a stronger secret with more character variety.",
+                unique.len(),
+                bytes.len(),
+            );
+        }
+
         Ok(())
     }
 }

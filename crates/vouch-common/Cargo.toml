@@ -9,17 +9,17 @@ description = "Shared types for vouch CLI and server"
 workspace = true
 
 [dependencies]
-serde = { workspace = true }
-serde_json = { workspace = true }
-uuid = { workspace = true }
-thiserror = { workspace = true }
-anyhow = { workspace = true }
-dirs = { workspace = true }
-jiff = { workspace = true }
-gethostname = { version = "=1.1.0", default-features = false }
+anyhow = { workspace = true, features = ["std"] }
+base64 = { workspace = true, features = ["std"] }
 ciborium = { workspace = true }
-hex = { workspace = true }
-base64 = { workspace = true }
+dirs = { workspace = true }
+gethostname = { workspace = true }
+hex = { workspace = true, features = ["std"] }
+jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
+reqwest = { workspace = true, features = ["json", "rustls", "form"] }
+secrecy = { workspace = true, features = ["serde"] }
+serde = { workspace = true, features = ["std", "derive"] }
+serde_json = { workspace = true, features = ["std"] }
+thiserror = { workspace = true }
 url = { workspace = true }
-reqwest = { workspace = true }
-secrecy = { workspace = true }
+uuid = { workspace = true, features = ["v7", "serde", "std"] }

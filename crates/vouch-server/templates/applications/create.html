@@ -86,6 +86,7 @@ http://localhost:3000/callback"></textarea>
                     placeholder="https://api.example.com
 https://data.example.com"></textarea>
                 <p class="mt-1 text-sm text-gray-500">One URI per line. Target resource servers that will receive access tokens (RFC 8707). Leave empty to allow any resource.</p>
+                <div id="resource-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
             </div>
 
             <div>
@@ -132,129 +133,8 @@ https://data.example.com"></textarea>
     </div>
 </div>
 
-<script>
-(function() {
-    const redirectSection = document.getElementById('redirect-uris-section');
-    const redirectTextarea = document.getElementById('redirect_uris');
-    const redirectError = document.getElementById('redirect-uri-error');
-    const nameInput = document.getElementById('name');
-    const form = document.querySelector('form');
+{% endblock %}
 
-    // Validate redirect URIs and return error message (or null if valid)
-    function validateRedirectUris() {
-        const appTypeRadio = document.querySelector('input[name="application_type"]:checked');
-        const appType = appTypeRadio ? appTypeRadio.value : 'web';
-
-        // Service type doesn't need redirect URIs
-        if (appType === 'service') {
-            return null;
-        }
-
-        const uris = redirectTextarea.value.trim().split('\n').filter(line => line.trim());
-
-        if (uris.length === 0) {
-            return 'At least one redirect URI is required.';
-        }
-
-        const invalid = [];
-        for (const uri of uris) {
-            const trimmed = uri.trim();
-            try {
-                const url = new URL(trimmed);
-                if (url.protocol !== 'http:' && url.protocol !== 'https:') {
-                    invalid.push(trimmed);
-                }
-            } catch {
-                invalid.push(trimmed);
-            }
-        }
-
-        if (invalid.length > 0) {
-            return 'Invalid redirect URI(s): ' + invalid.join(', ') + '. Each URI must be a valid http:// or https:// URL.';
-        }
-
-        return null;
-    }
-
-    // Show/hide redirect URI error
-    function showRedirectError(message) {
-        if (message) {
-            redirectError.textContent = message;
-            redirectError.classList.remove('hidden');
-            redirectTextarea.classList.add('border-vouch-error');
-        } else {
-            redirectError.classList.add('hidden');
-            redirectTextarea.classList.remove('border-vouch-error');
-        }
-    }
-
-    // Hide redirect URIs for service type
-    document.querySelectorAll('input[name="application_type"]').forEach(radio => {
-        radio.addEventListener('change', function() {
-            if (this.value === 'service') {
-                redirectSection.style.display = 'none';
-                redirectTextarea.required = false;
-                showRedirectError(null); // Clear any error
-            } else {
-                redirectSection.style.display = 'block';
-                redirectTextarea.required = true;
-                // Re-validate if there's content
-                if (redirectTextarea.value.trim()) {
-                    showRedirectError(validateRedirectUris());
-                }
-            }
-        });
-    });
-
-    // Validate redirect URIs on blur
-    redirectTextarea.addEventListener('blur', function() {
-        const error = validateRedirectUris();
-        showRedirectError(error);
-    });
-
-    // Clear error styling when user starts typing
-    redirectTextarea.addEventListener('input', function() {
-        if (redirectTextarea.classList.contains('border-vouch-error')) {
-            // Re-validate after a short delay
-            clearTimeout(redirectTextarea.validateTimeout);
-            redirectTextarea.validateTimeout = setTimeout(() => {
-                showRedirectError(validateRedirectUris());
-            }, 500);
-        }
-    });
-
-    // Validate form on submit
-    form.addEventListener('submit', function(e) {
-        let hasError = false;
-
-        // Validate name
-        if (!nameInput.value.trim()) {
-            e.preventDefault();
-            nameInput.focus();
-            return false;
-        }
-
-        // Validate application type
-        const appTypeRadio = document.querySelector('input[name="application_type"]:checked');
-        if (!appTypeRadio) {
-            e.preventDefault();
-            return false;
-        }
-
-        // Validate redirect URIs (this is the key validation)
-        const redirectUriError = validateRedirectUris();
-        if (redirectUriError) {
-            e.preventDefault();
-            showRedirectError(redirectUriError);
-            redirectTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            redirectTextarea.focus();
-            hasError = true;
-        }
-
-        if (hasError) {
-            return false;
-        }
-    });
-})();
-</script>
+{% block scripts %}
+<script src="/static/js/app-create.js"></script>
 {% endblock %}

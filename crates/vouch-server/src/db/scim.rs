@@ -123,8 +123,12 @@ pub struct ScimToken {
 }
 
 /// Get a SCIM token by its hash.
+///
+/// Only returns tokens that are not expired. Tokens with `expires_at IS NULL`
+/// (no expiration) are always returned.
 pub async fn get_scim_token_by_hash(pool: &Pool, token_hash: &str) -> Result<Option<ScimToken>> {
     let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
 
     let sql = {
         let query = Query::select()
@@ -140,6 +144,12 @@ pub async fn get_scim_token_by_hash(pool: &Pool, token_hash: &str) -> Result<Opt
             ])
             .from(ScimTokens::Table)
             .and_where(Expr::col(ScimTokens::TokenHash).eq(token_hash))
+            // Enforce token expiration: only return non-expired tokens
+            .and_where(
+                Expr::col(ScimTokens::ExpiresAt)
+                    .is_null()
+                    .or(Expr::col(ScimTokens::ExpiresAt).gt(now.as_str())),
+            )
             .to_owned();
         query.build_sql(db_type)
     };

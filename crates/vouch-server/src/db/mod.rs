@@ -24,7 +24,7 @@ pub mod migrations;
 mod oauth;
 mod organizations;
 mod pending_oauth;
-mod pool;
+pub(crate) mod pool;
 pub(crate) mod schema;
 mod scim;
 mod sessions;
@@ -82,7 +82,7 @@ pub use device_auth::get_device_auth_by_id;
 // Re-export config and auth event types and functions
 pub use config::{
     AuthEvent, AuthEventParams, AuthEventQuery, AuthEventType, delete_old_auth_events,
-    get_auth_events, get_config, insert_auth_event, set_config,
+    get_auth_events, insert_auth_event,
 };
 
 // Re-export SCIM types and functions

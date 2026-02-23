@@ -265,6 +265,16 @@ impl AuthorizationCode {
     }
 }
 
+// Maximum lengths for OAuth authorization request parameters.
+// These prevent oversized inputs from consuming memory or being stored in the database.
+const MAX_CLIENT_ID_LEN: usize = 256;
+const MAX_REDIRECT_URI_LEN: usize = 2048;
+const MAX_RESOURCE_LEN: usize = 2048;
+const MAX_STATE_LEN: usize = 512;
+const MAX_SCOPE_LEN: usize = 512;
+const MAX_NONCE_LEN: usize = 256;
+const MAX_CODE_CHALLENGE_LEN: usize = 128;
+
 /// Validate an authorization request.
 ///
 /// # Arguments
@@ -300,6 +310,25 @@ pub fn validate_authorize_request(
             OAuthErrorCode::InvalidRequest,
             "client_id is required",
         ));
+    }
+
+    // Input length validation — reject oversized parameters early.
+    validate_param_length("client_id", &params.client_id, MAX_CLIENT_ID_LEN)?;
+    validate_param_length("redirect_uri", &params.redirect_uri, MAX_REDIRECT_URI_LEN)?;
+    if let Some(ref state) = params.state {
+        validate_param_length("state", state, MAX_STATE_LEN)?;
+    }
+    if let Some(ref scope) = params.scope {
+        validate_param_length("scope", scope, MAX_SCOPE_LEN)?;
+    }
+    if let Some(ref nonce) = params.nonce {
+        validate_param_length("nonce", nonce, MAX_NONCE_LEN)?;
+    }
+    if let Some(ref challenge) = params.code_challenge {
+        validate_param_length("code_challenge", challenge, MAX_CODE_CHALLENGE_LEN)?;
+    }
+    if let Some(ref resource) = params.resource {
+        validate_param_length("resource", resource, MAX_RESOURCE_LEN)?;
     }
 
     // RFC 9700 Section 2.1.1: PKCE with S256 is required for all clients.
@@ -352,6 +381,17 @@ pub fn validate_authorize_request(
         code_challenge_method: parsed_method,
         resource: params.resource,
     })
+}
+
+/// Validate that a parameter does not exceed the maximum allowed length.
+fn validate_param_length(name: &str, value: &str, max_len: usize) -> ServiceResult<()> {
+    if value.len() > max_len {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            format!("{name} exceeds maximum length of {max_len}"),
+        ));
+    }
+    Ok(())
 }
 
 /// Check if the user has a valid session for authorization.
