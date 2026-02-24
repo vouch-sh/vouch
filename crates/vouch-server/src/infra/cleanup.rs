@@ -183,6 +183,12 @@ pub async fn run_cleanup(
         );
     }
 
+    // Clean up expired JWT assertion JTIs (RFC 7523)
+    cleanup_and_log!(
+        db::delete_expired_jwt_assertion_jtis(db, &now_str),
+        "expired JWT assertion JTIs"
+    );
+
     // Clean up DPoP nonces
     {
         let mut nonce_manager = dpop_state.nonce_manager.write().await;

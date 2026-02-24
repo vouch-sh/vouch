@@ -635,6 +635,11 @@ mod tests {
             access_scope,
             org_id: org_id.map(String::from),
             resource_uris: "[]".to_string(),
+            jwks: None,
+            jwks_uri: None,
+            jwks_uri_cached_at: None,
+            jwks_uri_cache: None,
+            token_endpoint_auth_method: "client_secret_basic".to_string(),
         }
     }
 

@@ -76,7 +76,7 @@ pub struct AppState {
     pub oidc_key: services::oidc::OidcSigningKey,
     /// GitHub App for credential issuance (optional, None if not configured).
     pub github_app: Option<std::sync::Arc<services::integrations::github::GitHubApp>>,
-    /// Shared HTTP client for outbound server-side API calls.
+    /// Shared HTTP client for outbound server-side API calls (no redirects).
     pub http_client: reqwest::Client,
 }
 
@@ -206,6 +206,7 @@ mod redirect_tests {
             s3_config_key: "config/vouch-server.json".to_string(),
             s3_config_region: None,
             s3_config_poll_interval: 60,
+            jwt_assertion_max_lifetime_seconds: 300,
         };
         let webauthn = webauthn_rs::WebauthnBuilder::new(
             rp_id,

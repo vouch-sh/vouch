@@ -2,7 +2,7 @@
 //! OAuth Client Application database operations.
 
 use super::Pool;
-use super::schema::{OAuthClientSecrets, OAuthClients, OAuthUsageEvents};
+use super::schema::{JwtAssertionJtis, OAuthClientSecrets, OAuthClients, OAuthUsageEvents};
 use super::types::BuildSql;
 use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute};
@@ -122,6 +122,53 @@ impl OAuthClientType {
     }
 }
 
+/// Token endpoint authentication method (RFC 7523).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TokenEndpointAuthMethod {
+    /// Client authenticates using HTTP Basic with client_id:client_secret.
+    #[default]
+    ClientSecretBasic,
+    /// Client sends client_id and client_secret in the POST body.
+    ClientSecretPost,
+    /// Client authenticates using a signed JWT assertion (RFC 7523).
+    PrivateKeyJwt,
+    /// Public client with no authentication.
+    None,
+}
+
+impl TokenEndpointAuthMethod {
+    /// Return the string representation for database storage.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::ClientSecretBasic => "client_secret_basic",
+            Self::ClientSecretPost => "client_secret_post",
+            Self::PrivateKeyJwt => "private_key_jwt",
+            Self::None => "none",
+        }
+    }
+}
+
+impl std::str::FromStr for TokenEndpointAuthMethod {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "client_secret_basic" => Ok(Self::ClientSecretBasic),
+            "client_secret_post" => Ok(Self::ClientSecretPost),
+            "private_key_jwt" => Ok(Self::PrivateKeyJwt),
+            "none" => Ok(Self::None),
+            _ => Err(format!("Unknown token endpoint auth method: {s}")),
+        }
+    }
+}
+
+impl std::fmt::Display for TokenEndpointAuthMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 // ============================================================================
 // OAuth Client
 // ============================================================================
@@ -146,6 +193,16 @@ pub struct OAuthClient {
     pub org_id: Option<String>,
     /// RFC 8707: JSON array of registered resource URIs.
     pub resource_uris: String,
+    /// RFC 7523: Inline JWKS JSON for private_key_jwt client authentication.
+    pub jwks: Option<String>,
+    /// RFC 7523: Remote JWKS endpoint for private_key_jwt client authentication.
+    pub jwks_uri: Option<String>,
+    /// RFC 7523: Timestamp of last JWKS URI fetch.
+    pub jwks_uri_cached_at: Option<DbTimestamp>,
+    /// RFC 7523: Cached JWKS content fetched from jwks_uri.
+    pub jwks_uri_cache: Option<String>,
+    /// RFC 7523: Token endpoint authentication method.
+    pub token_endpoint_auth_method: String,
 }
 
 impl OAuthClient {
@@ -216,6 +273,7 @@ pub async fn create_oauth_client(
                 OAuthClients::AccessScope,
                 OAuthClients::OrgId,
                 OAuthClients::ResourceUris,
+                OAuthClients::TokenEndpointAuthMethod,
                 OAuthClients::CreatedAt,
                 OAuthClients::UpdatedAt,
             ])
@@ -230,6 +288,7 @@ pub async fn create_oauth_client(
                 access_scope.as_str().into(),
                 org_id.into(),
                 resource_uris_json.into(),
+                TokenEndpointAuthMethod::default().as_str().into(),
                 now.as_str().into(),
                 now.as_str().into(),
             ])
@@ -267,6 +326,11 @@ pub async fn get_oauth_client_by_id(pool: &Pool, id: &str) -> Result<Option<OAut
                 OAuthClients::AccessScope,
                 OAuthClients::OrgId,
                 OAuthClients::ResourceUris,
+                OAuthClients::Jwks,
+                OAuthClients::JwksUri,
+                OAuthClients::JwksUriCachedAt,
+                OAuthClients::JwksUriCache,
+                OAuthClients::TokenEndpointAuthMethod,
             ])
             .from(OAuthClients::Table)
             .and_where(Expr::col(OAuthClients::Id).eq(id))
@@ -303,6 +367,11 @@ pub async fn get_oauth_client_by_client_id(
                 OAuthClients::AccessScope,
                 OAuthClients::OrgId,
                 OAuthClients::ResourceUris,
+                OAuthClients::Jwks,
+                OAuthClients::JwksUri,
+                OAuthClients::JwksUriCachedAt,
+                OAuthClients::JwksUriCache,
+                OAuthClients::TokenEndpointAuthMethod,
             ])
             .from(OAuthClients::Table)
             .and_where(Expr::col(OAuthClients::ClientId).eq(client_id))
@@ -336,6 +405,11 @@ pub async fn get_oauth_clients_for_user(pool: &Pool, user_id: &str) -> Result<Ve
                 OAuthClients::AccessScope,
                 OAuthClients::OrgId,
                 OAuthClients::ResourceUris,
+                OAuthClients::Jwks,
+                OAuthClients::JwksUri,
+                OAuthClients::JwksUriCachedAt,
+                OAuthClients::JwksUriCache,
+                OAuthClients::TokenEndpointAuthMethod,
             ])
             .from(OAuthClients::Table)
             .and_where(Expr::col(OAuthClients::UserId).eq(user_id))
@@ -759,6 +833,122 @@ pub async fn delete_old_oauth_usage_events(pool: &Pool, before: &str) -> Result<
     Ok(result.rows_affected())
 }
 
+// ============================================================================
+// JWKS Cache Operations (RFC 7523)
+// ============================================================================
+
+/// Get the effective JWKS for a client (inline or cached from URI).
+///
+/// Returns the inline `jwks` field if set, otherwise the `jwks_uri_cache`.
+#[must_use]
+pub fn get_client_jwks(client: &OAuthClient) -> Option<&str> {
+    client.jwks.as_deref().or(client.jwks_uri_cache.as_deref())
+}
+
+/// Update the cached JWKS fetched from a client's jwks_uri.
+pub async fn update_client_jwks_cache(pool: &Pool, id: &str, jwks_json: &str) -> Result<()> {
+    let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
+
+    let sql = {
+        let query = Query::update()
+            .table(OAuthClients::Table)
+            .value(OAuthClients::JwksUriCache, jwks_json)
+            .value(OAuthClients::JwksUriCachedAt, now.as_str())
+            .and_where(Expr::col(OAuthClients::Id).eq(id))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    db_execute!(pool, sqlx::query(&sql))?;
+
+    Ok(())
+}
+
+// ============================================================================
+// JWT Assertion JTI Operations (RFC 7523)
+// ============================================================================
+
+/// Maximum JTI length to prevent oversized values inflating the table.
+const MAX_JTI_LENGTH: usize = 256;
+
+/// Store a JWT assertion JTI for replay prevention.
+///
+/// Returns `true` if stored successfully (first use), `false` if the
+/// (jti, client_id) pair already exists (replay detected). The UNIQUE
+/// constraint on (jti, client_id) makes this atomic — no TOCTOU race.
+pub async fn store_jwt_assertion_jti(
+    pool: &Pool,
+    jti: &str,
+    client_id: &str,
+    expires_at: &str,
+) -> Result<bool> {
+    if jti.len() > MAX_JTI_LENGTH {
+        return Err(anyhow::anyhow!(
+            "JTI exceeds maximum length ({MAX_JTI_LENGTH})"
+        ));
+    }
+
+    let id = Uuid::now_v7().to_string();
+    let db_type = pool.db_type();
+    let now = Timestamp::now().to_string();
+
+    let sql = {
+        let query = Query::insert()
+            .into_table(JwtAssertionJtis::Table)
+            .columns([
+                JwtAssertionJtis::Id,
+                JwtAssertionJtis::Jti,
+                JwtAssertionJtis::ClientId,
+                JwtAssertionJtis::CreatedAt,
+                JwtAssertionJtis::ExpiresAt,
+            ])
+            .values_panic([
+                id.into(),
+                jti.into(),
+                client_id.into(),
+                now.as_str().into(),
+                expires_at.into(),
+            ])
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    match db_execute!(pool, sqlx::query(&sql)) {
+        Ok(_) => Ok(true),
+        Err(e) => {
+            // Check for unique constraint violation (replay)
+            let err_str = e.to_string();
+            if err_str.contains("UNIQUE") || err_str.contains("duplicate key") {
+                Ok(false)
+            } else {
+                Err(e.into())
+            }
+        }
+    }
+}
+
+/// Delete expired JWT assertion JTI entries.
+pub async fn delete_expired_jwt_assertion_jtis(pool: &Pool, now: &str) -> Result<u64> {
+    let db_type = pool.db_type();
+
+    let sql = {
+        let query = Query::delete()
+            .from_table(JwtAssertionJtis::Table)
+            .and_where(Expr::col(JwtAssertionJtis::ExpiresAt).lte(now))
+            .to_owned();
+        query.build_sql(db_type)
+    };
+
+    let result = db_execute!(pool, sqlx::query(&sql))?;
+
+    Ok(result.rows_affected())
+}
+
+// ============================================================================
+// Client Credential Validation
+// ============================================================================
+
 /// Validate client credentials (client_id + client_secret).
 /// Returns the OAuth client if valid, None otherwise.
 pub async fn validate_oauth_client_credentials(
@@ -873,6 +1063,58 @@ mod tests {
             let s = scope.as_str();
             let parsed = AccessScope::from_str(s);
             assert_eq!(parsed, Some(scope));
+        }
+    }
+
+    #[test]
+    fn test_token_endpoint_auth_method_from_str_client_secret_basic() {
+        let result: Result<TokenEndpointAuthMethod, _> = "client_secret_basic".parse();
+        assert!(result.is_ok());
+        assert_eq!(result, Ok(TokenEndpointAuthMethod::ClientSecretBasic));
+    }
+
+    #[test]
+    fn test_token_endpoint_auth_method_from_str_client_secret_post() {
+        let result: Result<TokenEndpointAuthMethod, _> = "client_secret_post".parse();
+        assert!(result.is_ok());
+        assert_eq!(result, Ok(TokenEndpointAuthMethod::ClientSecretPost));
+    }
+
+    #[test]
+    fn test_token_endpoint_auth_method_from_str_private_key_jwt() {
+        let result: Result<TokenEndpointAuthMethod, _> = "private_key_jwt".parse();
+        assert!(result.is_ok());
+        assert_eq!(result, Ok(TokenEndpointAuthMethod::PrivateKeyJwt));
+    }
+
+    #[test]
+    fn test_token_endpoint_auth_method_from_str_none() {
+        let result: Result<TokenEndpointAuthMethod, _> = "none".parse();
+        assert!(result.is_ok());
+        assert_eq!(result, Ok(TokenEndpointAuthMethod::None));
+    }
+
+    #[test]
+    fn test_token_endpoint_auth_method_from_str_rejects_unknown() {
+        let result: Result<TokenEndpointAuthMethod, _> = "magic_auth".parse();
+        assert!(result.is_err());
+
+        let result2: Result<TokenEndpointAuthMethod, _> = "".parse();
+        assert!(result2.is_err());
+    }
+
+    #[test]
+    fn test_token_endpoint_auth_method_display_roundtrip() {
+        let variants = [
+            TokenEndpointAuthMethod::ClientSecretBasic,
+            TokenEndpointAuthMethod::ClientSecretPost,
+            TokenEndpointAuthMethod::PrivateKeyJwt,
+            TokenEndpointAuthMethod::None,
+        ];
+        for variant in variants {
+            let display_str = variant.to_string();
+            let parsed: Result<TokenEndpointAuthMethod, _> = display_str.parse();
+            assert_eq!(parsed, Ok(variant));
         }
     }
 }

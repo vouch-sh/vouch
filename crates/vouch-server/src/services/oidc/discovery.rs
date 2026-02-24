@@ -17,6 +17,7 @@ use std::sync::Arc;
 /// All fields defined in OpenID Provider Metadata:
 /// <https://openid.net/specs/openid-connect-discovery-1_0.html#ProviderMetadata>
 #[derive(Debug, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct OidcDiscoveryDocument {
     /// OIDC Discovery 1.0 Section 3: REQUIRED. Issuer Identifier (must match tokens).
     pub issuer: String,
@@ -67,6 +68,9 @@ pub struct OidcDiscoveryDocument {
     /// RFC 8707 Section 2: Indicates support for the `resource` parameter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_indicators_supported: Option<bool>,
+    /// RFC 7523: Supported JWS algorithms for JWT client authentication.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub token_endpoint_auth_signing_alg_values_supported: Option<Vec<String>>,
 }
 
 /// JSON Web Key Set response (RFC 7517 Section 5).
@@ -107,12 +111,14 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "authorization_code".to_string(),
             "urn:ietf:params:oauth:grant-type:device_code".to_string(),
             "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+            "urn:ietf:params:oauth:grant-type:jwt-bearer".to_string(),
         ],
         subject_types_supported: vec!["public".to_string()],
         id_token_signing_alg_values_supported: vec!["ES256".to_string()],
         token_endpoint_auth_methods_supported: vec![
             "client_secret_basic".to_string(),
             "client_secret_post".to_string(),
+            "private_key_jwt".to_string(),
         ],
         claims_supported: vec![
             "sub".to_string(),
@@ -145,6 +151,11 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         authorization_response_iss_parameter_supported: true,
         // RFC 8707: Advertise resource indicator support
         resource_indicators_supported: Some(true),
+        // RFC 7523: Advertise supported signing algorithms for JWT client auth
+        token_endpoint_auth_signing_alg_values_supported: Some(vec![
+            "ES256".to_string(),
+            "RS256".to_string(),
+        ]),
     }
 }
 
