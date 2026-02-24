@@ -77,7 +77,8 @@ async fn test_rfc9700_client_id_matching_at_token_endpoint() {
             resource: None,
             acr_values: None,
             dpop_jkt: None,
-            auth_code_lifetime_seconds: crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -131,7 +132,8 @@ async fn test_rfc9700_redirect_uri_exact_match_at_token() {
             resource: None,
             acr_values: None,
             dpop_jkt: None,
-            auth_code_lifetime_seconds: crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -186,7 +188,8 @@ async fn test_rfc9700_redirect_uri_required_when_present_in_auth() {
             resource: None,
             acr_values: None,
             dpop_jkt: None,
-            auth_code_lifetime_seconds: crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -241,7 +244,8 @@ async fn test_rfc9700_authorization_code_single_use() {
             resource: None,
             acr_values: None,
             dpop_jkt: None,
-            auth_code_lifetime_seconds: crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await

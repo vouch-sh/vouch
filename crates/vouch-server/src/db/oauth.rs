@@ -996,7 +996,10 @@ pub mod test_helpers {
             let query = Query::update()
                 .table(OAuthClients::Table)
                 .value(OAuthClients::FapiProfile, fapi_profile.as_db_str())
-                .value(OAuthClients::DpopBoundAccessTokens, dpop_bound_access_tokens)
+                .value(
+                    OAuthClients::DpopBoundAccessTokens,
+                    dpop_bound_access_tokens,
+                )
                 .value(OAuthClients::UpdatedAt, now.as_str())
                 .and_where(Expr::col(OAuthClients::Id).eq(id))
                 .to_owned();
@@ -1266,7 +1269,10 @@ mod tests {
     #[test]
     fn test_fapi_profile_from_db() {
         assert_eq!(FapiProfile::from_db("none"), FapiProfile::None);
-        assert_eq!(FapiProfile::from_db("fapi2_security"), FapiProfile::Fapi2Security);
+        assert_eq!(
+            FapiProfile::from_db("fapi2_security"),
+            FapiProfile::Fapi2Security
+        );
         // Unknown values default to None for forward compatibility
         assert_eq!(FapiProfile::from_db("unknown"), FapiProfile::None);
         assert_eq!(FapiProfile::from_db(""), FapiProfile::None);
@@ -1298,8 +1304,7 @@ mod tests {
             .expect("FapiProfile::Fapi2Security serialization");
         assert_eq!(json, r#""fapi2_security""#);
 
-        let parsed: FapiProfile =
-            serde_json::from_str(&json).expect("FapiProfile deserialization");
+        let parsed: FapiProfile = serde_json::from_str(&json).expect("FapiProfile deserialization");
         assert_eq!(parsed, FapiProfile::Fapi2Security);
 
         let none_json =

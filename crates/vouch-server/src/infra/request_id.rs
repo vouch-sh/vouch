@@ -14,8 +14,7 @@ use tower_http::request_id::{
 };
 use uuid::Uuid;
 
-static X_FAPI_INTERACTION_ID: HeaderName =
-    HeaderName::from_static("x-fapi-interaction-id");
+static X_FAPI_INTERACTION_ID: HeaderName = HeaderName::from_static("x-fapi-interaction-id");
 
 /// Generates UUID v7 request IDs (time-ordered).
 #[derive(Clone, Default)]

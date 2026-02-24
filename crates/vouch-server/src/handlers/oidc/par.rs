@@ -203,7 +203,11 @@ pub async fn par(
                 .into_response();
         }
         Err(e) => {
-            return par_error_response(StatusCode::BAD_REQUEST, "invalid_dpop_proof", &e.to_string());
+            return par_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_dpop_proof",
+                &e.to_string(),
+            );
         }
     };
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.as_str());

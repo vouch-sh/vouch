@@ -305,8 +305,7 @@ pub async fn authorize(
     let session_token = jar.get("vouch_session").map(|c| c.value());
 
     // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
-    let auth_code_lifetime =
-        crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
+    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
 
     // Check if we have a valid session
     match check_session_for_authorization(&state, session_token).await {
@@ -545,8 +544,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
     let session_token = jar.get("vouch_session").map(|c| c.value());
 
     // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
-    let auth_code_lifetime =
-        crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
+    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
 
     match check_session_for_authorization(state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
@@ -726,8 +724,7 @@ async fn handle_jar_request(
     let session_token = jar.get("vouch_session").map(|c| c.value());
 
     // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
-    let auth_code_lifetime =
-        crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
+    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
 
     // Check if we have a valid session
     match check_session_for_authorization(state, session_token).await {
@@ -967,8 +964,7 @@ async fn handle_par_request(
     let session_token = jar.get("vouch_session").map(|c| c.value());
 
     // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
-    let auth_code_lifetime =
-        crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
+    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
 
     // Check if we have a valid session
     match check_session_for_authorization(state, session_token).await {
@@ -1016,12 +1012,7 @@ async fn handle_par_request(
 
             if needs_reauth {
                 // Preserve DPoP key binding from PAR through the login redirect.
-                return store_pending_and_redirect(
-                    state,
-                    validated,
-                    par.dpop_jkt.as_deref(),
-                )
-                .await;
+                return store_pending_and_redirect(state, validated, par.dpop_jkt.as_deref()).await;
             }
 
             // RFC 9470: Validate requested ACR
