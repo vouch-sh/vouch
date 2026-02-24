@@ -21,6 +21,3 @@ CREATE TABLE IF NOT EXISTS pushed_authorization_requests (
     expires_at TIMESTAMPTZ NOT NULL,
     consumed_at TIMESTAMPTZ
 );
-
-CREATE INDEX IF NOT EXISTS idx_par_request_uri ON pushed_authorization_requests(request_uri);
-CREATE INDEX IF NOT EXISTS idx_par_expires_at ON pushed_authorization_requests(expires_at);
