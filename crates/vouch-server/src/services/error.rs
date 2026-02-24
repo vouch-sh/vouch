@@ -74,6 +74,19 @@ pub enum ServiceError {
         message: String,
     },
 
+    /// RFC 9470: Step-up authentication required.
+    ///
+    /// A resource server determines the current token's authentication is
+    /// insufficient (e.g., `auth_time` too old). The response includes a
+    /// `WWW-Authenticate` header with `error="insufficient_user_authentication"`.
+    #[error("step-up authentication required")]
+    StepUpRequired {
+        /// Requested authentication context class references.
+        acr_values: Option<String>,
+        /// Maximum authentication age in seconds.
+        max_age: Option<u64>,
+    },
+
     /// Database error.
     #[error("database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -118,6 +131,10 @@ pub enum OAuthErrorCode {
     UseDpopNonce,
     /// RFC 8707 Section 2: The target resource is invalid, unknown, or malformed.
     InvalidTarget,
+    /// RFC 9470 Section 3: Token authentication is insufficient (step-up required).
+    InsufficientUserAuthentication,
+    /// RFC 9470 Section 4: Authorization server cannot meet requested authentication requirements.
+    UnmetAuthenticationRequirements,
 }
 
 impl std::fmt::Display for OAuthErrorCode {
@@ -134,8 +151,10 @@ impl OAuthErrorCode {
             Self::InvalidRequest
             | Self::InvalidScope
             | Self::InvalidDpopProof
-            | Self::InvalidTarget => StatusCode::BAD_REQUEST,
+            | Self::InvalidTarget
+            | Self::UnmetAuthenticationRequirements => StatusCode::BAD_REQUEST,
             Self::InvalidClient | Self::UnauthorizedClient => StatusCode::UNAUTHORIZED,
+            Self::InsufficientUserAuthentication => StatusCode::UNAUTHORIZED,
             Self::InvalidGrant
             | Self::UnsupportedGrantType
             | Self::UnsupportedResponseType
@@ -168,6 +187,8 @@ impl OAuthErrorCode {
             Self::InvalidDpopProof => "invalid_dpop_proof",
             Self::UseDpopNonce => "use_dpop_nonce",
             Self::InvalidTarget => "invalid_target",
+            Self::InsufficientUserAuthentication => "insufficient_user_authentication",
+            Self::UnmetAuthenticationRequirements => "unmet_authentication_requirements",
         }
     }
 }
@@ -277,6 +298,16 @@ impl ServiceError {
                     error_uri: None,
                 }),
             ),
+            Self::StepUpRequired { .. } => (
+                StatusCode::UNAUTHORIZED,
+                Json(OAuthErrorResponse {
+                    error: OAuthErrorCode::InsufficientUserAuthentication
+                        .as_str()
+                        .to_string(),
+                    error_description: Some("A recent authentication is required".to_string()),
+                    error_uri: None,
+                }),
+            ),
             _ => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(OAuthErrorResponse {
@@ -368,6 +399,21 @@ impl ServiceError {
             .into_response()
     }
 
+    /// Build a `WWW-Authenticate` header value for RFC 9470 step-up challenges.
+    fn build_www_authenticate(acr_values: &Option<String>, max_age: &Option<u64>) -> String {
+        let mut parts = vec![
+            "Bearer error=\"insufficient_user_authentication\"".to_string(),
+            "error_description=\"A recent authentication is required\"".to_string(),
+        ];
+        if let Some(acr) = acr_values {
+            parts.push(format!("acr_values=\"{acr}\""));
+        }
+        if let Some(age) = max_age {
+            parts.push(format!("max_age=\"{age}\""));
+        }
+        parts.join(", ")
+    }
+
     /// Convert to a standard API error response.
     pub fn into_api_response(self) -> Response {
         let (status, message) = match &self {
@@ -382,6 +428,28 @@ impl ServiceError {
                 message,
             } => {
                 return (*status, Json(ApiError::new(code.clone(), message.clone())))
+                    .into_response();
+            }
+            Self::StepUpRequired {
+                acr_values,
+                max_age,
+            } => {
+                let www_auth = Self::build_www_authenticate(acr_values, max_age);
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    [(
+                        axum::http::header::WWW_AUTHENTICATE,
+                        axum::http::HeaderValue::from_str(&www_auth).unwrap_or_else(|_| {
+                            axum::http::HeaderValue::from_static(
+                                "Bearer error=\"insufficient_user_authentication\"",
+                            )
+                        }),
+                    )],
+                    Json(serde_json::json!({
+                        "error": "insufficient_user_authentication",
+                        "error_description": "A recent authentication is required",
+                    })),
+                )
                     .into_response();
             }
             Self::Database(_) | Self::Internal(_) => (
@@ -584,5 +652,106 @@ mod tests {
             }
             _ => panic!("Expected Scim error"),
         }
+    }
+
+    // =========================================================================
+    // RFC 9470 Step-Up Authentication Tests
+    // =========================================================================
+
+    #[test]
+    fn test_rfc9470_error_codes() {
+        assert_eq!(
+            OAuthErrorCode::InsufficientUserAuthentication.as_str(),
+            "insufficient_user_authentication"
+        );
+        assert_eq!(
+            OAuthErrorCode::UnmetAuthenticationRequirements.as_str(),
+            "unmet_authentication_requirements"
+        );
+    }
+
+    #[test]
+    fn test_rfc9470_error_status_codes() {
+        assert_eq!(
+            OAuthErrorCode::InsufficientUserAuthentication.status_code(),
+            StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            OAuthErrorCode::UnmetAuthenticationRequirements.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    /// Verify StepUpRequired produces a 401 with WWW-Authenticate header (RFC 9470 Section 3).
+    #[tokio::test]
+    async fn test_step_up_required_response_with_all_params() {
+        use axum::body::to_bytes;
+
+        let err = ServiceError::StepUpRequired {
+            acr_values: Some("urn:nist:authentication:assurance-level:aal3".to_string()),
+            max_age: Some(300),
+        };
+        let response = err.into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        // Check WWW-Authenticate header
+        let www_auth = response
+            .headers()
+            .get("www-authenticate")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(www_auth.contains("insufficient_user_authentication"));
+        assert!(www_auth.contains("acr_values=\"urn:nist:authentication:assurance-level:aal3\""));
+        assert!(www_auth.contains("max_age=\"300\""));
+
+        // Check body
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "insufficient_user_authentication");
+    }
+
+    /// Verify StepUpRequired with only max_age omits acr_values from header.
+    #[tokio::test]
+    async fn test_step_up_required_response_max_age_only() {
+        let err = ServiceError::StepUpRequired {
+            acr_values: None,
+            max_age: Some(60),
+        };
+        let response = err.into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let www_auth = response
+            .headers()
+            .get("www-authenticate")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(www_auth.contains("max_age=\"60\""));
+        assert!(!www_auth.contains("acr_values"));
+    }
+
+    /// Verify StepUpRequired with no params still produces correct header.
+    #[tokio::test]
+    async fn test_step_up_required_response_no_params() {
+        let err = ServiceError::StepUpRequired {
+            acr_values: None,
+            max_age: None,
+        };
+        let response = err.into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+
+        let www_auth = response
+            .headers()
+            .get("www-authenticate")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(www_auth.starts_with("Bearer error=\"insufficient_user_authentication\""));
+        assert!(!www_auth.contains("acr_values"));
+        assert!(!www_auth.contains("max_age"));
     }
 }

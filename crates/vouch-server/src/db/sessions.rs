@@ -47,6 +47,7 @@ pub struct Session {
     pub token_hash: String,
     pub authenticator_id: Option<String>,
     pub expires_at: DbTimestamp,
+    pub created_at: DbTimestamp,
     pub session_type: SessionPurpose,
 }
 
@@ -112,6 +113,7 @@ pub async fn get_session_by_token_hash(pool: &Pool, token_hash: &str) -> Result<
                 Sessions::TokenHash,
                 Sessions::AuthenticatorId,
                 Sessions::ExpiresAt,
+                Sessions::CreatedAt,
                 Sessions::SessionType,
             ])
             .from(Sessions::Table)

@@ -75,6 +75,7 @@ async fn test_rfc9700_client_id_matching_at_token_endpoint() {
             code_challenge: None,
             code_challenge_method: None,
             resource: None,
+            acr_values: None,
         },
     )
     .await
@@ -126,6 +127,7 @@ async fn test_rfc9700_redirect_uri_exact_match_at_token() {
             code_challenge: None,
             code_challenge_method: None,
             resource: None,
+            acr_values: None,
         },
     )
     .await
@@ -178,6 +180,7 @@ async fn test_rfc9700_redirect_uri_required_when_present_in_auth() {
             code_challenge: None,
             code_challenge_method: None,
             resource: None,
+            acr_values: None,
         },
     )
     .await
@@ -230,6 +233,7 @@ async fn test_rfc9700_authorization_code_single_use() {
             code_challenge: None,
             code_challenge_method: None,
             resource: None,
+            acr_values: None,
         },
     )
     .await

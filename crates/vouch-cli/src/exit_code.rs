@@ -24,6 +24,9 @@ pub const PERMISSION_DENIED: u8 = 5;
 /// Configuration error (missing or invalid config).
 pub const CONFIG_ERROR: u8 = 6;
 
+/// Step-up authentication required but failed (e.g., no YubiKey attached).
+pub const STEP_UP_REQUIRED: u8 = 7;
+
 /// Typed CLI errors that map directly to exit codes.
 ///
 /// Use these at error sites instead of ad-hoc `anyhow::bail!()` calls
@@ -57,6 +60,18 @@ pub enum CliError {
     /// Configuration is missing or invalid.
     #[error("{0}")]
     ConfigError(String),
+
+    /// RFC 9470: Step-up authentication required.
+    ///
+    /// Server returned `insufficient_user_authentication` in `WWW-Authenticate`.
+    /// The CLI should re-authenticate and retry the request.
+    #[error("step-up authentication required (max_age={max_age:?})")]
+    StepUpRequired {
+        /// Requested ACR values from the challenge.
+        acr_values: Option<String>,
+        /// Maximum authentication age in seconds.
+        max_age: Option<u64>,
+    },
 }
 
 /// Classify an `anyhow::Error` into an appropriate exit code.
@@ -74,6 +89,7 @@ pub fn classify(err: &anyhow::Error) -> ExitCode {
                 CliError::NetworkError(_) => ExitCode::from(NETWORK_ERROR),
                 CliError::PermissionDenied => ExitCode::from(PERMISSION_DENIED),
                 CliError::ConfigError(_) => ExitCode::from(CONFIG_ERROR),
+                CliError::StepUpRequired { .. } => ExitCode::from(STEP_UP_REQUIRED),
             };
         }
     }
@@ -280,5 +296,15 @@ mod tests {
         let err =
             anyhow::Error::new(CliError::NotAuthenticated).context("failed to get credentials");
         assert_eq!(code_value(classify(&err)), NOT_AUTHENTICATED);
+    }
+
+    #[test]
+    fn test_classify_cli_error_step_up_required() {
+        let err: anyhow::Error = CliError::StepUpRequired {
+            acr_values: None,
+            max_age: Some(300),
+        }
+        .into();
+        assert_eq!(code_value(classify(&err)), STEP_UP_REQUIRED);
     }
 }

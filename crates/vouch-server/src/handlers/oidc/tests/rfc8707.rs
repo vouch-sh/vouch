@@ -68,6 +68,7 @@ async fn test_rfc8707_resource_passthrough_authorize_to_token() {
             code_challenge: None,
             code_challenge_method: None,
             resource: Some(resource_uri),
+            acr_values: None,
         },
     )
     .await

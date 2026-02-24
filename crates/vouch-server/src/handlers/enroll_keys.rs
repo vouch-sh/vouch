@@ -5,6 +5,7 @@
 //! Authentication is via the vouch_session cookie.
 
 use crate::AppState;
+use crate::services::error::ServiceError;
 use crate::services::keys as key_svc;
 use axum::{
     Json,
@@ -77,24 +78,23 @@ pub async fn rename_key(
 /// Delete a security key (during enrollment).
 /// DELETE /enroll/keys/{id}
 /// Authentication is via vouch_session cookie.
+///
+/// Returns `ServiceError` directly (rather than the tuple format used by other
+/// enroll_keys handlers) so that `StepUpRequired` can emit a `WWW-Authenticate`
+/// header via `ServiceError::into_api_response()`.
 pub async fn delete_key(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(key_id): Path<String>,
-) -> Result<Json<DeleteKeyResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<DeleteKeyResponse>, ServiceError> {
     let session = extract_session_from_cookie(&state, &jar)
         .await
-        .map_err(|_| {
-            json_error(
-                StatusCode::UNAUTHORIZED,
-                "invalid_session",
-                "Invalid or expired session",
-            )
-        })?;
+        .map_err(|_| ServiceError::Unauthorized("Invalid or expired session"))?;
 
-    let (key_name, sessions_revoked) = key_svc::delete_key(&state.db, &session.claims.sub, &key_id)
-        .await
-        .map_err(into_handler_error)?;
+    key_svc::require_fresh_session(&session.claims, key_svc::KEY_DELETE_MAX_AGE_SECS)?;
+
+    let (key_name, sessions_revoked) =
+        key_svc::delete_key(&state.db, &session.claims.sub, &key_id).await?;
 
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),

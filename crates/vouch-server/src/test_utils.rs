@@ -438,6 +438,11 @@ pub async fn http_delete(
     http_request(app, "DELETE", uri, None, headers).await
 }
 
+/// Helper for making DELETE requests that returns full response including headers.
+pub async fn http_delete_full(app: &Router, uri: &str, headers: &[(&str, &str)]) -> HttpResponse {
+    http_request_full(app, "DELETE", uri, None, headers).await
+}
+
 /// Create a valid test JWT session token.
 pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: &str) -> String {
     use jiff::{Span, Timestamp};
@@ -468,6 +473,85 @@ pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: 
         &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
     )
     .expect("Failed to encode test token")
+}
+
+/// Create a test JWT session token with a custom `iat` timestamp.
+///
+/// Used for step-up authentication tests (RFC 9470) where the session age
+/// relative to `iat` determines whether the operation is allowed.
+pub fn create_test_token_with_iat(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+    auth_id: &str,
+    iat: i64,
+) -> String {
+    use jsonwebtoken::{EncodingKey, encode};
+
+    let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
+    let exp = iat + session_hours * 3600;
+
+    let base_url = state.config().base_url.clone();
+    let claims = crate::services::auth::SessionClaims {
+        iss: base_url.clone(),
+        aud: base_url,
+        sub: user_id.to_string(),
+        email: email.to_string(),
+        authenticator_id: Some(auth_id.to_string()),
+        iat,
+        exp,
+        purpose: crate::db::SessionPurpose::Fido2Session,
+        scope: None,
+    };
+
+    encode(
+        &crate::crypto::jwt::JwtType::Session.to_header(),
+        &claims,
+        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
+    )
+    .expect("Failed to encode test token")
+}
+
+/// Create a test session with a custom `iat` timestamp stored in the database.
+///
+/// Like `create_test_session`, but accepts a custom `iat` value for testing
+/// step-up authentication (RFC 9470) where the session must be fresh.
+pub async fn create_test_session_with_iat(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+    auth_id: &str,
+    iat: i64,
+) -> String {
+    use aws_lc_rs::digest::{self, SHA256};
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use jiff::Timestamp;
+
+    let token = create_test_token_with_iat(state, user_id, email, auth_id, iat);
+
+    // Hash the token for database storage
+    let hash = digest::digest(&SHA256, token.as_bytes());
+    let token_hash = URL_SAFE_NO_PAD.encode(hash.as_ref());
+
+    // Calculate expiration from iat
+    let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
+    let expires_ts = iat + session_hours * 3600;
+    let expires = Timestamp::from_second(expires_ts).unwrap_or_else(|_| Timestamp::now());
+
+    // Store session in database
+    crate::db::create_session(
+        &state.db,
+        user_id,
+        &token_hash,
+        Some(auth_id),
+        &expires.to_string(),
+        crate::db::SessionPurpose::Fido2Session,
+    )
+    .await
+    .expect("Failed to create session");
+
+    token
 }
 
 /// Create an expired test JWT session token.

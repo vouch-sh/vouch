@@ -29,4 +29,5 @@ mod rfc8725;
 mod rfc9068;
 mod rfc9207;
 mod rfc9449;
+mod rfc9470;
 mod rfc9700;

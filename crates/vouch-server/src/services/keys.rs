@@ -6,8 +6,35 @@
 //! key handlers (cookie-based auth).
 
 use crate::db::{self, Pool};
+use crate::services::auth::SessionClaims;
 use crate::services::error::ServiceError;
 use vouch_common::{KeyInfo, lookup_device_model};
+
+/// Maximum session age (in seconds) for destructive key operations.
+pub const KEY_DELETE_MAX_AGE_SECS: i64 = 60;
+
+/// Require the session to have been created within `max_age_secs` seconds.
+///
+/// Returns `ServiceError::StepUpRequired` if the session is too old.
+///
+/// # Errors
+///
+/// Returns `ServiceError::StepUpRequired` when the session's `iat` claim
+/// is older than the specified `max_age_secs`.
+pub fn require_fresh_session(
+    claims: &SessionClaims,
+    max_age_secs: i64,
+) -> Result<(), ServiceError> {
+    let now = jiff::Timestamp::now().as_second();
+    let session_age = now.saturating_sub(claims.iat);
+    if session_age > max_age_secs {
+        return Err(ServiceError::StepUpRequired {
+            acr_values: None,
+            max_age: Some(u64::try_from(max_age_secs).unwrap_or(60)),
+        });
+    }
+    Ok(())
+}
 
 /// List all registered keys for a user.
 ///
@@ -179,4 +206,64 @@ pub async fn delete_key(
     tracing::info!("Deleted key {key_id} for user {user_id}, revoked {sessions} sessions");
 
     Ok((authenticator.name, sessions))
+}
+
+#[cfg(test)]
+#[allow(clippy::panic, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use crate::db::SessionPurpose;
+
+    fn make_claims(iat: i64) -> SessionClaims {
+        SessionClaims {
+            iss: "https://test.example.com".to_string(),
+            aud: "https://test.example.com".to_string(),
+            sub: "user-1".to_string(),
+            email: "test@example.com".to_string(),
+            authenticator_id: Some("auth-1".to_string()),
+            iat,
+            exp: iat + 28800,
+            purpose: SessionPurpose::Fido2Session,
+            scope: None,
+        }
+    }
+
+    #[test]
+    fn test_require_fresh_session_passes_for_fresh() {
+        let now = jiff::Timestamp::now().as_second();
+        let claims = make_claims(now - 5); // 5 seconds old
+        assert!(require_fresh_session(&claims, 60).is_ok());
+    }
+
+    #[test]
+    fn test_require_fresh_session_fails_for_stale() {
+        let now = jiff::Timestamp::now().as_second();
+        let claims = make_claims(now - 120); // 2 minutes old
+        let err = require_fresh_session(&claims, 60).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                ServiceError::StepUpRequired {
+                    max_age: Some(60),
+                    ..
+                }
+            ),
+            "Expected StepUpRequired, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_require_fresh_session_boundary_exactly_at_max_age() {
+        let now = jiff::Timestamp::now().as_second();
+        let claims = make_claims(now - 60); // Exactly 60 seconds old
+        // Session age == max_age is NOT > max_age, so it should pass
+        assert!(require_fresh_session(&claims, 60).is_ok());
+    }
+
+    #[test]
+    fn test_require_fresh_session_just_over_max_age() {
+        let now = jiff::Timestamp::now().as_second();
+        let claims = make_claims(now - 61); // 61 seconds old
+        assert!(require_fresh_session(&claims, 60).is_err());
+    }
 }

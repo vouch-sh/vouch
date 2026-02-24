@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Key management commands - list, rename, and remove registered security keys.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use clap::Subcommand;
 use inquire::{
     Confirm, Select,
@@ -12,6 +12,7 @@ use vouch_common::{
 };
 
 use crate::client::VouchClient;
+use crate::exit_code::CliError;
 
 /// Keys subcommands.
 #[derive(Subcommand)]
@@ -86,7 +87,7 @@ pub async fn interactive(server: &str) -> Result<()> {
                     && let Some(key) = response.keys.get(idx)
                 {
                     // Show action menu for selected key
-                    if !handle_key_action(&client, key).await? {
+                    if !handle_key_action(server, &client, key).await? {
                         return Ok(());
                     }
                 }
@@ -108,7 +109,7 @@ pub async fn interactive(server: &str) -> Result<()> {
 
 /// Handle action on a selected key.
 /// Returns false if we should exit the interactive loop.
-async fn handle_key_action(client: &VouchClient, key: &KeyInfo) -> Result<bool> {
+async fn handle_key_action(server: &str, client: &VouchClient, key: &KeyInfo) -> Result<bool> {
     let current_marker = if key.is_current_session {
         " (current session)"
     } else {
@@ -124,7 +125,7 @@ async fn handle_key_action(client: &VouchClient, key: &KeyInfo) -> Result<bool> 
 
     match selection {
         Ok("Delete this key") => {
-            delete_key_interactive(client, key).await?;
+            delete_key_interactive(server, client, key).await?;
             Ok(true) // Continue loop to refresh list
         }
         Ok("Quit") => Ok(false),
@@ -139,7 +140,7 @@ async fn handle_key_action(client: &VouchClient, key: &KeyInfo) -> Result<bool> 
 }
 
 /// Delete a key with confirmation.
-async fn delete_key_interactive(client: &VouchClient, key: &KeyInfo) -> Result<()> {
+async fn delete_key_interactive(server: &str, client: &VouchClient, key: &KeyInfo) -> Result<()> {
     let warning = if key.is_current_session {
         "\nWARNING: This is the key used for your current session. Your session will be invalidated."
     } else {
@@ -155,9 +156,7 @@ async fn delete_key_interactive(client: &VouchClient, key: &KeyInfo) -> Result<(
 
     match confirmed {
         Ok(true) => {
-            let response: DeleteKeyResponse = client
-                .delete_authenticated(&format!("/v1/keys/{}", key.id))
-                .await?;
+            let response = delete_with_step_up(server, client, &key.id).await?;
 
             println!("\n{}", response.message);
             if response.sessions_revoked > 0 {
@@ -177,6 +176,40 @@ async fn delete_key_interactive(client: &VouchClient, key: &KeyInfo) -> Result<(
     }
 
     Ok(())
+}
+
+/// Attempt to delete a key, handling step-up authentication if required.
+///
+/// If the server returns a step-up challenge (RFC 9470), prompts the user to
+/// re-authenticate via FIDO2, then retries the delete with a fresh session.
+async fn delete_with_step_up(
+    server: &str,
+    client: &VouchClient,
+    key_id: &str,
+) -> Result<DeleteKeyResponse> {
+    match client
+        .delete_authenticated::<DeleteKeyResponse>(&format!("/v1/keys/{key_id}"))
+        .await
+    {
+        Ok(resp) => Ok(resp),
+        Err(e) => {
+            if let Some(cli_err) = e.downcast_ref::<CliError>()
+                && matches!(cli_err, CliError::StepUpRequired { .. })
+            {
+                println!("\nFresh authentication required to delete a key.");
+                crate::commands::login::run(server, 30)
+                    .await
+                    .context("step-up re-authentication failed")?;
+
+                let fresh_client = VouchClient::new(server).await?;
+                Ok(fresh_client
+                    .delete_authenticated(&format!("/v1/keys/{key_id}"))
+                    .await?)
+            } else {
+                Err(e)
+            }
+        }
+    }
 }
 
 /// Format a key for display in the interactive menu.
@@ -270,10 +303,8 @@ pub async fn remove(server: &str, key_id: &str, force: bool) -> Result<()> {
         }
     }
 
-    // Delete the key
-    let response: DeleteKeyResponse = client
-        .delete_authenticated(&format!("/v1/keys/{key_id}"))
-        .await?;
+    // Delete the key (with step-up re-authentication if required)
+    let response = delete_with_step_up(server, &client, key_id).await?;
 
     println!("{}", response.message);
     if response.sessions_revoked > 0 {
