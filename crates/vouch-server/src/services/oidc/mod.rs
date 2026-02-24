@@ -13,6 +13,8 @@
 //! - [RFC 7662 - Token Introspection](https://www.rfc-editor.org/rfc/rfc7662)
 //! - [RFC 8628 - Device Authorization Grant](https://www.rfc-editor.org/rfc/rfc8628)
 //! - [RFC 8693 - Token Exchange](https://www.rfc-editor.org/rfc/rfc8693)
+//! - [RFC 7521 - Assertion Framework](https://www.rfc-editor.org/rfc/rfc7521)
+//! - [RFC 7523 - JWT Profile for Client Auth and Authorization Grants](https://www.rfc-editor.org/rfc/rfc7523)
 //! - [RFC 9068 - JWT Profile for OAuth 2.0 Access Tokens](https://www.rfc-editor.org/rfc/rfc9068)
 //! - [RFC 9449 - DPoP](https://www.rfc-editor.org/rfc/rfc9449)
 //!
@@ -23,6 +25,7 @@
 //! - [`authorization`] - Authorization code issuance and validation
 //! - [`token`] - Token endpoint logic (auth code, device code grants)
 //! - [`exchange`] - Token exchange (RFC 8693)
+//! - [`jwt_bearer`] - JWT client authentication and bearer grants (RFC 7523)
 //! - [`introspection`] - Token introspection and revocation
 
 pub mod amr;

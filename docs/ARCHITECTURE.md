@@ -224,6 +224,8 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - OAuth 2.0 Token Revocation (RFC 7009)
 - OAuth 2.0 Token Introspection (RFC 7662)
 - OAuth 2.0 Token Exchange (RFC 8693)
+- Assertion Framework for OAuth 2.0 (RFC 7521)
+- JWT Profile for OAuth 2.0 Client Authentication and Authorization Grants (RFC 7523)
 - Authentication Method Reference Values (RFC 8176)
 - JWT Best Current Practices (RFC 8725) — explicit `typ` headers, issuer/audience validation
 - JWT Profile for OAuth 2.0 Access Tokens (RFC 9068) — including `amr`/`acr` claims
@@ -239,6 +241,7 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 | `authorization_code` (with PKCE) | Web and native applications |
 | `urn:ietf:params:oauth:grant-type:device_code` | CLI tools, headless devices (RFC 8628) |
 | `urn:ietf:params:oauth:grant-type:token-exchange` | Service-to-service delegation (RFC 8693) |
+| `urn:ietf:params:oauth:grant-type:jwt-bearer` | Machine-to-machine, federated service auth (RFC 7523) |
 
 **Supported Scopes:**
 | Scope | Claims Returned |
@@ -254,12 +257,13 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 | `client_secret_basic` | HTTP Basic Auth with client_id:client_secret |
 | `client_secret_post` | client_id and client_secret in request body |
 | `none` | Public clients (native apps with PKCE) |
+| `private_key_jwt` | JWT assertion signed with client's private key (RFC 7523) |
 
 **Standard OIDC Endpoints:**
 - `GET /.well-known/openid-configuration` — Discovery document (RFC 8414)
 - `GET /oauth/jwks` — Public keys for token verification (RFC 7517)
 - `GET /oauth/authorize` — Authorization endpoint
-- `POST /oauth/token` — Token issuance (device code, authorization code, token exchange)
+- `POST /oauth/token` — Token issuance (device code, authorization code, token exchange, JWT bearer)
 - `POST /oauth/revoke` — Token revocation (RFC 7009)
 - `POST /oauth/introspect` — Token introspection (RFC 7662)
 - `GET /oauth/userinfo` — User info endpoint
@@ -301,6 +305,58 @@ When a client includes the `resource` parameter in the authorization request, th
 - A single `resource` value per request is supported
 - The `resource` parameter can be included at authorization time and optionally repeated at token exchange time (it cannot be widened, only confirmed)
 - Discovery metadata advertises `resource_indicators_supported: true`
+
+**JWT Profile (RFC 7523):**
+
+Vouch implements two capabilities from RFC 7523 (built on the assertion framework of RFC 7521):
+
+**JWT Bearer Authorization Grant** — External services exchange a signed JWT assertion for a Vouch access token, enabling machine-to-machine authentication without browser-based flows.
+
+Token endpoint request:
+```
+POST /oauth/token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=urn:ietf:params:oauth:grant-type:jwt-bearer
+&assertion=eyJhbGciOiJFUzI1NiIs...
+&scope=openid email
+```
+
+JWT assertion claim requirements:
+- `iss` — Issuer (must match a configured trusted issuer)
+- `sub` — Subject (mapped to a Vouch user via trusted issuer configuration)
+- `aud` — Audience (must be the Vouch token endpoint URL)
+- `exp` — Expiration (must not exceed the trusted issuer's max lifetime)
+- `iat` — Issued at
+- `jti` — Unique token ID (for replay prevention)
+
+Trusted issuers are configured per-organization with: issuer URL, JWKS URI for signature verification, subject-to-user mapping rules, allowed scopes, and maximum assertion lifetime.
+
+Example response:
+```json
+{
+  "access_token": "eyJhbGciOiJFUzI1NiIs...",
+  "token_type": "Bearer",
+  "expires_in": 28800
+}
+```
+
+**JWT Client Authentication (`private_key_jwt`)** — OAuth clients authenticate at the token endpoint using a signed JWT assertion instead of a shared client secret. This is used in combination with other grant types (e.g., authorization code, token exchange).
+
+Request format:
+```
+client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
+&client_assertion=eyJhbGciOiJFUzI1NiIs...
+```
+
+JWT requirements: `iss` and `sub` must equal the `client_id`, `aud` must be the token endpoint URL. Clients configure their public keys via inline `jwks` or a `jwks_uri` on the client registration.
+
+**Security:**
+- Only ES256 and RS256 algorithms are accepted (no HMAC, no `none`)
+- JTI-based replay prevention with server-side tracking
+- JWKS responses are cached (1-hour TTL, 24-hour maximum staleness)
+- JWKS URIs must use HTTPS
+- Maximum assertion lifetime enforced per trusted issuer configuration
 
 **Why OIDC:**
 - Standard protocol, works with any language/framework

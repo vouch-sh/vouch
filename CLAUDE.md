@@ -286,6 +286,8 @@ Before implementing a feature:
 - [RFC 8414 - OAuth 2.0 Authorization Server Metadata](https://www.rfc-editor.org/rfc/rfc8414)
 - [RFC 8628 - Device Authorization Grant](https://www.rfc-editor.org/rfc/rfc8628)
 - [RFC 8693 - Token Exchange](https://www.rfc-editor.org/rfc/rfc8693)
+- [RFC 7521 - Assertion Framework for OAuth 2.0](https://www.rfc-editor.org/rfc/rfc7521)
+- [RFC 7523 - JWT Profile for OAuth 2.0 Client Authentication and Authorization Grants](https://www.rfc-editor.org/rfc/rfc7523)
 - [RFC 8707 - Resource Indicators for OAuth 2.0](https://www.rfc-editor.org/rfc/rfc8707)
 - [RFC 8725 - JWT Best Current Practices](https://www.rfc-editor.org/rfc/rfc8725)
 - [RFC 9068 - JWT Profile for OAuth 2.0 Access Tokens](https://www.rfc-editor.org/rfc/rfc9068)
