@@ -99,9 +99,8 @@ pub async fn userinfo(
             token,
             method.as_str(),
             &full_uri,
-            &state.dpop,
+            &state.db,
             state.config().dpop_max_age_seconds,
-            state.config().dpop_nonce_required,
         )
         .await
         {

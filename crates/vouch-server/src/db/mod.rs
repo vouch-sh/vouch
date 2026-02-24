@@ -17,6 +17,7 @@ mod authorization_codes;
 mod config;
 mod credentials;
 mod device_auth;
+mod dpop;
 pub mod dsql;
 mod enrollment;
 mod github;
@@ -118,6 +119,12 @@ pub use jwt_issuer::{
     TrustedJwtIssuer, create_trusted_jwt_issuer, delete_trusted_jwt_issuer,
     get_trusted_jwt_issuer_by_issuer, list_trusted_jwt_issuers, update_issuer_jwks_cache,
     update_trusted_jwt_issuer,
+};
+
+// Re-export DPoP types and functions (RFC 9449)
+pub use dpop::{
+    check_and_store_dpop_jti, delete_expired_dpop_jtis, delete_expired_dpop_nonces,
+    generate_dpop_nonce, validate_and_consume_dpop_nonce,
 };
 
 // Re-export credentials types and functions

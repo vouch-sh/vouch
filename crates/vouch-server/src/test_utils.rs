@@ -28,7 +28,6 @@ use crate::AppState;
 use crate::config::ServerConfig;
 use crate::handlers;
 use crate::services::oidc::OidcSigningKey;
-use crate::services::oidc::dpop::DpopState;
 
 /// Create an in-memory SQLite database with migrations for testing.
 pub async fn test_db() -> Pool {
@@ -74,7 +73,6 @@ pub fn test_config() -> ServerConfig {
         ssh_ca_key_path: None,
         ssh_ca_key: None,
         oidc_signing_key: None,
-        dpop_nonce_required: false,
         dpop_max_age_seconds: 300,
         cleanup_interval_minutes: 0, // Disabled for tests
         auth_events_retention_days: 90,
@@ -116,7 +114,6 @@ pub async fn test_app_state() -> Arc<AppState> {
         config: Arc::new(ArcSwap::from_pointee(config)),
         webauthn,
         ssh_ca: None,
-        dpop: Arc::new(DpopState::new()),
         oidc_key,
         github_app: None,
         http_client: reqwest::Client::new(),

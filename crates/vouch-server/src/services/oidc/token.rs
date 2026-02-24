@@ -622,9 +622,8 @@ pub async fn validate_dpop_if_present(
         dpop_proof,
         method,
         &full_uri,
-        &state.dpop,
+        &state.db,
         state.config().dpop_max_age_seconds,
-        state.config().dpop_nonce_required,
     )
     .await
     {

@@ -382,6 +382,25 @@ pub enum JwtAssertionJtis {
     ExpiresAt,
 }
 
+/// DPoP nonces table (RFC 9449).
+#[derive(Iden)]
+pub enum DpopNonces {
+    Table,
+    Id,
+    Nonce,
+    CreatedAt,
+    ExpiresAt,
+}
+
+/// DPoP JTI cache table (RFC 9449 replay prevention).
+#[derive(Iden)]
+pub enum DpopJtiCache {
+    Table,
+    Jti,
+    CreatedAt,
+    ExpiresAt,
+}
+
 /// Trusted JWT issuers for RFC 7523 authorization grants.
 #[derive(Iden)]
 pub enum TrustedJwtIssuers {

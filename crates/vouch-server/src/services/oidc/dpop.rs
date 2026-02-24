@@ -10,14 +10,16 @@
 //! - Token Binding: Access tokens include `cnf` claim with JWK thumbprint
 
 use aws_lc_rs::digest::{self, SHA256};
-use aws_lc_rs::rand as aws_rand;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use jiff::{Timestamp, ToSpan};
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use subtle::ConstantTimeEq;
-use tokio::sync::RwLock;
+
+use crate::db::{self, Pool};
+
+/// Nonce validity in seconds (5 minutes).
+const NONCE_VALIDITY_SECONDS: i64 = 300;
 
 /// Supported DPoP signing algorithms (asymmetric only per RFC 9449).
 pub const SUPPORTED_ALGORITHMS: &[&str] = &["ES256", "RS256", "EdDSA"];
@@ -203,161 +205,6 @@ pub struct ValidatedDpopProof {
     pub jti: String,
 }
 
-/// Maximum number of entries in the nonce manager before rejecting new nonces.
-const MAX_NONCE_ENTRIES: usize = 100_000;
-
-/// Maximum number of entries in the JTI cache before rejecting new JTIs.
-const MAX_JTI_ENTRIES: usize = 100_000;
-
-/// DPoP nonce manager for server-provided nonces.
-pub struct DpopNonceManager {
-    /// Active nonces (nonce -> expiration).
-    nonces: HashMap<String, Timestamp>,
-    /// Nonce validity duration.
-    validity_seconds: i64,
-}
-
-impl DpopNonceManager {
-    /// Create a new nonce manager.
-    pub fn new(validity_seconds: i64) -> Self {
-        Self {
-            nonces: HashMap::new(),
-            validity_seconds,
-        }
-    }
-
-    /// Generate a new nonce.
-    ///
-    /// Returns `None` if the RNG fails or if the cache is at capacity
-    /// after cleanup.
-    pub fn generate_nonce(&mut self) -> Option<String> {
-        // Periodically clean up expired entries
-        self.cleanup();
-
-        // Reject if still at capacity after cleanup
-        if self.nonces.len() >= MAX_NONCE_ENTRIES {
-            return None;
-        }
-
-        let nonce = generate_random_string(32)?;
-        let expires_at = Timestamp::now()
-            .checked_add(self.validity_seconds.seconds())
-            .unwrap_or_else(|_| Timestamp::now());
-        self.nonces.insert(nonce.clone(), expires_at);
-        Some(nonce)
-    }
-
-    /// Validate and consume a nonce.
-    pub fn validate_nonce(&mut self, nonce: &str) -> bool {
-        if let Some(expires_at) = self.nonces.remove(nonce) {
-            Timestamp::now() < expires_at
-        } else {
-            false
-        }
-    }
-
-    /// Clean up expired nonces.
-    pub fn cleanup(&mut self) {
-        let now = Timestamp::now();
-        self.nonces.retain(|_, expires_at| *expires_at > now);
-    }
-}
-
-impl Default for DpopNonceManager {
-    fn default() -> Self {
-        Self::new(300) // 5 minutes default
-    }
-}
-
-/// JTI cache for replay prevention.
-pub struct JtiCache {
-    /// Recently used JTIs (jti -> expiration).
-    jtis: HashMap<String, Timestamp>,
-    /// JTI validity duration (how long to remember).
-    validity_seconds: i64,
-}
-
-impl JtiCache {
-    /// Create a new JTI cache.
-    pub fn new(validity_seconds: i64) -> Self {
-        Self {
-            jtis: HashMap::new(),
-            validity_seconds,
-        }
-    }
-
-    /// Check if a JTI has been seen before and record it.
-    ///
-    /// Returns `true` if this is a new JTI, `false` if it's a replay
-    /// or if the cache is at capacity.
-    pub fn check_and_record(&mut self, jti: &str) -> bool {
-        let now = Timestamp::now();
-
-        // Clean up expired entries
-        self.jtis.retain(|_, expires_at| *expires_at > now);
-
-        // Check if already seen
-        if self.jtis.contains_key(jti) {
-            return false;
-        }
-
-        // Reject if at capacity after cleanup
-        if self.jtis.len() >= MAX_JTI_ENTRIES {
-            return false;
-        }
-
-        // Record the new JTI
-        let expires_at = now
-            .checked_add(self.validity_seconds.seconds())
-            .unwrap_or(now);
-        self.jtis.insert(jti.to_string(), expires_at);
-
-        true
-    }
-}
-
-impl Default for JtiCache {
-    fn default() -> Self {
-        Self::new(300) // 5 minutes default
-    }
-}
-
-/// Thread-safe DPoP state.
-///
-/// Since `AppState.dpop` wraps this in `Arc<DpopState>`, the inner fields
-/// only need `RwLock` — no redundant `Arc` wrapping.
-pub struct DpopState {
-    /// Nonce manager.
-    pub nonce_manager: RwLock<DpopNonceManager>,
-    /// JTI cache.
-    pub jti_cache: RwLock<JtiCache>,
-}
-
-impl DpopState {
-    /// Create new DPoP state.
-    pub fn new() -> Self {
-        Self {
-            nonce_manager: RwLock::new(DpopNonceManager::default()),
-            jti_cache: RwLock::new(JtiCache::default()),
-        }
-    }
-}
-
-impl Default for DpopState {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Generate a random URL-safe string.
-///
-/// Returns `None` if the system RNG fails.
-fn generate_random_string(len: usize) -> Option<String> {
-    let mut bytes = vec![0u8; len];
-    aws_rand::fill(&mut bytes).ok()?;
-    Some(URL_SAFE_NO_PAD.encode(&bytes))
-}
-
 /// Compute the access token hash (`ath`) for DPoP (RFC 9449 Section 4.2).
 ///
 /// The hash is the base64url-encoded SHA-256 hash of the ASCII access token.
@@ -448,7 +295,6 @@ pub fn validate_dpop_claims(
     expected_method: &str,
     expected_uri: &str,
     max_age_seconds: i64,
-    require_nonce: bool,
     expected_nonce: Option<&str>,
     expected_ath: Option<&str>,
 ) -> Result<(), DpopError> {
@@ -478,9 +324,9 @@ pub fn validate_dpop_claims(
 
     // RFC 9449 Section 5.1: Nonce validation.
     // When `expected_nonce` is Some, validate inline with constant-time comparison.
-    // When `expected_nonce` is None (callers use the nonce manager instead), skip
+    // When `expected_nonce` is None (callers use the database instead), skip
     // the inline check here. Callers handle missing nonce before calling this
-    // function and validate provided nonces via the nonce manager afterward.
+    // function and validate provided nonces via the database afterward.
     if let Some(expected) = expected_nonce {
         match &claims.nonce {
             Some(proof_nonce) => {
@@ -491,9 +337,6 @@ pub fn validate_dpop_claims(
             }
             None => return Err(DpopError::InvalidNonce),
         }
-    } else if require_nonce && claims.nonce.is_none() {
-        // Nonce is required but not provided and caller didn't handle it
-        return Err(DpopError::InvalidNonce);
     }
 
     // Check access token hash if provided (constant-time comparison for defense-in-depth)
@@ -570,56 +413,59 @@ fn build_decoding_key(jwk: &DpopJwk, alg: &str) -> Result<jsonwebtoken::Decoding
 /// Shared DPoP validation logic for both token and resource endpoints.
 ///
 /// Handles: signature verification, JTI replay check, nonce requirement,
-/// claims validation, nonce manager validation, and thumbprint extraction.
+/// claims validation, nonce validation, and thumbprint extraction.
+///
+/// All state (nonces and JTIs) is persisted in the database for
+/// multi-instance consistency.
 async fn validate_dpop_common(
     proof: &str,
     expected_method: &str,
     expected_uri: &str,
-    dpop_state: &DpopState,
+    pool: &Pool,
     config_max_age: i64,
-    require_nonce: bool,
     expected_ath: Option<&str>,
 ) -> Result<ValidatedDpopProof, DpopError> {
     // Parse header, verify signature, and extract claims in a single pass
     let (header, claims) = parse_and_verify_dpop_proof(proof)?;
 
-    // Check for replay (JTI must be unique)
-    {
-        let mut jti_cache = dpop_state.jti_cache.write().await;
-        if !jti_cache.check_and_record(&claims.jti) {
-            return Err(DpopError::ReplayDetected);
-        }
+    // Check for replay (JTI must be unique) — atomic INSERT on PRIMARY KEY
+    let is_new = db::check_and_store_dpop_jti(pool, &claims.jti, config_max_age)
+        .await
+        .map_err(|e| DpopError::InvalidFormat(format!("JTI check failed: {e}")))?;
+    if !is_new {
+        return Err(DpopError::ReplayDetected);
     }
 
-    // Nonce requirement check: generate a nonce if required but not provided
-    if require_nonce && claims.nonce.is_none() {
-        let mut nonce_manager = dpop_state.nonce_manager.write().await;
-        let new_nonce = nonce_manager
-            .generate_nonce()
-            .ok_or_else(|| DpopError::InvalidFormat("nonce generation failed".to_string()))?;
+    // Nonce requirement: always require nonces per RFC 9449 Section 8
+    if claims.nonce.is_none() {
+        let new_nonce = db::generate_dpop_nonce(pool, NONCE_VALIDITY_SECONDS)
+            .await
+            .map_err(|e| DpopError::InvalidFormat(format!("nonce generation failed: {e}")))?;
         return Err(DpopError::UseNonce(new_nonce));
     }
 
     // Validate claims (method, URI, timestamp, nonce inline, ath)
     // Pass None for expected_nonce to skip redundant self-comparison;
-    // nonce manager validation happens below.
+    // database nonce validation happens below.
     validate_dpop_claims(
         &claims,
         expected_method,
         expected_uri,
         config_max_age,
-        require_nonce,
         None,
         expected_ath,
     )?;
 
-    // Validate nonce via nonce manager if provided
-    if let Some(nonce) = &claims.nonce {
-        let mut nonce_manager = dpop_state.nonce_manager.write().await;
-        if !nonce_manager.validate_nonce(nonce) {
-            let new_nonce = nonce_manager
-                .generate_nonce()
-                .ok_or_else(|| DpopError::InvalidFormat("nonce generation failed".to_string()))?;
+    // Validate nonce via database if provided — atomic DELETE WHERE nonce=? AND expires_at > now
+    if claims.nonce.is_some() {
+        let nonce = claims.nonce.as_deref().unwrap_or("");
+        let valid = db::validate_and_consume_dpop_nonce(pool, nonce)
+            .await
+            .map_err(|e| DpopError::InvalidFormat(format!("nonce validation failed: {e}")))?;
+        if !valid {
+            let new_nonce = db::generate_dpop_nonce(pool, NONCE_VALIDITY_SECONDS)
+                .await
+                .map_err(|e| DpopError::InvalidFormat(format!("nonce generation failed: {e}")))?;
             return Err(DpopError::UseNonce(new_nonce));
         }
     }
@@ -642,17 +488,15 @@ pub async fn validate_dpop_proof(
     proof: &str,
     expected_method: &str,
     expected_uri: &str,
-    dpop_state: &DpopState,
+    pool: &Pool,
     config_max_age: i64,
-    require_nonce: bool,
 ) -> Result<ValidatedDpopProof, DpopError> {
     validate_dpop_common(
         proof,
         expected_method,
         expected_uri,
-        dpop_state,
+        pool,
         config_max_age,
-        require_nonce,
         None, // No access token hash for token endpoint
     )
     .await
@@ -669,26 +513,23 @@ pub async fn validate_dpop_proof(
 /// * `access_token` - The access token from the `Authorization: DPoP` header
 /// * `method` - HTTP method of the request
 /// * `uri` - Full request URI
-/// * `dpop_state` - DPoP state for JTI and nonce management
+/// * `pool` - Database pool for nonce and JTI persistence
 /// * `config_max_age` - Maximum allowed proof age in seconds
-/// * `require_nonce` - Whether server-provided nonces are required
 pub async fn validate_dpop_at_resource(
     proof: &str,
     access_token: &str,
     method: &str,
     uri: &str,
-    dpop_state: &DpopState,
+    pool: &Pool,
     config_max_age: i64,
-    require_nonce: bool,
 ) -> Result<ValidatedDpopProof, DpopError> {
     let expected_ath = compute_access_token_hash(access_token);
     validate_dpop_common(
         proof,
         method,
         uri,
-        dpop_state,
+        pool,
         config_max_age,
-        require_nonce,
         Some(&expected_ath),
     )
     .await
@@ -713,34 +554,6 @@ mod tests {
         assert!(!thumbprint.is_empty());
         // Thumbprint should be base64url encoded SHA-256 (43 chars)
         assert_eq!(thumbprint.len(), 43);
-    }
-
-    #[test]
-    fn test_jti_cache() {
-        let mut cache = JtiCache::new(300);
-
-        // First use should succeed
-        assert!(cache.check_and_record("test-jti-1"));
-
-        // Replay should fail
-        assert!(!cache.check_and_record("test-jti-1"));
-
-        // Different JTI should succeed
-        assert!(cache.check_and_record("test-jti-2"));
-    }
-
-    #[test]
-    fn test_nonce_manager() {
-        let mut manager = DpopNonceManager::new(300);
-
-        let nonce = manager.generate_nonce().expect("should generate nonce");
-        assert!(!nonce.is_empty());
-
-        // Validate should succeed and consume
-        assert!(manager.validate_nonce(&nonce));
-
-        // Second validation should fail (consumed)
-        assert!(!manager.validate_nonce(&nonce));
     }
 
     #[test]
