@@ -28,7 +28,6 @@ use crate::AppState;
 use crate::config::ServerConfig;
 use crate::handlers;
 use crate::services::oidc::OidcSigningKey;
-use crate::services::oidc::dpop::DpopState;
 
 /// Create an in-memory SQLite database with migrations for testing.
 pub async fn test_db() -> Pool {
@@ -74,8 +73,6 @@ pub fn test_config() -> ServerConfig {
         ssh_ca_key_path: None,
         ssh_ca_key: None,
         oidc_signing_key: None,
-        dpop_enabled: true,
-        dpop_nonce_required: false,
         dpop_max_age_seconds: 300,
         cleanup_interval_minutes: 0, // Disabled for tests
         auth_events_retention_days: 90,
@@ -117,7 +114,6 @@ pub async fn test_app_state() -> Arc<AppState> {
         config: Arc::new(ArcSwap::from_pointee(config)),
         webauthn,
         ssh_ca: None,
-        dpop: Arc::new(DpopState::new()),
         oidc_key,
         github_app: None,
         http_client: reqwest::Client::new(),
@@ -132,6 +128,11 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         // OIDC Provider endpoints
         .route(
             "/.well-known/openid-configuration",
+            get(handlers::oidc::discovery),
+        )
+        // RFC 8414 Section 3: OAuth Authorization Server Metadata alias
+        .route(
+            "/.well-known/oauth-authorization-server",
             get(handlers::oidc::discovery),
         )
         .route("/oauth/jwks", get(handlers::oidc::jwks))
@@ -633,6 +634,48 @@ pub async fn create_test_oauth_client(pool: &Pool, user_id: &str) -> TestOAuthCl
         crate::db::AccessScope::Public,
         None,
         &[],
+    )
+    .await
+    .expect("Failed to create test OAuth client");
+
+    // Generate a secret
+    let mut secret_bytes = [0u8; 32];
+    aws_rand::fill(&mut secret_bytes).expect("RNG failure");
+    let secret = URL_SAFE_NO_PAD.encode(secret_bytes);
+    let secret_hash = crate::handlers::hash_token(&secret);
+
+    crate::db::create_oauth_client_secret(pool, &client.id, &secret_hash, Some("test"), None)
+        .await
+        .expect("Failed to create test OAuth client secret");
+
+    TestOAuthClient {
+        client_id,
+        client_secret: secret,
+    }
+}
+
+/// Create a test OAuth client with custom access scope and resource URIs.
+pub async fn create_test_oauth_client_with_options(
+    pool: &Pool,
+    user_id: &str,
+    access_scope: crate::db::AccessScope,
+    org_id: Option<&str>,
+    resource_uris: &[String],
+) -> TestOAuthClient {
+    use aws_lc_rs::rand as aws_rand;
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let (client, client_id) = crate::db::create_oauth_client(
+        pool,
+        user_id,
+        "Test App",
+        None,
+        crate::db::OAuthClientType::Web,
+        &["https://example.com/callback".to_string()],
+        access_scope,
+        org_id,
+        resource_uris,
     )
     .await
     .expect("Failed to create test OAuth client");

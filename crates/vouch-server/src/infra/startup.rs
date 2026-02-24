@@ -16,10 +16,7 @@ use crate::{
     crypto::{ssh_ca, tpm_decrypt},
     db::{Pool, dsql::DsqlEndpoint, migrations::run_dsql_migrations, pool::redact_database_url},
     infra::{cleanup, s3_config},
-    services::{
-        integrations::github::GitHubApp,
-        oidc::{OidcSigningKey, dpop},
-    },
+    services::{integrations::github::GitHubApp, oidc::OidcSigningKey},
 };
 
 /// All components needed to run the server after initialization.
@@ -82,14 +79,8 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 
     // Feature status summary — one log per feature for searchable CloudWatch events
     tracing::info!(
-        "Sessions: duration={}h, dpop={}, dpop_nonce_required={}, dpop_max_age={}s",
+        "Sessions: duration={}h, dpop_max_age={}s",
         config.session_hours,
-        if config.dpop_enabled {
-            "enabled"
-        } else {
-            "disabled"
-        },
-        config.dpop_nonce_required,
         config.dpop_max_age_seconds,
     );
 
@@ -121,7 +112,7 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     }
 
     // Build AppState and start background tasks
-    let (state, dpop_state) = build_app_state(&config, db.clone()).await?;
+    let state = build_app_state(&config, db.clone()).await?;
 
     // Start background cleanup task if enabled
     let cleanup_handle = if config.cleanup_interval_minutes > 0 {
@@ -134,7 +125,6 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
         );
         Some(cleanup::start_cleanup_task(
             db.clone(),
-            dpop_state,
             config.cleanup_interval_minutes,
             config.auth_events_retention_days,
             config.oauth_events_retention_days,
@@ -278,12 +268,7 @@ async fn connect_and_migrate(config: &config::ServerConfig) -> Result<Pool> {
 }
 
 /// Build shared application state with all service components.
-///
-/// Returns both the `AppState` and the `DpopState` (needed by the cleanup task).
-async fn build_app_state(
-    config: &config::ServerConfig,
-    db: Pool,
-) -> Result<(Arc<AppState>, Arc<dpop::DpopState>)> {
+async fn build_app_state(config: &config::ServerConfig, db: Pool) -> Result<Arc<AppState>> {
     // Build WebAuthn instance
     // Use base_url as origin (handles localhost with http and port correctly)
     let rp_origin = url::Url::parse(&config.base_url)?;
@@ -361,9 +346,6 @@ async fn build_app_state(
         }
     };
 
-    // Create DPoP state (single instance shared between AppState and cleanup task)
-    let dpop_state = Arc::new(dpop::DpopState::new());
-
     // Wrap config in ArcSwap for dynamic updates
     let config_swap = Arc::new(ArcSwap::from_pointee(config.clone()));
 
@@ -372,11 +354,10 @@ async fn build_app_state(
         config: config_swap,
         webauthn,
         ssh_ca,
-        dpop: Arc::clone(&dpop_state),
         oidc_key,
         github_app,
         http_client,
     });
 
-    Ok((state, dpop_state))
+    Ok(state)
 }

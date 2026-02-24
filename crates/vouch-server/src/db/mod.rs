@@ -17,6 +17,7 @@ mod authorization_codes;
 mod config;
 mod credentials;
 mod device_auth;
+mod dpop;
 pub mod dsql;
 mod enrollment;
 mod github;
@@ -88,12 +89,13 @@ pub use config::{
 
 // Re-export SCIM types and functions
 pub use scim::{
-    ScimGroupRecord, ScimScope, ScimScopeSet, ScimToken, ScimUserRecord, add_scim_group_member,
-    count_scim_groups, count_scim_users, create_scim_group, create_scim_token, create_scim_user,
-    delete_old_scim_audit_logs, delete_scim_group, delete_scim_token, get_scim_group,
-    get_scim_group_members, get_scim_token_by_hash, get_scim_user, insert_scim_audit,
-    list_scim_groups, list_scim_tokens, list_scim_users, remove_scim_group_member,
-    replace_scim_group_members, update_scim_group, update_scim_token_last_used, update_scim_user,
+    ScimFilterError, ScimGroupRecord, ScimScope, ScimScopeSet, ScimToken, ScimUserRecord,
+    add_scim_group_member, count_scim_groups, count_scim_users, create_scim_group,
+    create_scim_token, create_scim_user, delete_old_scim_audit_logs, delete_scim_group,
+    delete_scim_token, get_scim_group, get_scim_group_members, get_scim_token_by_hash,
+    get_scim_user, insert_scim_audit, list_scim_groups, list_scim_tokens, list_scim_users,
+    remove_scim_group_member, replace_scim_group_members, update_scim_group,
+    update_scim_token_last_used, update_scim_user,
 };
 
 // Re-export OAuth types and functions
@@ -108,11 +110,21 @@ pub use oauth::{
     validate_oauth_client_credentials,
 };
 
+// Re-export test-only OAuth client helpers
+#[cfg(test)]
+pub use oauth::test_helpers::{update_oauth_client_auth_method, update_oauth_client_jwks};
+
 // Re-export JWT issuer types and functions (RFC 7523)
 pub use jwt_issuer::{
     TrustedJwtIssuer, create_trusted_jwt_issuer, delete_trusted_jwt_issuer,
     get_trusted_jwt_issuer_by_issuer, list_trusted_jwt_issuers, update_issuer_jwks_cache,
     update_trusted_jwt_issuer,
+};
+
+// Re-export DPoP types and functions (RFC 9449)
+pub use dpop::{
+    check_and_store_dpop_jti, delete_expired_dpop_jtis, delete_expired_dpop_nonces,
+    generate_dpop_nonce, validate_and_consume_dpop_nonce,
 };
 
 // Re-export credentials types and functions

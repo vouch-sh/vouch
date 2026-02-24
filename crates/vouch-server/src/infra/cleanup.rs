@@ -13,10 +13,8 @@
 //! - DPoP nonces and JTI cache
 
 use crate::db::{self, Pool};
-use crate::services::oidc::dpop::DpopState;
 use aws_lc_rs::rand as aws_rand;
 use jiff::{Timestamp, ToSpan};
-use std::sync::Arc;
 use tokio::task::JoinHandle;
 
 /// Log cleanup results: info on deletions, warn on errors, silent on zero.
@@ -59,7 +57,6 @@ fn random_jitter(max_jitter_secs: u64) -> std::time::Duration {
 /// to avoid thundering-herd database pressure.
 pub fn start_cleanup_task(
     db: Pool,
-    dpop_state: Arc<DpopState>,
     interval_minutes: u64,
     auth_events_retention_days: i64,
     oauth_events_retention_days: i64,
@@ -85,13 +82,7 @@ pub fn start_cleanup_task(
             tracing::debug!("Running background cleanup tasks");
 
             // Run all cleanup tasks
-            run_cleanup(
-                &db,
-                &dpop_state,
-                auth_events_retention_days,
-                oauth_events_retention_days,
-            )
-            .await;
+            run_cleanup(&db, auth_events_retention_days, oauth_events_retention_days).await;
 
             // Sleep with jitter before the next run
             let jitter = random_jitter(max_jitter_secs);
@@ -110,7 +101,6 @@ pub fn start_cleanup_task(
 /// Run all cleanup tasks once.
 pub async fn run_cleanup(
     db: &Pool,
-    dpop_state: &DpopState,
     auth_events_retention_days: i64,
     oauth_events_retention_days: i64,
 ) {
@@ -189,11 +179,15 @@ pub async fn run_cleanup(
         "expired JWT assertion JTIs"
     );
 
-    // Clean up DPoP nonces
-    {
-        let mut nonce_manager = dpop_state.nonce_manager.write().await;
-        nonce_manager.cleanup();
-    }
+    // Clean up expired DPoP nonces and JTIs (RFC 9449)
+    cleanup_and_log!(
+        db::delete_expired_dpop_nonces(db, &now_str),
+        "expired DPoP nonces"
+    );
+    cleanup_and_log!(
+        db::delete_expired_dpop_jtis(db, &now_str),
+        "expired DPoP JTIs"
+    );
 
     // Clean up expired SSH certificate revocations
     cleanup_and_log!(

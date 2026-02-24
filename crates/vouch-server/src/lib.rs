@@ -70,8 +70,6 @@ pub struct AppState {
     pub webauthn: webauthn_rs::Webauthn,
     /// SSH Certificate Authority (optional, None if disabled).
     pub ssh_ca: Option<crypto::ssh_ca::SshCa>,
-    /// RFC 9449 DPoP state (nonce manager, JTI cache).
-    pub dpop: Arc<services::oidc::dpop::DpopState>,
     /// OIDC signing key for ES256 JWT signing.
     pub oidc_key: services::oidc::OidcSigningKey,
     /// GitHub App for credential issuance (optional, None if not configured).
@@ -187,8 +185,6 @@ mod redirect_tests {
             ssh_ca_key_path: None,
             ssh_ca_key: None,
             oidc_signing_key: None,
-            dpop_enabled: true,
-            dpop_nonce_required: false,
             dpop_max_age_seconds: 300,
             cleanup_interval_minutes: 0,
             auth_events_retention_days: 90,
@@ -221,7 +217,6 @@ mod redirect_tests {
             config: Arc::new(ArcSwap::from_pointee(config)),
             webauthn,
             ssh_ca: None,
-            dpop: Arc::new(crate::services::oidc::dpop::DpopState::new()),
             oidc_key: OidcSigningKey::generate().unwrap(),
             github_app: None,
             http_client: reqwest::Client::new(),

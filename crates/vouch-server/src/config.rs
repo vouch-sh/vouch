@@ -26,12 +26,6 @@ fn parse_comma_list_preserve_case(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// Parse a boolean value that defaults to true (false only if "false" or "0").
-fn parse_bool_default_true(s: &str) -> bool {
-    let lower = s.to_lowercase();
-    lower != "false" && s != "0"
-}
-
 // ============================================================================
 // Command Line Arguments
 // ============================================================================
@@ -126,14 +120,6 @@ pub struct Args {
     /// If not set, an ephemeral key will be generated.
     #[arg(long, env = "VOUCH_OIDC_SIGNING_KEY")]
     pub oidc_signing_key: Option<String>,
-
-    /// Enable RFC 9449 DPoP support.
-    #[arg(long, env = "VOUCH_DPOP_ENABLED")]
-    pub dpop_enabled: Option<String>,
-
-    /// Require DPoP nonce in proofs.
-    #[arg(long, env = "VOUCH_DPOP_NONCE_REQUIRED")]
-    pub dpop_nonce_required: Option<String>,
 
     /// Maximum age of DPoP proofs in seconds.
     #[arg(long, env = "VOUCH_DPOP_MAX_AGE", default_value = "300")]
@@ -264,10 +250,6 @@ pub struct ServerConfig {
     /// OIDC signing key content (PEM format, P-256 EC).
     /// Used for signing OIDC ID tokens with ES256 algorithm.
     pub oidc_signing_key: Option<SecretString>,
-    /// Enable RFC 9449 DPoP support (default: true).
-    pub dpop_enabled: bool,
-    /// Require DPoP nonce in proofs (default: true per RFC 9449 Section 8).
-    pub dpop_nonce_required: bool,
     /// Maximum age of DPoP proofs in seconds (default: 300).
     pub dpop_max_age_seconds: i64,
     /// Cleanup task interval in minutes (default: 15).
@@ -337,18 +319,6 @@ impl ServerConfig {
             .map(|s| parse_comma_list(&s))
             .filter(|v| !v.is_empty());
 
-        // Parse DPoP booleans
-        let dpop_enabled = args
-            .dpop_enabled
-            .map(|s| parse_bool_default_true(&s))
-            .unwrap_or(true);
-
-        // Default to requiring DPoP nonces per RFC 9449 Section 8
-        let dpop_nonce_required = args
-            .dpop_nonce_required
-            .map(|s| parse_bool_default_true(&s))
-            .unwrap_or(true);
-
         // Parse CORS origins
         let cors_origins = args
             .cors_origins
@@ -382,8 +352,6 @@ impl ServerConfig {
             ssh_ca_key_path,
             ssh_ca_key: args.ssh_ca_key.map(SecretString::from),
             oidc_signing_key: args.oidc_signing_key.map(SecretString::from),
-            dpop_enabled,
-            dpop_nonce_required,
             dpop_max_age_seconds: args.dpop_max_age,
             cleanup_interval_minutes: args.cleanup_interval,
             auth_events_retention_days: args.auth_events_retention_days,

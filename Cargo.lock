@@ -4924,7 +4924,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.2.41"
+version = "2026.2.42"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4949,7 +4949,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.2.41"
+version = "2026.2.42"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -4992,7 +4992,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.2.41"
+version = "2026.2.42"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5012,7 +5012,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.2.41"
+version = "2026.2.42"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5072,7 +5072,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.2.41"
+version = "2026.2.42"
 dependencies = [
  "anyhow",
  "aws-lc-rs",

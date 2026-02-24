@@ -8,7 +8,7 @@ use super::types::DbTimestamp;
 use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute};
 use anyhow::Result;
 use jiff::Timestamp;
-use sea_query::{Alias, Asterisk, Expr, Func, JoinType, OnConflict, Order, Query};
+use sea_query::{Alias, Asterisk, Expr, Func, JoinType, LikeExpr, OnConflict, Order, Query};
 use uuid::Uuid;
 
 // ============================================================================
@@ -410,21 +410,8 @@ pub async fn list_scim_users(
             .from(Users::Table)
             .to_owned();
 
-        // Parse simple SCIM filter (userName eq "value" or email eq "value")
         if let Some(f) = filter {
-            if let Some(value) = parse_scim_filter(f, "userName") {
-                query = query
-                    .and_where(Expr::col(Users::Email).eq(value))
-                    .to_owned();
-            } else if let Some(value) = parse_scim_filter(f, "email") {
-                query = query
-                    .and_where(Expr::col(Users::Email).eq(value))
-                    .to_owned();
-            } else if let Some(value) = parse_scim_filter(f, "externalId") {
-                query = query
-                    .and_where(Expr::col(Users::ExternalId).eq(value))
-                    .to_owned();
-            }
+            apply_user_filter(&mut query, f)?;
         }
 
         query = query
@@ -452,19 +439,7 @@ pub async fn count_scim_users(pool: &Pool, filter: Option<&str>) -> Result<usize
             .to_owned();
 
         if let Some(f) = filter {
-            if let Some(value) = parse_scim_filter(f, "userName") {
-                query = query
-                    .and_where(Expr::col(Users::Email).eq(value))
-                    .to_owned();
-            } else if let Some(value) = parse_scim_filter(f, "email") {
-                query = query
-                    .and_where(Expr::col(Users::Email).eq(value))
-                    .to_owned();
-            } else if let Some(value) = parse_scim_filter(f, "externalId") {
-                query = query
-                    .and_where(Expr::col(Users::ExternalId).eq(value))
-                    .to_owned();
-            }
+            apply_user_filter(&mut query, f)?;
         }
 
         query.build_sql(db_type)
@@ -475,22 +450,191 @@ pub async fn count_scim_users(pool: &Pool, filter: Option<&str>) -> Result<usize
     Ok(count.0 as usize)
 }
 
-/// Parse simple SCIM filter (e.g., `userName eq "john@example.com"`).
-pub(crate) fn parse_scim_filter(filter: &str, attr: &str) -> Option<String> {
-    let pattern = format!("{attr} eq ");
-    let filter_lower = filter.to_lowercase();
-    let pattern_lower = pattern.to_lowercase();
-    if let Some(pos) = filter_lower.find(&pattern_lower) {
-        // Get the rest of the string after the pattern
-        let rest = filter.get(pos + pattern.len()..)?;
-        // Extract quoted value
-        if let Some(unquoted) = rest.strip_prefix('"')
-            && let Some(end) = unquoted.find('"')
-        {
-            return unquoted.get(..end).map(|s| s.to_string());
+/// SCIM filter operator (RFC 7644 Section 3.4.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScimFilterOp {
+    /// Equal — exact match.
+    Eq,
+    /// Contains — substring match.
+    Co,
+    /// Starts with — prefix match.
+    Sw,
+}
+
+/// Parsed SCIM filter result.
+#[derive(Debug)]
+pub(crate) struct ScimFilter {
+    /// The filter operator.
+    pub op: ScimFilterOp,
+    /// The quoted value from the filter expression.
+    pub value: String,
+}
+
+/// Error from parsing a SCIM filter expression.
+#[derive(Debug)]
+pub enum ScimFilterError {
+    /// The filter uses an operator we don't support.
+    UnsupportedOperator(String),
+}
+
+impl std::fmt::Display for ScimFilterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnsupportedOperator(op) => {
+                write!(f, "unsupported filter operator '{op}'")
+            }
         }
     }
-    None
+}
+
+impl std::error::Error for ScimFilterError {}
+
+/// Parse a SCIM filter expression for the given attribute.
+///
+/// Supports `eq`, `co`, and `sw` operators (RFC 7644 Section 3.4.2).
+/// Returns `Ok(Some(filter))` on match, `Ok(None)` if the attribute doesn't
+/// match, and `Err` for unsupported operators.
+pub(crate) fn parse_scim_filter(
+    filter: &str,
+    attr: &str,
+) -> Result<Option<ScimFilter>, ScimFilterError> {
+    let filter_lower = filter.to_lowercase();
+    let attr_lower = attr.to_lowercase();
+
+    // Does this filter reference the given attribute?
+    let Some(attr_pos) = filter_lower.find(&attr_lower) else {
+        return Ok(None);
+    };
+
+    // Extract the operator word and remaining text after the attribute
+    let after_attr = filter_lower
+        .get(attr_pos + attr_lower.len()..)
+        .unwrap_or("");
+    let after_attr_trimmed = after_attr.trim_start();
+
+    let Some(space_end) = after_attr_trimmed.find(' ') else {
+        return Ok(None);
+    };
+    let Some(op_word) = after_attr_trimmed.get(..space_end) else {
+        return Ok(None);
+    };
+
+    // Match the operator (case-insensitive — we're already lowercased)
+    let op = match op_word {
+        "eq" => ScimFilterOp::Eq,
+        "co" => ScimFilterOp::Co,
+        "sw" => ScimFilterOp::Sw,
+        other => return Err(ScimFilterError::UnsupportedOperator(other.to_string())),
+    };
+
+    // Extract the quoted value from the original filter (preserving case).
+    // Build the full `attr op ` pattern to locate the value portion.
+    let pattern = format!("{attr} {op_word} ");
+    let pattern_lower = pattern.to_lowercase();
+
+    if let Some(pos) = filter_lower.find(&pattern_lower)
+        && let Some(rest_str) = filter.get(pos + pattern.len()..)
+        && let Some(unquoted) = rest_str.strip_prefix('"')
+        && let Some(end) = unquoted.find('"')
+        && let Some(val) = unquoted.get(..end)
+    {
+        return Ok(Some(ScimFilter {
+            op,
+            value: val.to_string(),
+        }));
+    }
+
+    Ok(None)
+}
+
+/// The escape character used in LIKE patterns.
+///
+/// We use `\` and attach an explicit `ESCAPE '\'` clause via sea-query's
+/// `LikeExpr::escape()`. This is required for SQLite (which does not treat
+/// `\` as an escape by default) and is supported by PostgreSQL / Aurora DSQL.
+const LIKE_ESCAPE_CHAR: char = '\\';
+
+/// Escape special SQL LIKE characters (`%` and `_`) in a value using
+/// [`LIKE_ESCAPE_CHAR`].
+fn escape_like_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch == '%' || ch == '_' || ch == LIKE_ESCAPE_CHAR {
+            out.push(LIKE_ESCAPE_CHAR);
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Build a sea-query `LikeExpr` with the explicit `ESCAPE` clause.
+fn like_expr(pattern: String) -> LikeExpr {
+    LikeExpr::new(pattern).escape(LIKE_ESCAPE_CHAR)
+}
+
+/// Build the sea-query condition for a SCIM filter and column.
+fn scim_filter_condition(
+    column: impl sea_query::IntoColumnRef,
+    filter: &ScimFilter,
+) -> sea_query::SimpleExpr {
+    match filter.op {
+        ScimFilterOp::Eq => Expr::col(column).eq(&filter.value),
+        ScimFilterOp::Co => {
+            let pattern = format!("%{}%", escape_like_value(&filter.value));
+            Expr::col(column).like(like_expr(pattern))
+        }
+        ScimFilterOp::Sw => {
+            let pattern = format!("{}%", escape_like_value(&filter.value));
+            Expr::col(column).like(like_expr(pattern))
+        }
+    }
+}
+
+/// Try to apply a SCIM filter for a single attribute.
+///
+/// Returns `Ok(true)` if the filter matched and was applied, `Ok(false)` if
+/// the attribute was not referenced, or `Err` for unsupported operators.
+fn try_apply_attr_filter(
+    query: &mut sea_query::SelectStatement,
+    filter: &str,
+    attr: &str,
+    column: impl sea_query::IntoColumnRef,
+) -> Result<bool> {
+    match parse_scim_filter(filter, attr) {
+        Ok(Some(f)) => {
+            *query = query
+                .and_where(scim_filter_condition(column, &f))
+                .to_owned();
+            Ok(true)
+        }
+        Err(e) => Err(e.into()),
+        Ok(None) => Ok(false),
+    }
+}
+
+/// Apply a SCIM filter to a user query.
+///
+/// Checks `userName`, `email`, and `externalId` attributes.
+fn apply_user_filter(query: &mut sea_query::SelectStatement, filter: &str) -> Result<()> {
+    if try_apply_attr_filter(query, filter, "userName", Users::Email)? {
+        return Ok(());
+    }
+    if try_apply_attr_filter(query, filter, "email", Users::Email)? {
+        return Ok(());
+    }
+    let _ = try_apply_attr_filter(query, filter, "externalId", Users::ExternalId)?;
+    Ok(())
+}
+
+/// Apply a SCIM filter to a group query.
+///
+/// Checks `displayName` and `externalId` attributes.
+fn apply_group_filter(query: &mut sea_query::SelectStatement, filter: &str) -> Result<()> {
+    if try_apply_attr_filter(query, filter, "displayName", ScimGroups::DisplayName)? {
+        return Ok(());
+    }
+    let _ = try_apply_attr_filter(query, filter, "externalId", ScimGroups::ExternalId)?;
+    Ok(())
 }
 
 /// Get a user by ID for SCIM.
@@ -740,15 +884,7 @@ pub async fn list_scim_groups(
             .to_owned();
 
         if let Some(filter_str) = filter {
-            if let Some(value) = parse_scim_filter(filter_str, "displayName") {
-                query = query
-                    .and_where(Expr::col(ScimGroups::DisplayName).eq(value))
-                    .to_owned();
-            } else if let Some(value) = parse_scim_filter(filter_str, "externalId") {
-                query = query
-                    .and_where(Expr::col(ScimGroups::ExternalId).eq(value))
-                    .to_owned();
-            }
+            apply_group_filter(&mut query, filter_str)?;
         }
 
         query = query
@@ -776,15 +912,7 @@ pub async fn count_scim_groups(pool: &Pool, filter: Option<&str>) -> Result<usiz
             .to_owned();
 
         if let Some(filter_str) = filter {
-            if let Some(value) = parse_scim_filter(filter_str, "displayName") {
-                query = query
-                    .and_where(Expr::col(ScimGroups::DisplayName).eq(value))
-                    .to_owned();
-            } else if let Some(value) = parse_scim_filter(filter_str, "externalId") {
-                query = query
-                    .and_where(Expr::col(ScimGroups::ExternalId).eq(value))
-                    .to_owned();
-            }
+            apply_group_filter(&mut query, filter_str)?;
         }
 
         query.build_sql(db_type)

@@ -219,7 +219,6 @@ impl std::fmt::Debug for TokenExchangeResponse {
 }
 
 // Maximum lengths for token request parameters.
-const MAX_CODE_VERIFIER_LEN: usize = 128;
 const MAX_TOKEN_REDIRECT_URI_LEN: usize = 2048;
 const MAX_TOKEN_CLIENT_ID_LEN: usize = 256;
 const MAX_TOKEN_SCOPE_LEN: usize = 512;
@@ -240,11 +239,11 @@ pub async fn token(
 ) -> Response {
     // Input length validation — reject oversized parameters early.
     if let Some(ref v) = params.code_verifier
-        && v.len() > MAX_CODE_VERIFIER_LEN
+        && !is_valid_pkce_verifier(v)
     {
         return token_error_response(
             "invalid_request",
-            &format!("code_verifier exceeds maximum length of {MAX_CODE_VERIFIER_LEN}"),
+            "code_verifier must be 43-128 characters and contain only [A-Za-z0-9\\-._~]",
         );
     }
     if let Some(ref v) = params.redirect_uri
@@ -382,7 +381,14 @@ async fn handle_authorization_code_grant(
     let dpop_proof =
         match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
             Ok(proof) => proof,
-            Err(e) => return e.into_oauth_response().into_response(),
+            Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
+                return dpop_use_nonce_response(&nonce);
+            }
+            Err(e) => {
+                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
         };
 
     // Extract client_id for audience validation (RFC 8725 §3.9)
@@ -468,7 +474,14 @@ async fn handle_token_exchange_grant(
     let dpop_proof =
         match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
             Ok(proof) => proof,
-            Err(e) => return e.into_oauth_response().into_response(),
+            Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
+                return dpop_use_nonce_response(&nonce);
+            }
+            Err(e) => {
+                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
         };
 
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.clone());
@@ -685,6 +698,40 @@ async fn handle_jwt_bearer_grant(
         .into_response(),
         Err(e) => e.into_oauth_response().into_response(),
     }
+}
+
+/// Validate PKCE code_verifier format per RFC 7636 Section 4.1.
+///
+/// The verifier must be 43-128 characters long and contain only unreserved
+/// characters: `[A-Za-z0-9\-._~]`.
+fn is_valid_pkce_verifier(verifier: &str) -> bool {
+    verifier.len() >= 43
+        && verifier.len() <= 128
+        && verifier.bytes().all(
+            |b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~'),
+        )
+}
+
+/// Build a `use_dpop_nonce` error response with the `DPoP-Nonce` header.
+///
+/// RFC 9449 Section 4.3: When the server requires a nonce, the error response
+/// MUST include the `DPoP-Nonce` header so the client can retry.
+fn dpop_use_nonce_response(nonce: &str) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        [(
+            axum::http::header::HeaderName::from_static("dpop-nonce"),
+            nonce.to_string(),
+        )],
+        Json(OAuthErrorResponse {
+            error: "use_dpop_nonce".to_string(),
+            error_description: Some(
+                "Authorization server requires nonce in DPoP proof".to_string(),
+            ),
+            error_uri: None,
+        }),
+    )
+        .into_response()
 }
 
 /// Build an OAuth error response for parameter validation failures.

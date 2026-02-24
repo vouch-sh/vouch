@@ -150,6 +150,11 @@ fn build_api_routes() -> Router<Arc<AppState>> {
             "/.well-known/openid-configuration",
             get(handlers::oidc::discovery),
         )
+        // RFC 8414 Section 3: OAuth Authorization Server Metadata alias
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(handlers::oidc::discovery),
+        )
         .route("/oauth/jwks", get(handlers::oidc::jwks))
         // OIDC Core Section 5.3.1: UserInfo MUST support GET and POST
         .route(

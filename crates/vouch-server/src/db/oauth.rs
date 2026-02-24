@@ -19,6 +19,7 @@ use uuid::Uuid;
 ///
 /// Controls who can authenticate with the application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, sqlx::Type)]
+#[sqlx(type_name = "text")]
 #[sqlx(rename_all = "lowercase")]
 pub enum AccessScope {
     /// Only users in the same organization can authenticate.
@@ -76,6 +77,7 @@ impl AccessScope {
 
 /// OAuth application type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "text")]
 #[sqlx(rename_all = "lowercase")]
 pub enum OAuthClientType {
     Web,
@@ -863,6 +865,56 @@ pub async fn update_client_jwks_cache(pool: &Pool, id: &str, jwks_json: &str) ->
     db_execute!(pool, sqlx::query(&sql))?;
 
     Ok(())
+}
+
+/// Test-only helpers for modifying OAuth clients.
+#[cfg(test)]
+pub mod test_helpers {
+    use super::*;
+
+    /// Update the inline JWKS for a client (RFC 7523 private_key_jwt).
+    pub async fn update_oauth_client_jwks(pool: &Pool, id: &str, jwks_json: &str) -> Result<()> {
+        let db_type = pool.db_type();
+        let now = Timestamp::now().to_string();
+
+        let sql = {
+            let query = Query::update()
+                .table(OAuthClients::Table)
+                .value(OAuthClients::Jwks, jwks_json)
+                .value(OAuthClients::UpdatedAt, now.as_str())
+                .and_where(Expr::col(OAuthClients::Id).eq(id))
+                .to_owned();
+            query.build_sql(db_type)
+        };
+
+        db_execute!(pool, sqlx::query(&sql))?;
+
+        Ok(())
+    }
+
+    /// Update the token endpoint authentication method for a client (RFC 7523).
+    pub async fn update_oauth_client_auth_method(
+        pool: &Pool,
+        id: &str,
+        method: &str,
+    ) -> Result<()> {
+        let db_type = pool.db_type();
+        let now = Timestamp::now().to_string();
+
+        let sql = {
+            let query = Query::update()
+                .table(OAuthClients::Table)
+                .value(OAuthClients::TokenEndpointAuthMethod, method)
+                .value(OAuthClients::UpdatedAt, now.as_str())
+                .and_where(Expr::col(OAuthClients::Id).eq(id))
+                .to_owned();
+            query.build_sql(db_type)
+        };
+
+        db_execute!(pool, sqlx::query(&sql))?;
+
+        Ok(())
+    }
 }
 
 // ============================================================================
