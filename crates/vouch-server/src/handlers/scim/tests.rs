@@ -424,3 +424,107 @@ async fn test_rfc7644_error_format() {
     assert!(error.get("status").is_some(), "Error must have status");
     assert!(error.get("detail").is_some(), "Error must have detail");
 }
+
+// ========================================================================
+// P2: Additional RFC 7644 - Filter Operator Tests
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7644_filter_eq_operator() {
+    // RFC 7644 Section 3.4.1: "eq" filter operator.
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.db, "test-eq-filter").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Create a user to search for
+    let _ = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "eqtest@example.com"}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    // Filter with eq operator
+    let (status, body) = http_get(
+        &app,
+        "/scim/v2/Users?filter=userName%20eq%20%22eqtest@example.com%22",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let resources = response["Resources"].as_array().expect("Resources array");
+    assert!(
+        resources
+            .iter()
+            .any(|r| r["userName"] == "eqtest@example.com"),
+        "eq filter should find the matching user"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7644_error_includes_scim_schema() {
+    // RFC 7644 Section 3.12: SCIM errors must include correct schemas URN.
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.db, "test-error-schema").await;
+
+    let (status, body) = http_get(
+        &app,
+        "/scim/v2/Users/does-not-exist",
+        &[("Authorization", &format!("Bearer {}", token))],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    // RFC 7644 Section 3.12: schemas MUST contain error schema
+    let schemas = error["schemas"].as_array().expect("schemas array");
+    assert!(
+        schemas
+            .iter()
+            .any(|s| s == "urn:ietf:params:scim:api:messages:2.0:Error"),
+        "SCIM error schemas must contain the Error URN"
+    );
+
+    // status must be a string matching the HTTP status code
+    assert_eq!(
+        error["status"].as_str(),
+        Some("404"),
+        "SCIM error status must match HTTP status as a string"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7644_list_response_format() {
+    // RFC 7644 Section 3.4.2: ListResponse must include proper schemas,
+    // totalResults, startIndex, and itemsPerPage.
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.db, "test-list-format").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_get(&app, "/scim/v2/Users", &[("Authorization", &auth_header)]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    // RFC 7644: ListResponse schemas
+    let schemas = response["schemas"].as_array().expect("schemas array");
+    assert!(
+        schemas
+            .iter()
+            .any(|s| s == "urn:ietf:params:scim:api:messages:2.0:ListResponse"),
+        "ListResponse must have correct schema"
+    );
+
+    // Required ListResponse fields
+    assert!(
+        response.get("totalResults").is_some(),
+        "ListResponse must have totalResults"
+    );
+}

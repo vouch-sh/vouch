@@ -108,6 +108,10 @@ pub use oauth::{
     validate_oauth_client_credentials,
 };
 
+// Re-export test-only OAuth client helpers
+#[cfg(test)]
+pub use oauth::test_helpers::{update_oauth_client_auth_method, update_oauth_client_jwks};
+
 // Re-export JWT issuer types and functions (RFC 7523)
 pub use jwt_issuer::{
     TrustedJwtIssuer, create_trusted_jwt_issuer, delete_trusted_jwt_issuer,
