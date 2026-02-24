@@ -25,6 +25,7 @@ mod jwt_issuer;
 pub mod migrations;
 mod oauth;
 mod organizations;
+pub(crate) mod par;
 mod pending_oauth;
 pub(crate) mod pool;
 pub(crate) mod schema;
@@ -145,6 +146,12 @@ pub use github::{
     get_github_installation_by_org_and_account, get_github_installations_by_org,
     log_github_credential_event, suspend_github_installation, unsuspend_github_installation,
     update_github_installation_repos, update_github_installation_repos_delta,
+};
+
+// Re-export PAR types and functions (RFC 9126)
+pub use par::{
+    CreateParParams, PushedAuthorizationRequest, consume_pushed_authorization_request,
+    create_pushed_authorization_request, delete_expired_pushed_authorization_requests,
 };
 
 // Re-export pending OAuth types and functions (RFC 6749, RFC 9700)

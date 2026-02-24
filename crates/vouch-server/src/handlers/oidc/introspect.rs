@@ -15,7 +15,7 @@ use secrecy::SecretString;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use super::token::extract_client_credentials;
+use super::client_auth::extract_client_credentials;
 
 /// Token revocation request (RFC 7009 Section 2.1).
 ///

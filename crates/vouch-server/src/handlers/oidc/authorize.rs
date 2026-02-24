@@ -67,6 +67,9 @@ pub struct AuthorizeQuery {
     /// OIDC Core Section 3.1.2.1: Requested prompt behavior.
     #[serde(default)]
     prompt: Option<String>,
+    /// RFC 9126: Pushed Authorization Request URI.
+    #[serde(default)]
+    request_uri: Option<String>,
 }
 
 /// GET /oauth/authorize
@@ -99,6 +102,21 @@ pub async fn authorize(
     // Check if we're returning from login with a pending auth
     if let Some(pending_id) = &params.pending_auth {
         return handle_pending_auth(&state, pending_id, &jar).await;
+    }
+
+    // RFC 9126: If request_uri is present, resolve the PAR and replace parameters.
+    if let Some(ref request_uri) = params.request_uri {
+        let client_id = params.client_id.clone().unwrap_or_default();
+        if client_id.is_empty() {
+            return AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message: "Invalid request: client_id is required with request_uri"
+                    .to_string(),
+            }
+            .into_response();
+        }
+
+        return handle_par_request(&state, request_uri, &client_id, jar).await;
     }
 
     // Normal authorization request - validate parameters
@@ -501,6 +519,238 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                 error_message: "Authentication failed. Please try again.".to_string(),
             }
             .into_response()
+        }
+    }
+}
+
+/// Handle an authorization request using a pushed authorization request URI (RFC 9126).
+///
+/// Consumes the PAR (single-use) and proceeds with the normal authorization flow
+/// using the stored parameters.
+async fn handle_par_request(
+    state: &Arc<AppState>,
+    request_uri: &str,
+    client_id: &str,
+    jar: CookieJar,
+) -> Response {
+    // Consume the PAR (single-use, client-bound)
+    let par = match db::consume_pushed_authorization_request(&state.db, request_uri, client_id)
+        .await
+    {
+        Ok(Some(p)) => p,
+        Ok(None) => {
+            tracing::warn!(
+                "PAR not found, expired, consumed, or wrong client: request_uri={}, client_id={}",
+                request_uri,
+                client_id,
+            );
+            return AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message:
+                    "Invalid or expired request_uri. Please restart the authorization flow."
+                        .to_string(),
+            }
+            .into_response();
+        }
+        Err(e) => {
+            tracing::error!("Failed to consume PAR: {}", e);
+            return AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message: "An error occurred. Please try again.".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    // Reconstruct the authorization parameters from the stored PAR
+    let redirect_uri = par.redirect_uri.clone();
+
+    // Validate prompt
+    let parsed_prompt = match par.prompt.as_deref() {
+        Some(p) => Prompt::parse(p),
+        None => None,
+    };
+
+    let request_params = AuthorizeRequestParams {
+        response_type: par.response_type.clone(),
+        client_id: par.client_id.clone(),
+        redirect_uri: par.redirect_uri.clone(),
+        scope: par.scope.clone(),
+        state: par.state.clone(),
+        nonce: par.nonce.clone(),
+        code_challenge: par.code_challenge.clone(),
+        code_challenge_method: par.code_challenge_method.clone(),
+        resource: par.resource.clone(),
+        acr_values: par.acr_values.clone(),
+        max_age: par.max_age.and_then(|v| u64::try_from(v).ok()),
+        prompt: parsed_prompt,
+    };
+
+    let validated = match validate_authorize_request(request_params) {
+        Ok(v) => v,
+        Err(e) => {
+            let (error_code, description) = match &e {
+                crate::services::ServiceError::OAuth { code, description } => {
+                    (code.as_str(), description.clone())
+                }
+                _ => ("server_error", e.to_string()),
+            };
+            return oauth_error_redirect(
+                &redirect_uri,
+                error_code,
+                &description,
+                par.state.as_deref(),
+                &state.config().base_url,
+            );
+        }
+    };
+
+    // Look up the OAuth client
+    let oauth_client =
+        match db::get_oauth_client_by_client_id(&state.db, validated.client_id()).await {
+            Ok(Some(client)) => client,
+            Ok(None) => {
+                return AuthorizeDeniedTemplate {
+                    client_name: "Unknown Application".to_string(),
+                    error_message:
+                        "Unknown client application. Please contact the application administrator."
+                            .to_string(),
+                }
+                .into_response();
+            }
+            Err(_) => {
+                return AuthorizeDeniedTemplate {
+                    client_name: "Unknown Application".to_string(),
+                    error_message: "An error occurred. Please try again.".to_string(),
+                }
+                .into_response();
+            }
+        };
+
+    // Validate redirect_uri against registered URIs
+    if !oauth_client.is_valid_redirect_uri(validated.redirect_uri()) {
+        return AuthorizeDeniedTemplate {
+            client_name: oauth_client.name,
+            error_message: "Invalid redirect_uri: not registered for this application".to_string(),
+        }
+        .into_response();
+    }
+
+    // Try to get existing session from cookie
+    let session_token = jar.get("vouch_session").map(|c| c.value());
+
+    // Check if we have a valid session
+    match check_session_for_authorization(state, session_token).await {
+        Ok(AuthorizationSessionState::Authenticated {
+            user,
+            session: ref auth_session,
+            authenticator,
+        }) => {
+            // User is authenticated - check access
+            if let Err(e) = check_client_access(&oauth_client, &user) {
+                let error_message = match e {
+                    crate::services::ServiceError::OAuth { description, .. } => description,
+                    _ => "You don't have access to this application".to_string(),
+                };
+                return AuthorizeDeniedTemplate {
+                    client_name: oauth_client.name,
+                    error_message,
+                }
+                .into_response();
+            }
+
+            // RFC 9470: Check if re-authentication is required
+            let needs_reauth = validated.prompt() == Some(Prompt::Login)
+                || validated.max_age().is_some_and(|max_age| {
+                    let auth_time = auth_session.created_at.to_jiff();
+                    let age_secs = jiff::Timestamp::now()
+                        .duration_since(auth_time)
+                        .as_secs()
+                        .max(0);
+                    let Ok(age) = u64::try_from(age_secs) else {
+                        return true;
+                    };
+                    age >= max_age
+                });
+
+            if needs_reauth && validated.prompt() == Some(Prompt::Silent) {
+                return oauth_error_redirect(
+                    validated.redirect_uri(),
+                    "login_required",
+                    "Re-authentication required but prompt=none was requested",
+                    validated.state(),
+                    &state.config().base_url,
+                );
+            }
+
+            if needs_reauth {
+                return store_pending_and_redirect(state, validated).await;
+            }
+
+            // RFC 9470: Validate requested ACR
+            if let Some(acr) = validated.acr_values() {
+                let acr_ok = acr
+                    .split_whitespace()
+                    .any(|v| v == crate::services::oidc::amr::ACR_AAL3);
+                if !acr_ok {
+                    return oauth_error_redirect(
+                        validated.redirect_uri(),
+                        "unmet_authentication_requirements",
+                        "The requested authentication context class is not supported",
+                        validated.state(),
+                        &state.config().base_url,
+                    );
+                }
+            }
+
+            // RFC 8707: Validate resource parameter against registered URIs
+            if let Some(resource) = validated.resource()
+                && !oauth_client.is_valid_resource_uri(resource)
+            {
+                return oauth_error_redirect(
+                    validated.redirect_uri(),
+                    "invalid_target",
+                    "The requested resource is not registered for this client",
+                    validated.state(),
+                    &state.config().base_url,
+                );
+            }
+
+            // Issue authorization code
+            let code_params = AuthorizationCodeParams {
+                client_id: validated.client_id(),
+                redirect_uri: validated.redirect_uri(),
+                user_id: &user.id,
+                email: &user.email,
+                authenticator_id: &authenticator.id,
+                aaguid: authenticator.aaguid.as_deref(),
+                scope: validated.scope(),
+                nonce: validated.nonce(),
+                code_challenge: validated.code_challenge(),
+                code_challenge_method: validated.code_challenge_method(),
+                resource: validated.resource(),
+                acr_values: validated.acr_values(),
+            };
+
+            issue_code_and_redirect(
+                state,
+                code_params,
+                validated.redirect_uri(),
+                validated.state(),
+            )
+            .await
+        }
+        Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
+            if validated.prompt() == Some(Prompt::Silent) {
+                return oauth_error_redirect(
+                    validated.redirect_uri(),
+                    "login_required",
+                    "User is not authenticated and prompt=none was requested",
+                    validated.state(),
+                    &state.config().base_url,
+                );
+            }
+            store_pending_and_redirect(state, validated).await
         }
     }
 }

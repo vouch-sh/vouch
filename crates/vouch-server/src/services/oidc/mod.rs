@@ -16,6 +16,7 @@
 //! - [RFC 7521 - Assertion Framework](https://www.rfc-editor.org/rfc/rfc7521)
 //! - [RFC 7523 - JWT Profile for Client Auth and Authorization Grants](https://www.rfc-editor.org/rfc/rfc7523)
 //! - [RFC 9068 - JWT Profile for OAuth 2.0 Access Tokens](https://www.rfc-editor.org/rfc/rfc9068)
+//! - [RFC 9126 - Pushed Authorization Requests](https://www.rfc-editor.org/rfc/rfc9126)
 //! - [RFC 9449 - DPoP](https://www.rfc-editor.org/rfc/rfc9449)
 //!
 //! ## Module Organization

@@ -232,6 +232,7 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - OAuth 2.0 Authorization Server Issuer Identification (RFC 9207)
 - SCIM 2.0 (RFC 7643/7644)
 - Resource Indicators for OAuth 2.0 (RFC 8707) — audience-restricted tokens
+- Pushed Authorization Requests (RFC 9126) — server-side parameter storage
 - DPoP (RFC 9449) — Demonstrating Proof of Possession
 - OAuth 2.0 Security Best Current Practice (RFC 9700) — followed
 
@@ -266,6 +267,7 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - `POST /oauth/token` — Token issuance (device code, authorization code, token exchange, JWT bearer)
 - `POST /oauth/revoke` — Token revocation (RFC 7009)
 - `POST /oauth/introspect` — Token introspection (RFC 7662)
+- `POST /oauth/par` — Pushed Authorization Requests (RFC 9126)
 - `GET /oauth/userinfo` — User info endpoint
 
 **ID Token Claims:**
