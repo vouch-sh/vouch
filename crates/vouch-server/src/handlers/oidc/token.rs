@@ -368,6 +368,18 @@ async fn handle_authorization_code_grant(
             }
         };
 
+    // FAPI 2.0: Require DPoP for FAPI clients (sender-constrained tokens).
+    // FAPI 2.0 Section 5.2.2 mandates sender-constrained access tokens.
+    // Since we use DPoP (not mTLS), a DPoP proof is required for FAPI clients.
+    if let Some(ref auth) = jwt_authenticated
+        && let Err(e) = crate::services::oidc::fapi::validate_fapi_token_request(
+            &auth.client,
+            dpop_proof.is_some(),
+        )
+    {
+        return e.into_oauth_response().into_response();
+    }
+
     // Extract client_id for audience validation (RFC 8725 §3.9)
     let exchange_client_id = jwt_authenticated
         .as_ref()

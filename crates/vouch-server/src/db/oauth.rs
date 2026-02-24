@@ -9,6 +9,7 @@ use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execut
 use anyhow::Result;
 use jiff::Timestamp;
 use sea_query::{Alias, Asterisk, Expr, Func, Order, Query};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 // ============================================================================
@@ -171,6 +172,44 @@ impl std::fmt::Display for TokenEndpointAuthMethod {
     }
 }
 
+/// FAPI 2.0 Security Profile designation for an OAuth client.
+///
+/// Controls which FAPI constraints apply during authorization and token requests.
+///
+/// Reference: <https://openid.net/specs/fapi-security-profile-2_0-final.html>
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum FapiProfile {
+    /// No FAPI profile — standard OAuth 2.0 behavior.
+    #[default]
+    #[serde(rename = "none")]
+    None,
+    /// FAPI 2.0 Security Profile — enforces PAR, DPoP, private_key_jwt, PS256/ES256/EdDSA.
+    #[serde(rename = "fapi2_security")]
+    Fapi2Security,
+}
+
+impl FapiProfile {
+    /// Parse from the database string representation.
+    ///
+    /// Unknown values default to `None` for forward compatibility.
+    #[must_use]
+    pub fn from_db(s: &str) -> Self {
+        match s {
+            "fapi2_security" => Self::Fapi2Security,
+            _ => Self::None,
+        }
+    }
+
+    /// Return the database string representation.
+    #[must_use]
+    pub fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Fapi2Security => "fapi2_security",
+        }
+    }
+}
+
 // ============================================================================
 // OAuth Client
 // ============================================================================
@@ -209,6 +248,12 @@ pub struct OAuthClient {
     pub request_object_signing_alg: Option<String>,
     /// RFC 9101: Whether this client MUST use JAR for authorization requests.
     pub require_signed_request_object: Option<bool>,
+    /// FAPI 2.0: Raw profile string stored in the database (e.g., "none", "fapi2_security").
+    ///
+    /// Use `fapi_profile()` to get the parsed `FapiProfile` value.
+    pub fapi_profile: String,
+    /// FAPI 2.0: Whether access tokens must be sender-constrained via DPoP.
+    pub dpop_bound_access_tokens: bool,
 }
 
 impl OAuthClient {
@@ -243,7 +288,48 @@ impl OAuthClient {
         }
         uris.iter().any(|u| u == uri)
     }
+
+    /// Get the parsed FAPI 2.0 security profile for this client.
+    #[must_use]
+    pub fn fapi_profile(&self) -> FapiProfile {
+        FapiProfile::from_db(&self.fapi_profile)
+    }
+
+    /// Returns `true` if this client has FAPI 2.0 Security Profile enabled.
+    #[must_use]
+    pub fn is_fapi(&self) -> bool {
+        self.fapi_profile() != FapiProfile::None
+    }
 }
+
+/// The columns selected in all `OAuthClient` SELECT queries.
+///
+/// Centralized here so adding a new column only requires updating one place.
+const OAUTH_CLIENT_COLUMNS: &[OAuthClients] = &[
+    OAuthClients::Id,
+    OAuthClients::UserId,
+    OAuthClients::ClientId,
+    OAuthClients::Name,
+    OAuthClients::Description,
+    OAuthClients::ApplicationType,
+    OAuthClients::RedirectUris,
+    OAuthClients::Active,
+    OAuthClients::CreatedAt,
+    OAuthClients::UpdatedAt,
+    OAuthClients::LastUsedAt,
+    OAuthClients::AccessScope,
+    OAuthClients::OrgId,
+    OAuthClients::ResourceUris,
+    OAuthClients::Jwks,
+    OAuthClients::JwksUri,
+    OAuthClients::JwksUriCachedAt,
+    OAuthClients::JwksUriCache,
+    OAuthClients::TokenEndpointAuthMethod,
+    OAuthClients::RequestObjectSigningAlg,
+    OAuthClients::RequireSignedRequestObject,
+    OAuthClients::FapiProfile,
+    OAuthClients::DpopBoundAccessTokens,
+];
 
 /// Create a new OAuth client application.
 #[allow(clippy::too_many_arguments)]
@@ -280,6 +366,8 @@ pub async fn create_oauth_client(
                 OAuthClients::OrgId,
                 OAuthClients::ResourceUris,
                 OAuthClients::TokenEndpointAuthMethod,
+                OAuthClients::FapiProfile,
+                OAuthClients::DpopBoundAccessTokens,
                 OAuthClients::CreatedAt,
                 OAuthClients::UpdatedAt,
             ])
@@ -295,6 +383,8 @@ pub async fn create_oauth_client(
                 org_id.into(),
                 resource_uris_json.into(),
                 TokenEndpointAuthMethod::default().as_str().into(),
+                FapiProfile::None.as_db_str().into(),
+                false.into(),
                 now.as_str().into(),
                 now.as_str().into(),
             ])
@@ -317,29 +407,7 @@ pub async fn get_oauth_client_by_id(pool: &Pool, id: &str) -> Result<Option<OAut
 
     let sql = {
         let query = Query::select()
-            .columns([
-                OAuthClients::Id,
-                OAuthClients::UserId,
-                OAuthClients::ClientId,
-                OAuthClients::Name,
-                OAuthClients::Description,
-                OAuthClients::ApplicationType,
-                OAuthClients::RedirectUris,
-                OAuthClients::Active,
-                OAuthClients::CreatedAt,
-                OAuthClients::UpdatedAt,
-                OAuthClients::LastUsedAt,
-                OAuthClients::AccessScope,
-                OAuthClients::OrgId,
-                OAuthClients::ResourceUris,
-                OAuthClients::Jwks,
-                OAuthClients::JwksUri,
-                OAuthClients::JwksUriCachedAt,
-                OAuthClients::JwksUriCache,
-                OAuthClients::TokenEndpointAuthMethod,
-                OAuthClients::RequestObjectSigningAlg,
-                OAuthClients::RequireSignedRequestObject,
-            ])
+            .columns(OAUTH_CLIENT_COLUMNS.iter().copied())
             .from(OAuthClients::Table)
             .and_where(Expr::col(OAuthClients::Id).eq(id))
             .to_owned();
@@ -360,29 +428,7 @@ pub async fn get_oauth_client_by_client_id(
 
     let sql = {
         let query = Query::select()
-            .columns([
-                OAuthClients::Id,
-                OAuthClients::UserId,
-                OAuthClients::ClientId,
-                OAuthClients::Name,
-                OAuthClients::Description,
-                OAuthClients::ApplicationType,
-                OAuthClients::RedirectUris,
-                OAuthClients::Active,
-                OAuthClients::CreatedAt,
-                OAuthClients::UpdatedAt,
-                OAuthClients::LastUsedAt,
-                OAuthClients::AccessScope,
-                OAuthClients::OrgId,
-                OAuthClients::ResourceUris,
-                OAuthClients::Jwks,
-                OAuthClients::JwksUri,
-                OAuthClients::JwksUriCachedAt,
-                OAuthClients::JwksUriCache,
-                OAuthClients::TokenEndpointAuthMethod,
-                OAuthClients::RequestObjectSigningAlg,
-                OAuthClients::RequireSignedRequestObject,
-            ])
+            .columns(OAUTH_CLIENT_COLUMNS.iter().copied())
             .from(OAuthClients::Table)
             .and_where(Expr::col(OAuthClients::ClientId).eq(client_id))
             .to_owned();
@@ -400,29 +446,7 @@ pub async fn get_oauth_clients_for_user(pool: &Pool, user_id: &str) -> Result<Ve
 
     let sql = {
         let query = Query::select()
-            .columns([
-                OAuthClients::Id,
-                OAuthClients::UserId,
-                OAuthClients::ClientId,
-                OAuthClients::Name,
-                OAuthClients::Description,
-                OAuthClients::ApplicationType,
-                OAuthClients::RedirectUris,
-                OAuthClients::Active,
-                OAuthClients::CreatedAt,
-                OAuthClients::UpdatedAt,
-                OAuthClients::LastUsedAt,
-                OAuthClients::AccessScope,
-                OAuthClients::OrgId,
-                OAuthClients::ResourceUris,
-                OAuthClients::Jwks,
-                OAuthClients::JwksUri,
-                OAuthClients::JwksUriCachedAt,
-                OAuthClients::JwksUriCache,
-                OAuthClients::TokenEndpointAuthMethod,
-                OAuthClients::RequestObjectSigningAlg,
-                OAuthClients::RequireSignedRequestObject,
-            ])
+            .columns(OAUTH_CLIENT_COLUMNS.iter().copied())
             .from(OAuthClients::Table)
             .and_where(Expr::col(OAuthClients::UserId).eq(user_id))
             .order_by(OAuthClients::CreatedAt, Order::Desc)
@@ -957,6 +981,32 @@ pub mod test_helpers {
 
         Ok(())
     }
+
+    /// Update FAPI 2.0 profile settings for a client.
+    pub async fn update_oauth_client_fapi_settings(
+        pool: &Pool,
+        id: &str,
+        fapi_profile: FapiProfile,
+        dpop_bound_access_tokens: bool,
+    ) -> Result<()> {
+        let db_type = pool.db_type();
+        let now = Timestamp::now().to_string();
+
+        let sql = {
+            let query = Query::update()
+                .table(OAuthClients::Table)
+                .value(OAuthClients::FapiProfile, fapi_profile.as_db_str())
+                .value(OAuthClients::DpopBoundAccessTokens, dpop_bound_access_tokens)
+                .value(OAuthClients::UpdatedAt, now.as_str())
+                .and_where(Expr::col(OAuthClients::Id).eq(id))
+                .to_owned();
+            query.build_sql(db_type)
+        };
+
+        db_execute!(pool, sqlx::query(&sql))?;
+
+        Ok(())
+    }
 }
 
 // ============================================================================
@@ -1086,6 +1136,7 @@ pub async fn validate_oauth_client_credentials(
 // ============================================================================
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -1210,5 +1261,49 @@ mod tests {
             let parsed: Result<TokenEndpointAuthMethod, _> = display_str.parse();
             assert_eq!(parsed, Ok(variant));
         }
+    }
+
+    #[test]
+    fn test_fapi_profile_from_db() {
+        assert_eq!(FapiProfile::from_db("none"), FapiProfile::None);
+        assert_eq!(FapiProfile::from_db("fapi2_security"), FapiProfile::Fapi2Security);
+        // Unknown values default to None for forward compatibility
+        assert_eq!(FapiProfile::from_db("unknown"), FapiProfile::None);
+        assert_eq!(FapiProfile::from_db(""), FapiProfile::None);
+    }
+
+    #[test]
+    fn test_fapi_profile_as_db_str() {
+        assert_eq!(FapiProfile::None.as_db_str(), "none");
+        assert_eq!(FapiProfile::Fapi2Security.as_db_str(), "fapi2_security");
+    }
+
+    #[test]
+    fn test_fapi_profile_default() {
+        assert_eq!(FapiProfile::default(), FapiProfile::None);
+    }
+
+    #[test]
+    fn test_fapi_profile_roundtrip() {
+        for profile in [FapiProfile::None, FapiProfile::Fapi2Security] {
+            let db_str = profile.as_db_str();
+            let parsed = FapiProfile::from_db(db_str);
+            assert_eq!(parsed, profile);
+        }
+    }
+
+    #[test]
+    fn test_fapi_profile_serde_roundtrip() {
+        let json = serde_json::to_string(&FapiProfile::Fapi2Security)
+            .expect("FapiProfile::Fapi2Security serialization");
+        assert_eq!(json, r#""fapi2_security""#);
+
+        let parsed: FapiProfile =
+            serde_json::from_str(&json).expect("FapiProfile deserialization");
+        assert_eq!(parsed, FapiProfile::Fapi2Security);
+
+        let none_json =
+            serde_json::to_string(&FapiProfile::None).expect("FapiProfile::None serialization");
+        assert_eq!(none_json, r#""none""#);
     }
 }

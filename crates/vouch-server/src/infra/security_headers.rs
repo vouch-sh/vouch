@@ -113,11 +113,12 @@ pub fn apply_security_layers(
             ),
         ));
 
-    // HSTS only when TLS is configured
+    // HSTS only when TLS is configured.
+    // `preload` enables submission to browser HSTS preload lists per RFC 6797 / FAPI 2.0.
     if config.tls_configured() {
         router.layer(SetResponseHeaderLayer::overriding(
             header::STRICT_TRANSPORT_SECURITY,
-            HeaderValue::from_static("max-age=63072000; includeSubDomains"),
+            HeaderValue::from_static("max-age=63072000; includeSubDomains; preload"),
         ))
     } else {
         router

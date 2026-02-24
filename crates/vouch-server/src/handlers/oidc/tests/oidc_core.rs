@@ -55,6 +55,8 @@ async fn test_oidc_id_token_nonce_echo() {
             code_challenge_method: None,
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds: crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -194,6 +196,8 @@ async fn test_oidc_scope_based_claim_filtering() {
             code_challenge_method: None,
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds: crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -388,6 +392,8 @@ async fn test_oidc_nonce_echo_in_id_token() {
             code_challenge_method: None,
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds: crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await

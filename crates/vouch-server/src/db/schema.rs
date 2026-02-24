@@ -161,7 +161,7 @@ pub enum ScimGroupMembers {
 }
 
 /// OAuth clients table.
-#[derive(Iden)]
+#[derive(Iden, Clone, Copy)]
 pub enum OAuthClients {
     #[iden = "oauth_clients"]
     Table,
@@ -194,6 +194,12 @@ pub enum OAuthClients {
     RequestObjectSigningAlg,
     /// RFC 9101: Whether this client MUST use JAR for authorization requests.
     RequireSignedRequestObject,
+    /// FAPI 2.0: Security profile designation for this client.
+    #[iden = "fapi_profile"]
+    FapiProfile,
+    /// FAPI 2.0: Whether access tokens must be sender-constrained via DPoP.
+    #[iden = "dpop_bound_access_tokens"]
+    DpopBoundAccessTokens,
 }
 
 /// OAuth client secrets table.
@@ -229,6 +235,7 @@ pub enum OAuthUsageEvents {
 
 /// Pending OAuth authorizations table.
 #[derive(Iden)]
+#[allow(dead_code)]
 pub enum PendingOAuthAuthorizations {
     #[iden = "pending_oauth_authorizations"]
     Table,
@@ -252,6 +259,9 @@ pub enum PendingOAuthAuthorizations {
     MaxAge,
     /// RFC 9470: Requested prompt behavior (e.g., "login", "none").
     Prompt,
+    /// FAPI 2.0: DPoP key confirmation (JWK Thumbprint) from PAR request.
+    #[iden = "dpop_jkt"]
+    DpopJkt,
 }
 
 /// Token exchanges table (RFC 8693).
@@ -413,6 +423,7 @@ pub enum DpopJtiCache {
 
 /// Pushed Authorization Requests table (RFC 9126).
 #[derive(Iden)]
+#[allow(dead_code)]
 pub enum PushedAuthorizationRequests {
     #[iden = "pushed_authorization_requests"]
     Table,
@@ -437,6 +448,9 @@ pub enum PushedAuthorizationRequests {
     CreatedAt,
     ExpiresAt,
     ConsumedAt,
+    /// FAPI 2.0: DPoP key confirmation (JWK Thumbprint) from PAR request.
+    #[iden = "dpop_jkt"]
+    DpopJkt,
 }
 
 /// Trusted JWT issuers for RFC 7523 authorization grants.

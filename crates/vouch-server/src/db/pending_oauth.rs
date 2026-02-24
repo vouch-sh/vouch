@@ -40,6 +40,12 @@ pub struct PendingOAuthAuthorization {
     pub max_age: Option<i64>,
     /// RFC 9470: Requested prompt behavior (e.g., "login", "none").
     pub prompt: Option<String>,
+    /// RFC 9449 / FAPI 2.0: DPoP key thumbprint bound at PAR time.
+    ///
+    /// Preserved from the original PAR record so that the DPoP key binding
+    /// survives the browser login redirect and can be embedded in the
+    /// authorization code at completion.
+    pub dpop_jkt: Option<String>,
 }
 
 /// Parameters for creating a pending OAuth authorization.
@@ -61,6 +67,8 @@ pub struct CreatePendingOAuthParams<'a> {
     pub max_age: Option<i64>,
     /// RFC 9470: Requested prompt behavior.
     pub prompt: Option<&'a str>,
+    /// RFC 9449 / FAPI 2.0: DPoP key thumbprint for authorization code binding.
+    pub dpop_jkt: Option<&'a str>,
 }
 
 /// Create a pending OAuth authorization.
@@ -101,6 +109,7 @@ pub async fn create_pending_oauth_authorization(
                 PendingOAuthAuthorizations::AcrValues,
                 PendingOAuthAuthorizations::MaxAge,
                 PendingOAuthAuthorizations::Prompt,
+                PendingOAuthAuthorizations::DpopJkt,
                 PendingOAuthAuthorizations::CreatedAt,
                 PendingOAuthAuthorizations::ExpiresAt,
             ])
@@ -118,6 +127,7 @@ pub async fn create_pending_oauth_authorization(
                 params.acr_values.into(),
                 params.max_age.into(),
                 params.prompt.into(),
+                params.dpop_jkt.into(),
                 created_at.as_str().into(),
                 expires_at.as_str().into(),
             ])
@@ -159,6 +169,7 @@ pub async fn get_pending_oauth_authorization(
                 PendingOAuthAuthorizations::AcrValues,
                 PendingOAuthAuthorizations::MaxAge,
                 PendingOAuthAuthorizations::Prompt,
+                PendingOAuthAuthorizations::DpopJkt,
             ])
             .from(PendingOAuthAuthorizations::Table)
             .and_where(Expr::col(PendingOAuthAuthorizations::Id).eq(id))
@@ -230,6 +241,7 @@ pub async fn consume_pending_oauth_authorization(
                 PendingOAuthAuthorizations::AcrValues,
                 PendingOAuthAuthorizations::MaxAge,
                 PendingOAuthAuthorizations::Prompt,
+                PendingOAuthAuthorizations::DpopJkt,
             ])
             .from(PendingOAuthAuthorizations::Table)
             .and_where(Expr::col(PendingOAuthAuthorizations::Id).eq(id))
@@ -297,6 +309,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
         };
 
         let id = create_pending_oauth_authorization(&pool, params)
@@ -311,6 +324,40 @@ mod tests {
         assert_eq!(record.redirect_uri, "https://example.com/callback");
         assert_eq!(record.state, Some("state123".to_string()));
         assert_eq!(record.code_challenge, Some("challenge789".to_string()));
+        assert_eq!(record.dpop_jkt, None);
+    }
+
+    #[tokio::test]
+    async fn test_pending_oauth_with_dpop_jkt() {
+        let pool = test_pool().await;
+
+        let params = CreatePendingOAuthParams {
+            client_id: "test-client",
+            redirect_uri: "https://example.com/callback",
+            response_type: "code",
+            state: None,
+            scope: Some("openid"),
+            nonce: None,
+            code_challenge: Some("challenge"),
+            code_challenge_method: Some("S256"),
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: Some("thumbprint123"),
+        };
+
+        let id = create_pending_oauth_authorization(&pool, params)
+            .await
+            .unwrap();
+
+        let record = consume_pending_oauth_authorization(&pool, &id)
+            .await
+            .unwrap();
+        assert!(record.is_some());
+
+        let record = record.unwrap();
+        assert_eq!(record.dpop_jkt, Some("thumbprint123".to_string()));
     }
 
     #[tokio::test]
@@ -330,6 +377,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
         };
 
         let id = create_pending_oauth_authorization(&pool, params)

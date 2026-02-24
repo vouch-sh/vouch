@@ -132,6 +132,16 @@ pub struct AuthorizationCodeParams<'a> {
     pub resource: Option<&'a str>,
     /// RFC 9470: Requested ACR values.
     pub acr_values: Option<&'a str>,
+    /// RFC 9449 / FAPI 2.0: DPoP key thumbprint bound at PAR time.
+    ///
+    /// When present, the same DPoP key must be used at the token endpoint
+    /// (verified in `exchange_authorization_code`).
+    pub dpop_jkt: Option<&'a str>,
+    /// Authorization code lifetime in seconds.
+    ///
+    /// FAPI 2.0 clients use 60s; standard clients use 300s.
+    /// Use `fapi::auth_code_lifetime_seconds(&client)` to compute the correct value.
+    pub auth_code_lifetime_seconds: i64,
 }
 
 /// Authorization request parameters (from query string).
@@ -299,6 +309,12 @@ pub struct AuthorizationCode {
     /// RFC 9470: Requested ACR values from authorization request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub acr_values: Option<String>,
+    /// RFC 9449 / FAPI 2.0: DPoP key thumbprint bound at PAR time.
+    ///
+    /// When present, the token endpoint MUST verify that the DPoP proof
+    /// presented at token exchange uses the same key (RFC 9449 Section 10).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dpop_jkt: Option<String>,
     pub iat: i64,
     pub exp: i64,
 }
@@ -558,10 +574,14 @@ pub async fn issue_authorization_code(
     params: AuthorizationCodeParams<'_>,
 ) -> ServiceResult<String> {
     let now = Timestamp::now();
+    // Use the caller-supplied lifetime (FAPI 2.0 uses 60s, standard uses 300s).
+    // Fallback to the supplied value if Span arithmetic overflows (shouldn't happen
+    // for reasonable lifetime values).
+    let lifetime_secs = params.auth_code_lifetime_seconds;
     let exp = now
-        .checked_add(Span::new().minutes(5))
+        .checked_add(Span::new().seconds(lifetime_secs))
         .map(|t| t.as_second())
-        .unwrap_or(now.as_second() + 300);
+        .unwrap_or_else(|_| now.as_second() + lifetime_secs);
 
     let auth_code = AuthorizationCode {
         iss: state.config().base_url.clone(),
@@ -578,6 +598,7 @@ pub async fn issue_authorization_code(
         code_challenge_method: params.code_challenge_method,
         resource: params.resource.map(String::from),
         acr_values: params.acr_values.map(String::from),
+        dpop_jkt: params.dpop_jkt.map(String::from),
         iat: now.as_second(),
         exp,
     };
@@ -756,6 +777,8 @@ mod tests {
             token_endpoint_auth_method: "client_secret_basic".to_string(),
             request_object_signing_alg: None,
             require_signed_request_object: None,
+            fapi_profile: "none".to_string(),
+            dpop_bound_access_tokens: false,
         }
     }
 

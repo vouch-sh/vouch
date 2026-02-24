@@ -29,9 +29,6 @@ use std::sync::Arc;
 /// Expected `typ` header value for Request Objects (RFC 9101 + RFC 8725).
 const REQUEST_OBJECT_TYP: &str = "oauth-authz-req+jwt";
 
-/// Clock skew tolerance in seconds.
-const CLOCK_SKEW_SECONDS: i64 = 30;
-
 /// Request Object JWT claims.
 #[derive(Debug, Deserialize)]
 struct RequestObjectClaims {
@@ -195,6 +192,21 @@ pub async fn validate_request_object(
         ));
     }
 
+    // 2b. FAPI 2.0: Validate algorithm is in the FAPI allowlist.
+    // RS256 is excluded per FAPI 2.0 Section 5.2.2 — use PS256, ES256, or EdDSA.
+    if let Err(e) = crate::services::oidc::fapi::validate_fapi_algorithm(
+        client,
+        &assertion_header.alg,
+    ) {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequestObject,
+            match &e {
+                ServiceError::OAuth { description, .. } => description.clone(),
+                _ => e.to_string(),
+            },
+        ));
+    }
+
     // 3. Resolve client JWKS and find matching key
     let jwks = resolve_client_jwks(
         &state.db,
@@ -249,10 +261,12 @@ pub async fn validate_request_object(
     let claims = token_data.claims;
 
     // 5. Validate temporal claims
+    // FAPI 2.0 clients use a tighter 10-second clock skew tolerance.
+    let clock_skew = super::fapi::clock_skew_seconds(client);
     let now = Timestamp::now().as_second();
 
     if let Some(exp) = claims.exp
-        && exp < now - CLOCK_SKEW_SECONDS
+        && exp < now - clock_skew
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
@@ -261,7 +275,7 @@ pub async fn validate_request_object(
     }
 
     if let Some(nbf) = claims.nbf
-        && nbf > now + CLOCK_SKEW_SECONDS
+        && nbf > now + clock_skew
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
@@ -270,7 +284,7 @@ pub async fn validate_request_object(
     }
 
     if let Some(iat) = claims.iat
-        && iat > now + CLOCK_SKEW_SECONDS
+        && iat > now + clock_skew
     {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequestObject,
@@ -672,7 +686,7 @@ mod tests {
         // Manually check expiration (as validate_request_object would)
         let exp = token_data.claims.exp.unwrap();
         assert!(
-            exp < now - CLOCK_SKEW_SECONDS,
+            exp < now - crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
             "Expired token should be detected"
         );
     }
@@ -682,7 +696,7 @@ mod tests {
         let now = Timestamp::now().as_second();
         let iat = now + 15; // 15s in future, within 30s skew
         assert!(
-            iat <= now + CLOCK_SKEW_SECONDS,
+            iat <= now + crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
             "iat 15s in future should be within 30s clock skew"
         );
     }
@@ -692,7 +706,7 @@ mod tests {
         let now = Timestamp::now().as_second();
         let iat = now + 60; // 60s in future, beyond 30s skew
         assert!(
-            iat > now + CLOCK_SKEW_SECONDS,
+            iat > now + crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
             "iat 60s in future should be beyond 30s clock skew"
         );
     }
@@ -702,7 +716,7 @@ mod tests {
         let now = Timestamp::now().as_second();
         let nbf = now + 3600; // 1 hour in future
         assert!(
-            nbf > now + CLOCK_SKEW_SECONDS,
+            nbf > now + crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
             "nbf 1 hour in future should be rejected"
         );
     }

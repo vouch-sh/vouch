@@ -101,7 +101,7 @@ pub use scim::{
 
 // Re-export OAuth types and functions
 pub use oauth::{
-    AccessScope, OAuthClient, OAuthClientType, OAuthEventType, OAuthUsageStats,
+    AccessScope, FapiProfile, OAuthClient, OAuthClientType, OAuthEventType, OAuthUsageStats,
     TokenEndpointAuthMethod, create_oauth_client, create_oauth_client_secret,
     delete_expired_jwt_assertion_jtis, delete_oauth_client, delete_old_oauth_usage_events,
     get_client_jwks, get_oauth_client_by_client_id, get_oauth_client_by_id,
@@ -114,7 +114,8 @@ pub use oauth::{
 // Re-export test-only OAuth client helpers
 #[cfg(test)]
 pub use oauth::test_helpers::{
-    update_oauth_client_auth_method, update_oauth_client_jar_settings, update_oauth_client_jwks,
+    update_oauth_client_auth_method, update_oauth_client_fapi_settings,
+    update_oauth_client_jar_settings, update_oauth_client_jwks,
 };
 
 // Re-export JWT issuer types and functions (RFC 7523)
