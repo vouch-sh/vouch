@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.2.42"
+version = "2026.2.43"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.93.1"
@@ -87,7 +87,7 @@ serde_yaml = { version = "=0.9.34", default-features = false }
 sqlx = { version = "=0.8.6", default-features = false }
 ssh-key = { version = "=0.6.7", default-features = false }
 subtle = { version = "=2.6.1", default-features = false }
-tempfile = { version = "=3.25.0", default-features = false }
+tempfile = { version = "=3.26.0", default-features = false }
 thiserror = { version = "=2.0.18", default-features = false }
 time = { version = "=0.3.47", default-features = false }
 tokio = { version = "=1.49.0", default-features = false }
