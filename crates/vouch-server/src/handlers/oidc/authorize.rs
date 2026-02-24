@@ -12,7 +12,7 @@ use crate::impl_template_response;
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization::{
     AuthorizationCodeParams, AuthorizationSessionState, AuthorizeRequestParams,
-    CodeChallengeMethod, check_client_access, check_session_for_authorization,
+    CodeChallengeMethod, Prompt, check_client_access, check_session_for_authorization,
     issue_authorization_code, validate_authorize_request,
 };
 use askama::Template;
@@ -58,6 +58,15 @@ pub struct AuthorizeQuery {
     /// RFC 8707 Section 2: Target resource indicator.
     #[serde(default)]
     resource: Option<String>,
+    /// RFC 9470: Requested authentication context class references.
+    #[serde(default)]
+    acr_values: Option<String>,
+    /// RFC 9470 / OIDC Core Section 3.1.2.1: Maximum authentication age in seconds.
+    #[serde(default)]
+    max_age: Option<u64>,
+    /// OIDC Core Section 3.1.2.1: Requested prompt behavior.
+    #[serde(default)]
+    prompt: Option<String>,
 }
 
 /// GET /oauth/authorize
@@ -107,6 +116,23 @@ pub async fn authorize(
         .into_response();
     }
 
+    // Validate prompt before constructing params — reject unsupported values.
+    let parsed_prompt = match params.prompt.as_deref() {
+        Some(p) => match Prompt::parse(p) {
+            Some(prompt) => Some(prompt),
+            None => {
+                return oauth_error_redirect(
+                    &redirect_uri,
+                    "invalid_request",
+                    "Unsupported prompt value. Only 'login' and 'none' are supported",
+                    params.state.as_deref(),
+                    &state.config().base_url,
+                );
+            }
+        },
+        None => None,
+    };
+
     let request_params = AuthorizeRequestParams {
         response_type,
         client_id: client_id.clone(),
@@ -117,6 +143,9 @@ pub async fn authorize(
         code_challenge: params.code_challenge.clone(),
         code_challenge_method: params.code_challenge_method.clone(),
         resource: params.resource.clone(),
+        acr_values: params.acr_values.clone(),
+        max_age: params.max_age,
+        prompt: parsed_prompt,
     };
 
     let validated = match validate_authorize_request(request_params) {
@@ -197,7 +226,7 @@ pub async fn authorize(
     match check_session_for_authorization(&state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
             user,
-            session: _,
+            session: ref auth_session,
             authenticator,
         }) => {
             // User is authenticated - check access before issuing code
@@ -211,6 +240,56 @@ pub async fn authorize(
                     error_message,
                 }
                 .into_response();
+            }
+
+            // RFC 9470: Check if re-authentication is required.
+            //
+            // prompt=login always forces re-auth (even with a fresh session).
+            // max_age checks authentication age: if (now - auth_time) > max_age,
+            // the user must re-authenticate with their FIDO2 key.
+            let needs_reauth = validated.prompt() == Some(Prompt::Login)
+                || validated.max_age().is_some_and(|max_age| {
+                    let auth_time = auth_session.created_at.to_jiff();
+                    let age_secs = jiff::Timestamp::now()
+                        .duration_since(auth_time)
+                        .as_secs()
+                        .max(0);
+                    let Ok(age) = u64::try_from(age_secs) else {
+                        return true;
+                    };
+                    age >= max_age
+                });
+
+            // prompt=none means "don't show UI"; if re-auth is needed, return error.
+            if needs_reauth && validated.prompt() == Some(Prompt::Silent) {
+                return oauth_error_redirect(
+                    validated.redirect_uri(),
+                    "login_required",
+                    "Re-authentication required but prompt=none was requested",
+                    validated.state(),
+                    &state.config().base_url,
+                );
+            }
+
+            if needs_reauth {
+                return store_pending_and_redirect(&state, validated).await;
+            }
+
+            // RFC 9470: Validate requested ACR is satisfiable.
+            // Vouch only provides AAL3 — reject requests for other ACR levels.
+            if let Some(acr) = validated.acr_values() {
+                let acr_ok = acr
+                    .split_whitespace()
+                    .any(|v| v == crate::services::oidc::amr::ACR_AAL3);
+                if !acr_ok {
+                    return oauth_error_redirect(
+                        validated.redirect_uri(),
+                        "unmet_authentication_requirements",
+                        "The requested authentication context class is not supported",
+                        validated.state(),
+                        &state.config().base_url,
+                    );
+                }
             }
 
             // RFC 8707: Validate resource parameter against registered URIs
@@ -239,6 +318,7 @@ pub async fn authorize(
                 code_challenge: validated.code_challenge(),
                 code_challenge_method: validated.code_challenge_method(),
                 resource: validated.resource(),
+                acr_values: validated.acr_values(),
             };
 
             issue_code_and_redirect(
@@ -250,41 +330,64 @@ pub async fn authorize(
             .await
         }
         Ok(AuthorizationSessionState::NeedsAuth) | Err(_) => {
-            // No valid session - store OAuth params and redirect to login
-            // This prevents parameter tampering per RFC 9700
-            let scope_str = validated.scope().to_space_separated();
-            let pending_params = CreatePendingOAuthParams {
-                client_id: validated.client_id(),
-                redirect_uri: validated.redirect_uri(),
-                response_type: "code",
-                state: validated.state(),
-                scope: Some(&scope_str),
-                nonce: validated.nonce(),
-                code_challenge: validated.code_challenge(),
-                code_challenge_method: validated.code_challenge_method().map(|m| m.as_str()),
-                resource: validated.resource(),
-            };
-
-            match db::create_pending_oauth_authorization(&state.db, pending_params).await {
-                Ok(pending_id) => {
-                    // Redirect to login with pending auth ID
-                    Redirect::to(&format!(
-                        "/login?pending_auth={}",
-                        urlencoding::encode(&pending_id)
-                    ))
-                    .into_response()
-                }
-                Err(e) => {
-                    tracing::error!("Failed to create pending OAuth authorization: {}", e);
-                    oauth_error_redirect(
-                        validated.redirect_uri(),
-                        "server_error",
-                        "Failed to initiate login",
-                        validated.state(),
-                        &state.config().base_url,
-                    )
-                }
+            // No valid session - store OAuth params and redirect to login.
+            // prompt=none means "don't show UI" — return error immediately.
+            if validated.prompt() == Some(Prompt::Silent) {
+                return oauth_error_redirect(
+                    validated.redirect_uri(),
+                    "login_required",
+                    "User is not authenticated and prompt=none was requested",
+                    validated.state(),
+                    &state.config().base_url,
+                );
             }
+            store_pending_and_redirect(&state, validated).await
+        }
+    }
+}
+
+/// Store OAuth params in the database and redirect to login.
+///
+/// Used when the user needs to (re-)authenticate before authorization can proceed:
+/// - No existing session
+/// - `prompt=login` requested
+/// - `max_age` exceeded (RFC 9470 step-up)
+async fn store_pending_and_redirect(
+    state: &Arc<AppState>,
+    validated: crate::services::oidc::authorization::ValidatedAuthRequest,
+) -> Response {
+    let scope_str = validated.scope().to_space_separated();
+    let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
+    let pending_params = CreatePendingOAuthParams {
+        client_id: validated.client_id(),
+        redirect_uri: validated.redirect_uri(),
+        response_type: "code",
+        state: validated.state(),
+        scope: Some(&scope_str),
+        nonce: validated.nonce(),
+        code_challenge: validated.code_challenge(),
+        code_challenge_method: validated.code_challenge_method().map(|m| m.as_str()),
+        resource: validated.resource(),
+        acr_values: validated.acr_values(),
+        max_age: max_age_i64,
+        prompt: validated.prompt().map(|p| p.as_str()),
+    };
+
+    match db::create_pending_oauth_authorization(&state.db, pending_params).await {
+        Ok(pending_id) => Redirect::to(&format!(
+            "/login?pending_auth={}",
+            urlencoding::encode(&pending_id)
+        ))
+        .into_response(),
+        Err(e) => {
+            tracing::error!("Failed to create pending OAuth authorization: {}", e);
+            oauth_error_redirect(
+                validated.redirect_uri(),
+                "server_error",
+                "Failed to initiate login",
+                validated.state(),
+                &state.config().base_url,
+            )
         }
     }
 }
@@ -378,6 +481,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                     .as_deref()
                     .and_then(CodeChallengeMethod::parse),
                 resource: pending.resource.as_deref(),
+                acr_values: pending.acr_values.as_deref(),
             };
 
             issue_code_and_redirect(

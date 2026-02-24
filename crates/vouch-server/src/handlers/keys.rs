@@ -57,6 +57,7 @@ pub async fn delete_key(
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
     let session = extract_session(&state, auth_header, &jar).await?;
+    key_svc::require_fresh_session(&session.claims, key_svc::KEY_DELETE_MAX_AGE_SECS)?;
 
     let (key_name, sessions_revoked) =
         key_svc::delete_key(&state.db, &session.claims.sub, &key_id).await?;

@@ -242,6 +242,12 @@ pub enum PendingOAuthAuthorizations {
     ConsumedAt,
     /// RFC 8707: Resource indicator from authorization request.
     Resource,
+    /// RFC 9470: Requested authentication context class references.
+    AcrValues,
+    /// RFC 9470: Maximum authentication age in seconds.
+    MaxAge,
+    /// RFC 9470: Requested prompt behavior (e.g., "login", "none").
+    Prompt,
 }
 
 /// Token exchanges table (RFC 8693).

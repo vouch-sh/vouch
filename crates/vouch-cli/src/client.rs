@@ -8,7 +8,9 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
-use vouch_cli::http::{HttpClient, HttpResponse, ReqwestClient, format_http_error};
+use vouch_cli::http::{
+    HttpClient, HttpResponse, ReqwestClient, format_http_error, parse_www_authenticate,
+};
 
 /// HTTP client wrapper for vouch server API.
 ///
@@ -253,7 +255,19 @@ impl<H: HttpClient> VouchClient<H> {
         let error_text = response.text().unwrap_or_default();
 
         match status_code {
-            401 => Err(crate::exit_code::CliError::NotAuthenticated.into()),
+            401 => {
+                // RFC 9470: Check for step-up authentication challenge
+                if let Some(ref www_auth) = response.www_authenticate
+                    && let Some(challenge) = parse_www_authenticate(www_auth)
+                {
+                    return Err(crate::exit_code::CliError::StepUpRequired {
+                        acr_values: challenge.acr_values,
+                        max_age: challenge.max_age,
+                    }
+                    .into());
+                }
+                Err(crate::exit_code::CliError::NotAuthenticated.into())
+            }
             403 => Err(crate::exit_code::CliError::PermissionDenied.into()),
             _ => Err(format_http_error(status_code, &error_text)),
         }
@@ -328,5 +342,41 @@ mod tests {
         let result: Result<serde_json::Value> =
             VouchClient::<ReqwestClient>::handle_response(response);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_handle_response_401_step_up_challenge() {
+        let response = HttpResponse::with_www_authenticate(
+            401,
+            b"{}".to_vec(),
+            Some("Bearer error=\"insufficient_user_authentication\", max_age=\"300\"".to_string()),
+        );
+        let result: Result<serde_json::Value> =
+            VouchClient::<ReqwestClient>::handle_response(response);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let cli_err = err.downcast_ref::<crate::exit_code::CliError>().unwrap();
+        assert!(matches!(
+            cli_err,
+            crate::exit_code::CliError::StepUpRequired {
+                max_age: Some(300),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_handle_response_401_without_step_up() {
+        // Regular 401 without WWW-Authenticate → NotAuthenticated
+        let response = HttpResponse::new(401, b"{}".to_vec());
+        let result: Result<serde_json::Value> =
+            VouchClient::<ReqwestClient>::handle_response(response);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let cli_err = err.downcast_ref::<crate::exit_code::CliError>().unwrap();
+        assert!(matches!(
+            cli_err,
+            crate::exit_code::CliError::NotAuthenticated
+        ));
     }
 }

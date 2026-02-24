@@ -59,6 +59,52 @@ impl fmt::Display for CodeChallengeMethod {
     }
 }
 
+/// OIDC Core Section 3.1.2.1: Prompt parameter values.
+///
+/// Controls whether the authorization server prompts the user for re-authentication.
+/// Vouch only supports `login` (force re-auth) and `none` (no UI).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Prompt {
+    /// Force the user to re-authenticate even if they have a valid session.
+    #[serde(rename = "login")]
+    Login,
+    /// Do not display any authentication UI. Return an error if the user
+    /// is not already authenticated.
+    ///
+    /// Named `Silent` (not `None`) to avoid ambiguity with `Option::None`.
+    #[serde(rename = "none")]
+    Silent,
+}
+
+impl Prompt {
+    /// Parse a prompt value from a string.
+    ///
+    /// Returns `None` for unsupported values (e.g., `consent`, `select_account`).
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "login" => Some(Self::Login),
+            "none" => Some(Self::Silent),
+            _ => None,
+        }
+    }
+
+    /// Return the string representation used in OAuth parameters.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Login => "login",
+            Self::Silent => "none",
+        }
+    }
+}
+
+impl fmt::Display for Prompt {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Parameters for creating an authorization code.
 #[derive(Debug)]
 pub struct AuthorizationCodeParams<'a> {
@@ -84,6 +130,8 @@ pub struct AuthorizationCodeParams<'a> {
     pub code_challenge_method: Option<CodeChallengeMethod>,
     /// RFC 8707: Target resource indicator.
     pub resource: Option<&'a str>,
+    /// RFC 9470: Requested ACR values.
+    pub acr_values: Option<&'a str>,
 }
 
 /// Authorization request parameters (from query string).
@@ -108,6 +156,12 @@ pub struct AuthorizeRequestParams {
     pub code_challenge_method: Option<String>,
     /// RFC 8707 Section 2: Target resource indicator.
     pub resource: Option<String>,
+    /// RFC 9470: Requested authentication context class references.
+    pub acr_values: Option<String>,
+    /// RFC 9470 / OIDC Core Section 3.1.2.1: Maximum authentication age in seconds.
+    pub max_age: Option<u64>,
+    /// OIDC Core Section 3.1.2.1: Requested prompt behavior.
+    pub prompt: Option<Prompt>,
 }
 
 /// Validated authorization request ready for code issuance.
@@ -125,6 +179,12 @@ pub struct ValidatedAuthRequest {
     code_challenge_method: Option<CodeChallengeMethod>,
     /// RFC 8707: Validated resource indicator.
     resource: Option<String>,
+    /// RFC 9470: Requested ACR values.
+    acr_values: Option<String>,
+    /// RFC 9470: Maximum authentication age in seconds.
+    max_age: Option<u64>,
+    /// OIDC Core: Requested prompt behavior.
+    prompt: Option<Prompt>,
 }
 
 impl ValidatedAuthRequest {
@@ -175,6 +235,24 @@ impl ValidatedAuthRequest {
     pub fn resource(&self) -> Option<&str> {
         self.resource.as_deref()
     }
+
+    /// RFC 9470: Requested ACR values.
+    #[must_use]
+    pub fn acr_values(&self) -> Option<&str> {
+        self.acr_values.as_deref()
+    }
+
+    /// RFC 9470: Maximum authentication age in seconds.
+    #[must_use]
+    pub fn max_age(&self) -> Option<u64> {
+        self.max_age
+    }
+
+    /// OIDC Core: Requested prompt behavior.
+    #[must_use]
+    pub fn prompt(&self) -> Option<Prompt> {
+        self.prompt
+    }
 }
 
 /// Result of checking session state for authorization.
@@ -218,6 +296,9 @@ pub struct AuthorizationCode {
     /// RFC 8707: Resource indicator from authorization request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource: Option<String>,
+    /// RFC 9470: Requested ACR values from authorization request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub acr_values: Option<String>,
     pub iat: i64,
     pub exp: i64,
 }
@@ -274,6 +355,10 @@ const MAX_STATE_LEN: usize = 512;
 const MAX_SCOPE_LEN: usize = 512;
 const MAX_NONCE_LEN: usize = 256;
 const MAX_CODE_CHALLENGE_LEN: usize = 128;
+const MAX_ACR_VALUES_LEN: usize = 512;
+/// Maximum allowed value for the `max_age` parameter (1 year in seconds).
+/// Prevents unreasonable values and ensures safe u64→i64 conversion for storage.
+const MAX_MAX_AGE: u64 = 31_536_000;
 
 /// Validate an authorization request.
 ///
@@ -330,6 +415,31 @@ pub fn validate_authorize_request(
     if let Some(ref resource) = params.resource {
         validate_param_length("resource", resource, MAX_RESOURCE_LEN)?;
     }
+    if let Some(ref acr_values) = params.acr_values {
+        validate_param_length("acr_values", acr_values, MAX_ACR_VALUES_LEN)?;
+        // Reject characters that could break WWW-Authenticate header quoted-string
+        // syntax (RFC 9470 Section 3): double quotes, backslashes, and control chars.
+        if acr_values
+            .bytes()
+            .any(|b| b == b'"' || b == b'\\' || b < 0x20)
+        {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "acr_values contains invalid characters",
+            ));
+        }
+    }
+    if let Some(max_age) = params.max_age
+        && max_age > MAX_MAX_AGE
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            format!("max_age exceeds maximum allowed value of {MAX_MAX_AGE}"),
+        ));
+    }
+
+    // prompt is already validated by Prompt::parse() at the handler level;
+    // the enum type ensures only valid values reach here.
 
     // RFC 9700 Section 2.1.1: PKCE with S256 is required for all clients.
     let parsed_method = if let Some(ref method_str) = params.code_challenge_method {
@@ -380,6 +490,9 @@ pub fn validate_authorize_request(
         code_challenge: params.code_challenge,
         code_challenge_method: parsed_method,
         resource: params.resource,
+        acr_values: params.acr_values,
+        max_age: params.max_age,
+        prompt: params.prompt,
     })
 }
 
@@ -464,6 +577,7 @@ pub async fn issue_authorization_code(
         code_challenge: params.code_challenge.map(String::from),
         code_challenge_method: params.code_challenge_method,
         resource: params.resource.map(String::from),
+        acr_values: params.acr_values.map(String::from),
         iat: now.as_second(),
         exp,
     };
@@ -669,6 +783,9 @@ mod tests {
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some("S256".to_string()),
             resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
         };
 
         let result = validate_authorize_request(params);
@@ -690,6 +807,9 @@ mod tests {
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some("S256".to_string()),
             resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
         };
 
         let result = validate_authorize_request(params);
@@ -714,6 +834,9 @@ mod tests {
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some("S256".to_string()),
             resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
         };
 
         let result = validate_authorize_request(params);
@@ -732,6 +855,9 @@ mod tests {
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some("S256".to_string()),
             resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
         };
 
         let result = validate_authorize_request(params);
@@ -753,6 +879,9 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
         };
 
         let result = validate_authorize_request(params);
@@ -778,6 +907,9 @@ mod tests {
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some("plain".to_string()),
             resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
         };
 
         let result = validate_authorize_request(params);
@@ -873,6 +1005,255 @@ mod tests {
         let creator = test_user("user-1", Some("org-1"));
 
         let result = check_client_access(&client, &creator);
+        assert!(result.is_ok());
+    }
+
+    // =========================================================================
+    // RFC 9470 Step-Up Authentication Tests
+    // =========================================================================
+
+    #[test]
+    fn test_validate_authorize_request_with_acr_values() {
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: Some("urn:nist:authentication:assurance-level:aal3".to_string()),
+            max_age: None,
+            prompt: None,
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_ok());
+        let validated = result.unwrap();
+        assert_eq!(
+            validated.acr_values(),
+            Some("urn:nist:authentication:assurance-level:aal3")
+        );
+    }
+
+    #[test]
+    fn test_validate_authorize_request_with_max_age() {
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: None,
+            max_age: Some(300),
+            prompt: None,
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_ok());
+        let validated = result.unwrap();
+        assert_eq!(validated.max_age(), Some(300));
+    }
+
+    #[test]
+    fn test_validate_authorize_request_with_prompt_login() {
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: Some(Prompt::Login),
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_ok());
+        let validated = result.unwrap();
+        assert_eq!(validated.prompt(), Some(Prompt::Login));
+    }
+
+    #[test]
+    fn test_validate_authorize_request_with_prompt_none() {
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: Some("openid".to_string()),
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: Some(Prompt::Silent),
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_ok());
+        let validated = result.unwrap();
+        assert_eq!(validated.prompt(), Some(Prompt::Silent));
+    }
+
+    #[test]
+    fn test_validate_authorize_request_rejects_long_acr_values() {
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: None,
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: Some("a".repeat(513)),
+            max_age: None,
+            prompt: None,
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_prompt_parse() {
+        assert_eq!(Prompt::parse("login"), Some(Prompt::Login));
+        assert_eq!(Prompt::parse("none"), Some(Prompt::Silent));
+        assert_eq!(Prompt::parse("consent"), None);
+        assert_eq!(Prompt::parse("select_account"), None);
+        assert_eq!(Prompt::parse(""), None);
+    }
+
+    #[test]
+    fn test_prompt_as_str() {
+        assert_eq!(Prompt::Login.as_str(), "login");
+        assert_eq!(Prompt::Silent.as_str(), "none");
+    }
+
+    #[test]
+    fn test_prompt_display() {
+        assert_eq!(format!("{}", Prompt::Login), "login");
+        assert_eq!(format!("{}", Prompt::Silent), "none");
+    }
+
+    #[test]
+    fn test_prompt_serde_roundtrip() {
+        let login = Prompt::Login;
+        let json = serde_json::to_string(&login).unwrap();
+        assert_eq!(json, "\"login\"");
+
+        let deserialized: Prompt = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, Prompt::Login);
+    }
+
+    #[test]
+    fn test_validate_authorize_request_rejects_acr_values_with_quotes() {
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: None,
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: Some("aal3\", injected=\"bad".to_string()),
+            max_age: None,
+            prompt: None,
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ServiceError::OAuth { code, description } => {
+                assert_eq!(code, OAuthErrorCode::InvalidRequest);
+                assert!(description.contains("invalid characters"));
+            }
+            _ => panic!("Expected OAuth InvalidRequest error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_authorize_request_rejects_acr_values_with_control_chars() {
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: None,
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: Some("aal3\rnewline".to_string()),
+            max_age: None,
+            prompt: None,
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_authorize_request_rejects_excessive_max_age() {
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: None,
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: None,
+            max_age: Some(31_536_001), // 1 year + 1 second
+            prompt: None,
+        };
+
+        let result = validate_authorize_request(params);
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ServiceError::OAuth { code, .. } => {
+                assert_eq!(code, OAuthErrorCode::InvalidRequest);
+            }
+            _ => panic!("Expected OAuth InvalidRequest error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_authorize_request_accepts_max_max_age() {
+        // Exactly 1 year should be accepted
+        let params = AuthorizeRequestParams {
+            response_type: "code".to_string(),
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: None,
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge".to_string()),
+            code_challenge_method: Some("S256".to_string()),
+            resource: None,
+            acr_values: None,
+            max_age: Some(31_536_000),
+            prompt: None,
+        };
+
+        let result = validate_authorize_request(params);
         assert!(result.is_ok());
     }
 }

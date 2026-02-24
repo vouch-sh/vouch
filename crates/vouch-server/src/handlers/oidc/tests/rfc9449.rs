@@ -1019,6 +1019,7 @@ async fn test_rfc9449_dpop_nonce_required_token_endpoint_returns_nonce_header() 
             code_challenge: None,
             code_challenge_method: None,
             resource: None,
+            acr_values: None,
         },
     )
     .await
@@ -1095,6 +1096,7 @@ async fn test_rfc9449_dpop_nonce_required_retry_with_nonce_succeeds() {
             code_challenge: None,
             code_challenge_method: None,
             resource: None,
+            acr_values: None,
         },
     )
     .await

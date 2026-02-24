@@ -58,6 +58,7 @@ async fn test_rfc7636_code_verifier_too_short() {
                 crate::services::oidc::authorization::CodeChallengeMethod::S256,
             ),
             resource: None,
+            acr_values: None,
         },
     )
     .await
@@ -156,6 +157,7 @@ async fn test_rfc7636_end_to_end_pkce_flow() {
                 crate::services::oidc::authorization::CodeChallengeMethod::S256,
             ),
             resource: None,
+            acr_values: None,
         },
     )
     .await
@@ -217,6 +219,7 @@ async fn test_rfc7636_wrong_verifier_rejected() {
                 crate::services::oidc::authorization::CodeChallengeMethod::S256,
             ),
             resource: None,
+            acr_values: None,
         },
     )
     .await
@@ -277,6 +280,7 @@ async fn test_rfc7636_code_verifier_length_too_short() {
             code_challenge: Some(&challenge),
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
+            acr_values: None,
         },
     )
     .await
@@ -333,6 +337,7 @@ async fn test_rfc7636_code_verifier_too_long() {
             code_challenge: Some(&challenge),
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
+            acr_values: None,
         },
     )
     .await
@@ -388,6 +393,7 @@ async fn test_rfc7636_complete_pkce_s256_flow() {
             code_challenge: Some(&challenge),
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
+            acr_values: None,
         },
     )
     .await
@@ -443,6 +449,7 @@ async fn issue_pkce_code(
             code_challenge: Some(challenge),
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
+            acr_values: None,
         },
     )
     .await

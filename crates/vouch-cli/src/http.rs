@@ -17,13 +17,34 @@ pub struct HttpResponse {
     pub status: u16,
     /// Response body bytes.
     pub body: Vec<u8>,
+    /// WWW-Authenticate header value (if present on 401 responses).
+    /// Used for RFC 9470 step-up authentication challenge detection.
+    pub www_authenticate: Option<String>,
 }
 
 impl HttpResponse {
     /// Create a new HTTP response.
     #[must_use]
     pub fn new(status: u16, body: Vec<u8>) -> Self {
-        Self { status, body }
+        Self {
+            status,
+            body,
+            www_authenticate: None,
+        }
+    }
+
+    /// Create a new HTTP response with a WWW-Authenticate header.
+    #[must_use]
+    pub fn with_www_authenticate(
+        status: u16,
+        body: Vec<u8>,
+        www_authenticate: Option<String>,
+    ) -> Self {
+        Self {
+            status,
+            body,
+            www_authenticate,
+        }
     }
 
     /// Check if the response indicates success (2xx status).
@@ -139,12 +160,28 @@ impl HttpClient for ReqwestClient {
         let response = builder.send().await.context("HTTP request failed")?;
 
         let status = response.status().as_u16();
+
+        // Extract WWW-Authenticate header for RFC 9470 step-up detection
+        let www_authenticate = if status == 401 {
+            response
+                .headers()
+                .get("www-authenticate")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from)
+        } else {
+            None
+        };
+
         let body = response
             .bytes()
             .await
             .context("failed to read response body")?;
 
-        Ok(HttpResponse::new(status, body.to_vec()))
+        Ok(HttpResponse::with_www_authenticate(
+            status,
+            body.to_vec(),
+            www_authenticate,
+        ))
     }
 }
 
@@ -273,6 +310,66 @@ fn handle_response<Resp: DeserializeOwned>(response: HttpResponse) -> Result<Res
     }
 }
 
+/// RFC 9470: Parsed step-up authentication challenge from a `WWW-Authenticate` header.
+#[derive(Debug, Clone)]
+pub struct StepUpChallenge {
+    /// Requested authentication context class references.
+    pub acr_values: Option<String>,
+    /// Maximum authentication age in seconds.
+    pub max_age: Option<u64>,
+}
+
+/// Parse a `WWW-Authenticate` header value for an RFC 9470 step-up challenge.
+///
+/// Returns `Some(challenge)` if the header contains
+/// `error="insufficient_user_authentication"`, extracting any `acr_values`
+/// and `max_age` parameters.
+///
+/// Returns `None` for non-step-up Bearer challenges (e.g., `error="invalid_token"`).
+pub fn parse_www_authenticate(header: &str) -> Option<StepUpChallenge> {
+    // Must be a Bearer challenge
+    if !header.starts_with("Bearer ") {
+        return None;
+    }
+
+    // Check for the step-up error code
+    if !header.contains("insufficient_user_authentication") {
+        return None;
+    }
+
+    // Extract quoted parameter values with boundary checking to avoid
+    // matching parameter names that appear as substrings of other values.
+    let extract_param = |name: &str| -> Option<String> {
+        let prefix = format!("{name}=\"");
+        let mut search_from = 0;
+        loop {
+            let start = header.get(search_from..)?.find(&prefix)? + search_from;
+            // Verify boundary: the character before the match must be a delimiter
+            // (comma, space) or the start of the string.
+            if start > 0 {
+                let prev = header.as_bytes().get(start.wrapping_sub(1)).copied()?;
+                if prev != b',' && prev != b' ' {
+                    // Not a real parameter boundary — keep searching
+                    search_from = start + 1;
+                    continue;
+                }
+            }
+            let value_start = start + prefix.len();
+            let rest = header.get(value_start..)?;
+            let end = rest.find('"')?;
+            return rest.get(..end).map(String::from);
+        }
+    };
+
+    let acr_values = extract_param("acr_values");
+    let max_age = extract_param("max_age").and_then(|v| v.parse().ok());
+
+    Some(StepUpChallenge {
+        acr_values,
+        max_age,
+    })
+}
+
 #[cfg(feature = "test-utils")]
 pub use test_utils::*;
 
@@ -352,13 +449,27 @@ mod test_utils {
                 .await
                 .context("router error")?;
 
-            // Extract status and body
+            // Extract status and headers
             let status = response.status().as_u16();
+            let www_authenticate = if status == 401 {
+                response
+                    .headers()
+                    .get("www-authenticate")
+                    .and_then(|v| v.to_str().ok())
+                    .map(String::from)
+            } else {
+                None
+            };
+
             let body_bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
                 .await
                 .context("failed to read response body")?;
 
-            Ok(HttpResponse::new(status, body_bytes.to_vec()))
+            Ok(HttpResponse::with_www_authenticate(
+                status,
+                body_bytes.to_vec(),
+                www_authenticate,
+            ))
         }
     }
 }
@@ -498,6 +609,67 @@ mod tests {
                 .to_string()
                 .contains("not authenticated")
         );
+    }
+
+    // =========================================================================
+    // RFC 9470 WWW-Authenticate Header Parsing Tests
+    // =========================================================================
+
+    #[test]
+    fn test_parse_www_authenticate_step_up_with_all_params() {
+        let header = "Bearer error=\"insufficient_user_authentication\", \
+                      error_description=\"A recent authentication is required\", \
+                      acr_values=\"urn:nist:authentication:assurance-level:aal3\", \
+                      max_age=\"300\"";
+        let challenge = parse_www_authenticate(header).unwrap();
+        assert_eq!(
+            challenge.acr_values.as_deref(),
+            Some("urn:nist:authentication:assurance-level:aal3")
+        );
+        assert_eq!(challenge.max_age, Some(300));
+    }
+
+    #[test]
+    fn test_parse_www_authenticate_step_up_max_age_only() {
+        let header = "Bearer error=\"insufficient_user_authentication\", max_age=\"60\"";
+        let challenge = parse_www_authenticate(header).unwrap();
+        assert_eq!(challenge.acr_values, None);
+        assert_eq!(challenge.max_age, Some(60));
+    }
+
+    #[test]
+    fn test_parse_www_authenticate_step_up_no_params() {
+        let header = "Bearer error=\"insufficient_user_authentication\"";
+        let challenge = parse_www_authenticate(header).unwrap();
+        assert_eq!(challenge.acr_values, None);
+        assert_eq!(challenge.max_age, None);
+    }
+
+    #[test]
+    fn test_parse_www_authenticate_non_step_up_error() {
+        let header = "Bearer error=\"invalid_token\"";
+        assert!(parse_www_authenticate(header).is_none());
+    }
+
+    #[test]
+    fn test_parse_www_authenticate_not_bearer() {
+        let header = "Basic realm=\"example\"";
+        assert!(parse_www_authenticate(header).is_none());
+    }
+
+    #[test]
+    fn test_parse_www_authenticate_empty() {
+        assert!(parse_www_authenticate("").is_none());
+    }
+
+    #[test]
+    fn test_parse_www_authenticate_param_substring_no_false_match() {
+        // "xacr_values" should NOT match when extracting "acr_values"
+        let header = "Bearer error=\"insufficient_user_authentication\", \
+                      xacr_values=\"fake\", acr_values=\"real_acr\", max_age=\"120\"";
+        let challenge = parse_www_authenticate(header).unwrap();
+        assert_eq!(challenge.acr_values.as_deref(), Some("real_acr"));
+        assert_eq!(challenge.max_age, Some(120));
     }
 
     #[cfg(feature = "test-utils")]

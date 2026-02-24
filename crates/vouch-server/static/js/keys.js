@@ -171,15 +171,113 @@
                 credentials: 'same-origin'
             });
 
+            // RFC 9470: Check for step-up authentication challenge
+            if (response.status === 401) {
+                var wwwAuth = response.headers.get('WWW-Authenticate') || '';
+                if (wwwAuth.indexOf('insufficient_user_authentication') !== -1) {
+                    // Re-authenticate inline with FIDO2, then retry delete
+                    await stepUpReauth();
+                    var retryResp = await fetch('/enroll/keys/' + keyId, {
+                        method: 'DELETE',
+                        credentials: 'same-origin'
+                    });
+                    if (!retryResp.ok) {
+                        var retryErr = await retryResp.json();
+                        throw new Error(retryErr.message || 'Failed to delete key after re-authentication');
+                    }
+                    await loadKeysAfterDelete();
+                    return;
+                }
+                // Regular expired session
+                window.location.href = '/login';
+                return;
+            }
+
             if (!response.ok) {
                 var err = await response.json();
                 throw new Error(err.message || 'Failed to delete key');
             }
 
-            loadKeys();
+            await loadKeysAfterDelete();
         } catch (err) {
             alert('Failed to delete key: ' + err.message);
         }
+    }
+
+    // Reload key list after a successful delete. If the deleted key was used
+    // for the current session, the session was cascade-deleted too — redirect
+    // to login so the user can re-authenticate with a remaining key.
+    async function loadKeysAfterDelete() {
+        var response = await fetch('/enroll/keys/api', {
+            credentials: 'same-origin'
+        });
+
+        if (response.status === 401) {
+            // Session was invalidated (deleted key's session cascade)
+            window.location.href = '/login';
+            return;
+        }
+
+        if (!response.ok) {
+            var err = await response.json();
+            throw new Error(err.message || 'Failed to load keys');
+        }
+
+        var data = await response.json();
+        keysData = data.keys;
+        renderKeys();
+    }
+
+    // RFC 9470: Perform inline FIDO2 re-authentication to get a fresh session.
+    // Calls the same WebAuthn assertion endpoints as the login page.
+    async function stepUpReauth() {
+        alert('Deleting a key requires recent authentication.\nPlease touch your security key when prompted.');
+
+        var startResp = await fetch('/login/webauthn/start', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({})
+        });
+
+        if (!startResp.ok) {
+            var err = await startResp.json();
+            throw new Error(err.message || 'Failed to start re-authentication');
+        }
+
+        var options = await startResp.json();
+        var challenge = base64urlToBuffer(options.challenge);
+
+        var credential = await navigator.credentials.get({
+            publicKey: {
+                challenge: challenge,
+                rpId: options.rp_id,
+                timeout: options.timeout,
+                userVerification: options.user_verification,
+                allowCredentials: []
+            }
+        });
+
+        var assertionResponse = credential.response;
+        var completeResp = await fetch('/login/webauthn/complete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({
+                state: options.state,
+                credential_id: bufferToBase64url(credential.rawId),
+                authenticator_data: bufferToBase64url(assertionResponse.authenticatorData),
+                client_data_json: bufferToBase64url(assertionResponse.clientDataJSON),
+                signature: bufferToBase64url(assertionResponse.signature),
+                user_handle: bufferToBase64url(assertionResponse.userHandle)
+            })
+        });
+
+        if (!completeResp.ok) {
+            var errResp = await completeResp.json();
+            throw new Error(errResp.message || 'Failed to complete re-authentication');
+        }
+        // Fresh vouch_session cookie is now set by the Set-Cookie header
     }
 
     async function addNewKey(event) {

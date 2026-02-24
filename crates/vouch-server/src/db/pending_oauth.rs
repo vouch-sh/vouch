@@ -34,6 +34,12 @@ pub struct PendingOAuthAuthorization {
     pub consumed_at: Option<DbTimestamp>,
     /// RFC 8707: Resource indicator from authorization request.
     pub resource: Option<String>,
+    /// RFC 9470: Requested authentication context class references.
+    pub acr_values: Option<String>,
+    /// RFC 9470: Maximum authentication age in seconds.
+    pub max_age: Option<i64>,
+    /// RFC 9470: Requested prompt behavior (e.g., "login", "none").
+    pub prompt: Option<String>,
 }
 
 /// Parameters for creating a pending OAuth authorization.
@@ -49,6 +55,12 @@ pub struct CreatePendingOAuthParams<'a> {
     pub code_challenge_method: Option<&'a str>,
     /// RFC 8707: Resource indicator from authorization request.
     pub resource: Option<&'a str>,
+    /// RFC 9470: Requested authentication context class references.
+    pub acr_values: Option<&'a str>,
+    /// RFC 9470: Maximum authentication age in seconds.
+    pub max_age: Option<i64>,
+    /// RFC 9470: Requested prompt behavior.
+    pub prompt: Option<&'a str>,
 }
 
 /// Create a pending OAuth authorization.
@@ -86,6 +98,9 @@ pub async fn create_pending_oauth_authorization(
                 PendingOAuthAuthorizations::CodeChallenge,
                 PendingOAuthAuthorizations::CodeChallengeMethod,
                 PendingOAuthAuthorizations::Resource,
+                PendingOAuthAuthorizations::AcrValues,
+                PendingOAuthAuthorizations::MaxAge,
+                PendingOAuthAuthorizations::Prompt,
                 PendingOAuthAuthorizations::CreatedAt,
                 PendingOAuthAuthorizations::ExpiresAt,
             ])
@@ -100,6 +115,9 @@ pub async fn create_pending_oauth_authorization(
                 params.code_challenge.into(),
                 params.code_challenge_method.into(),
                 params.resource.into(),
+                params.acr_values.into(),
+                params.max_age.into(),
+                params.prompt.into(),
                 created_at.as_str().into(),
                 expires_at.as_str().into(),
             ])
@@ -138,6 +156,9 @@ pub async fn get_pending_oauth_authorization(
                 PendingOAuthAuthorizations::ExpiresAt,
                 PendingOAuthAuthorizations::ConsumedAt,
                 PendingOAuthAuthorizations::Resource,
+                PendingOAuthAuthorizations::AcrValues,
+                PendingOAuthAuthorizations::MaxAge,
+                PendingOAuthAuthorizations::Prompt,
             ])
             .from(PendingOAuthAuthorizations::Table)
             .and_where(Expr::col(PendingOAuthAuthorizations::Id).eq(id))
@@ -206,6 +227,9 @@ pub async fn consume_pending_oauth_authorization(
                 PendingOAuthAuthorizations::ExpiresAt,
                 PendingOAuthAuthorizations::ConsumedAt,
                 PendingOAuthAuthorizations::Resource,
+                PendingOAuthAuthorizations::AcrValues,
+                PendingOAuthAuthorizations::MaxAge,
+                PendingOAuthAuthorizations::Prompt,
             ])
             .from(PendingOAuthAuthorizations::Table)
             .and_where(Expr::col(PendingOAuthAuthorizations::Id).eq(id))
@@ -270,6 +294,9 @@ mod tests {
             code_challenge: Some("challenge789"),
             code_challenge_method: Some("S256"),
             resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
         };
 
         let id = create_pending_oauth_authorization(&pool, params)
@@ -300,6 +327,9 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
         };
 
         let id = create_pending_oauth_authorization(&pool, params)

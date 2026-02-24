@@ -52,6 +52,7 @@ pub(super) async fn issue_oauth_access_token_with_scope(
         code_challenge: None,
         code_challenge_method: None,
         resource: None,
+        acr_values: None,
     };
 
     let code = issue_authorization_code(state, code_params)

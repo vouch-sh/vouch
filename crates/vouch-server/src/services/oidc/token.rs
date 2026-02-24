@@ -303,6 +303,22 @@ pub async fn exchange_authorization_code(
     // Validate PKCE code_verifier if code_challenge was present
     validate_pkce(&auth_code, params.code_verifier)?;
 
+    // RFC 9470 Section 4: Defense-in-depth ACR validation.
+    // If the authorization code carried acr_values, verify that Vouch's AAL3
+    // is among the requested values. The authorization endpoint already checks
+    // this, but we verify again here to prevent code injection attacks.
+    if let Some(ref acr_values) = auth_code.acr_values {
+        let acr_ok = acr_values
+            .split_whitespace()
+            .any(|v| v == crate::services::oidc::amr::ACR_AAL3);
+        if !acr_ok {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::UnmetAuthenticationRequirements,
+                "The requested authentication context class cannot be satisfied",
+            ));
+        }
+    }
+
     // RFC 8707: Resource narrowing — determine the audience for the access token.
     // The resource from the auth code (granted at authorization time) takes precedence.
     let audience = match (auth_code.resource.as_deref(), params.resource) {
@@ -758,6 +774,7 @@ mod tests {
             code_challenge: Some(expected_challenge.to_string()),
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
+            acr_values: None,
             iat: 0,
             exp: i64::MAX,
         };
@@ -782,6 +799,7 @@ mod tests {
             code_challenge: Some("expected_challenge".to_string()),
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
+            acr_values: None,
             iat: 0,
             exp: i64::MAX,
         };
@@ -806,6 +824,7 @@ mod tests {
             code_challenge: Some("challenge".to_string()),
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
+            acr_values: None,
             iat: 0,
             exp: i64::MAX,
         };
@@ -831,6 +850,7 @@ mod tests {
             code_challenge: None,
             code_challenge_method: None,
             resource: None,
+            acr_values: None,
             iat: 0,
             exp: i64::MAX,
         };
