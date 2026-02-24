@@ -1,0 +1,277 @@
+// SPDX-License-Identifier: BUSL-1.1
+//! Pushed Authorization Request (PAR) endpoint handler (RFC 9126).
+
+use super::client_auth::{ClientAuthFields, authenticate_client_any, extract_client_auth};
+use crate::AppState;
+use crate::db::par::PAR_EXPIRES_IN;
+use crate::db::{self, CreateParParams};
+use crate::services::ServiceError;
+use crate::services::error::OAuthErrorResponse;
+use crate::services::oidc::authorization::{
+    AuthorizeRequestParams, Prompt, validate_authorize_request,
+};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
+use secrecy::SecretString;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+/// PAR response (RFC 9126 Section 2.2).
+#[derive(Serialize)]
+struct ParResponse {
+    /// The request URI that the client uses at the authorization endpoint.
+    request_uri: String,
+    /// Lifetime of the request URI in seconds.
+    expires_in: i64,
+}
+
+/// PAR request body (RFC 9126 Section 2.1).
+///
+/// Contains the same parameters as an authorization request, plus client
+/// authentication fields.
+#[derive(Debug, Deserialize)]
+pub struct ParRequest {
+    /// RFC 6749 Section 4.1.1: Response type (must be "code").
+    #[serde(default)]
+    response_type: Option<String>,
+    /// RFC 6749 Section 4.1.1: Client identifier.
+    #[serde(default)]
+    client_id: Option<String>,
+    /// RFC 6749 Section 4.1.1: Redirect URI for the response.
+    #[serde(default)]
+    redirect_uri: Option<String>,
+    /// RFC 6749 Section 3.3: Requested scope.
+    #[serde(default)]
+    scope: Option<String>,
+    /// RFC 6749 Section 4.1.1: State parameter.
+    #[serde(default)]
+    state: Option<String>,
+    /// OIDC Core Section 3.1.2.1: Nonce value.
+    #[serde(default)]
+    nonce: Option<String>,
+    /// RFC 7636 Section 4.2: PKCE code challenge.
+    #[serde(default)]
+    code_challenge: Option<String>,
+    /// RFC 7636 Section 4.3: PKCE code challenge method.
+    #[serde(default)]
+    code_challenge_method: Option<String>,
+    /// RFC 8707 Section 2: Target resource indicator.
+    #[serde(default)]
+    resource: Option<String>,
+    /// RFC 9470: Requested authentication context class references.
+    #[serde(default)]
+    acr_values: Option<String>,
+    /// RFC 9470 / OIDC Core Section 3.1.2.1: Maximum authentication age in seconds.
+    #[serde(default)]
+    max_age: Option<u64>,
+    /// OIDC Core Section 3.1.2.1: Requested prompt behavior.
+    #[serde(default)]
+    prompt: Option<String>,
+    /// RFC 9126 Section 2.1: MUST NOT include request_uri in PAR request.
+    #[serde(default)]
+    request_uri: Option<String>,
+    /// RFC 6749 Section 2.3.1: Client secret.
+    #[serde(default)]
+    client_secret: Option<SecretString>,
+    /// RFC 7521 Section 4.2: Client assertion for JWT client authentication.
+    #[serde(default)]
+    client_assertion: Option<String>,
+    /// RFC 7521 Section 4.2: Client assertion type.
+    #[serde(default)]
+    client_assertion_type: Option<String>,
+}
+
+/// Implement `ClientAuthFields` for `ParRequest` to enable shared client
+/// authentication extraction.
+impl ClientAuthFields for ParRequest {
+    fn client_id(&self) -> Option<&str> {
+        self.client_id.as_deref()
+    }
+
+    fn client_secret(&self) -> Option<SecretString> {
+        self.client_secret.clone()
+    }
+
+    fn client_assertion(&self) -> Option<&str> {
+        self.client_assertion.as_deref()
+    }
+
+    fn client_assertion_type(&self) -> Option<&str> {
+        self.client_assertion_type.as_deref()
+    }
+}
+
+/// POST /oauth/par
+///
+/// Pushed Authorization Request endpoint (RFC 9126 Section 2).
+///
+/// Allows clients to POST authorization request parameters directly,
+/// receiving a `request_uri` reference in exchange. The client then
+/// redirects the user to the authorization endpoint with only
+/// `client_id` and `request_uri`.
+///
+/// ## Requirements
+///
+/// - Client authentication is REQUIRED (RFC 9126 Section 2).
+/// - The `request_uri` parameter MUST NOT be present in the request.
+/// - All standard authorization request parameters are accepted.
+///
+/// ## Response
+///
+/// Returns 201 Created with a JSON body containing `request_uri` and `expires_in`.
+pub async fn par(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    axum::Form(params): axum::Form<ParRequest>,
+) -> Response {
+    // RFC 9126 Section 2.1: request_uri MUST NOT be provided in a PAR request
+    if params.request_uri.is_some() {
+        return par_error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "request_uri must not be provided in a pushed authorization request",
+        );
+    }
+
+    // Extract and authenticate the client (required for PAR)
+    let client_auth = match extract_client_auth(&headers, &params) {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+
+    // RFC 9126 Section 2: Client authentication is REQUIRED
+    let Some((authenticated_client, _client_id)) =
+        (match authenticate_client_any(&state, client_auth).await {
+            Ok(result) => result,
+            Err(resp) => return resp,
+        })
+    else {
+        return par_error_response(
+            StatusCode::UNAUTHORIZED,
+            "invalid_client",
+            "Client authentication is required for pushed authorization requests",
+        );
+    };
+
+    // Validate prompt before constructing params
+    let parsed_prompt = match params.prompt.as_deref() {
+        Some(p) => match Prompt::parse(p) {
+            Some(prompt) => Some(prompt),
+            None => {
+                return par_error_response(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_request",
+                    "Unsupported prompt value. Only 'login' and 'none' are supported",
+                );
+            }
+        },
+        None => None,
+    };
+
+    // Validate the authorization request parameters
+    let request_params = AuthorizeRequestParams {
+        response_type: params.response_type.unwrap_or_default(),
+        client_id: authenticated_client.client.client_id.clone(),
+        redirect_uri: params.redirect_uri.clone().unwrap_or_default(),
+        scope: params.scope.clone(),
+        state: params.state.clone(),
+        nonce: params.nonce.clone(),
+        code_challenge: params.code_challenge.clone(),
+        code_challenge_method: params.code_challenge_method.clone(),
+        resource: params.resource.clone(),
+        acr_values: params.acr_values.clone(),
+        max_age: params.max_age,
+        prompt: parsed_prompt,
+    };
+
+    let validated = match validate_authorize_request(request_params) {
+        Ok(v) => v,
+        Err(e) => {
+            let (error_code, description) = match &e {
+                ServiceError::OAuth { code, description } => (code.as_str(), description.clone()),
+                _ => ("server_error", e.to_string()),
+            };
+            return par_error_response(StatusCode::BAD_REQUEST, error_code, &description);
+        }
+    };
+
+    // Validate redirect_uri against registered URIs
+    if !authenticated_client
+        .client
+        .is_valid_redirect_uri(validated.redirect_uri())
+    {
+        return par_error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "redirect_uri is not registered for this client",
+        );
+    }
+
+    // RFC 8707: Validate resource parameter against registered URIs
+    if let Some(resource) = validated.resource()
+        && !authenticated_client.client.is_valid_resource_uri(resource)
+    {
+        return par_error_response(
+            StatusCode::BAD_REQUEST,
+            "invalid_target",
+            "The requested resource is not registered for this client",
+        );
+    }
+
+    // Store the pushed authorization request
+    let scope_str = validated.scope().to_space_separated();
+    let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
+    let create_params = CreateParParams {
+        client_id: validated.client_id(),
+        response_type: "code",
+        redirect_uri: validated.redirect_uri(),
+        scope: Some(&scope_str),
+        state: validated.state(),
+        nonce: validated.nonce(),
+        code_challenge: validated.code_challenge(),
+        code_challenge_method: validated.code_challenge_method().map(|m| m.as_str()),
+        resource: validated.resource(),
+        acr_values: validated.acr_values(),
+        max_age: max_age_i64,
+        prompt: validated.prompt().map(|p| p.as_str()),
+    };
+
+    match db::create_pushed_authorization_request(&state.db, create_params).await {
+        Ok((_id, request_uri)) => {
+            // RFC 9126 Section 2.2: Return 201 Created
+            (
+                StatusCode::CREATED,
+                Json(ParResponse {
+                    request_uri,
+                    expires_in: PAR_EXPIRES_IN,
+                }),
+            )
+                .into_response()
+        }
+        Err(e) => {
+            tracing::error!("Failed to create pushed authorization request: {}", e);
+            par_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Failed to store pushed authorization request",
+            )
+        }
+    }
+}
+
+/// Build a PAR error response.
+fn par_error_response(status: StatusCode, error: &str, description: &str) -> Response {
+    (
+        status,
+        Json(OAuthErrorResponse {
+            error: error.to_string(),
+            error_description: Some(description.to_string()),
+            error_uri: None,
+        }),
+    )
+        .into_response()
+}

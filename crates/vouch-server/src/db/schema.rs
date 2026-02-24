@@ -407,6 +407,34 @@ pub enum DpopJtiCache {
     ExpiresAt,
 }
 
+/// Pushed Authorization Requests table (RFC 9126).
+#[derive(Iden)]
+pub enum PushedAuthorizationRequests {
+    #[iden = "pushed_authorization_requests"]
+    Table,
+    Id,
+    RequestUri,
+    ClientId,
+    ResponseType,
+    RedirectUri,
+    Scope,
+    State,
+    Nonce,
+    CodeChallenge,
+    CodeChallengeMethod,
+    /// RFC 8707: Resource indicator from authorization request.
+    Resource,
+    /// RFC 9470: Requested authentication context class references.
+    AcrValues,
+    /// RFC 9470: Maximum authentication age in seconds.
+    MaxAge,
+    /// RFC 9470: Requested prompt behavior.
+    Prompt,
+    CreatedAt,
+    ExpiresAt,
+    ConsumedAt,
+}
+
 /// Trusted JWT issuers for RFC 7523 authorization grants.
 #[derive(Iden)]
 pub enum TrustedJwtIssuers {

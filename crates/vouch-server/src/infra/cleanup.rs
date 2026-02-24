@@ -125,6 +125,10 @@ pub async fn run_cleanup(
         "expired pending OAuth authorizations"
     );
     cleanup_and_log!(
+        db::delete_expired_pushed_authorization_requests(db, &now_str),
+        "expired pushed authorization requests"
+    );
+    cleanup_and_log!(
         db::delete_expired_authorization_codes(db),
         "expired authorization codes"
     );

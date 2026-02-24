@@ -1,54 +1,31 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Token endpoint handler.
 
+use super::client_auth::{
+    ClientAuthFields, ExtractedClientAuth, authenticate_client_any, extract_client_auth,
+    extract_client_credentials,
+};
 use crate::AppState;
 use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::{
     ScopeSet,
     exchange::{TokenExchangeParams, exchange_token},
     jwt_bearer::{client_auth::authenticate_client_jwt, grant::exchange_jwt_bearer_grant},
-    token::{
-        AuthCodeExchangeParams, ClientCredentials, authenticate_client,
-        exchange_authorization_code, validate_dpop_if_present,
-    },
+    token::{AuthCodeExchangeParams, exchange_authorization_code, validate_dpop_if_present},
 };
 use crate::services::{OAuthErrorCode, ServiceError};
 use axum::{
     Json,
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
-use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// RFC 7521 Section 4.2: Expected client assertion type for JWT bearer.
-const JWT_BEARER_CLIENT_ASSERTION_TYPE: &str =
-    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
-
 /// RFC 7523 Section 2.1: Grant type for JWT bearer authorization grants.
 const JWT_BEARER_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
-
-/// Extracted client authentication method from a token request.
-///
-/// Represents the mutually-exclusive authentication methods that a client
-/// can use at the token endpoint (RFC 7521 Section 4.2).
-enum ExtractedClientAuth {
-    /// Client secret via Basic header or body params.
-    Secret(ClientCredentials),
-    /// JWT assertion (RFC 7523).
-    JwtAssertion {
-        client_assertion: String,
-        client_id: Option<String>,
-    },
-    /// Public client with only client_id.
-    PublicClient { client_id: String },
-    /// No authentication provided.
-    None,
-}
 
 /// OAuth grant types supported by this server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -527,147 +504,23 @@ async fn handle_token_exchange_grant(
     }
 }
 
-/// Extract client credentials from Authorization header or request body.
-///
-/// Supports both `client_secret_basic` (RFC 6749 Section 2.3.1) and
-/// `client_secret_post` (RFC 6749 Section 2.3.1) authentication methods.
-///
-/// The client secret is wrapped in `SecretString` to prevent accidental logging
-/// and ensure it is zeroized on drop.
-pub fn extract_client_credentials(
-    headers: &HeaderMap,
-    client_id_param: Option<&str>,
-    client_secret_param: Option<SecretString>,
-) -> Option<ClientCredentials> {
-    // Try Authorization header first (client_secret_basic)
-    if let Some(auth_header) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .and_then(|h| h.strip_prefix("Basic "))
-        && let Ok(decoded) = base64::engine::general_purpose::STANDARD
-            .decode(auth_header.trim())
-            .or_else(|_| URL_SAFE_NO_PAD.decode(auth_header.trim()))
-        && let Ok(creds) = String::from_utf8(decoded)
-        && let Some((id, secret)) = creds.split_once(':')
-    {
-        // RFC 6749 Section 2.3.1: URL-decode client_id and client_secret after base64 decoding
-        let decoded_id =
-            urlencoding::decode(id).map_or_else(|_| id.to_string(), |d| d.into_owned());
-        let decoded_secret =
-            urlencoding::decode(secret).map_or_else(|_| secret.to_string(), |d| d.into_owned());
-        return Some(ClientCredentials {
-            client_id: decoded_id,
-            client_secret: Some(SecretString::from(decoded_secret)),
-        });
+/// Implement `ClientAuthFields` for `TokenRequest` to enable shared client
+/// authentication extraction.
+impl ClientAuthFields for TokenRequest {
+    fn client_id(&self) -> Option<&str> {
+        self.client_id.as_deref()
     }
 
-    // Fall back to request body parameters (client_secret_post)
-    client_id_param.map(|id| ClientCredentials {
-        client_id: id.to_string(),
-        client_secret: client_secret_param,
-    })
-}
-
-/// Extract client authentication from a token request (RFC 7521 Section 4.2).
-///
-/// Handles mutual exclusion: a request MUST NOT use more than one client
-/// authentication method (e.g., Basic auth header + client_assertion = error).
-#[allow(clippy::result_large_err)]
-fn extract_client_auth(
-    headers: &HeaderMap,
-    params: &TokenRequest,
-) -> Result<ExtractedClientAuth, Response> {
-    let has_basic = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|h| h.to_str().ok())
-        .is_some_and(|h| h.starts_with("Basic "));
-
-    let has_client_secret = params.client_secret.is_some();
-    let has_client_assertion = params.client_assertion.is_some();
-
-    // RFC 7521 Section 4.2: MUST NOT use more than one method
-    if has_client_assertion && (has_basic || has_client_secret) {
-        return Err(token_error_response(
-            "invalid_request",
-            "client_assertion cannot be combined with Basic auth or client_secret",
-        ));
+    fn client_secret(&self) -> Option<SecretString> {
+        self.client_secret.clone()
     }
 
-    // JWT client assertion
-    if let Some(ref assertion) = params.client_assertion {
-        // Validate assertion type
-        let assertion_type = params.client_assertion_type.as_deref().unwrap_or("");
-        if assertion_type != JWT_BEARER_CLIENT_ASSERTION_TYPE {
-            return Err(token_error_response(
-                "invalid_request",
-                &format!(
-                    "Unsupported client_assertion_type. Expected: {JWT_BEARER_CLIENT_ASSERTION_TYPE}"
-                ),
-            ));
-        }
-
-        return Ok(ExtractedClientAuth::JwtAssertion {
-            client_assertion: assertion.clone(),
-            client_id: params.client_id.clone(),
-        });
+    fn client_assertion(&self) -> Option<&str> {
+        self.client_assertion.as_deref()
     }
 
-    // Secret-based auth (Basic header or body params)
-    if let Some(creds) = extract_client_credentials(
-        headers,
-        params.client_id.as_deref(),
-        params.client_secret.clone(),
-    ) {
-        if creds.client_secret.is_some() || has_basic {
-            return Ok(ExtractedClientAuth::Secret(creds));
-        }
-        // client_id only, no secret
-        return Ok(ExtractedClientAuth::PublicClient {
-            client_id: creds.client_id,
-        });
-    }
-
-    Ok(ExtractedClientAuth::None)
-}
-
-/// Authenticate a client using any supported method.
-///
-/// Dispatches to secret-based or JWT-based authentication depending on
-/// the extracted authentication method.
-async fn authenticate_client_any(
-    state: &Arc<AppState>,
-    auth: ExtractedClientAuth,
-) -> Result<Option<(crate::services::oidc::token::AuthenticatedClient, String)>, Response> {
-    match auth {
-        ExtractedClientAuth::Secret(creds) => {
-            let client_id = creds.client_id.clone();
-            match authenticate_client(state, &creds).await {
-                Ok(client) => Ok(Some((client, client_id))),
-                Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
-            }
-        }
-        ExtractedClientAuth::JwtAssertion {
-            client_assertion,
-            client_id,
-        } => match authenticate_client_jwt(state, &client_assertion, client_id.as_deref()).await {
-            Ok(client) => {
-                let cid = client.client.client_id.clone();
-                Ok(Some((client, cid)))
-            }
-            Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
-        },
-        ExtractedClientAuth::PublicClient { client_id } => {
-            // Public client — create credentials without a secret for authenticate_client
-            let creds = ClientCredentials {
-                client_id: client_id.clone(),
-                client_secret: None,
-            };
-            match authenticate_client(state, &creds).await {
-                Ok(client) => Ok(Some((client, client_id))),
-                Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
-            }
-        }
-        ExtractedClientAuth::None => Ok(None),
+    fn client_assertion_type(&self) -> Option<&str> {
+        self.client_assertion_type.as_deref()
     }
 }
 

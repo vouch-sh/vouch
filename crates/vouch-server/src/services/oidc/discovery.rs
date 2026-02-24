@@ -71,6 +71,11 @@ pub struct OidcDiscoveryDocument {
     /// RFC 7523: Supported JWS algorithms for JWT client authentication.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_endpoint_auth_signing_alg_values_supported: Option<Vec<String>>,
+    /// RFC 9126: URL of the Pushed Authorization Request endpoint.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pushed_authorization_request_endpoint: Option<String>,
+    /// RFC 9126: Whether PAR is required for all authorization requests.
+    pub require_pushed_authorization_requests: bool,
 }
 
 /// JSON Web Key Set response (RFC 7517 Section 5).
@@ -152,6 +157,9 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "ES256".to_string(),
             "RS256".to_string(),
         ]),
+        // RFC 9126: Pushed Authorization Request endpoint
+        pushed_authorization_request_endpoint: Some(format!("{base_url}/oauth/par")),
+        require_pushed_authorization_requests: false,
     }
 }
 
