@@ -601,13 +601,14 @@ fn generate_id_token(state: &Arc<AppState>, params: IdTokenParams<'_>) -> Servic
 /// # Returns
 /// - `Ok(Some(proof))` if DPoP header was present and valid
 /// - `Ok(None)` if DPoP header was not present (use Bearer token)
+/// - `Err(DpopError::UseNonce(nonce))` if the server requires a nonce
 /// - `Err(...)` if DPoP header was present but invalid
 pub async fn validate_dpop_if_present(
     state: &AppState,
     dpop_header: Option<&str>,
     method: &str,
     uri: &str,
-) -> ServiceResult<Option<ValidatedDpopProof>> {
+) -> Result<Option<ValidatedDpopProof>, DpopError> {
     // Check if DPoP is enabled
     if !state.config().dpop_enabled {
         return Ok(None);
@@ -640,20 +641,13 @@ pub async fn validate_dpop_if_present(
             );
             Ok(Some(validated))
         }
-        Err(DpopError::UseNonce(_nonce)) => {
-            // RFC 9449 Section 8: Server requires nonce
-            tracing::debug!("DPoP nonce required, returning use_dpop_nonce error");
-            Err(ServiceError::oauth(
-                OAuthErrorCode::UseDpopNonce,
-                "Authorization server requires nonce in DPoP proof",
-            ))
-        }
         Err(e) => {
-            tracing::warn!("DPoP validation failed: {}", e);
-            Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidDpopProof,
-                e.to_string(),
-            ))
+            if matches!(&e, DpopError::UseNonce(_)) {
+                tracing::debug!("DPoP nonce required, returning use_dpop_nonce error");
+            } else {
+                tracing::warn!("DPoP validation failed: {}", e);
+            }
+            Err(e)
         }
     }
 }

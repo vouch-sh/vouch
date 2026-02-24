@@ -127,6 +127,15 @@ pub async fn introspect_token(
     // Build the introspection response based on the decoded token type
     match &decoded {
         DecodedToken::AccessToken(claims) => {
+            // RFC 7662 Section 4: Prevent cross-client information leakage.
+            // If the caller's client_id differs from the token's client_id,
+            // return inactive to avoid disclosing another client's tokens.
+            if let Some(caller_id) = caller_client_id
+                && caller_id != claims.client_id
+            {
+                return Ok(IntrospectionResult::inactive());
+            }
+
             // RFC 9068 access token — populate client_id from the JWT
             Ok(IntrospectionResult {
                 active: true,

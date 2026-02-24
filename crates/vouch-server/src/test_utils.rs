@@ -134,6 +134,11 @@ pub fn test_router(state: Arc<AppState>) -> Router {
             "/.well-known/openid-configuration",
             get(handlers::oidc::discovery),
         )
+        // RFC 8414 Section 3: OAuth Authorization Server Metadata alias
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(handlers::oidc::discovery),
+        )
         .route("/oauth/jwks", get(handlers::oidc::jwks))
         .route("/oauth/authorize", get(handlers::oidc::authorize))
         // OIDC Core Section 5.3.1: UserInfo MUST support GET and POST
@@ -692,6 +697,14 @@ pub fn make_test_access_token(key: &OidcSigningKey) -> String {
         acr: None,
     };
     key.sign_access_token_jwt(&claims).expect("sign")
+}
+
+/// Format a session token as a `Cookie` header value for the `/oauth/authorize` endpoint.
+///
+/// The authorize handler reads `vouch_session` from cookies, so this helper
+/// converts a session JWT into the appropriate header format.
+pub fn session_cookie_header(token: &str) -> String {
+    format!("vouch_session={token}")
 }
 
 /// Create a test HS256 session token.

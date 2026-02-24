@@ -5434,13 +5434,16 @@ async fn test_rfc7662_cross_client_introspection() {
     assert_eq!(status, StatusCode::OK);
     let result: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
 
-    // Per RFC 7662 Section 4, server may return active=false or limited info
-    // to prevent token information disclosure to unauthorized parties.
-    // Our implementation returns the token info since both clients belong to the same user.
-    // Verify the response is valid JSON with 'active' field.
+    // RFC 7662 Section 4: Cross-client introspection MUST return active=false.
+    // Client B must not see metadata from tokens issued to Client A.
+    assert_eq!(
+        result["active"], false,
+        "RFC 7662: Client B must not introspect Client A's token, got: {result}"
+    );
+    // No metadata should be disclosed on cross-client introspection
     assert!(
-        result.get("active").is_some(),
-        "Introspection response must include 'active' field"
+        result.get("sub").is_none(),
+        "Inactive cross-client response must not leak sub"
     );
 }
 
@@ -6467,5 +6470,1043 @@ async fn test_rfc9449_dpop_expired_proof() {
     assert!(
         status == StatusCode::UNAUTHORIZED || status == StatusCode::BAD_REQUEST,
         "Expired DPoP proof should be rejected, got: {status}"
+    );
+}
+
+// ========================================================================
+// RFC 7662 Section 4 — Cross-Client Introspection Prevention
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7662_cross_client_introspection_returns_inactive() {
+    // RFC 7662 Section 4: A token issued to Client A, when introspected by
+    // Client B, MUST return active=false to prevent information disclosure.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "introspect-cross-inactive@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client_a = create_test_oauth_client(&state.db, &user.id).await;
+    let client_b = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Issue token for client A
+    let (token_a, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client_a).await;
+
+    // Introspect with client B — must return active=false per RFC 7662 Section 4
+    let auth_b = client_b.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        &format!("token={token_a}"),
+        &[("Authorization", &auth_b)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    // RFC 7662 Section 4: Cross-client introspection returns active=false
+    assert_eq!(
+        result["active"], false,
+        "Client B must not be able to introspect Client A's token, got: {result}"
+    );
+    // No metadata should be leaked on inactive response
+    assert!(
+        result.get("sub").is_none(),
+        "Inactive response must not leak sub"
+    );
+    assert!(
+        result.get("exp").is_none(),
+        "Inactive response must not leak exp"
+    );
+    assert!(
+        result.get("client_id").is_none(),
+        "Inactive response must not leak client_id"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7662_same_client_introspection_returns_active() {
+    // RFC 7662 Section 2.2: A client introspecting its own token must receive
+    // active=true with full metadata.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "introspect-own-active@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Issue token for the client
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    // Client introspects its own token
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/introspect",
+        &format!("token={access_token}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let result: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+
+    // Must return active=true with full claims
+    assert_eq!(
+        result["active"], true,
+        "Same-client introspection must return active=true"
+    );
+    assert!(
+        result.get("sub").is_some(),
+        "Active introspection must include sub"
+    );
+    assert!(
+        result.get("exp").is_some(),
+        "Active introspection must include exp"
+    );
+    assert!(
+        result.get("iat").is_some(),
+        "Active introspection must include iat"
+    );
+}
+
+// ========================================================================
+// RFC 8414 — OAuth Authorization Server Metadata Alias
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc8414_oauth_authorization_server_alias_returns_200() {
+    // RFC 8414 Section 3: The authorization server MUST publish its metadata at
+    // /.well-known/oauth-authorization-server in addition to the OIDC path.
+    let (app, _state) = test_app().await;
+
+    let response = http_get_full(&app, "/.well-known/oauth-authorization-server", &[]).await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "RFC 8414 alias must return 200 OK"
+    );
+    let content_type = response
+        .headers
+        .get("Content-Type")
+        .expect("Must have Content-Type header")
+        .to_str()
+        .expect("Valid UTF-8");
+    assert!(
+        content_type.contains("application/json"),
+        "RFC 8414 alias must return application/json, got: {content_type}"
+    );
+    let metadata: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert!(
+        metadata.get("issuer").is_some(),
+        "RFC 8414 metadata must include issuer"
+    );
+    assert!(
+        metadata.get("authorization_endpoint").is_some(),
+        "RFC 8414 metadata must include authorization_endpoint"
+    );
+    assert!(
+        metadata.get("token_endpoint").is_some(),
+        "RFC 8414 metadata must include token_endpoint"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8414_oauth_authorization_server_alias_matches_openid_configuration() {
+    // RFC 8414 Section 3: Both discovery endpoints must expose identical metadata.
+    let (app, state) = test_app().await;
+
+    let (oidc_status, oidc_body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    let (rfc8414_status, rfc8414_body) =
+        http_get(&app, "/.well-known/oauth-authorization-server", &[]).await;
+
+    assert_eq!(oidc_status, StatusCode::OK);
+    assert_eq!(rfc8414_status, StatusCode::OK);
+
+    let oidc_meta: serde_json::Value = serde_json::from_str(&oidc_body).expect("Valid JSON");
+    let rfc8414_meta: serde_json::Value = serde_json::from_str(&rfc8414_body).expect("Valid JSON");
+
+    // Key fields must be identical
+    let base_url = &state.config().base_url;
+    let fields = [
+        "issuer",
+        "authorization_endpoint",
+        "token_endpoint",
+        "jwks_uri",
+        "response_types_supported",
+    ];
+    for field in &fields {
+        assert_eq!(
+            oidc_meta.get(*field),
+            rfc8414_meta.get(*field),
+            "Field '{field}' must match between both discovery endpoints"
+        );
+    }
+
+    // Both issuers must match the server's base URL
+    assert_eq!(
+        rfc8414_meta["issuer"].as_str(),
+        Some(base_url.as_str()),
+        "RFC 8414 issuer must equal base_url"
+    );
+}
+
+// ========================================================================
+// RFC 7636 Section 4.1 — PKCE Code Verifier Character Set Validation
+// ========================================================================
+
+/// Issue an authorization code with a PKCE challenge pre-computed from the given verifier.
+async fn issue_pkce_code(
+    state: &std::sync::Arc<crate::AppState>,
+    client_id: &str,
+    user: &crate::db::User,
+    auth_id: &str,
+    challenge: &str,
+) -> String {
+    let scope_set = ScopeSet::parse("openid");
+    issue_authorization_code(
+        state,
+        AuthorizationCodeParams {
+            client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: auth_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: None,
+            code_challenge: Some(challenge),
+            code_challenge_method: Some(CodeChallengeMethod::S256),
+            resource: None,
+        },
+    )
+    .await
+    .expect("Failed to issue authorization code with PKCE")
+}
+
+#[tokio::test]
+async fn test_rfc7636_code_verifier_invalid_char_space() {
+    // RFC 7636 Section 4.1: code_verifier MUST only contain unreserved chars
+    // [A-Za-z0-9\-._~]. Space is NOT allowed.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "pkce-space@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Build a 44-char verifier with a space embedded.
+    // The hash is computed from the exact verifier so the server would normally accept it
+    // if it only validates the challenge hash. The charset check must catch the space.
+    let verifier = "abcdefghijklmnopqrstuvwxyz0123456789abcde f"; // 44 chars, space at position 43
+
+    let challenge = sha256_base64url(verifier);
+    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback\
+             &code_verifier={verifier}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "code_verifier with space must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        error["error"] == "invalid_request" || error["error"] == "invalid_grant",
+        "Must return invalid_request or invalid_grant, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7636_code_verifier_invalid_char_exclamation() {
+    // RFC 7636 Section 4.1: '!' is not in [A-Za-z0-9\-._~] — must be rejected.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "pkce-excl@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // 43-char verifier with '!' character
+    let verifier = "abcdefghijklmnopqrstuvwxyz0123456789abcdef!"; // 43 chars, '!' at end
+    let challenge = sha256_base64url(verifier);
+    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback\
+             &code_verifier={verifier}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "code_verifier with '!' must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        error["error"] == "invalid_request" || error["error"] == "invalid_grant",
+        "Must return error for invalid charset, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7636_code_verifier_invalid_char_at_sign() {
+    // RFC 7636 Section 4.1: '@' (common in email) is not in [A-Za-z0-9\-._~].
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "pkce-at@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // 43-char verifier with '@' character
+    let verifier = "abcdefghijklmnopqrstuvwxyz0123456789abcde@f"; // 43 chars
+    let challenge = sha256_base64url(verifier);
+    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback\
+             &code_verifier={verifier}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "code_verifier with '@' must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        error["error"] == "invalid_request" || error["error"] == "invalid_grant",
+        "Must return error for '@' in verifier, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7636_code_verifier_invalid_char_unicode() {
+    // RFC 7636 Section 4.1: Unicode characters (outside ASCII unreserved) must be rejected.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "pkce-unicode@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // 43+ char verifier with a Unicode char (é = U+00E9, 2 bytes in UTF-8)
+    // This results in a string > 43 bytes but has invalid characters
+    let verifier = "abcdefghijklmnopqrstuvwxyz0123456789abcdéf"; // contains 'é'
+    let challenge = sha256_base64url(verifier);
+    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback\
+             &code_verifier={verifier}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "code_verifier with Unicode characters must be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        error["error"] == "invalid_request" || error["error"] == "invalid_grant",
+        "Must return error for Unicode in verifier, got: {error}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7636_code_verifier_minimum_length_43_accepted() {
+    // RFC 7636 Section 4.1: code_verifier of exactly 43 chars (minimum) must be accepted.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "pkce-min43@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Exactly 43 chars, all valid unreserved characters
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"; // RFC 7636 Appendix B
+    assert_eq!(verifier.len(), 43, "Test verifier must be exactly 43 chars");
+
+    let challenge = sha256_base64url(verifier);
+    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback\
+             &code_verifier={verifier}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Minimum-length (43 char) verifier must be accepted: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        response.get("access_token").is_some(),
+        "Must return access_token for valid minimum-length verifier"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7636_code_verifier_maximum_length_128_accepted() {
+    // RFC 7636 Section 4.1: code_verifier of exactly 128 chars (maximum) must be accepted.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "pkce-max128@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Exactly 128 valid unreserved chars
+    let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    assert_eq!(
+        verifier.len(),
+        128,
+        "Test verifier must be exactly 128 chars"
+    );
+    // Verify all chars are valid
+    assert!(
+        verifier.bytes().all(|b| b.is_ascii_alphanumeric()
+            || b == b'-'
+            || b == b'.'
+            || b == b'_'
+            || b == b'~'),
+        "All verifier chars must be in [A-Za-z0-9-._~]"
+    );
+
+    let challenge = sha256_base64url(verifier);
+    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback\
+             &code_verifier={verifier}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Maximum-length (128 char) verifier must be accepted: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        response.get("access_token").is_some(),
+        "Must return access_token for valid maximum-length verifier"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7636_code_verifier_all_allowed_char_classes() {
+    // RFC 7636 Section 4.1: All character classes from [A-Za-z0-9\-._~] must be accepted.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "pkce-allchars@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Use all allowed character classes in a 50-char verifier
+    // Uppercase, lowercase, digits, hyphen, dot, underscore, tilde
+    let verifier = "ABCDEFGHIJKLMNOPQRSTabcdefghijklmnopqrst0123456789-._~";
+    assert!(
+        verifier.len() >= 43,
+        "Test verifier must be at least 43 chars"
+    );
+    assert!(
+        verifier.bytes().all(|b| b.is_ascii_alphanumeric()
+            || b == b'-'
+            || b == b'.'
+            || b == b'_'
+            || b == b'~'),
+        "All verifier chars must be in [A-Za-z0-9-._~]"
+    );
+
+    let challenge = sha256_base64url(verifier);
+    let code = issue_pkce_code(&state, &client.client_id, &user, &auth_id, &challenge).await;
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback\
+             &code_verifier={verifier}"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "Verifier using all allowed RFC 7636 character classes must be accepted: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        response.get("access_token").is_some(),
+        "Must return access_token for verifier with all allowed char classes"
+    );
+}
+
+// ========================================================================
+// RFC 9449 Section 4.3 — DPoP Nonce Required at Token Endpoint
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc9449_dpop_nonce_required_token_endpoint_returns_nonce_header() {
+    // RFC 9449 Section 4.3: When dpop_nonce_required=true, the token endpoint MUST
+    // return error=use_dpop_nonce AND a DPoP-Nonce response header when a DPoP
+    // proof without a nonce is submitted.
+    let (app, state) = test_app().await;
+
+    // Enable dpop_nonce_required via ArcSwap in-place mutation
+    {
+        let current = (**state.config.load()).clone();
+        let mut modified = current;
+        modified.dpop_nonce_required = true;
+        state.config.store(std::sync::Arc::new(modified));
+    }
+
+    let user = create_test_user(&state.db, "dpop-nonce-req@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Issue authorization code (no PKCE, no DPoP needed here)
+    let scope_set = ScopeSet::parse("openid");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+        },
+    )
+    .await
+    .expect("Failed to issue authorization code");
+
+    // Build DPoP proof WITHOUT a nonce
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let dpop_proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "POST",
+        &format!("{}/oauth/token", state.config().base_url),
+        None, // no nonce
+        None,
+    );
+
+    let auth_header = client.basic_auth_header();
+    let response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback"
+        ),
+        &[("Authorization", &auth_header), ("DPoP", &dpop_proof)],
+    )
+    .await;
+
+    // Must be an error status
+    assert!(
+        response.status == StatusCode::BAD_REQUEST || response.status == StatusCode::UNAUTHORIZED,
+        "Token endpoint must reject DPoP proof without nonce when nonce required, got: {}",
+        response.status
+    );
+
+    // Must include error=use_dpop_nonce in the body
+    let error: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "use_dpop_nonce",
+        "Error must be use_dpop_nonce when nonce is required, got: {error}"
+    );
+
+    // RFC 9449 Section 4.3: Server MUST include DPoP-Nonce response header
+    assert!(
+        response.headers.get("DPoP-Nonce").is_some(),
+        "Server must include DPoP-Nonce header when use_dpop_nonce error is returned"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9449_dpop_nonce_required_retry_with_nonce_succeeds() {
+    // RFC 9449 Section 4.3: After receiving use_dpop_nonce, the client MUST
+    // retry with the nonce from the DPoP-Nonce response header.
+    let (app, state) = test_app().await;
+
+    // Enable dpop_nonce_required
+    {
+        let current = (**state.config.load()).clone();
+        let mut modified = current;
+        modified.dpop_nonce_required = true;
+        state.config.store(std::sync::Arc::new(modified));
+    }
+
+    let user = create_test_user(&state.db, "dpop-nonce-retry@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Issue authorization code
+    let scope_set = ScopeSet::parse("openid");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+        },
+    )
+    .await
+    .expect("Failed to issue authorization code");
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let auth_header = client.basic_auth_header();
+    let token_uri = format!("{}/oauth/token", state.config().base_url);
+
+    // Step 1: Request without nonce — capture the DPoP-Nonce header
+    let no_nonce_proof = create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, None, None);
+    let first_response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback"
+        ),
+        &[("Authorization", &auth_header), ("DPoP", &no_nonce_proof)],
+    )
+    .await;
+
+    // Should get use_dpop_nonce error with DPoP-Nonce header
+    assert!(
+        first_response.status == StatusCode::BAD_REQUEST
+            || first_response.status == StatusCode::UNAUTHORIZED,
+        "First request must be rejected: {}",
+        first_response.status
+    );
+    let server_nonce = first_response
+        .headers
+        .get("DPoP-Nonce")
+        .expect("DPoP-Nonce header must be present in error response")
+        .to_str()
+        .expect("DPoP-Nonce must be valid UTF-8")
+        .to_string();
+
+    // DPoP validation fails BEFORE code exchange, so the original code is NOT consumed.
+    // Reuse the same code for the retry with the server-provided nonce.
+
+    // Step 2: Retry with the nonce from the response header
+    let nonce_proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "POST",
+        &token_uri,
+        Some(&server_nonce),
+        None,
+    );
+    let second_response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback"
+        ),
+        &[("Authorization", &auth_header), ("DPoP", &nonce_proof)],
+    )
+    .await;
+
+    assert_eq!(
+        second_response.status,
+        StatusCode::OK,
+        "Retry with server-provided nonce must succeed: {}",
+        second_response.body
+    );
+    let token_response: serde_json::Value =
+        serde_json::from_str(&second_response.body).expect("Valid JSON");
+    assert!(
+        token_response.get("access_token").is_some(),
+        "Successful retry must return access_token"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9449_dpop_nonce_not_required_no_nonce_succeeds() {
+    // When dpop_nonce_required=false (default), DPoP proof without nonce must succeed.
+    // This is the default config and prevents regression.
+    let (app, state) = test_app().await;
+
+    // Verify the default setting is false
+    assert!(
+        !state.config().dpop_nonce_required,
+        "Default test config must have dpop_nonce_required=false"
+    );
+
+    let user = create_test_user(&state.db, "dpop-nononce@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    let scope_set = ScopeSet::parse("openid");
+    let code = issue_authorization_code(
+        &state,
+        AuthorizationCodeParams {
+            client_id: &client.client_id,
+            redirect_uri: "https://example.com/callback",
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: &auth_id,
+            aaguid: None,
+            scope: &scope_set,
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+        },
+    )
+    .await
+    .expect("Failed to issue authorization code");
+
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let dpop_proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "POST",
+        &format!("{}/oauth/token", state.config().base_url),
+        None, // no nonce — should still work when not required
+        None,
+    );
+
+    let auth_header = client.basic_auth_header();
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=authorization_code&code={code}\
+             &redirect_uri=https://example.com/callback"
+        ),
+        &[("Authorization", &auth_header), ("DPoP", &dpop_proof)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "DPoP without nonce must succeed when nonce is not required: {body}"
+    );
+    let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(
+        response.get("access_token").is_some(),
+        "Must return access_token when nonce not required"
+    );
+}
+
+// ========================================================================
+// RFC 6749 Section 4.1.2 — Authorization Endpoint Redirect Tests
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc6749_authorize_authenticated_user_redirects_with_code() {
+    // RFC 6749 Section 4.1.2: Authenticated user must receive a 302/303 redirect
+    // to the redirect_uri with code and state parameters.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "authorize-authed@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Create a valid session stored in the DB (cookie-based auth)
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    // Build a valid PKCE challenge
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let state_param = "teststate-rfc6749";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&state={}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+            state_param,
+        ),
+        &[("Cookie", &format!("vouch_session={session_token}"))],
+    )
+    .await;
+
+    // Must redirect (302 or 303)
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Authenticated authorize request must redirect, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Location must be valid UTF-8");
+
+    // RFC 6749 Section 4.1.2: code parameter must be present
+    assert!(
+        location.contains("code="),
+        "Location must include authorization code: {location}"
+    );
+
+    // RFC 6749 Section 4.1.2: state must be echoed unchanged
+    assert!(
+        location.contains(&format!("state={state_param}")),
+        "Location must echo state parameter unchanged: {location}"
+    );
+
+    // RFC 9207 Section 2: iss parameter must be present
+    assert!(
+        location.contains("iss="),
+        "Location must include iss parameter (RFC 9207): {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_unknown_client_shows_error_page() {
+    // RFC 6749 Section 4.1.2.1: If client_id is unknown, the server MUST NOT
+    // redirect to the redirect_uri — it must show an error page.
+    let (app, _state) = test_app().await;
+
+    let response = http_get_full(
+        &app,
+        "/oauth/authorize?response_type=code&client_id=nonexistent-client-xyz\
+         &redirect_uri=https://example.com/callback&scope=openid\
+         &code_challenge=dummychallenge&code_challenge_method=S256",
+        &[],
+    )
+    .await;
+
+    // Must show an error page (200 HTML), NOT redirect to the unregistered URI
+    assert!(
+        response.status == StatusCode::OK || response.status.is_client_error(),
+        "Unknown client must produce error page, not redirect, got: {}",
+        response.status
+    );
+
+    // Specifically must NOT redirect (no Location header pointing to callback)
+    if let Some(location) = response.headers.get("Location") {
+        let loc_str = location.to_str().unwrap_or("");
+        assert!(
+            !loc_str.contains("example.com/callback"),
+            "Must not redirect to unregistered URI for unknown client: {loc_str}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_unregistered_redirect_uri_shows_error_page() {
+    // RFC 6749 Section 10.6: If redirect_uri is not registered, the server MUST NOT
+    // redirect — it must display an error to the user.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "authorize-badredir@example.com").await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    // Note: client is registered with https://example.com/callback
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}\
+             &redirect_uri={}&scope=openid\
+             &code_challenge=dummychallenge&code_challenge_method=S256",
+            client.client_id,
+            urlencoding::encode("https://evil.example.com/steal")
+        ),
+        &[],
+    )
+    .await;
+
+    // Must show error page, NOT redirect to the evil URI
+    assert!(
+        response.status == StatusCode::OK || response.status.is_client_error(),
+        "Unregistered redirect_uri must produce error page, not redirect, got: {}",
+        response.status
+    );
+
+    if let Some(location) = response.headers.get("Location") {
+        let loc_str = location.to_str().unwrap_or("");
+        assert!(
+            !loc_str.contains("evil.example.com"),
+            "Must not redirect to unregistered URI: {loc_str}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_missing_response_type_redirects_with_error() {
+    // RFC 6749 Section 4.1.2.1: Missing response_type must produce error=invalid_request
+    // redirected back to the registered redirect_uri.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "authorize-nort@example.com").await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    let response = http_get_full(
+        &app,
+        // No response_type parameter
+        &format!(
+            "/oauth/authorize?client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge=dummychallenge&code_challenge_method=S256",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback")
+        ),
+        &[],
+    )
+    .await;
+
+    // Must redirect with error OR show error page
+    if response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER {
+        let location = response
+            .headers
+            .get("Location")
+            .expect("Redirect must have Location")
+            .to_str()
+            .expect("Valid UTF-8");
+        assert!(
+            location.contains("error=invalid_request") || location.contains("error="),
+            "Redirect must include error parameter: {location}"
+        );
+    } else {
+        // Error page is also acceptable for this case
+        assert!(
+            response.status == StatusCode::OK || response.status.is_client_error(),
+            "Must show error for missing response_type, got: {}",
+            response.status
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc9207_authorize_response_includes_iss_parameter() {
+    // RFC 9207 Section 2: The authorization response MUST include the iss parameter
+    // so clients can bind the response to the correct authorization server.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "authorize-iss@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&state=nonce123",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+        ),
+        &[("Cookie", &format!("vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Authenticated request must redirect, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    // RFC 9207 Section 2: iss must be present and equal to the authorization server's issuer
+    assert!(
+        location.contains("iss="),
+        "Authorization response must include iss parameter (RFC 9207): {location}"
+    );
+
+    // Parse the URL and check the iss value
+    let iss_start = location.find("iss=").expect("iss parameter exists") + 4;
+    let after_iss = location.get(iss_start..).expect("iss_start in bounds");
+    let iss_end = after_iss
+        .find('&')
+        .map(|i| iss_start + i)
+        .unwrap_or(location.len());
+    let iss_encoded = location
+        .get(iss_start..iss_end)
+        .expect("iss range in bounds");
+    let iss = urlencoding::decode(iss_encoded)
+        .expect("iss must be valid URL-encoded")
+        .into_owned();
+
+    let expected_issuer = &state.config().base_url;
+    assert_eq!(
+        &iss, expected_issuer,
+        "iss in authorization response must match server issuer"
     );
 }

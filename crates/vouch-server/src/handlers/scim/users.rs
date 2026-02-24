@@ -16,7 +16,7 @@ use super::types::{
 };
 use crate::AppState;
 use crate::db;
-use crate::db::ScimScope;
+use crate::db::{ScimFilterError, ScimScope};
 use crate::redact_email;
 
 /// GET /scim/v2/Users (RFC 7644 Section 3.4.2).
@@ -44,6 +44,13 @@ pub async fn list_users(
         match db::list_scim_users(&state.db, query.filter.as_deref(), start_index, count).await {
             Ok(users) => users,
             Err(e) => {
+                if e.downcast_ref::<ScimFilterError>().is_some() {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(ScimError::new(400, e.to_string()).with_type("invalidFilter")),
+                    )
+                        .into_response();
+                }
                 tracing::error!("Failed to list users: {e}");
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
