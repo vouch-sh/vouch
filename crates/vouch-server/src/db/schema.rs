@@ -190,6 +190,10 @@ pub enum OAuthClients {
     JwksUriCache,
     /// RFC 7523: Token endpoint authentication method.
     TokenEndpointAuthMethod,
+    /// RFC 9101: Client's preferred signing algorithm for Request Objects.
+    RequestObjectSigningAlg,
+    /// RFC 9101: Whether this client MUST use JAR for authorization requests.
+    RequireSignedRequestObject,
 }
 
 /// OAuth client secrets table.

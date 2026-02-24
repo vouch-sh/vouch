@@ -135,6 +135,8 @@ pub enum OAuthErrorCode {
     InsufficientUserAuthentication,
     /// RFC 9470 Section 4: Authorization server cannot meet requested authentication requirements.
     UnmetAuthenticationRequirements,
+    /// RFC 9101 Section 6.2: The Request Object is invalid.
+    InvalidRequestObject,
 }
 
 impl std::fmt::Display for OAuthErrorCode {
@@ -152,7 +154,8 @@ impl OAuthErrorCode {
             | Self::InvalidScope
             | Self::InvalidDpopProof
             | Self::InvalidTarget
-            | Self::UnmetAuthenticationRequirements => StatusCode::BAD_REQUEST,
+            | Self::UnmetAuthenticationRequirements
+            | Self::InvalidRequestObject => StatusCode::BAD_REQUEST,
             Self::InvalidClient | Self::UnauthorizedClient => StatusCode::UNAUTHORIZED,
             Self::InsufficientUserAuthentication => StatusCode::UNAUTHORIZED,
             Self::InvalidGrant
@@ -189,6 +192,7 @@ impl OAuthErrorCode {
             Self::InvalidTarget => "invalid_target",
             Self::InsufficientUserAuthentication => "insufficient_user_authentication",
             Self::UnmetAuthenticationRequirements => "unmet_authentication_requirements",
+            Self::InvalidRequestObject => "invalid_request_object",
         }
     }
 }

@@ -16,6 +16,7 @@
 //! - [RFC 7521 - Assertion Framework](https://www.rfc-editor.org/rfc/rfc7521)
 //! - [RFC 7523 - JWT Profile for Client Auth and Authorization Grants](https://www.rfc-editor.org/rfc/rfc7523)
 //! - [RFC 9068 - JWT Profile for OAuth 2.0 Access Tokens](https://www.rfc-editor.org/rfc/rfc9068)
+//! - [RFC 9101 - JWT-Secured Authorization Request (JAR)](https://www.rfc-editor.org/rfc/rfc9101)
 //! - [RFC 9126 - Pushed Authorization Requests](https://www.rfc-editor.org/rfc/rfc9126)
 //! - [RFC 9449 - DPoP](https://www.rfc-editor.org/rfc/rfc9449)
 //!
@@ -27,6 +28,7 @@
 //! - [`token`] - Token endpoint logic (auth code, device code grants)
 //! - [`exchange`] - Token exchange (RFC 8693)
 //! - [`jwt_bearer`] - JWT client authentication and bearer grants (RFC 7523)
+//! - [`jar`] - JWT-Secured Authorization Request validation (RFC 9101)
 //! - [`introspection`] - Token introspection and revocation
 
 pub mod amr;
@@ -36,6 +38,7 @@ pub mod discovery;
 pub mod dpop;
 pub mod exchange;
 pub mod introspection;
+pub mod jar;
 pub mod jwt_bearer;
 pub mod keys;
 pub mod resource;

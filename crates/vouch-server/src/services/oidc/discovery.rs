@@ -76,6 +76,13 @@ pub struct OidcDiscoveryDocument {
     pub pushed_authorization_request_endpoint: Option<String>,
     /// RFC 9126: Whether PAR is required for all authorization requests.
     pub require_pushed_authorization_requests: bool,
+    /// RFC 9101: Whether the server supports the `request` parameter.
+    pub request_parameter_supported: bool,
+    /// RFC 9101: Supported JWS algorithms for Request Object signing.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_object_signing_alg_values_supported: Option<Vec<String>>,
+    /// RFC 9101: Whether all authorization requests must use signed Request Objects.
+    pub require_signed_request_object: bool,
 }
 
 /// JSON Web Key Set response (RFC 7517 Section 5).
@@ -160,6 +167,14 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         // RFC 9126: Pushed Authorization Request endpoint
         pushed_authorization_request_endpoint: Some(format!("{base_url}/oauth/par")),
         require_pushed_authorization_requests: false,
+        // RFC 9101: JWT-Secured Authorization Request support
+        request_parameter_supported: true,
+        request_object_signing_alg_values_supported: Some(vec![
+            "ES256".to_string(),
+            "RS256".to_string(),
+            "PS256".to_string(),
+        ]),
+        require_signed_request_object: false,
     }
 }
 

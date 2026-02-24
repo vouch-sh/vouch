@@ -287,7 +287,7 @@ pub fn find_matching_key(
     // Fall back to matching by algorithm/key type
     let expected_kty = match header.alg.as_str() {
         "ES256" => "EC",
-        "RS256" => "RSA",
+        "RS256" | "PS256" => "RSA",
         _ => {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClient,
@@ -338,7 +338,7 @@ fn build_decoding_key_from_jwk(
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
             })
         }
-        ("RSA", "RS256") => {
+        ("RSA", "RS256") | ("RSA", "PS256") => {
             let n = key.n.as_deref().ok_or_else(|| {
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "RSA key missing n component")
             })?;
@@ -883,5 +883,33 @@ mod tests {
             }
             other => panic!("Expected OAuth error, got: {other:?}"),
         }
+    }
+
+    // ====================================================================
+    // PS256 support (RFC 9101 / FAPI 2.0)
+    // ====================================================================
+
+    #[test]
+    fn test_find_matching_key_algorithm_fallback_ps256() {
+        let jwks = JwkSet {
+            keys: vec![rsa_jwk_entry(None, None, None)],
+        };
+        let hdr = header("PS256", None);
+
+        let result = find_matching_key(&jwks, &hdr);
+        assert!(
+            result.is_ok(),
+            "should match RSA key by algorithm fallback for PS256"
+        );
+    }
+
+    #[test]
+    fn test_build_decoding_key_rsa_ps256_valid() {
+        let key = rsa_jwk_entry(None, None, None);
+        let result = build_decoding_key_from_jwk(&key, "PS256");
+        assert!(
+            result.is_ok(),
+            "PS256 with valid RSA key should produce a decoding key"
+        );
     }
 }
