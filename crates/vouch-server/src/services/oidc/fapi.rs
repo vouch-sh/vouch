@@ -13,7 +13,10 @@ use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 pub const FAPI_AUTH_CODE_LIFETIME_SECONDS: i64 = 60;
 
 /// Standard (non-FAPI) authorization code lifetime in seconds.
-pub const STANDARD_AUTH_CODE_LIFETIME_SECONDS: i64 = 300;
+///
+/// 60 seconds is sufficient for the client to exchange the code after redirect.
+/// Matches the FAPI 2.0 recommendation — no reason for standard clients to be laxer.
+pub const STANDARD_AUTH_CODE_LIFETIME_SECONDS: i64 = 60;
 
 /// FAPI 2.0 PAR request lifetime in seconds.
 pub const FAPI_PAR_EXPIRES_IN: i64 = 60;
@@ -30,7 +33,10 @@ pub const FAPI_CLOCK_SKEW_ACCEPT_SECONDS: i64 = 10;
 pub const FAPI_CLOCK_SKEW_REJECT_SECONDS: i64 = 60;
 
 /// Standard (non-FAPI) clock skew tolerance in seconds.
-pub const STANDARD_CLOCK_SKEW_SECONDS: i64 = 30;
+///
+/// 10 seconds matches the FAPI 2.0 recommendation. Modern NTP-synced systems
+/// should not drift beyond this. Tighter tolerance reduces replay attack windows.
+pub const STANDARD_CLOCK_SKEW_SECONDS: i64 = 10;
 
 /// Validate that a client's registration is compatible with FAPI 2.0.
 ///
@@ -496,7 +502,7 @@ mod tests {
     fn test_clock_skew_seconds_standard_client() {
         let client = standard_client();
         assert_eq!(clock_skew_seconds(&client), STANDARD_CLOCK_SKEW_SECONDS);
-        assert_eq!(clock_skew_seconds(&client), 30);
+        assert_eq!(clock_skew_seconds(&client), 10);
     }
 
     // =========================================================================
@@ -520,7 +526,7 @@ mod tests {
             auth_code_lifetime_seconds(&client),
             STANDARD_AUTH_CODE_LIFETIME_SECONDS
         );
-        assert_eq!(auth_code_lifetime_seconds(&client), 300);
+        assert_eq!(auth_code_lifetime_seconds(&client), 60);
     }
 
     // =========================================================================
@@ -528,17 +534,21 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_fapi_auth_code_lifetime_is_shorter_than_standard() {
+    fn test_fapi_and_standard_auth_code_lifetime_aligned() {
+        // Both FAPI and standard use 60s — FAPI best practice adopted as default.
         let fapi = FAPI_AUTH_CODE_LIFETIME_SECONDS;
         let standard = STANDARD_AUTH_CODE_LIFETIME_SECONDS;
-        assert!(fapi < standard);
+        assert_eq!(fapi, standard);
+        assert_eq!(fapi, 60);
     }
 
     #[test]
-    fn test_fapi_clock_skew_is_tighter_than_standard() {
+    fn test_fapi_and_standard_clock_skew_aligned() {
+        // Both FAPI and standard use 10s — FAPI best practice adopted as default.
         let fapi = FAPI_CLOCK_SKEW_ACCEPT_SECONDS;
         let standard = STANDARD_CLOCK_SKEW_SECONDS;
-        assert!(fapi < standard);
+        assert_eq!(fapi, standard);
+        assert_eq!(fapi, 10);
     }
 
     #[test]

@@ -693,20 +693,20 @@ mod tests {
     #[test]
     fn test_jar_validate_future_iat_within_skew_accepted() {
         let now = Timestamp::now().as_second();
-        let iat = now + 15; // 15s in future, within 30s skew
+        let iat = now + 5; // 5s in future, within 10s skew
         assert!(
             iat <= now + crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
-            "iat 15s in future should be within 30s clock skew"
+            "iat 5s in future should be within 10s clock skew"
         );
     }
 
     #[test]
     fn test_jar_validate_future_iat_beyond_skew_rejected() {
         let now = Timestamp::now().as_second();
-        let iat = now + 60; // 60s in future, beyond 30s skew
+        let iat = now + 60; // 60s in future, beyond 10s skew
         assert!(
             iat > now + crate::services::oidc::fapi::STANDARD_CLOCK_SKEW_SECONDS,
-            "iat 60s in future should be beyond 30s clock skew"
+            "iat 60s in future should be beyond 10s clock skew"
         );
     }
 
