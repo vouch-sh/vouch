@@ -754,6 +754,8 @@ mod tests {
             jwks_uri_cached_at: None,
             jwks_uri_cache: None,
             token_endpoint_auth_method: "client_secret_basic".to_string(),
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
         }
     }
 

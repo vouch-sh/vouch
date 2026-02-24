@@ -10,6 +10,7 @@ use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::authorization::{
     AuthorizeRequestParams, Prompt, validate_authorize_request,
 };
+use crate::services::oidc::jar::validate_request_object;
 use axum::{
     Json,
     extract::State,
@@ -83,6 +84,9 @@ pub struct ParRequest {
     /// RFC 7521 Section 4.2: Client assertion type.
     #[serde(default)]
     client_assertion_type: Option<String>,
+    /// RFC 9101: JWT-Secured Authorization Request (Request Object).
+    #[serde(default)]
+    request: Option<String>,
 }
 
 /// Implement `ClientAuthFields` for `ParRequest` to enable shared client
@@ -156,6 +160,108 @@ pub async fn par(
             "Client authentication is required for pushed authorization requests",
         );
     };
+
+    // RFC 9101: If request parameter is present, validate the Request Object JWT
+    // and extract parameters from it instead of using the form fields.
+    if let Some(ref request_jwt) = params.request {
+        let request_params =
+            match validate_request_object(&state, request_jwt, &authenticated_client.client, None)
+                .await
+            {
+                Ok(params) => params,
+                Err(e) => {
+                    let (error_code, description) = match &e {
+                        ServiceError::OAuth { code, description } => {
+                            (code.as_str(), description.clone())
+                        }
+                        _ => ("server_error", e.to_string()),
+                    };
+                    return par_error_response(StatusCode::BAD_REQUEST, error_code, &description);
+                }
+            };
+
+        // client_id from JWT must match the authenticated client
+        if request_params.client_id != authenticated_client.client.client_id {
+            return par_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_object",
+                "client_id in Request Object does not match authenticated client",
+            );
+        }
+
+        let validated = match validate_authorize_request(request_params) {
+            Ok(v) => v,
+            Err(e) => {
+                let (error_code, description) = match &e {
+                    ServiceError::OAuth { code, description } => {
+                        (code.as_str(), description.clone())
+                    }
+                    _ => ("server_error", e.to_string()),
+                };
+                return par_error_response(StatusCode::BAD_REQUEST, error_code, &description);
+            }
+        };
+
+        // Validate redirect_uri against registered URIs
+        if !authenticated_client
+            .client
+            .is_valid_redirect_uri(validated.redirect_uri())
+        {
+            return par_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "redirect_uri is not registered for this client",
+            );
+        }
+
+        // RFC 8707: Validate resource parameter against registered URIs
+        if let Some(resource) = validated.resource()
+            && !authenticated_client.client.is_valid_resource_uri(resource)
+        {
+            return par_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_target",
+                "The requested resource is not registered for this client",
+            );
+        }
+
+        // Store the pushed authorization request
+        let scope_str = validated.scope().to_space_separated();
+        let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
+        let create_params = CreateParParams {
+            client_id: validated.client_id(),
+            response_type: "code",
+            redirect_uri: validated.redirect_uri(),
+            scope: Some(&scope_str),
+            state: validated.state(),
+            nonce: validated.nonce(),
+            code_challenge: validated.code_challenge(),
+            code_challenge_method: validated.code_challenge_method().map(|m| m.as_str()),
+            resource: validated.resource(),
+            acr_values: validated.acr_values(),
+            max_age: max_age_i64,
+            prompt: validated.prompt().map(|p| p.as_str()),
+        };
+
+        return match db::create_pushed_authorization_request(&state.db, create_params).await {
+            Ok((_id, request_uri)) => (
+                StatusCode::CREATED,
+                Json(ParResponse {
+                    request_uri,
+                    expires_in: PAR_EXPIRES_IN,
+                }),
+            )
+                .into_response(),
+            Err(e) => {
+                tracing::error!("Failed to create pushed authorization request: {}", e);
+                par_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "Failed to store pushed authorization request",
+                )
+            }
+        };
+    }
 
     // Validate prompt before constructing params
     let parsed_prompt = match params.prompt.as_deref() {

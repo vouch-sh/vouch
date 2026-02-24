@@ -205,6 +205,10 @@ pub struct OAuthClient {
     pub jwks_uri_cache: Option<String>,
     /// RFC 7523: Token endpoint authentication method.
     pub token_endpoint_auth_method: String,
+    /// RFC 9101: Client's preferred signing algorithm for Request Objects.
+    pub request_object_signing_alg: Option<String>,
+    /// RFC 9101: Whether this client MUST use JAR for authorization requests.
+    pub require_signed_request_object: Option<bool>,
 }
 
 impl OAuthClient {
@@ -333,6 +337,8 @@ pub async fn get_oauth_client_by_id(pool: &Pool, id: &str) -> Result<Option<OAut
                 OAuthClients::JwksUriCachedAt,
                 OAuthClients::JwksUriCache,
                 OAuthClients::TokenEndpointAuthMethod,
+                OAuthClients::RequestObjectSigningAlg,
+                OAuthClients::RequireSignedRequestObject,
             ])
             .from(OAuthClients::Table)
             .and_where(Expr::col(OAuthClients::Id).eq(id))
@@ -374,6 +380,8 @@ pub async fn get_oauth_client_by_client_id(
                 OAuthClients::JwksUriCachedAt,
                 OAuthClients::JwksUriCache,
                 OAuthClients::TokenEndpointAuthMethod,
+                OAuthClients::RequestObjectSigningAlg,
+                OAuthClients::RequireSignedRequestObject,
             ])
             .from(OAuthClients::Table)
             .and_where(Expr::col(OAuthClients::ClientId).eq(client_id))
@@ -412,6 +420,8 @@ pub async fn get_oauth_clients_for_user(pool: &Pool, user_id: &str) -> Result<Ve
                 OAuthClients::JwksUriCachedAt,
                 OAuthClients::JwksUriCache,
                 OAuthClients::TokenEndpointAuthMethod,
+                OAuthClients::RequestObjectSigningAlg,
+                OAuthClients::RequireSignedRequestObject,
             ])
             .from(OAuthClients::Table)
             .and_where(Expr::col(OAuthClients::UserId).eq(user_id))
@@ -905,6 +915,38 @@ pub mod test_helpers {
             let query = Query::update()
                 .table(OAuthClients::Table)
                 .value(OAuthClients::TokenEndpointAuthMethod, method)
+                .value(OAuthClients::UpdatedAt, now.as_str())
+                .and_where(Expr::col(OAuthClients::Id).eq(id))
+                .to_owned();
+            query.build_sql(db_type)
+        };
+
+        db_execute!(pool, sqlx::query(&sql))?;
+
+        Ok(())
+    }
+
+    /// Update JAR-related fields for a client (RFC 9101).
+    pub async fn update_oauth_client_jar_settings(
+        pool: &Pool,
+        id: &str,
+        request_object_signing_alg: Option<&str>,
+        require_signed_request_object: bool,
+    ) -> Result<()> {
+        let db_type = pool.db_type();
+        let now = Timestamp::now().to_string();
+
+        let sql = {
+            let query = Query::update()
+                .table(OAuthClients::Table)
+                .value(
+                    OAuthClients::RequestObjectSigningAlg,
+                    request_object_signing_alg,
+                )
+                .value(
+                    OAuthClients::RequireSignedRequestObject,
+                    require_signed_request_object,
+                )
                 .value(OAuthClients::UpdatedAt, now.as_str())
                 .and_where(Expr::col(OAuthClients::Id).eq(id))
                 .to_owned();

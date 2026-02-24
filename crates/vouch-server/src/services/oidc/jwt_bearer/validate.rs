@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// HS* and "none" are unconditionally rejected to prevent symmetric key
 /// confusion attacks (RFC 7523 Section 3).
-pub const SUPPORTED_ALGORITHMS: &[&str] = &["ES256", "RS256"];
+pub const SUPPORTED_ALGORITHMS: &[&str] = &["ES256", "RS256", "PS256"];
 
 /// Clock skew tolerance in seconds (matching DPoP behavior).
 const CLOCK_SKEW_SECONDS: i64 = 30;
@@ -126,7 +126,7 @@ pub fn parse_assertion_header(assertion: &str) -> ServiceResult<JwtAssertionHead
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             format!(
-                "Unsupported JWT assertion algorithm: {}. Supported: ES256, RS256",
+                "Unsupported JWT assertion algorithm: {}. Supported: ES256, RS256, PS256",
                 header.alg
             ),
         ));
@@ -271,6 +271,7 @@ pub fn map_algorithm(alg: &str) -> ServiceResult<jsonwebtoken::Algorithm> {
     match alg {
         "ES256" => Ok(jsonwebtoken::Algorithm::ES256),
         "RS256" => Ok(jsonwebtoken::Algorithm::RS256),
+        "PS256" => Ok(jsonwebtoken::Algorithm::PS256),
         _ => Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             format!("Unsupported algorithm: {alg}"),
@@ -870,5 +871,30 @@ mod tests {
         // "es256" (lowercase) is not a valid algorithm identifier.
         let result = map_algorithm("es256");
         assert!(result.is_err(), "Algorithm matching must be case-sensitive");
+    }
+
+    // ====================================================================
+    // PS256 support (RFC 9101 / FAPI 2.0)
+    // ====================================================================
+
+    #[test]
+    fn test_parse_assertion_header_accepts_ps256() {
+        let header_json = serde_json::json!({"alg": "PS256", "typ": "JWT"});
+        let header_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&header_json).unwrap());
+        let jwt = format!(
+            "{}.{}.sig",
+            header_b64,
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"{}"),
+        );
+        let result = parse_assertion_header(&jwt);
+        assert!(result.is_ok(), "PS256 should be accepted: {result:?}");
+        assert_eq!(result.unwrap().alg, "PS256");
+    }
+
+    #[test]
+    fn test_map_algorithm_ps256() {
+        let alg = map_algorithm("PS256").expect("PS256 should be mapped");
+        assert_eq!(alg, jsonwebtoken::Algorithm::PS256);
     }
 }

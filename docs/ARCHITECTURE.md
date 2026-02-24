@@ -232,8 +232,10 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - OAuth 2.0 Authorization Server Issuer Identification (RFC 9207)
 - SCIM 2.0 (RFC 7643/7644)
 - Resource Indicators for OAuth 2.0 (RFC 8707) — audience-restricted tokens
+- JWT-Secured Authorization Request (RFC 9101) — signed Request Objects for authorization requests (FAPI 2.0 compatible)
 - Pushed Authorization Requests (RFC 9126) — server-side parameter storage
 - DPoP (RFC 9449) — Demonstrating Proof of Possession
+- Step Up Authentication Challenge Protocol (RFC 9470) — `acr_values` and `max_age` in authorization requests
 - OAuth 2.0 Security Best Current Practice (RFC 9700) — followed
 
 **Supported Grant Types:**
@@ -354,7 +356,7 @@ client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer
 JWT requirements: `iss` and `sub` must equal the `client_id`, `aud` must be the token endpoint URL. Clients configure their public keys via inline `jwks` or a `jwks_uri` on the client registration.
 
 **Security:**
-- Only ES256 and RS256 algorithms are accepted (no HMAC, no `none`)
+- Only ES256, RS256, and PS256 algorithms are accepted (no HMAC, no `none`)
 - JTI-based replay prevention with server-side tracking
 - JWKS responses are cached (1-hour TTL, 24-hour maximum staleness)
 - JWKS URIs must use HTTPS
