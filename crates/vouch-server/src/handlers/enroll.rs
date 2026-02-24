@@ -696,9 +696,10 @@ pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar
             }
             .into_response()
         }
-        Err(_) => {
-            tracing::debug!(
-                "enroll_keys_page: no valid session found, redirecting to /enroll/start"
+        Err(err) => {
+            tracing::warn!(
+                error = ?err,
+                "enroll_keys_page: session extraction failed, redirecting to /enroll/start"
             );
             // No valid session - redirect to sign in
             Redirect::to("/enroll/start").into_response()

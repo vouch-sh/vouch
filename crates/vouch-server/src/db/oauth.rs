@@ -19,6 +19,7 @@ use uuid::Uuid;
 ///
 /// Controls who can authenticate with the application.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, sqlx::Type)]
+#[sqlx(type_name = "text")]
 #[sqlx(rename_all = "lowercase")]
 pub enum AccessScope {
     /// Only users in the same organization can authenticate.
@@ -76,6 +77,7 @@ impl AccessScope {
 
 /// OAuth application type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "text")]
 #[sqlx(rename_all = "lowercase")]
 pub enum OAuthClientType {
     Web,

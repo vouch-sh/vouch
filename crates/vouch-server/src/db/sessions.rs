@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 /// Session purpose — distinguishes FIDO2 login sessions from OAuth access tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "text")]
 pub enum SessionPurpose {
     /// FIDO2 hardware-backed login session (CLI login, device code flow).
     #[default]
