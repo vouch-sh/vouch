@@ -609,11 +609,6 @@ pub async fn validate_dpop_if_present(
     method: &str,
     uri: &str,
 ) -> Result<Option<ValidatedDpopProof>, DpopError> {
-    // Check if DPoP is enabled
-    if !state.config().dpop_enabled {
-        return Ok(None);
-    }
-
     let dpop_proof = match dpop_header {
         Some(proof) => proof,
         None => return Ok(None), // No DPoP header, use Bearer token

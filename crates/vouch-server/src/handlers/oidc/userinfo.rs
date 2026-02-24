@@ -81,7 +81,7 @@ pub async fn userinfo(
     };
 
     // RFC 9449 Section 7.1: If DPoP scheme is used, validate the DPoP proof at resource endpoint
-    if is_dpop_scheme && state.config().dpop_enabled {
+    if is_dpop_scheme {
         let dpop_header = match headers.get("DPoP").and_then(|v| v.to_str().ok()) {
             Some(h) => h,
             None => {
@@ -171,13 +171,6 @@ pub async fn userinfo(
                 );
             }
         }
-    } else if is_dpop_scheme {
-        // DPoP scheme used but DPoP is not enabled
-        return oauth_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_token",
-            "DPoP is not enabled on this server",
-        );
     }
 
     // Validate the session token

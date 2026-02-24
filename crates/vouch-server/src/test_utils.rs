@@ -74,7 +74,6 @@ pub fn test_config() -> ServerConfig {
         ssh_ca_key_path: None,
         ssh_ca_key: None,
         oidc_signing_key: None,
-        dpop_enabled: true,
         dpop_nonce_required: false,
         dpop_max_age_seconds: 300,
         cleanup_interval_minutes: 0, // Disabled for tests

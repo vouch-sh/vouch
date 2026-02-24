@@ -82,13 +82,8 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 
     // Feature status summary — one log per feature for searchable CloudWatch events
     tracing::info!(
-        "Sessions: duration={}h, dpop={}, dpop_nonce_required={}, dpop_max_age={}s",
+        "Sessions: duration={}h, dpop_nonce_required={}, dpop_max_age={}s",
         config.session_hours,
-        if config.dpop_enabled {
-            "enabled"
-        } else {
-            "disabled"
-        },
         config.dpop_nonce_required,
         config.dpop_max_age_seconds,
     );

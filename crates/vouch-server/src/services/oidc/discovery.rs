@@ -137,15 +137,11 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "acr".to_string(),
         ],
         code_challenge_methods_supported: vec!["S256".to_string()],
-        dpop_signing_alg_values_supported: if state.config().dpop_enabled {
-            Some(vec![
-                "ES256".to_string(),
-                "RS256".to_string(),
-                "EdDSA".to_string(),
-            ])
-        } else {
-            None
-        },
+        dpop_signing_alg_values_supported: Some(vec![
+            "ES256".to_string(),
+            "RS256".to_string(),
+            "EdDSA".to_string(),
+        ]),
         acr_values_supported: Some(vec![ACR_AAL3.to_string()]),
         // RFC 9207: Advertise that we include `iss` in authorization responses
         authorization_response_iss_parameter_supported: true,

@@ -113,8 +113,6 @@ impl std::fmt::Debug for S3OidcConfig {
 /// Nested DPoP configuration from S3.
 #[derive(Debug, Deserialize, Default)]
 pub struct S3DpopConfig {
-    /// Enable DPoP support.
-    pub enabled: Option<bool>,
     /// Require nonce in DPoP proofs.
     pub nonce_required: Option<bool>,
     /// Maximum age of DPoP proofs in seconds.
@@ -678,9 +676,6 @@ impl ServerConfig {
 
         // DPoP configuration
         if let Some(dpop) = &s3.dpop {
-            if let Some(v) = dpop.enabled {
-                self.dpop_enabled = v;
-            }
             if let Some(v) = dpop.nonce_required {
                 self.dpop_nonce_required = v;
             }
@@ -833,7 +828,6 @@ mod tests {
         let mut config = crate::test_utils::test_config();
         let s3 = S3Config {
             dpop: Some(S3DpopConfig {
-                enabled: Some(false),
                 nonce_required: Some(true),
                 max_age_seconds: Some(600),
             }),
@@ -842,7 +836,6 @@ mod tests {
 
         config.merge_s3_config(&s3, false);
 
-        assert!(!config.dpop_enabled);
         assert!(config.dpop_nonce_required);
         assert_eq!(config.dpop_max_age_seconds, 600);
     }
