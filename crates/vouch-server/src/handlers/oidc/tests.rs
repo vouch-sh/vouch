@@ -7510,3 +7510,612 @@ async fn test_rfc9207_authorize_response_includes_iss_parameter() {
         "iss in authorization response must match server issuer"
     );
 }
+
+// ========================================================================
+// RFC 6749 Section 4.1.2.1 — Authorization Endpoint Error Conditions
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc6749_authorize_empty_redirect_uri_shows_error_page() {
+    // RFC 6749 Section 4.1.2.1: If the redirect_uri is missing or invalid,
+    // the server MUST NOT redirect and MUST display an error to the user.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "authorize-noredir@example.com").await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&scope=openid\
+             &code_challenge=dummychallenge&code_challenge_method=S256",
+            client.client_id,
+        ),
+        &[],
+    )
+    .await;
+
+    // Must show an error page, not redirect
+    assert!(
+        response.status == StatusCode::OK || response.status.is_client_error(),
+        "Missing redirect_uri must produce error page, not redirect, got: {}",
+        response.status
+    );
+
+    // Body must indicate redirect_uri is required
+    assert!(
+        response.body.contains("redirect_uri"),
+        "Error page should mention redirect_uri: {}",
+        response.body
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_unsupported_response_type_redirects_with_error() {
+    // RFC 6749 Section 4.1.2.1: If response_type is unsupported, the server
+    // MUST redirect to the redirect_uri with error=unsupported_response_type.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "authorize-badrt@example.com").await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let state_param = "teststate-badrt";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=token&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge=dummychallenge&code_challenge_method=S256&state={}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            state_param,
+        ),
+        &[],
+    )
+    .await;
+
+    // Must redirect with error
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Unsupported response_type must redirect with error, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    // RFC 6749 Section 4.1.2.1: error=unsupported_response_type
+    assert!(
+        location.contains("error=unsupported_response_type"),
+        "Redirect must include error=unsupported_response_type: {location}"
+    );
+
+    // RFC 6749 Section 4.1.2.1: State must be echoed unchanged
+    assert!(
+        location.contains(&format!("state={state_param}")),
+        "Error redirect must echo state parameter: {location}"
+    );
+
+    // RFC 9207 Section 2: iss must be present even in error responses
+    assert!(
+        location.contains("iss="),
+        "Error redirect must include iss parameter (RFC 9207): {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_unauthenticated_user_redirects_to_login() {
+    // RFC 6749 Section 4.1.1: If the user is not authenticated, the server
+    // must redirect to a login page. Vouch stores OAuth params and redirects
+    // to /login with pending_auth.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "authorize-noauth@example.com").await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+
+    // No session cookie — user is not authenticated
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&state=loginstate",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+        ),
+        &[],
+    )
+    .await;
+
+    // Must redirect to login
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Unauthenticated user must be redirected to login, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    // Must redirect to /login with pending_auth parameter
+    assert!(
+        location.starts_with("/login"),
+        "Redirect must target /login: {location}"
+    );
+    assert!(
+        location.contains("pending_auth="),
+        "Login redirect must include pending_auth parameter: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_access_denied_personal_scope() {
+    // RFC 6749 Section 4.1.2.1: If the user does not have access, the server
+    // must deny the request. For Personal scope apps, only the creator can authorize.
+    let (app, state) = test_app().await;
+
+    // Create user who owns the app
+    let owner = create_test_user(&state.db, "authorize-owner@example.com").await;
+    // Create a Personal scope app
+    let client = create_test_oauth_client_with_options(
+        &state.db,
+        &owner.id,
+        crate::db::AccessScope::Personal,
+        None,
+        &[],
+    )
+    .await;
+
+    // Create a different user who will try to authorize
+    let other_user = create_test_user(&state.db, "authorize-other@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &other_user.id).await;
+    let session_token =
+        create_test_session(&state, &other_user.id, &other_user.email, &auth_id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+        ),
+        &[("Cookie", &format!("vouch_session={session_token}"))],
+    )
+    .await;
+
+    // Must show error page (denied template), NOT redirect with code
+    assert!(
+        response.status == StatusCode::OK || response.status.is_client_error(),
+        "Access denied must produce error page, got: {}",
+        response.status
+    );
+
+    // Must not have a Location header with an auth code
+    if let Some(location) = response.headers.get("Location") {
+        let loc_str = location.to_str().unwrap_or("");
+        assert!(
+            !loc_str.contains("code="),
+            "Must not issue authorization code to unauthorized user: {loc_str}"
+        );
+    }
+
+    // Body should indicate access denied
+    assert!(
+        response.body.contains("access")
+            || response.body.contains("denied")
+            || response.body.contains("don"),
+        "Error page should explain access denial"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8707_authorize_invalid_resource_redirects_with_error() {
+    // RFC 8707 Section 2: If the resource parameter is not registered for the client,
+    // the server MUST return error=invalid_target.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "authorize-badres@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+
+    // Create a client with a specific resource URI
+    let client = create_test_oauth_client_with_options(
+        &state.db,
+        &user.id,
+        crate::db::AccessScope::Public,
+        None,
+        &["https://api.example.com".to_string()],
+    )
+    .await;
+
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    let state_param = "teststate-badres";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&state={}\
+             &resource={}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+            state_param,
+            urlencoding::encode("https://unregistered.example.com"),
+        ),
+        &[("Cookie", &format!("vouch_session={session_token}"))],
+    )
+    .await;
+
+    // Must redirect with error=invalid_target
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Invalid resource must redirect with error, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    assert!(
+        location.contains("error=invalid_target"),
+        "Redirect must include error=invalid_target (RFC 8707): {location}"
+    );
+
+    // RFC 6749 Section 4.1.2.1: State must be echoed
+    assert!(
+        location.contains(&format!("state={state_param}")),
+        "Error redirect must echo state parameter: {location}"
+    );
+
+    // RFC 9207: iss must be present
+    assert!(
+        location.contains("iss="),
+        "Error redirect must include iss parameter (RFC 9207): {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc9700_authorize_pkce_required_without_challenge() {
+    // RFC 9700 Section 2.1.1: PKCE with S256 is REQUIRED for all clients.
+    // Missing code_challenge must be rejected.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "authorize-nopkce@example.com").await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let state_param = "teststate-nopkce";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &state={}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            state_param,
+        ),
+        &[],
+    )
+    .await;
+
+    // Must redirect with error=invalid_request (PKCE required)
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Missing PKCE must redirect with error, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    assert!(
+        location.contains("error=invalid_request"),
+        "Redirect must include error=invalid_request for missing PKCE: {location}"
+    );
+
+    // State must be echoed even in error
+    assert!(
+        location.contains(&format!("state={state_param}")),
+        "Error redirect must echo state parameter: {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_missing_client_id_shows_error_page() {
+    // RFC 6749 Section 4.1.2.1: If client_id is missing, the server MUST NOT
+    // redirect and MUST display an error page.
+    let (app, _state) = test_app().await;
+
+    let response = http_get_full(
+        &app,
+        "/oauth/authorize?response_type=code\
+         &redirect_uri=https://example.com/callback&scope=openid\
+         &code_challenge=dummychallenge&code_challenge_method=S256",
+        &[],
+    )
+    .await;
+
+    // Must show error page — no redirect
+    assert!(
+        response.status == StatusCode::OK || response.status.is_client_error(),
+        "Missing client_id must produce error page, got: {}",
+        response.status
+    );
+
+    // Must not redirect to the callback
+    if let Some(location) = response.headers.get("Location") {
+        let loc_str = location.to_str().unwrap_or("");
+        assert!(
+            !loc_str.contains("example.com/callback"),
+            "Must not redirect when client_id is missing: {loc_str}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc9207_authorize_error_redirect_includes_iss() {
+    // RFC 9207 Section 2: The iss parameter MUST be included even in
+    // error redirect responses, not just successful ones.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "authorize-erriss@example.com").await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // response_type=token is unsupported — will produce an error redirect
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=token&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge=dummychallenge&code_challenge_method=S256&state=err-iss-test",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+        ),
+        &[],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Error must redirect, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    // RFC 9207: iss must be present in error responses too
+    assert!(
+        location.contains("iss="),
+        "Error redirect must include iss parameter (RFC 9207 Section 2): {location}"
+    );
+
+    // Verify iss matches the server's issuer
+    let expected_issuer = &state.config().base_url;
+    let encoded_issuer = urlencoding::encode(expected_issuer);
+    assert!(
+        location.contains(&format!("iss={encoded_issuer}")),
+        "iss must match server issuer '{expected_issuer}': {location}"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_pending_auth_expired_shows_error_page() {
+    // When returning from login with an invalid or expired pending_auth ID,
+    // the server must show an error page since the authorization context is lost.
+    let (app, _state) = test_app().await;
+
+    // Use a nonexistent pending_auth ID
+    let response = http_get_full(
+        &app,
+        "/oauth/authorize?pending_auth=nonexistent-pending-id-12345",
+        &[],
+    )
+    .await;
+
+    // Must show error page
+    assert!(
+        response.status == StatusCode::OK || response.status.is_client_error(),
+        "Expired/invalid pending_auth must produce error page, got: {}",
+        response.status
+    );
+
+    // Body should indicate the session expired
+    assert!(
+        response.body.contains("expired") || response.body.contains("try again"),
+        "Error page should mention expiration or retry"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_state_preserved_across_redirect() {
+    // RFC 6749 Section 4.1.2: The state parameter MUST be returned unchanged
+    // in the authorization response. This tests a complex state value with
+    // special characters that must survive URL encoding round-trip.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "authorize-state@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+    // State value with characters that need URL encoding
+    let state_param = "state_with-special.chars~123";
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256&state={}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+            urlencoding::encode(state_param),
+        ),
+        &[("Cookie", &format!("vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Authenticated request must redirect, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    // Parse the redirect URL and verify state is preserved
+    let url = url::Url::parse(location).expect("Location must be a valid URL");
+    let state_values: Vec<String> = url
+        .query_pairs()
+        .filter(|(k, _)| k == "state")
+        .map(|(_, v)| v.into_owned())
+        .collect();
+
+    assert_eq!(
+        state_values.len(),
+        1,
+        "Must have exactly one state parameter"
+    );
+    assert_eq!(
+        state_values[0], state_param,
+        "State parameter must be echoed unchanged"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_param_length_validation() {
+    // The authorization endpoint must reject parameters that exceed
+    // maximum allowed lengths to prevent abuse.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "authorize-longparam@example.com").await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // state has max length of 512 — send 600 chars
+    let long_state = "x".repeat(600);
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge=dummychallenge&code_challenge_method=S256&state={}",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            long_state,
+        ),
+        &[],
+    )
+    .await;
+
+    // Must redirect with error=invalid_request or show error page
+    if response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER {
+        let location = response
+            .headers
+            .get("Location")
+            .expect("Must have Location header")
+            .to_str()
+            .expect("Valid UTF-8");
+        assert!(
+            location.contains("error="),
+            "Oversized parameter must produce error: {location}"
+        );
+    } else {
+        assert!(
+            response.status == StatusCode::OK || response.status.is_client_error(),
+            "Must show error for oversized parameter, got: {}",
+            response.status
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc6749_authorize_code_redirect_to_registered_uri_only() {
+    // RFC 6749 Section 10.6: The authorization code must be delivered only
+    // to the redirect_uri that was registered for the client. This verifies
+    // that the successful redirect goes to the correct URI.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "authorize-reguri@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+    let challenge = sha256_base64url(verifier);
+
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
+             &code_challenge={}&code_challenge_method=S256",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            challenge,
+        ),
+        &[("Cookie", &format!("vouch_session={session_token}"))],
+    )
+    .await;
+
+    assert!(
+        response.status == StatusCode::FOUND || response.status == StatusCode::SEE_OTHER,
+        "Must redirect, got: {}",
+        response.status
+    );
+
+    let location = response
+        .headers
+        .get("Location")
+        .expect("Must have Location header")
+        .to_str()
+        .expect("Valid UTF-8");
+
+    // Redirect must go to the registered URI
+    assert!(
+        location.starts_with("https://example.com/callback?"),
+        "Redirect must target the registered redirect_uri: {location}"
+    );
+
+    // Must contain the authorization code
+    assert!(
+        location.contains("code="),
+        "Redirect must contain authorization code: {location}"
+    );
+}

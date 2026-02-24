@@ -658,6 +658,48 @@ pub async fn create_test_oauth_client(pool: &Pool, user_id: &str) -> TestOAuthCl
     }
 }
 
+/// Create a test OAuth client with custom access scope and resource URIs.
+pub async fn create_test_oauth_client_with_options(
+    pool: &Pool,
+    user_id: &str,
+    access_scope: crate::db::AccessScope,
+    org_id: Option<&str>,
+    resource_uris: &[String],
+) -> TestOAuthClient {
+    use aws_lc_rs::rand as aws_rand;
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+    let (client, client_id) = crate::db::create_oauth_client(
+        pool,
+        user_id,
+        "Test App",
+        None,
+        crate::db::OAuthClientType::Web,
+        &["https://example.com/callback".to_string()],
+        access_scope,
+        org_id,
+        resource_uris,
+    )
+    .await
+    .expect("Failed to create test OAuth client");
+
+    // Generate a secret
+    let mut secret_bytes = [0u8; 32];
+    aws_rand::fill(&mut secret_bytes).expect("RNG failure");
+    let secret = URL_SAFE_NO_PAD.encode(secret_bytes);
+    let secret_hash = crate::handlers::hash_token(&secret);
+
+    crate::db::create_oauth_client_secret(pool, &client.id, &secret_hash, Some("test"), None)
+        .await
+        .expect("Failed to create test OAuth client secret");
+
+    TestOAuthClient {
+        client_id,
+        client_secret: secret,
+    }
+}
+
 // ============================================================================
 // JWT Test Helpers (shared between crypto::jwt and services::auth tests)
 // ============================================================================
@@ -697,14 +739,6 @@ pub fn make_test_access_token(key: &OidcSigningKey) -> String {
         acr: None,
     };
     key.sign_access_token_jwt(&claims).expect("sign")
-}
-
-/// Format a session token as a `Cookie` header value for the `/oauth/authorize` endpoint.
-///
-/// The authorize handler reads `vouch_session` from cookies, so this helper
-/// converts a session JWT into the appropriate header format.
-pub fn session_cookie_header(token: &str) -> String {
-    format!("vouch_session={token}")
 }
 
 /// Create a test HS256 session token.
