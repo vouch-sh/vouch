@@ -96,6 +96,8 @@ pub fn agent_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error>
 ///
 /// Uses moderate timeouts (15s total, 5s connect) since external
 /// APIs may be slower but we still want to fail reasonably fast.
+/// Redirects are disabled to prevent SSRF attacks where an HTTPS
+/// URL redirects to an internal HTTP endpoint.
 ///
 /// # Arguments
 ///
@@ -107,6 +109,7 @@ pub fn agent_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error>
 pub fn server_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .user_agent(user_agent)
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(timeouts::SERVER_TOTAL)
         .connect_timeout(timeouts::SERVER_CONNECT)
         .build()

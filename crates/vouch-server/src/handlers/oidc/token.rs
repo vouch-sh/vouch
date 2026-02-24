@@ -6,6 +6,7 @@ use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::{
     ScopeSet,
     exchange::{TokenExchangeParams, exchange_token},
+    jwt_bearer::{client_auth::authenticate_client_jwt, grant::exchange_jwt_bearer_grant},
     token::{
         AuthCodeExchangeParams, ClientCredentials, authenticate_client,
         exchange_authorization_code, validate_dpop_if_present,
@@ -24,6 +25,31 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// RFC 7521 Section 4.2: Expected client assertion type for JWT bearer.
+const JWT_BEARER_CLIENT_ASSERTION_TYPE: &str =
+    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer";
+
+/// RFC 7523 Section 2.1: Grant type for JWT bearer authorization grants.
+const JWT_BEARER_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
+
+/// Extracted client authentication method from a token request.
+///
+/// Represents the mutually-exclusive authentication methods that a client
+/// can use at the token endpoint (RFC 7521 Section 4.2).
+enum ExtractedClientAuth {
+    /// Client secret via Basic header or body params.
+    Secret(ClientCredentials),
+    /// JWT assertion (RFC 7523).
+    JwtAssertion {
+        client_assertion: String,
+        client_id: Option<String>,
+    },
+    /// Public client with only client_id.
+    PublicClient { client_id: String },
+    /// No authentication provided.
+    None,
+}
+
 /// OAuth grant types supported by this server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OAuthGrantType {
@@ -33,6 +59,8 @@ pub enum OAuthGrantType {
     DeviceCode,
     /// Token exchange grant (RFC 8693).
     TokenExchange,
+    /// JWT bearer assertion grant (RFC 7523).
+    JwtBearer,
 }
 
 impl std::str::FromStr for OAuthGrantType {
@@ -43,6 +71,7 @@ impl std::str::FromStr for OAuthGrantType {
             "authorization_code" => Ok(Self::AuthorizationCode),
             "urn:ietf:params:oauth:grant-type:device_code" => Ok(Self::DeviceCode),
             "urn:ietf:params:oauth:grant-type:token-exchange" => Ok(Self::TokenExchange),
+            JWT_BEARER_GRANT_TYPE => Ok(Self::JwtBearer),
             _ => Err(format!("unsupported grant_type: {s}")),
         }
     }
@@ -123,6 +152,15 @@ pub struct TokenRequest {
     /// RFC 8707 Section 2: Target resource indicator (OPTIONAL).
     #[serde(default)]
     pub resource: Option<String>,
+    /// RFC 7521 Section 4.2: Client assertion for JWT client authentication.
+    #[serde(default)]
+    pub client_assertion: Option<String>,
+    /// RFC 7521 Section 4.2: Client assertion type.
+    #[serde(default)]
+    pub client_assertion_type: Option<String>,
+    /// RFC 7521 Section 4.1: The assertion for JWT bearer grants.
+    #[serde(default)]
+    pub assertion: Option<String>,
 }
 
 // Custom Debug that redacts secrets to prevent accidental log exposure.
@@ -144,6 +182,9 @@ impl std::fmt::Debug for TokenRequest {
             .field("scope", &self.scope)
             .field("requested_token_type", &self.requested_token_type)
             .field("resource", &self.resource)
+            .field("client_assertion", &"[REDACTED]")
+            .field("client_assertion_type", &self.client_assertion_type)
+            .field("assertion", &"[REDACTED]")
             .finish()
     }
 }
@@ -183,6 +224,8 @@ const MAX_TOKEN_REDIRECT_URI_LEN: usize = 2048;
 const MAX_TOKEN_CLIENT_ID_LEN: usize = 256;
 const MAX_TOKEN_SCOPE_LEN: usize = 512;
 const MAX_TOKEN_RESOURCE_LEN: usize = 2048;
+/// Maximum length for JWT assertions (RFC 7521).
+const MAX_ASSERTION_LEN: usize = 8192;
 
 /// POST /oauth/token
 ///
@@ -236,6 +279,22 @@ pub async fn token(
             &format!("resource exceeds maximum length of {MAX_TOKEN_RESOURCE_LEN}"),
         );
     }
+    if let Some(ref v) = params.client_assertion
+        && v.len() > MAX_ASSERTION_LEN
+    {
+        return token_error_response(
+            "invalid_request",
+            &format!("client_assertion exceeds maximum length of {MAX_ASSERTION_LEN}"),
+        );
+    }
+    if let Some(ref v) = params.assertion
+        && v.len() > MAX_ASSERTION_LEN
+    {
+        return token_error_response(
+            "invalid_request",
+            &format!("assertion exceeds maximum length of {MAX_ASSERTION_LEN}"),
+        );
+    }
 
     // RFC 6749 Section 5.2: Return unsupported_grant_type error for unknown grants
     let Ok(grant_type) = params.grant_type.parse::<OAuthGrantType>() else {
@@ -244,7 +303,7 @@ pub async fn token(
             Json(OAuthErrorResponse {
                 error: "unsupported_grant_type".to_string(),
                 error_description: Some(
-                    "Supported grant types: authorization_code, urn:ietf:params:oauth:grant-type:device_code, urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
+                    format!("Supported grant types: authorization_code, urn:ietf:params:oauth:grant-type:device_code, urn:ietf:params:oauth:grant-type:token-exchange, {JWT_BEARER_GRANT_TYPE}"),
                 ),
                 error_uri: None,
             }),
@@ -260,6 +319,7 @@ pub async fn token(
         OAuthGrantType::TokenExchange => {
             handle_token_exchange_grant(State(state), headers, params).await
         }
+        OAuthGrantType::JwtBearer => handle_jwt_bearer_grant(State(state), params).await,
     }
 }
 
@@ -285,9 +345,37 @@ async fn handle_authorization_code_grant(
         }
     };
 
-    // Extract client credentials from headers or body
-    let credentials =
-        extract_client_credentials(&headers, params.client_id.as_deref(), params.client_secret);
+    // Extract client credentials from headers or body (including JWT assertion)
+    let has_jwt_assertion = params.client_assertion.is_some();
+
+    // For JWT assertion, authenticate and extract the client
+    let jwt_authenticated = if has_jwt_assertion {
+        let client_auth = match extract_client_auth(&headers, &params) {
+            Ok(auth) => auth,
+            Err(resp) => return resp,
+        };
+        if let ExtractedClientAuth::JwtAssertion {
+            client_assertion,
+            client_id,
+        } = client_auth
+        {
+            match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref()).await {
+                Ok(client) => Some(client),
+                Err(e) => return e.into_service_error().into_oauth_response().into_response(),
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // For non-JWT auth, extract traditional credentials
+    let credentials = if !has_jwt_assertion {
+        extract_client_credentials(&headers, params.client_id.as_deref(), params.client_secret)
+    } else {
+        None
+    };
 
     // RFC 9449 Section 5: Validate DPoP proof if present at the token endpoint
     let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
@@ -298,9 +386,10 @@ async fn handle_authorization_code_grant(
         };
 
     // Extract client_id for audience validation (RFC 8725 §3.9)
-    let exchange_client_id = credentials
+    let exchange_client_id = jwt_authenticated
         .as_ref()
-        .map(|c| c.client_id.as_str())
+        .map(|c| c.client.client_id.as_str())
+        .or_else(|| credentials.as_ref().map(|c| c.client_id.as_str()))
         .or(params.client_id.as_deref())
         .unwrap_or("");
 
@@ -353,22 +442,25 @@ async fn handle_token_exchange_grant(
     headers: HeaderMap,
     params: TokenRequest,
 ) -> Response {
-    // Extract and authenticate client credentials (required for token exchange)
-    let credentials =
-        extract_client_credentials(&headers, params.client_id.as_deref(), params.client_secret);
+    // Extract client authentication (supports secret-based and JWT assertion)
+    let client_auth = match extract_client_auth(&headers, &params) {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
 
-    let Some(creds) = credentials else {
+    // Authenticate client (required for token exchange)
+    let Some((authenticated_client, _client_id)) =
+        (match authenticate_client_any(&state, client_auth).await {
+            Ok(result) => result,
+            Err(resp) => return resp,
+        })
+    else {
         return ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "Client authentication required for token exchange",
         )
         .into_oauth_response()
         .into_response();
-    };
-
-    let authenticated_client = match authenticate_client(&state, &creds).await {
-        Ok(client) => client,
-        Err(e) => return e.into_service_error().into_oauth_response().into_response(),
     };
 
     // RFC 9449 Section 5: Validate DPoP proof if present at the token endpoint
@@ -463,6 +555,138 @@ pub fn extract_client_credentials(
     })
 }
 
+/// Extract client authentication from a token request (RFC 7521 Section 4.2).
+///
+/// Handles mutual exclusion: a request MUST NOT use more than one client
+/// authentication method (e.g., Basic auth header + client_assertion = error).
+#[allow(clippy::result_large_err)]
+fn extract_client_auth(
+    headers: &HeaderMap,
+    params: &TokenRequest,
+) -> Result<ExtractedClientAuth, Response> {
+    let has_basic = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|h| h.starts_with("Basic "));
+
+    let has_client_secret = params.client_secret.is_some();
+    let has_client_assertion = params.client_assertion.is_some();
+
+    // RFC 7521 Section 4.2: MUST NOT use more than one method
+    if has_client_assertion && (has_basic || has_client_secret) {
+        return Err(token_error_response(
+            "invalid_request",
+            "client_assertion cannot be combined with Basic auth or client_secret",
+        ));
+    }
+
+    // JWT client assertion
+    if let Some(ref assertion) = params.client_assertion {
+        // Validate assertion type
+        let assertion_type = params.client_assertion_type.as_deref().unwrap_or("");
+        if assertion_type != JWT_BEARER_CLIENT_ASSERTION_TYPE {
+            return Err(token_error_response(
+                "invalid_request",
+                &format!(
+                    "Unsupported client_assertion_type. Expected: {JWT_BEARER_CLIENT_ASSERTION_TYPE}"
+                ),
+            ));
+        }
+
+        return Ok(ExtractedClientAuth::JwtAssertion {
+            client_assertion: assertion.clone(),
+            client_id: params.client_id.clone(),
+        });
+    }
+
+    // Secret-based auth (Basic header or body params)
+    if let Some(creds) = extract_client_credentials(
+        headers,
+        params.client_id.as_deref(),
+        params.client_secret.clone(),
+    ) {
+        if creds.client_secret.is_some() || has_basic {
+            return Ok(ExtractedClientAuth::Secret(creds));
+        }
+        // client_id only, no secret
+        return Ok(ExtractedClientAuth::PublicClient {
+            client_id: creds.client_id,
+        });
+    }
+
+    Ok(ExtractedClientAuth::None)
+}
+
+/// Authenticate a client using any supported method.
+///
+/// Dispatches to secret-based or JWT-based authentication depending on
+/// the extracted authentication method.
+async fn authenticate_client_any(
+    state: &Arc<AppState>,
+    auth: ExtractedClientAuth,
+) -> Result<Option<(crate::services::oidc::token::AuthenticatedClient, String)>, Response> {
+    match auth {
+        ExtractedClientAuth::Secret(creds) => {
+            let client_id = creds.client_id.clone();
+            match authenticate_client(state, &creds).await {
+                Ok(client) => Ok(Some((client, client_id))),
+                Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
+            }
+        }
+        ExtractedClientAuth::JwtAssertion {
+            client_assertion,
+            client_id,
+        } => match authenticate_client_jwt(state, &client_assertion, client_id.as_deref()).await {
+            Ok(client) => {
+                let cid = client.client.client_id.clone();
+                Ok(Some((client, cid)))
+            }
+            Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
+        },
+        ExtractedClientAuth::PublicClient { client_id } => {
+            // Public client — create credentials without a secret for authenticate_client
+            let creds = ClientCredentials {
+                client_id: client_id.clone(),
+                client_secret: None,
+            };
+            match authenticate_client(state, &creds).await {
+                Ok(client) => Ok(Some((client, client_id))),
+                Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
+            }
+        }
+        ExtractedClientAuth::None => Ok(None),
+    }
+}
+
+/// Handle JWT bearer grant (RFC 7523 Section 2.1).
+async fn handle_jwt_bearer_grant(
+    State(state): State<Arc<AppState>>,
+    params: TokenRequest,
+) -> Response {
+    // The assertion parameter is REQUIRED for jwt-bearer grants
+    let assertion = match &params.assertion {
+        Some(a) => a.clone(),
+        None => {
+            return token_error_response(
+                "invalid_request",
+                "Missing assertion parameter for jwt-bearer grant",
+            );
+        }
+    };
+
+    match exchange_jwt_bearer_grant(&state, &assertion, params.scope.as_deref()).await {
+        Ok(result) => Json(TokenResponse {
+            access_token: result.access_token,
+            token_type: result.token_type,
+            expires_in: result.expires_in,
+            id_token: None,
+            scope: result.scope,
+        })
+        .into_response(),
+        Err(e) => e.into_oauth_response().into_response(),
+    }
+}
+
 /// Build an OAuth error response for parameter validation failures.
 fn token_error_response(error: &str, description: &str) -> Response {
     (
@@ -474,4 +698,49 @@ fn token_error_response(error: &str, description: &str) -> Response {
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests {
+    use super::OAuthGrantType;
+
+    #[test]
+    fn test_oauth_grant_type_from_str_authorization_code() {
+        let result: Result<OAuthGrantType, _> = "authorization_code".parse();
+        assert_eq!(result, Ok(OAuthGrantType::AuthorizationCode));
+    }
+
+    #[test]
+    fn test_oauth_grant_type_from_str_device_code() {
+        let result: Result<OAuthGrantType, _> =
+            "urn:ietf:params:oauth:grant-type:device_code".parse();
+        assert_eq!(result, Ok(OAuthGrantType::DeviceCode));
+    }
+
+    #[test]
+    fn test_oauth_grant_type_from_str_token_exchange() {
+        let result: Result<OAuthGrantType, _> =
+            "urn:ietf:params:oauth:grant-type:token-exchange".parse();
+        assert_eq!(result, Ok(OAuthGrantType::TokenExchange));
+    }
+
+    #[test]
+    fn test_oauth_grant_type_from_str_jwt_bearer() {
+        let result: Result<OAuthGrantType, _> =
+            "urn:ietf:params:oauth:grant-type:jwt-bearer".parse();
+        assert_eq!(result, Ok(OAuthGrantType::JwtBearer));
+    }
+
+    #[test]
+    fn test_oauth_grant_type_from_str_rejects_unknown() {
+        let result: Result<OAuthGrantType, _> = "client_credentials".parse();
+        assert!(result.is_err());
+
+        let result2: Result<OAuthGrantType, _> = "".parse();
+        assert!(result2.is_err());
+
+        let result3: Result<OAuthGrantType, _> = "jwt-bearer".parse();
+        assert!(result3.is_err());
+    }
 }

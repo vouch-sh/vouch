@@ -208,6 +208,10 @@ pub struct Args {
     /// S3 config polling interval in seconds.
     #[arg(long, env = "VOUCH_S3_CONFIG_POLL_INTERVAL", default_value = "60")]
     pub s3_config_poll_interval: u64,
+
+    /// Maximum lifetime for JWT assertions in seconds (RFC 7523).
+    #[arg(long, env = "VOUCH_JWT_ASSERTION_MAX_LIFETIME", default_value = "300")]
+    pub jwt_assertion_max_lifetime: i64,
 }
 
 // ============================================================================
@@ -301,6 +305,8 @@ pub struct ServerConfig {
     pub s3_config_region: Option<String>,
     /// S3 config poll interval in seconds.
     pub s3_config_poll_interval: u64,
+    /// Maximum lifetime for JWT assertions in seconds (RFC 7523, default: 300).
+    pub jwt_assertion_max_lifetime_seconds: i64,
 }
 
 impl ServerConfig {
@@ -395,6 +401,7 @@ impl ServerConfig {
             s3_config_key: args.s3_config_key,
             s3_config_region: args.s3_config_region,
             s3_config_poll_interval: args.s3_config_poll_interval,
+            jwt_assertion_max_lifetime_seconds: args.jwt_assertion_max_lifetime,
         })
     }
 

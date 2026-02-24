@@ -32,6 +32,7 @@ pub mod discovery;
 pub mod dpop;
 pub mod exchange;
 pub mod introspection;
+pub mod jwt_bearer;
 pub mod keys;
 pub mod resource;
 pub mod scope;

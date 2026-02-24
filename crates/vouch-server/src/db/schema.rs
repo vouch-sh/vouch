@@ -180,6 +180,16 @@ pub enum OAuthClients {
     OrgId,
     /// RFC 8707: JSON array of registered resource URIs.
     ResourceUris,
+    /// RFC 7523: Inline JWKS for private_key_jwt client authentication.
+    Jwks,
+    /// RFC 7523: Remote JWKS URI for private_key_jwt client authentication.
+    JwksUri,
+    /// RFC 7523: Timestamp of last JWKS URI fetch.
+    JwksUriCachedAt,
+    /// RFC 7523: Cached JWKS content fetched from jwks_uri.
+    JwksUriCache,
+    /// RFC 7523: Token endpoint authentication method.
+    TokenEndpointAuthMethod,
 }
 
 /// OAuth client secrets table.
@@ -358,4 +368,36 @@ pub enum CloudIntegrations {
     CreatedAt,
     UpdatedAt,
     CreatedByUserId,
+}
+
+/// JWT assertion JTI replay prevention table (RFC 7523).
+#[derive(Iden)]
+pub enum JwtAssertionJtis {
+    #[iden = "jwt_assertion_jtis"]
+    Table,
+    Id,
+    Jti,
+    ClientId,
+    CreatedAt,
+    ExpiresAt,
+}
+
+/// Trusted JWT issuers for RFC 7523 authorization grants.
+#[derive(Iden)]
+pub enum TrustedJwtIssuers {
+    #[iden = "trusted_jwt_issuers"]
+    Table,
+    Id,
+    Issuer,
+    Name,
+    Description,
+    JwksUri,
+    JwksCache,
+    JwksCachedAt,
+    SubjectClaimMapping,
+    AllowedScopes,
+    MaxTokenLifetimeSeconds,
+    Enabled,
+    CreatedAt,
+    UpdatedAt,
 }
