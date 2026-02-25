@@ -26,6 +26,7 @@ pub(crate) mod client_auth;
 mod discovery;
 mod introspect;
 mod par;
+mod register;
 mod token;
 mod userinfo;
 
@@ -34,6 +35,7 @@ pub use authorize::authorize;
 pub use discovery::{discovery, jwks};
 pub use introspect::{introspect, revoke};
 pub use par::par;
+pub use register::register;
 pub use token::token;
 pub use userinfo::userinfo;
 

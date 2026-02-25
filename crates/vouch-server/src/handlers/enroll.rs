@@ -223,7 +223,7 @@ pub async fn device_verify_submit(
     }
 
     // Check if already used
-    if request.status != "pending" {
+    if request.status != db::DeviceAuthStatus::Pending {
         return DeviceVerifyTemplate {
             error: Some("This code has already been used.".to_string()),
         }

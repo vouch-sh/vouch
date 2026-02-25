@@ -22,7 +22,7 @@ use secrecy::SecretString;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-use crate::db::Pool;
+use crate::db::{CreateOAuthClientParams, Pool, RegistrationSource};
 
 use crate::AppState;
 use crate::config::ServerConfig;
@@ -149,6 +149,8 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         .route("/oauth/par", post(handlers::oidc::par))
         // Device Authorization Grant (RFC 8628)
         .route("/oauth/device", post(handlers::device::device_code))
+        // RFC 7591 Dynamic Client Registration
+        .route("/oauth/register", post(handlers::oidc::register))
         // Legacy auth endpoints
         .route(
             "/v1/auth/register/start",
@@ -712,14 +714,28 @@ pub async fn create_test_oauth_client(pool: &Pool, user_id: &str) -> TestOAuthCl
 
     let (client, client_id) = crate::db::create_oauth_client(
         pool,
-        user_id,
-        "Test App",
-        None,
-        crate::db::OAuthClientType::Web,
-        &["https://example.com/callback".to_string()],
-        crate::db::AccessScope::Public,
-        None,
-        &[],
+        &CreateOAuthClientParams {
+            user_id,
+            name: "Test App",
+            description: None,
+            application_type: crate::db::OAuthClientType::Web,
+            redirect_uris: &["https://example.com/callback".to_string()],
+            access_scope: crate::db::AccessScope::Public,
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+        },
     )
     .await
     .expect("Failed to create test OAuth client");
@@ -754,14 +770,28 @@ pub async fn create_test_oauth_client_with_options(
 
     let (client, client_id) = crate::db::create_oauth_client(
         pool,
-        user_id,
-        "Test App",
-        None,
-        crate::db::OAuthClientType::Web,
-        &["https://example.com/callback".to_string()],
-        access_scope,
-        org_id,
-        resource_uris,
+        &CreateOAuthClientParams {
+            user_id,
+            name: "Test App",
+            description: None,
+            application_type: crate::db::OAuthClientType::Web,
+            redirect_uris: &["https://example.com/callback".to_string()],
+            access_scope,
+            org_id,
+            resource_uris,
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+        },
     )
     .await
     .expect("Failed to create test OAuth client");

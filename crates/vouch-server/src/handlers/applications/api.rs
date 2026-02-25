@@ -6,7 +6,8 @@
 
 use crate::AppState;
 use crate::db::{
-    self, AccessScope, FapiProfile, OAuthClientType, OAuthEventType, UpdateOAuthClientParams,
+    self, AccessScope, CreateOAuthClientParams, FapiProfile, OAuthClientType, OAuthEventType,
+    RegistrationSource, TokenEndpointAuthMethod, UpdateOAuthClientParams,
 };
 use axum::{
     Json,
@@ -227,14 +228,28 @@ pub async fn create_application_api(
     // Create the application
     let (client, client_id) = db::create_oauth_client(
         &state.db,
-        &claims.sub,
-        name,
-        req.description.as_deref(),
-        app_type,
-        &req.redirect_uris,
-        access_scope,
-        org_id,
-        resource_uris,
+        &CreateOAuthClientParams {
+            user_id: &claims.sub,
+            name,
+            description: req.description.as_deref(),
+            application_type: app_type,
+            redirect_uris: &req.redirect_uris,
+            access_scope,
+            org_id,
+            resource_uris,
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+        },
     )
     .await
     .map_err(|e| {
@@ -258,7 +273,7 @@ pub async fn create_application_api(
                 access_scope: Some(access_scope),
                 org_id,
                 resource_uris,
-                token_endpoint_auth_method: "private_key_jwt",
+                token_endpoint_auth_method: TokenEndpointAuthMethod::PrivateKeyJwt,
                 jwks: jwks_trimmed,
                 jwks_uri: jwks_uri_trimmed,
                 fapi_profile: FapiProfile::Fapi2Security,
@@ -339,8 +354,8 @@ pub async fn create_application_api(
         application_type: req.application_type,
         access_scope: access_scope.as_str().to_string(),
         resource_uris: resource_uris.to_vec(),
-        token_endpoint_auth_method: final_client.token_endpoint_auth_method,
-        fapi_profile: final_client.fapi_profile,
+        token_endpoint_auth_method: final_client.token_endpoint_auth_method.as_str().to_string(),
+        fapi_profile: final_client.fapi_profile.as_str().to_string(),
         jwks_configured,
         jwks_uri: response_jwks_uri,
     }))
@@ -583,16 +598,16 @@ pub async fn update_application_api(
         // Explicitly set to non-FAPI
         FapiProfile::None
     } else {
-        client.fapi_profile()
+        client.fapi_profile
     };
 
     let token_endpoint_auth_method = if is_fapi {
-        "private_key_jwt"
+        TokenEndpointAuthMethod::PrivateKeyJwt
     } else if !is_fapi && req.fapi_profile.is_some() && client.is_fapi() {
         // Transitioning from FAPI to Standard
-        "client_secret_basic"
+        TokenEndpointAuthMethod::ClientSecretBasic
     } else {
-        client.token_endpoint_auth_method.as_str()
+        client.token_endpoint_auth_method
     };
 
     let effective_jwks = if jwks_trimmed.is_some() {

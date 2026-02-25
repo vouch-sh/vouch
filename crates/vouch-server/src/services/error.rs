@@ -137,6 +137,14 @@ pub enum OAuthErrorCode {
     UnmetAuthenticationRequirements,
     /// RFC 9101 Section 6.2: The Request Object is invalid.
     InvalidRequestObject,
+    /// RFC 7591 Section 3.2.2: A redirect URI is invalid.
+    InvalidRedirectUri,
+    /// RFC 7591 Section 3.2.2: Client metadata is invalid.
+    InvalidClientMetadata,
+    /// RFC 7591 Section 3.2.2: Software statement JWT is malformed or has invalid signature.
+    InvalidSoftwareStatement,
+    /// RFC 7591 Section 3.2.2: Software statement issuer is not trusted.
+    UnapprovedSoftwareStatement,
 }
 
 impl std::fmt::Display for OAuthErrorCode {
@@ -155,7 +163,11 @@ impl OAuthErrorCode {
             | Self::InvalidDpopProof
             | Self::InvalidTarget
             | Self::UnmetAuthenticationRequirements
-            | Self::InvalidRequestObject => StatusCode::BAD_REQUEST,
+            | Self::InvalidRequestObject
+            | Self::InvalidRedirectUri
+            | Self::InvalidClientMetadata
+            | Self::InvalidSoftwareStatement
+            | Self::UnapprovedSoftwareStatement => StatusCode::BAD_REQUEST,
             Self::InvalidClient | Self::UnauthorizedClient => StatusCode::UNAUTHORIZED,
             Self::InsufficientUserAuthentication => StatusCode::UNAUTHORIZED,
             Self::InvalidGrant
@@ -193,6 +205,10 @@ impl OAuthErrorCode {
             Self::InsufficientUserAuthentication => "insufficient_user_authentication",
             Self::UnmetAuthenticationRequirements => "unmet_authentication_requirements",
             Self::InvalidRequestObject => "invalid_request_object",
+            Self::InvalidRedirectUri => "invalid_redirect_uri",
+            Self::InvalidClientMetadata => "invalid_client_metadata",
+            Self::InvalidSoftwareStatement => "invalid_software_statement",
+            Self::UnapprovedSoftwareStatement => "unapproved_software_statement",
         }
     }
 }
@@ -757,5 +773,71 @@ mod tests {
         assert!(www_auth.starts_with("Bearer error=\"insufficient_user_authentication\""));
         assert!(!www_auth.contains("acr_values"));
         assert!(!www_auth.contains("max_age"));
+    }
+
+    // =========================================================================
+    // RFC 7591 Dynamic Client Registration Error Code Tests
+    // =========================================================================
+
+    #[test]
+    fn test_rfc7591_error_code_as_str() {
+        assert_eq!(
+            OAuthErrorCode::InvalidRedirectUri.as_str(),
+            "invalid_redirect_uri"
+        );
+        assert_eq!(
+            OAuthErrorCode::InvalidClientMetadata.as_str(),
+            "invalid_client_metadata"
+        );
+        assert_eq!(
+            OAuthErrorCode::InvalidSoftwareStatement.as_str(),
+            "invalid_software_statement"
+        );
+        assert_eq!(
+            OAuthErrorCode::UnapprovedSoftwareStatement.as_str(),
+            "unapproved_software_statement"
+        );
+    }
+
+    #[test]
+    fn test_rfc7591_error_codes_all_400() {
+        assert_eq!(
+            OAuthErrorCode::InvalidRedirectUri.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            OAuthErrorCode::InvalidClientMetadata.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            OAuthErrorCode::InvalidSoftwareStatement.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            OAuthErrorCode::UnapprovedSoftwareStatement.status_code(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rfc7591_oauth_error_response_format() {
+        use axum::body::to_bytes;
+
+        let err = ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "jwks and jwks_uri are mutually exclusive",
+        );
+        let response = err.into_response();
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        let body = to_bytes(response.into_body(), 4096).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(json["error"], "invalid_client_metadata");
+        assert_eq!(
+            json["error_description"],
+            "jwks and jwks_uri are mutually exclusive"
+        );
     }
 }

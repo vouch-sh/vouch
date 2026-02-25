@@ -126,16 +126,22 @@ impl OAuthClientType {
 }
 
 /// Token endpoint authentication method (RFC 7523).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, sqlx::Type)]
+#[sqlx(type_name = "text")]
+#[sqlx(rename_all = "snake_case")]
 pub enum TokenEndpointAuthMethod {
     /// Client authenticates using HTTP Basic with client_id:client_secret.
     #[default]
+    #[serde(rename = "client_secret_basic")]
     ClientSecretBasic,
     /// Client sends client_id and client_secret in the POST body.
+    #[serde(rename = "client_secret_post")]
     ClientSecretPost,
     /// Client authenticates using a signed JWT assertion (RFC 7523).
+    #[serde(rename = "private_key_jwt")]
     PrivateKeyJwt,
     /// Public client with no authentication.
+    #[serde(rename = "none")]
     None,
 }
 
@@ -177,7 +183,9 @@ impl std::fmt::Display for TokenEndpointAuthMethod {
 /// Controls which FAPI constraints apply during authorization and token requests.
 ///
 /// Reference: <https://openid.net/specs/fapi-security-profile-2_0-final.html>
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, sqlx::Type)]
+#[sqlx(type_name = "text")]
+#[sqlx(rename_all = "snake_case")]
 pub enum FapiProfile {
     /// No FAPI profile — standard OAuth 2.0 behavior.
     #[default]
@@ -189,23 +197,35 @@ pub enum FapiProfile {
 }
 
 impl FapiProfile {
-    /// Parse from the database string representation.
-    ///
-    /// Unknown values default to `None` for forward compatibility.
+    /// Return the string representation for sea-query values.
     #[must_use]
-    pub fn from_db(s: &str) -> Self {
-        match s {
-            "fapi2_security" => Self::Fapi2Security,
-            _ => Self::None,
-        }
-    }
-
-    /// Return the database string representation.
-    #[must_use]
-    pub fn as_db_str(&self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::None => "none",
             Self::Fapi2Security => "fapi2_security",
+        }
+    }
+}
+
+/// RFC 7591: Registration source for an OAuth client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, sqlx::Type)]
+#[sqlx(type_name = "text")]
+#[sqlx(rename_all = "lowercase")]
+pub enum RegistrationSource {
+    /// Client was registered manually (web UI or API).
+    #[default]
+    Manual,
+    /// Client was registered via RFC 7591 dynamic registration.
+    Dynamic,
+}
+
+impl RegistrationSource {
+    /// Return the string representation for database storage.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Dynamic => "dynamic",
         }
     }
 }
@@ -243,17 +263,29 @@ pub struct OAuthClient {
     /// RFC 7523: Cached JWKS content fetched from jwks_uri.
     pub jwks_uri_cache: Option<String>,
     /// RFC 7523: Token endpoint authentication method.
-    pub token_endpoint_auth_method: String,
+    pub token_endpoint_auth_method: TokenEndpointAuthMethod,
     /// RFC 9101: Client's preferred signing algorithm for Request Objects.
     pub request_object_signing_alg: Option<String>,
     /// RFC 9101: Whether this client MUST use JAR for authorization requests.
     pub require_signed_request_object: Option<bool>,
-    /// FAPI 2.0: Raw profile string stored in the database (e.g., "none", "fapi2_security").
-    ///
-    /// Use `fapi_profile()` to get the parsed `FapiProfile` value.
-    pub fapi_profile: String,
+    /// FAPI 2.0: Security profile designation.
+    pub fapi_profile: FapiProfile,
     /// FAPI 2.0: Whether access tokens must be sender-constrained via DPoP.
     pub dpop_bound_access_tokens: bool,
+    /// RFC 7591: JSON array of allowed grant types.
+    pub grant_types: Option<String>,
+    /// RFC 7591: JSON array of allowed response types.
+    pub response_types: Option<String>,
+    /// RFC 7591: Software identifier (groups CLI instances).
+    pub software_id: Option<String>,
+    /// RFC 7591: Software version string.
+    pub software_version: Option<String>,
+    /// RFC 7591: Registration source (`manual` or `dynamic`).
+    pub registration_source: Option<RegistrationSource>,
+    /// RFC 7591: SHA-256 hash of the registration access token (RFC 7592 prep).
+    pub registration_access_token_hash: Option<String>,
+    /// RFC 7591: JSON blob for cosmetic metadata (client_uri, logo_uri, etc.).
+    pub registration_metadata: Option<String>,
 }
 
 impl OAuthClient {
@@ -289,16 +321,10 @@ impl OAuthClient {
         uris.iter().any(|u| u == uri)
     }
 
-    /// Get the parsed FAPI 2.0 security profile for this client.
-    #[must_use]
-    pub fn fapi_profile(&self) -> FapiProfile {
-        FapiProfile::from_db(&self.fapi_profile)
-    }
-
     /// Returns `true` if this client has FAPI 2.0 Security Profile enabled.
     #[must_use]
     pub fn is_fapi(&self) -> bool {
-        self.fapi_profile() != FapiProfile::None
+        self.fapi_profile != FapiProfile::None
     }
 }
 
@@ -329,27 +355,69 @@ const OAUTH_CLIENT_COLUMNS: &[OAuthClients] = &[
     OAuthClients::RequireSignedRequestObject,
     OAuthClients::FapiProfile,
     OAuthClients::DpopBoundAccessTokens,
+    OAuthClients::GrantTypes,
+    OAuthClients::ResponseTypes,
+    OAuthClients::SoftwareId,
+    OAuthClients::SoftwareVersion,
+    OAuthClients::RegistrationSource,
+    OAuthClients::RegistrationAccessTokenHash,
+    OAuthClients::RegistrationMetadata,
 ];
 
+/// Parameters for creating a new OAuth client application.
+///
+/// Replaces the positional arguments to `create_oauth_client()` and includes
+/// RFC 7591 metadata fields for dynamic registration.
+pub struct CreateOAuthClientParams<'a> {
+    pub user_id: &'a str,
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub application_type: OAuthClientType,
+    pub redirect_uris: &'a [String],
+    pub access_scope: AccessScope,
+    pub org_id: Option<&'a str>,
+    pub resource_uris: &'a [String],
+    /// RFC 7523: Token endpoint authentication method.
+    pub token_endpoint_auth_method: Option<TokenEndpointAuthMethod>,
+    /// RFC 7523: Inline JWKS JSON.
+    pub jwks: Option<&'a str>,
+    /// RFC 7523: Remote JWKS endpoint.
+    pub jwks_uri: Option<&'a str>,
+    /// FAPI 2.0: Security profile designation.
+    pub fapi_profile: Option<FapiProfile>,
+    /// FAPI 2.0: Whether access tokens must be DPoP-bound.
+    pub dpop_bound_access_tokens: Option<bool>,
+    /// RFC 7591: Allowed grant types (JSON array).
+    pub grant_types: Option<&'a str>,
+    /// RFC 7591: Allowed response types (JSON array).
+    pub response_types: Option<&'a str>,
+    /// RFC 7591: Software identifier.
+    pub software_id: Option<&'a str>,
+    /// RFC 7591: Software version.
+    pub software_version: Option<&'a str>,
+    /// RFC 7591: Registration source.
+    pub registration_source: RegistrationSource,
+    /// RFC 7591: SHA-256 hash of registration access token.
+    pub registration_access_token_hash: Option<&'a str>,
+    /// RFC 7591: JSON blob of cosmetic metadata.
+    pub registration_metadata: Option<&'a str>,
+}
+
 /// Create a new OAuth client application.
-#[allow(clippy::too_many_arguments)]
 pub async fn create_oauth_client(
     pool: &Pool,
-    user_id: &str,
-    name: &str,
-    description: Option<&str>,
-    application_type: OAuthClientType,
-    redirect_uris: &[String],
-    access_scope: AccessScope,
-    org_id: Option<&str>,
-    resource_uris: &[String],
+    params: &CreateOAuthClientParams<'_>,
 ) -> Result<(OAuthClient, String)> {
     let id = Uuid::now_v7().to_string();
     let client_id = Uuid::now_v7().to_string();
-    let redirect_uris_json = serde_json::to_string(redirect_uris)?;
-    let resource_uris_json = serde_json::to_string(resource_uris)?;
+    let redirect_uris_json = serde_json::to_string(params.redirect_uris)?;
+    let resource_uris_json = serde_json::to_string(params.resource_uris)?;
     let db_type = pool.db_type();
     let now = Timestamp::now().to_string();
+
+    let auth_method = params.token_endpoint_auth_method.unwrap_or_default();
+    let fapi = params.fapi_profile.unwrap_or(FapiProfile::None);
+    let dpop = params.dpop_bound_access_tokens.unwrap_or(false);
 
     let sql = {
         let query = Query::insert()
@@ -366,25 +434,43 @@ pub async fn create_oauth_client(
                 OAuthClients::OrgId,
                 OAuthClients::ResourceUris,
                 OAuthClients::TokenEndpointAuthMethod,
+                OAuthClients::Jwks,
+                OAuthClients::JwksUri,
                 OAuthClients::FapiProfile,
                 OAuthClients::DpopBoundAccessTokens,
+                OAuthClients::GrantTypes,
+                OAuthClients::ResponseTypes,
+                OAuthClients::SoftwareId,
+                OAuthClients::SoftwareVersion,
+                OAuthClients::RegistrationSource,
+                OAuthClients::RegistrationAccessTokenHash,
+                OAuthClients::RegistrationMetadata,
                 OAuthClients::CreatedAt,
                 OAuthClients::UpdatedAt,
             ])
             .values_panic([
                 id.clone().into(),
-                user_id.into(),
+                params.user_id.into(),
                 client_id.clone().into(),
-                name.into(),
-                description.into(),
-                application_type.as_str().into(),
+                params.name.into(),
+                params.description.into(),
+                params.application_type.as_str().into(),
                 redirect_uris_json.into(),
-                access_scope.as_str().into(),
-                org_id.into(),
+                params.access_scope.as_str().into(),
+                params.org_id.into(),
                 resource_uris_json.into(),
-                TokenEndpointAuthMethod::default().as_str().into(),
-                FapiProfile::None.as_db_str().into(),
-                false.into(),
+                auth_method.as_str().into(),
+                params.jwks.into(),
+                params.jwks_uri.into(),
+                fapi.as_str().into(),
+                dpop.into(),
+                params.grant_types.into(),
+                params.response_types.into(),
+                params.software_id.into(),
+                params.software_version.into(),
+                params.registration_source.as_str().into(),
+                params.registration_access_token_hash.into(),
+                params.registration_metadata.into(),
                 now.as_str().into(),
                 now.as_str().into(),
             ])
@@ -471,7 +557,7 @@ pub struct UpdateOAuthClientParams<'a> {
     pub access_scope: Option<AccessScope>,
     pub org_id: Option<&'a str>,
     pub resource_uris: &'a [String],
-    pub token_endpoint_auth_method: &'a str,
+    pub token_endpoint_auth_method: TokenEndpointAuthMethod,
     pub jwks: Option<&'a str>,
     pub jwks_uri: Option<&'a str>,
     pub fapi_profile: FapiProfile,
@@ -494,11 +580,11 @@ pub async fn update_oauth_client(pool: &Pool, params: &UpdateOAuthClientParams<'
             .value(OAuthClients::ResourceUris, resource_uris_json.as_str())
             .value(
                 OAuthClients::TokenEndpointAuthMethod,
-                params.token_endpoint_auth_method,
+                params.token_endpoint_auth_method.as_str(),
             )
             .value(OAuthClients::Jwks, params.jwks)
             .value(OAuthClients::JwksUri, params.jwks_uri)
-            .value(OAuthClients::FapiProfile, params.fapi_profile.as_db_str())
+            .value(OAuthClients::FapiProfile, params.fapi_profile.as_str())
             .value(
                 OAuthClients::DpopBoundAccessTokens,
                 params.dpop_bound_access_tokens,
@@ -772,6 +858,8 @@ pub enum OAuthEventType {
     TokenRevoked,
     AuthSuccess,
     AuthFailure,
+    /// RFC 7591: Client registered via dynamic registration.
+    ClientRegistered,
 }
 
 impl OAuthEventType {
@@ -784,6 +872,7 @@ impl OAuthEventType {
             Self::TokenRevoked => "token_revoked",
             Self::AuthSuccess => "auth_success",
             Self::AuthFailure => "auth_failure",
+            Self::ClientRegistered => "client_registered",
         }
     }
 }
@@ -1015,7 +1104,7 @@ pub mod test_helpers {
         let sql = {
             let query = Query::update()
                 .table(OAuthClients::Table)
-                .value(OAuthClients::FapiProfile, fapi_profile.as_db_str())
+                .value(OAuthClients::FapiProfile, fapi_profile.as_str())
                 .value(
                     OAuthClients::DpopBoundAccessTokens,
                     dpop_bound_access_tokens,
@@ -1287,35 +1376,14 @@ mod tests {
     }
 
     #[test]
-    fn test_fapi_profile_from_db() {
-        assert_eq!(FapiProfile::from_db("none"), FapiProfile::None);
-        assert_eq!(
-            FapiProfile::from_db("fapi2_security"),
-            FapiProfile::Fapi2Security
-        );
-        // Unknown values default to None for forward compatibility
-        assert_eq!(FapiProfile::from_db("unknown"), FapiProfile::None);
-        assert_eq!(FapiProfile::from_db(""), FapiProfile::None);
-    }
-
-    #[test]
-    fn test_fapi_profile_as_db_str() {
-        assert_eq!(FapiProfile::None.as_db_str(), "none");
-        assert_eq!(FapiProfile::Fapi2Security.as_db_str(), "fapi2_security");
+    fn test_fapi_profile_as_str() {
+        assert_eq!(FapiProfile::None.as_str(), "none");
+        assert_eq!(FapiProfile::Fapi2Security.as_str(), "fapi2_security");
     }
 
     #[test]
     fn test_fapi_profile_default() {
         assert_eq!(FapiProfile::default(), FapiProfile::None);
-    }
-
-    #[test]
-    fn test_fapi_profile_roundtrip() {
-        for profile in [FapiProfile::None, FapiProfile::Fapi2Security] {
-            let db_str = profile.as_db_str();
-            let parsed = FapiProfile::from_db(db_str);
-            assert_eq!(parsed, profile);
-        }
     }
 
     #[test]

@@ -169,7 +169,7 @@ pub async fn par(
     // public-client ("none") authentication are rejected for FAPI clients.
     if let Err(e) = crate::services::oidc::fapi::validate_fapi_client_auth_method(
         &authenticated_client.client,
-        &authenticated_client.client.token_endpoint_auth_method,
+        authenticated_client.client.token_endpoint_auth_method,
     ) {
         let desc = match &e {
             ServiceError::OAuth { description, .. } => description.clone(),

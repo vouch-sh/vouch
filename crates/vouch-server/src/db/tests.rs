@@ -165,7 +165,7 @@ async fn test_device_auth_request_lifecycle() {
         .expect("Device auth should exist");
 
     assert_eq!(request.user_code, user_code);
-    assert_eq!(request.status, "pending");
+    assert_eq!(request.status, DeviceAuthStatus::Pending);
     assert!(request.user_id.is_none());
 
     // Get by user code
@@ -225,7 +225,7 @@ async fn test_device_auth_authorization_flow() {
         .await
         .expect("Failed to get request")
         .expect("Should exist");
-    assert_eq!(request.status, "pending");
+    assert_eq!(request.status, DeviceAuthStatus::Pending);
 
     // Authorize the request
     authorize_device_auth(&pool, &id, &user.id, &user.email, &auth_id)
@@ -237,7 +237,7 @@ async fn test_device_auth_authorization_flow() {
         .await
         .expect("Failed to get request")
         .expect("Should exist");
-    assert_eq!(request.status, "authorized");
+    assert_eq!(request.status, DeviceAuthStatus::Authorized);
     assert_eq!(request.user_id, Some(user.id.clone()));
     assert_eq!(request.user_email, Some(user.email.clone()));
     assert_eq!(request.authenticator_id, Some(auth_id));
@@ -358,14 +358,28 @@ async fn test_oauth_client_crud() {
     let redirect_uris = vec!["https://example.com/callback".to_string()];
     let (client, client_id) = create_oauth_client(
         &pool,
-        &user.id,
-        "My App",
-        Some("A test application"),
-        OAuthClientType::Web,
-        &redirect_uris,
-        AccessScope::default(),
-        None,
-        &[],
+        &CreateOAuthClientParams {
+            user_id: &user.id,
+            name: "My App",
+            description: Some("A test application"),
+            application_type: OAuthClientType::Web,
+            redirect_uris: &redirect_uris,
+            access_scope: AccessScope::default(),
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+        },
     )
     .await
     .expect("Failed to create OAuth client");
@@ -404,10 +418,10 @@ async fn test_oauth_client_crud() {
             access_scope: None,
             org_id: None,
             resource_uris: &[],
-            token_endpoint_auth_method: client.token_endpoint_auth_method.as_str(),
+            token_endpoint_auth_method: client.token_endpoint_auth_method,
             jwks: client.jwks.as_deref(),
             jwks_uri: client.jwks_uri.as_deref(),
-            fapi_profile: client.fapi_profile(),
+            fapi_profile: client.fapi_profile,
             dpop_bound_access_tokens: client.dpop_bound_access_tokens,
         },
     )
@@ -451,14 +465,28 @@ async fn test_oauth_client_types() {
     ] {
         let (client, _) = create_oauth_client(
             &pool,
-            &user.id,
-            &format!("{:?} App", app_type),
-            None,
-            app_type,
-            &[],
-            AccessScope::default(),
-            None,
-            &[],
+            &CreateOAuthClientParams {
+                user_id: &user.id,
+                name: &format!("{:?} App", app_type),
+                description: None,
+                application_type: app_type,
+                redirect_uris: &[],
+                access_scope: AccessScope::default(),
+                org_id: None,
+                resource_uris: &[],
+                token_endpoint_auth_method: None,
+                jwks: None,
+                jwks_uri: None,
+                fapi_profile: None,
+                dpop_bound_access_tokens: None,
+                grant_types: None,
+                response_types: None,
+                software_id: None,
+                software_version: None,
+                registration_source: RegistrationSource::Manual,
+                registration_access_token_hash: None,
+                registration_metadata: None,
+            },
         )
         .await
         .expect("Failed to create client");
@@ -489,14 +517,28 @@ async fn test_oauth_client_list_for_user() {
     for i in 0..3 {
         create_oauth_client(
             &pool,
-            &user1.id,
-            &format!("App {}", i),
-            None,
-            OAuthClientType::Web,
-            &[],
-            AccessScope::default(),
-            None,
-            &[],
+            &CreateOAuthClientParams {
+                user_id: &user1.id,
+                name: &format!("App {}", i),
+                description: None,
+                application_type: OAuthClientType::Web,
+                redirect_uris: &[],
+                access_scope: AccessScope::default(),
+                org_id: None,
+                resource_uris: &[],
+                token_endpoint_auth_method: None,
+                jwks: None,
+                jwks_uri: None,
+                fapi_profile: None,
+                dpop_bound_access_tokens: None,
+                grant_types: None,
+                response_types: None,
+                software_id: None,
+                software_version: None,
+                registration_source: RegistrationSource::Manual,
+                registration_access_token_hash: None,
+                registration_metadata: None,
+            },
         )
         .await
         .expect("Failed to create client");
@@ -505,14 +547,28 @@ async fn test_oauth_client_list_for_user() {
     // Create client for user2
     create_oauth_client(
         &pool,
-        &user2.id,
-        "Other App",
-        None,
-        OAuthClientType::Web,
-        &[],
-        AccessScope::default(),
-        None,
-        &[],
+        &CreateOAuthClientParams {
+            user_id: &user2.id,
+            name: "Other App",
+            description: None,
+            application_type: OAuthClientType::Web,
+            redirect_uris: &[],
+            access_scope: AccessScope::default(),
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+        },
     )
     .await
     .expect("Failed to create client");
@@ -540,14 +596,28 @@ async fn test_oauth_client_secret_management() {
 
     let (client, _) = create_oauth_client(
         &pool,
-        &user.id,
-        "Secret App",
-        None,
-        OAuthClientType::Web,
-        &[],
-        AccessScope::default(),
-        None,
-        &[],
+        &CreateOAuthClientParams {
+            user_id: &user.id,
+            name: "Secret App",
+            description: None,
+            application_type: OAuthClientType::Web,
+            redirect_uris: &[],
+            access_scope: AccessScope::default(),
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+        },
     )
     .await
     .expect("Failed to create client");
@@ -592,14 +662,28 @@ async fn test_oauth_usage_recording() {
 
     let (client, _) = create_oauth_client(
         &pool,
-        &user.id,
-        "Usage App",
-        None,
-        OAuthClientType::Web,
-        &[],
-        AccessScope::default(),
-        None,
-        &[],
+        &CreateOAuthClientParams {
+            user_id: &user.id,
+            name: "Usage App",
+            description: None,
+            application_type: OAuthClientType::Web,
+            redirect_uris: &[],
+            access_scope: AccessScope::default(),
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+        },
     )
     .await
     .expect("Failed to create client");
@@ -917,7 +1001,7 @@ async fn test_auth_event_logging() {
     .expect("Failed to get events");
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].event_type, "login_success");
+    assert_eq!(events[0].event_type, AuthEventType::LoginSuccess);
 }
 
 // ========================================================================
@@ -1207,14 +1291,28 @@ async fn test_oauth_client_cascade_delete() {
 
     let (client, _) = create_oauth_client(
         &pool,
-        &user.id,
-        "Cascade App",
-        None,
-        OAuthClientType::Web,
-        &[],
-        AccessScope::default(),
-        None,
-        &[],
+        &CreateOAuthClientParams {
+            user_id: &user.id,
+            name: "Cascade App",
+            description: None,
+            application_type: OAuthClientType::Web,
+            redirect_uris: &[],
+            access_scope: AccessScope::default(),
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+        },
     )
     .await
     .expect("Failed to create client");

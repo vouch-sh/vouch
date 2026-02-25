@@ -76,15 +76,11 @@ pub async fn authenticate_client_jwt(
     }
 
     // 4. Verify client is configured for private_key_jwt
-    let method: TokenEndpointAuthMethod = client
-        .token_endpoint_auth_method
-        .parse()
-        .map_err(|_| ClientAuthError::InvalidCredentials)?;
-    if method != TokenEndpointAuthMethod::PrivateKeyJwt {
+    if client.token_endpoint_auth_method != TokenEndpointAuthMethod::PrivateKeyJwt {
         tracing::warn!(
             "Client {} attempted private_key_jwt but is configured for {}",
             client.client_id,
-            client.token_endpoint_auth_method
+            client.token_endpoint_auth_method.as_str()
         );
         return Err(ClientAuthError::InvalidCredentials);
     }

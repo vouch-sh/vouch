@@ -200,6 +200,20 @@ pub enum OAuthClients {
     /// FAPI 2.0: Whether access tokens must be sender-constrained via DPoP.
     #[iden = "dpop_bound_access_tokens"]
     DpopBoundAccessTokens,
+    /// RFC 7591: JSON array of allowed grant types.
+    GrantTypes,
+    /// RFC 7591: JSON array of allowed response types.
+    ResponseTypes,
+    /// RFC 7591: Software identifier (groups CLI instances).
+    SoftwareId,
+    /// RFC 7591: Software version string.
+    SoftwareVersion,
+    /// RFC 7591: Registration source (`manual` or `dynamic`).
+    RegistrationSource,
+    /// RFC 7591: SHA-256 hash of the registration access token (RFC 7592 prep).
+    RegistrationAccessTokenHash,
+    /// RFC 7591: JSON blob for cosmetic metadata (client_uri, logo_uri, etc.).
+    RegistrationMetadata,
 }
 
 /// OAuth client secrets table.

@@ -124,7 +124,7 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         revocation_endpoint: format!("{base_url}/oauth/revoke"),
         introspection_endpoint: format!("{base_url}/oauth/introspect"),
         device_authorization_endpoint: format!("{base_url}/oauth/device"),
-        registration_endpoint: None, // Dynamic registration not supported
+        registration_endpoint: Some(format!("{base_url}/oauth/register")),
         scopes_supported: OAuthScope::all()
             .iter()
             .map(|s| s.as_str().to_string())
@@ -133,6 +133,8 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         response_modes_supported: vec!["query".to_string()],
         grant_types_supported: vec![
             "authorization_code".to_string(),
+            "client_credentials".to_string(),
+            "refresh_token".to_string(),
             "urn:ietf:params:oauth:grant-type:device_code".to_string(),
             "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
             "urn:ietf:params:oauth:grant-type:jwt-bearer".to_string(),
