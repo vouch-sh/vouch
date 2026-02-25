@@ -6,27 +6,23 @@
 //! key handlers (cookie-based auth).
 
 use crate::db::{self, Pool};
-use crate::services::auth::SessionClaims;
 use crate::services::error::ServiceError;
 use vouch_common::{KeyInfo, lookup_device_model};
 
 /// Maximum session age (in seconds) for destructive key operations.
 pub const KEY_DELETE_MAX_AGE_SECS: i64 = 60;
 
-/// Require the session to have been created within `max_age_secs` seconds.
+/// Require the given issued-at or auth timestamp to be within `max_age_secs` seconds.
 ///
-/// Returns `ServiceError::StepUpRequired` if the session is too old.
+/// Returns `ServiceError::StepUpRequired` if the timestamp is too old.
+/// Used by delete key operations to enforce recency of authentication.
 ///
 /// # Errors
 ///
-/// Returns `ServiceError::StepUpRequired` when the session's `iat` claim
-/// is older than the specified `max_age_secs`.
-pub fn require_fresh_session(
-    claims: &SessionClaims,
-    max_age_secs: i64,
-) -> Result<(), ServiceError> {
+/// Returns `ServiceError::StepUpRequired` when `issued_at` is older than `max_age_secs`.
+pub fn require_fresh_timestamp(issued_at: i64, max_age_secs: i64) -> Result<(), ServiceError> {
     let now = jiff::Timestamp::now().as_second();
-    let session_age = now.saturating_sub(claims.iat);
+    let session_age = now.saturating_sub(issued_at);
     if session_age > max_age_secs {
         return Err(ServiceError::StepUpRequired {
             acr_values: None,
@@ -212,34 +208,21 @@ pub async fn delete_key(
 #[allow(clippy::panic, clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::db::SessionPurpose;
 
-    fn make_claims(iat: i64) -> SessionClaims {
-        SessionClaims {
-            iss: "https://test.example.com".to_string(),
-            aud: "https://test.example.com".to_string(),
-            sub: "user-1".to_string(),
-            email: "test@example.com".to_string(),
-            authenticator_id: Some("auth-1".to_string()),
-            iat,
-            exp: iat + 28800,
-            purpose: SessionPurpose::Fido2Session,
-            scope: None,
-        }
+    fn make_iat(seconds_ago: i64) -> i64 {
+        jiff::Timestamp::now().as_second() - seconds_ago
     }
 
     #[test]
-    fn test_require_fresh_session_passes_for_fresh() {
-        let now = jiff::Timestamp::now().as_second();
-        let claims = make_claims(now - 5); // 5 seconds old
-        assert!(require_fresh_session(&claims, 60).is_ok());
+    fn test_require_fresh_timestamp_passes_for_fresh() {
+        let iat = make_iat(5); // 5 seconds old
+        assert!(require_fresh_timestamp(iat, 60).is_ok());
     }
 
     #[test]
-    fn test_require_fresh_session_fails_for_stale() {
-        let now = jiff::Timestamp::now().as_second();
-        let claims = make_claims(now - 120); // 2 minutes old
-        let err = require_fresh_session(&claims, 60).unwrap_err();
+    fn test_require_fresh_timestamp_fails_for_stale() {
+        let iat = make_iat(120); // 2 minutes old
+        let err = require_fresh_timestamp(iat, 60).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -253,17 +236,19 @@ mod tests {
     }
 
     #[test]
-    fn test_require_fresh_session_boundary_exactly_at_max_age() {
-        let now = jiff::Timestamp::now().as_second();
-        let claims = make_claims(now - 60); // Exactly 60 seconds old
+    fn test_require_fresh_timestamp_boundary_exactly_at_max_age() {
+        let iat = make_iat(60); // Exactly 60 seconds old
         // Session age == max_age is NOT > max_age, so it should pass
-        assert!(require_fresh_session(&claims, 60).is_ok());
+        assert!(require_fresh_timestamp(iat, 60).is_ok());
     }
 
     #[test]
-    fn test_require_fresh_session_just_over_max_age() {
-        let now = jiff::Timestamp::now().as_second();
-        let claims = make_claims(now - 61); // 61 seconds old
-        assert!(require_fresh_session(&claims, 60).is_err());
+    fn test_require_fresh_timestamp_one_second_over() {
+        let iat = make_iat(61); // 61 seconds old (1 second over)
+        let err = require_fresh_timestamp(iat, 60).unwrap_err();
+        assert!(
+            matches!(err, ServiceError::StepUpRequired { .. }),
+            "Expected StepUpRequired for timestamp 1 second over max_age"
+        );
     }
 }

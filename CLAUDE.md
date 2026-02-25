@@ -16,7 +16,7 @@ vouch/
 │   ├── vouch-server/     # Auth server with OIDC provider, SSH CA (BUSL-1.1)
 │   ├── vouch-common/     # Shared types, FIDO2 helpers, API client (Apache-2.0/MIT)
 │   └── vouch-tests/      # Integration + property-based tests
-├── docs/                 # Architecture, security model, guides
+├── docs/                 # mdBook documentation (build with `make docs-build`)
 └── packaging/            # AMI and post-install scripts
 ```
 
@@ -25,11 +25,11 @@ vouch/
 **Database:** vouch-server uses SQLite (dev), PostgreSQL (prod), and Aurora DSQL via sqlx with a `Pool` enum abstraction (`db/pool.rs`) that dispatches at runtime based on the `DATABASE_URL` scheme. Query building uses `sea-query` for dynamic SQL. DSQL endpoints (hostname contains `.dsql.` and ends `.on.aws`) auto-generate IAM auth tokens. Migrations live in `crates/vouch-server/migrations/{sqlite,postgres}/`. Domain modules are in `crates/vouch-server/src/db/` (users, sessions, authenticators, oauth, scim, etc.).
 
 **Key flows:**
-1. `vouch enroll` → Browser OIDC → WebAuthn in browser → CLI receives session token (first key)
-2. `vouch login` → FIDO2 getAssertion → receive session token
-3. `vouch register` → (requires login) → FIDO2 makeCredential → add additional key
-4. `vouch credential ssh` → exchange session for SSH certificate
-5. `vouch credential aws` → exchange session for AWS temporary credentials
+1. `vouch enroll` → Browser OIDC → WebAuthn in browser → CLI receives OAuth access token (first key)
+2. `vouch login` → FAPI 2.0: /oauth/fido2/challenge → CTAP2 getAssertion → /oauth/token (FIDO2 grant + DPoP) → DPoP-bound access token
+3. `vouch register` → (requires login) → FIDO2 makeCredential → add additional key (POST /v1/keys/register/*)
+4. `vouch credential ssh` → exchange access token for SSH certificate
+5. `vouch credential aws` → exchange access token for AWS temporary credentials
 6. `vouch setup eks` → configure kubeconfig for EKS (chains through `vouch credential aws` → `aws eks get-token`)
 7. Native tools (ssh, aws, kubectl) call vouch helpers transparently via `credential_process`
 
@@ -251,6 +251,7 @@ cargo test --features yubikey-tests -- --ignored
 | HTML templates | `crates/vouch-server/templates/` |
 | CSS source | `crates/vouch-server/styles/input.css` |
 | Static assets | `crates/vouch-server/static/` (embedded via rust-embed) |
+| FAPI client (CLI) | `crates/vouch-cli/src/fapi/` (key.rs, dpop.rs, client_assertion.rs, registration.rs) |
 | Integration tests | `crates/vouch-tests/tests/` |
 | DB migrations | `crates/vouch-server/migrations/{sqlite,postgres}/` |
 
@@ -271,7 +272,7 @@ Before implementing a feature:
 1. Does this require new dependencies? Can we avoid them?
 2. Does this touch sensitive data? Use appropriate wrappers.
 3. Is this in scope for MVP?
-4. Does this change the security model? Document in `docs/SECURITY.md`.
+4. Does this change the security model? Document in `docs/src/security/model.md`.
 
 ## External Resources
 
@@ -297,6 +298,7 @@ Before implementing a feature:
 - [RFC 9449 - DPoP](https://www.rfc-editor.org/rfc/rfc9449)
 - [RFC 9470 - OAuth 2.0 Step Up Authentication Challenge Protocol](https://www.rfc-editor.org/rfc/rfc9470)
 - [RFC 9700 - OAuth 2.0 Security Best Current Practice](https://www.rfc-editor.org/rfc/rfc9700)
+- [RFC 7591 - OAuth 2.0 Dynamic Client Registration](https://www.rfc-editor.org/rfc/rfc7591)
 - [RFC 7643/7644 - SCIM 2.0](https://www.rfc-editor.org/rfc/rfc7643)
 
 **Crates:**

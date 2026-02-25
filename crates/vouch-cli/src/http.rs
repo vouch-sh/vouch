@@ -20,6 +20,10 @@ pub struct HttpResponse {
     /// WWW-Authenticate header value (if present on 401 responses).
     /// Used for RFC 9470 step-up authentication challenge detection.
     pub www_authenticate: Option<String>,
+    /// DPoP-Nonce header value (if present).
+    /// Returned by the server to bind the next DPoP proof to a server-issued nonce
+    /// (RFC 9449 Section 8).
+    pub dpop_nonce: Option<String>,
 }
 
 impl HttpResponse {
@@ -30,6 +34,7 @@ impl HttpResponse {
             status,
             body,
             www_authenticate: None,
+            dpop_nonce: None,
         }
     }
 
@@ -44,6 +49,7 @@ impl HttpResponse {
             status,
             body,
             www_authenticate,
+            dpop_nonce: None,
         }
     }
 
@@ -86,6 +92,7 @@ pub trait HttpClient: Send + Sync {
     /// * `body` - Optional request body bytes
     /// * `content_type` - Optional Content-Type header
     /// * `auth_header` - Optional Authorization header value
+    /// * `extra_headers` - Optional additional headers as `(name, value)` pairs
     ///
     /// # Errors
     ///
@@ -97,6 +104,7 @@ pub trait HttpClient: Send + Sync {
         body: Option<&[u8]>,
         content_type: Option<&str>,
         auth_header: Option<&str>,
+        extra_headers: Option<&[(&str, &str)]>,
     ) -> impl std::future::Future<Output = Result<HttpResponse>> + Send;
 }
 
@@ -139,6 +147,7 @@ impl HttpClient for ReqwestClient {
         body: Option<&[u8]>,
         content_type: Option<&str>,
         auth_header: Option<&str>,
+        extra_headers: Option<&[(&str, &str)]>,
     ) -> Result<HttpResponse> {
         let method =
             reqwest::Method::from_bytes(method.as_bytes()).context("invalid HTTP method")?;
@@ -151,6 +160,12 @@ impl HttpClient for ReqwestClient {
 
         if let Some(auth) = auth_header {
             builder = builder.header("Authorization", auth);
+        }
+
+        if let Some(headers) = extra_headers {
+            for (name, value) in headers {
+                builder = builder.header(*name, *value);
+            }
         }
 
         if let Some(b) = body {
@@ -172,16 +187,24 @@ impl HttpClient for ReqwestClient {
             None
         };
 
+        // Extract DPoP-Nonce header for RFC 9449 nonce binding
+        let dpop_nonce = response
+            .headers()
+            .get("dpop-nonce")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+
         let body = response
             .bytes()
             .await
             .context("failed to read response body")?;
 
-        Ok(HttpResponse::with_www_authenticate(
+        Ok(HttpResponse {
             status,
-            body.to_vec(),
+            body: body.to_vec(),
             www_authenticate,
-        ))
+            dpop_nonce,
+        })
     }
 }
 
@@ -200,7 +223,14 @@ pub trait HttpClientExt: HttpClient {
         async move {
             let json = serde_json::to_vec(body).context("failed to serialize request")?;
             let response = self
-                .request("POST", url, Some(&json), Some("application/json"), None)
+                .request(
+                    "POST",
+                    url,
+                    Some(&json),
+                    Some("application/json"),
+                    None,
+                    None,
+                )
                 .await?;
             handle_response(response)
         }
@@ -227,6 +257,7 @@ pub trait HttpClientExt: HttpClient {
                     Some(&json),
                     Some("application/json"),
                     Some(&auth),
+                    None,
                 )
                 .await?;
             handle_response(response)
@@ -244,7 +275,9 @@ pub trait HttpClientExt: HttpClient {
     {
         let auth = format!("Bearer {}", token.expose_secret());
         async move {
-            let response = self.request("GET", url, None, None, Some(&auth)).await?;
+            let response = self
+                .request("GET", url, None, None, Some(&auth), None)
+                .await?;
             handle_response(response)
         }
     }
@@ -268,6 +301,7 @@ pub trait HttpClientExt: HttpClient {
                     url,
                     Some(form.as_bytes()),
                     Some("application/x-www-form-urlencoded"),
+                    None,
                     None,
                 )
                 .await?;
@@ -411,6 +445,7 @@ mod test_utils {
             body: Option<&[u8]>,
             content_type: Option<&str>,
             auth_header: Option<&str>,
+            extra_headers: Option<&[(&str, &str)]>,
         ) -> Result<HttpResponse> {
             use axum::body::Body;
 
@@ -434,6 +469,12 @@ mod test_utils {
 
             if let Some(auth) = auth_header {
                 builder = builder.header("Authorization", auth);
+            }
+
+            if let Some(headers) = extra_headers {
+                for (name, value) in headers {
+                    builder = builder.header(*name, *value);
+                }
             }
 
             let body = match body {
@@ -461,15 +502,23 @@ mod test_utils {
                 None
             };
 
+            // Extract DPoP-Nonce header
+            let dpop_nonce = response
+                .headers()
+                .get("dpop-nonce")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from);
+
             let body_bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
                 .await
                 .context("failed to read response body")?;
 
-            Ok(HttpResponse::with_www_authenticate(
+            Ok(HttpResponse {
                 status,
-                body_bytes.to_vec(),
+                body: body_bytes.to_vec(),
                 www_authenticate,
-            ))
+                dpop_nonce,
+            })
         }
     }
 }
@@ -528,6 +577,18 @@ mod tests {
         let response = HttpResponse::new(200, b"not json".to_vec());
         let result: Result<serde_json::Value> = response.json();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_http_response_dpop_nonce_default_none() {
+        let response = HttpResponse::new(200, b"{}".to_vec());
+        assert!(response.dpop_nonce.is_none());
+    }
+
+    #[test]
+    fn test_http_response_with_www_authenticate_dpop_nonce_none() {
+        let response = HttpResponse::with_www_authenticate(401, b"{}".to_vec(), None);
+        assert!(response.dpop_nonce.is_none());
     }
 
     #[test]
@@ -692,7 +753,7 @@ mod tests {
         let client = TestHttpClient::new(router);
 
         let resp = client
-            .request("GET", "http://test.local/test", None, None, None)
+            .request("GET", "http://test.local/test", None, None, None, None)
             .await
             .unwrap();
 

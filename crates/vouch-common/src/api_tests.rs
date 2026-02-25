@@ -32,26 +32,6 @@ mod tests {
     }
 
     #[test]
-    fn test_login_complete_request_round_trip() {
-        let request = LoginCompleteRequest {
-            state: "test-state".to_string(),
-            credential_id: vec![1u8, 2, 3].into(),
-            authenticator_data: vec![4u8, 5, 6].into(),
-            signature: vec![7u8, 8, 9].into(),
-            client_data_json: vec![10u8, 11, 12].into(),
-            user_handle: vec![13u8, 14, 15].into(),
-            client_context: None,
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        let decoded: LoginCompleteRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(request.credential_id, decoded.credential_id);
-        assert_eq!(request.authenticator_data, decoded.authenticator_data);
-        assert_eq!(request.signature, decoded.signature);
-        assert_eq!(request.client_data_json, decoded.client_data_json);
-        assert_eq!(request.user_handle, decoded.user_handle);
-    }
-
-    #[test]
     fn test_register_start_response_round_trip() {
         let response = RegisterStartResponse {
             challenge: vec![0u8; 32].into(),
@@ -72,45 +52,6 @@ mod tests {
         );
         assert_eq!(response.rp_id, decoded.rp_id);
         assert_eq!(response.algorithms, decoded.algorithms);
-    }
-
-    #[test]
-    fn test_login_start_response_round_trip() {
-        let response = LoginStartResponse {
-            challenge: vec![42u8; 32].into(),
-            rp_id: "example.com".to_string(),
-            state: "login-state-token".to_string(),
-        };
-        let json = serde_json::to_string(&response).unwrap();
-        let decoded: LoginStartResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(response.challenge, decoded.challenge);
-        assert_eq!(response.rp_id, decoded.rp_id);
-        assert_eq!(response.state, decoded.state);
-    }
-
-    #[test]
-    fn test_login_complete_with_client_context() {
-        let request = LoginCompleteRequest {
-            state: "test-state".to_string(),
-            credential_id: vec![1u8, 2, 3].into(),
-            authenticator_data: vec![4u8, 5, 6].into(),
-            signature: vec![7u8, 8, 9].into(),
-            client_data_json: vec![10u8, 11, 12].into(),
-            user_handle: vec![13u8, 14, 15].into(),
-            client_context: Some(ClientContext {
-                cli_version: Some("0.1.0".to_string()),
-                os: Some("macos".to_string()),
-                os_version: Some("14.0".to_string()),
-                arch: Some("aarch64".to_string()),
-                hostname: Some("test-host".to_string()),
-            }),
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        let decoded: LoginCompleteRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(request.credential_id, decoded.credential_id);
-        assert!(decoded.client_context.is_some());
-        let ctx = decoded.client_context.unwrap();
-        assert_eq!(ctx.cli_version, Some("0.1.0".to_string()));
     }
 
     #[test]
@@ -160,36 +101,6 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_login_complete_missing_state() {
-        // Missing required 'state' field should fail
-        let json = r#"{
-            "credential_id": [1, 2, 3],
-            "authenticator_data": [4, 5, 6],
-            "signature": [7, 8, 9],
-            "client_data_json": [10, 11, 12],
-            "user_handle": [13, 14, 15]
-        }"#;
-        let result: Result<LoginCompleteRequest, _> = serde_json::from_str(json);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("state"));
-    }
-
-    #[test]
-    fn test_login_complete_missing_credential_id() {
-        // Missing required 'credential_id' field should fail
-        let json = r#"{
-            "state": "test-state",
-            "authenticator_data": [4, 5, 6],
-            "signature": [7, 8, 9],
-            "client_data_json": [10, 11, 12],
-            "user_handle": [13, 14, 15]
-        }"#;
-        let result: Result<LoginCompleteRequest, _> = serde_json::from_str(json);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("credential_id"));
-    }
-
-    #[test]
     fn test_register_complete_missing_public_key() {
         // Missing required 'public_key' field should fail
         let json = r#"{
@@ -208,23 +119,6 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_login_complete_empty_credential_id() {
-        // Empty credential_id is syntactically valid (semantic validation happens elsewhere)
-        let request = LoginCompleteRequest {
-            state: "test-state".to_string(),
-            credential_id: vec![].into(),
-            authenticator_data: vec![4u8, 5, 6].into(),
-            signature: vec![7u8, 8, 9].into(),
-            client_data_json: vec![10u8, 11, 12].into(),
-            user_handle: vec![13u8, 14, 15].into(),
-            client_context: None,
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        let decoded: LoginCompleteRequest = serde_json::from_str(&json).unwrap();
-        assert!(decoded.credential_id.is_empty());
-    }
-
-    #[test]
     fn test_register_complete_empty_public_key() {
         // Empty public_key is syntactically valid
         let request = RegisterCompleteRequest {
@@ -237,23 +131,6 @@ mod tests {
         let json = serde_json::to_string(&request).unwrap();
         let decoded: RegisterCompleteRequest = serde_json::from_str(&json).unwrap();
         assert!(decoded.public_key.is_empty());
-    }
-
-    #[test]
-    fn test_login_complete_empty_signature() {
-        // Empty signature is syntactically valid
-        let request = LoginCompleteRequest {
-            state: "test-state".to_string(),
-            credential_id: vec![1u8, 2, 3].into(),
-            authenticator_data: vec![4u8, 5, 6].into(),
-            signature: vec![].into(),
-            client_data_json: vec![10u8, 11, 12].into(),
-            user_handle: vec![13u8, 14, 15].into(),
-            client_context: None,
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        let decoded: LoginCompleteRequest = serde_json::from_str(&json).unwrap();
-        assert!(decoded.signature.is_empty());
     }
 
     #[test]
@@ -277,24 +154,6 @@ mod tests {
     // =========================================================================
     // Large Field Handling Tests
     // =========================================================================
-
-    #[test]
-    fn test_login_complete_large_signature() {
-        // Large signature field should serialize/deserialize correctly
-        let large_sig = vec![0xABu8; 10_000];
-        let request = LoginCompleteRequest {
-            state: "test-state".to_string(),
-            credential_id: vec![1u8, 2, 3].into(),
-            authenticator_data: vec![4u8, 5, 6].into(),
-            signature: large_sig.clone().into(),
-            client_data_json: vec![10u8, 11, 12].into(),
-            user_handle: vec![13u8, 14, 15].into(),
-            client_context: None,
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        let decoded: LoginCompleteRequest = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.signature.len(), 10_000);
-    }
 
     #[test]
     fn test_register_complete_large_attestation_object() {
@@ -440,28 +299,6 @@ mod tests {
     // =========================================================================
     // Invalid JSON Format Tests
     // =========================================================================
-
-    #[test]
-    fn test_login_complete_invalid_json_syntax() {
-        let invalid = r#"{ "state": "test", invalid json }"#;
-        let result: Result<LoginCompleteRequest, _> = serde_json::from_str(invalid);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_login_complete_wrong_type_for_field() {
-        // credential_id should be an array, not a string
-        let json = r#"{
-            "state": "test-state",
-            "credential_id": "not an array",
-            "authenticator_data": [4, 5, 6],
-            "signature": [7, 8, 9],
-            "client_data_json": [10, 11, 12],
-            "user_handle": [13, 14, 15]
-        }"#;
-        let result: Result<LoginCompleteRequest, _> = serde_json::from_str(json);
-        assert!(result.is_err());
-    }
 
     #[test]
     fn test_register_start_response_wrong_type_for_algorithms() {

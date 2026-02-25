@@ -6,10 +6,8 @@ use crate::db::{self, GitHubCredentialEventParams};
 use crate::services::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
-use axum::{Json, extract::State, http::StatusCode};
-use axum_extra::TypedHeader;
+use axum::{Json, extract::State, http::HeaderMap, http::StatusCode};
 use axum_extra::extract::cookie::CookieJar;
-use headers::authorization::{Authorization, Bearer};
 use jiff::Timestamp;
 use serde::Serialize;
 use std::sync::Arc;
@@ -18,8 +16,7 @@ use vouch_common::{
     SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
 };
 
-use super::extract_session_with_email;
-use super::session::extract_session;
+use super::session::{extract_resource_token, extract_resource_token_with_email};
 use crate::redact_email;
 
 /// Issue an SSH certificate for the authenticated user.
@@ -30,12 +27,12 @@ use crate::redact_email;
 /// as a user certificate with principals extracted from the user's email.
 pub async fn issue_ssh_certificate(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(request): Json<SshCertificateRequest>,
 ) -> Result<Json<SshCertificateResponse>, ServiceError> {
-    // Validate session
-    let (_claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
+    // Validate token and get user email
+    let (_token, user_email) = extract_resource_token_with_email(&state, &headers, &jar).await?;
 
     // Get SSH CA
     let ssh_ca = state.ssh_ca.as_ref().ok_or_else(|| {
@@ -211,14 +208,14 @@ pub struct SshRevocationCheckResponse {
 /// The AWS IAM role must be configured to trust the Vouch OIDC provider.
 pub async fn get_aws_token(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
-    // Validate session
-    let (claims, user_email) = extract_session_with_email(&state, auth_header, &jar).await?;
+    // Validate token and get user email
+    let (token, user_email) = extract_resource_token_with_email(&state, &headers, &jar).await?;
 
     // Get user's organization domain (hd claim) if they belong to an org
-    let hd = get_user_org_domain(&state, &claims.sub).await?;
+    let hd = get_user_org_domain(&state, &token.sub).await?;
 
     // Issue AWS token
     let config = state.config();
@@ -228,7 +225,7 @@ pub async fn get_aws_token(
         config.session_hours,
         &state.oidc_key,
         &user_email,
-        claims.authenticator_id.as_deref(),
+        token.authenticator_id.as_deref(),
         hd,
     )
     .await
@@ -321,14 +318,14 @@ async fn get_user_org_domain(
 /// Returns whether GitHub is configured and connected for the user's organization.
 pub async fn get_github_status(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<GitHubStatusResponse>, ServiceError> {
-    // Validate session
-    let session = extract_session(&state, auth_header, &jar).await?;
+    // Validate token
+    let token = extract_resource_token(&state, &headers, &jar).await?;
 
     // Get user
-    let user = db::get_user_by_id(&state.db, &session.claims.sub)
+    let user = db::get_user_by_id(&state.db, &token.sub)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get user by ID: {e}");
@@ -390,16 +387,15 @@ pub async fn get_github_status(
 /// GitHub installation with minimal permissions (contents:write, metadata:read).
 pub async fn get_github_token(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
-    headers: axum::http::HeaderMap,
     Json(request): Json<GitHubTokenRequest>,
 ) -> Result<Json<GitHubTokenResponse>, ServiceError> {
-    // Validate session
-    let session = extract_session(&state, auth_header, &jar).await?;
+    // Validate token
+    let token = extract_resource_token(&state, &headers, &jar).await?;
 
     // Get user
-    let user = db::get_user_by_id(&state.db, &session.claims.sub)
+    let user = db::get_user_by_id(&state.db, &token.sub)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get user by ID: {e}");
@@ -528,7 +524,7 @@ pub async fn get_github_token(
 
     // Get scoped token with minimal permissions
     let permissions = minimal_git_permissions();
-    let token = github_app
+    let gh_token = github_app
         .get_installation_token(
             GitHubInstallationId(u64::try_from(installation.installation_id).map_err(|_| {
                 ServiceError::http(
@@ -556,10 +552,10 @@ pub async fn get_github_token(
         })?;
 
     // Calculate expires_in from expires_at
-    let expires_at_ts: Timestamp = token.expires_at.parse().unwrap_or_else(|e| {
+    let expires_at_ts: Timestamp = gh_token.expires_at.parse().unwrap_or_else(|e| {
         tracing::warn!(
             "Failed to parse token expires_at '{}': {e}",
-            token.expires_at
+            gh_token.expires_at
         );
         Timestamp::now()
     });
@@ -574,7 +570,7 @@ pub async fn get_github_token(
         .repositories
         .as_ref()
         .map(|r| serde_json::to_string(r).unwrap_or_default());
-    let perms_json = serde_json::to_string(&token.permissions).unwrap_or_default();
+    let perms_json = serde_json::to_string(&gh_token.permissions).unwrap_or_default();
 
     // Log audit event
     if let Err(e) = db::log_github_credential_event(
@@ -586,10 +582,10 @@ pub async fn get_github_token(
             org_id: Some(org_id),
             installation_id: Some(installation.installation_id),
             session_id: None, // Session ID not stored in JWT claims
-            authenticator_id: session.claims.authenticator_id.as_deref(),
+            authenticator_id: token.authenticator_id.as_deref(),
             repositories: repos_json.as_deref(),
             permissions: Some(&perms_json),
-            token_expires_at: Some(&token.expires_at),
+            token_expires_at: Some(&gh_token.expires_at),
             success: true,
             error_code: None,
             ip_address: ip_address.as_deref(),
@@ -609,15 +605,15 @@ pub async fn get_github_token(
     );
 
     // Build response with repository names if scoped
-    let repositories = token
+    let repositories = gh_token
         .repositories
         .map(|repos| repos.into_iter().map(|r| r.full_name).collect());
 
     Ok(Json(GitHubTokenResponse {
-        token: token.token,
-        expires_at: token.expires_at,
+        token: gh_token.token,
+        expires_at: gh_token.expires_at,
         expires_in,
-        permissions: token.permissions,
+        permissions: gh_token.permissions,
         repositories,
     }))
 }

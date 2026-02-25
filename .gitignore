@@ -68,6 +68,9 @@ rust-project.json
 
 .env
 ssh_ca_key*
+
+# mdBook build output
+docs/book/
 .claude/skills
 .mcp.json
 scripts/*

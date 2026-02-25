@@ -1,0 +1,22 @@
+[book]
+title = "Vouch Documentation"
+authors = ["Vouch Team"]
+description = "Operator and administrator documentation for Vouch — hardware-backed authentication."
+language = "en"
+src = "src"
+
+[build]
+build-dir = "book"
+
+[output.html]
+git-repository-url = "https://github.com/vouch-sh/vouch"
+edit-url-template = "https://github.com/vouch-sh/vouch/edit/main/docs/{path}"
+default-theme = "light"
+preferred-dark-theme = "navy"
+
+[output.html.search]
+enable = true
+
+[output.html.fold]
+enable = true
+level = 1

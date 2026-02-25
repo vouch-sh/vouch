@@ -33,7 +33,7 @@ async fn test_userinfo_returns_sub_claim() {
     // OIDC Core 1.0 Section 5.3.2: Response must include 'sub' claim
     let (app, state) = test_app().await;
 
-    // Create a test user and session (FIDO2 session — no email scope)
+    // Create a test user and OAuth access token session (includes email scope)
     let user = create_test_user(&state.db, "userinfo@example.com").await;
     let auth_id = create_test_authenticator(&state.db, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
@@ -51,11 +51,11 @@ async fn test_userinfo_returns_sub_claim() {
         userinfo.get("sub").is_some(),
         "UserInfo must contain 'sub' claim"
     );
-    // FIDO2 sessions don't have email scope, so email claims are omitted
-    // per OIDC Core Section 5.4
-    assert!(
-        userinfo.get("email").is_none(),
-        "FIDO2 session should not have email claim without email scope"
+    // OAuth access token created with ScopeSet::all() includes email scope
+    assert_eq!(
+        userinfo["email"].as_str(),
+        Some("userinfo@example.com"),
+        "Email should be present when email scope is granted"
     );
 }
 

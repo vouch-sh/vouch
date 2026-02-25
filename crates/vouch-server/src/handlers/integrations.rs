@@ -11,16 +11,14 @@
 //! - GET/PUT/DELETE /v1/integrations/aws
 
 use crate::db;
-use crate::handlers::session::{AuthContext, extract_session, get_auth_context};
+use crate::handlers::session::{AuthContext, extract_resource_token, get_resource_auth_context};
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::Json;
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
-use axum_extra::TypedHeader;
 use axum_extra::extract::cookie::CookieJar;
-use headers::authorization::{Authorization, Bearer};
 use std::sync::Arc;
 use vouch_common::{ApiError, AwsIntegrationConfig, IntegrationConfigResponse};
 
@@ -52,7 +50,7 @@ impl_template_response!(IntegrationsTemplate);
 
 /// GET /integrations - Show integrations page.
 pub async fn integrations_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
-    let auth = get_auth_context(&state, &jar).await;
+    let auth = get_resource_auth_context(&state, &jar).await;
 
     // Redirect unauthenticated users to enrollment
     if !auth.authenticated {
@@ -71,7 +69,7 @@ pub async fn integrations_page(State(state): State<Arc<AppState>>, jar: CookieJa
         if let Ok(session) =
             crate::handlers::session::extract_session_from_cookie(&state, &jar).await
         {
-            if let Ok(Some(user)) = db::get_user_by_id(&state.db, &session.claims.sub).await {
+            if let Ok(Some(user)) = db::get_user_by_id(&state.db, &session.sub).await {
                 if let Some(org_id) = &user.org_id {
                     db::get_github_installations_by_org(&state.db, org_id)
                         .await
@@ -109,12 +107,12 @@ pub async fn integrations_page(State(state): State<Arc<AppState>>, jar: CookieJa
 /// Returns (user, org_id) or an error if not authenticated or no org.
 async fn extract_user_with_org(
     state: &AppState,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: &HeaderMap,
     jar: &CookieJar,
 ) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
-    let session = extract_session(state, auth_header, jar).await?;
+    let token = extract_resource_token(state, headers, jar).await?;
 
-    let user = db::get_user_by_id(&state.db, &session.claims.sub)
+    let user = db::get_user_by_id(&state.db, &token.sub)
         .await
         .map_err(|e| {
             json_error(
@@ -136,14 +134,14 @@ async fn extract_user_with_org(
     Ok((user, org_id))
 }
 
-/// Extract and validate an org admin from the JWT Bearer token.
+/// Extract and validate an org admin from the access token.
 /// Returns the user and their org_id if they are an org admin.
 async fn extract_org_admin(
     state: &AppState,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: &HeaderMap,
     jar: &CookieJar,
 ) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
-    let (user, org_id) = extract_user_with_org(state, auth_header, jar).await?;
+    let (user, org_id) = extract_user_with_org(state, headers, jar).await?;
 
     if !user.is_org_admin {
         return Err(json_error(
@@ -164,10 +162,10 @@ async fn extract_org_admin(
 /// Returns AWS config for authenticated user's organization.
 pub async fn get_aws_integration(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<IntegrationConfigResponse<AwsIntegrationConfig>>, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_user_with_org(&state, auth_header, &jar).await?;
+    let (_user, org_id) = extract_user_with_org(&state, &headers, &jar).await?;
 
     let integration = db::get_cloud_integration(&state.db, &org_id, "aws")
         .await
@@ -204,11 +202,11 @@ pub async fn get_aws_integration(
 /// Set or update AWS config for the organization.
 pub async fn set_aws_integration(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(config): Json<AwsIntegrationConfig>,
 ) -> Result<Json<AwsIntegrationConfig>, (StatusCode, Json<ApiError>)> {
-    let (user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
+    let (user, org_id) = extract_org_admin(&state, &headers, &jar).await?;
 
     let config_json = serde_json::to_string(&config).map_err(|e| {
         json_error(
@@ -241,10 +239,10 @@ pub async fn set_aws_integration(
 /// Remove AWS config for the organization.
 pub async fn delete_aws_integration(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let (user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
+    let (user, org_id) = extract_org_admin(&state, &headers, &jar).await?;
 
     let deleted = db::delete_cloud_integration(&state.db, &org_id, "aws")
         .await

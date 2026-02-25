@@ -322,7 +322,7 @@ Documentation lives in `/docs`. When updating:
 
 - **Questions**: Open a [GitHub Discussion](https://github.com/vouch-sh/vouch/discussions)
 - **Bugs**: Open a [GitHub Issue](https://github.com/vouch-sh/vouch/issues)
-- **Security**: Email security@vouch.sh (see [SECURITY.md](docs/SECURITY.md))
+- **Security**: Email security@vouch.sh (see [Security Model](docs/src/security/model.md))
 
 ## License
 

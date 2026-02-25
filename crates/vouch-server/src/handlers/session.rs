@@ -3,17 +3,12 @@
 
 use crate::AppState;
 use crate::crypto::hash_token;
-use crate::db::{self, SessionPurpose};
+use crate::db;
 use axum::Json;
 use axum::http::StatusCode;
-use axum_extra::TypedHeader;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use headers::authorization::{Authorization, Bearer};
-use jsonwebtoken::DecodingKey;
+use subtle::ConstantTimeEq;
 use time::Duration;
-
-use crate::crypto::jwt::JwtType;
-use crate::services::auth::SessionClaims;
 
 use super::errors::json_error;
 
@@ -54,86 +49,65 @@ impl AuthContext {
     }
 }
 
-/// Helper to extract auth context from cookie jar.
-///
-/// This is a convenience function for handlers that need to pass
-/// auth state to templates. It looks up the user to determine org membership.
-pub async fn get_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
-    let session = match extract_session_from_cookie(state, jar).await {
-        Ok(s) => s,
-        Err(_) => return AuthContext::unauthenticated(),
-    };
-
-    // Look up user to check org membership and admin status
-    let (has_org, is_org_admin) = match db::get_user_by_id(&state.db, &session.claims.sub).await {
-        Ok(Some(user)) => (user.org_id.is_some(), user.is_org_admin),
-        _ => (false, false),
-    };
-
-    AuthContext {
-        authenticated: true,
-        user_id: Some(session.claims.sub),
-        user_email: Some(session.claims.email),
-        has_org,
-        is_org_admin,
-    }
-}
-
 // ============================================================================
-// Session Extraction
+// OAuth Resource Token Extraction (FAPI 2.0)
 // ============================================================================
 
-/// Validated session information.
-pub struct ValidatedSession {
-    /// JWT claims from the session token.
-    pub claims: SessionClaims,
-    /// SHA-256 hash of the session token (for database lookups/revocation).
-    #[allow(dead_code)]
+/// Validated OAuth resource token information.
+pub struct ValidatedResourceToken {
+    /// User ID (`sub` claim from the access token).
+    pub sub: String,
+    /// User email (from `email` claim if present, or DB lookup).
+    pub email: Option<String>,
+    /// OAuth client_id from the access token.
+    pub client_id: String,
+    /// Granted OAuth scope.
+    pub scope: Option<crate::services::oidc::scope::ScopeSet>,
+    /// Authenticator ID from the server-side session record (not in JWT).
+    pub authenticator_id: Option<String>,
+    /// Authentication time (`auth_time` claim).
+    pub auth_time: Option<i64>,
+    /// SHA-256 hash of the access token (for DB lookups/revocation).
     pub token_hash: String,
 }
 
-/// Extract and validate session from Authorization header only.
+/// Extract and validate an OAuth access token from the request.
 ///
-/// This validates the JWT token and checks that a corresponding session
-/// exists in the database. For APIs that should also accept cookies,
-/// use `extract_session` instead.
+/// Supports three token sources (in order of precedence):
+/// 1. `Authorization: DPoP <token>` — DPoP-bound token (FAPI 2.0)
+/// 2. `Authorization: Bearer <token>` — standard Bearer token
+/// 3. `vouch_session` cookie — browser sessions
 ///
-/// # Errors
-///
-/// Returns an error response if:
-/// - The Authorization header is missing or invalid
-/// - The JWT token is invalid or expired
-/// - No session exists in the database for this token
-async fn extract_session_from_header(
+/// Validates the token as ES256 `at+jwt` (RFC 9068), verifies session
+/// existence in DB, and validates DPoP proof if the token is sender-constrained.
+pub async fn extract_resource_token(
     state: &AppState,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
-) -> Result<ValidatedSession, (StatusCode, Json<vouch_common::ApiError>)> {
-    // Get token from Authorization header
-    let TypedHeader(Authorization(bearer)) = auth_header.ok_or_else(|| {
+    headers: &axum::http::HeaderMap,
+    jar: &CookieJar,
+) -> Result<ValidatedResourceToken, (StatusCode, Json<vouch_common::ApiError>)> {
+    // 1. Extract token from Authorization header or cookie
+    let (token, auth_scheme) = extract_token_from_request(headers, jar)?;
+
+    // 2. Decode as ES256 at+jwt using the OIDC signing key
+    let config = state.config();
+    let decoded = crate::services::auth::decode_token(
+        &token,
+        config.jwt_secret_bytes(),
+        &state.oidc_key,
+        &config.base_url,
+    )
+    .ok_or_else(|| {
         json_error(
             StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Missing or invalid Authorization header",
+            "invalid_token",
+            "Invalid or expired access token",
         )
     })?;
 
-    let token = bearer.token();
+    let crate::services::auth::DecodedToken::AccessToken(access_claims) = decoded;
 
-    // Validate JWT with iss/aud/typ checks (RFC 8725 §3.8, §3.9, §3.11)
-    let config = state.config();
-    let token_data = decode_session_jwt(token, config.jwt_secret_bytes(), &config.base_url)
-        .map_err(|_| {
-            json_error(
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "Invalid or expired token",
-            )
-        })?;
-
-    let claims = token_data.claims;
-
-    // Verify session exists in database
-    let token_hash = hash_token(token);
+    // 3. Verify session exists in DB via token_hash
+    let token_hash = hash_token(&token);
     let session = db::get_session_by_token_hash(&state.db, &token_hash)
         .await
         .map_err(|e| {
@@ -142,32 +116,127 @@ async fn extract_session_from_header(
                 "db_error",
                 &e.to_string(),
             )
+        })?
+        .ok_or_else(|| {
+            json_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Session not found or revoked",
+            )
         })?;
 
-    if session.is_none() {
-        return Err(json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Session not found",
-        ));
+    // 4. DPoP validation for sender-constrained tokens
+    if let Some(ref cnf) = access_claims.cnf {
+        // Token has cnf.jkt → it's sender-constrained
+        match auth_scheme {
+            AuthScheme::DPoP => {
+                // Validate DPoP proof header against cnf.jkt
+                let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
+                if let Some(proof) = dpop_header {
+                    let full_uri = format!("{}{}", config.base_url, extract_request_path(headers));
+                    let method = extract_request_method(headers);
+                    match crate::services::oidc::dpop::validate_dpop_at_resource(
+                        &token,
+                        proof,
+                        &method,
+                        &full_uri,
+                        &state.db,
+                        config.dpop_max_age_seconds,
+                    )
+                    .await
+                    {
+                        Ok(validated) => {
+                            // Verify jkt matches
+                            let is_match: bool =
+                                validated.jkt.as_bytes().ct_eq(cnf.jkt.as_bytes()).into();
+                            if !is_match {
+                                return Err(json_error(
+                                    StatusCode::UNAUTHORIZED,
+                                    "invalid_token",
+                                    "DPoP proof key does not match token binding",
+                                ));
+                            }
+                        }
+                        Err(_e) => {
+                            return Err(json_error(
+                                StatusCode::UNAUTHORIZED,
+                                "invalid_token",
+                                "Invalid DPoP proof",
+                            ));
+                        }
+                    }
+                } else {
+                    return Err(json_error(
+                        StatusCode::UNAUTHORIZED,
+                        "invalid_token",
+                        "Missing DPoP proof header for sender-constrained token",
+                    ));
+                }
+            }
+            AuthScheme::Bearer => {
+                // RFC 9449: Token has cnf.jkt but sent as Bearer → reject
+                return Err(json_error(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_token",
+                    "Sender-constrained tokens must use DPoP authorization scheme",
+                ));
+            }
+            AuthScheme::Cookie => {
+                // Browser cookie sessions from the server's own UI are allowed
+                // even for DPoP-bound tokens (the server is both issuer and consumer)
+            }
+        }
     }
 
-    // Gate management endpoints: only FIDO2 sessions are allowed
-    if claims.purpose != SessionPurpose::Fido2Session {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "insufficient_scope",
-            "This endpoint requires a FIDO2 session token",
-        ));
-    }
+    // 5. Look up authenticator_id from DB session record
+    let authenticator_id = session.authenticator_id;
 
-    Ok(ValidatedSession { claims, token_hash })
+    Ok(ValidatedResourceToken {
+        sub: access_claims.sub,
+        email: access_claims.email,
+        client_id: access_claims.client_id,
+        scope: access_claims.scope,
+        authenticator_id,
+        auth_time: access_claims.auth_time,
+        token_hash,
+    })
 }
 
-/// Extract and validate session from cookie (for browser UI).
+/// Extract resource token and also fetch the user email from DB.
 ///
-/// This is similar to `extract_session` but reads from cookies instead of
-/// the Authorization header. Used for browser-based pages like `/github/connect`.
+/// Convenience function for handlers that need the user email.
+pub async fn extract_resource_token_with_email(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    jar: &CookieJar,
+) -> Result<(ValidatedResourceToken, String), (StatusCode, Json<vouch_common::ApiError>)> {
+    let token = extract_resource_token(state, headers, jar).await?;
+
+    // If token already has email, use it; otherwise look up from DB
+    let email = if let Some(ref email) = token.email {
+        email.clone()
+    } else {
+        let user = db::get_user_by_id(&state.db, &token.sub)
+            .await
+            .map_err(|e| {
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    &e.to_string(),
+                )
+            })?
+            .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
+        user.email
+    };
+
+    Ok((token, email))
+}
+
+/// Extract and validate an OAuth access token from the `vouch_session` cookie only.
+///
+/// Used by browser UI handlers (enrollment, GitHub, applications) where the
+/// Authorization header is not available. The cookie contains an OAuth access token
+/// set by `browser_login_complete` or `oidc_callback`.
 ///
 /// # Errors
 ///
@@ -175,105 +244,71 @@ async fn extract_session_from_header(
 pub async fn extract_session_from_cookie(
     state: &AppState,
     jar: &CookieJar,
-) -> Result<ValidatedSession, (StatusCode, Json<vouch_common::ApiError>)> {
-    // Get session token from cookie
-    let token = jar.get("vouch_session").map(|c| c.value()).ok_or_else(|| {
-        json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "No session cookie",
-        )
-    })?;
-
-    // Validate JWT with iss/aud/typ checks (RFC 8725 §3.8, §3.9, §3.11)
-    let config = state.config();
-    let token_data = decode_session_jwt(token, config.jwt_secret_bytes(), &config.base_url)
-        .map_err(|_| {
-            json_error(
-                StatusCode::UNAUTHORIZED,
-                "unauthorized",
-                "Invalid or expired session",
-            )
-        })?;
-
-    let claims = token_data.claims;
-
-    // Verify session exists in database
-    let token_hash = hash_token(token);
-    let session = db::get_session_by_token_hash(&state.db, &token_hash)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?;
-
-    if session.is_none() {
-        return Err(json_error(
-            StatusCode::UNAUTHORIZED,
-            "unauthorized",
-            "Session not found",
-        ));
-    }
-
-    // Gate management endpoints: only FIDO2 sessions are allowed (defense-in-depth)
-    if claims.purpose != SessionPurpose::Fido2Session {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "insufficient_scope",
-            "This endpoint requires a FIDO2 session token",
-        ));
-    }
-
-    Ok(ValidatedSession { claims, token_hash })
+) -> Result<ValidatedResourceToken, (StatusCode, Json<vouch_common::ApiError>)> {
+    // Use an empty header map — cookie path only
+    let empty_headers = axum::http::HeaderMap::new();
+    extract_resource_token(state, &empty_headers, jar).await
 }
 
-/// Decode and validate a session JWT with iss/aud/typ checks.
-///
-/// RFC 8725 §3.8: Validates issuer.
-/// RFC 8725 §3.9: Validates audience.
-/// RFC 8725 §3.11: Validates typ header.
-pub(crate) fn decode_session_jwt(
-    token: &str,
-    jwt_secret: &[u8],
-    expected_issuer: &str,
-) -> Result<jsonwebtoken::TokenData<SessionClaims>, jsonwebtoken::errors::Error> {
-    let validation = crate::crypto::jwt::session_validation(expected_issuer);
-
-    let token_data = jsonwebtoken::decode::<SessionClaims>(
-        token,
-        &DecodingKey::from_secret(jwt_secret),
-        &validation,
-    )?;
-
-    // RFC 8725 §3.11: Validate typ header
-    if token_data.header.typ.as_deref() != Some(JwtType::Session.as_header_str()) {
-        return Err(jsonwebtoken::errors::Error::from(
-            jsonwebtoken::errors::ErrorKind::InvalidToken,
-        ));
-    }
-
-    Ok(token_data)
+/// Authorization scheme detected from the request.
+#[derive(Debug, Clone, Copy)]
+enum AuthScheme {
+    /// `Authorization: DPoP <token>`
+    DPoP,
+    /// `Authorization: Bearer <token>`
+    Bearer,
+    /// Token read from `vouch_session` cookie
+    Cookie,
 }
 
-/// Extract and validate session from Bearer token or cookie.
+/// Extract token and auth scheme from the request.
 ///
-/// Tries Authorization header first, then falls back to vouch_session cookie.
-/// This allows API endpoints to be called via curl with either:
-/// - `Authorization: Bearer <token>` header
-/// - `-b ~/.vouch/cookie.txt` cookie file
-pub async fn extract_session(
-    state: &AppState,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+/// Checks Authorization header first (DPoP then Bearer), then cookie.
+/// Returns an owned `String` to avoid lifetime issues between headers and jar.
+fn extract_token_from_request(
+    headers: &axum::http::HeaderMap,
     jar: &CookieJar,
-) -> Result<ValidatedSession, (StatusCode, Json<vouch_common::ApiError>)> {
-    if auth_header.is_some() {
-        extract_session_from_header(state, auth_header).await
-    } else {
-        extract_session_from_cookie(state, jar).await
+) -> Result<(String, AuthScheme), (StatusCode, Json<vouch_common::ApiError>)> {
+    use axum::http::header::AUTHORIZATION;
+
+    // Check Authorization header
+    if let Some(auth_value) = headers.get(AUTHORIZATION).and_then(|v| v.to_str().ok()) {
+        if let Some(token) = auth_value.strip_prefix("DPoP ") {
+            return Ok((token.to_string(), AuthScheme::DPoP));
+        }
+        if let Some(token) = auth_value.strip_prefix("Bearer ") {
+            return Ok((token.to_string(), AuthScheme::Bearer));
+        }
     }
+
+    // Fall back to cookie
+    if let Some(cookie) = jar.get("vouch_session") {
+        return Ok((cookie.value().to_string(), AuthScheme::Cookie));
+    }
+
+    Err(json_error(
+        StatusCode::UNAUTHORIZED,
+        "unauthorized",
+        "Missing access token",
+    ))
+}
+
+/// Extract the request path from headers (via X-Original-URI or fallback).
+fn extract_request_path(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-original-uri")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("/")
+        .to_string()
+}
+
+/// Extract the request method from headers (via X-Original-Method or fallback).
+fn extract_request_method(headers: &axum::http::HeaderMap) -> String {
+    headers
+        .get("x-original-method")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("GET")
+        .to_string()
 }
 
 /// Create a session cookie.
@@ -304,33 +339,59 @@ pub fn clear_session_cookie() -> Cookie<'static> {
         .build()
 }
 
-/// Extract session and also fetch the user email.
-///
-/// This is a convenience function for handlers that need the user's email
-/// in addition to the session claims.
-///
-/// # Errors
-///
-/// Returns an error response if session extraction fails or if the user
-/// is not found in the database.
-pub async fn extract_session_with_email(
-    state: &AppState,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
-    jar: &CookieJar,
-) -> Result<(SessionClaims, String), (StatusCode, Json<vouch_common::ApiError>)> {
-    let session = extract_session(state, auth_header, jar).await?;
+/// Helper to extract auth context from cookie jar using OAuth tokens.
+pub async fn get_resource_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
+    // Try to extract token from cookie
+    let token = match jar.get("vouch_session") {
+        Some(c) => c.value(),
+        None => return AuthContext::unauthenticated(),
+    };
 
-    // Get user email
-    let user = db::get_user_by_id(&state.db, &session.claims.sub)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
+    // Decode using ES256 access token path only
+    let config = state.config();
+    let decoded = match crate::services::auth::decode_token(
+        token,
+        config.jwt_secret_bytes(),
+        &state.oidc_key,
+        &config.base_url,
+    ) {
+        Some(d) => d,
+        None => return AuthContext::unauthenticated(),
+    };
 
-    Ok((session.claims, user.email))
+    // Verify session exists in DB
+    let token_hash = hash_token(token);
+    let session_exists = matches!(
+        db::get_session_by_token_hash(&state.db, &token_hash).await,
+        Ok(Some(_))
+    );
+
+    if !session_exists {
+        return AuthContext::unauthenticated();
+    }
+
+    let user_id = decoded.sub().to_string();
+    let user_email = decoded.email().map(String::from);
+
+    // Look up user to check org membership and admin status
+    let (has_org, is_org_admin) = match db::get_user_by_id(&state.db, &user_id).await {
+        Ok(Some(user)) => (user.org_id.is_some(), user.is_org_admin),
+        _ => (false, false),
+    };
+
+    AuthContext {
+        authenticated: true,
+        user_id: Some(user_id),
+        user_email,
+        has_org,
+        is_org_admin,
+    }
+}
+
+/// Alias for `get_resource_auth_context` to retain a consistent name used
+/// by templates and browser UI handlers.
+///
+/// Both names refer to the same OAuth-token-based auth context extraction.
+pub async fn get_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
+    get_resource_auth_context(state, jar).await
 }

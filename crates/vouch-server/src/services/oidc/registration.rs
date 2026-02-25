@@ -36,6 +36,7 @@ const ALLOWED_GRANT_TYPES: &[&str] = &[
     "refresh_token",
     "urn:ietf:params:oauth:grant-type:token-exchange",
     "urn:ietf:params:oauth:grant-type:jwt-bearer",
+    "urn:ietf:params:oauth:grant-type:fido2-assertion",
 ];
 
 /// Response types that this server accepts for dynamic registration.
@@ -161,14 +162,14 @@ pub struct RegistrationResponse {
 /// # Arguments
 /// * `state` — Application state (DB, config, etc.)
 /// * `request` — The registration request body
-/// * `authenticated_user_id` — User ID from the Bearer token (always required)
+/// * `authenticated_user_id` — Optional user ID from the Bearer token; `None` for open registration
 ///
 /// # Errors
 /// Returns `ServiceError::OAuth` with the appropriate RFC 7591 error code.
 pub async fn register_client(
     state: &Arc<AppState>,
     mut request: RegistrationRequest,
-    authenticated_user_id: &str,
+    authenticated_user_id: Option<&str>,
 ) -> Result<RegistrationResponse, ServiceError> {
     // 1. Software statement: verify and apply precedence
     if let Some(statement_jwt) = request.software_statement.take() {
@@ -475,7 +476,7 @@ pub async fn register_client(
         &state.db,
         &client.id,
         OAuthEventType::ClientRegistered,
-        Some(authenticated_user_id),
+        authenticated_user_id,
         None,
         None,
         Some("RFC 7591 dynamic registration"),
@@ -491,7 +492,7 @@ pub async fn register_client(
     tracing::info!(
         "Dynamic client registration: client_id={}, user={}, app_type={:?}",
         client_id,
-        authenticated_user_id,
+        authenticated_user_id.unwrap_or("(open)"),
         app_type
     );
 

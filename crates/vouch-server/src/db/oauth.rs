@@ -369,7 +369,8 @@ const OAUTH_CLIENT_COLUMNS: &[OAuthClients] = &[
 /// Replaces the positional arguments to `create_oauth_client()` and includes
 /// RFC 7591 metadata fields for dynamic registration.
 pub struct CreateOAuthClientParams<'a> {
-    pub user_id: &'a str,
+    /// Owner user ID. `None` for open registration (RFC 7591).
+    pub user_id: Option<&'a str>,
     pub name: &'a str,
     pub description: Option<&'a str>,
     pub application_type: OAuthClientType,

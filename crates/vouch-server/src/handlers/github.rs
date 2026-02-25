@@ -328,7 +328,7 @@ pub async fn github_connect_page(
     };
 
     // Get user
-    let user = match db::get_user_by_id(&state.db, &session.claims.sub).await {
+    let user = match db::get_user_by_id(&state.db, &session.sub).await {
         Ok(Some(u)) => u,
         _ => return error_response(GitHubError::UserNotFound),
     };
@@ -548,7 +548,7 @@ pub async fn github_link_start(State(state): State<Arc<AppState>>, jar: CookieJa
     };
 
     // Get user
-    let user = match db::get_user_by_id(&state.db, &session.claims.sub).await {
+    let user = match db::get_user_by_id(&state.db, &session.sub).await {
         Ok(Some(u)) => u,
         _ => return error_response(GitHubError::UserNotFound),
     };
@@ -611,7 +611,7 @@ pub async fn github_reconnect(
     };
 
     // Get user
-    let user = match db::get_user_by_id(&state.db, &session.claims.sub).await {
+    let user = match db::get_user_by_id(&state.db, &session.sub).await {
         Ok(Some(u)) => u,
         _ => return error_response(GitHubError::UserNotFound),
     };

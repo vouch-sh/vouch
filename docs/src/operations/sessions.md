@@ -1,0 +1,80 @@
+# Session Management
+
+Vouch sessions are time-limited authentication tokens that prove recent hardware presence verification.
+
+## Session Lifecycle
+
+1. **Creation** — `vouch login` performs FIDO2 assertion with YubiKey touch + PIN
+2. **Active** — Session token stored in agent memory, valid for 8 hours (default)
+3. **Usage** — Credential helpers exchange the token for service-specific credentials
+4. **Expiry** — Session expires automatically after the configured duration
+5. **Revocation** — `vouch logout` explicitly ends the session
+
+## Session Duration
+
+Default: 8 hours. Configurable via:
+
+```bash
+VOUCH_SESSION_HOURS=8
+```
+
+## Session Storage
+
+Sessions are stored in multiple locations for different access patterns:
+
+| Location | Purpose | Security |
+|----------|---------|----------|
+| `vouch-agent` memory | Primary access for CLI and credential helpers | In-process, zeroized on drop |
+| `~/.vouch/config.json` | Fallback when agent is not running | File permissions 0600 |
+| `~/.vouch/cookie.txt` | Netscape cookie format for curl/wget | File permissions 0600 |
+| Server database | Server-side session record | Token hash stored, not plaintext |
+
+## Checking Session Status
+
+```bash
+$ vouch status
+Authenticated as you@company.com
+Session expires in 7h 42m
+Authenticated at 2025-01-15T09:00:00Z
+```
+
+## Ending a Session
+
+```bash
+vouch logout
+```
+
+This clears the session from:
+- Agent memory
+- Config file
+- Cookie file
+- Server-side session record (revoked)
+
+## Server-Side Session Management
+
+### Cleanup
+
+Expired sessions are cleaned up automatically by a background task:
+
+```bash
+# Cleanup interval in minutes (default: 15, set to 0 to disable)
+VOUCH_CLEANUP_INTERVAL=15
+```
+
+### Admin Operations
+
+Organization administrators can view authentication events via the admin API:
+
+```bash
+# List recent auth events
+curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+  https://auth.example.com/api/v1/org/auth-events
+```
+
+## Security Properties
+
+- **Presence-bound** — Every session traces to a FIDO2 assertion with user verification
+- **Time-limited** — Sessions cannot be renewed; a new login is required after expiry
+- **DPoP-bound** — Access tokens are bound to the client's DPoP key; token theft without the key is useless
+- **Non-transferable** — Sessions are bound to the client that created them
+- **Audited** — Every session creation and usage is logged

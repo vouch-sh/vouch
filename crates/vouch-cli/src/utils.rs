@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Shared utility functions for the CLI.
 
+#![allow(dead_code)]
+
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write;
@@ -26,7 +28,6 @@ pub fn ensure_secure_dir(path: &Path) -> Result<()> {
 /// Unix file permission mode for atomic writes.
 ///
 /// On non-Unix platforms, this value is accepted but ignored.
-#[allow(dead_code)]
 pub(crate) enum FileMode {
     /// Use default permissions (no explicit chmod).
     Default,

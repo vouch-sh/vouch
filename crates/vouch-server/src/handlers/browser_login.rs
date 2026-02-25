@@ -28,6 +28,9 @@ use crate::handlers::errors::json_error;
 use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
 use crate::redact_email;
+use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::services::oidc::amr::{ACR_AAL3, AuthMethod};
+use crate::services::oidc::scope::ScopeSet;
 use askama::Template;
 use axum::{
     Json,
@@ -407,15 +410,23 @@ pub async fn browser_login_complete(
             )
         })?;
 
-    // Create session using the shared service function
-    let session_result = crate::services::auth::create_login_session(
+    // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
+    let client_id = state.config().base_url.clone();
+    let auth_now = Timestamp::now();
+    let session_result = create_oauth_access_token(
         &state,
-        crate::services::auth::CreateSessionParams {
+        CreateOAuthTokenParams {
             user_id: &user.id,
             email: &user.email,
             authenticator_id: Some(&authenticator.id),
-            purpose: crate::db::SessionPurpose::Fido2Session,
-            scope: None,
+            client_id: &client_id,
+            scope: Some(ScopeSet::all()),
+            dpop_jkt: None,
+            act: None,
+            audience: None,
+            auth_time: Some(auth_now.as_second()),
+            amr: Some(AuthMethod::all_fido2().to_vec()),
+            acr: Some(ACR_AAL3.to_string()),
         },
     )
     .await

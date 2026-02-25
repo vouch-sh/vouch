@@ -265,7 +265,7 @@ pub async fn create_application_form(
     let (client, client_id) = match db::create_oauth_client(
         &state.db,
         &CreateOAuthClientParams {
-            user_id,
+            user_id: Some(user_id),
             name,
             description: form.description.as_deref(),
             application_type: app_type,

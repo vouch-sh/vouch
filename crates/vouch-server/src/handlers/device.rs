@@ -3,6 +3,9 @@
 
 use crate::AppState;
 use crate::db::{self, DeviceAuthStatus};
+use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::services::oidc::amr::{ACR_AAL3, AuthMethod};
+use crate::services::oidc::scope::ScopeSet;
 use aws_lc_rs::digest::{self, SHA256};
 use axum::{Json, extract::State, http::StatusCode};
 use base64::Engine;
@@ -215,7 +218,7 @@ pub async fn device_token(
             OAuthError::access_denied(),
         )),
         DeviceAuthStatus::Authorized => {
-            // Get user info and create session token
+            // Get user info and create OAuth access token
             let user_id = request.user_id.ok_or_else(|| {
                 oauth_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -235,15 +238,24 @@ pub async fn device_token(
                 )
             })?;
 
-            // Create session using the shared service function
-            let session_result = crate::services::auth::create_login_session(
+            // Use base_url as client_id (device flow does not carry a registered client_id)
+            let client_id = state.config().base_url.clone();
+            let now_secs = now.as_second();
+
+            let session_result = create_oauth_access_token(
                 &state,
-                crate::services::auth::CreateSessionParams {
+                CreateOAuthTokenParams {
                     user_id: &user_id,
                     email: &user_email,
                     authenticator_id: Some(&authenticator_id),
-                    purpose: crate::db::SessionPurpose::Fido2Session,
-                    scope: None,
+                    client_id: &client_id,
+                    scope: Some(ScopeSet::all()),
+                    dpop_jkt: None,
+                    act: None,
+                    audience: None,
+                    auth_time: Some(now_secs),
+                    amr: Some(AuthMethod::all_fido2().to_vec()),
+                    acr: Some(ACR_AAL3.to_string()),
                 },
             )
             .await

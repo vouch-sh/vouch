@@ -13,7 +13,7 @@ KAMAL ?= kamal
 IMAGE_NAME ?= vouch-sh/vouch
 IMAGE_TAG ?= latest
 
-.PHONY: all build test test-integration run run-agent clean help docker-build docker-run deploy deploy-logs css-dev css-build
+.PHONY: all build test test-integration run run-agent clean help docker-build docker-run deploy deploy-logs css-dev css-build docs-build docs-serve
 
 all: build
 
@@ -78,6 +78,14 @@ deploy: ## Deploy to production
 
 deploy-logs: ## View production logs
 	$(KAMAL) app logs
+
+##@ Documentation
+
+docs-build: ## Build documentation
+	cd docs && mdbook build
+
+docs-serve: ## Serve documentation locally
+	cd docs && mdbook serve --open
 
 ##@ Cleanup
 

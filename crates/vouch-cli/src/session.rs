@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Session utilities for credential commands.
 
+use crate::client::VouchClient;
+use crate::config::Config;
 use anyhow::{Context, Result};
 use secrecy::SecretString;
 #[cfg(unix)]
 use vouch_agent::{AgentClient, AgentError};
-use vouch_common::{SessionCookie, write_cookie};
-
-use crate::client::VouchClient;
-use crate::config::Config;
 
 /// A resolved session: server URL and authentication token.
 pub struct ResolvedSession {
@@ -129,32 +127,12 @@ pub async fn store_session_in_agent(
     }
 }
 
-/// Write the session cookie file for CLI tools.
-pub fn write_session_cookie_file(
-    server: &str,
-    token: &str,
-    expires_at: jiff::Timestamp,
-) -> Result<()> {
-    let url = url::Url::parse(server).context("failed to parse server URL")?;
-    let domain = url
-        .host_str()
-        .context("server URL has no host")?
-        .to_string();
-
-    let cookie = SessionCookie::new(&domain, token, expires_at.as_second());
-    write_cookie(&cookie)?;
-
-    tracing::debug!("Cookie written to ~/.vouch/cookie.txt");
-    Ok(())
-}
-
 /// Store session credentials and finalize the post-authentication ceremony.
 ///
 /// This is the shared logic between `login` and `enroll` commands. It:
 /// 1. Saves the server URL and token to the config file
 /// 2. Stores the session in the agent (if running, Unix only)
-/// 3. Writes the session cookie file
-/// 4. Auto-provisions an SSH certificate
+/// 3. Auto-provisions an SSH certificate
 ///
 /// Returns whether the agent stored the session successfully.
 pub async fn store_and_finalize(
@@ -162,7 +140,7 @@ pub async fn store_and_finalize(
     token: &str,
     email: &str,
     expires_at_str: &str,
-    expires_at_ts: Option<jiff::Timestamp>,
+    _expires_at_ts: Option<jiff::Timestamp>,
 ) -> Result<bool> {
     // 1. Config save — fast local I/O, do first
     let mut config = Config::load()?;
@@ -170,36 +148,19 @@ pub async fn store_and_finalize(
     config.set_token(token);
     config.save()?;
 
-    // 2. Parse timestamp (use provided or parse from string)
-    let ts = match expires_at_ts {
-        Some(ts) => Some(ts),
-        None => expires_at_str.parse::<jiff::Timestamp>().ok(),
+    // 2. Store session in agent (if running)
+    let agent_stored = {
+        #[cfg(unix)]
+        {
+            store_session_in_agent(token, email, expires_at_str, server).await
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     };
 
-    // 3. Agent IPC and cookie write are independent — run concurrently
-    let (agent_stored, _) = tokio::join!(
-        async {
-            #[cfg(unix)]
-            {
-                store_session_in_agent(token, email, expires_at_str, server).await
-            }
-            #[cfg(not(unix))]
-            {
-                false
-            }
-        },
-        async {
-            if let Some(expires_at) = ts {
-                if let Err(e) = write_session_cookie_file(server, token, expires_at) {
-                    tracing::debug!("Failed to write cookie file: {e}");
-                }
-            } else {
-                tracing::debug!("Failed to parse expiration time: {expires_at_str}");
-            }
-        },
-    );
-
-    // 4. Auto-provision SSH certificate
+    // 3. Auto-provision SSH certificate
     crate::commands::credential::ssh::auto_provision(server, expires_at_str).await;
 
     Ok(agent_stored)
@@ -229,39 +190,4 @@ pub async fn get_user_email(server: &str) -> Option<String> {
     }
 
     None
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_write_session_cookie_file_invalid_url() {
-        let result = write_session_cookie_file("not-a-url", "token", jiff::Timestamp::UNIX_EPOCH);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_write_session_cookie_file_url_without_host() {
-        let result =
-            write_session_cookie_file("file:///etc/passwd", "token", jiff::Timestamp::UNIX_EPOCH);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_write_session_cookie_file_valid_url() {
-        // This will attempt to write to ~/.vouch/cookie.txt
-        // We just verify it doesn't error on URL parsing
-        let ts = jiff::Timestamp::now();
-        let result = write_session_cookie_file("https://vouch.example.com", "test-token", ts);
-        // This may succeed or fail depending on whether ~/.vouch/ exists,
-        // but it should not fail on URL parsing
-        if let Err(e) = &result {
-            let msg = format!("{e}");
-            // Should not fail on URL parsing
-            assert!(!msg.contains("failed to parse server URL"));
-            assert!(!msg.contains("server URL has no host"));
-        }
-    }
 }

@@ -24,6 +24,7 @@
 mod authorize;
 pub(crate) mod client_auth;
 mod discovery;
+mod fido2_challenge;
 mod introspect;
 mod par;
 mod register;
@@ -33,6 +34,7 @@ mod userinfo;
 // Re-export handler functions
 pub use authorize::authorize;
 pub use discovery::{discovery, jwks};
+pub use fido2_challenge::fido2_challenge;
 pub use introspect::{introspect, revoke};
 pub use par::par;
 pub use register::register;

@@ -157,15 +157,27 @@ Vouch is designed for high-security environments:
 - **Short-lived credentials** — Minimize blast radius of compromise
 - **Audit trail** — Every credential issuance logged with attestation
 
-See [SECURITY.md](docs/SECURITY.md) for our security model and responsible disclosure policy. For the threat model, see [THREAT_MODEL.md](docs/THREAT_MODEL.md).
+See the [Security Model](docs/src/security/model.md) for our security philosophy and the [Threat Model](docs/src/threat-model/overview.md) for STRIDE analysis.
 
 ## Documentation
 
-- [Architecture](docs/ARCHITECTURE.md) — System design and data flows
-- [Security Model](docs/SECURITY.md) — Security controls and incident response
-- [Threat Model](docs/THREAT_MODEL.md) — STRIDE analysis and mitigations
-- [Air-Gap Deployment](docs/AIRGAP.md) — On-premises installation guide
-- [Agent Delegation](docs/DELEGATION.md) — AI assistant credential management
+Full documentation is available as an [mdBook](https://rust-lang.github.io/mdBook/):
+
+```bash
+# Build and serve locally
+make docs-serve
+```
+
+Key sections:
+
+- [Getting Started](docs/src/getting-started/quick-start.md) — Installation and first enrollment
+- [Server Deployment](docs/src/deployment/overview.md) — Deploy and configure the Vouch server
+- [Integrations](docs/src/integrations/ssh.md) — SSH, AWS, EKS, GitHub, Docker, and more
+- [Architecture](docs/src/architecture/overview.md) — System design and data flows
+- [Security Model](docs/src/security/model.md) — Security controls and incident response
+- [Threat Model](docs/src/threat-model/overview.md) — STRIDE analysis and mitigations
+- [Air-Gapped Deployment](docs/src/advanced/airgap.md) — On-premises installation guide
+- [Agent Delegation](docs/src/advanced/delegation.md) — AI assistant credential management
 
 ## Contributing
 

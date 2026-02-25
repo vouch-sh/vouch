@@ -12,11 +12,9 @@ use crate::db::{
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
-use axum_extra::TypedHeader;
 use axum_extra::extract::cookie::CookieJar;
-use headers::authorization::{Authorization, Bearer};
 use std::sync::Arc;
 use vouch_common::ApiError;
 
@@ -25,20 +23,20 @@ use super::types::{
     ListApplicationsResponse, RotateSecretResponse, UpdateApplicationRequest,
 };
 use super::{generate_client_secret, validate_redirect_uris};
-use crate::handlers::{extract_session, hash_token, json_error};
+use crate::handlers::session::extract_resource_token;
+use crate::handlers::{hash_token, json_error};
 use crate::services::oidc::ResourceUri;
 
 /// List user's applications (API).
 /// GET /api/v1/applications
 pub async fn list_applications_api(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<ListApplicationsResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header, &jar).await?;
-    let claims = session.claims;
+    let token = extract_resource_token(&state, &headers, &jar).await?;
 
-    let applications = db::get_oauth_clients_for_user(&state.db, &claims.sub)
+    let applications = db::get_oauth_clients_for_user(&state.db, &token.sub)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list applications: {e}");
@@ -59,12 +57,11 @@ pub async fn list_applications_api(
 /// POST /api/v1/applications
 pub async fn create_application_api(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(req): Json<CreateApplicationRequest>,
 ) -> Result<Json<CreateApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header, &jar).await?;
-    let claims = session.claims;
+    let token = extract_resource_token(&state, &headers, &jar).await?;
 
     // Validate inputs
     let name = req.name.trim();
@@ -92,7 +89,7 @@ pub async fn create_application_api(
         .unwrap_or_default();
 
     // Get user to check org membership
-    let user = db::get_user_by_id(&state.db, &claims.sub)
+    let user = db::get_user_by_id(&state.db, &token.sub)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get user: {e}");
@@ -229,7 +226,7 @@ pub async fn create_application_api(
     let (client, client_id) = db::create_oauth_client(
         &state.db,
         &CreateOAuthClientParams {
-            user_id: &claims.sub,
+            user_id: Some(&token.sub),
             name,
             description: req.description.as_deref(),
             application_type: app_type,
@@ -365,12 +362,11 @@ pub async fn create_application_api(
 /// GET /api/v1/applications/:id
 pub async fn get_application_api(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header, &jar).await?;
-    let claims = session.claims;
+    let token = extract_resource_token(&state, &headers, &jar).await?;
 
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
         .await
@@ -385,7 +381,7 @@ pub async fn get_application_api(
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
 
     // Verify ownership
-    if client.user_id != claims.sub {
+    if client.user_id != token.sub {
         return Err(json_error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -400,13 +396,12 @@ pub async fn get_application_api(
 /// PATCH /api/v1/applications/:id
 pub async fn update_application_api(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Path(app_id): Path<String>,
     Json(req): Json<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header, &jar).await?;
-    let claims = session.claims;
+    let token = extract_resource_token(&state, &headers, &jar).await?;
 
     // Get existing application
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
@@ -422,7 +417,7 @@ pub async fn update_application_api(
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
 
     // Verify ownership
-    if client.user_id != claims.sub {
+    if client.user_id != token.sub {
         return Err(json_error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -439,7 +434,7 @@ pub async fn update_application_api(
     // Get user to check org membership if changing to organization scope
     let user = if access_scope == Some(AccessScope::Organization) {
         Some(
-            db::get_user_by_id(&state.db, &claims.sub)
+            db::get_user_by_id(&state.db, &token.sub)
                 .await
                 .map_err(|e| {
                     tracing::error!("Failed to get user for scope validation: {e}");
@@ -683,12 +678,11 @@ pub async fn update_application_api(
 /// DELETE /api/v1/applications/:id
 pub async fn delete_application_api(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header, &jar).await?;
-    let claims = session.claims;
+    let token = extract_resource_token(&state, &headers, &jar).await?;
 
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
@@ -703,7 +697,7 @@ pub async fn delete_application_api(
         })?
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
 
-    if client.user_id != claims.sub {
+    if client.user_id != token.sub {
         return Err(json_error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -731,12 +725,11 @@ pub async fn delete_application_api(
 /// POST /api/v1/applications/:id/rotate
 pub async fn rotate_secret_api(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Result<Json<RotateSecretResponse>, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header, &jar).await?;
-    let claims = session.claims;
+    let token = extract_resource_token(&state, &headers, &jar).await?;
 
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
@@ -751,7 +744,7 @@ pub async fn rotate_secret_api(
         })?
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
 
-    if client.user_id != claims.sub {
+    if client.user_id != token.sub {
         return Err(json_error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -815,12 +808,11 @@ pub async fn rotate_secret_api(
 /// POST /api/v1/applications/:id/revoke
 pub async fn revoke_tokens_api(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let session = extract_session(&state, auth_header, &jar).await?;
-    let claims = session.claims;
+    let token = extract_resource_token(&state, &headers, &jar).await?;
 
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
@@ -835,7 +827,7 @@ pub async fn revoke_tokens_api(
         })?
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
 
-    if client.user_id != claims.sub {
+    if client.user_id != token.sub {
         return Err(json_error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -860,7 +852,7 @@ pub async fn revoke_tokens_api(
         &state.db,
         &app_id,
         OAuthEventType::TokenRevoked,
-        Some(&claims.sub),
+        Some(&token.sub),
         None,
         None,
         Some("All tokens revoked"),

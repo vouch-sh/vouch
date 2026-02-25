@@ -70,49 +70,15 @@ async fn test_auth_code_flow_token_works_with_userinfo() {
 }
 
 #[tokio::test]
-async fn test_oauth_access_token_rejected_at_management_endpoints() {
-    // OAuth access tokens (ES256, RFC 9068) are rejected at management endpoints
-    // because the management endpoint only decodes HS256 FIDO2 session tokens.
-    // The ES256 token fails HS256 decoding, returning 401 (unauthorized).
+async fn test_oauth_token_works_at_management_endpoints() {
+    // Verify OAuth access tokens work at management endpoints
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.db, "oauth-mgmt@example.com").await;
     let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
-
-    let (access_token, _id_token) =
-        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
-
-    // Try calling key listing endpoint with OAuth access token
-    let (status, body) = http_get(
-        &app,
-        "/v1/keys",
-        &[("Authorization", &format!("Bearer {}", access_token))],
-    )
-    .await;
-
-    // ES256 access tokens cannot be decoded by the HS256-only management
-    // endpoint, so they fail at the JWT decode step with 401.
-    assert_eq!(
-        status,
-        StatusCode::UNAUTHORIZED,
-        "OAuth access token should be rejected at management endpoints: {}",
-        body
-    );
-    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(error["code"], "unauthorized");
-}
-
-#[tokio::test]
-async fn test_fido2_session_still_works_at_management_endpoints() {
-    // Verify FIDO2 session tokens still work at management endpoints
-    let (app, state) = test_app().await;
-
-    let user = create_test_user(&state.db, "fido2-mgmt@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
-    // Call key listing endpoint with FIDO2 session token (should succeed)
+    // Call key listing endpoint with OAuth access token (should succeed)
     let (status, _body) = http_get(
         &app,
         "/v1/keys",
@@ -123,7 +89,7 @@ async fn test_fido2_session_still_works_at_management_endpoints() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "FIDO2 session should work at management endpoints"
+        "OAuth access token should work at management endpoints"
     );
 }
 
@@ -232,13 +198,208 @@ async fn test_id_token_scope_aware() {
 }
 
 #[tokio::test]
-async fn test_backward_compat_token_without_scope() {
-    // JWTs without scope field should deserialize as None
-    let claims_json = r#"{"iss":"https://vouch.example.com","aud":"https://vouch.example.com","sub":"user-id","email":"test@example.com","iat":1700000000,"exp":1700028800,"purpose":"fido2_session"}"#;
-    let claims: crate::services::auth::SessionClaims =
+async fn test_access_token_optional_scope_field() {
+    // AccessTokenClaims with missing scope field should deserialize as None
+    use crate::services::auth::AccessTokenClaims;
+    let claims_json = r#"{"iss":"https://vouch.example.com","aud":"client-id","sub":"user-id","exp":9999999999,"iat":1700000000,"jti":"jti-1","client_id":"client-id","hardware_verified":true}"#;
+    let claims: AccessTokenClaims =
         serde_json::from_str(claims_json).expect("Should deserialize without scope");
     assert!(
         claims.scope.is_none(),
         "Missing scope field should deserialize as None"
     );
+}
+
+// ========================================================================
+// Step 9 Migration — Unified Token Type Tests
+// ========================================================================
+
+#[tokio::test]
+async fn test_create_test_session_for_client_produces_client_bound_token() {
+    // Verify the new create_test_session_for_client helper creates a token
+    // whose client_id claim matches the given client_id, not the server base_url.
+    // This is critical for introspection cross-client tests.
+    use crate::services::auth::{DecodedToken, decode_token};
+
+    let (_app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "client-bound@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Use the helper — token's client_id must match client.client_id
+    let token =
+        create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client.client_id)
+            .await;
+
+    let config = state.config();
+    let decoded = decode_token(
+        &token,
+        config.jwt_secret_bytes(),
+        &state.oidc_key,
+        &config.base_url,
+    )
+    .expect("Token must decode successfully");
+
+    let DecodedToken::AccessToken(claims) = decoded;
+    assert_eq!(
+        claims.client_id, client.client_id,
+        "Token client_id must match the supplied client_id, not the server base_url"
+    );
+    assert_eq!(claims.sub, user.id, "Token sub must match the user_id");
+}
+
+#[tokio::test]
+async fn test_unified_token_hardware_verified_claim_always_set() {
+    // All unified ES256 access tokens produced by create_oauth_access_token
+    // must carry hardware_verified=true (FIDO2 attestation guarantee).
+    use crate::services::auth::{DecodedToken, decode_token};
+
+    let (_app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "hw-verified@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let config = state.config();
+    let decoded = decode_token(
+        &token,
+        config.jwt_secret_bytes(),
+        &state.oidc_key,
+        &config.base_url,
+    )
+    .expect("Token must decode successfully");
+
+    let DecodedToken::AccessToken(claims) = decoded;
+    assert!(
+        claims.hardware_verified,
+        "All unified access tokens must carry hardware_verified=true"
+    );
+}
+
+#[tokio::test]
+async fn test_unified_token_typ_header_is_at_jwt() {
+    // RFC 9068 Section 2.1 + Step 9 migration: the single surviving token type
+    // is ES256 with typ "at+jwt". Verify this is what create_test_session produces.
+    use crate::crypto::jwt::JwtType;
+
+    let (_app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "typ-header@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    // Peek at the header without full validation
+    let header = jsonwebtoken::decode_header(&token).expect("Valid JWT header");
+    assert_eq!(
+        header.typ.as_deref(),
+        Some(JwtType::AccessToken.as_header_str()),
+        "Unified token must have typ=at+jwt"
+    );
+    assert_eq!(
+        header.alg,
+        jsonwebtoken::Algorithm::ES256,
+        "Unified token must be signed with ES256"
+    );
+}
+
+#[tokio::test]
+async fn test_legacy_register_routes_removed() {
+    // Step 9: /v1/auth/register/* backward-compat routes were removed.
+    // Only /v1/keys/register/* remains. Verify the legacy paths return 404
+    // so clients cannot accidentally rely on removed endpoints.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "legacy-route@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    let auth = format!("Bearer {token}");
+
+    // Legacy path: /v1/auth/register/start — must not exist
+    let (status, _) = http_request(
+        &app,
+        "POST",
+        "/v1/auth/register/start",
+        Some(r#"{"name":"key"}"#.to_string()),
+        &[
+            ("Authorization", &auth),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "/v1/auth/register/start must return 404 after removal"
+    );
+
+    // Legacy path: /v1/auth/register/complete — must not exist
+    let (status, _) = http_request(
+        &app,
+        "POST",
+        "/v1/auth/register/complete",
+        Some(r#"{"state":"x"}"#.to_string()),
+        &[
+            ("Authorization", &auth),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "/v1/auth/register/complete must return 404 after removal"
+    );
+}
+
+#[tokio::test]
+async fn test_current_register_routes_still_exist() {
+    // Regression guard: /v1/keys/register/* routes must still exist and
+    // require authentication (not 404).
+    let (app, _state) = test_app().await;
+
+    // Without auth — should be 401, not 404
+    let (status, _) = http_request(
+        &app,
+        "POST",
+        "/v1/keys/register/start",
+        Some(r#"{"name":"key"}"#.to_string()),
+        &[("Content-Type", "application/json")],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "/v1/keys/register/start must exist and require auth (not 404)"
+    );
+}
+
+#[tokio::test]
+async fn test_decoded_token_enum_single_variant_destructuring() {
+    // DecodedToken is now a single-variant enum. Verify that exhaustive
+    // destructuring (used in introspection.rs etc.) compiles and works correctly.
+    // This is a compilation + runtime correctness check.
+    use crate::services::auth::{DecodedToken, decode_token};
+
+    let (_app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "enum-destr@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let config = state.config();
+    let decoded = decode_token(
+        &token,
+        config.jwt_secret_bytes(),
+        &state.oidc_key,
+        &config.base_url,
+    )
+    .expect("Token must decode");
+
+    // Exhaustive destructuring of the single-variant enum — if a second variant
+    // were added this would produce a compiler warning, keeping tests honest.
+    let DecodedToken::AccessToken(claims) = decoded;
+    assert!(!claims.sub.is_empty(), "sub must be populated");
+    assert!(!claims.iss.is_empty(), "iss must be populated");
+    assert!(!claims.jti.is_empty(), "jti must be populated");
 }

@@ -138,6 +138,7 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "urn:ietf:params:oauth:grant-type:device_code".to_string(),
             "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
             "urn:ietf:params:oauth:grant-type:jwt-bearer".to_string(),
+            "urn:ietf:params:oauth:grant-type:fido2-assertion".to_string(),
         ],
         subject_types_supported: vec!["public".to_string()],
         id_token_signing_alg_values_supported: vec!["ES256".to_string()],

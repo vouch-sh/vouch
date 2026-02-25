@@ -3,13 +3,12 @@
 //!
 //! Implements:
 //! - WebAuthn Level 2 Section 7.2 — Verifying an Authentication Assertion
-//! - RFC 7519 — JSON Web Token (JWT) for session tokens
 //!
 //! This module provides business logic for authenticating users via WebAuthn
 //! discoverable credentials. It handles:
 //! - Authenticator lookup and ownership verification
 //! - WebAuthn assertion verification
-//! - Session token creation and storage
+//! - OAuth access token creation and storage
 //!
 //! The handlers remain thin, focusing on HTTP concerns.
 
@@ -24,7 +23,6 @@ use crate::services::oidc::scope::ScopeSet;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
-use jsonwebtoken::{EncodingKey, encode};
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -271,109 +269,10 @@ pub struct CreateOAuthTokenParams<'a> {
     pub acr: Option<String>,
 }
 
-/// Session claims for JWT tokens (RFC 7519 Section 4.1).
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
-pub struct SessionClaims {
-    /// RFC 8725 §3.8 / RFC 7519 §4.1.1: Issuer (base_url).
-    pub iss: String,
-    /// RFC 8725 §3.9 / RFC 7519 §4.1.3: Audience (base_url for sessions).
-    pub aud: String,
-    /// RFC 7519 Section 4.1.2: Subject — the user ID.
-    pub sub: String,
-    /// User email (custom claim).
-    pub email: String,
-    /// Authenticator ID used for this session (custom claim).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authenticator_id: Option<String>,
-    /// RFC 7519 Section 4.1.6: Issued At — Unix timestamp.
-    pub iat: i64,
-    /// RFC 7519 Section 4.1.4: Expiration Time — Unix timestamp.
-    pub exp: i64,
-    /// Session purpose — distinguishes FIDO2 sessions from OAuth access tokens.
-    /// Defaults to `Fido2Session` for backward compatibility with existing JWTs.
-    #[serde(default)]
-    pub purpose: SessionPurpose,
-    /// OAuth 2.0 granted scope. `None` for FIDO2 sessions and legacy tokens.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub scope: Option<ScopeSet>,
-}
-
-/// Parameters for creating a login session.
-pub struct CreateSessionParams<'a> {
-    /// User ID.
-    pub user_id: &'a str,
-    /// User email.
-    pub email: &'a str,
-    /// Authenticator ID (optional for OIDC-only users).
-    pub authenticator_id: Option<&'a str>,
-    /// Session purpose (FIDO2 login vs OAuth access token).
-    pub purpose: SessionPurpose,
-    /// OAuth 2.0 granted scope. `None` for FIDO2 sessions.
-    pub scope: Option<ScopeSet>,
-}
-
-/// Result of creating a login session.
+/// Result of creating a session token.
 pub struct CreateSessionResult {
     /// The JWT token.
     pub token: SecretString,
-    /// When the session expires (ISO 8601 string).
-    pub expires_at: String,
-}
-
-/// Create a new login session and store it in the database.
-///
-/// # Errors
-///
-/// Returns `ServiceError::Internal` if token encoding or database operations fail.
-pub async fn create_login_session(
-    state: &AppState,
-    params: CreateSessionParams<'_>,
-) -> ServiceResult<CreateSessionResult> {
-    let now = Timestamp::now();
-    let session_hours = i64::try_from(state.config().session_hours)
-        .map_err(|_| ServiceError::Internal("Invalid session hours".to_string()))?;
-    let duration = Span::new().hours(session_hours);
-    let expires = now
-        .checked_add(duration)
-        .map_err(|_| ServiceError::Internal("Time overflow".to_string()))?;
-
-    let base_url = state.config().base_url.clone();
-    let claims = SessionClaims {
-        iss: base_url.clone(),
-        aud: base_url,
-        sub: params.user_id.to_string(),
-        email: params.email.to_string(),
-        authenticator_id: params.authenticator_id.map(String::from),
-        iat: now.as_second(),
-        exp: expires.as_second(),
-        purpose: params.purpose,
-        scope: params.scope,
-    };
-
-    let token = encode(
-        &crate::crypto::jwt::JwtType::Session.to_header(),
-        &claims,
-        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
-    )
-    .map_err(|e| ServiceError::Internal(format!("Token encoding failed: {e}")))?;
-
-    // Store session in database
-    let token_hash = hash_token(&token);
-    db::create_session(
-        &state.db,
-        params.user_id,
-        &token_hash,
-        params.authenticator_id,
-        &expires.to_string(),
-        params.purpose,
-    )
-    .await
-    .map_err(|e| ServiceError::Internal(format!("Failed to store session: {e}")))?;
-
-    Ok(CreateSessionResult {
-        token: SecretString::from(token),
-        expires_at: expires.to_string(),
-    })
 }
 
 /// Create an OAuth 2.0 access token per RFC 9068.
@@ -458,15 +357,11 @@ pub async fn create_oauth_access_token(
 
     Ok(CreateSessionResult {
         token: SecretString::from(token),
-        expires_at: expires.to_string(),
     })
 }
 
-/// Decoded JWT token — either a FIDO2 session (HS256) or an
-/// RFC 9068 OAuth access token (ES256).
+/// Decoded JWT token — an RFC 9068 OAuth access token (ES256, `at+jwt`).
 pub enum DecodedToken {
-    /// Internal FIDO2 session token (HS256, RFC 7519).
-    Session(SessionClaims),
     /// OAuth 2.0 access token (ES256, RFC 9068).
     AccessToken(AccessTokenClaims),
 }
@@ -476,7 +371,6 @@ impl DecodedToken {
     #[must_use]
     pub fn sub(&self) -> &str {
         match self {
-            Self::Session(c) => &c.sub,
             Self::AccessToken(c) => &c.sub,
         }
     }
@@ -485,7 +379,6 @@ impl DecodedToken {
     #[must_use]
     pub fn email(&self) -> Option<&str> {
         match self {
-            Self::Session(c) => Some(&c.email),
             Self::AccessToken(c) => c.email.as_deref(),
         }
     }
@@ -494,16 +387,14 @@ impl DecodedToken {
     #[must_use]
     pub fn scope(&self) -> Option<&ScopeSet> {
         match self {
-            Self::Session(c) => c.scope.as_ref(),
             Self::AccessToken(c) => c.scope.as_ref(),
         }
     }
 
-    /// DPoP confirmation claim (None for FIDO2 sessions or non-DPoP tokens).
+    /// DPoP confirmation claim (None for non-DPoP tokens).
     #[must_use]
     pub fn cnf(&self) -> Option<&CnfClaim> {
         match self {
-            Self::Session(_) => None,
             Self::AccessToken(c) => c.cnf.as_ref(),
         }
     }
@@ -512,7 +403,6 @@ impl DecodedToken {
     #[must_use]
     pub fn exp(&self) -> Option<i64> {
         match self {
-            Self::Session(c) => Some(c.exp),
             Self::AccessToken(c) => Some(c.exp),
         }
     }
@@ -522,13 +412,12 @@ impl DecodedToken {
     #[must_use]
     pub fn act(&self) -> Option<&ActorClaim> {
         match self {
-            Self::Session(_) => None,
             Self::AccessToken(c) => c.act.as_ref(),
         }
     }
 }
 
-/// Decode a JWT, routing to the correct claims type based on algorithm.
+/// Decode a JWT as an RFC 9068 ES256 access token.
 ///
 /// This is a convenience wrapper around [`crate::crypto::jwt::decode_token`] that
 /// constructs a [`TokenValidationContext`] from individual parameters.
@@ -560,7 +449,6 @@ mod tests {
     use super::*;
     use crate::test_utils::{
         TEST_ISSUER, TEST_JWT_SECRET, make_test_access_token, make_test_oidc_key,
-        make_test_session_token,
     };
 
     #[test]
@@ -576,23 +464,6 @@ mod tests {
                 assert_eq!(c.client_id, "client-abc");
                 assert_eq!(c.email.as_deref(), Some("test@example.com"));
             }
-            DecodedToken::Session(_) => panic!("Expected AccessToken, got Session"),
-        }
-    }
-
-    #[test]
-    fn test_decode_token_routes_hs256_to_session() {
-        let key = make_test_oidc_key();
-        let token = make_test_session_token();
-
-        let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER);
-        assert!(decoded.is_some());
-        match decoded.unwrap() {
-            DecodedToken::Session(c) => {
-                assert_eq!(c.sub, "user-456");
-                assert_eq!(c.email, "session@example.com");
-            }
-            DecodedToken::AccessToken(_) => panic!("Expected Session, got AccessToken"),
         }
     }
 
@@ -637,16 +508,6 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_token_rejects_wrong_hs256_secret() {
-        let key = make_test_oidc_key();
-        let token = make_test_session_token();
-
-        // Decode with wrong secret should fail
-        let decoded = decode_token(&token, b"wrong-secret", &key, TEST_ISSUER);
-        assert!(decoded.is_none());
-    }
-
-    #[test]
     fn test_decode_token_rejects_expired_access_token() {
         let key = make_test_oidc_key();
 
@@ -683,19 +544,6 @@ mod tests {
         assert_eq!(decoded.sub(), "user-123");
         assert_eq!(decoded.email(), Some("test@example.com"));
         assert!(decoded.scope().is_some());
-        assert!(decoded.cnf().is_none());
-        assert!(decoded.act().is_none());
-    }
-
-    #[test]
-    fn test_decoded_token_session_accessors() {
-        let key = make_test_oidc_key();
-        let token = make_test_session_token();
-        let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER).unwrap();
-
-        assert_eq!(decoded.sub(), "user-456");
-        assert_eq!(decoded.email(), Some("session@example.com"));
-        assert!(decoded.scope().is_none());
         assert!(decoded.cnf().is_none());
         assert!(decoded.act().is_none());
     }
