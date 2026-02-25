@@ -205,15 +205,7 @@ pub async fn device_token(
         ));
     }
 
-    // Check status
-    let status = request.status().ok_or_else(|| {
-        oauth_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            OAuthError::invalid_grant(),
-        )
-    })?;
-
-    match status {
+    match request.status {
         DeviceAuthStatus::Pending => Err(oauth_error(
             StatusCode::BAD_REQUEST,
             OAuthError::authorization_pending(),

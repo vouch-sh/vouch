@@ -749,7 +749,7 @@ pub fn check_client_access(client: &OAuthClient, user: &User) -> ServiceResult<(
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
-    use crate::db::OAuthClientType;
+    use crate::db::{FapiProfile, OAuthClientType, TokenEndpointAuthMethod};
     use jiff_sqlx::ToSqlx;
 
     // Helper to create a test OAuthClient
@@ -774,10 +774,10 @@ mod tests {
             jwks_uri: None,
             jwks_uri_cached_at: None,
             jwks_uri_cache: None,
-            token_endpoint_auth_method: "client_secret_basic".to_string(),
+            token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
             request_object_signing_alg: None,
             require_signed_request_object: None,
-            fapi_profile: "none".to_string(),
+            fapi_profile: FapiProfile::None,
             dpop_bound_access_tokens: false,
             grant_types: None,
             response_types: None,

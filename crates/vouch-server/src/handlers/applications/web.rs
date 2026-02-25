@@ -7,7 +7,7 @@
 use crate::AppState;
 use crate::db::{
     self, AccessScope, CreateOAuthClientParams, FapiProfile, OAuthClientType, RegistrationSource,
-    UpdateOAuthClientParams,
+    TokenEndpointAuthMethod, UpdateOAuthClientParams,
 };
 use axum::{
     Form,
@@ -313,7 +313,7 @@ pub async fn create_application_form(
                 access_scope: Some(access_scope),
                 org_id,
                 resource_uris: &resource_uris,
-                token_endpoint_auth_method: "private_key_jwt",
+                token_endpoint_auth_method: TokenEndpointAuthMethod::PrivateKeyJwt,
                 jwks: jwks_trimmed,
                 jwks_uri: jwks_uri_trimmed,
                 fapi_profile: FapiProfile::Fapi2Security,
@@ -656,12 +656,12 @@ pub async fn update_application_form(
     };
 
     let token_endpoint_auth_method = if is_fapi {
-        "private_key_jwt"
+        TokenEndpointAuthMethod::PrivateKeyJwt
     } else if !is_fapi && client.is_fapi() {
         // Transitioning from FAPI to Standard: reset to default
-        "client_secret_basic"
+        TokenEndpointAuthMethod::ClientSecretBasic
     } else {
-        client.token_endpoint_auth_method.as_str()
+        client.token_endpoint_auth_method
     };
 
     // Resolve final JWKS values: use form values if provided, otherwise keep existing

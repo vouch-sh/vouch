@@ -6,7 +6,7 @@
 //!
 //! Reference: <https://openid.net/specs/fapi-security-profile-2_0-final.html>
 
-use crate::db::OAuthClient;
+use crate::db::{OAuthClient, TokenEndpointAuthMethod};
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 
 /// FAPI 2.0 authorization code lifetime in seconds (shorter than standard).
@@ -65,7 +65,7 @@ pub fn validate_fapi_client_registration(client: &OAuthClient) -> ServiceResult<
     }
 
     // FAPI 2.0 Section 5.2.2: Must use private_key_jwt
-    if client.token_endpoint_auth_method != "private_key_jwt" {
+    if client.token_endpoint_auth_method != TokenEndpointAuthMethod::PrivateKeyJwt {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             "FAPI 2.0 requires private_key_jwt authentication",
@@ -199,19 +199,19 @@ pub fn validate_fapi_algorithm(client: &OAuthClient, algorithm: &str) -> Service
 /// `private_key_jwt`.
 pub fn validate_fapi_client_auth_method(
     client: &OAuthClient,
-    auth_method: &str,
+    auth_method: TokenEndpointAuthMethod,
 ) -> ServiceResult<()> {
     if !client.is_fapi() {
         return Ok(());
     }
 
     match auth_method {
-        "private_key_jwt" => Ok(()),
+        TokenEndpointAuthMethod::PrivateKeyJwt => Ok(()),
         _ => Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             format!(
                 "FAPI 2.0 requires private_key_jwt authentication, got '{}'",
-                auth_method
+                auth_method.as_str()
             ),
         )),
     }
@@ -272,10 +272,10 @@ mod tests {
             jwks_uri: None,
             jwks_uri_cached_at: None,
             jwks_uri_cache: None,
-            token_endpoint_auth_method: "private_key_jwt".to_string(),
+            token_endpoint_auth_method: TokenEndpointAuthMethod::PrivateKeyJwt,
             request_object_signing_alg: None,
             require_signed_request_object: None,
-            fapi_profile: FapiProfile::Fapi2Security.as_db_str().to_string(),
+            fapi_profile: FapiProfile::Fapi2Security,
             dpop_bound_access_tokens: true,
             grant_types: None,
             response_types: None,
@@ -309,10 +309,10 @@ mod tests {
             jwks_uri: None,
             jwks_uri_cached_at: None,
             jwks_uri_cache: None,
-            token_endpoint_auth_method: "client_secret_basic".to_string(),
+            token_endpoint_auth_method: TokenEndpointAuthMethod::ClientSecretBasic,
             request_object_signing_alg: None,
             require_signed_request_object: None,
-            fapi_profile: FapiProfile::None.as_db_str().to_string(),
+            fapi_profile: FapiProfile::None,
             dpop_bound_access_tokens: false,
             grant_types: None,
             response_types: None,
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn test_validate_fapi_client_registration_rejects_client_secret() {
         let mut client = fapi_client();
-        client.token_endpoint_auth_method = "client_secret_basic".to_string();
+        client.token_endpoint_auth_method = TokenEndpointAuthMethod::ClientSecretBasic;
         assert!(validate_fapi_client_registration(&client).is_err());
     }
 
@@ -473,32 +473,44 @@ mod tests {
     #[test]
     fn test_validate_fapi_client_auth_method_accepts_private_key_jwt() {
         let client = fapi_client();
-        assert!(validate_fapi_client_auth_method(&client, "private_key_jwt").is_ok());
+        assert!(
+            validate_fapi_client_auth_method(&client, TokenEndpointAuthMethod::PrivateKeyJwt)
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_validate_fapi_client_auth_method_rejects_client_secret_basic() {
         let client = fapi_client();
-        assert!(validate_fapi_client_auth_method(&client, "client_secret_basic").is_err());
+        assert!(
+            validate_fapi_client_auth_method(&client, TokenEndpointAuthMethod::ClientSecretBasic)
+                .is_err()
+        );
     }
 
     #[test]
     fn test_validate_fapi_client_auth_method_rejects_client_secret_post() {
         let client = fapi_client();
-        assert!(validate_fapi_client_auth_method(&client, "client_secret_post").is_err());
+        assert!(
+            validate_fapi_client_auth_method(&client, TokenEndpointAuthMethod::ClientSecretPost)
+                .is_err()
+        );
     }
 
     #[test]
     fn test_validate_fapi_client_auth_method_rejects_none() {
         let client = fapi_client();
-        assert!(validate_fapi_client_auth_method(&client, "none").is_err());
+        assert!(validate_fapi_client_auth_method(&client, TokenEndpointAuthMethod::None).is_err());
     }
 
     #[test]
     fn test_validate_fapi_client_auth_method_skips_non_fapi() {
         let client = standard_client();
-        assert!(validate_fapi_client_auth_method(&client, "client_secret_basic").is_ok());
-        assert!(validate_fapi_client_auth_method(&client, "none").is_ok());
+        assert!(
+            validate_fapi_client_auth_method(&client, TokenEndpointAuthMethod::ClientSecretBasic)
+                .is_ok()
+        );
+        assert!(validate_fapi_client_auth_method(&client, TokenEndpointAuthMethod::None).is_ok());
     }
 
     // =========================================================================

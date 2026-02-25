@@ -137,7 +137,7 @@ pub async fn list_auth_events(
             id: e.id,
             user_id: e.user_id.clone(),
             user_email: user_emails.get(&e.user_id).cloned(),
-            event_type: e.event_type,
+            event_type: e.event_type.as_str().to_string(),
             authenticator_id: e.authenticator_id,
             client_ip: e.client_ip,
             user_agent: e.user_agent,

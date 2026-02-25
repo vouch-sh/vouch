@@ -57,8 +57,8 @@ impl From<OAuthClient> for ApplicationInfo {
     fn from(client: OAuthClient) -> Self {
         let redirect_uris = client.get_redirect_uris();
         let resource_uris = client.get_resource_uris();
-        let token_endpoint_auth_method = client.token_endpoint_auth_method.clone();
-        let fapi_profile = client.fapi_profile.clone();
+        let token_endpoint_auth_method = client.token_endpoint_auth_method.as_str().to_string();
+        let fapi_profile = client.fapi_profile.as_str().to_string();
         let jwks = client.jwks.clone();
         let jwks_uri = client.jwks_uri.clone();
         Self {
@@ -332,8 +332,8 @@ impl From<OAuthClient> for ApplicationResponse {
             access_scope: client.access_scope.as_str().to_string(),
             org_id: client.org_id,
             resource_uris,
-            token_endpoint_auth_method: client.token_endpoint_auth_method,
-            fapi_profile: client.fapi_profile,
+            token_endpoint_auth_method: client.token_endpoint_auth_method.as_str().to_string(),
+            fapi_profile: client.fapi_profile.as_str().to_string(),
             jwks_configured,
             jwks_uri,
         }

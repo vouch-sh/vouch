@@ -16,7 +16,9 @@ use uuid::Uuid;
 // ============================================================================
 
 /// Authentication event types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, sqlx::Type)]
+#[sqlx(type_name = "text")]
+#[sqlx(rename_all = "snake_case")]
 pub enum AuthEventType {
     #[default]
     LoginSuccess,
@@ -27,7 +29,7 @@ pub enum AuthEventType {
 }
 
 impl AuthEventType {
-    /// Convert to database string.
+    /// Return the string representation for sea-query values.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -37,19 +39,6 @@ impl AuthEventType {
             Self::Logout => "logout",
         }
     }
-
-    /// Parse from database string.
-    #[must_use]
-    #[allow(dead_code, clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "login_success" => Some(Self::LoginSuccess),
-            "login_failed" => Some(Self::LoginFailed),
-            "enrollment" => Some(Self::Enrollment),
-            "logout" => Some(Self::Logout),
-            _ => None,
-        }
-    }
 }
 
 /// Authentication event record.
@@ -57,7 +46,7 @@ impl AuthEventType {
 pub struct AuthEvent {
     pub id: String,
     pub user_id: String,
-    pub event_type: String,
+    pub event_type: AuthEventType,
     pub authenticator_id: Option<String>,
     pub client_ip: Option<String>,
     pub user_agent: Option<String>,

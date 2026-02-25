@@ -165,7 +165,7 @@ async fn test_device_auth_request_lifecycle() {
         .expect("Device auth should exist");
 
     assert_eq!(request.user_code, user_code);
-    assert_eq!(request.status, "pending");
+    assert_eq!(request.status, DeviceAuthStatus::Pending);
     assert!(request.user_id.is_none());
 
     // Get by user code
@@ -225,7 +225,7 @@ async fn test_device_auth_authorization_flow() {
         .await
         .expect("Failed to get request")
         .expect("Should exist");
-    assert_eq!(request.status, "pending");
+    assert_eq!(request.status, DeviceAuthStatus::Pending);
 
     // Authorize the request
     authorize_device_auth(&pool, &id, &user.id, &user.email, &auth_id)
@@ -237,7 +237,7 @@ async fn test_device_auth_authorization_flow() {
         .await
         .expect("Failed to get request")
         .expect("Should exist");
-    assert_eq!(request.status, "authorized");
+    assert_eq!(request.status, DeviceAuthStatus::Authorized);
     assert_eq!(request.user_id, Some(user.id.clone()));
     assert_eq!(request.user_email, Some(user.email.clone()));
     assert_eq!(request.authenticator_id, Some(auth_id));
@@ -418,10 +418,10 @@ async fn test_oauth_client_crud() {
             access_scope: None,
             org_id: None,
             resource_uris: &[],
-            token_endpoint_auth_method: client.token_endpoint_auth_method.as_str(),
+            token_endpoint_auth_method: client.token_endpoint_auth_method,
             jwks: client.jwks.as_deref(),
             jwks_uri: client.jwks_uri.as_deref(),
-            fapi_profile: client.fapi_profile(),
+            fapi_profile: client.fapi_profile,
             dpop_bound_access_tokens: client.dpop_bound_access_tokens,
         },
     )
@@ -1001,7 +1001,7 @@ async fn test_auth_event_logging() {
     .expect("Failed to get events");
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].event_type, "login_success");
+    assert_eq!(events[0].event_type, AuthEventType::LoginSuccess);
 }
 
 // ========================================================================

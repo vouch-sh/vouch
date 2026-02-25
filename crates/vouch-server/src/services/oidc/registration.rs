@@ -421,7 +421,7 @@ pub async fn register_client(
             access_scope: db::AccessScope::Personal,
             org_id: None,
             resource_uris: &[],
-            token_endpoint_auth_method: Some(auth_method.as_str()),
+            token_endpoint_auth_method: Some(auth_method),
             jwks: jwks_string.as_deref(),
             jwks_uri: jwks_uri.as_deref(),
             fapi_profile: Some(fapi_profile),

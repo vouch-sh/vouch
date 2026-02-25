@@ -12,7 +12,9 @@ use sea_query::{Expr, Query};
 use uuid::Uuid;
 
 /// Device authorization status (RFC 8628 state machine).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "text")]
+#[sqlx(rename_all = "lowercase")]
 pub enum DeviceAuthStatus {
     /// Waiting for user to authorize.
     Pending,
@@ -23,14 +25,13 @@ pub enum DeviceAuthStatus {
 }
 
 impl DeviceAuthStatus {
-    /// Parse a status string from the database.
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s {
-            "pending" => Some(Self::Pending),
-            "authorized" => Some(Self::Authorized),
-            "denied" => Some(Self::Denied),
-            _ => None,
+    /// Return the string representation for sea-query values.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Authorized => "authorized",
+            Self::Denied => "denied",
         }
     }
 }
@@ -42,20 +43,13 @@ pub struct DeviceAuthRequest {
     pub id: String,
     pub device_code_hash: String,
     pub user_code: String,
-    pub status: String,
+    pub status: DeviceAuthStatus,
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub authenticator_id: Option<String>,
     pub expires_at: DbTimestamp,
     pub interval_seconds: i32,
     pub last_poll_at: Option<DbTimestamp>,
-}
-
-impl DeviceAuthRequest {
-    /// Get the parsed status enum.
-    pub fn status(&self) -> Option<DeviceAuthStatus> {
-        DeviceAuthStatus::from_str(&self.status)
-    }
 }
 
 /// OIDC state record.
@@ -222,7 +216,10 @@ pub async fn authorize_device_auth(
     let sql = {
         let query = Query::update()
             .table(DeviceAuthRequests::Table)
-            .value(DeviceAuthRequests::Status, "authorized")
+            .value(
+                DeviceAuthRequests::Status,
+                DeviceAuthStatus::Authorized.as_str(),
+            )
             .value(DeviceAuthRequests::UserId, user_id)
             .value(DeviceAuthRequests::UserEmail, user_email)
             .value(DeviceAuthRequests::AuthenticatorId, authenticator_id)
@@ -251,7 +248,10 @@ pub async fn deny_device_auth(pool: &Pool, id: &str) -> Result<()> {
     let sql = {
         let query = Query::update()
             .table(DeviceAuthRequests::Table)
-            .value(DeviceAuthRequests::Status, "denied")
+            .value(
+                DeviceAuthRequests::Status,
+                DeviceAuthStatus::Denied.as_str(),
+            )
             .and_where(Expr::col(DeviceAuthRequests::Id).eq(id))
             .to_owned();
         query.build_sql(db_type)
