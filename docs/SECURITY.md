@@ -60,7 +60,7 @@ Vouch is designed around three core principles:
 |--------|-----|------------|------------|
 | **Physical authenticator theft + known PIN** | Attacker has both factors | Use biometric authenticator (e.g., YubiKey Bio series), rotate PIN | Audit logs, anomaly detection for unusual access patterns |
 | **Compromised Vouch server** | Server issues credentials | Self-host for high-security, air-gapped deployment (planned) | Server integrity monitoring, audit log analysis |
-| **Malware stealing session after login** | Session token in memory | 8-hour session lifetime, endpoint protection | EDR solutions, anomalous session usage patterns |
+| **Malware stealing session after login** | Access token in memory | 8-hour session lifetime, endpoint protection | EDR solutions, anomalous session usage patterns |
 | **Supply chain attacks on CLI** | Compromised binary | Reproducible builds, code signing, open source auditing | Security researcher engagement, build provenance verification |
 
 For detailed attacker profiles, trust boundaries, and security assumptions, see [THREAT_MODEL.md](THREAT_MODEL.md#threat-actors).
@@ -237,7 +237,7 @@ Vouch enforces a secure key registration model:
 
 **Additional Key Registration:**
 - Requires existing authentication (`vouch login` first)
-- CLI registration endpoint (`/v1/auth/register/start`) requires valid session token
+- CLI registration endpoint (`/v1/keys/register/start`) requires valid access token
 - Email is derived from session claims, not from request
 - Prevents unauthorized key addition to accounts
 
@@ -250,18 +250,21 @@ Vouch enforces a secure key registration model:
 ```
 User Workflow:
   First-time enrollment:
-    vouch enroll → Browser → Google Sign-in → WebAuthn → Session token
+    vouch enroll → Browser → Google Sign-in → WebAuthn → OAuth access token
+
+  Daily login (FAPI 2.0):
+    vouch login → FIDO2 challenge → YubiKey assertion → DPoP-bound access token
 
   Adding additional keys:
-    vouch login      → Authenticate with existing key
-    vouch register   → Add new key (requires valid session)
+    vouch login      → Authenticate with existing key (FAPI 2.0)
+    vouch register   → Add new key (requires valid access token)
 ```
 
 **Email Binding:**
 | Flow | Email Source | Verified By |
 |------|--------------|-------------|
 | `vouch enroll` | Google ID token | Google (OIDC) |
-| `vouch register` | Session token | Previously verified via OIDC |
+| `vouch register` | Access token | Previously verified via OIDC |
 | `vouch login` | Stored in user record | Looked up via credential's user_handle |
 
 The email is never self-asserted. It always traces back to the original OIDC verification.
@@ -398,7 +401,7 @@ All private keys and certificates in S3 config must be base64-encoded:
 
 ## Session Storage Security
 
-Vouch stores session tokens in multiple locations with appropriate security controls:
+Vouch stores access tokens in multiple locations with appropriate security controls:
 
 ### Cookie File (`~/.vouch/cookie.txt`)
 
@@ -407,7 +410,7 @@ A Netscape-format cookie file for CLI tools that need session access:
 **Security Controls:**
 - **File permissions**: 0600 (read/write for owner only)
 - **Location**: User's home directory (`~/.vouch/`)
-- **Contents**: Session token + expiration timestamp
+- **Contents**: Access token + expiration timestamp
 - **Lifetime**: Cleared on logout or session expiration
 
 **Format:**
@@ -664,14 +667,38 @@ All client credential operations are logged:
 }
 ```
 
+### FAPI 2.0 Security Properties
+
+The CLI operates as a FAPI 2.0 client with strong security guarantees:
+
+**CLI Key Security:**
+- ES256 key pair stored at `~/.vouch/client_key.json` with file permissions 0600
+- Used for `private_key_jwt` client authentication (RFC 7523) and DPoP proofs (RFC 9449)
+- No shared secrets between CLI and server — only the public key is registered
+
+**DPoP Sender Constraint:**
+- Access tokens are bound to the client's DPoP key via the `cnf.jkt` claim
+- Token theft without the corresponding DPoP key is useless — the server rejects requests where the DPoP proof doesn't match the token binding
+- Each DPoP proof includes `jti` (unique identifier), `iat` (issuance time), and `htu`/`htm` (target URL/method)
+
+**Private Key JWT:**
+- Client authentication uses `private_key_jwt` (RFC 7523) — the CLI signs a JWT assertion with its ES256 private key
+- The server verifies the assertion against the registered public key
+- Eliminates shared client secrets entirely for CLI authentication
+
+**FAPI Interaction ID:**
+- Every request carries an `x-fapi-interaction-id` header for end-to-end tracing
+- Enables correlation of client requests with server-side audit logs
+
 ### Token Security
 
-Tokens issued to OAuth clients follow security best practices:
+All access tokens are ES256 JWTs following RFC 9068 (JWT Profile for OAuth 2.0 Access Tokens). Legacy HS256 tokens are permanently rejected. Tokens issued to OAuth clients follow security best practices:
 
 **Access Tokens:**
 - Short-lived (default: 1 hour, max: 8 hours)
-- JWT format with standard claims
+- ES256 JWT format with standard claims (RFC 9068)
 - Bound to client_id and user (if applicable)
+- DPoP-bound when issued to FAPI clients (sender-constrained)
 - Include `hardware_verified` claim when backed by hardware authenticator session
 
 **Refresh Tokens:**
@@ -706,8 +733,8 @@ For sensitive data handling:
 ```rust
 use secrecy::{ExposeSecret, SecretString};
 
-// Session tokens wrapped in SecretString
-let session_token: SecretString = fetch_session_token()?;
+// Access tokens wrapped in SecretString
+let access_token: SecretString = fetch_access_token()?;
 
 // Automatically zeroized when dropped
 // Debug output shows "[REDACTED]"
@@ -839,9 +866,9 @@ Despite comprehensive mitigations, the following residual risks remain and have 
 | **Acceptance Rationale** | Self-hosted deployment shifts this risk to the organization. Air-gapped deployment (planned) provides additional protection. Audit logs provide detection capability. |
 | **Monitoring** | Server integrity monitoring, audit log analysis, and anomaly detection. |
 
-### RR-03: Session Token Theft via Advanced Malware
+### RR-03: Access Token Theft via Advanced Malware
 
-**Risk**: Sophisticated malware with root/admin access could potentially extract session tokens from memory despite protections.
+**Risk**: Sophisticated malware with root/admin access could potentially extract access tokens from memory despite protections. With FAPI 2.0, DPoP sender-constraint limits the impact — stolen tokens cannot be used without the corresponding DPoP key.
 
 | Aspect | Detail |
 |--------|--------|

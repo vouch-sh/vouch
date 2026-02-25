@@ -129,6 +129,18 @@ The user-facing command-line tool. Written in Rust using:
 - Startup time <1ms
 - Open source (Apache-2.0 OR MIT) for security auditing
 
+**FAPI 2.0 Client:**
+
+The CLI operates as a FAPI 2.0 client with its own cryptographic identity:
+- Generates an ES256 key pair stored at `~/.vouch/client_key.json` (file permissions 0600)
+- Auto-registers with the server via RFC 7591 Dynamic Client Registration on first use (`vouch enroll` or `vouch login`)
+- Uses `private_key_jwt` (RFC 7523) for client authentication — no shared secrets between CLI and server
+- Sends DPoP proofs (RFC 9449) with every token request
+- Access tokens are sender-constrained (DPoP-bound) — token theft without the key is useless
+- FAPI interaction headers (`x-fapi-interaction-id`) included for end-to-end request tracing
+
+Key management and FAPI protocol logic lives in `crates/vouch-cli/src/fapi/` (key.rs, dpop.rs, client_assertion.rs, registration.rs).
+
 ### vouch-agent
 
 Background daemon managing session state and credential access.
@@ -237,6 +249,7 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - DPoP (RFC 9449) — Demonstrating Proof of Possession
 - Step Up Authentication Challenge Protocol (RFC 9470) — `acr_values` and `max_age` in authorization requests
 - OAuth 2.0 Security Best Current Practice (RFC 9700) — followed
+- OAuth 2.0 Dynamic Client Registration (RFC 7591) — programmatic client registration
 
 **Supported Grant Types:**
 | Grant Type | Use Case |
@@ -245,6 +258,7 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 | `urn:ietf:params:oauth:grant-type:device_code` | CLI tools, headless devices (RFC 8628) |
 | `urn:ietf:params:oauth:grant-type:token-exchange` | Service-to-service delegation (RFC 8693) |
 | `urn:ietf:params:oauth:grant-type:jwt-bearer` | Machine-to-machine, federated service auth (RFC 7523) |
+| `urn:ietf:params:oauth:grant-type:fido2-assertion` | CLI FIDO2 login (hardware key authentication) |
 
 **Supported Scopes:**
 | Scope | Claims Returned |
@@ -270,6 +284,7 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - `POST /oauth/revoke` — Token revocation (RFC 7009)
 - `POST /oauth/introspect` — Token introspection (RFC 7662)
 - `POST /oauth/par` — Pushed Authorization Requests (RFC 9126)
+- `POST /oauth/register` — Dynamic Client Registration (RFC 7591)
 - `GET /oauth/userinfo` — User info endpoint
 
 **ID Token Claims:**
@@ -473,9 +488,13 @@ Registered applications can be managed via the portal:
 - **Revoke** — Immediately invalidate all tokens for an application
 - **Delete** — Remove the application registration entirely
 
+**Programmatic Registration (RFC 7591):**
+
+Applications can also be registered programmatically via `POST /oauth/register` (RFC 7591 Dynamic Client Registration). The CLI uses this for automatic FAPI client registration on first use.
+
 **API Access (Future):**
 
-Applications can also be managed programmatically:
+Registered applications can also be managed programmatically:
 ```bash
 # List applications
 curl -H "Authorization: Bearer $TOKEN" https://vouch.example.com/api/v1/applications
@@ -551,9 +570,11 @@ Links OIDC identity (Google Workspace, Okta, Azure AD) to hardware FIDO2 passkey
 
 **Key insight**: The passkey is created as a *discoverable credential* (resident key) on the hardware authenticator, so subsequent logins don't require the user to provide their email.
 
+**Note:** During first `vouch enroll`, the CLI auto-registers as a FAPI 2.0 client via RFC 7591 Dynamic Client Registration (`POST /oauth/register`), generating an ES256 key pair for subsequent `private_key_jwt` client authentication and DPoP proofs.
+
 ### Daily Login (CLI Only, No Browser)
 
-Uses discoverable credential from the hardware authenticator:
+Uses discoverable credential from the hardware authenticator via FAPI 2.0:
 
 ```
 +--------+     +-----------+     +--------------+     +----------+
@@ -564,6 +585,13 @@ Uses discoverable credential from the hardware authenticator:
     | vouch login    |                  |                  |
     | (no email!)    |                  |                  |
     |--------------->|                  |                  |
+    |                |                  |                  |
+    |                | POST /oauth/fido2/challenge         |
+    |                |----------------->|                  |
+    |                |                  |                  |
+    |                | challenge +      |                  |
+    |                | state            |                  |
+    |                |<-----------------|                  |
     |                |                  |                  |
     |                | CTAP2: Get discoverable credentials |
     |                | for RP "vouch.sh"                   |
@@ -578,16 +606,21 @@ Uses discoverable credential from the hardware authenticator:
     |                | Assertion + credential_id          |
     |                |<-----------------------------------|
     |                |                  |                  |
-    |                | POST /v1/auth/login                |
-    |                | (assertion, credential_id)         |
+    |                | POST /oauth/token                  |
+    |                |   grant_type=fido2-assertion        |
+    |                |   client_assertion (private_key_jwt)|
+    |                |   DPoP proof                        |
+    |                |   base64url assertion               |
     |                |----------------->|                  |
     |                |                  |                  |
+    |                |                  | Verify assertion |
     |                |                  | Lookup user by   |
     |                |                  | credential_id    |
     |                |                  | -> user@co.com   |
     |                |                  |                  |
-    |                |  Session token   |                  |
-    |                |  (8 hours)       |                  |
+    |                | DPoP-bound OAuth |                  |
+    |                | access token     |                  |
+    |                | (8 hours)        |                  |
     |                |<-----------------|                  |
     |                |                  |                  |
     | Authenticated  |                  |                  |
@@ -595,7 +628,7 @@ Uses discoverable credential from the hardware authenticator:
     |<---------------|                  |                  |
 ```
 
-**Key insight**: The authenticator's discoverable credential (passkey) identifies the user. No email needed for daily login.
+**Key insight**: The authenticator's discoverable credential (passkey) identifies the user. No email needed for daily login. The CLI auto-registers as a FAPI client (RFC 7591) during first `vouch enroll` or `vouch login`.
 
 **PIN Setup**: If the hardware authenticator doesn't have a PIN configured, `vouch login` and `vouch register` will detect this and guide the user through setting one up. Vouch requires a minimum 8-character PIN for security.
 
@@ -617,7 +650,7 @@ After initial enrollment, users can add backup keys via CLI:
     | --name "Backup"|                  |                  |
     |--------------->|                  |                  |
     |                |                  |                  |
-    |                | POST /v1/auth/register/start        |
+    |                | POST /v1/keys/register/start        |
     |                | Authorization: Bearer <token>       |
     |                |----------------->|                  |
     |                |                  |                  |
@@ -641,7 +674,7 @@ After initial enrollment, users can add backup keys via CLI:
     |                | Attestation      |                  |
     |                |<-----------------------------------|
     |                |                  |                  |
-    |                | POST /v1/auth/register/complete     |
+    |                | POST /v1/keys/register/complete     |
     |                |----------------->|                  |
     |                |                  |                  |
     |                |                  | Check duplicate  |
@@ -655,7 +688,7 @@ After initial enrollment, users can add backup keys via CLI:
 ```
 
 **Security controls:**
-- Requires valid session token (must `vouch login` first)
+- Requires valid access token (must `vouch login` first)
 - Email comes from session claims (OIDC-verified), not user input
 - `excludeCredentials` prevents re-registering the same credential on the same authenticator
 - Server checks for duplicate credential_id per user before storing
@@ -678,7 +711,7 @@ After initial enrollment, users can add backup keys via CLI:
     |                |                 |  or missing)     |
     |                |                 |                  |
     |                |                 | GET /v1/creds/ssh|
-    |                |                 | + session token  |
+    |                |                 | + access token   |
     |                |                 |----------------->|
     |                |                 |                  |
     |                |                 | SSH certificate  |
@@ -694,7 +727,7 @@ After initial enrollment, users can add backup keys via CLI:
     |<---------------|                 |                  |
 ```
 
-**Note:** No additional user interaction required — the session token proves recent presence attestation.
+**Note:** No additional user interaction required — the access token proves recent presence attestation.
 
 ## Integration Architecture
 
@@ -733,7 +766,7 @@ TrustedUserCAKeys /etc/ssh/vouch-ca.pub
 
 How it works:
 1. AWS CLI/SDK calls credential_process
-2. vouch gets OIDC token from server (exchanges session token)
+2. vouch gets OIDC token from server (exchanges access token)
 3. vouch calls AWS STS AssumeRoleWithWebIdentity
 4. Returns temporary credentials in credential_process format
 5. Credentials expire in 1 hour, auto-refresh within session
@@ -757,7 +790,7 @@ How it works:
 How it works:
 1. kubectl calls aws eks get-token via exec credential plugin
 2. AWS CLI uses credential_process to call vouch credential aws
-3. vouch exchanges session token for OIDC token, calls STS AssumeRoleWithWebIdentity
+3. vouch exchanges access token for OIDC token, calls STS AssumeRoleWithWebIdentity
 4. AWS CLI uses the temporary credentials to get an EKS bearer token
 5. kubectl presents token to EKS API server
 6. EKS validates via IAM and Access Entries for RBAC
@@ -814,7 +847,7 @@ How it works:
 1. Cargo invokes vouch as credential provider (Cargo credential provider protocol)
 2. vouch sends Hello message with supported protocol versions
 3. Cargo sends JSON request with registry info and action (get/login/logout)
-4. vouch returns session token for registry authentication
+4. vouch returns access token for registry authentication
 5. Token cached by Cargo based on JWT expiration
 ```
 
@@ -853,7 +886,7 @@ cargo build  # fetches from private registries automatically
 
 How it works:
 1. Docker calls vouch as a credential helper (docker-credential-vouch)
-2. vouch exchanges session token for AWS credentials via credential_process
+2. vouch exchanges access token for AWS credentials via credential_process
 3. vouch calls ECR GetAuthorizationToken with AWS credentials
 4. Returns Docker credentials (username/password) for the ECR registry
 5. Credentials auto-refresh within the session
@@ -903,7 +936,7 @@ pip install my-private-package
 
 How it works:
 1. Git calls vouch as a credential helper for CodeCommit HTTPS URLs
-2. vouch exchanges session token for AWS credentials via credential_process
+2. vouch exchanges access token for AWS credentials via credential_process
 3. Uses AWS credentials to generate CodeCommit Git credentials
 4. Returns username/password for HTTPS Git authentication
 ```
@@ -1096,7 +1129,7 @@ When the agent is not running, sessions are stored in the config file:
 ~/.vouch/config.json
 ```
 
-**Format:** JSON with `token` field containing the JWT session token
+**Format:** JSON with `token` field containing the JWT access token
 
 ### Cookie File (CLI Tools)
 

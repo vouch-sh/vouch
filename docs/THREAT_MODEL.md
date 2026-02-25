@@ -2,8 +2,8 @@
 
 This document provides a comprehensive threat model for Vouch, following the [AWS Threat Composer](https://github.com/awslabs/threat-composer) methodology. It identifies potential threats, documents assumptions, and maps mitigations to ensure the security of the hardware-backed authentication system.
 
-**Last Updated**: 2026-02-04
-**Version**: 1.1
+**Last Updated**: 2026-02-25
+**Version**: 1.2
 **Status**: Active
 
 ## Table of Contents
@@ -46,7 +46,7 @@ Out of scope:
 
 | Objective | Description |
 |-----------|-------------|
-| **Confidentiality** | Session tokens, private keys, and credentials are protected from unauthorized access |
+| **Confidentiality** | Access tokens, private keys, and credentials are protected from unauthorized access |
 | **Integrity** | Credentials are issued only after verified hardware authentication |
 | **Availability** | Users can authenticate and obtain credentials when needed |
 | **Non-repudiation** | All credential issuance is logged with cryptographic attestation |
@@ -156,7 +156,8 @@ Out of scope:
 | Asset | Description | CIA Priority |
 |-------|-------------|--------------|
 | **Authenticator Private Keys** | Non-exportable FIDO2 keys | C > I > A |
-| **Session Tokens (JWT)** | 8-hour authentication tokens | C > I > A |
+| **OAuth Access Tokens (ES256, RFC 9068)** | 8-hour DPoP-bound authentication tokens | C > I > A |
+| **CLI ES256 Key Pair** | FAPI 2.0 client key for DPoP and private_key_jwt | C > I > A |
 | **SSH CA Private Key** | Ed25519 key for signing certificates | C > I > A |
 | **User Credentials** | Temporary AWS/GitHub tokens | C > I > A |
 | **Audit Logs** | Credential issuance records | I > A > C |
@@ -169,6 +170,7 @@ Out of scope:
 | **OIDC Configuration** | External IdP settings | I > A > C |
 | **SSH Certificates** | Signed user certificates | I > C > A |
 | **Cookie Files** | Local session storage | C > I > A |
+| **FAPI Client Registration** | RFC 7591 client_id and server-stored public key | I > C > A |
 
 ---
 
@@ -370,9 +372,9 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 ### Session Management Threats
 
-#### T-06: Session Token Theft via Malware
+#### T-06: Access Token Theft via Malware
 
-**Threat Statement**: A **sophisticated attacker** with **malware on the user's workstation** can **read session tokens from memory or disk** which leads to **session hijacking until token expiration**, negatively impacting **confidentiality of issued credentials**.
+**Threat Statement**: A **sophisticated attacker** with **malware on the user's workstation** can **read access tokens from memory or disk** which leads to **limited session hijacking (DPoP sender-constraint requires matching key)**, negatively impacting **confidentiality of issued credentials**.
 
 **Likelihood**: Medium
 **Impact**: Medium (8-hour window)
@@ -391,7 +393,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 #### T-07: Session Fixation
 
-**Threat Statement**: A **sophisticated attacker** with **ability to inject session tokens** can **force a user to use an attacker-known session** which leads to **no impact due to session bound to hardware authentication**, negatively impacting **nothing (attack fails)**.
+**Threat Statement**: A **sophisticated attacker** with **ability to inject access tokens** can **force a user to use an attacker-known session** which leads to **no impact due to DPoP sender-constraint and hardware authentication binding**, negatively impacting **nothing (attack fails)**.
 
 **Likelihood**: Low
 **Impact**: None
@@ -401,7 +403,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 | ID | Mitigation | Status |
 |----|------------|--------|
 | M-22 | Sessions created only after FIDO2 assertion | Implemented |
-| M-23 | Session tokens not predictable (cryptographically random) | Implemented |
+| M-23 | Access tokens not predictable (ES256-signed JWTs) | Implemented |
 | M-24 | Session bound to authenticator and user | Implemented |
 
 ---
@@ -602,6 +604,61 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 ---
 
+### FAPI 2.0 Client Threats
+
+#### T-15b: Compromised CLI ES256 Key
+
+**Threat Statement**: A **sophisticated attacker** with **access to the user's workstation** can **steal the CLI ES256 key pair from `~/.vouch/client_key.json`** which leads to **ability to authenticate as the FAPI client but not obtain tokens without FIDO2 assertion**, negatively impacting **limited confidentiality (client identity only)**.
+
+**Likelihood**: Low
+**Impact**: Low (key alone cannot authenticate)
+**Risk**: Low
+
+**Mitigations**:
+| ID | Mitigation | Status |
+|----|------------|--------|
+| M-60f | File permissions 0600 on `client_key.json` | Implemented |
+| M-60g | Key is useless without FIDO2 assertion (cannot forge the FIDO2 grant) | Implemented |
+| M-60h | DPoP binding prevents token use from different key | Implemented |
+| M-60i | Re-registration with new key pair on compromise | Implemented |
+
+---
+
+#### T-15c: RFC 7591 Registration Abuse
+
+**Threat Statement**: A **script kiddie** with **network access to the server** can **flood `/oauth/register` with client registrations** which leads to **database pollution but no unauthorized access**, negatively impacting **system availability (storage)**.
+
+**Likelihood**: Low
+**Impact**: Low (no access tokens issued during registration)
+**Risk**: Low
+
+**Mitigations**:
+| ID | Mitigation | Status |
+|----|------------|--------|
+| M-60j | Rate limiting on `/oauth/register` endpoint | Implemented |
+| M-60k | client_id alone grants zero access — FIDO2 assertion required | Implemented |
+| M-60l | Registration creates only a client record, no tokens issued | Implemented |
+
+---
+
+#### T-15d: DPoP Proof Replay
+
+**Threat Statement**: A **sophisticated attacker** with **captured network traffic** can **replay a DPoP proof to reuse a sender-constrained token** which leads to **no impact due to server-side replay protection**, negatively impacting **nothing (attack fails)**.
+
+**Likelihood**: Low
+**Impact**: None
+**Risk**: Mitigated
+
+**Mitigations**:
+| ID | Mitigation | Status |
+|----|------------|--------|
+| M-60m | Server validates `jti` uniqueness (replay detection) | Implemented |
+| M-60n | Server validates `iat` freshness (clock skew window) | Implemented |
+| M-60o | `htu`/`htm` binding ensures proof is for specific endpoint and method | Implemented |
+| M-60p | TLS 1.3 encryption of all traffic | Implemented |
+
+---
+
 ### Network Threats
 
 #### T-16: Man-in-the-Middle Attack
@@ -697,7 +754,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 #### T-21: Key Removal by Attacker
 
-**Threat Statement**: A **sophisticated attacker** with **a stolen session token** can **remove legitimate keys from an account** which leads to **denial of service for legitimate user**, negatively impacting **authentication availability**.
+**Threat Statement**: A **sophisticated attacker** with **a stolen access token and DPoP key** can **remove legitimate keys from an account** which leads to **denial of service for legitimate user**, negatively impacting **authentication availability**.
 
 **Likelihood**: Low
 **Impact**: Medium
@@ -758,7 +815,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 | Status | Count | Mitigations |
 |--------|-------|-------------|
-| **Implemented** | 83 | M-01 through M-89 (most), M-41a, M-41g, M-60a through M-60e |
+| **Implemented** | 94 | M-01 through M-89 (most), M-41a, M-41g, M-60a through M-60p |
 | **Partial** | 1 | M-87 (slow_down implemented; per-IP rate limits planned) |
 | **Planned** | 10 | M-02, M-30, M-32, M-33, M-48a, M-52, M-64, M-70, M-71, M-80 |
 | **Hardware** | 2 | M-09, M-10 (authenticator enforced) |
@@ -774,7 +831,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 | **Server Security** | M-29 through M-41 |
 | **Configuration Security** | M-41a through M-41g |
 | **Supply Chain** | M-42 through M-54 |
-| **Credential Issuance** | M-55 through M-61 |
+| **Credential Issuance** | M-55 through M-61, M-60f through M-60p |
 | **Network Security** | M-62 through M-67 |
 | **Enrollment Security** | M-68 through M-78 |
 | **Key Management** | M-79 through M-86 |
@@ -800,6 +857,9 @@ For accepted residual risks and their monitoring strategies, see [SECURITY.md](S
 - [RFC 8707 - Resource Indicators for OAuth 2.0](https://www.rfc-editor.org/rfc/rfc8707)
 - [RFC 9068 - JWT Profile for OAuth 2.0 Access Tokens](https://www.rfc-editor.org/rfc/rfc9068)
 - [RFC 9449 - DPoP](https://www.rfc-editor.org/rfc/rfc9449)
+- [RFC 7591 - OAuth 2.0 Dynamic Client Registration](https://www.rfc-editor.org/rfc/rfc7591)
+- [RFC 7523 - JWT Profile for OAuth 2.0 Client Authentication](https://www.rfc-editor.org/rfc/rfc7523)
+- [RFC 9126 - Pushed Authorization Requests](https://www.rfc-editor.org/rfc/rfc9126)
 - [RFC 7643/7644 - SCIM 2.0](https://www.rfc-editor.org/rfc/rfc7643)
 
 ### Methodology
@@ -820,5 +880,6 @@ For accepted residual risks and their monitoring strategies, see [SECURITY.md](S
 
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
+| 1.2 | 2026-02-25 | Vouch Security Team | Added FAPI 2.0 client threats (T-15b, T-15c, T-15d), updated assets for ES256 tokens and CLI key pair |
 | 1.1 | 2026-02-04 | Vouch Security Team | Added S3 configuration threat (T-11a) and mitigations |
 | 1.0 | 2026-01-31 | Vouch Security Team | Initial threat model |
