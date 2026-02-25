@@ -1,4 +1,4 @@
-# Contributing to Vouch
+# Contributing
 
 Thank you for your interest in contributing to Vouch! This document covers development setup, code style, and submission guidelines.
 
@@ -10,11 +10,11 @@ Be respectful and constructive. We're building security software — thoughtful 
 
 | Component | License | Contributions Welcome |
 |-----------|---------|----------------------|
-| vouch-cli | Apache-2.0 OR MIT | ✅ Yes |
-| vouch-agent | Apache-2.0 OR MIT | ✅ Yes |
-| vouch-common | Apache-2.0 OR MIT | ✅ Yes |
-| vouch-server | BUSL-1.1 | ✅ Yes (CLA required) |
-| Documentation | CC-BY-4.0 | ✅ Yes |
+| vouch-cli | Apache-2.0 OR MIT | Yes |
+| vouch-agent | Apache-2.0 OR MIT | Yes |
+| vouch-common | Apache-2.0 OR MIT | Yes |
+| vouch-server | BUSL-1.1 | Yes (CLA required) |
+| Documentation | CC-BY-4.0 | Yes |
 
 ## Development Setup
 
@@ -135,9 +135,9 @@ let session = Session::new(user.id, None, Some(8), true, None)?;
 ```rust
 // Good: Document public APIs
 /// Authenticates a user with their FIDO2 credential.
-/// 
+///
 /// # Errors
-/// 
+///
 /// Returns `AuthError::InvalidCredential` if the assertion is invalid.
 /// Returns `AuthError::SessionExpired` if the session has expired.
 pub fn authenticate(credential: &Credential) -> Result<Session, AuthError> { ... }
@@ -322,7 +322,7 @@ Documentation lives in `/docs`. When updating:
 
 - **Questions**: Open a [GitHub Discussion](https://github.com/vouch-sh/vouch/discussions)
 - **Bugs**: Open a [GitHub Issue](https://github.com/vouch-sh/vouch/issues)
-- **Security**: Email security@vouch.sh (see [Security Model](docs/src/security/model.md))
+- **Security**: Email security@vouch.sh (see [Security Model](security/model.md))
 
 ## License
 
@@ -330,4 +330,4 @@ By contributing to open source components (vouch-cli, vouch-agent, vouch-common)
 
 ---
 
-Thank you for helping make Vouch better! 🔐
+Thank you for helping make Vouch better!

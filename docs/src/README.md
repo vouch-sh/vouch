@@ -1,4 +1,4 @@
-# Vouch
+# Introduction
 
 **Prove you're here.**
 
@@ -80,51 +80,6 @@ Vouch configures standard credential providers:
 
 After `vouch login`, existing workflows are unchanged.
 
-## Quick Start
-
-### Install
-```bash
-# macOS
-brew install vouch-sh/tap/vouch
-
-# Linux (Debian/Ubuntu)
-# See https://packages.vouch.sh for repository setup
-sudo apt install vouch
-
-# Linux (RPM-based)
-# See https://packages.vouch.sh for repository setup
-sudo dnf install vouch
-
-# From source
-cargo install --git https://github.com/vouch-sh/vouch vouch-cli
-```
-
-### Setup
-```bash
-# Enroll with your YubiKey (one-time, opens browser)
-vouch enroll
-
-# Configure integrations
-vouch setup ssh                                    # Configures SSH to use vouch certificates
-vouch setup aws --role arn:aws:iam::ID:role/name   # Configures AWS credential_process
-vouch setup eks --cluster my-cluster                # Configures kubectl for EKS via IAM
-vouch setup github --configure                     # Configures git credential helper for GitHub
-```
-
-### Daily Use
-```bash
-# Start your day
-vouch login
-
-# Everything just works for 8 hours
-ssh prod-server
-aws s3 ls
-git clone https://github.com/your-org/private-repo.git
-
-# Check session status
-vouch status
-```
-
 ## Requirements
 
 - **YubiKey 5 series** (firmware 5.2+) with FIDO2/WebAuthn support
@@ -140,10 +95,10 @@ Vouch consists of:
 
 | Component | Description | Source |
 |-----------|-------------|--------|
-| `vouch` CLI | User-facing commands, credential helpers | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
-| `vouch-agent` | Background daemon, session management | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
-| `vouch-common` | Shared types, FIDO2 helpers, API client | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
-| Vouch Server | OIDC provider, certificate authority | [BSL 1.1](crates/vouch-server/LICENSE) (converts to Apache-2.0) |
+| `vouch` CLI | User-facing commands, credential helpers | Open source (Apache-2.0 OR MIT) |
+| `vouch-agent` | Background daemon, session management | Open source (Apache-2.0 OR MIT) |
+| `vouch-common` | Shared types, FIDO2 helpers, API client | Open source (Apache-2.0 OR MIT) |
+| Vouch Server | OIDC provider, certificate authority | BSL 1.1 (converts to Apache-2.0) |
 
 The CLI is fully open source for security auditing. The server source is available under the Business Source License 1.1, which converts to Apache-2.0 after two years.
 
@@ -157,42 +112,8 @@ Vouch is designed for high-security environments:
 - **Short-lived credentials** — Minimize blast radius of compromise
 - **Audit trail** — Every credential issuance logged with attestation
 
-See the [Security Model](docs/src/security/model.md) for our security philosophy and the [Threat Model](docs/src/threat-model/overview.md) for STRIDE analysis.
-
-## Documentation
-
-Full documentation is available as an [mdBook](https://rust-lang.github.io/mdBook/):
-
-```bash
-# Build and serve locally
-make docs-serve
-```
-
-Key sections:
-
-- [Getting Started](docs/src/getting-started/quick-start.md) — Installation and first enrollment
-- [Server Deployment](docs/src/deployment/overview.md) — Deploy and configure the Vouch server
-- [Integrations](docs/src/integrations/ssh.md) — SSH, AWS, EKS, GitHub, Docker, and more
-- [Architecture](docs/src/architecture/overview.md) — System design and data flows
-- [Security Model](docs/src/security/model.md) — Security controls and incident response
-- [Threat Model](docs/src/threat-model/overview.md) — STRIDE analysis and mitigations
-- [Air-Gapped Deployment](docs/src/advanced/airgap.md) — On-premises installation guide
-- [Agent Delegation](docs/src/advanced/delegation.md) — AI assistant credential management
-
-## Contributing
-
-We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-The CLI is open source under Apache-2.0 OR MIT. We believe security tools should be auditable.
-
-## License
-
-- CLI, agent, and shared libraries: [Apache-2.0](LICENSE-APACHE) OR [MIT](LICENSE-MIT)
-- Server: [BSL 1.1](crates/vouch-server/LICENSE) (converts to Apache-2.0 after 2 years)
-- Documentation: [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)
+See [Security Model](security/model.md) for our security model and responsible disclosure policy. For the threat model, see [Threat Model](threat-model/overview.md).
 
 ---
 
-**Vouch** — Prove you're here.
-
-[Website](https://vouch.sh) · [Documentation](https://vouch.sh/docs) · [GitHub](https://github.com/vouch-sh/vouch)
+See the [Quick Start](getting-started/quick-start.md) to get started.

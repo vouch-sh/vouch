@@ -16,7 +16,7 @@ vouch/
 │   ├── vouch-server/     # Auth server with OIDC provider, SSH CA (BUSL-1.1)
 │   ├── vouch-common/     # Shared types, FIDO2 helpers, API client (Apache-2.0/MIT)
 │   └── vouch-tests/      # Integration + property-based tests
-├── docs/                 # Architecture, security model, guides
+├── docs/                 # mdBook documentation (build with `make docs-build`)
 └── packaging/            # AMI and post-install scripts
 ```
 
@@ -272,7 +272,7 @@ Before implementing a feature:
 1. Does this require new dependencies? Can we avoid them?
 2. Does this touch sensitive data? Use appropriate wrappers.
 3. Is this in scope for MVP?
-4. Does this change the security model? Document in `docs/SECURITY.md`.
+4. Does this change the security model? Document in `docs/src/security/model.md`.
 
 ## External Resources
 
