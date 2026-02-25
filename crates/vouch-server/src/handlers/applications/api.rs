@@ -5,7 +5,9 @@
 //! application management.
 
 use crate::AppState;
-use crate::db::{self, AccessScope, OAuthClientType, OAuthEventType};
+use crate::db::{
+    self, AccessScope, FapiProfile, OAuthClientType, OAuthEventType, UpdateOAuthClientParams,
+};
 use axum::{
     Json,
     extract::{Path, State},
@@ -152,6 +154,76 @@ pub async fn create_application_api(
         }
     }
 
+    // Determine FAPI profile
+    let is_fapi = req
+        .fapi_profile
+        .as_deref()
+        .is_some_and(|p| p == "fapi2_security");
+
+    // FAPI validation: must be a confidential client type
+    if is_fapi && !matches!(app_type, OAuthClientType::Web | OAuthClientType::Service) {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_fapi_profile",
+            "FAPI 2.0 Security Profile requires a confidential client type (web or service)",
+        ));
+    }
+
+    // FAPI validation: require JWKS or JWKS URI
+    let jwks_trimmed = req.jwks.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let jwks_uri_trimmed = req
+        .jwks_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if is_fapi && jwks_trimmed.is_none() && jwks_uri_trimmed.is_none() {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "missing_jwks",
+            "FAPI 2.0 requires jwks or jwks_uri for private_key_jwt authentication",
+        ));
+    }
+
+    // Validate JWKS JSON if provided
+    if let Some(jwks_json) = jwks_trimmed {
+        match serde_json::from_str::<serde_json::Value>(jwks_json) {
+            Ok(val) => {
+                if !val
+                    .get("keys")
+                    .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
+                {
+                    return Err(json_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_jwks",
+                        "JWKS must be a JSON object with a non-empty \"keys\" array",
+                    ));
+                }
+            }
+            Err(_) => {
+                return Err(json_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_jwks",
+                    "JWKS must be valid JSON",
+                ));
+            }
+        }
+    }
+
+    // Validate JWKS URI if provided
+    if let Some(uri) = jwks_uri_trimmed {
+        match url::Url::parse(uri) {
+            Ok(parsed) if parsed.scheme() == "https" => {}
+            _ => {
+                return Err(json_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_jwks_uri",
+                    "JWKS URI must be a valid https:// URL",
+                ));
+            }
+        }
+    }
+
     // Create the application
     let (client, client_id) = db::create_oauth_client(
         &state.db,
@@ -174,8 +246,38 @@ pub async fn create_application_api(
         )
     })?;
 
-    // Generate client secret for confidential clients
-    let client_secret = if app_type.requires_secret() {
+    // If FAPI is enabled, update the client with FAPI settings
+    if is_fapi {
+        db::update_oauth_client(
+            &state.db,
+            &UpdateOAuthClientParams {
+                id: &client.id,
+                name,
+                description: req.description.as_deref(),
+                redirect_uris: &req.redirect_uris,
+                access_scope: Some(access_scope),
+                org_id,
+                resource_uris,
+                token_endpoint_auth_method: "private_key_jwt",
+                jwks: jwks_trimmed,
+                jwks_uri: jwks_uri_trimmed,
+                fapi_profile: FapiProfile::Fapi2Security,
+                dpop_bound_access_tokens: true,
+            },
+        )
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to apply FAPI settings: {e}");
+            json_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?;
+    }
+
+    // Generate client secret for confidential clients (skip for FAPI — they use private_key_jwt)
+    let client_secret = if app_type.requires_secret() && !is_fapi {
         let secret = generate_client_secret();
         let secret_hash = hash_token(&secret);
 
@@ -201,16 +303,46 @@ pub async fn create_application_api(
         None
     };
 
+    // Re-fetch to get final state (with FAPI settings applied)
+    let final_client = if is_fapi {
+        db::get_oauth_client_by_id(&state.db, &client.id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to refetch client: {e}");
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    "Internal database error",
+                )
+            })?
+            .ok_or_else(|| {
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    "Internal database error",
+                )
+            })?
+    } else {
+        client
+    };
+
     tracing::info!("Created OAuth application: {} ({})", name, client_id);
 
+    let jwks_configured = final_client.jwks.is_some() || final_client.jwks_uri.is_some();
+    let response_jwks_uri = final_client.jwks_uri.clone();
+
     Ok(Json(CreateApplicationResponse {
-        id: client.id,
+        id: final_client.id,
         client_id,
         client_secret,
         name: name.to_string(),
         application_type: req.application_type,
         access_scope: access_scope.as_str().to_string(),
         resource_uris: resource_uris.to_vec(),
+        token_endpoint_auth_method: final_client.token_endpoint_auth_method,
+        fapi_profile: final_client.fapi_profile,
+        jwks_configured,
+        jwks_uri: response_jwks_uri,
     }))
 }
 
@@ -364,15 +496,145 @@ pub async fn update_application_api(
         }
     }
 
+    // Determine FAPI profile
+    let is_fapi = req
+        .fapi_profile
+        .as_deref()
+        .is_some_and(|p| p == "fapi2_security");
+
+    // FAPI validation: must be a confidential client type
+    if is_fapi
+        && !matches!(
+            client.application_type,
+            OAuthClientType::Web | OAuthClientType::Service
+        )
+    {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_fapi_profile",
+            "FAPI 2.0 Security Profile requires a confidential client type (web or service)",
+        ));
+    }
+
+    // FAPI validation: require JWKS or JWKS URI
+    let jwks_trimmed = req.jwks.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let jwks_uri_trimmed = req
+        .jwks_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if is_fapi
+        && jwks_trimmed.is_none()
+        && jwks_uri_trimmed.is_none()
+        && client.jwks.is_none()
+        && client.jwks_uri.is_none()
+    {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "missing_jwks",
+            "FAPI 2.0 requires jwks or jwks_uri for private_key_jwt authentication",
+        ));
+    }
+
+    // Validate JWKS JSON if provided
+    if let Some(jwks_json) = jwks_trimmed {
+        match serde_json::from_str::<serde_json::Value>(jwks_json) {
+            Ok(val) => {
+                if !val
+                    .get("keys")
+                    .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
+                {
+                    return Err(json_error(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_jwks",
+                        "JWKS must be a JSON object with a non-empty \"keys\" array",
+                    ));
+                }
+            }
+            Err(_) => {
+                return Err(json_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_jwks",
+                    "JWKS must be valid JSON",
+                ));
+            }
+        }
+    }
+
+    // Validate JWKS URI if provided
+    if let Some(uri) = jwks_uri_trimmed {
+        match url::Url::parse(uri) {
+            Ok(parsed) if parsed.scheme() == "https" => {}
+            _ => {
+                return Err(json_error(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_jwks_uri",
+                    "JWKS URI must be a valid https:// URL",
+                ));
+            }
+        }
+    }
+
+    // Compute FAPI-related values
+    let fapi_profile = if is_fapi {
+        FapiProfile::Fapi2Security
+    } else if req.fapi_profile.is_some() {
+        // Explicitly set to non-FAPI
+        FapiProfile::None
+    } else {
+        client.fapi_profile()
+    };
+
+    let token_endpoint_auth_method = if is_fapi {
+        "private_key_jwt"
+    } else if !is_fapi && req.fapi_profile.is_some() && client.is_fapi() {
+        // Transitioning from FAPI to Standard
+        "client_secret_basic"
+    } else {
+        client.token_endpoint_auth_method.as_str()
+    };
+
+    let effective_jwks = if jwks_trimmed.is_some() {
+        jwks_trimmed
+    } else if fapi_profile == FapiProfile::Fapi2Security {
+        client.jwks.as_deref()
+    } else {
+        None
+    };
+
+    let effective_jwks_uri = if jwks_uri_trimmed.is_some() {
+        jwks_uri_trimmed
+    } else if fapi_profile == FapiProfile::Fapi2Security {
+        client.jwks_uri.as_deref()
+    } else {
+        None
+    };
+
+    let dpop_bound = if is_fapi {
+        true
+    } else if req.fapi_profile.is_some() {
+        false
+    } else {
+        client.dpop_bound_access_tokens
+    };
+
     db::update_oauth_client(
         &state.db,
-        &app_id,
-        name,
-        description,
-        &redirect_uris,
-        access_scope,
-        org_id,
-        &resource_uris,
+        &UpdateOAuthClientParams {
+            id: &app_id,
+            name,
+            description,
+            redirect_uris: &redirect_uris,
+            access_scope,
+            org_id,
+            resource_uris: &resource_uris,
+            token_endpoint_auth_method,
+            jwks: effective_jwks,
+            jwks_uri: effective_jwks_uri,
+            fapi_profile,
+            dpop_bound_access_tokens: dpop_bound,
+        },
     )
     .await
     .map_err(|e| {

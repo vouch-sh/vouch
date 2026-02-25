@@ -16,8 +16,11 @@ use serde::{Deserialize, Serialize};
 /// confusion attacks (RFC 7523 Section 3).
 pub const SUPPORTED_ALGORITHMS: &[&str] = &["ES256", "RS256", "PS256"];
 
-/// Clock skew tolerance in seconds (matching DPoP behavior).
-const CLOCK_SKEW_SECONDS: i64 = 30;
+/// Clock skew tolerance in seconds.
+///
+/// 10 seconds is the FAPI 2.0 recommended tolerance. Modern NTP-synced
+/// systems should not drift beyond this.
+const CLOCK_SKEW_SECONDS: i64 = 10;
 
 /// JWT assertion claims (RFC 7523 Section 3).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -527,10 +530,10 @@ mod tests {
     fn test_validate_jwt_assertion_accepts_within_clock_skew() {
         let (enc, dec) = test_es256_keys();
         let now = Timestamp::now().as_second();
-        // exp is 15 seconds in the past — within the 30s clock skew window.
+        // exp is 5 seconds in the past — within the 10s clock skew window.
         let mut claims = valid_claims(now);
         claims.iat = Some(now - 300);
-        claims.exp = now - 15;
+        claims.exp = now - 5;
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -546,7 +549,7 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "JWT expired by 15s should be accepted (30s skew), got: {:?}",
+            "JWT expired by 5s should be accepted (10s skew), got: {:?}",
             result.unwrap_err()
         );
     }
@@ -585,8 +588,8 @@ mod tests {
         let (enc, dec) = test_es256_keys();
         let now = Timestamp::now().as_second();
         let mut claims = valid_claims(now);
-        // nbf 15 seconds in the future — within 30s clock skew.
-        claims.nbf = Some(now + 15);
+        // nbf 5 seconds in the future — within 10s clock skew.
+        claims.nbf = Some(now + 5);
 
         let jwt = sign_test_jwt(&claims, &enc);
         let header = parse_assertion_header(&jwt).expect("header should parse");
@@ -602,7 +605,7 @@ mod tests {
 
         assert!(
             result.is_ok(),
-            "nbf 15s in future should be accepted (30s skew), got: {:?}",
+            "nbf 5s in future should be accepted (10s skew), got: {:?}",
             result.unwrap_err()
         );
     }

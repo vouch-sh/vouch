@@ -250,6 +250,27 @@ pub async fn authorize(
             }
         };
 
+    // FAPI 2.0: Require PAR for FAPI clients.
+    //
+    // This catches the case where a FAPI client tries to use the normal
+    // authorization flow (no PAR `request_uri`). FAPI 2.0 Section 5.2.2 mandates
+    // that all authorization requests use PAR.
+    if let Err(e) =
+        crate::services::oidc::fapi::validate_fapi_authorization_request(&oauth_client, false)
+    {
+        let description = match &e {
+            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+            _ => e.to_string(),
+        };
+        return oauth_error_redirect(
+            validated.redirect_uri(),
+            "invalid_request",
+            &description,
+            validated.state(),
+            &state.config().base_url,
+        );
+    }
+
     // RFC 9101: Enforce require_signed_request_object for this client.
     // If the client requires JAR but the request came through the normal flow
     // (no `request` JWT, no PAR `request_uri`), reject it.
@@ -282,6 +303,9 @@ pub async fn authorize(
 
     // Try to get existing session from cookie
     let session_token = jar.get("vouch_session").map(|c| c.value());
+
+    // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
+    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
 
     // Check if we have a valid session
     match check_session_for_authorization(&state, session_token).await {
@@ -333,7 +357,8 @@ pub async fn authorize(
             }
 
             if needs_reauth {
-                return store_pending_and_redirect(&state, validated).await;
+                // Direct authorization flow: no DPoP at the browser endpoint.
+                return store_pending_and_redirect(&state, validated, None).await;
             }
 
             // RFC 9470: Validate requested ACR is satisfiable.
@@ -366,7 +391,9 @@ pub async fn authorize(
                 );
             }
 
-            // Access granted - issue authorization code
+            // Access granted - issue authorization code.
+            // Direct (non-PAR) authorization requests have no DPoP at the
+            // browser authorization endpoint; key binding is not applicable.
             let code_params = AuthorizationCodeParams {
                 client_id: validated.client_id(),
                 redirect_uri: validated.redirect_uri(),
@@ -380,6 +407,8 @@ pub async fn authorize(
                 code_challenge_method: validated.code_challenge_method(),
                 resource: validated.resource(),
                 acr_values: validated.acr_values(),
+                dpop_jkt: None,
+                auth_code_lifetime_seconds: auth_code_lifetime,
             };
 
             issue_code_and_redirect(
@@ -402,7 +431,8 @@ pub async fn authorize(
                     &state.config().base_url,
                 );
             }
-            store_pending_and_redirect(&state, validated).await
+            // Direct authorization flow: no DPoP at the browser endpoint.
+            store_pending_and_redirect(&state, validated, None).await
         }
     }
 }
@@ -413,9 +443,13 @@ pub async fn authorize(
 /// - No existing session
 /// - `prompt=login` requested
 /// - `max_age` exceeded (RFC 9470 step-up)
+///
+/// The `dpop_jkt` parameter carries the DPoP key thumbprint from the PAR record
+/// so that key binding survives the browser login redirect.
 async fn store_pending_and_redirect(
     state: &Arc<AppState>,
     validated: crate::services::oidc::authorization::ValidatedAuthRequest,
+    dpop_jkt: Option<&str>,
 ) -> Response {
     let scope_str = validated.scope().to_space_separated();
     let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
@@ -432,9 +466,12 @@ async fn store_pending_and_redirect(
         acr_values: validated.acr_values(),
         max_age: max_age_i64,
         prompt: validated.prompt().map(|p| p.as_str()),
+        dpop_jkt,
     };
 
     match db::create_pending_oauth_authorization(&state.db, pending_params).await {
+        // axum's Redirect::to() produces a 303 See Other, which is correct for
+        // FAPI 2.0 and best-practice for POST-redirect-GET patterns (RFC 9700).
         Ok(pending_id) => Redirect::to(&format!(
             "/login?pending_auth={}",
             urlencoding::encode(&pending_id)
@@ -506,6 +543,9 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
     // Get session from cookie (should exist after login)
     let session_token = jar.get("vouch_session").map(|c| c.value());
 
+    // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
+    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
+
     match check_session_for_authorization(state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
             user,
@@ -525,7 +565,9 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                 .into_response();
             }
 
-            // Issue authorization code using stored parameters
+            // Issue authorization code using stored parameters.
+            // Thread dpop_jkt from the pending record through to the auth code so
+            // the token endpoint can enforce DPoP key binding (RFC 9449 Section 10).
             let scope_set = ScopeSet::parse(pending.scope.as_deref().unwrap_or("openid"));
             let code_params = AuthorizationCodeParams {
                 client_id: &pending.client_id,
@@ -543,6 +585,8 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                     .and_then(CodeChallengeMethod::parse),
                 resource: pending.resource.as_deref(),
                 acr_values: pending.acr_values.as_deref(),
+                dpop_jkt: pending.dpop_jkt.as_deref(),
+                auth_code_lifetime_seconds: auth_code_lifetime,
             };
 
             issue_code_and_redirect(
@@ -679,6 +723,9 @@ async fn handle_jar_request(
     // Try to get existing session from cookie
     let session_token = jar.get("vouch_session").map(|c| c.value());
 
+    // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
+    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
+
     // Check if we have a valid session
     match check_session_for_authorization(state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
@@ -724,7 +771,8 @@ async fn handle_jar_request(
             }
 
             if needs_reauth {
-                return store_pending_and_redirect(state, validated).await;
+                // JAR flow: no DPoP key binding at the browser endpoint.
+                return store_pending_and_redirect(state, validated, None).await;
             }
 
             // RFC 9470: Validate requested ACR
@@ -756,7 +804,8 @@ async fn handle_jar_request(
                 );
             }
 
-            // Issue authorization code
+            // Issue authorization code. JAR flow has no DPoP key binding at
+            // the browser authorization endpoint.
             let code_params = AuthorizationCodeParams {
                 client_id: validated.client_id(),
                 redirect_uri: validated.redirect_uri(),
@@ -770,6 +819,8 @@ async fn handle_jar_request(
                 code_challenge_method: validated.code_challenge_method(),
                 resource: validated.resource(),
                 acr_values: validated.acr_values(),
+                dpop_jkt: None,
+                auth_code_lifetime_seconds: auth_code_lifetime,
             };
 
             issue_code_and_redirect(
@@ -790,7 +841,8 @@ async fn handle_jar_request(
                     &state.config().base_url,
                 );
             }
-            store_pending_and_redirect(state, validated).await
+            // JAR flow: no DPoP key binding at the browser endpoint.
+            store_pending_and_redirect(state, validated, None).await
         }
     }
 }
@@ -798,7 +850,7 @@ async fn handle_jar_request(
 /// Handle an authorization request using a pushed authorization request URI (RFC 9126).
 ///
 /// Consumes the PAR (single-use) and proceeds with the normal authorization flow
-/// using the stored parameters.
+/// using the stored parameters, including any DPoP key binding from the PAR record.
 async fn handle_par_request(
     state: &Arc<AppState>,
     request_uri: &str,
@@ -911,6 +963,9 @@ async fn handle_par_request(
     // Try to get existing session from cookie
     let session_token = jar.get("vouch_session").map(|c| c.value());
 
+    // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
+    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
+
     // Check if we have a valid session
     match check_session_for_authorization(state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
@@ -956,7 +1011,8 @@ async fn handle_par_request(
             }
 
             if needs_reauth {
-                return store_pending_and_redirect(state, validated).await;
+                // Preserve DPoP key binding from PAR through the login redirect.
+                return store_pending_and_redirect(state, validated, par.dpop_jkt.as_deref()).await;
             }
 
             // RFC 9470: Validate requested ACR
@@ -988,7 +1044,8 @@ async fn handle_par_request(
                 );
             }
 
-            // Issue authorization code
+            // Issue authorization code. Thread dpop_jkt from the PAR record so the
+            // token endpoint can enforce DPoP key binding (RFC 9449 Section 10).
             let code_params = AuthorizationCodeParams {
                 client_id: validated.client_id(),
                 redirect_uri: validated.redirect_uri(),
@@ -1002,6 +1059,8 @@ async fn handle_par_request(
                 code_challenge_method: validated.code_challenge_method(),
                 resource: validated.resource(),
                 acr_values: validated.acr_values(),
+                dpop_jkt: par.dpop_jkt.as_deref(),
+                auth_code_lifetime_seconds: auth_code_lifetime,
             };
 
             issue_code_and_redirect(
@@ -1022,7 +1081,8 @@ async fn handle_par_request(
                     &state.config().base_url,
                 );
             }
-            store_pending_and_redirect(state, validated).await
+            // Preserve DPoP key binding from PAR through the login redirect.
+            store_pending_and_redirect(state, validated, par.dpop_jkt.as_deref()).await
         }
     }
 }
@@ -1062,6 +1122,8 @@ async fn issue_code_and_redirect(
 /// Build an authorization redirect URL with the given query parameters.
 ///
 /// Uses `url::Url` for proper encoding instead of manual string concatenation.
+/// axum's `Redirect::to()` produces a 303 See Other, which is correct for
+/// FAPI 2.0 and the OAuth best-practice POST-redirect-GET pattern (RFC 9700).
 fn build_authorization_redirect(redirect_uri: &str, params: &[(&str, &str)]) -> Response {
     match url::Url::parse(redirect_uri) {
         Ok(mut url) => {

@@ -53,6 +53,10 @@ pub(super) async fn issue_oauth_access_token_with_scope(
         code_challenge_method: None,
         resource: None,
         acr_values: None,
+        dpop_jkt: None,
+        // Use standard lifetime for test helpers; FAPI enforcement tested separately.
+        auth_code_lifetime_seconds:
+            crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
     };
 
     let code = issue_authorization_code(state, code_params)

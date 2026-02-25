@@ -274,6 +274,9 @@ async fn test_rfc7523_private_key_jwt_client_auth_full_flow() {
             code_challenge_method: None,
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -335,6 +338,9 @@ async fn test_rfc7523_private_key_jwt_jti_replay_rejected() {
             code_challenge_method: None,
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -410,6 +416,9 @@ async fn test_rfc7523_private_key_jwt_expired_assertion_rejected() {
             code_challenge_method: None,
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -473,6 +482,9 @@ async fn test_rfc7523_private_key_jwt_wrong_audience() {
             code_challenge_method: None,
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -530,6 +542,9 @@ async fn test_rfc7523_private_key_jwt_wrong_key() {
             code_challenge_method: None,
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -579,6 +594,9 @@ async fn test_rfc7523_private_key_jwt_iss_sub_mismatch() {
             code_challenge_method: None,
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -643,6 +661,9 @@ async fn test_rfc7521_mutual_exclusion_secret_and_assertion() {
             code_challenge_method: None,
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await

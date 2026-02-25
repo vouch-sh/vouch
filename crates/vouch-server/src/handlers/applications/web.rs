@@ -5,7 +5,7 @@
 //! self-service application management portal.
 
 use crate::AppState;
-use crate::db::{self, AccessScope, OAuthClientType};
+use crate::db::{self, AccessScope, FapiProfile, OAuthClientType, UpdateOAuthClientParams};
 use axum::{
     Form,
     extract::{Path, State},
@@ -174,6 +174,90 @@ pub async fn create_application_form(
         }
     }
 
+    // Determine FAPI profile
+    let is_fapi = form
+        .fapi_profile
+        .as_deref()
+        .is_some_and(|p| p == "fapi2_security");
+
+    // FAPI validation: must be a confidential client type
+    if is_fapi && !matches!(app_type, OAuthClientType::Web | OAuthClientType::Service) {
+        return ApplicationErrorTemplate {
+            title: "Invalid Input".to_string(),
+            message: "FAPI 2.0 Security Profile requires a confidential client type \
+                      (Web Application or Service)."
+                .to_string(),
+            back_url: "/applications/new".to_string(),
+        }
+        .into_response();
+    }
+
+    // FAPI validation: require JWKS or JWKS URI
+    let jwks_trimmed = form
+        .jwks
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let jwks_uri_trimmed = form
+        .jwks_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if is_fapi && jwks_trimmed.is_none() && jwks_uri_trimmed.is_none() {
+        return ApplicationErrorTemplate {
+            title: "Invalid Input".to_string(),
+            message: "FAPI 2.0 requires a JWKS (inline JSON) or JWKS URI for \
+                      private_key_jwt authentication."
+                .to_string(),
+            back_url: "/applications/new".to_string(),
+        }
+        .into_response();
+    }
+
+    // Validate JWKS JSON if provided
+    if let Some(jwks_json) = jwks_trimmed {
+        match serde_json::from_str::<serde_json::Value>(jwks_json) {
+            Ok(val) => {
+                if !val
+                    .get("keys")
+                    .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
+                {
+                    return ApplicationErrorTemplate {
+                        title: "Invalid Input".to_string(),
+                        message: "JWKS must be a JSON object with a non-empty \"keys\" array."
+                            .to_string(),
+                        back_url: "/applications/new".to_string(),
+                    }
+                    .into_response();
+                }
+            }
+            Err(_) => {
+                return ApplicationErrorTemplate {
+                    title: "Invalid Input".to_string(),
+                    message: "JWKS must be valid JSON.".to_string(),
+                    back_url: "/applications/new".to_string(),
+                }
+                .into_response();
+            }
+        }
+    }
+
+    // Validate JWKS URI if provided
+    if let Some(uri) = jwks_uri_trimmed {
+        match url::Url::parse(uri) {
+            Ok(parsed) if parsed.scheme() == "https" => {}
+            _ => {
+                return ApplicationErrorTemplate {
+                    title: "Invalid Input".to_string(),
+                    message: "JWKS URI must be a valid https:// URL.".to_string(),
+                    back_url: "/applications/new".to_string(),
+                }
+                .into_response();
+            }
+        }
+    }
+
     // Create the application
     let (client, client_id) = match db::create_oauth_client(
         &state.db,
@@ -200,8 +284,43 @@ pub async fn create_application_form(
         }
     };
 
-    // Generate client secret for confidential clients
-    let client_secret = if app_type.requires_secret() {
+    // If FAPI is enabled, update the client with FAPI settings
+    if is_fapi
+        && let Err(e) = db::update_oauth_client(
+            &state.db,
+            &UpdateOAuthClientParams {
+                id: &client.id,
+                name,
+                description: form.description.as_deref(),
+                redirect_uris: &redirect_uris,
+                access_scope: Some(access_scope),
+                org_id,
+                resource_uris: &resource_uris,
+                token_endpoint_auth_method: "private_key_jwt",
+                jwks: jwks_trimmed,
+                jwks_uri: jwks_uri_trimmed,
+                fapi_profile: FapiProfile::Fapi2Security,
+                dpop_bound_access_tokens: true,
+            },
+        )
+        .await
+    {
+        tracing::error!("Failed to apply FAPI settings: {}", e);
+        if let Err(cleanup_err) = db::delete_oauth_client(&state.db, &client.id).await {
+            tracing::warn!(
+                "Failed to clean up OAuth client after FAPI settings failure: {cleanup_err}"
+            );
+        }
+        return ApplicationErrorTemplate {
+            title: "Error".to_string(),
+            message: "Failed to create application.".to_string(),
+            back_url: "/applications/new".to_string(),
+        }
+        .into_response();
+    }
+
+    // Generate client secret for confidential clients (skip for FAPI — they use private_key_jwt)
+    let client_secret = if app_type.requires_secret() && !is_fapi {
         let secret = generate_client_secret();
         let secret_hash = hash_token(&secret);
 
@@ -241,7 +360,7 @@ pub async fn create_application_form(
         client_id,
         client_secret,
         application_type: form.application_type,
-        requires_secret: app_type.requires_secret(),
+        requires_secret: app_type.requires_secret() && !is_fapi,
         auth,
     }
     .into_response()
@@ -420,16 +539,154 @@ pub async fn update_application_form(
         }
     }
 
+    // Determine FAPI profile
+    let is_fapi = form
+        .fapi_profile
+        .as_deref()
+        .is_some_and(|p| p == "fapi2_security");
+
+    // FAPI validation: must be a confidential client type
+    if is_fapi
+        && !matches!(
+            client.application_type,
+            OAuthClientType::Web | OAuthClientType::Service
+        )
+    {
+        return ApplicationErrorTemplate {
+            title: "Invalid Input".to_string(),
+            message: "FAPI 2.0 Security Profile requires a confidential client type \
+                      (Web Application or Service)."
+                .to_string(),
+            back_url: format!("/applications/{}", app_id),
+        }
+        .into_response();
+    }
+
+    // FAPI validation: require JWKS or JWKS URI
+    let jwks_trimmed = form
+        .jwks
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let jwks_uri_trimmed = form
+        .jwks_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if is_fapi && jwks_trimmed.is_none() && jwks_uri_trimmed.is_none() {
+        // If transitioning to FAPI, check if client already has JWKS configured
+        if client.jwks.is_none() && client.jwks_uri.is_none() {
+            return ApplicationErrorTemplate {
+                title: "Invalid Input".to_string(),
+                message: "FAPI 2.0 requires a JWKS (inline JSON) or JWKS URI for \
+                          private_key_jwt authentication."
+                    .to_string(),
+                back_url: format!("/applications/{}", app_id),
+            }
+            .into_response();
+        }
+    }
+
+    // Validate JWKS JSON if provided
+    if let Some(jwks_json) = jwks_trimmed {
+        match serde_json::from_str::<serde_json::Value>(jwks_json) {
+            Ok(val) => {
+                if !val
+                    .get("keys")
+                    .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
+                {
+                    return ApplicationErrorTemplate {
+                        title: "Invalid Input".to_string(),
+                        message: "JWKS must be a JSON object with a non-empty \"keys\" array."
+                            .to_string(),
+                        back_url: format!("/applications/{}", app_id),
+                    }
+                    .into_response();
+                }
+            }
+            Err(_) => {
+                return ApplicationErrorTemplate {
+                    title: "Invalid Input".to_string(),
+                    message: "JWKS must be valid JSON.".to_string(),
+                    back_url: format!("/applications/{}", app_id),
+                }
+                .into_response();
+            }
+        }
+    }
+
+    // Validate JWKS URI if provided
+    if let Some(uri) = jwks_uri_trimmed {
+        match url::Url::parse(uri) {
+            Ok(parsed) if parsed.scheme() == "https" => {}
+            _ => {
+                return ApplicationErrorTemplate {
+                    title: "Invalid Input".to_string(),
+                    message: "JWKS URI must be a valid https:// URL.".to_string(),
+                    back_url: format!("/applications/{}", app_id),
+                }
+                .into_response();
+            }
+        }
+    }
+
+    // Compute FAPI-related values: merge form values with existing client values
+    let fapi_profile = if is_fapi {
+        FapiProfile::Fapi2Security
+    } else {
+        FapiProfile::None
+    };
+
+    let token_endpoint_auth_method = if is_fapi {
+        "private_key_jwt"
+    } else if !is_fapi && client.is_fapi() {
+        // Transitioning from FAPI to Standard: reset to default
+        "client_secret_basic"
+    } else {
+        client.token_endpoint_auth_method.as_str()
+    };
+
+    // Resolve final JWKS values: use form values if provided, otherwise keep existing
+    let effective_jwks = if jwks_trimmed.is_some() {
+        jwks_trimmed
+    } else if is_fapi {
+        client.jwks.as_deref()
+    } else {
+        None
+    };
+
+    let effective_jwks_uri = if jwks_uri_trimmed.is_some() {
+        jwks_uri_trimmed
+    } else if is_fapi {
+        client.jwks_uri.as_deref()
+    } else {
+        None
+    };
+
+    let dpop_bound = if is_fapi {
+        true
+    } else {
+        client.dpop_bound_access_tokens
+    };
+
     // Update the application
     if let Err(e) = db::update_oauth_client(
         &state.db,
-        &app_id,
-        name,
-        form.description.as_deref(),
-        &redirect_uris,
-        access_scope,
-        org_id,
-        &resource_uris,
+        &UpdateOAuthClientParams {
+            id: &app_id,
+            name,
+            description: form.description.as_deref(),
+            redirect_uris: &redirect_uris,
+            access_scope,
+            org_id,
+            resource_uris: &resource_uris,
+            token_endpoint_auth_method,
+            jwks: effective_jwks,
+            jwks_uri: effective_jwks_uri,
+            fapi_profile,
+            dpop_bound_access_tokens: dpop_bound,
+        },
     )
     .await
     {

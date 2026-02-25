@@ -47,6 +47,12 @@ pub struct PushedAuthorizationRequest {
     pub max_age: Option<i64>,
     /// RFC 9470: Requested prompt behavior.
     pub prompt: Option<String>,
+    /// RFC 9449 / FAPI 2.0: DPoP key thumbprint bound at PAR time.
+    ///
+    /// When a DPoP proof is provided at the PAR endpoint, the JWK thumbprint
+    /// of the key is stored here and later verified at the token endpoint to
+    /// ensure the same key is used throughout the authorization flow.
+    pub dpop_jkt: Option<String>,
     pub created_at: DbTimestamp,
     pub expires_at: DbTimestamp,
     pub consumed_at: Option<DbTimestamp>,
@@ -71,6 +77,8 @@ pub struct CreateParParams<'a> {
     pub max_age: Option<i64>,
     /// RFC 9470: Requested prompt behavior.
     pub prompt: Option<&'a str>,
+    /// RFC 9449 / FAPI 2.0: DPoP key thumbprint for authorization code binding.
+    pub dpop_jkt: Option<&'a str>,
 }
 
 /// Generate a cryptographically random `request_uri` per RFC 9126 Section 2.2.
@@ -132,6 +140,7 @@ pub async fn create_pushed_authorization_request(
                 PushedAuthorizationRequests::AcrValues,
                 PushedAuthorizationRequests::MaxAge,
                 PushedAuthorizationRequests::Prompt,
+                PushedAuthorizationRequests::DpopJkt,
                 PushedAuthorizationRequests::CreatedAt,
                 PushedAuthorizationRequests::ExpiresAt,
             ])
@@ -150,6 +159,7 @@ pub async fn create_pushed_authorization_request(
                 params.acr_values.into(),
                 params.max_age.into(),
                 params.prompt.into(),
+                params.dpop_jkt.into(),
                 created_at.as_str().into(),
                 expires_at.as_str().into(),
             ])
@@ -223,6 +233,7 @@ pub async fn consume_pushed_authorization_request(
                 PushedAuthorizationRequests::AcrValues,
                 PushedAuthorizationRequests::MaxAge,
                 PushedAuthorizationRequests::Prompt,
+                PushedAuthorizationRequests::DpopJkt,
                 PushedAuthorizationRequests::CreatedAt,
                 PushedAuthorizationRequests::ExpiresAt,
                 PushedAuthorizationRequests::ConsumedAt,
@@ -293,6 +304,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
         };
 
         let (_id, request_uri) = create_pushed_authorization_request(&pool, params)
@@ -313,6 +325,40 @@ mod tests {
         assert_eq!(record.scope, Some("openid email".to_string()));
         assert_eq!(record.state, Some("state123".to_string()));
         assert_eq!(record.code_challenge, Some("challenge789".to_string()));
+        assert_eq!(record.dpop_jkt, None);
+    }
+
+    #[tokio::test]
+    async fn test_par_with_dpop_jkt() {
+        let pool = test_pool().await;
+
+        let params = CreateParParams {
+            client_id: "test-client",
+            response_type: "code",
+            redirect_uri: "https://example.com/callback",
+            scope: Some("openid"),
+            state: None,
+            nonce: None,
+            code_challenge: Some("challenge"),
+            code_challenge_method: Some("S256"),
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            dpop_jkt: Some("abc123thumbprint"),
+        };
+
+        let (_id, request_uri) = create_pushed_authorization_request(&pool, params)
+            .await
+            .unwrap();
+
+        let record = consume_pushed_authorization_request(&pool, &request_uri, "test-client")
+            .await
+            .unwrap();
+        assert!(record.is_some());
+
+        let record = record.unwrap();
+        assert_eq!(record.dpop_jkt, Some("abc123thumbprint".to_string()));
     }
 
     #[tokio::test]
@@ -332,6 +378,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
         };
 
         let (_id, request_uri) = create_pushed_authorization_request(&pool, params)
@@ -368,6 +415,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
         };
 
         let (_id, request_uri) = create_pushed_authorization_request(&pool, params)

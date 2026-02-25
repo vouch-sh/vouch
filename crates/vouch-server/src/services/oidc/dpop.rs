@@ -457,8 +457,7 @@ async fn validate_dpop_common(
     )?;
 
     // Validate nonce via database if provided — atomic DELETE WHERE nonce=? AND expires_at > now
-    if claims.nonce.is_some() {
-        let nonce = claims.nonce.as_deref().unwrap_or("");
+    if let Some(nonce) = claims.nonce.as_deref() {
         let valid = db::validate_and_consume_dpop_nonce(pool, nonce)
             .await
             .map_err(|e| DpopError::InvalidFormat(format!("nonce validation failed: {e}")))?;

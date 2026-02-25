@@ -59,6 +59,9 @@ async fn test_rfc7636_code_verifier_too_short() {
             ),
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -158,6 +161,9 @@ async fn test_rfc7636_end_to_end_pkce_flow() {
             ),
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -220,6 +226,9 @@ async fn test_rfc7636_wrong_verifier_rejected() {
             ),
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -281,6 +290,9 @@ async fn test_rfc7636_code_verifier_length_too_short() {
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -338,6 +350,9 @@ async fn test_rfc7636_code_verifier_too_long() {
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -394,6 +409,9 @@ async fn test_rfc7636_complete_pkce_s256_flow() {
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -450,6 +468,9 @@ async fn issue_pkce_code(
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await

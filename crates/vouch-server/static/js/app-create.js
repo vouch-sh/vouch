@@ -1,4 +1,5 @@
-// Application creation form: redirect URI validation, resource URI validation, app type toggling.
+// Application creation form: redirect URI validation, resource URI validation,
+// app type toggling, FAPI 2.0 security profile.
 
 (function() {
     document.addEventListener('DOMContentLoaded', function() {
@@ -9,6 +10,12 @@
         var resourceError = document.getElementById('resource-uri-error');
         var nameInput = document.getElementById('name');
         var form = document.querySelector('form');
+        var securityProfileSection = document.getElementById('security-profile-section');
+        var fapiJwksSection = document.getElementById('fapi-jwks-section');
+        var jwksTextarea = document.getElementById('jwks');
+        var jwksError = document.getElementById('jwks-error');
+        var jwksUriInput = document.getElementById('jwks_uri');
+        var jwksUriError = document.getElementById('jwks-uri-error');
 
         // Validate redirect URIs and return error message (or null if valid)
         function validateRedirectUris() {
@@ -113,7 +120,94 @@
             }
         }
 
-        // Hide redirect URIs for service type
+        // Show/hide a generic field error
+        function showFieldError(errorEl, inputEl, message) {
+            if (message) {
+                errorEl.textContent = message;
+                errorEl.classList.remove('hidden');
+                inputEl.classList.add('border-vouch-error');
+            } else {
+                errorEl.classList.add('hidden');
+                inputEl.classList.remove('border-vouch-error');
+            }
+        }
+
+        // Whether the selected app type is confidential (supports FAPI)
+        function isConfidentialType() {
+            var appTypeRadio = document.querySelector('input[name="application_type"]:checked');
+            var appType = appTypeRadio ? appTypeRadio.value : 'web';
+            return appType === 'web' || appType === 'service';
+        }
+
+        // Whether FAPI 2.0 is selected
+        function isFapiSelected() {
+            var fapiRadio = document.querySelector('input[name="fapi_profile"]:checked');
+            return fapiRadio && fapiRadio.value === 'fapi2_security';
+        }
+
+        // Update security profile section visibility based on app type
+        function updateSecurityProfileVisibility() {
+            if (isConfidentialType()) {
+                securityProfileSection.classList.remove('hidden');
+            } else {
+                securityProfileSection.classList.add('hidden');
+                // Reset to standard when hiding
+                var standardRadio = document.querySelector('input[name="fapi_profile"][value=""]');
+                if (standardRadio) {
+                    standardRadio.checked = true;
+                }
+                fapiJwksSection.classList.add('hidden');
+            }
+        }
+
+        // Update JWKS section visibility based on FAPI selection
+        function updateFapiJwksVisibility() {
+            if (isFapiSelected()) {
+                fapiJwksSection.classList.remove('hidden');
+            } else {
+                fapiJwksSection.classList.add('hidden');
+            }
+        }
+
+        // Validate JWKS JSON
+        function validateJwks() {
+            var value = jwksTextarea.value.trim();
+            if (!value) {
+                return null; // Empty is ok — might use JWKS URI instead
+            }
+
+            try {
+                var parsed = JSON.parse(value);
+                if (!parsed.keys || !Array.isArray(parsed.keys) || parsed.keys.length === 0) {
+                    return 'JWKS must be a JSON object with a non-empty "keys" array.';
+                }
+            } catch (e) {
+                return 'JWKS must be valid JSON.';
+            }
+
+            return null;
+        }
+
+        // Validate JWKS URI
+        function validateJwksUri() {
+            var value = jwksUriInput.value.trim();
+            if (!value) {
+                return null; // Empty is ok — might use inline JWKS instead
+            }
+
+            try {
+                var url = new URL(value);
+                if (url.protocol !== 'https:') {
+                    return 'JWKS URI must use https://.';
+                }
+            } catch (e) {
+                return 'JWKS URI must be a valid https:// URL.';
+            }
+
+            return null;
+        }
+
+        // Hide redirect URIs for service type, show/hide security profile
         var appTypeRadios = document.querySelectorAll('input[name="application_type"]');
         for (var i = 0; i < appTypeRadios.length; i++) {
             appTypeRadios[i].addEventListener('change', function() {
@@ -128,8 +222,18 @@
                         showRedirectError(validateRedirectUris());
                     }
                 }
+                updateSecurityProfileVisibility();
             });
         }
+
+        // Toggle JWKS fields when FAPI radio changes
+        var fapiRadios = document.querySelectorAll('input[name="fapi_profile"]');
+        for (var i = 0; i < fapiRadios.length; i++) {
+            fapiRadios[i].addEventListener('change', updateFapiJwksVisibility);
+        }
+
+        // Initial visibility
+        updateSecurityProfileVisibility();
 
         // Validate redirect URIs on blur
         redirectTextarea.addEventListener('blur', function() {
@@ -160,6 +264,20 @@
                 resourceTextarea.validateTimeout = setTimeout(function() {
                     showResourceError(validateResourceUris());
                 }, 500);
+            }
+        });
+
+        // Validate JWKS on blur
+        jwksTextarea.addEventListener('blur', function() {
+            if (jwksTextarea.value.trim()) {
+                showFieldError(jwksError, jwksTextarea, validateJwks());
+            }
+        });
+
+        // Validate JWKS URI on blur
+        jwksUriInput.addEventListener('blur', function() {
+            if (jwksUriInput.value.trim()) {
+                showFieldError(jwksUriError, jwksUriInput, validateJwksUri());
             }
         });
 
@@ -197,6 +315,43 @@
                     resourceTextarea.focus();
                 }
                 hasError = true;
+            }
+
+            // FAPI JWKS validation
+            if (isFapiSelected()) {
+                var jwksErr = validateJwks();
+                if (jwksErr) {
+                    e.preventDefault();
+                    showFieldError(jwksError, jwksTextarea, jwksErr);
+                    if (!hasError) {
+                        jwksTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        jwksTextarea.focus();
+                    }
+                    hasError = true;
+                }
+
+                var jwksUriErr = validateJwksUri();
+                if (jwksUriErr) {
+                    e.preventDefault();
+                    showFieldError(jwksUriError, jwksUriInput, jwksUriErr);
+                    if (!hasError) {
+                        jwksUriInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        jwksUriInput.focus();
+                    }
+                    hasError = true;
+                }
+
+                // At least one of JWKS or JWKS URI must be provided
+                if (!jwksTextarea.value.trim() && !jwksUriInput.value.trim()) {
+                    e.preventDefault();
+                    var msg = 'FAPI 2.0 requires either a JWKS or JWKS URI.';
+                    showFieldError(jwksError, jwksTextarea, msg);
+                    if (!hasError) {
+                        jwksTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                        jwksTextarea.focus();
+                    }
+                    hasError = true;
+                }
             }
 
             if (hasError) {

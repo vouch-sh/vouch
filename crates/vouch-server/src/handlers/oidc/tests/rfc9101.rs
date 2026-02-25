@@ -149,12 +149,20 @@ async fn test_rfc9101_discovery_includes_request_object_signing_alg_values_suppo
     let algs = doc["request_object_signing_alg_values_supported"]
         .as_array()
         .expect("Must be an array");
-    assert!(algs.len() >= 2, "Must support at least ES256 and RS256");
+    assert!(
+        algs.len() >= 3,
+        "Must support at least ES256, PS256, and EdDSA"
+    );
 
     let alg_strs: Vec<&str> = algs.iter().map(|v| v.as_str().unwrap()).collect();
     assert!(alg_strs.contains(&"ES256"), "Must support ES256");
-    assert!(alg_strs.contains(&"RS256"), "Must support RS256");
     assert!(alg_strs.contains(&"PS256"), "Must support PS256");
+    assert!(alg_strs.contains(&"EdDSA"), "Must support EdDSA");
+    // RS256 is excluded per FAPI 2.0 Section 5.2.2
+    assert!(
+        !alg_strs.contains(&"RS256"),
+        "RS256 must be excluded per FAPI 2.0"
+    );
 }
 
 #[tokio::test]

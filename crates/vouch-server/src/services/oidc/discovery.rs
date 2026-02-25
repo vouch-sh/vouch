@@ -56,6 +56,8 @@ pub struct OidcDiscoveryDocument {
     /// RFC 7636 Section 6.2: Supported PKCE code challenge methods.
     pub code_challenge_methods_supported: Vec<String>,
     /// RFC 9449 Section 5.1: Supported DPoP JWS signing algorithms.
+    ///
+    /// RS256 is excluded per FAPI 2.0 Section 5.2.2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dpop_signing_alg_values_supported: Option<Vec<String>>,
     /// OIDC Discovery 1.0 Section 3: OPTIONAL. Supported ACR values.
@@ -69,6 +71,9 @@ pub struct OidcDiscoveryDocument {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub resource_indicators_supported: Option<bool>,
     /// RFC 7523: Supported JWS algorithms for JWT client authentication.
+    ///
+    /// Includes PS256 and EdDSA per FAPI 2.0 requirements; RS256 is excluded
+    /// per FAPI 2.0 Section 5.2.2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub token_endpoint_auth_signing_alg_values_supported: Option<Vec<String>>,
     /// RFC 9126: URL of the Pushed Authorization Request endpoint.
@@ -79,10 +84,17 @@ pub struct OidcDiscoveryDocument {
     /// RFC 9101: Whether the server supports the `request` parameter.
     pub request_parameter_supported: bool,
     /// RFC 9101: Supported JWS algorithms for Request Object signing.
+    ///
+    /// Includes EdDSA and PS256 per FAPI 2.0; RS256 is excluded per FAPI 2.0 Section 5.2.2.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_object_signing_alg_values_supported: Option<Vec<String>>,
     /// RFC 9101: Whether all authorization requests must use signed Request Objects.
     pub require_signed_request_object: bool,
+    /// OAuth 2.0 Mutual TLS Client Authentication — not supported.
+    ///
+    /// Explicitly advertised as `false` so FAPI 2.0 conformance tools know we do
+    /// not support mTLS certificate-bound access tokens (we use DPoP instead).
+    pub tls_client_certificate_bound_access_tokens: bool,
 }
 
 /// JSON Web Key Set response (RFC 7517 Section 5).
@@ -149,9 +161,10 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "acr".to_string(),
         ],
         code_challenge_methods_supported: vec!["S256".to_string()],
+        // RS256 excluded per FAPI 2.0 Section 5.2.2.
         dpop_signing_alg_values_supported: Some(vec![
             "ES256".to_string(),
-            "RS256".to_string(),
+            "PS256".to_string(),
             "EdDSA".to_string(),
         ]),
         acr_values_supported: Some(vec![ACR_AAL3.to_string()]),
@@ -159,22 +172,28 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         authorization_response_iss_parameter_supported: true,
         // RFC 8707: Advertise resource indicator support
         resource_indicators_supported: Some(true),
-        // RFC 7523: Advertise supported signing algorithms for JWT client auth
+        // RFC 7523: JWT client auth signing algorithms.
+        // PS256 and EdDSA added per FAPI 2.0; RS256 excluded per FAPI 2.0 Section 5.2.2.
         token_endpoint_auth_signing_alg_values_supported: Some(vec![
             "ES256".to_string(),
-            "RS256".to_string(),
+            "PS256".to_string(),
+            "EdDSA".to_string(),
         ]),
         // RFC 9126: Pushed Authorization Request endpoint
         pushed_authorization_request_endpoint: Some(format!("{base_url}/oauth/par")),
         require_pushed_authorization_requests: false,
         // RFC 9101: JWT-Secured Authorization Request support
         request_parameter_supported: true,
+        // Request Object signing algorithms: EdDSA added per FAPI 2.0; RS256 excluded
+        // per FAPI 2.0 Section 5.2.2.
         request_object_signing_alg_values_supported: Some(vec![
             "ES256".to_string(),
-            "RS256".to_string(),
             "PS256".to_string(),
+            "EdDSA".to_string(),
         ]),
         require_signed_request_object: false,
+        // We use DPoP (not mTLS) for sender-constrained tokens.
+        tls_client_certificate_bound_access_tokens: false,
     }
 }
 

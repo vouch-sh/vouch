@@ -19,9 +19,11 @@
 //! - [RFC 9101 - JWT-Secured Authorization Request (JAR)](https://www.rfc-editor.org/rfc/rfc9101)
 //! - [RFC 9126 - Pushed Authorization Requests](https://www.rfc-editor.org/rfc/rfc9126)
 //! - [RFC 9449 - DPoP](https://www.rfc-editor.org/rfc/rfc9449)
+//! - [FAPI 2.0 Security Profile](https://openid.net/specs/fapi-security-profile-2_0-final.html)
 //!
 //! ## Module Organization
 //!
+//! - [`fapi`] - FAPI 2.0 Security Profile validation
 //! - [`keys`] - ES256 signing key management and JWK export
 //! - [`discovery`] - OIDC Discovery document and JWKS generation
 //! - [`authorization`] - Authorization code issuance and validation
@@ -37,6 +39,7 @@ pub mod claims;
 pub mod discovery;
 pub mod dpop;
 pub mod exchange;
+pub mod fapi;
 pub mod introspection;
 pub mod jar;
 pub mod jwt_bearer;

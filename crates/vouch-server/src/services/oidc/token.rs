@@ -303,6 +303,29 @@ pub async fn exchange_authorization_code(
     // Validate PKCE code_verifier if code_challenge was present
     validate_pkce(&auth_code, params.code_verifier)?;
 
+    // FAPI 2.0 / RFC 9449 Section 10: Verify DPoP authorization code binding.
+    // If the authorization code was bound to a DPoP key at PAR time, the same
+    // key must be used at the token endpoint.
+    if let Some(ref bound_jkt) = auth_code.dpop_jkt {
+        let proof_jkt = match &params.dpop_proof {
+            Some(proof) => &proof.jkt,
+            None => {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidGrant,
+                    "Authorization code is bound to a DPoP key but no DPoP proof was provided",
+                ));
+            }
+        };
+        // Constant-time comparison to prevent timing attacks
+        let is_match: bool = bound_jkt.as_bytes().ct_eq(proof_jkt.as_bytes()).into();
+        if !is_match {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "DPoP key does not match the key bound during authorization",
+            ));
+        }
+    }
+
     // RFC 9470 Section 4: Defense-in-depth ACR validation.
     // If the authorization code carried acr_values, verify that Vouch's AAL3
     // is among the requested values. The authorization endpoint already checks
@@ -775,6 +798,7 @@ mod tests {
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
         };
@@ -800,6 +824,7 @@ mod tests {
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
         };
@@ -825,6 +850,7 @@ mod tests {
             code_challenge_method: Some(CodeChallengeMethod::S256),
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
         };
@@ -851,6 +877,7 @@ mod tests {
             code_challenge_method: None,
             resource: None,
             acr_values: None,
+            dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
         };

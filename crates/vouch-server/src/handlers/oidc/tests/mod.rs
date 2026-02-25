@@ -11,6 +11,7 @@
 mod helpers;
 
 mod e2e;
+mod fapi2;
 mod oidc_core;
 mod oidc_discovery;
 mod oidc_userinfo;

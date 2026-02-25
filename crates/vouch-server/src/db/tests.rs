@@ -396,13 +396,20 @@ async fn test_oauth_client_crud() {
     ];
     update_oauth_client(
         &pool,
-        &client.id,
-        "My Updated App",
-        Some("Updated desc"),
-        &new_redirect_uris,
-        None,
-        None,
-        &[],
+        &UpdateOAuthClientParams {
+            id: &client.id,
+            name: "My Updated App",
+            description: Some("Updated desc"),
+            redirect_uris: &new_redirect_uris,
+            access_scope: None,
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: client.token_endpoint_auth_method.as_str(),
+            jwks: client.jwks.as_deref(),
+            jwks_uri: client.jwks_uri.as_deref(),
+            fapi_profile: client.fapi_profile(),
+            dpop_bound_access_tokens: client.dpop_bound_access_tokens,
+        },
     )
     .await
     .expect("Failed to update client");

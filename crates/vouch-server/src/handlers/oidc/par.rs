@@ -10,7 +10,9 @@ use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::authorization::{
     AuthorizeRequestParams, Prompt, validate_authorize_request,
 };
+use crate::services::oidc::dpop::DpopError;
 use crate::services::oidc::jar::validate_request_object;
+use crate::services::oidc::token::validate_dpop_if_present;
 use axum::{
     Json,
     extract::State,
@@ -161,6 +163,55 @@ pub async fn par(
         );
     };
 
+    // FAPI 2.0: Validate client authentication method.
+    //
+    // FAPI 2.0 Section 5.2.2 requires `private_key_jwt`. Client secrets and
+    // public-client ("none") authentication are rejected for FAPI clients.
+    if let Err(e) = crate::services::oidc::fapi::validate_fapi_client_auth_method(
+        &authenticated_client.client,
+        &authenticated_client.client.token_endpoint_auth_method,
+    ) {
+        let desc = match &e {
+            ServiceError::OAuth { description, .. } => description.clone(),
+            _ => e.to_string(),
+        };
+        return par_error_response(StatusCode::UNAUTHORIZED, "invalid_client", &desc);
+    }
+
+    // RFC 9449 Section 10: Capture DPoP proof at PAR for authorization code binding.
+    // If a DPoP proof is provided, bind the JWK thumbprint to the PAR record so
+    // that the same key must be used at the token endpoint.
+    let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
+    let dpop_proof = match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/par").await
+    {
+        Ok(proof) => proof,
+        Err(DpopError::UseNonce(nonce)) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                [(
+                    axum::http::header::HeaderName::from_static("dpop-nonce"),
+                    nonce.to_string(),
+                )],
+                Json(OAuthErrorResponse {
+                    error: "use_dpop_nonce".to_string(),
+                    error_description: Some(
+                        "Authorization server requires nonce in DPoP proof".to_string(),
+                    ),
+                    error_uri: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(e) => {
+            return par_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_dpop_proof",
+                &e.to_string(),
+            );
+        }
+    };
+    let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.as_str());
+
     // RFC 9101: If request parameter is present, validate the Request Object JWT
     // and extract parameters from it instead of using the form fields.
     if let Some(ref request_jwt) = params.request {
@@ -241,6 +292,7 @@ pub async fn par(
             acr_values: validated.acr_values(),
             max_age: max_age_i64,
             prompt: validated.prompt().map(|p| p.as_str()),
+            dpop_jkt,
         };
 
         return match db::create_pushed_authorization_request(&state.db, create_params).await {
@@ -344,6 +396,7 @@ pub async fn par(
         acr_values: validated.acr_values(),
         max_age: max_age_i64,
         prompt: validated.prompt().map(|p| p.as_str()),
+        dpop_jkt,
     };
 
     match db::create_pushed_authorization_request(&state.db, create_params).await {

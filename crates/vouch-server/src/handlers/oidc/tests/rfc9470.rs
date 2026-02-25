@@ -629,6 +629,9 @@ async fn test_rfc9470_acr_values_carried_to_token() {
             code_challenge_method: None,
             resource: None,
             acr_values: Some(acr),
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
@@ -699,6 +702,9 @@ async fn test_rfc9470_unsatisfiable_acr_in_token_exchange_rejected() {
             code_challenge_method: None,
             resource: None,
             acr_values: Some(bad_acr),
+            dpop_jkt: None,
+            auth_code_lifetime_seconds:
+                crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         },
     )
     .await
