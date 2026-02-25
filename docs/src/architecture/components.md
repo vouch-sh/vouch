@@ -91,7 +91,7 @@ The authentication backend with built-in certificate authority.
 - 8-hour certificate TTL (matches session)
 - Principals from user email
 
-For details on SSH certificate integration, see [SSH Certificates](../integrations/ssh.md).
+
 
 ### OIDC Provider
 
@@ -114,8 +114,6 @@ Vouch integrates with GitHub via a shared GitHub App to provide short-lived Git 
 3. Git operations automatically request tokens via `vouch credential github`
 4. Tokens are scoped to the specific GitHub organization being accessed
 
-For more on GitHub integration, see [GitHub](../integrations/github.md).
-
 ### External Identity Provider Integration
 
 Vouch uses external identity providers (IdPs) to verify user identity during enrollment. This links a trusted corporate identity to a hardware-bound FIDO2 credential.
@@ -126,4 +124,4 @@ For the full IdP configuration details, see [Identity Provider Overview](../idp/
 
 Developers register their applications through a self-service portal to obtain OAuth client credentials for integrating with Vouch.
 
-For the full application registration workflow, see [Application Registration](../integrations/application-registration.md).
+Application registration is managed through the Vouch web interface.
