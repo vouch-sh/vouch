@@ -69,6 +69,7 @@ fn build_rate_limited_routes() -> Router<Arc<AppState>> {
         )
         .route("/oauth/token", post(handlers::oidc::token))
         .route("/oauth/par", post(handlers::oidc::par))
+        .route("/oauth/register", post(handlers::oidc::register))
         .route("/oauth/device", post(handlers::device::device_code))
         .layer(rate_limit::build_auth_rate_limiter())
 }

@@ -779,6 +779,13 @@ mod tests {
             require_signed_request_object: None,
             fapi_profile: "none".to_string(),
             dpop_bound_access_tokens: false,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: None,
+            registration_access_token_hash: None,
+            registration_metadata: None,
         }
     }
 

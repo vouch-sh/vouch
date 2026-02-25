@@ -210,6 +210,29 @@ impl FapiProfile {
     }
 }
 
+/// RFC 7591: Registration source for an OAuth client.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, sqlx::Type)]
+#[sqlx(type_name = "text")]
+#[sqlx(rename_all = "lowercase")]
+pub enum RegistrationSource {
+    /// Client was registered manually (web UI or API).
+    #[default]
+    Manual,
+    /// Client was registered via RFC 7591 dynamic registration.
+    Dynamic,
+}
+
+impl RegistrationSource {
+    /// Return the string representation for database storage.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::Dynamic => "dynamic",
+        }
+    }
+}
+
 // ============================================================================
 // OAuth Client
 // ============================================================================
@@ -254,6 +277,20 @@ pub struct OAuthClient {
     pub fapi_profile: String,
     /// FAPI 2.0: Whether access tokens must be sender-constrained via DPoP.
     pub dpop_bound_access_tokens: bool,
+    /// RFC 7591: JSON array of allowed grant types.
+    pub grant_types: Option<String>,
+    /// RFC 7591: JSON array of allowed response types.
+    pub response_types: Option<String>,
+    /// RFC 7591: Software identifier (groups CLI instances).
+    pub software_id: Option<String>,
+    /// RFC 7591: Software version string.
+    pub software_version: Option<String>,
+    /// RFC 7591: Registration source (`manual` or `dynamic`).
+    pub registration_source: Option<RegistrationSource>,
+    /// RFC 7591: SHA-256 hash of the registration access token (RFC 7592 prep).
+    pub registration_access_token_hash: Option<String>,
+    /// RFC 7591: JSON blob for cosmetic metadata (client_uri, logo_uri, etc.).
+    pub registration_metadata: Option<String>,
 }
 
 impl OAuthClient {
@@ -329,27 +366,71 @@ const OAUTH_CLIENT_COLUMNS: &[OAuthClients] = &[
     OAuthClients::RequireSignedRequestObject,
     OAuthClients::FapiProfile,
     OAuthClients::DpopBoundAccessTokens,
+    OAuthClients::GrantTypes,
+    OAuthClients::ResponseTypes,
+    OAuthClients::SoftwareId,
+    OAuthClients::SoftwareVersion,
+    OAuthClients::RegistrationSource,
+    OAuthClients::RegistrationAccessTokenHash,
+    OAuthClients::RegistrationMetadata,
 ];
 
+/// Parameters for creating a new OAuth client application.
+///
+/// Replaces the positional arguments to `create_oauth_client()` and includes
+/// RFC 7591 metadata fields for dynamic registration.
+pub struct CreateOAuthClientParams<'a> {
+    pub user_id: &'a str,
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub application_type: OAuthClientType,
+    pub redirect_uris: &'a [String],
+    pub access_scope: AccessScope,
+    pub org_id: Option<&'a str>,
+    pub resource_uris: &'a [String],
+    /// RFC 7523: Token endpoint authentication method.
+    pub token_endpoint_auth_method: Option<&'a str>,
+    /// RFC 7523: Inline JWKS JSON.
+    pub jwks: Option<&'a str>,
+    /// RFC 7523: Remote JWKS endpoint.
+    pub jwks_uri: Option<&'a str>,
+    /// FAPI 2.0: Security profile designation.
+    pub fapi_profile: Option<FapiProfile>,
+    /// FAPI 2.0: Whether access tokens must be DPoP-bound.
+    pub dpop_bound_access_tokens: Option<bool>,
+    /// RFC 7591: Allowed grant types (JSON array).
+    pub grant_types: Option<&'a str>,
+    /// RFC 7591: Allowed response types (JSON array).
+    pub response_types: Option<&'a str>,
+    /// RFC 7591: Software identifier.
+    pub software_id: Option<&'a str>,
+    /// RFC 7591: Software version.
+    pub software_version: Option<&'a str>,
+    /// RFC 7591: Registration source.
+    pub registration_source: RegistrationSource,
+    /// RFC 7591: SHA-256 hash of registration access token.
+    pub registration_access_token_hash: Option<&'a str>,
+    /// RFC 7591: JSON blob of cosmetic metadata.
+    pub registration_metadata: Option<&'a str>,
+}
+
 /// Create a new OAuth client application.
-#[allow(clippy::too_many_arguments)]
 pub async fn create_oauth_client(
     pool: &Pool,
-    user_id: &str,
-    name: &str,
-    description: Option<&str>,
-    application_type: OAuthClientType,
-    redirect_uris: &[String],
-    access_scope: AccessScope,
-    org_id: Option<&str>,
-    resource_uris: &[String],
+    params: &CreateOAuthClientParams<'_>,
 ) -> Result<(OAuthClient, String)> {
     let id = Uuid::now_v7().to_string();
     let client_id = Uuid::now_v7().to_string();
-    let redirect_uris_json = serde_json::to_string(redirect_uris)?;
-    let resource_uris_json = serde_json::to_string(resource_uris)?;
+    let redirect_uris_json = serde_json::to_string(params.redirect_uris)?;
+    let resource_uris_json = serde_json::to_string(params.resource_uris)?;
     let db_type = pool.db_type();
     let now = Timestamp::now().to_string();
+
+    let auth_method = params
+        .token_endpoint_auth_method
+        .unwrap_or(TokenEndpointAuthMethod::default().as_str());
+    let fapi = params.fapi_profile.unwrap_or(FapiProfile::None);
+    let dpop = params.dpop_bound_access_tokens.unwrap_or(false);
 
     let sql = {
         let query = Query::insert()
@@ -366,25 +447,43 @@ pub async fn create_oauth_client(
                 OAuthClients::OrgId,
                 OAuthClients::ResourceUris,
                 OAuthClients::TokenEndpointAuthMethod,
+                OAuthClients::Jwks,
+                OAuthClients::JwksUri,
                 OAuthClients::FapiProfile,
                 OAuthClients::DpopBoundAccessTokens,
+                OAuthClients::GrantTypes,
+                OAuthClients::ResponseTypes,
+                OAuthClients::SoftwareId,
+                OAuthClients::SoftwareVersion,
+                OAuthClients::RegistrationSource,
+                OAuthClients::RegistrationAccessTokenHash,
+                OAuthClients::RegistrationMetadata,
                 OAuthClients::CreatedAt,
                 OAuthClients::UpdatedAt,
             ])
             .values_panic([
                 id.clone().into(),
-                user_id.into(),
+                params.user_id.into(),
                 client_id.clone().into(),
-                name.into(),
-                description.into(),
-                application_type.as_str().into(),
+                params.name.into(),
+                params.description.into(),
+                params.application_type.as_str().into(),
                 redirect_uris_json.into(),
-                access_scope.as_str().into(),
-                org_id.into(),
+                params.access_scope.as_str().into(),
+                params.org_id.into(),
                 resource_uris_json.into(),
-                TokenEndpointAuthMethod::default().as_str().into(),
-                FapiProfile::None.as_db_str().into(),
-                false.into(),
+                auth_method.into(),
+                params.jwks.into(),
+                params.jwks_uri.into(),
+                fapi.as_db_str().into(),
+                dpop.into(),
+                params.grant_types.into(),
+                params.response_types.into(),
+                params.software_id.into(),
+                params.software_version.into(),
+                params.registration_source.as_str().into(),
+                params.registration_access_token_hash.into(),
+                params.registration_metadata.into(),
                 now.as_str().into(),
                 now.as_str().into(),
             ])
@@ -772,6 +871,8 @@ pub enum OAuthEventType {
     TokenRevoked,
     AuthSuccess,
     AuthFailure,
+    /// RFC 7591: Client registered via dynamic registration.
+    ClientRegistered,
 }
 
 impl OAuthEventType {
@@ -784,6 +885,7 @@ impl OAuthEventType {
             Self::TokenRevoked => "token_revoked",
             Self::AuthSuccess => "auth_success",
             Self::AuthFailure => "auth_failure",
+            Self::ClientRegistered => "client_registered",
         }
     }
 }

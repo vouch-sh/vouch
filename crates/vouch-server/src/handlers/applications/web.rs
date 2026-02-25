@@ -5,7 +5,10 @@
 //! self-service application management portal.
 
 use crate::AppState;
-use crate::db::{self, AccessScope, FapiProfile, OAuthClientType, UpdateOAuthClientParams};
+use crate::db::{
+    self, AccessScope, CreateOAuthClientParams, FapiProfile, OAuthClientType, RegistrationSource,
+    UpdateOAuthClientParams,
+};
 use axum::{
     Form,
     extract::{Path, State},
@@ -261,14 +264,28 @@ pub async fn create_application_form(
     // Create the application
     let (client, client_id) = match db::create_oauth_client(
         &state.db,
-        user_id,
-        name,
-        form.description.as_deref(),
-        app_type,
-        &redirect_uris,
-        access_scope,
-        org_id,
-        &resource_uris,
+        &CreateOAuthClientParams {
+            user_id,
+            name,
+            description: form.description.as_deref(),
+            application_type: app_type,
+            redirect_uris: &redirect_uris,
+            access_scope,
+            org_id,
+            resource_uris: &resource_uris,
+            token_endpoint_auth_method: None,
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+        },
     )
     .await
     {

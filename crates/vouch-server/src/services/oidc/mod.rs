@@ -44,6 +44,7 @@ pub mod introspection;
 pub mod jar;
 pub mod jwt_bearer;
 pub mod keys;
+pub mod registration;
 pub mod resource;
 pub mod scope;
 pub mod token;
@@ -55,6 +56,7 @@ pub use discovery::{OidcDiscoveryDocument, build_discovery_document, build_jwks}
 pub use exchange::{TokenExchangeParams, TokenExchangeResult};
 pub use introspection::{IntrospectionResult, RevocationResult};
 pub use keys::{EcJwk, OidcSigningKey};
+pub use registration::{RegistrationRequest, RegistrationResponse, register_client};
 pub use resource::ResourceUri;
 pub use scope::{OAuthScope, ScopeSet};
 pub use token::{

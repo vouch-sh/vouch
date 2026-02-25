@@ -745,3 +745,103 @@ fn test_attestation_malformed_cbor_no_panic() {
         let _ = validate_attestation_object(input);
     }
 }
+
+// =============================================================================
+// RFC 7591 — Dynamic Client Registration Property-Based Tests
+// =============================================================================
+//
+// These tests verify that the registration request validation helpers are safe
+// against arbitrary string input — they must never panic.
+
+proptest! {
+    // =========================================================================
+    // Redirect URI Validation Fuzzing (RFC 7591 Section 2)
+    // =========================================================================
+
+    /// `validate_registration_redirect_uri` must never panic on arbitrary strings.
+    ///
+    /// This mirrors how the handler receives untrusted client input.
+    #[test]
+    fn prop_redirect_uri_validation_no_panic(uri in "\\PC*") {
+        use vouch_server::services::oidc::registration::validate_redirect_uri_for_test;
+
+        // Must not panic — errors are expected for random input
+        let _ = validate_redirect_uri_for_test(&uri);
+    }
+
+    /// Redirect URI validation must not panic on ASCII-printable strings.
+    #[test]
+    fn prop_redirect_uri_validation_ascii_no_panic(
+        chars in prop::collection::vec(0x20u8..0x7Eu8, 0..200)
+    ) {
+        use vouch_server::services::oidc::registration::validate_redirect_uri_for_test;
+
+        if let Ok(s) = String::from_utf8(chars) {
+            // Must not panic
+            let _ = validate_redirect_uri_for_test(&s);
+        }
+    }
+
+    /// Any HTTPS URI should be accepted as a redirect URI.
+    #[test]
+    fn prop_https_redirect_uri_always_accepted(
+        path in "[a-z0-9/._-]{0,50}",
+        host in "[a-z][a-z0-9.-]{0,30}\\.[a-z]{2,6}",
+    ) {
+        use vouch_server::services::oidc::registration::validate_redirect_uri_for_test;
+
+        let uri = format!("https://{host}/{path}");
+        // Any well-formed HTTPS URI must be accepted
+        let result = validate_redirect_uri_for_test(&uri);
+        prop_assert!(
+            result.is_ok(),
+            "HTTPS redirect URI '{uri}' must be accepted: {result:?}"
+        );
+    }
+
+    /// URIs containing '#' must always be rejected (fragment component).
+    #[test]
+    fn prop_redirect_uri_with_fragment_always_rejected(
+        prefix in "https://[a-z]{3,10}\\.[a-z]{2,4}/[a-z]{0,20}",
+        fragment in "[a-z0-9]{1,20}",
+    ) {
+        use vouch_server::services::oidc::registration::validate_redirect_uri_for_test;
+
+        let uri = format!("{prefix}#{fragment}");
+        let result = validate_redirect_uri_for_test(&uri);
+        prop_assert!(
+            result.is_err(),
+            "Redirect URI with fragment '{uri}' must be rejected"
+        );
+    }
+
+    // =========================================================================
+    // Registration Request JSON Deserialization Fuzzing
+    // =========================================================================
+
+    /// Arbitrary JSON strings must not cause deserialization to panic.
+    ///
+    /// The RegistrationRequest struct must safely handle any input string since
+    /// the handler receives raw bytes from untrusted clients.
+    #[test]
+    fn prop_registration_request_deserialize_no_panic(s in "\\PC*") {
+        // Must not panic — errors are expected for most random strings
+        let _: Result<vouch_server::services::oidc::registration::RegistrationRequest, _> =
+            serde_json::from_str(&s);
+    }
+
+    /// JSON objects with arbitrary key/value string pairs must not panic.
+    ///
+    /// RFC 7591 requires ignoring unknown fields — this verifies that property.
+    #[test]
+    fn prop_registration_request_with_arbitrary_keys_no_panic(
+        key in "[a-zA-Z_][a-zA-Z0-9_]{0,30}",
+        value in "\\PC{0,100}",
+    ) {
+        let json = serde_json::json!({ key: value });
+        let json_str = json.to_string();
+        // Must not panic regardless of key/value content
+        let _: Result<vouch_server::services::oidc::registration::RegistrationRequest, _> =
+            serde_json::from_str(&json_str);
+    }
+}

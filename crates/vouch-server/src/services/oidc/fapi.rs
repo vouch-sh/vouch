@@ -277,6 +277,13 @@ mod tests {
             require_signed_request_object: None,
             fapi_profile: FapiProfile::Fapi2Security.as_db_str().to_string(),
             dpop_bound_access_tokens: true,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: None,
+            registration_access_token_hash: None,
+            registration_metadata: None,
         }
     }
 
@@ -307,6 +314,13 @@ mod tests {
             require_signed_request_object: None,
             fapi_profile: FapiProfile::None.as_db_str().to_string(),
             dpop_bound_access_tokens: false,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: None,
+            registration_access_token_hash: None,
+            registration_metadata: None,
         }
     }
 
