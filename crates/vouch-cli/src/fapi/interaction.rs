@@ -6,6 +6,20 @@
 //! logs on both sides can be correlated. The `x-fapi-end-user-present` header
 //! signals whether the end-user is interactively present (i.e., the request
 //! originated from a human-facing terminal rather than a background process).
+//!
+//! # Security note
+//!
+//! Per the [FAPI 2.0 Implementation Advice][advice], `x-fapi-end-user-present`
+//! is **not a security mechanism** — servers cannot independently verify it.
+//! The real cryptographic proof of user presence is the `hardware_verified`
+//! claim in the access token, which is only set after the server verifies a
+//! FIDO2 assertion with both User Presence (UP) and User Verified (UV) flags.
+//!
+//! This module provides two constructors:
+//! - [`FapiInteraction::new`] — terminal heuristic (pre-FIDO2 requests)
+//! - [`FapiInteraction::with_presence`] — explicit state (post-FIDO2 requests)
+//!
+//! [advice]: https://openid.bitbucket.io/fapi/fapi-2_0-implementation_advice.html
 
 use std::io::IsTerminal;
 
@@ -23,11 +37,27 @@ pub struct FapiInteraction {
 
 impl FapiInteraction {
     /// Create a new interaction with a fresh UUID and terminal detection.
+    ///
+    /// Uses `stdin().is_terminal()` as a heuristic for end-user presence.
+    /// Prefer [`with_presence`](Self::with_presence) after a successful FIDO2
+    /// assertion, where a hardware touch provides stronger evidence.
     #[must_use]
     pub fn new() -> Self {
         Self {
             interaction_id: uuid::Uuid::now_v7().to_string(),
             end_user_present: std::io::stdin().is_terminal(),
+        }
+    }
+
+    /// Create a new interaction with an explicit end-user presence state.
+    ///
+    /// Use after a successful FIDO2 assertion, where hardware touch
+    /// provides cryptographic proof of user presence.
+    #[must_use]
+    pub fn with_presence(end_user_present: bool) -> Self {
+        Self {
+            interaction_id: uuid::Uuid::now_v7().to_string(),
+            end_user_present,
         }
     }
 
@@ -150,5 +180,37 @@ mod tests {
         // Default should produce a valid interaction (not panic)
         let i = FapiInteraction::default();
         assert!(!i.interaction_id().is_empty());
+    }
+
+    #[test]
+    fn test_with_presence_true() {
+        let interaction = FapiInteraction::with_presence(true);
+        assert!(interaction.end_user_present());
+        let headers = interaction.headers();
+        let present = headers
+            .iter()
+            .find(|(k, _)| *k == "x-fapi-end-user-present")
+            .map(|(_, v)| *v);
+        assert_eq!(present, Some("true"));
+    }
+
+    #[test]
+    fn test_with_presence_false() {
+        let interaction = FapiInteraction::with_presence(false);
+        assert!(!interaction.end_user_present());
+        let headers = interaction.headers();
+        let present = headers
+            .iter()
+            .find(|(k, _)| *k == "x-fapi-end-user-present")
+            .map(|(_, v)| *v);
+        assert_eq!(present, Some("false"));
+    }
+
+    #[test]
+    fn test_with_presence_has_valid_uuid() {
+        let interaction = FapiInteraction::with_presence(true);
+        let id = interaction.interaction_id();
+        assert_eq!(id.len(), 36);
+        assert_eq!(id.as_bytes().get(8), Some(&b'-'));
     }
 }

@@ -2,8 +2,8 @@
 //! Session recovery from persisted credentials on disk.
 //!
 //! On startup, the agent attempts to restore a valid session by reading
-//! `~/.vouch/config.json` (or falling back to `~/.vouch/cookie.txt`),
-//! validating the token against the server, and populating in-memory state.
+//! `~/.vouch/config.json`, validating the token against the server, and
+//! populating in-memory state.
 //!
 //! This is best-effort: all errors are logged and never block startup.
 
@@ -41,14 +41,8 @@ async fn try_recover_inner(
     let (token, server_url) = match read_credentials_from_config()? {
         Some((t, url)) => (SecretString::from(t), url),
         None => {
-            // Fall back to cookie.txt
-            match read_credentials_from_cookie()? {
-                Some((t, url)) => (SecretString::from(t), url),
-                None => {
-                    debug!("No persisted credentials found for recovery");
-                    return Ok(false);
-                }
-            }
+            debug!("No persisted credentials found for recovery");
+            return Ok(false);
         }
     };
 
@@ -139,52 +133,4 @@ fn read_credentials_from_config() -> Result<Option<(String, String)>, Box<dyn st
         (Some(token), Some(url)) if !token.is_empty() && !url.is_empty() => Ok(Some((token, url))),
         _ => Ok(None),
     }
-}
-
-/// Read token and server URL from `~/.vouch/cookie.txt` as fallback.
-///
-/// Derives server URL from the cookie domain as `https://{domain}`.
-fn read_credentials_from_cookie() -> Result<Option<(String, String)>, Box<dyn std::error::Error>> {
-    let cookie = match vouch_common::read_cookie() {
-        Ok(Some(c)) => c,
-        Ok(None) => return Ok(None),
-        Err(e) => {
-            debug!("Failed to read cookie.txt: {e}");
-            return Ok(None);
-        }
-    };
-
-    if vouch_common::is_cookie_expired(&cookie) {
-        debug!("Cookie is expired, skipping");
-        return Ok(None);
-    }
-
-    if cookie.value.is_empty() || cookie.domain.is_empty() {
-        return Ok(None);
-    }
-
-    // Validate the domain is safe to use in a URL (no path traversal, credentials, etc.)
-    let server_url = format!("https://{}", cookie.domain);
-    let parsed = url::Url::parse(&server_url).map_err(|e| {
-        Box::new(std::io::Error::other(format!(
-            "invalid cookie domain '{}': {e}",
-            cookie.domain
-        ))) as Box<dyn std::error::Error>
-    })?;
-
-    // Ensure the URL only has a host (no path, credentials, query, or fragment)
-    if parsed.path() != "/"
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-    {
-        debug!(
-            "Cookie domain '{}' produced a URL with unexpected components, skipping",
-            cookie.domain
-        );
-        return Ok(None);
-    }
-
-    Ok(Some((cookie.value, server_url)))
 }

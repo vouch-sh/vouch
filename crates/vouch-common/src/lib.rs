@@ -4,7 +4,6 @@
 pub mod aaguid;
 pub(crate) mod api;
 pub(crate) mod config;
-pub(crate) mod cookie;
 pub mod encoding;
 pub(crate) mod error;
 pub mod fido2_types;
@@ -26,8 +25,5 @@ pub use aaguid::{
 };
 pub use api::*;
 pub use config::{VouchConfig, config_path, read_config};
-pub use cookie::{
-    SessionCookie, clear_cookie, cookie_path, is_cookie_expired, read_cookie, write_cookie,
-};
 pub use error::*;
 pub use url::{UrlSecurity, check_url_security, is_loopback_host};

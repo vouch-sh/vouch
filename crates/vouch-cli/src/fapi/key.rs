@@ -1,9 +1,26 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! ES256 (P-256 ECDSA) key management for FAPI 2.0 client authentication.
 //!
-//! Keys are stored on disk as JSON files containing the PKCS#8 DER bytes
-//! (base64url-encoded) plus the public key coordinates and key ID.
-//! Files are written with 0600 permissions to prevent other users from reading them.
+//! This key is a **per-device** artifact used for OAuth 2.0 confidential client
+//! authentication (`private_key_jwt`) and DPoP proof generation. It is **not**
+//! bound to the YubiKey — the YubiKey provides *user* identity via FIDO2, while
+//! this key provides *device/client* identity.
+//!
+//! When a user inserts their registered YubiKey into a new machine, `vouch login`
+//! automatically generates a new client key and registers a new `client_id` via
+//! RFC 7591 Dynamic Client Registration. This is the correct behavior:
+//!
+//! - **Client key = device identity** (OAuth confidential client authentication)
+//! - **FIDO2 credential = user identity** (portable on YubiKey)
+//! - **DPoP binding** prevents token theft even if the client key is compromised
+//! - The `private_key_jwt` + DPoP combination prevents stolen authorization code attacks
+//!
+//! Keys are stored in the OS keychain when available (see [`super::key_store`]),
+//! falling back to JSON files on disk with 0600 permissions. Enterprise
+//! deployments can further tighten security by:
+//! 1. Disabling open registration (require MDM-issued software statements)
+//! 2. Binding `client_id` to FIDO2 `credential_id` at first registration
+//! 3. Using Secure Enclave / TPM for client key generation
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -124,7 +141,43 @@ impl ClientKey {
         })
     }
 
-    /// Load a `ClientKey` from a JSON key file.
+    /// Reconstruct a `ClientKey` from a [`ClientKeyFile`].
+    ///
+    /// Verifies that the stored thumbprint matches the computed thumbprint
+    /// of the loaded public key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FapiError::InvalidKeyFormat`] if the format is incorrect.
+    /// Returns [`FapiError::ThumbprintComputation`] if the thumbprint mismatches.
+    pub fn from_key_file(key_file: &ClientKeyFile) -> Result<Self, FapiError> {
+        let pkcs8_der = URL_SAFE_NO_PAD
+            .decode(&key_file.pkcs8)
+            .map_err(|e| FapiError::InvalidKeyFormat(format!("base64url decode error: {e}")))?;
+
+        let der_bytes = Zeroizing::new(pkcs8_der);
+
+        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &der_bytes)
+            .map_err(|e| FapiError::InvalidKeyFormat(format!("PKCS#8 parse error: {e}")))?;
+
+        let (x, y) = extract_ec_coordinates(&key_pair)?;
+        let computed_kid = compute_thumbprint(&x, &y)?;
+
+        if computed_kid != key_file.kid {
+            return Err(FapiError::InvalidKeyFormat(format!(
+                "key ID mismatch: stored={}, computed={}",
+                key_file.kid, computed_kid
+            )));
+        }
+
+        Ok(Self {
+            key_pair,
+            der_bytes,
+            kid: computed_kid,
+        })
+    }
+
+    /// Load a `ClientKey` from a JSON key file on disk.
     ///
     /// Verifies that the stored thumbprint matches the computed thumbprint
     /// of the loaded public key.
@@ -143,32 +196,7 @@ impl ClientKey {
         let key_file: ClientKeyFile = serde_json::from_str(&content)
             .map_err(|e| FapiError::InvalidKeyFormat(format!("JSON parse error: {e}")))?;
 
-        // Decode PKCS#8 DER from base64url
-        let pkcs8_der = URL_SAFE_NO_PAD
-            .decode(&key_file.pkcs8)
-            .map_err(|e| FapiError::InvalidKeyFormat(format!("base64url decode error: {e}")))?;
-
-        let der_bytes = Zeroizing::new(pkcs8_der);
-
-        let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &der_bytes)
-            .map_err(|e| FapiError::InvalidKeyFormat(format!("PKCS#8 parse error: {e}")))?;
-
-        // Verify thumbprint matches the stored kid
-        let (x, y) = extract_ec_coordinates(&key_pair)?;
-        let computed_kid = compute_thumbprint(&x, &y)?;
-
-        if computed_kid != key_file.kid {
-            return Err(FapiError::InvalidKeyFormat(format!(
-                "key ID mismatch: stored={}, computed={}",
-                key_file.kid, computed_kid
-            )));
-        }
-
-        Ok(Self {
-            key_pair,
-            der_bytes,
-            kid: computed_kid,
-        })
+        Self::from_key_file(&key_file)
     }
 
     /// Save this key to a JSON file with 0600 permissions.
@@ -178,17 +206,7 @@ impl ClientKey {
     /// Returns [`FapiError::KeySave`] if the file cannot be written.
     /// Returns [`FapiError::ThumbprintComputation`] if coordinates cannot be extracted.
     pub fn save(&self, path: &Path) -> Result<(), FapiError> {
-        let (x, y) = extract_ec_coordinates(&self.key_pair)?;
-        let pkcs8_b64 = URL_SAFE_NO_PAD.encode(&*self.der_bytes);
-
-        let key_file = ClientKeyFile {
-            kty: "EC".to_string(),
-            crv: "P-256".to_string(),
-            x,
-            y,
-            kid: self.kid.clone(),
-            pkcs8: pkcs8_b64,
-        };
+        let key_file = self.to_key_file()?;
 
         let json = serde_json::to_vec_pretty(&key_file)
             .map_err(|e| FapiError::KeySave(format!("JSON serialization error: {e}")))?;
@@ -212,6 +230,25 @@ impl ClientKey {
             key.save(path)?;
             Ok(key)
         }
+    }
+
+    /// Serialize this key as a [`ClientKeyFile`] for storage.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FapiError::ThumbprintComputation`] if coordinates cannot be extracted.
+    pub fn to_key_file(&self) -> Result<ClientKeyFile, FapiError> {
+        let (x, y) = extract_ec_coordinates(&self.key_pair)?;
+        let pkcs8_b64 = URL_SAFE_NO_PAD.encode(&*self.der_bytes);
+
+        Ok(ClientKeyFile {
+            kty: "EC".to_string(),
+            crv: "P-256".to_string(),
+            x,
+            y,
+            kid: self.kid.clone(),
+            pkcs8: pkcs8_b64,
+        })
     }
 
     /// Get the key ID (JWK thumbprint).

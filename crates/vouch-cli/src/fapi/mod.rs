@@ -12,6 +12,8 @@
 //!   assertions for client authentication at the token endpoint.
 //! - **Interaction tracking** ([`interaction`]): FAPI `x-fapi-interaction-id`
 //!   and `x-fapi-end-user-present` header generation.
+//! - **Keychain storage** ([`key_store`]): OS keychain backend for encrypted-at-rest
+//!   key storage (macOS Keychain, Linux Secret Service, Windows Credential Manager).
 //! - **Error types** ([`error`]): Typed errors for all FAPI operations.
 
 pub mod client_assertion;
@@ -19,6 +21,7 @@ pub mod dpop;
 pub mod error;
 pub mod interaction;
 pub mod key;
+pub mod key_store;
 pub mod registration;
 
 // Re-export the most commonly used types for convenience

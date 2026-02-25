@@ -184,7 +184,8 @@ async fn run_fapi_login(
         scope: "openid email",
     };
 
-    let interaction = FapiInteraction::new();
+    // FIDO2 touch just completed — we have hardware proof of user presence.
+    let interaction = FapiInteraction::with_presence(true);
     let fapi_headers = interaction.headers();
 
     let form_body =
@@ -286,7 +287,8 @@ async fn run_fapi_login_with_nonce(
         scope: request.scope,
     };
 
-    let interaction = FapiInteraction::new();
+    // Still within the same FIDO2 session — user presence confirmed by prior touch.
+    let interaction = FapiInteraction::with_presence(true);
     let fapi_headers = interaction.headers();
 
     let form_body =
@@ -380,16 +382,71 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
 // Helpers
 // ============================================================================
 
-/// Load the FAPI client key from `~/.vouch/client_key.json`, generating one if absent.
+/// Load the FAPI client key, checking sources in order:
 ///
-/// Unlike the old `load_fapi_key()`, this function never returns `None` — if the key
-/// cannot be loaded or generated, it returns an error. FAPI 2.0 is now the only
-/// supported login flow.
+/// 1. OS keychain (preferred — encrypted at rest)
+/// 2. `~/.vouch/client_key.json` (legacy/fallback — migrated to keychain if possible)
+/// 3. Generate new key → save to keychain (or file if keychain unavailable)
+///
+/// If the key is found on disk but not in the keychain, it is migrated to the
+/// keychain and the file is removed. If the keychain is unavailable (CI, headless),
+/// file storage is used as a fallback.
 fn load_or_create_fapi_key() -> Result<ClientKey> {
     let home = dirs::home_dir().context("cannot determine home directory")?;
     let key_path = home.join(".vouch").join("client_key.json");
 
-    ClientKey::load_or_generate(&key_path).context("failed to load or generate FAPI client key")
+    // 1. Try the OS keychain first.
+    match vouch_cli::fapi::key_store::load_from_keychain() {
+        Ok(Some(key_file)) => {
+            let key = ClientKey::from_key_file(&key_file)
+                .context("failed to load client key from keychain")?;
+            tracing::debug!("FAPI client key loaded from keychain: kid={}", key.kid());
+            return Ok(key);
+        }
+        Ok(None) => {
+            tracing::debug!("No client key in keychain, checking disk");
+        }
+        Err(e) => {
+            tracing::debug!("Keychain unavailable ({e}), falling back to disk");
+        }
+    }
+
+    // 2. Try loading from disk (legacy location).
+    if key_path.exists() {
+        let key = ClientKey::load(&key_path).context("failed to load FAPI client key from disk")?;
+        tracing::debug!("FAPI client key loaded from disk: kid={}", key.kid());
+
+        // Migrate to keychain if possible, then remove the file.
+        if let Ok(key_file) = key.to_key_file()
+            && vouch_cli::fapi::key_store::save_to_keychain(&key_file).is_ok()
+        {
+            tracing::debug!("Migrated client key to keychain");
+            if let Err(e) = std::fs::remove_file(&key_path) {
+                tracing::debug!("Could not remove old key file: {e}");
+            }
+        }
+
+        return Ok(key);
+    }
+
+    // 3. Generate a new key.
+    let key = ClientKey::generate().context("failed to generate FAPI client key")?;
+    tracing::debug!("Generated new FAPI client key: kid={}", key.kid());
+
+    // Save to keychain first, fall back to disk.
+    if let Ok(key_file) = key.to_key_file()
+        && vouch_cli::fapi::key_store::save_to_keychain(&key_file).is_ok()
+    {
+        tracing::debug!("Saved new client key to keychain");
+        return Ok(key);
+    }
+
+    // Keychain unavailable — save to disk.
+    key.save(&key_path)
+        .context("failed to save FAPI client key to disk")?;
+    tracing::debug!("Saved new client key to disk (keychain unavailable)");
+
+    Ok(key)
 }
 
 /// Compute `(expires_at_string, expires_at_timestamp)` from the token response.

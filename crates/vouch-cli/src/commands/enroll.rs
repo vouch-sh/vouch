@@ -134,16 +134,42 @@ pub async fn run(server: &str) -> Result<()> {
     Ok(())
 }
 
-/// Load or generate the FAPI client key from `~/.vouch/client_key.json`.
+/// Load or generate the FAPI client key, trying keychain first.
 ///
 /// Returns `None` if the key cannot be loaded or generated (non-fatal).
 fn load_fapi_key() -> Option<vouch_cli::fapi::ClientKey> {
+    // 1. Try keychain.
+    match vouch_cli::fapi::key_store::load_from_keychain() {
+        Ok(Some(key_file)) => {
+            if let Ok(key) = vouch_cli::fapi::ClientKey::from_key_file(&key_file) {
+                tracing::debug!("FAPI client key loaded from keychain: kid={}", key.kid());
+                return Some(key);
+            }
+        }
+        Ok(None) => {}
+        Err(e) => {
+            tracing::debug!("Keychain unavailable ({e}), falling back to disk");
+        }
+    }
+
+    // 2. Try disk, with migration to keychain.
     let home = dirs::home_dir()?;
     let key_path = home.join(".vouch").join("client_key.json");
 
     match vouch_cli::fapi::ClientKey::load_or_generate(&key_path) {
         Ok(key) => {
             tracing::debug!("FAPI client key loaded: kid={}", key.kid());
+
+            // Migrate to keychain if possible.
+            if let Ok(key_file) = key.to_key_file()
+                && vouch_cli::fapi::key_store::save_to_keychain(&key_file).is_ok()
+            {
+                tracing::debug!("Migrated client key to keychain");
+                if let Err(e) = std::fs::remove_file(&key_path) {
+                    tracing::debug!("Could not remove old key file: {e}");
+                }
+            }
+
             Some(key)
         }
         Err(e) => {

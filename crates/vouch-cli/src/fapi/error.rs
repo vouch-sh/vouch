@@ -33,6 +33,10 @@ pub enum FapiError {
     /// Failed to compute a JWK thumbprint per RFC 7638.
     #[error("failed to compute JWK thumbprint: {0}")]
     ThumbprintComputation(String),
+
+    /// Failed to access the OS keychain.
+    #[error("keychain access error: {0}")]
+    KeychainAccess(String),
 }
 
 #[cfg(test)]
@@ -75,6 +79,13 @@ mod tests {
     fn test_fapi_error_display_thumbprint() {
         let err = FapiError::ThumbprintComputation("hash failed".to_string());
         assert!(err.to_string().contains("JWK thumbprint"));
+    }
+
+    #[test]
+    fn test_fapi_error_display_keychain_access() {
+        let err = FapiError::KeychainAccess("no backend available".to_string());
+        assert!(err.to_string().contains("keychain access error"));
+        assert!(err.to_string().contains("no backend available"));
     }
 
     #[test]

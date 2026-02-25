@@ -145,6 +145,16 @@ pub struct IdTokenClaims {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email_verified: Option<bool>,
     /// Custom claim: Hardware verification flag (FIDO2 presence proof).
+    ///
+    /// This is the **cryptographic** proof of user presence. It is only set to
+    /// `true` after the server verifies a FIDO2 assertion where both the User
+    /// Presence (UP) and User Verified (UV) flags are set in the authenticator
+    /// data. This is enforced by passing `require_user_verification: true` to
+    /// the WebAuthn verification step.
+    ///
+    /// Unlike the client-side `x-fapi-end-user-present` header (which is a
+    /// non-verifiable hint per FAPI 2.0 Implementation Advice), this claim
+    /// is backed by the authenticator's cryptographic attestation.
     pub hardware_verified: bool,
     /// Custom claim: Hardware authenticator AAGUID.
     pub hardware_aaguid: Option<String>,
