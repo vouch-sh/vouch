@@ -11,36 +11,34 @@ use aws_lc_rs::rand as aws_rand;
 use axum::{
     Json,
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
 };
-use axum_extra::TypedHeader;
 use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use headers::authorization::{Authorization, Bearer};
 use serde::Deserialize;
 use std::sync::Arc;
 use vouch_common::{ApiError, AuthEventInfo, ListAuthEventsResponse};
 
 use super::json_error;
-use super::session::extract_session;
+use super::session::extract_resource_token;
 
 // ============================================================================
 // Org Admin Extraction
 // ============================================================================
 
-/// Extract and validate an org admin from Bearer token or cookie.
+/// Extract and validate an org admin from Bearer token, DPoP token, or cookie.
 ///
 /// Tries Authorization header first, then falls back to vouch_session cookie.
 /// Returns the user and their org_id if they are an org admin.
 async fn extract_org_admin(
     state: &AppState,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: &HeaderMap,
     jar: &CookieJar,
 ) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
-    let session = extract_session(state, auth_header, jar).await?;
+    let token = extract_resource_token(state, headers, jar).await?;
 
-    let user = db::get_user_by_id(&state.db, &session.claims.sub)
+    let user = db::get_user_by_id(&state.db, &token.sub)
         .await
         .map_err(|e| {
             json_error(
@@ -93,11 +91,11 @@ pub struct AuthEventsQuery {
 /// GET /api/v1/org/auth-events
 pub async fn list_auth_events(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Query(query): Query<AuthEventsQuery>,
 ) -> Result<Json<ListAuthEventsResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, _org_id) = extract_org_admin(&state, auth_header, &jar).await?;
+    let (_user, _org_id) = extract_org_admin(&state, &headers, &jar).await?;
 
     // Build query params
     let db_query = db::AuthEventQuery {
@@ -195,11 +193,11 @@ pub struct ListScimTokensResponse {
 /// POST /api/v1/org/scim-tokens
 pub async fn create_scim_token(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Json(req): Json<CreateScimTokenRequest>,
 ) -> Result<Json<CreateScimTokenResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
+    let (_user, org_id) = extract_org_admin(&state, &headers, &jar).await?;
 
     // Validate expiration (required, 1-365 days)
     if req.expires_in_days < 1 || req.expires_in_days > 365 {
@@ -263,10 +261,10 @@ pub async fn create_scim_token(
 /// GET /api/v1/org/scim-tokens
 pub async fn list_scim_tokens(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<ListScimTokensResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
+    let (_user, org_id) = extract_org_admin(&state, &headers, &jar).await?;
 
     let tokens = db::list_scim_tokens(&state.db, Some(&org_id))
         .await
@@ -296,11 +294,11 @@ pub async fn list_scim_tokens(
 /// DELETE /api/v1/org/scim-tokens/:id
 pub async fn delete_scim_token(
     State(state): State<Arc<AppState>>,
-    auth_header: Option<TypedHeader<Authorization<Bearer>>>,
+    headers: HeaderMap,
     jar: CookieJar,
     Path(token_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_org_admin(&state, auth_header, &jar).await?;
+    let (_user, org_id) = extract_org_admin(&state, &headers, &jar).await?;
 
     let deleted = db::delete_scim_token(&state.db, &token_id, &org_id)
         .await

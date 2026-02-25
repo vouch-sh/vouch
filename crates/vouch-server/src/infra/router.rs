@@ -54,22 +54,22 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> Router 
 /// These endpoints are brute-force targets so rate limiting is critical.
 fn build_rate_limited_routes() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/v1/auth/login/start", post(handlers::auth::login_start))
+        // Key registration routes (FAPI 2.0)
         .route(
-            "/v1/auth/login/complete",
-            post(handlers::auth::login_complete),
+            "/v1/keys/register/start",
+            post(handlers::keys::register_start),
         )
         .route(
-            "/v1/auth/register/start",
-            post(handlers::auth::register_start),
-        )
-        .route(
-            "/v1/auth/register/complete",
-            post(handlers::auth::register_complete),
+            "/v1/keys/register/complete",
+            post(handlers::keys::register_complete),
         )
         .route("/oauth/token", post(handlers::oidc::token))
         .route("/oauth/par", post(handlers::oidc::par))
         .route("/oauth/register", post(handlers::oidc::register))
+        .route(
+            "/oauth/fido2/challenge",
+            post(handlers::oidc::fido2_challenge),
+        )
         .route("/oauth/device", post(handlers::device::device_code))
         .layer(rate_limit::build_auth_rate_limiter())
 }

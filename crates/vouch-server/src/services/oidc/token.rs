@@ -13,9 +13,7 @@ use crate::AppState;
 use crate::crypto::hash_token;
 use crate::db::{self, Authenticator, OAuthClient, Session, User};
 use crate::redact_email;
-use crate::services::auth::{
-    CreateOAuthTokenParams, DecodedToken, create_oauth_access_token, decode_token,
-};
+use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token, decode_token};
 use crate::services::oidc::amr::AuthMethod;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use aws_lc_rs::digest::{self, SHA256};
@@ -686,9 +684,6 @@ pub async fn validate_dpop_if_present(
 }
 
 /// Result of validating a session token for OIDC endpoints.
-///
-/// Named `OidcValidatedSession` to avoid collision with
-/// `handlers::session::ValidatedSession`.
 pub struct OidcValidatedSession {
     /// The authenticated user.
     pub user: User,
@@ -697,21 +692,19 @@ pub struct OidcValidatedSession {
     /// The authenticator used to create the session, if any.
     /// `None` for OIDC-only enrollment sessions that lack a hardware key.
     pub authenticator: Option<Authenticator>,
-    /// Granted OAuth scope from the session JWT. `None` for FIDO2 sessions
-    /// and legacy tokens issued before scope tracking.
+    /// Granted OAuth scope from the access token JWT.
     pub scope: Option<ScopeSet>,
 }
 
 /// Validate a session token and return the user, session, and authenticator.
 ///
-/// Supports both HS256 FIDO2 session tokens and ES256 RFC 9068 access tokens
-/// via the dual-decode helper. For access tokens, the `authenticator_id` is
+/// Accepts ES256 RFC 9068 access tokens only. The `authenticator_id` is
 /// looked up from the server-side session record (not from the JWT).
 pub async fn validate_session_token(
     state: &Arc<AppState>,
     token: &str,
 ) -> ServiceResult<Option<OidcValidatedSession>> {
-    // Decode the token using the dual-decode helper (HS256 or ES256)
+    // Decode the token as an ES256 RFC 9068 access token
     let config = state.config();
     let decoded = match decode_token(
         token,
@@ -742,12 +735,10 @@ pub async fn validate_session_token(
         None => return Ok(None),
     };
 
-    // Get authenticator — for FIDO2 sessions, from the JWT claim; for access tokens,
-    // from the server-side session record (authenticator_id is not in the JWT).
-    let authenticator_id = match &decoded {
-        DecodedToken::Session(c) => c.authenticator_id.as_deref(),
-        DecodedToken::AccessToken(_) => session.authenticator_id.as_deref(),
-    };
+    // Get authenticator from the server-side session record.
+    // The authenticator_id is stored server-side and is NOT included in the JWT
+    // to prevent information leakage.
+    let authenticator_id = session.authenticator_id.as_deref();
 
     // If the session references an authenticator that no longer exists (deleted/revoked),
     // the session is invalid — this implements key revocation.

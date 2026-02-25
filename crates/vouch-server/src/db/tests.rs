@@ -108,7 +108,7 @@ async fn test_session_lifecycle() {
         token_hash,
         Some(&auth_id),
         "2099-12-31T23:59:59Z",
-        SessionPurpose::Fido2Session,
+        SessionPurpose::OAuthAccessToken,
     )
     .await
     .expect("Failed to create session");
@@ -359,7 +359,7 @@ async fn test_oauth_client_crud() {
     let (client, client_id) = create_oauth_client(
         &pool,
         &CreateOAuthClientParams {
-            user_id: &user.id,
+            user_id: Some(&user.id),
             name: "My App",
             description: Some("A test application"),
             application_type: OAuthClientType::Web,
@@ -466,7 +466,7 @@ async fn test_oauth_client_types() {
         let (client, _) = create_oauth_client(
             &pool,
             &CreateOAuthClientParams {
-                user_id: &user.id,
+                user_id: Some(&user.id),
                 name: &format!("{:?} App", app_type),
                 description: None,
                 application_type: app_type,
@@ -518,7 +518,7 @@ async fn test_oauth_client_list_for_user() {
         create_oauth_client(
             &pool,
             &CreateOAuthClientParams {
-                user_id: &user1.id,
+                user_id: Some(&user1.id),
                 name: &format!("App {}", i),
                 description: None,
                 application_type: OAuthClientType::Web,
@@ -548,7 +548,7 @@ async fn test_oauth_client_list_for_user() {
     create_oauth_client(
         &pool,
         &CreateOAuthClientParams {
-            user_id: &user2.id,
+            user_id: Some(&user2.id),
             name: "Other App",
             description: None,
             application_type: OAuthClientType::Web,
@@ -597,7 +597,7 @@ async fn test_oauth_client_secret_management() {
     let (client, _) = create_oauth_client(
         &pool,
         &CreateOAuthClientParams {
-            user_id: &user.id,
+            user_id: Some(&user.id),
             name: "Secret App",
             description: None,
             application_type: OAuthClientType::Web,
@@ -663,7 +663,7 @@ async fn test_oauth_usage_recording() {
     let (client, _) = create_oauth_client(
         &pool,
         &CreateOAuthClientParams {
-            user_id: &user.id,
+            user_id: Some(&user.id),
             name: "Usage App",
             description: None,
             application_type: OAuthClientType::Web,
@@ -866,7 +866,7 @@ async fn test_scim_session_invalidation_on_deactivation() {
         "scim_token_hash",
         Some(&auth_id),
         "2099-12-31T23:59:59Z",
-        SessionPurpose::Fido2Session,
+        SessionPurpose::OAuthAccessToken,
     )
     .await
     .expect("Failed to create session");
@@ -1241,7 +1241,7 @@ async fn test_user_cascade_delete() {
         "cascade_token",
         Some(&auth_id),
         "2099-12-31T23:59:59Z",
-        SessionPurpose::Fido2Session,
+        SessionPurpose::OAuthAccessToken,
     )
     .await
     .expect("Failed to create session");
@@ -1292,7 +1292,7 @@ async fn test_oauth_client_cascade_delete() {
     let (client, _) = create_oauth_client(
         &pool,
         &CreateOAuthClientParams {
-            user_id: &user.id,
+            user_id: Some(&user.id),
             name: "Cascade App",
             description: None,
             application_type: OAuthClientType::Web,

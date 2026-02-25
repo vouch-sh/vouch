@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! Enroll command - RFC 8628 Device Authorization Grant.
+//! Enroll command - RFC 8628 Device Authorization Grant with FAPI 2.0 support.
 
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
@@ -7,6 +7,7 @@ use std::io::{IsTerminal, Write, stdout};
 use vouch_common::{DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, OAuthError};
 
 use crate::client::VouchClient;
+use crate::config::Config;
 use crate::session;
 
 /// Response from device token endpoint.
@@ -33,13 +34,35 @@ pub async fn run(server: &str) -> Result<()> {
 
     println!("Starting enrollment...\n");
 
-    // Step 1: Request device code (RFC 8628 Section 3.1 requires form encoding)
+    // Step 1: Generate or load the FAPI client key (for DPoP proofs).
+    let fapi_key = load_fapi_key();
+
+    // Step 2: Register as a FAPI 2.0 client BEFORE the device code flow
+    // (open registration — no auth token required).
+    //
+    // This ensures we have a client_id before the device authorization
+    // request so the token will be bound to our registered client from
+    // the start. Registration is non-fatal: enrollment continues even
+    // if this step fails.
+    let pre_registered_client_id = if let Some(ref key) = fapi_key {
+        register_fapi_client_open(client.raw_client(), server, key).await
+    } else {
+        None
+    };
+
+    // Step 3: Request device code (RFC 8628 Section 3.1).
+    // Include the client_id if we registered successfully.
+    let device_request = DeviceCodeRequest {
+        client_id: pre_registered_client_id.clone(),
+        scope: None,
+    };
+
     let device_response: DeviceCodeResponse = client
-        .post_form("/oauth/device", &DeviceCodeRequest::default())
+        .post_form("/oauth/device", &device_request)
         .await
         .context("Failed to start enrollment")?;
 
-    // Step 2: Open browser and display instructions
+    // Step 4: Open browser and display instructions.
     let verification_url = &device_response.verification_uri;
 
     // Try to open the browser automatically
@@ -50,7 +73,10 @@ pub async fn run(server: &str) -> Result<()> {
             println!("  URL:  {verification_url}");
             println!("  Code: {}", device_response.user_code);
             println!();
-            println!("If the browser didn't open, visit the URL above and enter the code.");
+            println!(
+                "If the browser didn't open, visit the URL above \
+                 and enter the code."
+            );
         }
         Err(e) => {
             tracing::debug!("Failed to open browser: {e}");
@@ -66,10 +92,10 @@ pub async fn run(server: &str) -> Result<()> {
     println!();
     println!("Waiting for browser authorization...");
 
-    // Step 3: Poll for token
-    let token_response = poll_for_token(&client, &device_response).await?;
+    // Step 5: Poll for token (with optional DPoP proofs).
+    let token_response = poll_for_token(&client, &device_response, fapi_key.as_ref()).await?;
 
-    // Step 4: Compute expiration timestamp from expires_in
+    // Step 6: Compute expiration timestamp from expires_in.
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(
             i64::try_from(token_response.expires_in).unwrap_or(28800) - 30,
@@ -77,7 +103,7 @@ pub async fn run(server: &str) -> Result<()> {
         .unwrap_or_else(|_| jiff::Timestamp::now());
     let expires_at_str = expires_at.to_string();
 
-    // Step 5: Store session, cookie, and auto-provision SSH
+    // Step 7: Store session, cookie, and auto-provision SSH.
     let agent_stored = session::store_and_finalize(
         server,
         token_response.access_token.expose_secret(),
@@ -108,10 +134,84 @@ pub async fn run(server: &str) -> Result<()> {
     Ok(())
 }
 
+/// Load or generate the FAPI client key from `~/.vouch/client_key.json`.
+///
+/// Returns `None` if the key cannot be loaded or generated (non-fatal).
+fn load_fapi_key() -> Option<vouch_cli::fapi::ClientKey> {
+    let home = dirs::home_dir()?;
+    let key_path = home.join(".vouch").join("client_key.json");
+
+    match vouch_cli::fapi::ClientKey::load_or_generate(&key_path) {
+        Ok(key) => {
+            tracing::debug!("FAPI client key loaded: kid={}", key.kid());
+            Some(key)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load/generate FAPI client key: {e}");
+            None
+        }
+    }
+}
+
+/// Attempt open (unauthenticated) FAPI client registration.
+///
+/// This is called before the device code flow so the resulting token will
+/// be bound to the registered client from the start. The server accepts
+/// `POST /oauth/register` without a Bearer token when open registration
+/// is enabled.
+///
+/// Returns `Some(client_id)` on success, `None` on any failure (non-fatal).
+async fn register_fapi_client_open(
+    http_client: &reqwest::Client,
+    base_url: &str,
+    key: &vouch_cli::fapi::ClientKey,
+) -> Option<String> {
+    // If we already have a client_id in config, skip registration.
+    if let Ok(config) = Config::load()
+        && let Some(id) = config.client_id()
+    {
+        tracing::debug!("FAPI client already registered: client_id={id}");
+        return Some(id.to_string());
+    }
+
+    // Open registration — no auth token.
+    match vouch_cli::fapi::registration::register_fapi_client(http_client, base_url, None, key)
+        .await
+    {
+        Ok(result) => {
+            let client_id = result.client_id.clone();
+
+            // Save registration results to config.
+            if let Err(e) = Config::modify(|config| {
+                config.set_client_id(&result.client_id);
+                if let Some(ref rat) = result.registration_access_token {
+                    config.set_registration_access_token(rat);
+                }
+                if let Some(ref uri) = result.registration_client_uri {
+                    config.set_registration_client_uri(uri);
+                }
+                config.set_dpop_key_id(&result.dpop_key_id);
+            }) {
+                tracing::warn!("Failed to save FAPI registration to config: {e}");
+            }
+
+            Some(client_id)
+        }
+        Err(e) => {
+            tracing::debug!("Pre-enrollment FAPI registration failed (non-fatal): {e}");
+            None
+        }
+    }
+}
+
 /// Poll the token endpoint until authorization is complete or timeout.
+///
+/// If a FAPI key is provided, includes DPoP proofs on token requests
+/// and handles DPoP nonce retry from the server.
 async fn poll_for_token(
     client: &VouchClient,
     device_response: &DeviceCodeResponse,
+    fapi_key: Option<&vouch_cli::fapi::ClientKey>,
 ) -> Result<DeviceTokenResponse> {
     let request = DeviceTokenRequest {
         grant_type: "urn:ietf:params:oauth:grant-type:device_code".to_string(),
@@ -123,6 +223,8 @@ async fn poll_for_token(
     let start = std::time::Instant::now();
 
     let mut dots = 0;
+    // Track server-provided DPoP nonce for RFC 9449 nonce binding
+    let mut dpop_nonce: Option<String> = None;
 
     loop {
         // Check timeout
@@ -141,8 +243,8 @@ async fn poll_for_token(
             stdout().flush().ok();
         }
 
-        // Poll for token
-        match poll_once(client, &request).await {
+        // Poll for token (with optional DPoP proof)
+        match poll_once(client, &request, fapi_key, dpop_nonce.as_deref()).await {
             Ok(response) => {
                 println!(); // Clear the progress line
                 return Ok(response);
@@ -153,6 +255,11 @@ async fn poll_for_token(
             Err(PollError::SlowDown) => {
                 // Increase interval and continue
                 tokio::time::sleep(interval).await;
+            }
+            Err(PollError::DpopNonce(nonce)) => {
+                // Server requires a DPoP nonce — retry immediately
+                tracing::debug!("Server requires DPoP nonce, retrying");
+                dpop_nonce = Some(nonce);
             }
             Err(PollError::Denied) => {
                 println!();
@@ -176,26 +283,66 @@ enum PollError {
     SlowDown,
     Denied,
     Expired,
+    /// Server returned `use_dpop_nonce` — retry with the provided nonce.
+    DpopNonce(String),
     Other(String),
 }
 
-/// Make a single poll request.
+/// Make a single poll request to the token endpoint.
+///
+/// Includes DPoP proof and FAPI headers if a client key is available.
 async fn poll_once(
     client: &VouchClient,
     request: &DeviceTokenRequest,
+    fapi_key: Option<&vouch_cli::fapi::ClientKey>,
+    dpop_nonce: Option<&str>,
 ) -> Result<DeviceTokenResponse, PollError> {
     let url = format!("{}/oauth/token", client.base_url());
 
-    // RFC 8628 Section 3.4: Token endpoint requires application/x-www-form-urlencoded
-    let response = client
-        .raw_client()
-        .post(&url)
-        .form(request)
+    // Build the request with form encoding
+    let mut builder = client.raw_client().post(&url).form(request);
+
+    // Add DPoP proof if we have a FAPI key
+    if let Some(key) = fapi_key {
+        let mut dpop_builder = vouch_cli::fapi::DpopProofBuilder::new("POST", &url);
+        if let Some(nonce) = dpop_nonce {
+            dpop_builder = dpop_builder.nonce(nonce);
+        }
+        match dpop_builder.build(key) {
+            Ok(proof) => {
+                builder = builder.header("DPoP", proof);
+            }
+            Err(e) => {
+                tracing::debug!("Failed to build DPoP proof: {e}");
+                // Continue without DPoP — server will issue
+                // a non-DPoP-bound token
+            }
+        }
+    }
+
+    // Add FAPI interaction headers only when FAPI key is present
+    // (consistent with VouchClient::build_fapi_request)
+    if fapi_key.is_some() {
+        let interaction = vouch_cli::fapi::FapiInteraction::new();
+        let fapi_headers = interaction.headers();
+        for (name, value) in &fapi_headers {
+            builder = builder.header(*name, *value);
+        }
+    }
+
+    let response = builder
         .send()
         .await
         .map_err(|e| PollError::Other(e.to_string()))?;
 
     let status = response.status();
+
+    // Capture DPoP-Nonce header for use_dpop_nonce flow (RFC 9449)
+    let response_dpop_nonce = response
+        .headers()
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
 
     if status.is_success() {
         let token_response: DeviceTokenResponse = response
@@ -210,10 +357,24 @@ async fn poll_once(
 
     if let Ok(oauth_error) = serde_json::from_str::<OAuthError>(&error_text) {
         match oauth_error.error.as_str() {
-            "authorization_pending" => return Err(PollError::Pending),
+            "authorization_pending" => {
+                return Err(PollError::Pending);
+            }
             "slow_down" => return Err(PollError::SlowDown),
             "access_denied" => return Err(PollError::Denied),
             "expired_token" => return Err(PollError::Expired),
+            "use_dpop_nonce" => {
+                // RFC 9449: Server requires a DPoP nonce
+                if let Some(nonce) = response_dpop_nonce {
+                    return Err(PollError::DpopNonce(nonce));
+                }
+                // No nonce header — treat as a generic error
+                return Err(PollError::Other(
+                    "Server requires DPoP nonce but did not \
+                     provide one"
+                        .to_string(),
+                ));
+            }
             _ => {
                 let msg = oauth_error.error_description.unwrap_or(oauth_error.error);
                 return Err(PollError::Other(msg));

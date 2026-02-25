@@ -10,7 +10,7 @@
 use proptest::prelude::*;
 use vouch_common::encoding::{Base64Url, ConvertEncoding, Raw};
 use vouch_common::fido2_types::{Challenge, CoseKey, CredentialId, Signature};
-use vouch_common::{LoginCompleteRequest, RegisterCompleteRequest, RegisterStartResponse};
+use vouch_common::{RegisterCompleteRequest, RegisterStartResponse};
 
 proptest! {
     // =========================================================================
@@ -54,36 +54,6 @@ proptest! {
     // =========================================================================
     // Test API request/response types
     // =========================================================================
-
-    /// Full LoginCompleteRequest round-trip (simulates CLI → Server)
-    #[test]
-    fn prop_login_complete_request_round_trip(
-        cred_id in prop::collection::vec(any::<u8>(), 32..64),
-        auth_data in prop::collection::vec(any::<u8>(), 37..100),
-        signature in prop::collection::vec(any::<u8>(), 64..72),
-        client_data in prop::collection::vec(any::<u8>(), 50..200),
-        user_handle in prop::collection::vec(any::<u8>(), 16..64),
-    ) {
-        let request = LoginCompleteRequest {
-            state: "test-state".to_string(),
-            credential_id: cred_id.clone().into(),
-            authenticator_data: auth_data.clone().into(),
-            signature: signature.clone().into(),
-            client_data_json: client_data.clone().into(),
-            user_handle: user_handle.clone().into(),
-            client_context: None,
-        };
-
-        let json = serde_json::to_string(&request).unwrap();
-        let decoded: LoginCompleteRequest = serde_json::from_str(&json).unwrap();
-
-        // Verify all binary fields preserved exactly
-        prop_assert_eq!(cred_id.as_slice(), decoded.credential_id.as_bytes());
-        prop_assert_eq!(auth_data.as_slice(), decoded.authenticator_data.as_bytes());
-        prop_assert_eq!(signature.as_slice(), decoded.signature.as_bytes());
-        prop_assert_eq!(client_data.as_slice(), decoded.client_data_json.as_bytes());
-        prop_assert_eq!(user_handle.as_slice(), decoded.user_handle.as_bytes());
-    }
 
     /// Full RegisterCompleteRequest round-trip
     #[test]
@@ -216,9 +186,6 @@ fn compile_time_assert_serde<T: serde::Serialize + for<'de> serde::Deserialize<'
 
 #[test]
 fn test_api_types_implement_required_traits() {
-    // LoginCompleteRequest
-    compile_time_assert_serde::<LoginCompleteRequest>();
-
     // RegisterCompleteRequest
     compile_time_assert_serde::<RegisterCompleteRequest>();
 

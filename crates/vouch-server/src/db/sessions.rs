@@ -12,16 +12,12 @@ use sea_query::{Expr, Query};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-/// Session purpose — distinguishes FIDO2 login sessions from OAuth access tokens.
+/// Session purpose — distinguishes OAuth access tokens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "text")]
 pub enum SessionPurpose {
-    /// FIDO2 hardware-backed login session (CLI login, device code flow).
+    /// OAuth 2.0 access token issued via authorization code grant or FIDO2 assertion grant.
     #[default]
-    #[serde(rename = "fido2_session")]
-    #[sqlx(rename = "fido2_session")]
-    Fido2Session,
-    /// OAuth 2.0 access token issued via authorization code grant.
     #[serde(rename = "oauth_access_token")]
     #[sqlx(rename = "oauth_access_token")]
     OAuthAccessToken,
@@ -32,7 +28,6 @@ impl SessionPurpose {
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Fido2Session => "fido2_session",
             Self::OAuthAccessToken => "oauth_access_token",
         }
     }
@@ -53,7 +48,7 @@ pub struct Session {
 
 /// Create a new session.
 /// `authenticator_id` is optional for OIDC-authenticated users who haven't registered a security key yet.
-/// `session_type` distinguishes FIDO2 login sessions from OAuth access tokens.
+/// `session_type` identifies the token type (currently always `OAuthAccessToken`).
 pub async fn create_session(
     pool: &Pool,
     user_id: &str,

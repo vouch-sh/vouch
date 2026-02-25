@@ -35,7 +35,10 @@ async fn bearer_token_unique(app_state: &std::sync::Arc<crate::AppState>, suffix
 // ========================================================================
 
 #[tokio::test]
-async fn test_rfc7591_register_requires_bearer_token() {
+async fn test_rfc7591_open_registration_succeeds_without_bearer() {
+    // RFC 7591 "open registration": POST /oauth/register without a Bearer token
+    // succeeds because we allow unauthenticated registration. The resulting
+    // client_id alone grants zero access — FIDO2 auth is still required for tokens.
     let (app, _state) = test_app().await;
 
     let body = serde_json::json!({
@@ -45,17 +48,32 @@ async fn test_rfc7591_register_requires_bearer_token() {
 
     let (status, body) = http_post_json(&app, "/oauth/register", &body.to_string(), &[]).await;
 
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "Missing Bearer → 401");
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "Open registration should succeed: {body}"
+    );
     let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    assert_eq!(json["error"], "invalid_client");
+    assert!(
+        json.get("client_id").is_some(),
+        "Response must include client_id"
+    );
 }
 
 #[tokio::test]
 async fn test_rfc7591_register_rejects_expired_token() {
+    // Simulate a revoked token by creating a real session then deleting it from the DB.
+    // The token is a valid ES256 JWT but has no matching session record, so validation fails.
     let (app, state) = test_app().await;
     let user = create_test_user(&state.db, "rfc7591-expired@example.com").await;
     let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let token = create_expired_token(&state, &user.id, &user.email, &auth_id);
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    // Delete the session to simulate revocation/expiry
+    let token_hash = crate::crypto::hash_token(&token);
+    crate::db::delete_session_by_token_hash(&state.db, &token_hash)
+        .await
+        .expect("Failed to delete session");
 
     let body = serde_json::json!({
         "redirect_uris": ["https://example.com/callback"],
@@ -69,7 +87,7 @@ async fn test_rfc7591_register_rejects_expired_token() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "Expired token → 401");
+    assert_eq!(status, StatusCode::UNAUTHORIZED, "Revoked token → 401");
 }
 
 #[tokio::test]

@@ -66,13 +66,11 @@ async fn extract_auth_from_cookie(state: &AppState, jar: &CookieJar) -> Option<A
     let session = extract_session_from_cookie(state, jar).await.ok()?;
 
     // Get user info
-    let user = db::get_user_by_id(&state.db, &session.claims.sub)
-        .await
-        .ok()??;
+    let user = db::get_user_by_id(&state.db, &session.sub).await.ok()??;
 
     Some(AuthContext {
         authenticated: true,
-        user_id: Some(session.claims.sub),
+        user_id: Some(session.sub),
         user_email: Some(user.email),
         has_org: user.org_id.is_some(),
         is_org_admin: user.is_org_admin,

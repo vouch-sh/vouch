@@ -151,19 +151,14 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         .route("/oauth/device", post(handlers::device::device_code))
         // RFC 7591 Dynamic Client Registration
         .route("/oauth/register", post(handlers::oidc::register))
-        // Legacy auth endpoints
+        // Key registration routes (FAPI 2.0)
         .route(
-            "/v1/auth/register/start",
-            post(handlers::auth::register_start),
+            "/v1/keys/register/start",
+            post(handlers::keys::register_start),
         )
         .route(
-            "/v1/auth/register/complete",
-            post(handlers::auth::register_complete),
-        )
-        .route("/v1/auth/login/start", post(handlers::auth::login_start))
-        .route(
-            "/v1/auth/login/complete",
-            post(handlers::auth::login_complete),
+            "/v1/keys/register/complete",
+            post(handlers::keys::register_complete),
         )
         .route("/v1/auth/status", get(handlers::auth::status))
         // Browser-based enrollment
@@ -447,146 +442,6 @@ pub async fn http_delete_full(app: &Router, uri: &str, headers: &[(&str, &str)])
     http_request_full(app, "DELETE", uri, None, headers).await
 }
 
-/// Create a valid test JWT session token.
-pub fn create_test_token(state: &AppState, user_id: &str, email: &str, auth_id: &str) -> String {
-    use jiff::{Span, Timestamp};
-    use jsonwebtoken::{EncodingKey, encode};
-
-    let now = Timestamp::now();
-    let exp = now
-        .checked_add(Span::new().hours(8))
-        .map(|t| t.as_second())
-        .unwrap_or(now.as_second() + 28800);
-
-    let base_url = state.config().base_url.clone();
-    let claims = crate::services::auth::SessionClaims {
-        iss: base_url.clone(),
-        aud: base_url,
-        sub: user_id.to_string(),
-        email: email.to_string(),
-        authenticator_id: Some(auth_id.to_string()),
-        iat: now.as_second(),
-        exp,
-        purpose: crate::db::SessionPurpose::Fido2Session,
-        scope: None,
-    };
-
-    encode(
-        &crate::crypto::jwt::JwtType::Session.to_header(),
-        &claims,
-        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
-    )
-    .expect("Failed to encode test token")
-}
-
-/// Create a test JWT session token with a custom `iat` timestamp.
-///
-/// Used for step-up authentication tests (RFC 9470) where the session age
-/// relative to `iat` determines whether the operation is allowed.
-pub fn create_test_token_with_iat(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-    iat: i64,
-) -> String {
-    use jsonwebtoken::{EncodingKey, encode};
-
-    let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
-    let exp = iat + session_hours * 3600;
-
-    let base_url = state.config().base_url.clone();
-    let claims = crate::services::auth::SessionClaims {
-        iss: base_url.clone(),
-        aud: base_url,
-        sub: user_id.to_string(),
-        email: email.to_string(),
-        authenticator_id: Some(auth_id.to_string()),
-        iat,
-        exp,
-        purpose: crate::db::SessionPurpose::Fido2Session,
-        scope: None,
-    };
-
-    encode(
-        &crate::crypto::jwt::JwtType::Session.to_header(),
-        &claims,
-        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
-    )
-    .expect("Failed to encode test token")
-}
-
-/// Create a test session with a custom `iat` timestamp stored in the database.
-///
-/// Like `create_test_session`, but accepts a custom `iat` value for testing
-/// step-up authentication (RFC 9470) where the session must be fresh.
-pub async fn create_test_session_with_iat(
-    state: &AppState,
-    user_id: &str,
-    email: &str,
-    auth_id: &str,
-    iat: i64,
-) -> String {
-    use aws_lc_rs::digest::{self, SHA256};
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use jiff::Timestamp;
-
-    let token = create_test_token_with_iat(state, user_id, email, auth_id, iat);
-
-    // Hash the token for database storage
-    let hash = digest::digest(&SHA256, token.as_bytes());
-    let token_hash = URL_SAFE_NO_PAD.encode(hash.as_ref());
-
-    // Calculate expiration from iat
-    let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
-    let expires_ts = iat + session_hours * 3600;
-    let expires = Timestamp::from_second(expires_ts).unwrap_or_else(|_| Timestamp::now());
-
-    // Store session in database
-    crate::db::create_session(
-        &state.db,
-        user_id,
-        &token_hash,
-        Some(auth_id),
-        &expires.to_string(),
-        crate::db::SessionPurpose::Fido2Session,
-    )
-    .await
-    .expect("Failed to create session");
-
-    token
-}
-
-/// Create an expired test JWT session token.
-#[allow(dead_code)]
-pub fn create_expired_token(state: &AppState, user_id: &str, email: &str, auth_id: &str) -> String {
-    use jiff::Timestamp;
-    use jsonwebtoken::{EncodingKey, encode};
-
-    let now = Timestamp::now();
-
-    let base_url = state.config().base_url.clone();
-    let claims = crate::services::auth::SessionClaims {
-        iss: base_url.clone(),
-        aud: base_url,
-        sub: user_id.to_string(),
-        email: email.to_string(),
-        authenticator_id: Some(auth_id.to_string()),
-        iat: now.as_second() - 36000, // 10 hours ago
-        exp: now.as_second() - 3600,  // 1 hour ago (expired)
-        purpose: crate::db::SessionPurpose::Fido2Session,
-        scope: None,
-    };
-
-    encode(
-        &crate::crypto::jwt::JwtType::Session.to_header(),
-        &claims,
-        &EncodingKey::from_secret(state.config().jwt_secret_bytes()),
-    )
-    .expect("Failed to encode test token")
-}
-
 /// Create a test user in the database.
 pub async fn create_test_user(pool: &Pool, email: &str) -> crate::db::User {
     crate::db::upsert_user(pool, email, Some("Test User"))
@@ -628,41 +483,115 @@ pub async fn create_test_authenticator(pool: &Pool, user_id: &str) -> String {
     .expect("Failed to create authenticator")
 }
 
-/// Create a test session with token stored in the database.
+/// Create a test session with an OAuth access token stored in the database.
+///
+/// Returns the raw access token string. Uses the real `create_oauth_access_token`
+/// service function with ES256 signing so the token validates through the full
+/// token validation pipeline.
 pub async fn create_test_session(
     state: &AppState,
     user_id: &str,
     email: &str,
     auth_id: &str,
 ) -> String {
-    use aws_lc_rs::digest::{self, SHA256};
-    use base64::Engine;
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    use jiff::{Span, Timestamp};
+    use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+    use crate::services::oidc::scope::ScopeSet;
+    use secrecy::ExposeSecret;
 
-    let token = create_test_token(state, user_id, email, auth_id);
-
-    // Hash the token for database storage
-    let hash = digest::digest(&SHA256, token.as_bytes());
-    let token_hash = URL_SAFE_NO_PAD.encode(hash.as_ref());
-
-    // Calculate expiration
-    let now = Timestamp::now();
-    let expires = now.checked_add(Span::new().hours(8)).unwrap_or(now);
-
-    // Store session in database
-    crate::db::create_session(
-        &state.db,
-        user_id,
-        &token_hash,
-        Some(auth_id),
-        &expires.to_string(),
-        crate::db::SessionPurpose::Fido2Session,
+    let result = create_oauth_access_token(
+        state,
+        CreateOAuthTokenParams {
+            user_id,
+            email,
+            authenticator_id: Some(auth_id),
+            client_id: &state.config().base_url,
+            scope: Some(ScopeSet::all()),
+            dpop_jkt: None,
+            act: None,
+            audience: None,
+            auth_time: Some(jiff::Timestamp::now().as_second()),
+            amr: None,
+            acr: None,
+        },
     )
     .await
-    .expect("Failed to create session");
+    .expect("Failed to create test session");
 
-    token
+    result.token.expose_secret().to_string()
+}
+
+/// Create a test session with a custom `iat`-equivalent auth_time.
+///
+/// Used for step-up authentication tests (RFC 9470) where the auth_time
+/// relative to now determines whether the operation is allowed.
+pub async fn create_test_session_with_iat(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+    auth_id: &str,
+    iat: i64,
+) -> String {
+    use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+    use crate::services::oidc::scope::ScopeSet;
+    use secrecy::ExposeSecret;
+
+    let result = create_oauth_access_token(
+        state,
+        CreateOAuthTokenParams {
+            user_id,
+            email,
+            authenticator_id: Some(auth_id),
+            client_id: &state.config().base_url,
+            scope: Some(ScopeSet::all()),
+            dpop_jkt: None,
+            act: None,
+            audience: None,
+            auth_time: Some(iat),
+            amr: None,
+            acr: None,
+        },
+    )
+    .await
+    .expect("Failed to create test session");
+
+    result.token.expose_secret().to_string()
+}
+
+/// Create a test session bound to a specific OAuth client.
+///
+/// Used for tests that require the token's `client_id` to match a specific
+/// OAuth client (e.g., introspection cross-client checks).
+pub async fn create_test_session_for_client(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+    auth_id: &str,
+    client_id: &str,
+) -> String {
+    use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+    use crate::services::oidc::scope::ScopeSet;
+    use secrecy::ExposeSecret;
+
+    let result = create_oauth_access_token(
+        state,
+        CreateOAuthTokenParams {
+            user_id,
+            email,
+            authenticator_id: Some(auth_id),
+            client_id,
+            scope: Some(ScopeSet::all()),
+            dpop_jkt: None,
+            act: None,
+            audience: None,
+            auth_time: Some(jiff::Timestamp::now().as_second()),
+            amr: None,
+            acr: None,
+        },
+    )
+    .await
+    .expect("Failed to create test session");
+
+    result.token.expose_secret().to_string()
 }
 
 /// Create a SCIM bearer token for testing.
@@ -715,7 +644,7 @@ pub async fn create_test_oauth_client(pool: &Pool, user_id: &str) -> TestOAuthCl
     let (client, client_id) = crate::db::create_oauth_client(
         pool,
         &CreateOAuthClientParams {
-            user_id,
+            user_id: Some(user_id),
             name: "Test App",
             description: None,
             application_type: crate::db::OAuthClientType::Web,
@@ -771,7 +700,7 @@ pub async fn create_test_oauth_client_with_options(
     let (client, client_id) = crate::db::create_oauth_client(
         pool,
         &CreateOAuthClientParams {
-            user_id,
+            user_id: Some(user_id),
             name: "Test App",
             description: None,
             application_type: crate::db::OAuthClientType::Web,
@@ -851,28 +780,4 @@ pub fn make_test_access_token(key: &OidcSigningKey) -> String {
         acr: None,
     };
     key.sign_access_token_jwt(&claims).expect("sign")
-}
-
-/// Create a test HS256 session token.
-pub fn make_test_session_token() -> String {
-    use crate::services::auth::SessionClaims;
-    use jsonwebtoken::{EncodingKey, encode};
-
-    let claims = SessionClaims {
-        iss: TEST_ISSUER.to_string(),
-        aud: TEST_ISSUER.to_string(),
-        sub: "user-456".to_string(),
-        email: "session@example.com".to_string(),
-        authenticator_id: Some("auth-1".to_string()),
-        iat: 1_000_000_000,
-        exp: 9_999_999_999,
-        purpose: crate::db::SessionPurpose::Fido2Session,
-        scope: None,
-    };
-    encode(
-        &crate::crypto::jwt::JwtType::Session.to_header(),
-        &claims,
-        &EncodingKey::from_secret(TEST_JWT_SECRET),
-    )
-    .expect("encode")
 }

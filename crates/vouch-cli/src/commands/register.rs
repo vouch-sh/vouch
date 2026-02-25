@@ -39,7 +39,7 @@ pub async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> Result<
     )?;
     let start_resp: RegisterStartResponse = client
         .post_authenticated(
-            "/v1/auth/register/start",
+            "/v1/keys/register/start",
             &RegisterStartRequest {
                 name: name.to_string(),
             },
@@ -85,7 +85,7 @@ pub async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> Result<
     print!("Completing registration... ");
     let complete_resp: RegisterCompleteResponse = client
         .post_authenticated(
-            "/v1/auth/register/complete",
+            "/v1/keys/register/complete",
             &RegisterCompleteRequest {
                 state: start_resp.state,
                 credential_id: result.credential_id,

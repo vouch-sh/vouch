@@ -40,6 +40,7 @@ pub mod discovery;
 pub mod dpop;
 pub mod exchange;
 pub mod fapi;
+pub mod fido2_grant;
 pub mod introspection;
 pub mod jar;
 pub mod jwt_bearer;

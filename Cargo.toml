@@ -62,7 +62,7 @@ governor = { version = "=0.10.4", default-features = false }
 headers = { version = "=0.4.1", default-features = false }
 hex = { version = "=0.4.3", default-features = false }
 http = { version = "=1.4.0", default-features = false }
-inquire = { version = "=0.9.3", default-features = false }
+inquire = { version = "=0.9.4", default-features = false }
 jiff = { version = "=0.2.21", default-features = false }
 jiff-sqlx = { version = "0.1", default-features = false }
 jsonwebtoken = { version = "=10.3.0", default-features = false }
@@ -76,7 +76,7 @@ roxmltree = { version = "=0.21.1", default-features = false }
 rpassword = { version = "=7.4.0", default-features = false }
 rust-embed = { version = "=8.11.0", default-features = false }
 rust-ini = { version = "=0.21.3", default-features = false }
-rustls = { version = "=0.23.36", default-features = false }
+rustls = { version = "=0.23.37", default-features = false }
 rustls-pemfile = { version = "=2.2.0", default-features = false }
 sea-query = { version = "=0.32.7", default-features = false }
 secrecy = { version = "=0.10.3", default-features = false }

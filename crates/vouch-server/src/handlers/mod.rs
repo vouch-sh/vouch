@@ -27,8 +27,7 @@ pub(crate) use crate::crypto::{generate_challenge, generate_random_bytes, hash_t
 pub(crate) use errors::json_error;
 pub(crate) use registration::validate_registration_attestation;
 pub(crate) use session::{
-    clear_session_cookie, create_session_cookie, decode_session_jwt, extract_session,
-    extract_session_from_cookie, extract_session_with_email,
+    clear_session_cookie, create_session_cookie, extract_session_from_cookie,
 };
 
 /// Macro to implement `IntoResponse` for Askama templates.

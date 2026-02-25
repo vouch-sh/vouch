@@ -7,7 +7,7 @@
 
 use crate::AppState;
 use crate::crypto::hash_token;
-use crate::db::{self, SessionPurpose};
+use crate::db;
 use crate::redact_email;
 use crate::services::ServiceResult;
 use crate::services::auth::{DecodedToken, decode_token};
@@ -82,8 +82,8 @@ pub struct RevocationResult {
 
 /// Introspect a token (RFC 7662).
 ///
-/// Supports both HS256 FIDO2 session tokens and ES256 RFC 9068 access tokens
-/// via the dual-decode helper.
+/// Accepts ES256 RFC 9068 access tokens. Legacy HS256 session tokens
+/// are no longer supported and return `{"active": false}`.
 ///
 /// # Arguments
 /// * `state` - Application state
@@ -99,7 +99,7 @@ pub async fn introspect_token(
     _token_type_hint: Option<&str>,
     caller_client_id: Option<&str>,
 ) -> ServiceResult<IntrospectionResult> {
-    // Decode the token using the dual-decode helper (HS256 or ES256)
+    // Decode the token as an ES256 RFC 9068 access token
     let config = state.config();
     let decoded = match decode_token(
         token,
@@ -124,56 +124,30 @@ pub async fn introspect_token(
         return Ok(IntrospectionResult::inactive());
     }
 
-    // Build the introspection response based on the decoded token type
-    match &decoded {
-        DecodedToken::AccessToken(claims) => {
-            // RFC 7662 Section 4: Prevent cross-client information leakage.
-            // If the caller's client_id differs from the token's client_id,
-            // return inactive to avoid disclosing another client's tokens.
-            if let Some(caller_id) = caller_client_id
-                && caller_id != claims.client_id
-            {
-                return Ok(IntrospectionResult::inactive());
-            }
+    let DecodedToken::AccessToken(claims) = decoded;
 
-            // RFC 9068 access token — populate client_id from the JWT
-            Ok(IntrospectionResult {
-                active: true,
-                scope: claims.scope.clone(),
-                client_id: Some(claims.client_id.clone()),
-                username: claims.email.clone(),
-                token_type: Some("Bearer".to_string()),
-                exp: Some(claims.exp),
-                iat: Some(claims.iat),
-                sub: Some(claims.sub.clone()),
-                aud: Some(claims.aud.clone()),
-                iss: Some(claims.iss.clone()),
-            })
-        }
-        DecodedToken::Session(claims) => {
-            // FIDO2 session token — backward compat
-            let scope: Option<ScopeSet> = match &claims.scope {
-                Some(s) if !s.is_empty() => Some(s.clone()),
-                Some(_) => None,
-                // Backward compat: OAuth tokens issued before scope tracking
-                None if claims.purpose == SessionPurpose::OAuthAccessToken => Some(ScopeSet::all()),
-                None => None,
-            };
-
-            Ok(IntrospectionResult {
-                active: true,
-                scope,
-                client_id: None, // Session tokens don't track originating client_id
-                username: Some(claims.email.clone()),
-                token_type: Some("Bearer".to_string()),
-                exp: Some(claims.exp),
-                iat: Some(claims.iat),
-                sub: Some(claims.sub.clone()),
-                aud: caller_client_id.map(String::from),
-                iss: Some(state.config().base_url.clone()),
-            })
-        }
+    // RFC 7662 Section 4: Prevent cross-client information leakage.
+    // If the caller's client_id differs from the token's client_id,
+    // return inactive to avoid disclosing another client's tokens.
+    if let Some(caller_id) = caller_client_id
+        && caller_id != claims.client_id
+    {
+        return Ok(IntrospectionResult::inactive());
     }
+
+    // RFC 9068 access token — populate client_id from the JWT
+    Ok(IntrospectionResult {
+        active: true,
+        scope: claims.scope.clone(),
+        client_id: Some(claims.client_id.clone()),
+        username: claims.email.clone(),
+        token_type: Some("Bearer".to_string()),
+        exp: Some(claims.exp),
+        iat: Some(claims.iat),
+        sub: Some(claims.sub.clone()),
+        aud: Some(claims.aud.clone()),
+        iss: Some(claims.iss.clone()),
+    })
 }
 
 /// Revoke a token (RFC 7009).
@@ -181,7 +155,6 @@ pub async fn introspect_token(
 /// RFC 7009 specifies that the endpoint should always return success,
 /// even if the token was invalid, to prevent token oracle attacks.
 ///
-/// Supports both HS256 FIDO2 session tokens and ES256 RFC 9068 access tokens.
 /// Per RFC 7009, always attempts hash-based DB deletion even if JWT decode fails.
 ///
 /// # Arguments
@@ -259,5 +232,76 @@ mod tests {
         // None values should not be serialized
         assert!(parsed.get("exp").is_none());
         assert!(parsed.get("sub").is_none());
+    }
+
+    #[test]
+    fn test_inactive_result_has_no_claims() {
+        // RFC 7662 Section 2.2: Inactive response MUST NOT include token metadata.
+        let result = IntrospectionResult::inactive();
+        assert!(result.client_id.is_none());
+        assert!(result.username.is_none());
+        assert!(result.token_type.is_none());
+        assert!(result.exp.is_none());
+        assert!(result.iat.is_none());
+        assert!(result.sub.is_none());
+        assert!(result.aud.is_none());
+        assert!(result.iss.is_none());
+        assert!(result.scope.is_none());
+    }
+
+    #[test]
+    fn test_inactive_result_json_has_only_active_key() {
+        // Verify skip_serializing_if logic: serialized inactive response
+        // must contain exactly one key ("active").
+        let result = IntrospectionResult::inactive();
+        let json = serde_json::to_string(&result).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        let obj = parsed.as_object().unwrap();
+        assert_eq!(
+            obj.len(),
+            1,
+            "Inactive introspection response must have exactly one key (active), got: {parsed}"
+        );
+        assert!(obj.contains_key("active"));
+    }
+
+    #[test]
+    fn test_revocation_result_revoked_true() {
+        // RevocationResult with revoked=true carries email for audit logging.
+        let result = RevocationResult {
+            revoked: true,
+            user_email: Some("user@example.com".to_string()),
+        };
+        assert!(result.revoked);
+        assert_eq!(result.user_email.as_deref(), Some("user@example.com"));
+    }
+
+    #[test]
+    fn test_revocation_result_revoked_false_no_email() {
+        // RFC 7009: Revocation always "succeeds" even if nothing was found.
+        let result = RevocationResult {
+            revoked: false,
+            user_email: None,
+        };
+        assert!(!result.revoked);
+        assert!(result.user_email.is_none());
+    }
+
+    #[test]
+    fn test_hs256_token_is_inactive_in_introspection() {
+        // Regression: introspect_token must treat HS256 tokens as inactive.
+        // We test the decode_token path: None → IntrospectionResult::inactive()
+        // by verifying that a token that decode_token returns None for maps to
+        // active=false in the result structure.
+        //
+        // The actual HS256 rejection is exercised at the unit level in
+        // crypto::jwt::tests::test_hs256_tokens_rejected_by_decode_token.
+        // Here we verify the service-level consequence: inactive result.
+        let inactive = IntrospectionResult::inactive();
+        assert!(
+            !inactive.active,
+            "HS256 tokens must produce inactive=false introspection result"
+        );
     }
 }

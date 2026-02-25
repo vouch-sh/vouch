@@ -27,6 +27,9 @@ use std::sync::Arc;
 /// RFC 7523 Section 2.1: Grant type for JWT bearer authorization grants.
 const JWT_BEARER_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 
+/// Custom FIDO2 assertion grant type.
+const FIDO2_ASSERTION_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:fido2-assertion";
+
 /// OAuth grant types supported by this server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OAuthGrantType {
@@ -38,6 +41,8 @@ pub enum OAuthGrantType {
     TokenExchange,
     /// JWT bearer assertion grant (RFC 7523).
     JwtBearer,
+    /// FIDO2 assertion grant (custom extension per RFC 6749 Section 4.5).
+    Fido2Assertion,
 }
 
 impl std::str::FromStr for OAuthGrantType {
@@ -49,6 +54,7 @@ impl std::str::FromStr for OAuthGrantType {
             "urn:ietf:params:oauth:grant-type:device_code" => Ok(Self::DeviceCode),
             "urn:ietf:params:oauth:grant-type:token-exchange" => Ok(Self::TokenExchange),
             JWT_BEARER_GRANT_TYPE => Ok(Self::JwtBearer),
+            FIDO2_ASSERTION_GRANT_TYPE => Ok(Self::Fido2Assertion),
             _ => Err(format!("unsupported grant_type: {s}")),
         }
     }
@@ -279,7 +285,7 @@ pub async fn token(
             Json(OAuthErrorResponse {
                 error: "unsupported_grant_type".to_string(),
                 error_description: Some(
-                    format!("Supported grant types: authorization_code, urn:ietf:params:oauth:grant-type:device_code, urn:ietf:params:oauth:grant-type:token-exchange, {JWT_BEARER_GRANT_TYPE}"),
+                    format!("Supported grant types: authorization_code, urn:ietf:params:oauth:grant-type:device_code, urn:ietf:params:oauth:grant-type:token-exchange, {JWT_BEARER_GRANT_TYPE}, {FIDO2_ASSERTION_GRANT_TYPE}"),
                 ),
                 error_uri: None,
             }),
@@ -296,6 +302,9 @@ pub async fn token(
             handle_token_exchange_grant(State(state), headers, params).await
         }
         OAuthGrantType::JwtBearer => handle_jwt_bearer_grant(State(state), params).await,
+        OAuthGrantType::Fido2Assertion => {
+            handle_fido2_assertion_grant(State(state), headers, params).await
+        }
     }
 }
 
@@ -536,6 +545,101 @@ impl ClientAuthFields for TokenRequest {
     }
 }
 
+/// Handle FIDO2 assertion grant.
+///
+/// Requires `private_key_jwt` client authentication and a FIDO2 assertion
+/// in the `assertion` parameter. Optionally requires DPoP for FAPI clients.
+async fn handle_fido2_assertion_grant(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    params: TokenRequest,
+) -> Response {
+    // The assertion parameter is REQUIRED
+    let assertion = match &params.assertion {
+        Some(a) => a.clone(),
+        None => {
+            return token_error_response(
+                "invalid_request",
+                "Missing assertion parameter for fido2-assertion grant",
+            );
+        }
+    };
+
+    // Extract and authenticate client via private_key_jwt
+    let client_auth = match extract_client_auth(&headers, &params) {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+
+    let jwt_authenticated = match client_auth {
+        ExtractedClientAuth::JwtAssertion {
+            client_assertion,
+            client_id,
+        } => match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref()).await {
+            Ok(client) => client,
+            Err(e) => return e.into_service_error().into_oauth_response().into_response(),
+        },
+        _ => {
+            return token_error_response(
+                "invalid_client",
+                "fido2-assertion grant requires private_key_jwt client authentication",
+            );
+        }
+    };
+
+    // Validate DPoP proof if present
+    let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
+    let dpop_proof =
+        match validate_dpop_if_present(&state, dpop_header, "POST", "/oauth/token").await {
+            Ok(proof) => proof,
+            Err(crate::services::oidc::dpop::DpopError::UseNonce(nonce)) => {
+                return dpop_use_nonce_response(&nonce);
+            }
+            Err(e) => {
+                return ServiceError::oauth(OAuthErrorCode::InvalidDpopProof, e.to_string())
+                    .into_oauth_response()
+                    .into_response();
+            }
+        };
+
+    // FAPI 2.0: Require DPoP for FAPI clients
+    if let Err(e) = crate::services::oidc::fapi::validate_fapi_token_request(
+        &jwt_authenticated.client,
+        dpop_proof.is_some(),
+    ) {
+        return e.into_oauth_response().into_response();
+    }
+
+    // Exchange the FIDO2 assertion for an access token
+    let exchange_params = crate::services::oidc::fido2_grant::Fido2AssertionParams {
+        assertion: &assertion,
+        client: &crate::services::oidc::token::AuthenticatedClient {
+            client: jwt_authenticated.client,
+            is_public: false,
+        },
+        dpop_proof,
+        scope: params.scope.as_deref(),
+    };
+
+    match crate::services::oidc::fido2_grant::exchange_fido2_assertion(&state, exchange_params)
+        .await
+    {
+        Ok(result) => (
+            StatusCode::OK,
+            [("cache-control", "no-store"), ("pragma", "no-cache")],
+            Json(TokenResponse {
+                access_token: result.access_token,
+                token_type: result.token_type,
+                expires_in: result.expires_in,
+                id_token: None,
+                scope: result.scope,
+            }),
+        )
+            .into_response(),
+        Err(e) => e.into_oauth_response().into_response(),
+    }
+}
+
 /// Handle JWT bearer grant (RFC 7523 Section 2.1).
 async fn handle_jwt_bearer_grant(
     State(state): State<Arc<AppState>>,
@@ -642,6 +746,13 @@ mod tests {
         let result: Result<OAuthGrantType, _> =
             "urn:ietf:params:oauth:grant-type:jwt-bearer".parse();
         assert_eq!(result, Ok(OAuthGrantType::JwtBearer));
+    }
+
+    #[test]
+    fn test_oauth_grant_type_from_str_fido2_assertion() {
+        let result: Result<OAuthGrantType, _> =
+            "urn:ietf:params:oauth:grant-type:fido2-assertion".parse();
+        assert_eq!(result, Ok(OAuthGrantType::Fido2Assertion));
     }
 
     #[test]

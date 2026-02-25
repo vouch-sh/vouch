@@ -90,6 +90,29 @@ impl TestHarness {
         Ok(token)
     }
 
+    /// Create a session bound to a specific OAuth client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if session creation fails.
+    pub async fn create_session_for_client(
+        &self,
+        user_id: &str,
+        email: &str,
+        auth_id: &str,
+        client_id: &str,
+    ) -> Result<String> {
+        let token = test_utils::create_test_session_for_client(
+            &self.state,
+            user_id,
+            email,
+            auth_id,
+            client_id,
+        )
+        .await;
+        Ok(token)
+    }
+
     /// Create a fully set up user with an authenticator and session.
     ///
     /// Returns (user, auth_id, token).
@@ -174,7 +197,7 @@ impl TestHarness {
     pub async fn get(&self, path: &str) -> Result<vouch_cli::HttpResponse> {
         let url = self.url(path);
         self.http_client
-            .request("GET", &url, None, None, None)
+            .request("GET", &url, None, None, None, None)
             .await
     }
 
@@ -187,7 +210,14 @@ impl TestHarness {
         let url = self.url(path);
         let json = serde_json::to_vec(body)?;
         self.http_client
-            .request("POST", &url, Some(&json), Some("application/json"), None)
+            .request(
+                "POST",
+                &url,
+                Some(&json),
+                Some("application/json"),
+                None,
+                None,
+            )
             .await
     }
 
@@ -200,7 +230,7 @@ impl TestHarness {
         let url = self.url(path);
         let auth = format!("Bearer {}", token);
         self.http_client
-            .request("GET", &url, None, None, Some(&auth))
+            .request("GET", &url, None, None, Some(&auth), None)
             .await
     }
 
@@ -221,6 +251,7 @@ impl TestHarness {
                 Some(&json),
                 Some("application/json"),
                 Some(&auth),
+                None,
             )
             .await
     }
@@ -244,7 +275,7 @@ impl TestHarness {
         let url = self.url(path);
         let auth = format!("Bearer {}", token);
         self.http_client
-            .request("DELETE", &url, None, None, Some(&auth))
+            .request("DELETE", &url, None, None, Some(&auth), None)
             .await
     }
 
@@ -265,6 +296,7 @@ impl TestHarness {
                 Some(&json),
                 Some("application/json"),
                 Some(&auth),
+                None,
             )
             .await
     }
@@ -286,6 +318,7 @@ impl TestHarness {
                 Some(&json),
                 Some("application/json"),
                 Some(&auth),
+                None,
             )
             .await
     }
@@ -299,6 +332,7 @@ impl TestHarness {
                 &url,
                 Some(body.as_bytes()),
                 Some("application/x-www-form-urlencoded"),
+                None,
                 None,
             )
             .await
@@ -320,6 +354,7 @@ impl TestHarness {
                 Some(body.as_bytes()),
                 Some("application/x-www-form-urlencoded"),
                 Some(&auth),
+                None,
             )
             .await
     }
@@ -339,6 +374,7 @@ impl TestHarness {
                 Some(body.as_bytes()),
                 Some("application/x-www-form-urlencoded"),
                 Some(auth_header),
+                None,
             )
             .await
     }
@@ -393,13 +429,27 @@ impl TestHarness {
         Ok(())
     }
 
-    /// Create an expired session token for testing token expiration.
+    /// Create a session token that is not in the database (simulates revocation/expiration).
+    ///
+    /// Returns a valid JWT that will be rejected by the status endpoint because
+    /// the corresponding session does not exist in the database.
     ///
     /// # Errors
     ///
     /// Returns an error if token creation fails.
-    pub fn create_expired_token(&self, user_id: &str, email: &str, auth_id: &str) -> String {
-        test_utils::create_expired_token(&self.state, user_id, email, auth_id)
+    pub async fn create_expired_token(&self, user_id: &str, email: &str, auth_id: &str) -> String {
+        // Create a real session, then immediately delete it from the database.
+        // This simulates an expired/revoked session — the token is valid JWT
+        // but has no matching session record, so status returns authenticated: false.
+        use vouch_server::crypto::hash_token;
+
+        let token = test_utils::create_test_session(&self.state, user_id, email, auth_id).await;
+
+        // Delete the session from the database to make it appear revoked
+        let token_hash = hash_token(&token);
+        let _ = db::delete_session_by_token_hash(&self.state.db, &token_hash).await;
+
+        token
     }
 }
 

@@ -5,10 +5,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::encoding::Raw;
-use crate::fido2_types::{
-    AttestationObject, AuthData, Challenge, ClientDataJson, CoseKey, CredentialId, Signature,
-    UserHandle,
-};
+use crate::fido2_types::{AttestationObject, Challenge, ClientDataJson, CoseKey, CredentialId};
 
 // ============================================================================
 // Registration
@@ -113,56 +110,17 @@ impl ClientContext {
     }
 }
 
-// ============================================================================
-// Login / Authentication
-// ============================================================================
-
-/// Request to start FIDO2 authentication.
-/// Empty for discoverable credentials - the YubiKey identifies the user.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct LoginStartRequest {}
-
-/// Response containing challenge for FIDO2 authentication.
-/// For discoverable credentials, no credential_ids are needed.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct LoginStartResponse {
-    /// Random challenge bytes (32 bytes).
-    pub challenge: Challenge<Raw>,
-    /// Relying Party ID (domain).
+/// Response from `POST /oauth/fido2/challenge`.
+///
+/// Used by the CLI login flow (FAPI 2.0 FIDO2 assertion grant).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Fido2ChallengeResponse {
+    /// Base64url-encoded 32-byte challenge.
+    pub challenge: String,
+    /// Relying Party ID (domain, e.g., "vouch.sh").
     pub rp_id: String,
-    /// Authentication state token (opaque, returned to complete endpoint).
+    /// HS256 state JWT to include in the assertion grant.
     pub state: String,
-}
-
-/// Request to complete FIDO2 authentication with assertion.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct LoginCompleteRequest {
-    /// Authentication state token from start response.
-    pub state: String,
-    /// Credential ID used for this assertion.
-    pub credential_id: CredentialId<Raw>,
-    /// Authenticator data from assertion.
-    pub authenticator_data: AuthData<Raw>,
-    /// Signature from assertion.
-    pub signature: Signature<Raw>,
-    /// Client data JSON (constructed by CLI).
-    pub client_data_json: ClientDataJson<Raw>,
-    /// User handle from discoverable credential (identifies the user).
-    pub user_handle: UserHandle<Raw>,
-    /// Client context (device/environment info for anomaly detection).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_context: Option<ClientContext>,
-}
-
-/// Response after successful authentication.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct LoginCompleteResponse {
-    /// JWT session token.
-    pub token: String,
-    /// ISO 8601 expiration timestamp.
-    pub expires_at: String,
-    /// User's email address (identified from user_handle).
-    pub email: String,
 }
 
 // ============================================================================

@@ -11,7 +11,7 @@
 //! the `typ` header (RFC 7515 Section 4.1.9), preventing cross-type token
 //! substitution attacks.
 
-use crate::services::auth::{AccessTokenClaims, DecodedToken, SessionClaims};
+use crate::services::auth::{AccessTokenClaims, DecodedToken};
 use crate::services::oidc::keys::OidcSigningKey;
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation};
 use serde::Serialize;
@@ -25,20 +25,18 @@ use serde::de::DeserializeOwned;
 pub enum JwtType {
     /// RFC 9068 Section 2.1: OAuth 2.0 access token.
     AccessToken,
-    /// Internal FIDO2 session token.
-    Session,
     /// Internal short-lived authorization code.
     AuthorizationCode,
     /// WebAuthn registration state (CLI flow).
     RegistrationState,
-    /// WebAuthn authentication state (CLI flow).
-    AuthenticationState,
     /// Browser WebAuthn registration state.
     BrowserRegistrationState,
     /// Browser WebAuthn authentication state.
     BrowserAuthenticationState,
     /// GitHub OAuth state token.
     GitHubState,
+    /// FIDO2 challenge state for the FIDO2 assertion grant.
+    Fido2ChallengeState,
 }
 
 impl JwtType {
@@ -47,13 +45,12 @@ impl JwtType {
     pub const fn as_header_str(&self) -> &'static str {
         match self {
             Self::AccessToken => "at+jwt",
-            Self::Session => "vouch-session+jwt",
             Self::AuthorizationCode => "vouch-authz+jwt",
             Self::RegistrationState => "vouch-reg-state+jwt",
-            Self::AuthenticationState => "vouch-auth-state+jwt",
             Self::BrowserRegistrationState => "vouch-browser-reg+jwt",
             Self::BrowserAuthenticationState => "vouch-browser-auth+jwt",
             Self::GitHubState => "vouch-github-state+jwt",
+            Self::Fido2ChallengeState => "vouch-fido2-challenge+jwt",
         }
     }
 
@@ -63,13 +60,12 @@ impl JwtType {
     pub fn from_header_str(s: &str) -> Option<Self> {
         match s {
             "at+jwt" => Some(Self::AccessToken),
-            "vouch-session+jwt" => Some(Self::Session),
             "vouch-authz+jwt" => Some(Self::AuthorizationCode),
             "vouch-reg-state+jwt" => Some(Self::RegistrationState),
-            "vouch-auth-state+jwt" => Some(Self::AuthenticationState),
             "vouch-browser-reg+jwt" => Some(Self::BrowserRegistrationState),
             "vouch-browser-auth+jwt" => Some(Self::BrowserAuthenticationState),
             "vouch-github-state+jwt" => Some(Self::GitHubState),
+            "vouch-fido2-challenge+jwt" => Some(Self::Fido2ChallengeState),
             _ => None,
         }
     }
@@ -88,7 +84,11 @@ impl JwtType {
 ///
 /// Avoids parameter proliferation on [`decode_token`].
 pub struct TokenValidationContext<'a> {
-    /// HS256 symmetric secret.
+    /// HS256 symmetric secret (retained for state token operations).
+    ///
+    /// NOTE: currently unused in `decode_token` since HS256 session tokens
+    /// have been removed. Retained for future token validation extensions.
+    #[allow(dead_code)]
     pub(crate) jwt_secret: &'a [u8],
     /// ES256 OIDC signing key.
     pub(crate) oidc_key: &'a OidcSigningKey,
@@ -134,12 +134,11 @@ impl<'a> TokenValidationContext<'a> {
     }
 }
 
-/// Decode a JWT, routing to the correct claims type based on algorithm.
+/// Decode a JWT as an RFC 9068 ES256 access token.
 ///
-/// Prevents algorithm confusion attacks by pinning each decode path
-/// to a single algorithm via explicit `Validation`. Validates `typ` header
-/// for both ES256 and HS256 tokens (RFC 8725 Section 3.11). Validates
-/// `iss` claim (RFC 8725 Section 3.8).
+/// Prevents algorithm confusion attacks by pinning the decode path
+/// to ES256 via explicit `Validation`. Validates `typ` header
+/// (RFC 8725 Section 3.11) and `iss` claim (RFC 8725 Section 3.8).
 ///
 /// For access tokens, audience validation is contextual — callers MUST
 /// validate `aud` against their expected audience (RFC 8725 Section 3.9).
@@ -175,43 +174,16 @@ pub fn decode_token(token: &str, ctx: &TokenValidationContext<'_>) -> Option<Dec
 
             Some(DecodedToken::AccessToken(token_data.claims))
         }
-        Algorithm::HS256 => {
-            // Attempt to decode as a FIDO2 session token
-            let decoding_key = DecodingKey::from_secret(ctx.jwt_secret);
-            let validation = session_validation(ctx.expected_issuer);
-
-            let token_data =
-                jsonwebtoken::decode::<SessionClaims>(token, &decoding_key, &validation).ok()?;
-
-            // RFC 8725 §3.11: Validate typ header
-            if token_data.header.typ.as_deref() != Some(JwtType::Session.as_header_str()) {
-                return None;
-            }
-
-            Some(DecodedToken::Session(token_data.claims))
-        }
-        // Reject all other algorithms (including "none") to prevent attacks
+        // Reject all other algorithms (including "none" and HS256) to prevent attacks
         _ => None,
     }
 }
 
-/// Build HS256 session validation with issuer and audience set to the expected issuer.
-///
-/// This consolidates the identical validation setup used in [`decode_session_jwt`]
-/// (`handlers/common.rs`) and the HS256 branch of [`decode_token`].
-#[must_use]
-pub(crate) fn session_validation(expected_issuer: &str) -> Validation {
-    let mut validation = Validation::new(Algorithm::HS256);
-    validation.set_issuer(&[expected_issuer]);
-    validation.set_audience(&[expected_issuer]);
-    validation
-}
-
 /// Encode a short-lived state token as a JWT with an explicit `typ` header.
 ///
-/// This is a generic helper for the 5 state token types (registration, authentication,
-/// browser registration, browser authentication, GitHub state) that share the same
-/// encode pattern: set `typ` header from [`JwtType`], sign with HS256.
+/// This is a generic helper for the state token types (registration, authentication,
+/// browser registration, browser authentication, GitHub state, FIDO2 challenge) that
+/// share the same encode pattern: set `typ` header from [`JwtType`], sign with HS256.
 pub fn encode_state_token<T: Serialize>(
     claims: &T,
     jwt_type: JwtType,
@@ -226,7 +198,7 @@ pub fn encode_state_token<T: Serialize>(
 
 /// Decode a short-lived state token, validating the `typ` header.
 ///
-/// This is a generic helper for the 5 state token types. It decodes with
+/// This is a generic helper for the state token types. It decodes with
 /// default validation (only `exp` check), then validates that the `typ`
 /// header matches the expected [`JwtType`].
 pub fn decode_state_token<T: DeserializeOwned>(
@@ -255,13 +227,11 @@ pub fn decode_state_token<T: DeserializeOwned>(
 )]
 mod tests {
     use super::*;
-    use crate::services::auth::{AccessTokenClaims, SessionClaims};
+    use crate::services::auth::AccessTokenClaims;
     use crate::services::oidc::keys::OidcSigningKey;
     use crate::test_utils::{
         TEST_ISSUER, TEST_JWT_SECRET, make_test_access_token, make_test_oidc_key,
-        make_test_session_token,
     };
-    use jsonwebtoken::{EncodingKey, encode};
 
     fn make_ctx(key: &OidcSigningKey) -> TokenValidationContext<'_> {
         TokenValidationContext::new(TEST_JWT_SECRET, key, TEST_ISSUER)
@@ -281,24 +251,6 @@ mod tests {
                 assert_eq!(c.client_id, "client-abc");
                 assert_eq!(c.email.as_deref(), Some("test@example.com"));
             }
-            DecodedToken::Session(_) => panic!("Expected AccessToken, got Session"),
-        }
-    }
-
-    #[test]
-    fn test_decode_token_routes_hs256_to_session() {
-        let key = make_test_oidc_key();
-        let ctx = make_ctx(&key);
-        let token = make_test_session_token();
-
-        let decoded = decode_token(&token, &ctx);
-        assert!(decoded.is_some());
-        match decoded.unwrap() {
-            DecodedToken::Session(c) => {
-                assert_eq!(c.sub, "user-456");
-                assert_eq!(c.email, "session@example.com");
-            }
-            DecodedToken::AccessToken(_) => panic!("Expected Session, got AccessToken"),
         }
     }
 
@@ -342,16 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_token_rejects_wrong_hs256_secret() {
-        let key = make_test_oidc_key();
-        let token = make_test_session_token();
-
-        let ctx = TokenValidationContext::new(b"wrong-secret", &key, TEST_ISSUER);
-        let decoded = decode_token(&token, &ctx);
-        assert!(decoded.is_none());
-    }
-
-    #[test]
     fn test_decode_token_rejects_expired_access_token() {
         let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
@@ -383,7 +325,7 @@ mod tests {
     #[test]
     fn test_decode_token_rejects_wrong_issuer() {
         let key = make_test_oidc_key();
-        let token = make_test_session_token();
+        let token = make_test_access_token(&key);
 
         // Use a different expected issuer
         let ctx = TokenValidationContext::new(TEST_JWT_SECRET, &key, "https://wrong-issuer.com");
@@ -395,106 +337,15 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_token_rejects_wrong_audience() {
-        let key = make_test_oidc_key();
-
-        // Create a session token with different audience
-        let claims = SessionClaims {
-            iss: TEST_ISSUER.to_string(),
-            aud: "https://wrong-audience.com".to_string(),
-            sub: "user-456".to_string(),
-            email: "session@example.com".to_string(),
-            authenticator_id: Some("auth-1".to_string()),
-            iat: 1_000_000_000,
-            exp: 9_999_999_999,
-            purpose: crate::db::SessionPurpose::Fido2Session,
-            scope: None,
-        };
-        let token = encode(
-            &JwtType::Session.to_header(),
-            &claims,
-            &EncodingKey::from_secret(TEST_JWT_SECRET),
-        )
-        .expect("encode");
-
-        let ctx = make_ctx(&key);
-        let decoded = decode_token(&token, &ctx);
-        assert!(
-            decoded.is_none(),
-            "Token with wrong audience should be rejected"
-        );
-    }
-
-    #[test]
-    fn test_decode_token_rejects_session_without_typ() {
-        let key = make_test_oidc_key();
-        let ctx = make_ctx(&key);
-
-        // Create a session token without typ header
-        let claims = SessionClaims {
-            iss: TEST_ISSUER.to_string(),
-            aud: TEST_ISSUER.to_string(),
-            sub: "user-456".to_string(),
-            email: "session@example.com".to_string(),
-            authenticator_id: Some("auth-1".to_string()),
-            iat: 1_000_000_000,
-            exp: 9_999_999_999,
-            purpose: crate::db::SessionPurpose::Fido2Session,
-            scope: None,
-        };
-        let token = encode(
-            &Header::default(), // No typ
-            &claims,
-            &EncodingKey::from_secret(TEST_JWT_SECRET),
-        )
-        .expect("encode");
-
-        let decoded = decode_token(&token, &ctx);
-        assert!(
-            decoded.is_none(),
-            "Session token without typ should be rejected"
-        );
-    }
-
-    #[test]
-    fn test_decode_token_rejects_cross_type_substitution() {
-        let key = make_test_oidc_key();
-        let ctx = make_ctx(&key);
-
-        // Create a session token with auth code typ
-        let claims = SessionClaims {
-            iss: TEST_ISSUER.to_string(),
-            aud: TEST_ISSUER.to_string(),
-            sub: "user-456".to_string(),
-            email: "session@example.com".to_string(),
-            authenticator_id: Some("auth-1".to_string()),
-            iat: 1_000_000_000,
-            exp: 9_999_999_999,
-            purpose: crate::db::SessionPurpose::Fido2Session,
-            scope: None,
-        };
-        let token = encode(
-            &JwtType::AuthorizationCode.to_header(), // Wrong typ for a session
-            &claims,
-            &EncodingKey::from_secret(TEST_JWT_SECRET),
-        )
-        .expect("encode");
-
-        let decoded = decode_token(&token, &ctx);
-        assert!(decoded.is_none(), "Token with wrong typ should be rejected");
-    }
-
-    #[test]
     fn test_jwt_type_roundtrip() {
         let types = [
             JwtType::AccessToken,
-            JwtType::Session,
             JwtType::AuthorizationCode,
             JwtType::RegistrationState,
-            JwtType::AuthenticationState,
             JwtType::BrowserRegistrationState,
             JwtType::BrowserAuthenticationState,
             JwtType::GitHubState,
+            JwtType::Fido2ChallengeState,
         ];
 
         for typ in types {
@@ -508,13 +359,8 @@ mod tests {
     fn test_jwt_type_unknown_returns_none() {
         assert_eq!(JwtType::from_header_str("unknown"), None);
         assert_eq!(JwtType::from_header_str(""), None);
-    }
-
-    #[test]
-    fn test_jwt_type_to_header() {
-        let header = JwtType::Session.to_header();
-        assert_eq!(header.typ, Some("vouch-session+jwt".to_string()));
-        assert_eq!(header.alg, Algorithm::HS256); // Default algorithm
+        // Legacy session type is no longer supported
+        assert_eq!(JwtType::from_header_str("vouch-session+jwt"), None);
     }
 
     #[test]
@@ -582,11 +428,11 @@ mod tests {
             iat: 1_000_000_000,
             exp: 9_999_999_999,
         };
-        // Encode as RegistrationState, decode as AuthenticationState
+        // Encode as RegistrationState, decode as BrowserRegistrationState (different typ)
         let token = encode_state_token(&state, JwtType::RegistrationState, TEST_JWT_SECRET)
             .expect("encode");
         let result: Result<TestState, _> =
-            decode_state_token(&token, JwtType::AuthenticationState, TEST_JWT_SECRET);
+            decode_state_token(&token, JwtType::BrowserRegistrationState, TEST_JWT_SECRET);
         assert!(result.is_err(), "Wrong type should be rejected");
     }
 
@@ -604,14 +450,34 @@ mod tests {
         assert!(result.is_err(), "Wrong secret should be rejected");
     }
 
-    // ====================================================================
-    // Session validation helper
-    // ====================================================================
-
     #[test]
-    fn test_session_validation_config() {
-        let validation = session_validation("https://example.com");
-        assert_eq!(validation.algorithms, vec![Algorithm::HS256]);
-        // Issuer and audience are set (internal fields tested via decode behavior)
+    fn test_hs256_tokens_rejected_by_decode_token() {
+        // HS256 tokens (legacy session tokens) must be rejected by decode_token
+        use jsonwebtoken::{EncodingKey, encode};
+
+        let key = make_test_oidc_key();
+        let ctx = make_ctx(&key);
+
+        // Create an HS256 signed JWT
+        #[derive(serde::Serialize)]
+        struct LegacyClaims {
+            iss: String,
+            sub: String,
+            exp: i64,
+        }
+        let claims = LegacyClaims {
+            iss: TEST_ISSUER.to_string(),
+            sub: "user-456".to_string(),
+            exp: 9_999_999_999,
+        };
+        let token = encode(
+            &Header::default(), // HS256 by default
+            &claims,
+            &EncodingKey::from_secret(TEST_JWT_SECRET),
+        )
+        .expect("encode");
+
+        let decoded = decode_token(&token, &ctx);
+        assert!(decoded.is_none(), "HS256 tokens must be rejected");
     }
 }

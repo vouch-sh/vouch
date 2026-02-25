@@ -12,11 +12,14 @@ async fn test_introspect_active_token() {
     // RFC 7662 Section 2.2: Active token returns active=true with claims
     let (app, state) = test_app().await;
 
-    // Create a test user, OAuth client (for auth), and session
+    // Create a test user and OAuth client
     let user = create_test_user(&state.db, "introspect@example.com").await;
     let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
     let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Issue an access token via the OAuth flow so the token's client_id
+    // matches the introspecting client (RFC 7662 Section 4 cross-client check)
+    let (token, _id_token) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
     let auth_header = client.basic_auth_header();
 
     let (status, body) = http_post_form(

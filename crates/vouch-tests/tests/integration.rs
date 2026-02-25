@@ -303,7 +303,9 @@ mod auth_security {
             .expect("Failed to create auth");
 
         // Create an expired token
-        let expired_token = harness.create_expired_token(&user.id, &user.email, &auth_id);
+        let expired_token = harness
+            .create_expired_token(&user.id, &user.email, &auth_id)
+            .await;
 
         let response = harness
             .get_authenticated("/v1/auth/status", &expired_token)
@@ -335,14 +337,14 @@ mod auth_security {
             "Userinfo endpoint should require auth"
         );
 
-        // Test /v1/auth/register/start endpoint (POST)
+        // Test /v1/keys/register/start endpoint (POST)
         #[derive(serde::Serialize)]
         struct RegisterRequest {
             name: String,
         }
         let response = harness
             .post_json(
-                "/v1/auth/register/start",
+                "/v1/keys/register/start",
                 &RegisterRequest {
                     name: "test".to_string(),
                 },
@@ -577,142 +579,6 @@ mod device_flow {
 }
 
 // ============================================================================
-// Priority 3: WebAuthn Login Flow Tests
-// ============================================================================
-
-mod webauthn_flow {
-    use super::*;
-
-    /// Test that login start returns a challenge.
-    #[tokio::test]
-    async fn test_login_start_returns_challenge() {
-        let harness = TestHarness::new().await;
-
-        #[derive(serde::Serialize)]
-        struct LoginStartRequest {}
-
-        let response = harness
-            .post_json("/v1/auth/login/start", &LoginStartRequest {})
-            .await
-            .expect("Failed to post login start");
-
-        assert_eq!(response.status, 200);
-        let resp: serde_json::Value = response.json().expect("Failed to parse response");
-        assert!(resp.get("challenge").is_some(), "Should have challenge");
-        assert!(resp.get("rp_id").is_some(), "Should have rp_id");
-        assert!(resp.get("state").is_some(), "Should have state token");
-    }
-
-    /// Test that login start with mock device setup succeeds.
-    #[tokio::test]
-    async fn test_login_start_with_mock_device() {
-        let harness = TestHarness::new().await;
-        let _device = IntegrationMockDevice::new();
-
-        // Create user with authenticator (this creates a test authenticator)
-        let _user = harness
-            .create_user("login@example.com")
-            .await
-            .expect("Failed to create user");
-
-        // Get login challenge
-        #[derive(serde::Serialize)]
-        struct LoginStartRequest {}
-
-        let response = harness
-            .post_json("/v1/auth/login/start", &LoginStartRequest {})
-            .await
-            .expect("Failed to post login start");
-        let start_resp: serde_json::Value = response.json().expect("Failed to parse response");
-
-        // Verify challenge was returned
-        assert!(start_resp.get("challenge").is_some());
-        assert!(start_resp.get("state").is_some());
-    }
-
-    /// Test that login complete fails with invalid state.
-    #[tokio::test]
-    async fn test_login_complete_invalid_state() {
-        let harness = TestHarness::new().await;
-
-        #[derive(serde::Serialize)]
-        struct LoginCompleteRequest {
-            state: String,
-            credential_id: Vec<u8>,
-            authenticator_data: Vec<u8>,
-            client_data_json: Vec<u8>,
-            signature: Vec<u8>,
-            user_handle: Vec<u8>,
-        }
-
-        let request = LoginCompleteRequest {
-            state: "invalid.state.token".to_string(),
-            credential_id: vec![1, 2, 3],
-            authenticator_data: vec![],
-            client_data_json: vec![],
-            signature: vec![],
-            user_handle: vec![],
-        };
-
-        let response = harness
-            .post_json("/v1/auth/login/complete", &request)
-            .await
-            .expect("Failed to post login complete");
-
-        assert_eq!(response.status, 400);
-        let error: serde_json::Value = response.json().expect("Failed to parse error");
-        assert_eq!(error["code"], "invalid_state");
-    }
-
-    /// Test that login complete fails with unknown credential.
-    #[tokio::test]
-    async fn test_login_complete_credential_not_found() {
-        let harness = TestHarness::new().await;
-
-        // Get a valid state token first
-        #[derive(serde::Serialize)]
-        struct LoginStartRequest {}
-
-        let response = harness
-            .post_json("/v1/auth/login/start", &LoginStartRequest {})
-            .await
-            .expect("Failed to post login start");
-        let start_resp: serde_json::Value = response.json().expect("Failed to parse response");
-        let state = start_resp["state"].as_str().expect("state");
-
-        // Try to complete with unknown credential
-        #[derive(serde::Serialize)]
-        struct LoginCompleteRequest {
-            state: String,
-            credential_id: Vec<u8>,
-            authenticator_data: Vec<u8>,
-            client_data_json: Vec<u8>,
-            signature: Vec<u8>,
-            user_handle: Vec<u8>,
-        }
-
-        // Use a random UUID-like bytes as user handle
-        let fake_user_handle = [1u8; 16]; // 16 bytes like a UUID
-        let request = LoginCompleteRequest {
-            state: state.to_string(),
-            credential_id: vec![1, 2, 3, 4, 5],
-            authenticator_data: vec![0; 37],
-            client_data_json: vec![],
-            signature: vec![],
-            user_handle: fake_user_handle.to_vec(),
-        };
-
-        let response = harness
-            .post_json("/v1/auth/login/complete", &request)
-            .await
-            .expect("Failed to post login complete");
-
-        // Invalid user_handle format returns 400
-        assert!(response.status == 400 || response.status == 404);
-    }
-}
-
-// ============================================================================
 // Priority 4: Key Registration Tests
 // ============================================================================
 
@@ -731,7 +597,7 @@ mod register_flow {
 
         let response = harness
             .post_json(
-                "/v1/auth/register/start",
+                "/v1/keys/register/start",
                 &RegisterRequest {
                     name: "New Key".to_string(),
                 },
@@ -760,7 +626,7 @@ mod register_flow {
 
         let response = harness
             .post_json_authenticated(
-                "/v1/auth/register/start",
+                "/v1/keys/register/start",
                 &RegisterRequest {
                     name: "New Key".to_string(),
                 },
@@ -799,7 +665,7 @@ mod register_flow {
 
         let response = harness
             .post_json_authenticated(
-                "/v1/auth/register/start",
+                "/v1/keys/register/start",
                 &RegisterRequest {
                     name: "New Key".to_string(),
                 },
@@ -885,6 +751,7 @@ mod keys {
             &harness.http_client,
             "DELETE",
             &harness.url("/v1/keys/some-key-id"),
+            None,
             None,
             None,
             None,
@@ -1094,12 +961,11 @@ mod oidc {
         assert_eq!(response.status, 200);
         let userinfo: serde_json::Value = response.json().expect("Failed to parse response");
         assert!(userinfo.get("sub").is_some(), "Should have sub claim");
-        // FIDO2 sessions don't carry OAuth scopes, so email claims are omitted
-        // per OIDC Core Section 5.4. OAuth access tokens with "email" scope
-        // are tested in the vouch-server unit tests.
-        assert!(
-            userinfo.get("email").is_none(),
-            "FIDO2 session should not include email without email scope"
+        // OAuth access tokens include email scope, so email is present
+        assert_eq!(
+            userinfo["email"].as_str(),
+            Some("userinfo@example.com"),
+            "Email should be present when email scope is granted"
         );
         assert!(
             userinfo["hardware_verified"].as_bool().unwrap_or(false),
@@ -1138,17 +1004,30 @@ mod oidc {
     async fn test_introspect_active_token() {
         let harness = TestHarness::new().await;
 
-        let (user, _auth_id, token) = harness
+        let (user, auth_id, _token) = harness
             .create_authenticated_user("introspect@example.com")
             .await
             .expect("Failed to create authenticated user");
 
-        // RFC 7662: Introspection requires client authentication
+        // RFC 7662: Introspection requires client authentication.
+        // Create the OAuth client first, then issue a session bound to it
+        // so the token's client_id matches the introspecting client
+        // (RFC 7662 Section 4: cross-client protection).
         let client = harness
             .create_oauth_client(&user.id)
             .await
             .expect("Failed to create OAuth client");
         let auth_header = client.basic_auth_header();
+
+        let token = harness
+            .create_session_for_client(
+                &user.id,
+                "introspect@example.com",
+                &auth_id,
+                &client.client_id,
+            )
+            .await
+            .expect("Failed to create client-bound session");
 
         let response = harness
             .post_form_with_auth(
@@ -2370,11 +2249,23 @@ mod es256_flow {
 
 mod encoding_verification {
     use super::*;
-    use vouch_common::LoginCompleteRequest;
-
     /// Verify MockFidoDevice data survives JSON round-trip
     #[tokio::test]
     async fn test_mock_device_data_survives_serialization() {
+        use vouch_common::encoding::Raw;
+        use vouch_common::fido2_types::{
+            AuthData, ClientDataJson, CredentialId, Signature, UserHandle,
+        };
+
+        #[derive(serde::Serialize, serde::Deserialize)]
+        struct AssertionPayload {
+            credential_id: CredentialId<Raw>,
+            authenticator_data: AuthData<Raw>,
+            signature: Signature<Raw>,
+            client_data_json: ClientDataJson<Raw>,
+            user_handle: UserHandle<Raw>,
+        }
+
         let device = IntegrationMockDevice::new();
         let challenge = [1u8; 32];
 
@@ -2385,19 +2276,17 @@ mod encoding_verification {
             .unwrap();
         let auth = device.authenticate("test.local", &challenge).unwrap();
 
-        // Simulate CLI→Server serialization
-        let req = LoginCompleteRequest {
-            state: "test".to_string(),
+        // Simulate CLI→Server serialization using typed fields
+        let req = AssertionPayload {
             credential_id: auth.credential_id.clone(),
             authenticator_data: auth.authenticator_data.clone(),
             signature: auth.signature.clone(),
             client_data_json: auth.client_data_json.clone(),
             user_handle: auth.user_handle.clone(),
-            client_context: None,
         };
 
         let json = serde_json::to_string(&req).unwrap();
-        let decoded: LoginCompleteRequest = serde_json::from_str(&json).unwrap();
+        let decoded: AssertionPayload = serde_json::from_str(&json).unwrap();
 
         // Verify exact byte match
         assert_eq!(
@@ -2446,39 +2335,41 @@ mod encoding_verification {
         assert!(json.ends_with(']'), "Should be JSON array, got: {}", json);
     }
 
-    /// Verify all special byte values survive round-trip
+    /// Verify all special byte values survive round-trip through typed fido2 fields.
     #[tokio::test]
     async fn test_special_bytes_in_request() {
+        use vouch_common::encoding::Raw;
+        use vouch_common::fido2_types::{
+            AuthData, ClientDataJson, CredentialId, Signature, UserHandle,
+        };
+
         // Test with bytes that could cause issues
         let problematic_bytes: Vec<u8> = vec![0x00, 0xFF, 0x7F, 0x80, 0xC0, 0xE0, 0xF0, 0xFE];
 
-        let req = LoginCompleteRequest {
-            state: "test".to_string(),
-            credential_id: problematic_bytes.clone().into(),
-            authenticator_data: problematic_bytes.clone().into(),
-            signature: problematic_bytes.clone().into(),
-            client_data_json: problematic_bytes.clone().into(),
-            user_handle: problematic_bytes.clone().into(),
-            client_context: None,
-        };
+        // Use typed FIDO2 encoded fields to verify special bytes survive serialization
+        let cred_id: CredentialId<Raw> = problematic_bytes.clone().into();
+        let auth_data: AuthData<Raw> = problematic_bytes.clone().into();
+        let signature: Signature<Raw> = problematic_bytes.clone().into();
+        let client_data: ClientDataJson<Raw> = problematic_bytes.clone().into();
+        let user_handle: UserHandle<Raw> = problematic_bytes.clone().into();
 
-        let json = serde_json::to_string(&req).unwrap();
-        let decoded: LoginCompleteRequest = serde_json::from_str(&json).unwrap();
+        let json_cred = serde_json::to_string(&cred_id).unwrap();
+        let json_auth = serde_json::to_string(&auth_data).unwrap();
+        let json_sig = serde_json::to_string(&signature).unwrap();
+        let json_client = serde_json::to_string(&client_data).unwrap();
+        let json_user = serde_json::to_string(&user_handle).unwrap();
 
-        assert_eq!(
-            problematic_bytes.as_slice(),
-            decoded.credential_id.as_bytes()
-        );
-        assert_eq!(
-            problematic_bytes.as_slice(),
-            decoded.authenticator_data.as_bytes()
-        );
-        assert_eq!(problematic_bytes.as_slice(), decoded.signature.as_bytes());
-        assert_eq!(
-            problematic_bytes.as_slice(),
-            decoded.client_data_json.as_bytes()
-        );
-        assert_eq!(problematic_bytes.as_slice(), decoded.user_handle.as_bytes());
+        let decoded_cred: CredentialId<Raw> = serde_json::from_str(&json_cred).unwrap();
+        let decoded_auth: AuthData<Raw> = serde_json::from_str(&json_auth).unwrap();
+        let decoded_sig: Signature<Raw> = serde_json::from_str(&json_sig).unwrap();
+        let decoded_client: ClientDataJson<Raw> = serde_json::from_str(&json_client).unwrap();
+        let decoded_user: UserHandle<Raw> = serde_json::from_str(&json_user).unwrap();
+
+        assert_eq!(problematic_bytes.as_slice(), decoded_cred.as_bytes());
+        assert_eq!(problematic_bytes.as_slice(), decoded_auth.as_bytes());
+        assert_eq!(problematic_bytes.as_slice(), decoded_sig.as_bytes());
+        assert_eq!(problematic_bytes.as_slice(), decoded_client.as_bytes());
+        assert_eq!(problematic_bytes.as_slice(), decoded_user.as_bytes());
     }
 
     /// Test typed API with MockFidoDevice

@@ -29,6 +29,9 @@ use super::{
     json_error, validate_registration_attestation,
 };
 use crate::redact_email;
+use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::services::oidc::amr::{ACR_AAL3, AuthMethod};
+use crate::services::oidc::scope::ScopeSet;
 
 // ============================================================================
 // Templates
@@ -582,14 +585,22 @@ pub async fn oidc_callback(
         .unwrap_or_default();
     let authenticator_id = existing_auths.first().map(|a| a.id.clone());
 
-    let session_result = match crate::services::auth::create_login_session(
+    // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
+    let client_id_for_token = state.config().base_url.clone();
+    let session_result = match create_oauth_access_token(
         &state,
-        crate::services::auth::CreateSessionParams {
+        CreateOAuthTokenParams {
             user_id: &user.id,
             email: &user.email,
             authenticator_id: authenticator_id.as_deref(),
-            purpose: crate::db::SessionPurpose::Fido2Session,
-            scope: None,
+            client_id: &client_id_for_token,
+            scope: Some(ScopeSet::all()),
+            dpop_jkt: None,
+            act: None,
+            audience: None,
+            auth_time: Some(now.as_second()),
+            amr: Some(AuthMethod::all_fido2().to_vec()),
+            acr: Some(ACR_AAL3.to_string()),
         },
     )
     .await
@@ -672,21 +683,21 @@ pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar
 
     // Get session from vouch_session cookie
     match extract_session_from_cookie(&state, &jar).await {
-        Ok(session) => {
+        Ok(token) => {
+            let email = token.email.clone().unwrap_or_default();
             tracing::debug!(
                 "enroll_keys_page: found valid session for {}",
-                redact_email(&session.claims.email)
+                redact_email(&email)
             );
             // Look up user to check org membership
-            let (has_org, is_org_admin) =
-                match db::get_user_by_id(&state.db, &session.claims.sub).await {
-                    Ok(Some(user)) => (user.org_id.is_some(), user.is_org_admin),
-                    _ => (false, false),
-                };
+            let (has_org, is_org_admin) = match db::get_user_by_id(&state.db, &token.sub).await {
+                Ok(Some(user)) => (user.org_id.is_some(), user.is_org_admin),
+                _ => (false, false),
+            };
             let auth = AuthContext {
                 authenticated: true,
-                user_id: Some(session.claims.sub),
-                user_email: Some(session.claims.email),
+                user_id: Some(token.sub),
+                user_email: Some(email),
                 has_org,
                 is_org_admin,
             };
@@ -716,7 +727,7 @@ pub async fn browser_register_start(
     jar: CookieJar,
 ) -> Result<Json<BrowserRegisterStartResponse>, (StatusCode, Json<ApiError>)> {
     // Get session from vouch_session cookie
-    let session = extract_session_from_cookie(&state, &jar)
+    let token = extract_session_from_cookie(&state, &jar)
         .await
         .map_err(|_| {
             json_error(
@@ -726,7 +737,7 @@ pub async fn browser_register_start(
             )
         })?;
 
-    let user_id = Uuid::parse_str(&session.claims.sub).map_err(|e| {
+    let user_id = Uuid::parse_str(&token.sub).map_err(|e| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "uuid_error",
@@ -734,14 +745,14 @@ pub async fn browser_register_start(
         )
     })?;
 
-    let user_email = session.claims.email.clone();
+    let user_email = token.email.clone().unwrap_or_default();
 
     // Get device_auth_id from enrollment session if available (for CLI polling).
     // Look up by vouch_session token hash, since oidc_callback stores the
     // enrollment session keyed to the same token.
     let device_auth_id = match jar.get("vouch_session").map(|c| c.value()) {
-        Some(token) => {
-            let token_hash = hash_token(token);
+        Some(cookie_val) => {
+            let token_hash = hash_token(cookie_val);
             let enrollment_session =
                 db::get_enrollment_session_by_token_hash(&state.db, &token_hash)
                     .await
@@ -770,7 +781,7 @@ pub async fn browser_register_start(
     );
 
     // Get any existing credentials for this user to exclude them
-    let existing_auths = db::get_authenticators_for_user(&state.db, &session.claims.sub)
+    let existing_auths = db::get_authenticators_for_user(&state.db, &token.sub)
         .await
         .map_err(|e| {
             json_error(
@@ -782,7 +793,7 @@ pub async fn browser_register_start(
 
     tracing::info!(
         "browser_register_start: user {} has {} existing credentials",
-        redact_email(&session.claims.email),
+        redact_email(&user_email),
         existing_auths.len()
     );
 
@@ -1066,14 +1077,23 @@ pub async fn browser_register_complete(
         )
     })?;
 
-    let session_result = crate::services::auth::create_login_session(
+    // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
+    let enroll_client_id = state.config().base_url.clone();
+    let user_id_str = reg_state.user_id.to_string();
+    let session_result = create_oauth_access_token(
         &state,
-        crate::services::auth::CreateSessionParams {
-            user_id: &reg_state.user_id.to_string(),
+        CreateOAuthTokenParams {
+            user_id: &user_id_str,
             email: &reg_state.user_email,
             authenticator_id: Some(&authenticator_id),
-            purpose: crate::db::SessionPurpose::Fido2Session,
-            scope: None,
+            client_id: &enroll_client_id,
+            scope: Some(ScopeSet::all()),
+            dpop_jkt: None,
+            act: None,
+            audience: None,
+            auth_time: None,
+            amr: Some(AuthMethod::all_fido2().to_vec()),
+            acr: Some(ACR_AAL3.to_string()),
         },
     )
     .await

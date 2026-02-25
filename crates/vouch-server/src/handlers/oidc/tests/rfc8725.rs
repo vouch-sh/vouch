@@ -5,46 +5,46 @@ use super::helpers::*;
 
 #[tokio::test]
 async fn test_rfc8725_cross_type_token_substitution() {
-    // RFC 8725 Section 3.11: Access token (at+jwt) cannot be used where
-    // session token (vouch-session+jwt) is expected and vice versa.
+    // RFC 8725 Section 3.11: Only access tokens (ES256, at+jwt) are accepted.
+    // HS256 state tokens and ID tokens (typ != "at+jwt") must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "cross-type@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    // Create an HS256 state token (e.g. registration state) — should be rejected
+    // as a Bearer token at resource endpoints.
+    let fake_state = crate::crypto::jwt::encode_state_token(
+        &serde_json::json!({"sub": "user-1", "exp": 9_999_999_999i64, "iat": 1_000_000_000i64}),
+        crate::crypto::jwt::JwtType::RegistrationState,
+        state.config().jwt_secret_bytes(),
+    )
+    .expect("encode state token");
 
-    // Get an OAuth access token (ES256, typ=at+jwt)
-    let (access_token, _id_token) =
-        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
-
-    // Try using the access token at a management endpoint that expects a
-    // FIDO2 session token (HS256, typ=vouch-session+jwt) — should fail
     let (status, _body) = http_get(
         &app,
         "/v1/keys",
-        &[("Authorization", &format!("Bearer {}", access_token))],
+        &[("Authorization", &format!("Bearer {}", fake_state))],
     )
     .await;
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
-        "Access token (at+jwt) should not be accepted where session token is expected"
+        "HS256 state token must not be accepted as a Bearer token"
     );
 
-    // Get a FIDO2 session token (HS256, typ=vouch-session+jwt)
-    let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+    // Valid OAuth access token (ES256, at+jwt) should work
+    let user = create_test_user(&state.db, "cross-type@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
-    // Session token should work at management endpoints
     let (status, _body) = http_get(
         &app,
         "/v1/keys",
-        &[("Authorization", &format!("Bearer {}", session_token))],
+        &[("Authorization", &format!("Bearer {}", token))],
     )
     .await;
     assert_eq!(
         status,
         StatusCode::OK,
-        "Session token should work at management endpoints"
+        "OAuth access token (at+jwt) should work at resource endpoints"
     );
 }
 
@@ -91,5 +91,130 @@ async fn test_rfc8725_jwe_envelope_rejection() {
         status,
         StatusCode::UNAUTHORIZED,
         "JWE (5-part JWT) must be rejected at validation endpoints"
+    );
+}
+
+// ========================================================================
+// Step 9 Migration — Additional Cross-Type Substitution Coverage
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc8725_hs256_state_tokens_all_rejected_at_resource_endpoints() {
+    // RFC 8725 Section 3.11: All HS256 state token types are rejected at every
+    // resource endpoint. Post-migration there is exactly one valid token type:
+    // ES256 access tokens with typ "at+jwt". Verify each HS256 type variant
+    // is rejected at /oauth/userinfo (token validation path).
+    let (app, state) = test_app().await;
+
+    let secret = state.config().jwt_secret_bytes().to_vec();
+
+    let hs256_types = [
+        crate::crypto::jwt::JwtType::AuthorizationCode,
+        crate::crypto::jwt::JwtType::RegistrationState,
+        crate::crypto::jwt::JwtType::BrowserRegistrationState,
+        crate::crypto::jwt::JwtType::BrowserAuthenticationState,
+        crate::crypto::jwt::JwtType::GitHubState,
+        crate::crypto::jwt::JwtType::Fido2ChallengeState,
+    ];
+
+    for jwt_type in hs256_types {
+        let fake_token = crate::crypto::jwt::encode_state_token(
+            &serde_json::json!({
+                "sub": "attacker",
+                "exp": 9_999_999_999i64,
+                "iat": 1_000_000_000i64
+            }),
+            jwt_type,
+            &secret,
+        )
+        .expect("encode state token");
+
+        let (status, _) = http_get(
+            &app,
+            "/oauth/userinfo",
+            &[("Authorization", &format!("Bearer {}", fake_token))],
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "HS256 state token (typ={}) must be rejected at /oauth/userinfo",
+            jwt_type.as_header_str()
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_rfc8725_id_token_rejected_at_resource_endpoint() {
+    // RFC 9068 Section 2.1: ID tokens (typ "JWT") signed with the same OIDC
+    // key MUST NOT be accepted as access tokens. Only "at+jwt" typ is valid.
+    // This is the same-key-different-type substitution attack.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "id-token-sub@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Issue a real ID token through the auth code flow
+    let (_access_token, id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    // Attempt to use the ID token (typ: "JWT") as a Bearer token — must fail
+    let (status, _body) = http_get(
+        &app,
+        "/v1/keys",
+        &[("Authorization", &format!("Bearer {}", id_token))],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "ID token (typ=JWT) must not be accepted as a Bearer token at resource endpoints"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc8725_access_token_not_accepted_at_par_as_id_token() {
+    // Cross-type: ES256 access token (at+jwt) should not bypass PAR or other
+    // endpoints that require specific token types. This checks that the unified
+    // ES256 token type still enforces typ-header checking — an access token
+    // presented as an "id_token" in a form body should be treated as opaque data
+    // (not validated as an ID token).
+    //
+    // PAR endpoint requires client auth and an authorization request.
+    // Supplying an access token as `id_token_hint` should be silently ignored
+    // (per OIDC Core, id_token_hint is optional), not cause elevated access.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "par-hint@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    // Submit an access token as id_token_hint to PAR endpoint
+    // (the token is valid ES256 but the endpoint should not be confused)
+    let auth_header = client.basic_auth_header();
+    let (status, _body) = http_post_form(
+        &app,
+        "/oauth/par",
+        &format!(
+            "response_type=code&client_id={}&redirect_uri={}&scope=openid&id_token_hint={}&code_challenge=abc&code_challenge_method=S256",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback"),
+            token
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    // PAR may reject (400) or accept with a request_uri; either is fine.
+    // What must NOT happen is the access token being granted elevated PAR authority.
+    // A 401 would only occur if the client auth itself failed — not expected here.
+    assert_ne!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Client auth via Basic should not fail when an access token is supplied as id_token_hint"
     );
 }

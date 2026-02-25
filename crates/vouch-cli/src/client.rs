@@ -8,6 +8,7 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
+use vouch_cli::fapi::{ClientKey, DpopProofBuilder};
 use vouch_cli::http::{
     HttpClient, HttpResponse, ReqwestClient, format_http_error, parse_www_authenticate,
 };
@@ -16,23 +17,37 @@ use vouch_cli::http::{
 ///
 /// Generic over the HTTP transport to enable testing with mock servers.
 /// The default type parameter (`ReqwestClient`) is used by all production code.
+///
+/// When a `fapi_key` is present, authenticated requests use
+/// `Authorization: DPoP <token>` with a `DPoP: <proof>` header bound
+/// to the access token hash (`ath` claim, RFC 9449 Section 4.2).
+/// If DPoP proof generation fails, the client falls back to
+/// `Authorization: Bearer <token>` transparently.
 pub struct VouchClient<H: HttpClient = ReqwestClient> {
     http: H,
     base_url: String,
     /// Authentication token. Set at construction for authenticated clients,
     /// `None` for unauthenticated clients (login/enroll flows).
     token: Option<SecretString>,
+    /// FAPI 2.0 client key for DPoP proof generation on resource requests.
+    /// `None` when FAPI infrastructure is not available.
+    fapi_key: Option<ClientKey>,
 }
 
 impl VouchClient<ReqwestClient> {
     /// Create an authenticated client.
     ///
     /// Resolves the token once from the agent (if running) or config file.
+    /// Also loads the FAPI client key from `~/.vouch/client_key.json` for
+    /// DPoP proof generation on resource requests.
+    ///
     /// This is the standard constructor for most commands.
     pub async fn new(base_url: &str) -> Result<Self> {
         let mut client = Self::unauthenticated(base_url)?;
         let token = crate::session::resolve_token().await?;
         client.token = Some(token);
+        // Load the FAPI key for DPoP on resource endpoints (non-fatal).
+        client.fapi_key = load_fapi_key();
         Ok(client)
     }
 
@@ -46,6 +61,7 @@ impl VouchClient<ReqwestClient> {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
             token: None,
+            fapi_key: None,
         })
     }
 
@@ -56,6 +72,8 @@ impl VouchClient<ReqwestClient> {
     pub fn from_session(session: &crate::session::ResolvedSession) -> Result<Self> {
         let mut client = Self::unauthenticated(&session.server_url)?;
         client.token = Some(session.token.clone());
+        // Load the FAPI key for DPoP on resource endpoints (non-fatal).
+        client.fapi_key = load_fapi_key();
         Ok(client)
     }
 
@@ -75,6 +93,7 @@ impl<H: HttpClient> VouchClient<H> {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
             token: None,
+            fapi_key: None,
         }
     }
 
@@ -98,28 +117,38 @@ impl<H: HttpClient> VouchClient<H> {
             .context("not authenticated - run 'vouch login' first")
     }
 
+    /// Build the `Authorization` header value and an optional `DPoP` proof.
+    ///
+    /// When a FAPI key is present, generates a DPoP proof bound to the access
+    /// token hash and returns `("DPoP <token>", Some("<proof>"))`.
+    /// If proof generation fails, falls back to `("Bearer <token>", None)`.
+    ///
+    /// When no FAPI key is present, returns `("Bearer <token>", None)`.
+    fn build_auth(&self, method: &str, url: &str) -> Result<(String, Option<String>)> {
+        let token = self.token()?;
+        let token_str = token.expose_secret();
+
+        if let Some(ref key) = self.fapi_key {
+            match DpopProofBuilder::new(method, url)
+                .access_token(token_str)
+                .build(key)
+            {
+                Ok(proof) => {
+                    return Ok((format!("DPoP {token_str}"), Some(proof)));
+                }
+                Err(e) => {
+                    // Non-fatal: fall through to Bearer auth.
+                    tracing::debug!("DPoP proof generation failed, falling back to Bearer: {e}");
+                }
+            }
+        }
+
+        Ok((format!("Bearer {token_str}"), None))
+    }
+
     /// Build the full URL for a path.
     fn url(&self, path: &str) -> String {
         format!("{}{}", self.base_url, path)
-    }
-
-    /// POST a JSON request and get a JSON response.
-    pub async fn post<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
-    where
-        Req: Serialize,
-        Resp: DeserializeOwned,
-    {
-        let url = self.url(path);
-        tracing::debug!("POST {}", url);
-
-        let json = serde_json::to_vec(body).context("failed to serialize request")?;
-        let response = self
-            .http
-            .request("POST", &url, Some(&json), Some("application/json"), None)
-            .await
-            .with_context(|| format!("failed to connect to {url}"))?;
-
-        Self::handle_response(response)
     }
 
     /// POST a form-encoded request and get a JSON response.
@@ -141,6 +170,7 @@ impl<H: HttpClient> VouchClient<H> {
                 Some(form.as_bytes()),
                 Some("application/x-www-form-urlencoded"),
                 None,
+                None,
             )
             .await
             .with_context(|| format!("failed to connect to {url}"))?;
@@ -149,18 +179,24 @@ impl<H: HttpClient> VouchClient<H> {
     }
 
     /// GET a JSON response with authentication.
+    ///
+    /// Uses `Authorization: DPoP <token>` with a bound `DPoP:` proof header
+    /// when a FAPI client key is available; falls back to `Bearer` otherwise.
     pub async fn get_authenticated<Resp>(&self, path: &str) -> Result<Resp>
     where
         Resp: DeserializeOwned,
     {
-        let token = self.token()?;
-        let auth = format!("Bearer {}", token.expose_secret());
         let url = self.url(path);
         tracing::debug!("GET {} (authenticated)", url);
 
+        let (auth, dpop_proof) = self.build_auth("GET", &url)?;
+
+        let extra: Option<Vec<(&str, &str)>> = dpop_proof.as_deref().map(|p| vec![("DPoP", p)]);
+        let extra_ref: Option<&[(&str, &str)]> = extra.as_deref();
+
         let response = self
             .http
-            .request("GET", &url, None, None, Some(&auth))
+            .request("GET", &url, None, None, Some(&auth), extra_ref)
             .await
             .with_context(|| format!("failed to connect to {url}"))?;
 
@@ -168,18 +204,24 @@ impl<H: HttpClient> VouchClient<H> {
     }
 
     /// DELETE with authentication.
+    ///
+    /// Uses `Authorization: DPoP <token>` with a bound `DPoP:` proof header
+    /// when a FAPI client key is available; falls back to `Bearer` otherwise.
     pub async fn delete_authenticated<Resp>(&self, path: &str) -> Result<Resp>
     where
         Resp: DeserializeOwned,
     {
-        let token = self.token()?;
-        let auth = format!("Bearer {}", token.expose_secret());
         let url = self.url(path);
         tracing::debug!("DELETE {} (authenticated)", url);
 
+        let (auth, dpop_proof) = self.build_auth("DELETE", &url)?;
+
+        let extra: Option<Vec<(&str, &str)>> = dpop_proof.as_deref().map(|p| vec![("DPoP", p)]);
+        let extra_ref: Option<&[(&str, &str)]> = extra.as_deref();
+
         let response = self
             .http
-            .request("DELETE", &url, None, None, Some(&auth))
+            .request("DELETE", &url, None, None, Some(&auth), extra_ref)
             .await
             .with_context(|| format!("failed to connect to {url}"))?;
 
@@ -187,17 +229,24 @@ impl<H: HttpClient> VouchClient<H> {
     }
 
     /// POST a JSON request with authentication and get a JSON response.
+    ///
+    /// Uses `Authorization: DPoP <token>` with a bound `DPoP:` proof header
+    /// when a FAPI client key is available; falls back to `Bearer` otherwise.
     pub async fn post_authenticated<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
     where
         Req: Serialize,
         Resp: DeserializeOwned,
     {
-        let token = self.token()?;
-        let auth = format!("Bearer {}", token.expose_secret());
         let url = self.url(path);
         tracing::debug!("POST {} (authenticated)", url);
 
+        let (auth, dpop_proof) = self.build_auth("POST", &url)?;
+
         let json = serde_json::to_vec(body).context("failed to serialize request")?;
+
+        let extra: Option<Vec<(&str, &str)>> = dpop_proof.as_deref().map(|p| vec![("DPoP", p)]);
+        let extra_ref: Option<&[(&str, &str)]> = extra.as_deref();
+
         let response = self
             .http
             .request(
@@ -206,6 +255,7 @@ impl<H: HttpClient> VouchClient<H> {
                 Some(&json),
                 Some("application/json"),
                 Some(&auth),
+                extra_ref,
             )
             .await
             .with_context(|| format!("failed to connect to {url}"))?;
@@ -214,17 +264,24 @@ impl<H: HttpClient> VouchClient<H> {
     }
 
     /// PATCH a JSON request with authentication and get a JSON response.
+    ///
+    /// Uses `Authorization: DPoP <token>` with a bound `DPoP:` proof header
+    /// when a FAPI client key is available; falls back to `Bearer` otherwise.
     pub async fn patch_authenticated<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
     where
         Req: Serialize,
         Resp: DeserializeOwned,
     {
-        let token = self.token()?;
-        let auth = format!("Bearer {}", token.expose_secret());
         let url = self.url(path);
         tracing::debug!("PATCH {} (authenticated)", url);
 
+        let (auth, dpop_proof) = self.build_auth("PATCH", &url)?;
+
         let json = serde_json::to_vec(body).context("failed to serialize request")?;
+
+        let extra: Option<Vec<(&str, &str)>> = dpop_proof.as_deref().map(|p| vec![("DPoP", p)]);
+        let extra_ref: Option<&[(&str, &str)]> = extra.as_deref();
+
         let response = self
             .http
             .request(
@@ -233,6 +290,7 @@ impl<H: HttpClient> VouchClient<H> {
                 Some(&json),
                 Some("application/json"),
                 Some(&auth),
+                extra_ref,
             )
             .await
             .with_context(|| format!("failed to connect to {url}"))?;
@@ -274,8 +332,41 @@ impl<H: HttpClient> VouchClient<H> {
     }
 }
 
+/// Load the FAPI client key from `~/.vouch/client_key.json`.
+///
+/// Returns `None` if the key file does not exist or cannot be loaded.
+/// This is intentionally non-fatal: resource requests fall back to
+/// `Bearer` auth when no key is available.
+fn load_fapi_key() -> Option<ClientKey> {
+    let home = dirs::home_dir()?;
+    let key_path = home.join(".vouch").join("client_key.json");
+
+    // Only load an existing key — do NOT generate a new one here.
+    // Key generation happens in the enroll/login flows.
+    if !key_path.exists() {
+        return None;
+    }
+
+    match ClientKey::load(&key_path) {
+        Ok(key) => {
+            tracing::debug!("Loaded FAPI key for DPoP: kid={}", key.kid());
+            Some(key)
+        }
+        Err(e) => {
+            tracing::debug!("Could not load FAPI key for DPoP: {e}");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::string_slice
+)]
 mod tests {
     use super::*;
 
@@ -378,5 +469,70 @@ mod tests {
             cli_err,
             crate::exit_code::CliError::NotAuthenticated
         ));
+    }
+
+    #[test]
+    fn test_build_auth_without_fapi_key_returns_bearer() {
+        let mut client = VouchClient::unauthenticated("https://example.com").unwrap();
+        client.set_token(SecretString::from("my-token".to_string()));
+        // No fapi_key set → always Bearer
+        let (auth, proof) = client
+            .build_auth("GET", "https://example.com/v1/keys")
+            .unwrap();
+        assert_eq!(auth, "Bearer my-token");
+        assert!(proof.is_none());
+    }
+
+    #[test]
+    fn test_build_auth_with_fapi_key_returns_dpop() {
+        use vouch_cli::fapi::ClientKey;
+
+        let mut client = VouchClient::unauthenticated("https://example.com").unwrap();
+        client.set_token(SecretString::from("my-dpop-token".to_string()));
+        client.fapi_key = Some(ClientKey::generate().unwrap());
+
+        let (auth, proof) = client
+            .build_auth("POST", "https://example.com/v1/keys")
+            .unwrap();
+
+        assert!(
+            auth.starts_with("DPoP "),
+            "auth should be DPoP scheme: {auth}"
+        );
+        assert_eq!(&auth["DPoP ".len()..], "my-dpop-token");
+        assert!(proof.is_some(), "DPoP proof should be present");
+
+        // The proof must be a valid 3-part JWT
+        let proof_str = proof.unwrap();
+        assert_eq!(proof_str.split('.').count(), 3, "DPoP proof must be a JWT");
+    }
+
+    #[test]
+    fn test_build_auth_dpop_proof_contains_ath() {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        use vouch_cli::fapi::ClientKey;
+
+        let mut client = VouchClient::unauthenticated("https://example.com").unwrap();
+        client.set_token(SecretString::from("access-token-abc".to_string()));
+        client.fapi_key = Some(ClientKey::generate().unwrap());
+
+        let (_, proof) = client
+            .build_auth("GET", "https://example.com/v1/keys")
+            .unwrap();
+
+        let proof_str = proof.unwrap();
+        let parts: Vec<&str> = proof_str.split('.').collect();
+        let claims_bytes = URL_SAFE_NO_PAD.decode(parts[1]).unwrap();
+        let claims: serde_json::Value = serde_json::from_slice(&claims_bytes).unwrap();
+
+        // `ath` should be present (access token hash)
+        assert!(claims.get("ath").is_some(), "DPoP claims must include ath");
+
+        // Verify the ath value
+        let expected_digest =
+            aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, b"access-token-abc");
+        let expected_ath = URL_SAFE_NO_PAD.encode(expected_digest.as_ref());
+        assert_eq!(claims["ath"].as_str().unwrap(), expected_ath);
     }
 }
