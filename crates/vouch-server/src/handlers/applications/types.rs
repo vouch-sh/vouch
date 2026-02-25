@@ -43,12 +43,24 @@ pub struct ApplicationInfo {
     pub org_id: Option<String>,
     /// RFC 8707: Registered resource URIs.
     pub resource_uris: Vec<String>,
+    /// Token endpoint authentication method.
+    pub token_endpoint_auth_method: String,
+    /// FAPI 2.0 Security Profile designation ("none" or "fapi2_security").
+    pub fapi_profile: String,
+    /// Inline JWKS JSON (RFC 7523).
+    pub jwks: Option<String>,
+    /// Remote JWKS URI (RFC 7523).
+    pub jwks_uri: Option<String>,
 }
 
 impl From<OAuthClient> for ApplicationInfo {
     fn from(client: OAuthClient) -> Self {
         let redirect_uris = client.get_redirect_uris();
         let resource_uris = client.get_resource_uris();
+        let token_endpoint_auth_method = client.token_endpoint_auth_method.clone();
+        let fapi_profile = client.fapi_profile.clone();
+        let jwks = client.jwks.clone();
+        let jwks_uri = client.jwks_uri.clone();
         Self {
             id: client.id,
             client_id: client.client_id,
@@ -62,6 +74,10 @@ impl From<OAuthClient> for ApplicationInfo {
             access_scope: client.access_scope,
             org_id: client.org_id,
             resource_uris,
+            token_endpoint_auth_method,
+            fapi_profile,
+            jwks,
+            jwks_uri,
         }
     }
 }
@@ -173,6 +189,15 @@ pub struct CreateApplicationForm {
     /// RFC 8707: Resource URIs (newline or comma separated, optional).
     #[serde(default)]
     pub resource_uris: Option<String>,
+    /// FAPI 2.0: Security profile ("fapi2_security" or absent/empty for standard).
+    #[serde(default)]
+    pub fapi_profile: Option<String>,
+    /// RFC 7523: Inline JWKS JSON for private_key_jwt authentication.
+    #[serde(default)]
+    pub jwks: Option<String>,
+    /// RFC 7523: Remote JWKS endpoint URL for private_key_jwt authentication.
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
 }
 
 /// Form data for updating an application.
@@ -185,6 +210,15 @@ pub struct UpdateApplicationForm {
     /// RFC 8707: Resource URIs (newline or comma separated, optional).
     #[serde(default)]
     pub resource_uris: Option<String>,
+    /// FAPI 2.0: Security profile ("fapi2_security" or absent/empty for standard).
+    #[serde(default)]
+    pub fapi_profile: Option<String>,
+    /// RFC 7523: Inline JWKS JSON for private_key_jwt authentication.
+    #[serde(default)]
+    pub jwks: Option<String>,
+    /// RFC 7523: Remote JWKS endpoint URL for private_key_jwt authentication.
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
 }
 
 /// API request for creating an application.
@@ -198,6 +232,15 @@ pub struct CreateApplicationRequest {
     /// RFC 8707: Resource URIs for audience-restricted tokens.
     #[serde(default)]
     pub resource_uris: Option<Vec<String>>,
+    /// FAPI 2.0: Security profile ("fapi2_security" or absent/empty for standard).
+    #[serde(default)]
+    pub fapi_profile: Option<String>,
+    /// RFC 7523: Inline JWKS JSON for private_key_jwt authentication.
+    #[serde(default)]
+    pub jwks: Option<String>,
+    /// RFC 7523: Remote JWKS endpoint URL for private_key_jwt authentication.
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
 }
 
 /// API request for updating an application.
@@ -210,6 +253,15 @@ pub struct UpdateApplicationRequest {
     /// RFC 8707: Resource URIs for audience-restricted tokens.
     #[serde(default)]
     pub resource_uris: Option<Vec<String>>,
+    /// FAPI 2.0: Security profile ("fapi2_security" or absent/empty for standard).
+    #[serde(default)]
+    pub fapi_profile: Option<String>,
+    /// RFC 7523: Inline JWKS JSON for private_key_jwt authentication.
+    #[serde(default)]
+    pub jwks: Option<String>,
+    /// RFC 7523: Remote JWKS endpoint URL for private_key_jwt authentication.
+    #[serde(default)]
+    pub jwks_uri: Option<String>,
 }
 
 /// API response for a created application.
@@ -223,6 +275,14 @@ pub struct CreateApplicationResponse {
     pub access_scope: String,
     /// RFC 8707: Registered resource URIs.
     pub resource_uris: Vec<String>,
+    /// Token endpoint authentication method.
+    pub token_endpoint_auth_method: String,
+    /// FAPI 2.0 Security Profile designation.
+    pub fapi_profile: String,
+    /// Whether JWKS is configured (inline or via URI).
+    pub jwks_configured: bool,
+    /// Remote JWKS URI if configured.
+    pub jwks_uri: Option<String>,
 }
 
 /// API response for application details.
@@ -242,12 +302,22 @@ pub struct ApplicationResponse {
     pub org_id: Option<String>,
     /// RFC 8707: Registered resource URIs.
     pub resource_uris: Vec<String>,
+    /// Token endpoint authentication method.
+    pub token_endpoint_auth_method: String,
+    /// FAPI 2.0 Security Profile designation.
+    pub fapi_profile: String,
+    /// Whether JWKS is configured (inline or via URI).
+    pub jwks_configured: bool,
+    /// Remote JWKS URI if configured.
+    pub jwks_uri: Option<String>,
 }
 
 impl From<OAuthClient> for ApplicationResponse {
     fn from(client: OAuthClient) -> Self {
         let redirect_uris = client.get_redirect_uris();
         let resource_uris = client.get_resource_uris();
+        let jwks_configured = client.jwks.is_some() || client.jwks_uri.is_some();
+        let jwks_uri = client.jwks_uri.clone();
         Self {
             id: client.id,
             client_id: client.client_id,
@@ -262,6 +332,10 @@ impl From<OAuthClient> for ApplicationResponse {
             access_scope: client.access_scope.as_str().to_string(),
             org_id: client.org_id,
             resource_uris,
+            token_endpoint_auth_method: client.token_endpoint_auth_method,
+            fapi_profile: client.fapi_profile,
+            jwks_configured,
+            jwks_uri,
         }
     }
 }

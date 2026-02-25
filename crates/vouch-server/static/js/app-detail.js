@@ -1,4 +1,5 @@
-// Application detail page: toggle between view and edit modes, validate URIs.
+// Application detail page: toggle between view and edit modes, validate URIs,
+// FAPI 2.0 security profile editing.
 
 (function() {
     document.addEventListener('DOMContentLoaded', function() {
@@ -9,6 +10,13 @@
         var redirectError = document.getElementById('redirect-uri-error');
         var resourceTextarea = document.getElementById('resource_uris');
         var resourceError = document.getElementById('resource-uri-error');
+
+        // FAPI edit elements (may not exist for non-confidential types)
+        var editFapiJwksSection = document.getElementById('edit-fapi-jwks-section');
+        var editJwksTextarea = document.getElementById('edit-jwks');
+        var editJwksError = document.getElementById('edit-jwks-error');
+        var editJwksUriInput = document.getElementById('edit-jwks-uri');
+        var editJwksUriError = document.getElementById('edit-jwks-uri-error');
 
         function toggleEditForm() {
             var viewMode = document.getElementById('view-mode');
@@ -139,6 +147,89 @@
             });
         }
 
+        // --- FAPI 2.0 edit mode ---
+
+        function isEditFapiSelected() {
+            var fapiRadio = document.querySelector('#edit-mode input[name="fapi_profile"]:checked');
+            return fapiRadio && fapiRadio.value === 'fapi2_security';
+        }
+
+        function updateEditFapiVisibility() {
+            if (!editFapiJwksSection) {
+                return;
+            }
+            if (isEditFapiSelected()) {
+                editFapiJwksSection.classList.remove('hidden');
+            } else {
+                editFapiJwksSection.classList.add('hidden');
+            }
+        }
+
+        function validateEditJwks() {
+            if (!editJwksTextarea) {
+                return null;
+            }
+            var value = editJwksTextarea.value.trim();
+            if (!value) {
+                return null;
+            }
+
+            try {
+                var parsed = JSON.parse(value);
+                if (!parsed.keys || !Array.isArray(parsed.keys) || parsed.keys.length === 0) {
+                    return 'JWKS must be a JSON object with a non-empty "keys" array.';
+                }
+            } catch (e) {
+                return 'JWKS must be valid JSON.';
+            }
+
+            return null;
+        }
+
+        function validateEditJwksUri() {
+            if (!editJwksUriInput) {
+                return null;
+            }
+            var value = editJwksUriInput.value.trim();
+            if (!value) {
+                return null;
+            }
+
+            try {
+                var url = new URL(value);
+                if (url.protocol !== 'https:') {
+                    return 'JWKS URI must use https://.';
+                }
+            } catch (e) {
+                return 'JWKS URI must be a valid https:// URL.';
+            }
+
+            return null;
+        }
+
+        // Toggle FAPI JWKS section in edit mode
+        var editFapiRadios = document.querySelectorAll('#edit-mode input[name="fapi_profile"]');
+        for (var i = 0; i < editFapiRadios.length; i++) {
+            editFapiRadios[i].addEventListener('change', updateEditFapiVisibility);
+        }
+
+        // JWKS validation on blur
+        if (editJwksTextarea && editJwksError) {
+            editJwksTextarea.addEventListener('blur', function() {
+                if (editJwksTextarea.value.trim()) {
+                    showFieldError(editJwksError, editJwksTextarea, validateEditJwks());
+                }
+            });
+        }
+
+        if (editJwksUriInput && editJwksUriError) {
+            editJwksUriInput.addEventListener('blur', function() {
+                if (editJwksUriInput.value.trim()) {
+                    showFieldError(editJwksUriError, editJwksUriInput, validateEditJwksUri());
+                }
+            });
+        }
+
         // Validate on submit
         if (editForm) {
             editForm.addEventListener('submit', function(e) {
@@ -163,6 +254,44 @@
                         if (!hasError) {
                             resourceTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
                             resourceTextarea.focus();
+                        }
+                        hasError = true;
+                    }
+                }
+
+                // FAPI JWKS validation in edit mode
+                if (isEditFapiSelected()) {
+                    var jwksErr = validateEditJwks();
+                    if (jwksErr) {
+                        e.preventDefault();
+                        showFieldError(editJwksError, editJwksTextarea, jwksErr);
+                        if (!hasError) {
+                            editJwksTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            editJwksTextarea.focus();
+                        }
+                        hasError = true;
+                    }
+
+                    var jwksUriErr = validateEditJwksUri();
+                    if (jwksUriErr) {
+                        e.preventDefault();
+                        showFieldError(editJwksUriError, editJwksUriInput, jwksUriErr);
+                        if (!hasError) {
+                            editJwksUriInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            editJwksUriInput.focus();
+                        }
+                        hasError = true;
+                    }
+
+                    // At least one of JWKS or JWKS URI must be provided
+                    if (editJwksTextarea && editJwksUriInput
+                        && !editJwksTextarea.value.trim() && !editJwksUriInput.value.trim()) {
+                        e.preventDefault();
+                        var msg = 'FAPI 2.0 requires either a JWKS or JWKS URI.';
+                        showFieldError(editJwksError, editJwksTextarea, msg);
+                        if (!hasError) {
+                            editJwksTextarea.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                            editJwksTextarea.focus();
                         }
                         hasError = true;
                     }

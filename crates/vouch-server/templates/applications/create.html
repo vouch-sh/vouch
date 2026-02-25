@@ -89,6 +89,57 @@ https://data.example.com"></textarea>
                 <div id="resource-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
             </div>
 
+            <!-- Security Profile (shown only for confidential types: web, service) -->
+            <div id="security-profile-section" class="hidden">
+                <label class="block text-sm font-medium text-gray-300 mb-2">Security Profile</label>
+                <div class="space-y-3">
+                    <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
+                        <input type="radio" name="fapi_profile" value="" checked
+                            class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
+                        <div class="ml-3">
+                            <span class="block text-sm font-medium text-gray-200">Standard OAuth 2.0</span>
+                            <span class="block text-sm text-gray-500">Standard OAuth 2.0 with client secret authentication.</span>
+                        </div>
+                    </label>
+                    <label class="flex items-start p-3 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
+                        <input type="radio" name="fapi_profile" value="fapi2_security"
+                            class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
+                        <div class="ml-3">
+                            <span class="block text-sm font-medium text-gray-200">FAPI 2.0 Security Profile</span>
+                            <span class="block text-sm text-gray-500">Enforces PAR, DPoP, and private_key_jwt. No client secret — authentication uses signed JWTs.</span>
+                        </div>
+                    </label>
+                </div>
+
+                <!-- FAPI JWKS fields (shown when FAPI selected) -->
+                <div id="fapi-jwks-section" class="hidden mt-4 space-y-4 pl-4 border-l-2 border-vouch-accent/30">
+                    <div class="p-3 bg-vouch-raised border border-vouch-border rounded-lg">
+                        <p class="text-sm text-gray-400">FAPI 2.0 clients authenticate using signed JWTs instead of a client secret. Provide your public keys as a JWKS (inline JSON) or a JWKS URI endpoint.</p>
+                    </div>
+                    <div>
+                        <label for="jwks" class="block text-sm font-medium text-gray-300">JWKS (inline JSON)</label>
+                        <textarea name="jwks" id="jwks" rows="4"
+                            class="input-field mt-1 font-mono text-xs"
+                            placeholder='{"keys": [{"kty": "EC", "crv": "P-256", ...}]}'></textarea>
+                        <p class="mt-1 text-sm text-gray-500">JSON Web Key Set containing your public signing keys.</p>
+                        <div id="jwks-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div class="flex-1 border-t border-vouch-border"></div>
+                        <span class="text-xs text-gray-500">or</span>
+                        <div class="flex-1 border-t border-vouch-border"></div>
+                    </div>
+                    <div>
+                        <label for="jwks_uri" class="block text-sm font-medium text-gray-300">JWKS URI</label>
+                        <input type="url" name="jwks_uri" id="jwks_uri"
+                            class="input-field mt-1 font-mono"
+                            placeholder="https://example.com/.well-known/jwks.json">
+                        <p class="mt-1 text-sm text-gray-500">HTTPS endpoint serving your JWKS.</p>
+                        <div id="jwks-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                    </div>
+                </div>
+            </div>
+
             <div>
                 <label class="block text-sm font-medium text-gray-300 mb-2">Who can use this application?</label>
                 <div class="space-y-3">

@@ -459,42 +459,62 @@ pub async fn get_oauth_clients_for_user(pool: &Pool, user_id: &str) -> Result<Ve
     Ok(clients)
 }
 
+/// Parameters for updating an OAuth client.
+///
+/// All fields are always written to the database. Callers should load the
+/// existing `OAuthClient` first and pass existing values for unchanged fields.
+pub struct UpdateOAuthClientParams<'a> {
+    pub id: &'a str,
+    pub name: &'a str,
+    pub description: Option<&'a str>,
+    pub redirect_uris: &'a [String],
+    pub access_scope: Option<AccessScope>,
+    pub org_id: Option<&'a str>,
+    pub resource_uris: &'a [String],
+    pub token_endpoint_auth_method: &'a str,
+    pub jwks: Option<&'a str>,
+    pub jwks_uri: Option<&'a str>,
+    pub fapi_profile: FapiProfile,
+    pub dpop_bound_access_tokens: bool,
+}
+
 /// Update an OAuth client.
-#[allow(clippy::too_many_arguments)]
-pub async fn update_oauth_client(
-    pool: &Pool,
-    id: &str,
-    name: &str,
-    description: Option<&str>,
-    redirect_uris: &[String],
-    access_scope: Option<AccessScope>,
-    org_id: Option<&str>,
-    resource_uris: &[String],
-) -> Result<()> {
-    let redirect_uris_json = serde_json::to_string(redirect_uris)?;
-    let resource_uris_json = serde_json::to_string(resource_uris)?;
+pub async fn update_oauth_client(pool: &Pool, params: &UpdateOAuthClientParams<'_>) -> Result<()> {
+    let redirect_uris_json = serde_json::to_string(params.redirect_uris)?;
+    let resource_uris_json = serde_json::to_string(params.resource_uris)?;
     let db_type = pool.db_type();
     let now = Timestamp::now().to_string();
 
     let sql = {
         let mut query = Query::update()
             .table(OAuthClients::Table)
-            .value(OAuthClients::Name, name)
-            .value(OAuthClients::Description, description)
+            .value(OAuthClients::Name, params.name)
+            .value(OAuthClients::Description, params.description)
             .value(OAuthClients::RedirectUris, redirect_uris_json.as_str())
             .value(OAuthClients::ResourceUris, resource_uris_json.as_str())
+            .value(
+                OAuthClients::TokenEndpointAuthMethod,
+                params.token_endpoint_auth_method,
+            )
+            .value(OAuthClients::Jwks, params.jwks)
+            .value(OAuthClients::JwksUri, params.jwks_uri)
+            .value(OAuthClients::FapiProfile, params.fapi_profile.as_db_str())
+            .value(
+                OAuthClients::DpopBoundAccessTokens,
+                params.dpop_bound_access_tokens,
+            )
             .value(OAuthClients::UpdatedAt, now.as_str())
             .to_owned();
 
-        if let Some(scope) = access_scope {
+        if let Some(scope) = params.access_scope {
             query = query
                 .value(OAuthClients::AccessScope, scope.as_str())
-                .value(OAuthClients::OrgId, org_id)
+                .value(OAuthClients::OrgId, params.org_id)
                 .to_owned();
         }
 
         query = query
-            .and_where(Expr::col(OAuthClients::Id).eq(id))
+            .and_where(Expr::col(OAuthClients::Id).eq(params.id))
             .to_owned();
 
         query.build_sql(db_type)

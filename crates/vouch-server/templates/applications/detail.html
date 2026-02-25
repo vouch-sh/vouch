@@ -65,6 +65,23 @@
                     <span class="text-xs text-gray-500 ml-2">{{ app.access_scope.description() }}</span>
                 </dd>
 
+                <dt class="text-gray-400">Auth Method</dt>
+                <dd>
+                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded bg-vouch-raised text-gray-300">
+                        {{ app.token_endpoint_auth_method }}
+                    </span>
+                </dd>
+
+                {% if app.fapi_profile == "fapi2_security" %}
+                <dt class="text-gray-400">Security Profile</dt>
+                <dd>
+                    <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded bg-[#0d2d1f] text-[#3ecf8e]">
+                        FAPI 2.0
+                    </span>
+                    <span class="text-xs text-gray-500 ml-2">PAR + DPoP + private_key_jwt</span>
+                </dd>
+                {% endif %}
+
                 {% match app.description %}
                 {% when Some with (desc) %}
                 <dt class="text-gray-400">Description</dt>
@@ -78,6 +95,29 @@
                 <dt class="text-gray-400">Last Used</dt>
                 <dd class="text-gray-200">{% match app.last_used_at %}{% when Some with (date) %}{{ date }}{% when None %}Never{% endmatch %}</dd>
             </dl>
+
+            <!-- JWKS / JWKS URI (for FAPI clients) -->
+            {% if app.fapi_profile == "fapi2_security" %}
+            <div class="border-t border-vouch-border pt-4">
+                <label class="block text-sm text-gray-400 mb-2">Client Keys</label>
+                {% match app.jwks %}
+                {% when Some with (jwks_val) %}
+                <div class="mb-2">
+                    <span class="text-xs text-gray-500">Inline JWKS</span>
+                    <pre class="bg-vouch-raised border border-vouch-border rounded-md px-3 py-2 font-mono text-xs text-gray-300 overflow-x-auto mt-1">{{ jwks_val }}</pre>
+                </div>
+                {% when None %}
+                {% endmatch %}
+                {% match app.jwks_uri %}
+                {% when Some with (uri_val) %}
+                <div>
+                    <span class="text-xs text-gray-500">JWKS URI</span>
+                    <code class="block bg-vouch-raised border border-vouch-border px-3 py-2 rounded-md font-mono text-xs text-gray-300 break-all mt-1">{{ uri_val }}</code>
+                </div>
+                {% when None %}
+                {% endmatch %}
+            </div>
+            {% endif %}
 
             <!-- Redirect URIs -->
             <div class="border-t border-vouch-border pt-4">
@@ -105,8 +145,8 @@
             </div>
             {% endif %}
 
-            <!-- Client Secret Section (for confidential clients) -->
-            {% if app.application_type == "web" || app.application_type == "service" %}
+            <!-- Client Secret Section (for confidential clients, hidden for FAPI) -->
+            {% if (app.application_type == "web" || app.application_type == "service") && app.fapi_profile != "fapi2_security" %}
             <div class="border-t border-vouch-border pt-4">
                 <div class="flex items-center justify-between">
                     <div>
@@ -171,6 +211,57 @@
                 <p class="mt-1 text-sm text-gray-500">One URI per line. Target resource servers for audience-restricted tokens (RFC 8707).</p>
                 <div id="resource-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
             </div>
+
+            <!-- Security Profile (only for confidential types) -->
+            {% if app.application_type == "web" || app.application_type == "service" %}
+            <div id="edit-security-profile-section">
+                <label class="block text-sm font-medium text-gray-300 mb-2">Security Profile</label>
+                <div class="space-y-2">
+                    <label class="flex items-start p-2 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
+                        <input type="radio" name="fapi_profile" value=""
+                            {% if app.fapi_profile != "fapi2_security" %}checked{% endif %}
+                            class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
+                        <div class="ml-3">
+                            <span class="text-sm font-medium text-gray-200">Standard OAuth 2.0</span>
+                            <span class="block text-sm text-gray-500">Client secret authentication.</span>
+                        </div>
+                    </label>
+                    <label class="flex items-start p-2 border border-vouch-border rounded-lg cursor-pointer hover:bg-vouch-raised transition-colors">
+                        <input type="radio" name="fapi_profile" value="fapi2_security"
+                            {% if app.fapi_profile == "fapi2_security" %}checked{% endif %}
+                            class="mt-0.5 h-4 w-4 text-vouch-accent border-vouch-border">
+                        <div class="ml-3">
+                            <span class="text-sm font-medium text-gray-200">FAPI 2.0 Security Profile</span>
+                            <span class="block text-sm text-gray-500">PAR + DPoP + private_key_jwt.</span>
+                        </div>
+                    </label>
+                </div>
+
+                <!-- FAPI JWKS fields -->
+                <div id="edit-fapi-jwks-section" class="{% if app.fapi_profile != "fapi2_security" %}hidden{% endif %} mt-4 space-y-4 pl-4 border-l-2 border-vouch-accent/30">
+                    <div>
+                        <label for="edit-jwks" class="block text-sm font-medium text-gray-300">JWKS (inline JSON)</label>
+                        <textarea name="jwks" id="edit-jwks" rows="4"
+                            class="input-field mt-1 font-mono text-xs"
+                            placeholder='{"keys": [{"kty": "EC", "crv": "P-256", ...}]}'>{% match app.jwks %}{% when Some with (j) %}{{ j }}{% when None %}{% endmatch %}</textarea>
+                        <div id="edit-jwks-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                    </div>
+                    <div class="flex items-center gap-3">
+                        <div class="flex-1 border-t border-vouch-border"></div>
+                        <span class="text-xs text-gray-500">or</span>
+                        <div class="flex-1 border-t border-vouch-border"></div>
+                    </div>
+                    <div>
+                        <label for="edit-jwks-uri" class="block text-sm font-medium text-gray-300">JWKS URI</label>
+                        <input type="url" name="jwks_uri" id="edit-jwks-uri"
+                            class="input-field mt-1 font-mono"
+                            placeholder="https://example.com/.well-known/jwks.json"
+                            value="{% match app.jwks_uri %}{% when Some with (u) %}{{ u }}{% when None %}{% endmatch %}">
+                        <div id="edit-jwks-uri-error" class="hidden mt-2 p-3 bg-vouch-error-bg border border-vouch-error/30 rounded-lg text-sm text-vouch-error"></div>
+                    </div>
+                </div>
+            </div>
+            {% endif %}
 
             <div>
                 <label class="block text-sm font-medium text-gray-300 mb-2">Who can use this application?</label>

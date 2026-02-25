@@ -102,13 +102,13 @@ pub use scim::{
 // Re-export OAuth types and functions
 pub use oauth::{
     AccessScope, FapiProfile, OAuthClient, OAuthClientType, OAuthEventType, OAuthUsageStats,
-    TokenEndpointAuthMethod, create_oauth_client, create_oauth_client_secret,
-    delete_expired_jwt_assertion_jtis, delete_oauth_client, delete_old_oauth_usage_events,
-    get_client_jwks, get_oauth_client_by_client_id, get_oauth_client_by_id,
-    get_oauth_client_secrets, get_oauth_clients_for_user, get_oauth_usage_stats,
-    record_oauth_event, revoke_all_oauth_client_secrets, store_jwt_assertion_jti,
-    update_client_jwks_cache, update_oauth_client, update_oauth_client_last_used,
-    validate_oauth_client_credentials,
+    TokenEndpointAuthMethod, UpdateOAuthClientParams, create_oauth_client,
+    create_oauth_client_secret, delete_expired_jwt_assertion_jtis, delete_oauth_client,
+    delete_old_oauth_usage_events, get_client_jwks, get_oauth_client_by_client_id,
+    get_oauth_client_by_id, get_oauth_client_secrets, get_oauth_clients_for_user,
+    get_oauth_usage_stats, record_oauth_event, revoke_all_oauth_client_secrets,
+    store_jwt_assertion_jti, update_client_jwks_cache, update_oauth_client,
+    update_oauth_client_last_used, validate_oauth_client_credentials,
 };
 
 // Re-export test-only OAuth client helpers
