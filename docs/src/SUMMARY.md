@@ -4,18 +4,6 @@
 
 ---
 
-# Getting Started
-
-- [Quick Start](getting-started/quick-start.md)
-- [Requirements](getting-started/requirements.md)
-- [Installation](getting-started/installation.md)
-  - [macOS](getting-started/install-macos.md)
-  - [Linux](getting-started/install-linux.md)
-  - [From Source](getting-started/install-source.md)
-- [Your First Enrollment](getting-started/first-enrollment.md)
-
----
-
 # Server Deployment
 
 - [Deployment Overview](deployment/overview.md)
@@ -34,23 +22,6 @@
 
 - [Identity Provider Overview](idp/overview.md)
 - [Google Workspace](idp/google-workspace.md)
-- [Microsoft Entra ID](idp/entra-id.md)
-- [Generic OIDC](idp/generic-oidc.md)
-
----
-
-# Integrations
-
-- [SSH Certificates](integrations/ssh.md)
-- [AWS Credentials](integrations/aws.md)
-- [EKS (Kubernetes)](integrations/eks.md)
-- [GitHub](integrations/github.md)
-- [Docker / ECR](integrations/docker.md)
-- [Cargo Registries](integrations/cargo.md)
-- [CodeArtifact](integrations/codeartifact.md)
-- [CodeCommit](integrations/codecommit.md)
-- [SCIM Provisioning](integrations/scim.md)
-- [Application Registration](integrations/application-registration.md)
 
 ---
 
@@ -58,6 +29,7 @@
 
 - [Session Management](operations/sessions.md)
 - [Key Management](operations/key-management.md)
+- [SCIM Provisioning](operations/scim.md)
 - [S3 Configuration Storage](operations/s3-configuration.md)
 - [Backup and Recovery](operations/backup-recovery.md)
 - [Software Updates](operations/updates.md)
@@ -126,11 +98,5 @@
 # Reference
 
 - [Environment Variables](reference/environment-variables.md)
-- [CLI Commands](reference/cli-commands.md)
 - [S3 Configuration Schema](reference/s3-config-schema.md)
 - [Compliance Mapping](reference/compliance.md)
-- [Positioning](reference/positioning.md)
-
----
-
-[Contributing](contributing.md)

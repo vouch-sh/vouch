@@ -18,7 +18,7 @@ Admin Portal → Settings → Identity Providers → Add Provider
 
 ## Configuration Steps
 
-1. Select provider type (Google Workspace, Microsoft Entra ID, Generic OIDC)
+1. Select provider type (Google Workspace)
 2. Enter client credentials from the external IdP
 3. Configure allowed domains (e.g., `@company.com`)
 4. Test the connection
@@ -29,8 +29,6 @@ Admin Portal → Settings → Identity Providers → Add Provider
 | Provider | Status | Notes |
 |----------|--------|-------|
 | Google Workspace | Supported | First-class support, recommended |
-| Microsoft Entra ID | Supported | Azure AD / Entra ID integration |
-| Generic OIDC | Supported | Any OIDC-compliant IdP |
 
 ## Claims Mapping
 

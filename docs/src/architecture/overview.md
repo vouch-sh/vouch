@@ -147,6 +147,3 @@ vouch.example.com	FALSE	/	TRUE	1737849600	vouch_session	<token>
 
 For a detailed analysis of the security model, see the [Security Model](../security/model.md). For threat analysis, see the [Threat Model](../threat-model/overview.md).
 
-## Positioning
-
-For competitive positioning, comparisons with Amazon Midway, and target customer analysis, see [Positioning](../reference/positioning.md).
