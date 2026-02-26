@@ -79,19 +79,22 @@ pub async fn create_application_api(
         ));
     }
 
-    let app_type = OAuthClientType::from_str(&req.application_type).ok_or_else(|| {
-        json_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_type",
-            "Invalid application type. Must be: web, native, spa, or service",
-        )
-    })?;
+    let app_type = req
+        .application_type
+        .parse::<OAuthClientType>()
+        .map_err(|_| {
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_type",
+                "Invalid application type. Must be: web, native, spa, or service",
+            )
+        })?;
 
     // Parse access scope (default to personal if not provided)
     let access_scope = req
         .access_scope
         .as_ref()
-        .and_then(|s| AccessScope::from_str(s))
+        .and_then(|s| s.parse::<AccessScope>().ok())
         .unwrap_or_default();
 
     // Get user to check org membership
@@ -439,7 +442,7 @@ pub async fn update_application_api(
     let access_scope = req
         .access_scope
         .as_ref()
-        .and_then(|s| AccessScope::from_str(s));
+        .and_then(|s| s.parse::<AccessScope>().ok());
 
     // Get user to check org membership if changing to organization scope
     let user = if access_scope == Some(AccessScope::Organization) {

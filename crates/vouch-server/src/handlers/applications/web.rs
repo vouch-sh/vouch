@@ -95,7 +95,7 @@ pub async fn create_application_form(
         .into_response();
     }
 
-    let Some(app_type) = OAuthClientType::from_str(&form.application_type) else {
+    let Some(app_type) = form.application_type.parse::<OAuthClientType>().ok() else {
         return ApplicationErrorTemplate {
             title: "Invalid Input".to_string(),
             message: "Invalid application type.".to_string(),
@@ -105,7 +105,7 @@ pub async fn create_application_form(
     };
 
     // Parse and validate access scope
-    let access_scope = AccessScope::from_str(&form.access_scope).unwrap_or_default();
+    let access_scope = form.access_scope.parse::<AccessScope>().unwrap_or_default();
 
     // Validate: Organization scope requires user to have an org
     if access_scope == AccessScope::Organization && !auth.has_org {
@@ -495,7 +495,7 @@ pub async fn update_application_form(
     let access_scope = form
         .access_scope
         .as_ref()
-        .and_then(|s| AccessScope::from_str(s));
+        .and_then(|s| s.parse::<AccessScope>().ok());
 
     // Validate: Organization scope requires user to have an org
     if access_scope == Some(AccessScope::Organization) && !auth.has_org {

@@ -709,30 +709,32 @@ mod tests {
 
     #[test]
     fn test_access_scope_from_str() {
-        assert_eq!(
-            AccessScope::from_str("organization"),
-            Some(AccessScope::Organization)
-        );
-        assert_eq!(
-            AccessScope::from_str("personal"),
-            Some(AccessScope::Personal)
-        );
-        assert_eq!(AccessScope::from_str("public"), Some(AccessScope::Public));
-        assert_eq!(AccessScope::from_str("invalid"), None);
-        assert_eq!(AccessScope::from_str(""), None);
+        let result: Result<AccessScope, _> = "organization".parse();
+        assert_eq!(result, Ok(AccessScope::Organization));
+
+        let result: Result<AccessScope, _> = "personal".parse();
+        assert_eq!(result, Ok(AccessScope::Personal));
+
+        let result: Result<AccessScope, _> = "public".parse();
+        assert_eq!(result, Ok(AccessScope::Public));
+
+        let result: Result<AccessScope, _> = "invalid".parse();
+        assert!(result.is_err());
+
+        let result: Result<AccessScope, _> = "".parse();
+        assert!(result.is_err());
     }
 
     #[test]
     fn test_access_scope_from_str_case_insensitive() {
-        assert_eq!(
-            AccessScope::from_str("ORGANIZATION"),
-            Some(AccessScope::Organization)
-        );
-        assert_eq!(
-            AccessScope::from_str("Personal"),
-            Some(AccessScope::Personal)
-        );
-        assert_eq!(AccessScope::from_str("PUBLIC"), Some(AccessScope::Public));
+        let result: Result<AccessScope, _> = "ORGANIZATION".parse();
+        assert_eq!(result, Ok(AccessScope::Organization));
+
+        let result: Result<AccessScope, _> = "Personal".parse();
+        assert_eq!(result, Ok(AccessScope::Personal));
+
+        let result: Result<AccessScope, _> = "PUBLIC".parse();
+        assert_eq!(result, Ok(AccessScope::Public));
     }
 
     #[test]
@@ -766,15 +768,15 @@ mod tests {
     }
 
     #[test]
-    fn test_access_scope_roundtrip() {
+    fn test_access_scope_display_roundtrip() {
         for scope in [
             AccessScope::Organization,
             AccessScope::Personal,
             AccessScope::Public,
         ] {
-            let s = scope.as_str();
-            let parsed = AccessScope::from_str(s);
-            assert_eq!(parsed, Some(scope));
+            let display_str = scope.to_string();
+            let parsed: Result<AccessScope, _> = display_str.parse();
+            assert_eq!(parsed, Ok(scope));
         }
     }
 

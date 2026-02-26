@@ -35,20 +35,6 @@ impl AccessScope {
         }
     }
 
-    /// Parses a scope from a string (case-insensitive).
-    ///
-    /// Returns `None` if the string does not match a known scope.
-    #[must_use]
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "organization" => Some(Self::Organization),
-            "personal" => Some(Self::Personal),
-            "public" => Some(Self::Public),
-            _ => None,
-        }
-    }
-
     /// Returns a capitalized display name for UI rendering.
     #[must_use]
     pub fn display_name(&self) -> &'static str {
@@ -67,6 +53,25 @@ impl AccessScope {
             Self::Personal => "Only you can authenticate",
             Self::Public => "Any Vouch user can authenticate",
         }
+    }
+}
+
+impl std::str::FromStr for AccessScope {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "organization" => Ok(Self::Organization),
+            "personal" => Ok(Self::Personal),
+            "public" => Ok(Self::Public),
+            _ => Err(format!("Unknown access scope: {s}")),
+        }
+    }
+}
+
+impl std::fmt::Display for AccessScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -95,21 +100,6 @@ impl OAuthClientType {
         }
     }
 
-    /// Parses a client type from a string (case-insensitive).
-    ///
-    /// Returns `None` if the string does not match a known type.
-    #[must_use]
-    #[allow(clippy::should_implement_trait)]
-    pub fn from_str(s: &str) -> Option<Self> {
-        match s.to_lowercase().as_str() {
-            "web" => Some(Self::Web),
-            "native" => Some(Self::Native),
-            "spa" => Some(Self::Spa),
-            "service" => Some(Self::Service),
-            _ => None,
-        }
-    }
-
     /// Returns `true` if this client type requires a client secret.
     #[must_use]
     pub fn requires_secret(&self) -> bool {
@@ -120,6 +110,26 @@ impl OAuthClientType {
     #[must_use]
     pub fn requires_pkce(&self) -> bool {
         matches!(self, Self::Native | Self::Spa)
+    }
+}
+
+impl std::str::FromStr for OAuthClientType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "web" => Ok(Self::Web),
+            "native" => Ok(Self::Native),
+            "spa" => Ok(Self::Spa),
+            "service" => Ok(Self::Service),
+            _ => Err(format!("Unknown OAuth client type: {s}")),
+        }
+    }
+}
+
+impl std::fmt::Display for OAuthClientType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
