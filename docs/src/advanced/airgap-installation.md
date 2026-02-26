@@ -205,7 +205,7 @@ VOUCH_OIDC_SIGNING_KEY=<base64-encoded-oidc-signing-key>
 
 # -----------------------------------------------------------------------------
 # External Identity Provider (Optional)
-# For enrollment via external IdP like Okta, Azure AD
+# For enrollment via external IdP (e.g., on-premises OIDC provider)
 # -----------------------------------------------------------------------------
 
 # VOUCH_OIDC_ISSUER=https://idp.internal
@@ -422,6 +422,12 @@ export VOUCH_CA_CERT=/etc/vouch/root-ca.crt
 
 ## Step 10: Enroll Users
 
-Users enroll via the Vouch server's web interface at `https://auth.internal`. Each user navigates to the enrollment page in a browser on the internal network, authenticates via the configured identity provider (or direct registration if no external IdP is configured), and registers their YubiKey through the browser's WebAuthn prompt.
+> **Important:** Enrollment requires browser access to the Vouch server's web UI on the internal network. CLI-only enrollment (`vouch enroll --airgap`) is not yet implemented.
 
-> **Note:** Air-gap-specific CLI enrollment commands (e.g., `vouch enroll --airgap`) are planned but not yet implemented. Currently, enrollment requires browser access to the Vouch server's web UI.
+Each user:
+
+1. Opens a browser to `https://auth.internal/enroll`
+2. Authenticates via the configured identity provider (or direct registration if no external IdP is configured)
+3. Registers their YubiKey through the browser's WebAuthn prompt (touch + PIN)
+
+After enrollment, daily login uses the CLI (`vouch login`) with no browser required.

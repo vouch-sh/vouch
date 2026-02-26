@@ -22,7 +22,7 @@ All Vouch server configuration is done via environment variables (prefixed with 
 
 ## OIDC (External IdP)
 
-These variables configure an external OpenID Connect identity provider for enrollment (e.g., Google Workspace, Okta). All three must be set together for OIDC enrollment to work.
+These variables configure an external OpenID Connect identity provider for enrollment (e.g., Google Workspace). All three must be set together for OIDC enrollment to work.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|

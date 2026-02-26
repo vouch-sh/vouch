@@ -4,7 +4,7 @@ This chapter describes the core authentication flows in Vouch, from initial enro
 
 ## Enrollment (One-Time, Browser Required)
 
-Links OIDC identity (Google Workspace, Okta, Azure AD) to hardware FIDO2 passkey using RFC 8628 Device Authorization Grant:
+Links OIDC identity (Google Workspace) to hardware FIDO2 passkey using RFC 8628 Device Authorization Grant:
 
 ```
 +--------+     +-----------+     +--------------+     +--------------+     +----------+
@@ -55,10 +55,10 @@ Links OIDC identity (Google Workspace, Okta, Azure AD) to hardware FIDO2 passkey
     |<---------------|                  |                    |                  |
 ```
 
-**Why RFC 8628?** Unlike traditional OAuth callbacks that require a local HTTP server, device authorization:
+**Why [RFC 8628](https://www.rfc-editor.org/rfc/rfc8628)?** Unlike traditional OAuth callbacks that require a local HTTP server, the Device Authorization Grant:
 - Works in headless/SSH environments (no localhost binding)
 - Works behind firewalls (no inbound connections)
-- Simple user experience (enter 8-character code)
+- Simple user experience — the CLI displays a `user_code`, the user enters it in the browser
 - Industry standard (used by Azure CLI, GitHub CLI, etc.)
 
 **Server stores:** credential_id <-> user@company.com (from OIDC provider)

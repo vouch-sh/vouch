@@ -6,33 +6,6 @@ This chapter covers how Vouch secures session storage across different backends 
 
 Vouch stores access tokens in multiple locations with appropriate security controls:
 
-### Cookie File (`~/.vouch/cookie.txt`)
-
-A Netscape-format cookie file for CLI tools that need session access:
-
-**Security Controls:**
-- **File permissions**: 0600 (read/write for owner only)
-- **Location**: User's home directory (`~/.vouch/`)
-- **Contents**: Access token + expiration timestamp
-- **Lifetime**: Cleared on logout or session expiration
-
-**Format:**
-```
-# Netscape HTTP Cookie File
-vouch.example.com	FALSE	/	TRUE	1737849600	vouch_session	<jwt-token>
-```
-
-**Why Netscape format:**
-- Compatible with curl (`-b` flag), wget, and other CLI tools
-- Industry standard for cookie storage
-- Simple text format, easy to audit
-
-**Risk mitigation:**
-- Tokens are short-lived (8 hours max)
-- File is deleted on logout
-- Restrictive permissions prevent unauthorized access
-- Token hash (not plaintext) is stored server-side for revocation
-
 ### Config File (`~/.vouch/config.json`)
 
 Fallback storage when agent is not running:
@@ -53,7 +26,7 @@ In-memory storage via IPC socket:
 
 ## Client Credential Security
 
-OAuth client credentials issued through the application registration portal follow strict security practices.
+OAuth client credentials issued through the application management UI (`/applications`) or API (`/api/v1/applications`) follow strict security practices.
 
 ### Secret Storage
 
@@ -90,10 +63,10 @@ let secret = SecretString::new(base64url_encode(random_bytes(32)));
 
 ### Secret Rotation
 
-Client secrets can be rotated via the portal or API:
+Client secrets can be rotated via the web UI (`/applications/{id}`) or API (`POST /api/v1/applications/{id}/rotate`):
 
 ```
-1. User requests rotation via portal or API
+1. User requests rotation via web UI or API
 2. New secret generated and returned (shown once)
 3. All old secrets are immediately revoked
 4. Audit log records rotation event
@@ -189,7 +162,7 @@ All client credential operations are logged:
 The CLI operates as a FAPI 2.0 client with strong security guarantees:
 
 **CLI Key Security:**
-- ES256 key pair stored at `~/.vouch/client_key.json` with file permissions 0600
+- ES256 key pair stored in the OS keychain (macOS Keychain, Linux Secret Service, Windows Credential Manager) with file fallback
 - Used for `private_key_jwt` client authentication (RFC 7523) and DPoP proofs (RFC 9449)
 - No shared secrets between CLI and server — only the public key is registered
 

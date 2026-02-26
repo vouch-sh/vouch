@@ -29,15 +29,7 @@ When using S3-based configuration, additional security considerations apply. Thi
 
 ## Protected Configuration Fields
 
-Only TLS certificates can be updated via S3 at runtime (for hot-reload). All other fields are silently ignored during runtime S3 polling:
-
-| Field | Protection | Rationale |
-|-------|------------|-----------|
-| `jwt_secret` | Blocked at runtime | Changing would invalidate all sessions; security impact of hot-swap |
-| `database_url` | Blocked at runtime | Connection pool cannot be safely changed |
-| All other fields | Blocked at runtime | Only TLS cert/key changes are applied during polling |
-
-A server restart is required to apply changes to any non-TLS configuration fields.
+Only TLS certificates can be hot-reloaded at runtime via S3 polling. All other configuration fields are silently ignored during runtime S3 polling and require a server restart to take effect.
 
 ## S3 Polling Security
 

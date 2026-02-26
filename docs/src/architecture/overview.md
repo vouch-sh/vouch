@@ -115,27 +115,6 @@ When the agent is not running, sessions are stored in the config file:
 
 **Format:** JSON with `token` field containing the JWT access token
 
-### Cookie File (CLI Tools)
-
-For CLI tools that support Netscape cookie format (curl, wget, etc.):
-
-```
-~/.vouch/cookie.txt
-```
-
-**Format:** Netscape HTTP Cookie File
-```
-# Netscape HTTP Cookie File
-vouch.example.com	FALSE	/	TRUE	1737849600	vouch_session	<token>
-```
-
-**Use cases:**
-- SSH credential helper reads cookie, exchanges for certificate
-- AWS credential process reads cookie, gets OIDC token
-- CLI tools that need quick auth without browser flow
-
-**Security:** File permissions are set to 0600 (read/write for owner only)
-
 ## Security Properties
 
 1. **Credential issuance requires presence** — Every credential traces to a FIDO2 assertion with user verification

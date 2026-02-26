@@ -132,13 +132,13 @@ async fn login() -> Result<Session> {
 
 **Security benefit**: The hardware authenticator identifies the user via `user_handle`, not user-provided input. Eliminates username enumeration.
 
-## Enrollment Security (RFC 8628)
+## Enrollment Security — Device Authorization Grant ([RFC 8628](https://www.rfc-editor.org/rfc/rfc8628))
 
-Vouch uses RFC 8628 Device Authorization Grant for enrollment. Security considerations:
+Vouch uses the Device Authorization Grant for enrollment. The protocol uses two codes: the `device_code` (opaque polling token, never shown to the user) and the `user_code` (short human-readable code displayed in the terminal).
 
 ```
-Device Code:   32 random bytes, SHA-256 hashed before storage
-User Code:     8 characters from 20-char alphabet (~40 bits entropy)
+device_code:   32 random bytes, SHA-256 hashed before storage
+user_code:     8 characters from 20-char alphabet (~40 bits entropy)
                Format: XXXX-XXXX (no ambiguous chars: 0/O, 1/I/L)
 Expiration:    10 minutes (configurable)
 Polling:       5-second minimum interval, slow_down response
@@ -146,18 +146,18 @@ OIDC State:    32 random bytes, prevents CSRF
 Nonce:         32 random bytes, prevents token replay
 ```
 
-**Why this is secure:**
+**Security properties:**
 - Device codes are never stored in plain text (SHA-256 hash only)
 - User codes have limited entropy but short expiration + rate limiting compensate
-- Brute-force protection: `slow_down` response for rapid polling
+- `slow_down` response prevents rapid polling brute force
 - OIDC state parameter prevents authorization code injection
 - Nonce in ID token prevents replay attacks
 
 **Rate Limiting:**
 ```
-POST /oauth/token          1 request/5 seconds per device_code (implemented, slow_down response)
+POST /oauth/token          1 request/5 seconds per device_code (implemented)
 POST /oauth/device/code    10 requests/minute per IP (planned)
-POST /device               5 attempts/code (then code is invalidated) (planned)
+POST /device               5 attempts per user_code before invalidation (planned)
 ```
 
 ## Key Registration Security

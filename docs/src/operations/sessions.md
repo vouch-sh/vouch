@@ -1,12 +1,12 @@
 # Session Management
 
-Vouch sessions are time-limited authentication tokens that prove recent hardware presence verification.
+Vouch sessions are time-limited, DPoP-bound OAuth 2.0 access tokens (ES256 JWTs per RFC 9068) that prove recent hardware presence verification.
 
 ## Session Lifecycle
 
 1. **Creation** — `vouch login` performs FIDO2 assertion with YubiKey touch + PIN
-2. **Active** — Session token stored in agent memory, valid for 8 hours (default)
-3. **Usage** — Credential helpers exchange the token for service-specific credentials
+2. **Active** — Access token stored in agent memory, valid for 8 hours (default)
+3. **Usage** — Credential helpers exchange the access token for service-specific credentials
 4. **Expiry** — Session expires automatically after the configured duration
 5. **Revocation** — `vouch logout` explicitly ends the session
 
@@ -26,7 +26,6 @@ Sessions are stored in multiple locations for different access patterns:
 |----------|---------|----------|
 | `vouch-agent` memory | Primary access for CLI and credential helpers | In-process, zeroized on drop |
 | `~/.vouch/config.json` | Fallback when agent is not running | File permissions 0600 |
-| `~/.vouch/cookie.txt` | Netscape cookie format for curl/wget | File permissions 0600 |
 | Server database | Server-side session record | Token hash stored, not plaintext |
 
 ## Checking Session Status
@@ -47,7 +46,6 @@ vouch logout
 This clears the session from:
 - Agent memory
 - Config file
-- Cookie file
 - Server-side session record (revoked)
 
 ## Server-Side Session Management
@@ -63,11 +61,10 @@ VOUCH_CLEANUP_INTERVAL=15
 
 ### Admin Operations
 
-Organization administrators can view authentication events via the admin API:
+Organization administrators (users with `is_org_admin` flag) can view authentication events via the admin API. Log in to the web UI and use your `vouch_session` cookie:
 
 ```bash
-# List recent auth events
-curl -H "Authorization: Bearer $ADMIN_TOKEN" \
+curl -b "vouch_session=<your-session-cookie>" \
   https://auth.example.com/api/v1/org/auth-events
 ```
 

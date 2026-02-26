@@ -2,6 +2,45 @@
 
 Vouch supports SCIM 2.0 (RFC 7643/7644) for user provisioning and de-provisioning from external identity providers. SCIM is a **launch requirement** for enterprise deployments.
 
+## Setup
+
+The admin API endpoints (`/api/v1/org/*`) require an authenticated Vouch session from a user with org admin privileges. The server accepts the access token via `Authorization: Bearer <token>`, `Authorization: DPoP <token>`, or the `vouch_session` cookie.
+
+**Prerequisites:**
+- Your user account must have the `is_org_admin` flag set in the database
+- You must be assigned to an organization (`org_id`)
+
+### 1. Create a SCIM token
+
+Log in to the Vouch web UI at `https://auth.example.com/login`. Use your browser's developer tools to copy the `vouch_session` cookie value, then:
+
+```bash
+curl -X POST https://auth.example.com/api/v1/org/scim-tokens \
+  -b "vouch_session=<your-session-cookie>" \
+  -H "Content-Type: application/json" \
+  -d '{"description": "SCIM integration", "expires_in_days": 90}'
+```
+
+The response includes a token prefixed `vouch_scim_...`. This token is shown once and cannot be retrieved again.
+
+### 2. Configure your IdP
+
+Enter the following in your IdP's SCIM configuration:
+- **SCIM endpoint URL**: `https://auth.example.com/scim/v2/`
+- **Bearer token**: the `vouch_scim_...` token from step 1
+
+### 3. Manage tokens
+
+```bash
+# List active SCIM tokens
+curl -b "vouch_session=<your-session-cookie>" \
+  https://auth.example.com/api/v1/org/scim-tokens
+
+# Revoke a SCIM token
+curl -X DELETE -b "vouch_session=<your-session-cookie>" \
+  https://auth.example.com/api/v1/org/scim-tokens/<token-id>
+```
+
 ## De-Provisioning Behavior
 
 When a user is de-provisioned via SCIM (e.g., employee leaves the organization):
@@ -43,12 +82,12 @@ SCIM endpoints require bearer token authentication:
 
 **Authentication**:
 - Bearer token in `Authorization` header
-- Token generated in Vouch admin portal per external IdP
+- Token generated via the admin API (`POST /api/v1/org/scim-tokens`)
 - Tokens are long-lived but can be rotated/revoked
-- Separate token per IdP integration (Okta, Azure AD, etc.)
+- Separate token per IdP integration
 
 ```bash
-# Example SCIM request from Okta
+# Example SCIM request
 curl -X DELETE https://vouch.example.com/scim/v2/Users/usr_abc123 \
   -H "Authorization: Bearer scim_token_xyz789" \
   -H "Content-Type: application/scim+json"
@@ -57,7 +96,7 @@ curl -X DELETE https://vouch.example.com/scim/v2/Users/usr_abc123 \
 **Token Security**:
 - Tokens are hashed (SHA-256) before storage
 - Shown once at creation, never retrievable after
-- Bound to specific IdP and IP allowlist (optional)
+- Bound to specific organization
 - Minimum 256 bits of entropy
 
 ## SCIM Audit Logging

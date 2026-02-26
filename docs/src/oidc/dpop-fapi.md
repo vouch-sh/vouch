@@ -5,7 +5,7 @@ This chapter describes how the Vouch CLI operates as a FAPI 2.0 client with DPoP
 ## FAPI 2.0 Client
 
 The CLI operates as a FAPI 2.0 client with its own cryptographic identity:
-- Generates an ES256 key pair stored at `~/.vouch/client_key.json` (file permissions 0600)
+- Generates an ES256 key pair stored in the OS keychain (macOS Keychain, Linux Secret Service, Windows Credential Manager) with file fallback
 - Auto-registers with the server via RFC 7591 Dynamic Client Registration on first use (`vouch enroll` or `vouch login`)
 - Uses `private_key_jwt` (RFC 7523) for client authentication — no shared secrets between CLI and server
 - Sends DPoP proofs (RFC 9449) with every token request

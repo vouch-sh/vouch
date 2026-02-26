@@ -9,7 +9,7 @@ Before deploying, ensure you have:
 - [ ] **Domain name** — A domain for your Vouch server (e.g., `auth.example.com`)
 - [ ] **TLS certificate** — Valid certificate for your domain (or use Let's Encrypt)
 - [ ] **Database** — SQLite (single node) or PostgreSQL (multi-node)
-- [ ] **Identity provider** — Google Workspace, Microsoft Entra ID, or another OIDC provider
+- [ ] **Identity provider** — Google Workspace
 - [ ] **JWT secret** — Cryptographically random string, minimum 32 characters
 - [ ] **SSH CA key** (optional) — Ed25519 key pair for signing SSH certificates
 - [ ] **OIDC signing key** (optional) — P-256 EC key for signing ID tokens
@@ -75,6 +75,21 @@ VOUCH_OIDC_ISSUER=https://accounts.google.com  # External IdP
 VOUCH_OIDC_CLIENT_ID=...
 VOUCH_OIDC_CLIENT_SECRET=...
 ```
+
+## Sizing
+
+| Component | Minimum | Recommended |
+|-----------|---------|-------------|
+| CPU | 1 vCPU | 2 vCPU |
+| Memory | 256 MB | 512 MB |
+| Disk | 1 GB (SQLite) | 10 GB (PostgreSQL) |
+
+The server is single-process, async (tokio). Per-session memory overhead is minimal (~2 KB for token metadata). The primary bottleneck is database I/O during token issuance and session validation.
+
+**Database guidance:**
+- **SQLite** — suitable for single-node deployments under ~500 users
+- **PostgreSQL** — recommended for multi-node or >500 users
+- **Aurora DSQL** — for AWS deployments requiring managed infrastructure
 
 ## Next Steps
 
