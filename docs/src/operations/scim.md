@@ -12,11 +12,18 @@ The admin API endpoints (`/api/v1/org/*`) require an authenticated Vouch session
 
 ### 1. Create a SCIM token
 
-Log in to the Vouch web UI at `https://auth.example.com/login`. Use your browser's developer tools to copy the `vouch_session` cookie value, then:
+Log in with `vouch login`, then create a SCIM token using the cookie file or token command:
 
 ```bash
+# Using cookie file (written automatically on login)
 curl -X POST https://auth.example.com/api/v1/org/scim-tokens \
-  -b "vouch_session=<your-session-cookie>" \
+  -b ~/.vouch/cookie.txt \
+  -H "Content-Type: application/json" \
+  -d '{"description": "SCIM integration", "expires_in_days": 90}'
+
+# Or using the token command
+curl -X POST https://auth.example.com/api/v1/org/scim-tokens \
+  -H "Authorization: Bearer $(vouch credential token)" \
   -H "Content-Type: application/json" \
   -d '{"description": "SCIM integration", "expires_in_days": 90}'
 ```
@@ -33,11 +40,11 @@ Enter the following in your IdP's SCIM configuration:
 
 ```bash
 # List active SCIM tokens
-curl -b "vouch_session=<your-session-cookie>" \
+curl -b ~/.vouch/cookie.txt \
   https://auth.example.com/api/v1/org/scim-tokens
 
 # Revoke a SCIM token
-curl -X DELETE -b "vouch_session=<your-session-cookie>" \
+curl -X DELETE -b ~/.vouch/cookie.txt \
   https://auth.example.com/api/v1/org/scim-tokens/<token-id>
 ```
 

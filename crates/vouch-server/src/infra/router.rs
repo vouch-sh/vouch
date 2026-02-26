@@ -67,6 +67,10 @@ fn build_rate_limited_routes() -> Router<Arc<AppState>> {
         .route("/oauth/par", post(handlers::oidc::par))
         .route("/oauth/register", post(handlers::oidc::register))
         .route(
+            "/oauth/register/{client_id}",
+            get(handlers::oidc::read_client),
+        )
+        .route(
             "/oauth/fido2/challenge",
             post(handlers::oidc::fido2_challenge),
         )

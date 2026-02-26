@@ -8,6 +8,8 @@ use crate::AppState;
 use crate::db;
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::rand as aws_rand;
+use axum::extract::OriginalUri;
+use axum::http::Method;
 use axum::{
     Json,
     extract::{Path, Query, State},
@@ -35,8 +37,10 @@ async fn extract_org_admin(
     state: &AppState,
     headers: &HeaderMap,
     jar: &CookieJar,
+    method: &str,
+    uri: &str,
 ) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
-    let token = extract_resource_token(state, headers, jar).await?;
+    let token = extract_resource_token(state, headers, jar, method, uri).await?;
 
     let user = db::get_user_by_id(&state.db, &token.sub)
         .await
@@ -90,12 +94,15 @@ pub struct AuthEventsQuery {
 /// List authentication events for the organization.
 /// GET /api/v1/org/auth-events
 pub async fn list_auth_events(
+    method: Method,
+    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
     Query(query): Query<AuthEventsQuery>,
 ) -> Result<Json<ListAuthEventsResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, _org_id) = extract_org_admin(&state, &headers, &jar).await?;
+    let (_user, _org_id) =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Build query params
     let db_query = db::AuthEventQuery {
@@ -192,12 +199,15 @@ pub struct ListScimTokensResponse {
 /// Create a new SCIM token.
 /// POST /api/v1/org/scim-tokens
 pub async fn create_scim_token(
+    method: Method,
+    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
     Json(req): Json<CreateScimTokenRequest>,
 ) -> Result<Json<CreateScimTokenResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_org_admin(&state, &headers, &jar).await?;
+    let (_user, org_id) =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Validate expiration (required, 1-365 days)
     if req.expires_in_days < 1 || req.expires_in_days > 365 {
@@ -260,11 +270,14 @@ pub async fn create_scim_token(
 /// List SCIM tokens for the organization.
 /// GET /api/v1/org/scim-tokens
 pub async fn list_scim_tokens(
+    method: Method,
+    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<ListScimTokensResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_org_admin(&state, &headers, &jar).await?;
+    let (_user, org_id) =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let tokens = db::list_scim_tokens(&state.db, Some(&org_id))
         .await
@@ -293,12 +306,15 @@ pub async fn list_scim_tokens(
 /// Delete a SCIM token.
 /// DELETE /api/v1/org/scim-tokens/:id
 pub async fn delete_scim_token(
+    method: Method,
+    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
     Path(token_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let (_user, org_id) = extract_org_admin(&state, &headers, &jar).await?;
+    let (_user, org_id) =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let deleted = db::delete_scim_token(&state.db, &token_id, &org_id)
         .await

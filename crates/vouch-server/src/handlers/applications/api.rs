@@ -9,6 +9,8 @@ use crate::db::{
     self, AccessScope, CreateOAuthClientParams, FapiProfile, OAuthClientType, OAuthEventType,
     RegistrationSource, TokenEndpointAuthMethod, UpdateOAuthClientParams,
 };
+use axum::extract::OriginalUri;
+use axum::http::Method;
 use axum::{
     Json,
     extract::{Path, State},
@@ -30,11 +32,13 @@ use crate::services::oidc::ResourceUri;
 /// List user's applications (API).
 /// GET /api/v1/applications
 pub async fn list_applications_api(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListApplicationsResponse>, (StatusCode, Json<ApiError>)> {
-    let token = extract_resource_token(&state, &headers, &jar).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let applications = db::get_oauth_clients_for_user(&state.db, &token.sub)
         .await
@@ -56,12 +60,14 @@ pub async fn list_applications_api(
 /// Create a new application (API).
 /// POST /api/v1/applications
 pub async fn create_application_api(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<CreateApplicationRequest>,
 ) -> Result<Json<CreateApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let token = extract_resource_token(&state, &headers, &jar).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Validate inputs
     let name = req.name.trim();
@@ -142,12 +148,12 @@ pub async fn create_application_api(
     let resource_uris = req.resource_uris.as_deref().unwrap_or(&[]);
 
     // Validate resource URIs per RFC 8707 (absolute URI, no fragment).
-    for uri in resource_uris {
-        if let Err(e) = ResourceUri::parse(uri) {
+    for uri_str in resource_uris {
+        if let Err(e) = ResourceUri::parse(uri_str) {
             return Err(json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_resource_uri",
-                &format!("Invalid resource URI '{uri}': {e}"),
+                &format!("Invalid resource URI '{uri_str}': {e}"),
             ));
         }
     }
@@ -209,8 +215,8 @@ pub async fn create_application_api(
     }
 
     // Validate JWKS URI if provided
-    if let Some(uri) = jwks_uri_trimmed {
-        match url::Url::parse(uri) {
+    if let Some(jwks_uri_val) = jwks_uri_trimmed {
+        match url::Url::parse(jwks_uri_val) {
             Ok(parsed) if parsed.scheme() == "https" => {}
             _ => {
                 return Err(json_error(
@@ -361,12 +367,14 @@ pub async fn create_application_api(
 /// Get application details (API).
 /// GET /api/v1/applications/:id
 pub async fn get_application_api(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let token = extract_resource_token(&state, &headers, &jar).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
         .await
@@ -395,13 +403,15 @@ pub async fn get_application_api(
 /// Update an application (API).
 /// PATCH /api/v1/applications/:id
 pub async fn update_application_api(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
     Json(req): Json<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    let token = extract_resource_token(&state, &headers, &jar).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Get existing application
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
@@ -496,12 +506,12 @@ pub async fn update_application_api(
         .unwrap_or_else(|| client.get_resource_uris());
 
     // Validate resource URIs per RFC 8707 (absolute URI, no fragment).
-    for uri in &resource_uris {
-        if let Err(e) = ResourceUri::parse(uri) {
+    for uri_str in &resource_uris {
+        if let Err(e) = ResourceUri::parse(uri_str) {
             return Err(json_error(
                 StatusCode::BAD_REQUEST,
                 "invalid_resource_uri",
-                &format!("Invalid resource URI '{uri}': {e}"),
+                &format!("Invalid resource URI '{uri_str}': {e}"),
             ));
         }
     }
@@ -573,8 +583,8 @@ pub async fn update_application_api(
     }
 
     // Validate JWKS URI if provided
-    if let Some(uri) = jwks_uri_trimmed {
-        match url::Url::parse(uri) {
+    if let Some(jwks_uri_val) = jwks_uri_trimmed {
+        match url::Url::parse(jwks_uri_val) {
             Ok(parsed) if parsed.scheme() == "https" => {}
             _ => {
                 return Err(json_error(
@@ -677,12 +687,14 @@ pub async fn update_application_api(
 /// Delete an application (API).
 /// DELETE /api/v1/applications/:id
 pub async fn delete_application_api(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let token = extract_resource_token(&state, &headers, &jar).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
@@ -724,12 +736,14 @@ pub async fn delete_application_api(
 /// Rotate client secret (API).
 /// POST /api/v1/applications/:id/rotate
 pub async fn rotate_secret_api(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
 ) -> Result<Json<RotateSecretResponse>, (StatusCode, Json<ApiError>)> {
-    let token = extract_resource_token(&state, &headers, &jar).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.db, &app_id)
@@ -807,12 +821,14 @@ pub async fn rotate_secret_api(
 /// Revoke all tokens for an application (API).
 /// POST /api/v1/applications/:id/revoke
 pub async fn revoke_tokens_api(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    let token = extract_resource_token(&state, &headers, &jar).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.db, &app_id)

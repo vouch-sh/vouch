@@ -231,7 +231,7 @@ async fn run_fapi_login(
             .await;
         }
 
-        anyhow::bail!("token request failed (HTTP {token_status}): {body}");
+        return Err(token_error(&body, token_status));
     }
 
     let fapi_token: Fapi2TokenResponse = token_resp
@@ -245,12 +245,20 @@ async fn run_fapi_login(
 
     let email = fapi_token.email.as_deref().unwrap_or("").to_string();
 
+    // Reconstruct an owned key for auto-provision (avoids keychain
+    // round-trip that can silently fail on some platforms).
+    let owned_key = fapi_key
+        .to_key_file()
+        .ok()
+        .and_then(|kf| ClientKey::from_key_file(&kf).ok());
+
     let agent_stored = session::store_and_finalize(
         server,
         fapi_token.access_token.expose_secret(),
         &email,
         &expires_at_str,
         Some(expires_at_ts),
+        owned_key,
     )
     .await?;
 
@@ -309,7 +317,7 @@ async fn run_fapi_login_with_nonce(
     let token_status = token_resp.status();
     if !token_status.is_success() {
         let body = token_resp.text().await.unwrap_or_default();
-        anyhow::bail!("token request failed (HTTP {token_status}): {body}");
+        return Err(token_error(&body, token_status));
     }
 
     let fapi_token: Fapi2TokenResponse = token_resp
@@ -322,12 +330,19 @@ async fn run_fapi_login_with_nonce(
 
     let email = fapi_token.email.as_deref().unwrap_or("").to_string();
 
+    // Reconstruct an owned key for auto-provision.
+    let owned_key = fapi_key
+        .to_key_file()
+        .ok()
+        .and_then(|kf| ClientKey::from_key_file(&kf).ok());
+
     let agent_stored = session::store_and_finalize(
         server,
         fapi_token.access_token.expose_secret(),
         &email,
         &expires_at_str,
         Some(expires_at_ts),
+        owned_key,
     )
     .await?;
 
@@ -338,20 +353,63 @@ async fn run_fapi_login_with_nonce(
 
 /// Ensure the FAPI client is registered, registering on demand if needed.
 ///
-/// Reads `client_id` from config. If absent, calls open registration
-/// (no auth token required — the server allows unauthenticated registration).
+/// Validates the stored registration in two ways before using it:
+/// 1. **Key match**: the current FAPI key's `kid` must match the stored
+///    `dpop_key_id`. If the key changed (keychain reset, re-enrollment),
+///    the old registration is useless.
+/// 2. **Server check**: calls the RFC 7592 management endpoint to confirm
+///    the client still exists on the server (handles DB resets, revocation).
+///
+/// If either check fails, clears FAPI config and re-registers.
 ///
 /// Returns the `client_id` on success.
 async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) -> Result<String> {
-    // Fast path: already registered.
     if let Ok(config) = Config::load()
         && let Some(id) = config.client_id()
     {
-        return Ok(id.to_string());
+        // Check 1: does the current key match what was registered?
+        let key_matches = config
+            .dpop_key_id()
+            .is_some_and(|stored_kid| stored_kid == fapi_key.kid());
+
+        if !key_matches {
+            tracing::debug!(
+                "Key mismatch (stored={:?}, current={}), re-registering",
+                config.dpop_key_id(),
+                fapi_key.kid()
+            );
+        } else if let Some(uri) = config.registration_client_uri()
+            && let Some(token) = config.registration_access_token()
+        {
+            // Check 2: is the registration still active on the server?
+            match vouch_cli::fapi::registration::is_client_registered(
+                client.raw_client(),
+                uri,
+                token.expose_secret(),
+            )
+            .await
+            {
+                Ok(true) => return Ok(id.to_string()),
+                Ok(false) => {
+                    tracing::debug!("Client {id} no longer registered, re-registering");
+                }
+                Err(e) => {
+                    // Network error — try the stored client_id; if
+                    // the server is unreachable, login will fail with
+                    // a clearer error at the challenge step anyway.
+                    tracing::debug!("Could not validate registration: {e}");
+                    return Ok(id.to_string());
+                }
+            }
+        } else {
+            // No RFC 7592 credentials (pre-7592 config) but key
+            // matches — trust the stored client_id.
+            return Ok(id.to_string());
+        }
     }
 
-    // Slow path: register now (open registration — no auth token needed).
-    tracing::debug!("No client_id found, registering FAPI client");
+    // Register (or re-register) now.
+    tracing::debug!("Registering FAPI client");
 
     let result = vouch_cli::fapi::registration::register_fapi_client(
         client.raw_client(),
@@ -364,6 +422,7 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
 
     // Persist the registration to config.
     Config::modify(|config| {
+        config.clear_fapi();
         config.set_client_id(&result.client_id);
         if let Some(ref rat) = result.registration_access_token {
             config.set_registration_access_token(rat);
@@ -417,8 +476,11 @@ fn load_or_create_fapi_key() -> Result<ClientKey> {
         tracing::debug!("FAPI client key loaded from disk: kid={}", key.kid());
 
         // Migrate to keychain if possible, then remove the file.
+        // Verify the write by reading back — some platforms claim
+        // success but don't actually persist the entry.
         if let Ok(key_file) = key.to_key_file()
             && vouch_cli::fapi::key_store::save_to_keychain(&key_file).is_ok()
+            && vouch_cli::fapi::key_store::load_from_keychain().is_ok_and(|v| v.is_some())
         {
             tracing::debug!("Migrated client key to keychain");
             if let Err(e) = std::fs::remove_file(&key_path) {
@@ -433,18 +495,22 @@ fn load_or_create_fapi_key() -> Result<ClientKey> {
     let key = ClientKey::generate().context("failed to generate FAPI client key")?;
     tracing::debug!("Generated new FAPI client key: kid={}", key.kid());
 
-    // Save to keychain first, fall back to disk.
+    // Save to keychain first, verify it persisted, fall back to disk.
+    // Some platforms (notably macOS with unsigned debug builds) report
+    // success on write but the entry doesn't actually persist.
     if let Ok(key_file) = key.to_key_file()
         && vouch_cli::fapi::key_store::save_to_keychain(&key_file).is_ok()
+        && vouch_cli::fapi::key_store::load_from_keychain().is_ok_and(|v| v.is_some())
     {
         tracing::debug!("Saved new client key to keychain");
         return Ok(key);
     }
 
-    // Keychain unavailable — save to disk.
+    // Keychain unavailable or unreliable — save to disk.
+    tracing::debug!("Keychain unreliable, saving client key to disk");
     key.save(&key_path)
         .context("failed to save FAPI client key to disk")?;
-    tracing::debug!("Saved new client key to disk (keychain unavailable)");
+    tracing::debug!("Saved new client key to disk");
 
     Ok(key)
 }
@@ -486,6 +552,33 @@ fn finalize_login_output(email: &str, expires_at: &str, agent_stored: bool) {
     } else {
         println!("\nNote: Agent not running. Start it with: vouch-agent --foreground");
         println!("Your identity is stored locally. Check with: vouch status");
+    }
+}
+
+/// Map an OAuth token error response to an actionable CLI error.
+///
+/// Parses the JSON body and adds user-facing hints for recoverable errors.
+fn token_error(body: &str, status: reqwest::StatusCode) -> anyhow::Error {
+    if let Ok(oauth_err) = serde_json::from_str::<vouch_common::OAuthError>(body) {
+        let hint = match oauth_err.error.as_str() {
+            "invalid_grant" => {
+                "\n\nYour authenticator is not registered with this \
+                 server.\nRun 'vouch enroll' to register your YubiKey \
+                 first."
+            }
+            "invalid_client" => {
+                "\n\nClient registration is invalid.\nRun 'vouch login' \
+                 again — the client will be re-registered automatically."
+            }
+            _ => "",
+        };
+        let desc = oauth_err
+            .error_description
+            .as_deref()
+            .unwrap_or("(no description)");
+        anyhow::anyhow!("{}: {desc}{hint}", oauth_err.error)
+    } else {
+        anyhow::anyhow!("token request failed (HTTP {status}): {body}")
     }
 }
 

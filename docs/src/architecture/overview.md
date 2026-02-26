@@ -115,6 +115,16 @@ When the agent is not running, sessions are stored in the config file:
 
 **Format:** JSON with `token` field containing the JWT access token
 
+### Cookie File
+
+A Netscape-format cookie file is written on login for use with `curl -b`:
+
+```
+~/.vouch/cookie.txt
+```
+
+**Used by:** `curl -b ~/.vouch/cookie.txt`, `wget --load-cookies`, and other HTTP tools that support Netscape cookie format.
+
 ## Security Properties
 
 1. **Credential issuance requires presence** — Every credential traces to a FIDO2 assertion with user verification

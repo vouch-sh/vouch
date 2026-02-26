@@ -41,13 +41,25 @@ pub type RateLimitLayer =
 ///
 /// Uses `PeerIpKeyExtractor` which keys on the direct TCP peer address.
 ///
-/// Uses the `GovernorConfig::secure()` preset designed for login endpoints:
-/// burst of 2 requests, replenish 1 every 4 seconds per IP. This prevents
-/// brute-force attacks while allowing a user to quickly retry a mistyped
-/// password once before being rate-limited.
+/// Burst of 8 requests, replenish 1 every 2 seconds per IP. The FAPI 2.0
+/// login flow legitimately makes several rapid requests to rate-limited
+/// endpoints (register, challenge, token, DPoP nonce retry), so the burst
+/// must accommodate a full login sequence while still preventing brute-force.
 #[must_use]
 pub fn build_auth_rate_limiter() -> RateLimitLayer {
-    GovernorLayer::new(GovernorConfig::secure())
+    let config = GovernorConfigBuilder::default()
+        .per_second(2)
+        .burst_size(8)
+        .use_headers()
+        .finish()
+        .unwrap_or_else(|| {
+            tracing::warn!(
+                "Failed to build auth rate limiter config, \
+                 falling back to secure defaults"
+            );
+            GovernorConfig::secure()
+        });
+    GovernorLayer::new(config)
 }
 
 /// Build a rate limiting layer for credential issuance endpoints.

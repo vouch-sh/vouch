@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! RFC 7591 — Dynamic Client Registration endpoint handler.
+//! RFC 7591/7592 — Dynamic Client Registration endpoint handlers.
 //!
-//! `POST /oauth/register` — Creates a new OAuth client from metadata.
+//! - `POST /oauth/register` — Creates a new OAuth client (RFC 7591).
+//! - `GET /oauth/register/:client_id` — Reads client configuration (RFC 7592).
 //!
-//! Supports two modes:
+//! POST supports two modes:
 //! - **Authenticated registration**: With a valid Bearer token, the client is
 //!   associated with the authenticated user.
 //! - **Open registration** (RFC 7591 "open registration"): Without a Bearer token,
@@ -12,11 +13,14 @@
 //!   with a valid FIDO2 key (hardware-bound) to obtain any token.
 
 use crate::AppState;
-use crate::services::oidc::registration::{RegistrationRequest, register_client};
+use crate::services::oidc::registration::{
+    RegistrationRequest, read_client_configuration, register_client,
+};
+use axum::extract::OriginalUri;
 use axum::{
     Json,
-    extract::State,
-    http::{HeaderMap, StatusCode},
+    extract::{Path, State},
+    http::{HeaderMap, Method, StatusCode},
     response::{IntoResponse, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -30,6 +34,8 @@ use std::sync::Arc;
 ///
 /// Returns 201 Created with the client information response.
 pub async fn register(
+    method: Method,
+    uri: OriginalUri,
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(request): Json<RegistrationRequest>,
@@ -40,7 +46,15 @@ pub async fn register(
 
     let user_id = if has_auth {
         let jar = CookieJar::default();
-        match crate::handlers::session::extract_resource_token(&state, &headers, &jar).await {
+        match crate::handlers::session::extract_resource_token(
+            &state,
+            &headers,
+            &jar,
+            method.as_str(),
+            uri.path(),
+        )
+        .await
+        {
             Ok(token) => Some(token.sub),
             Err(_) => {
                 // If a Bearer token was provided but is invalid, reject it
@@ -70,4 +84,49 @@ pub async fn register(
         Json(response),
     )
         .into_response()
+}
+
+/// GET /oauth/register/:client_id — RFC 7592 Client Configuration Endpoint.
+///
+/// Authenticates via Bearer token (the `registration_access_token` issued
+/// during dynamic registration). Returns 200 with current client metadata
+/// on success, 401 if the token is invalid, 404 if the client does not exist.
+pub async fn read_client(
+    State(state): State<Arc<AppState>>,
+    Path(client_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [("www-authenticate", "Bearer")],
+                Json(serde_json::json!({
+                    "error": "invalid_client",
+                    "error_description": "Bearer token required"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    match read_client_configuration(&state, &client_id, token).await {
+        Ok(response) => (
+            StatusCode::OK,
+            [("cache-control", "no-store"), ("pragma", "no-cache")],
+            Json(response),
+        )
+            .into_response(),
+        Err(e) => e.into_oauth_response().into_response(),
+    }
+}
+
+/// Extract a Bearer token from the Authorization header.
+fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
 }

@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! RFC 7591 — OAuth 2.0 Dynamic Client Registration.
+//! RFC 7591/7592 — OAuth 2.0 Dynamic Client Registration and Management.
 //!
-//! Implements the `POST /oauth/register` endpoint logic:
+//! Implements:
+//! - `POST /oauth/register` — Client Registration (RFC 7591)
+//! - `GET /oauth/register/:client_id` — Client Configuration Read (RFC 7592)
+//!
+//! Registration logic includes:
 //! - Request validation and metadata defaulting
 //! - Grant/response type consistency checks
 //! - Redirect URI validation (delegates to existing helpers)
@@ -10,12 +14,14 @@
 //! - Software statement JWT verification (against trusted_jwt_issuers)
 //! - Client creation and credential generation
 //!
-//! Reference: <https://www.rfc-editor.org/rfc/rfc7591>
+//! References:
+//! - <https://www.rfc-editor.org/rfc/rfc7591>
+//! - <https://www.rfc-editor.org/rfc/rfc7592>
 
 use crate::AppState;
 use crate::crypto::{generate_random_bytes, hash_token};
 use crate::db::{
-    self, CreateOAuthClientParams, FapiProfile, OAuthClientType, OAuthEventType,
+    self, CreateOAuthClientParams, FapiProfile, OAuthClient, OAuthClientType, OAuthEventType,
     RegistrationSource, TokenEndpointAuthMethod,
 };
 use crate::services::error::{OAuthErrorCode, ServiceError};
@@ -23,6 +29,7 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 // ============================================================================
 // Allowed Grant and Response Types
@@ -528,6 +535,153 @@ pub async fn register_client(
         software_id: request.software_id,
         software_version: request.software_version,
         dpop_bound_access_tokens: if dpop_bound { Some(true) } else { None },
+    })
+}
+
+// ============================================================================
+// Client Configuration Read (RFC 7592 Section 2.1)
+// ============================================================================
+
+/// Read the configuration of a dynamically registered client (RFC 7592).
+///
+/// Authenticates the caller using the registration access token, then returns
+/// the current client metadata. The response omits the
+/// `registration_access_token` (RFC 7592 Section 3).
+///
+/// # Errors
+///
+/// - `ServiceError::Unauthorized` if the Bearer token is missing or invalid.
+/// - `ServiceError::NotFound` if the `client_id` does not exist.
+pub async fn read_client_configuration(
+    state: &Arc<AppState>,
+    client_id: &str,
+    registration_access_token: &str,
+) -> Result<RegistrationResponse, ServiceError> {
+    let client =
+        lookup_and_verify_registration_token(state, client_id, registration_access_token).await?;
+
+    let base_url = &state.config().base_url;
+    Ok(build_client_response(&client, base_url))
+}
+
+/// Look up a client by `client_id` and verify the registration access token.
+async fn lookup_and_verify_registration_token(
+    state: &Arc<AppState>,
+    client_id: &str,
+    token: &str,
+) -> Result<OAuthClient, ServiceError> {
+    let client = db::get_oauth_client_by_client_id(&state.db, client_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("DB error looking up client {client_id}: {e}");
+            ServiceError::Internal("Database error".to_string())
+        })?
+        .ok_or(ServiceError::NotFound("Client"))?;
+
+    if !client.active {
+        return Err(ServiceError::NotFound("Client"));
+    }
+
+    let stored_hash =
+        client
+            .registration_access_token_hash
+            .as_deref()
+            .ok_or(ServiceError::Unauthorized(
+                "Client has no registration access token",
+            ))?;
+
+    let provided_hash = hash_token(token);
+    let is_match: bool = provided_hash
+        .as_bytes()
+        .ct_eq(stored_hash.as_bytes())
+        .into();
+
+    if !is_match {
+        return Err(ServiceError::Unauthorized(
+            "Invalid registration access token",
+        ));
+    }
+
+    Ok(client)
+}
+
+/// Build a `RegistrationResponse` from a stored `OAuthClient`.
+///
+/// Per RFC 7592 Section 3, the response omits the `registration_access_token`
+/// but includes the `registration_client_uri`.
+fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationResponse {
+    let redirect_uris = client.get_redirect_uris();
+    let grant_types = parse_json_string_array(client.grant_types.as_deref());
+    let response_types = parse_json_string_array(client.response_types.as_deref());
+    let metadata = parse_registration_metadata(client.registration_metadata.as_deref());
+
+    let client_id_issued_at = client.created_at.to_jiff().as_second();
+
+    RegistrationResponse {
+        client_id: client.client_id.clone(),
+        client_secret: None,
+        client_secret_expires_at: None,
+        client_id_issued_at: Some(client_id_issued_at),
+        registration_access_token: None,
+        registration_client_uri: Some(format!("{base_url}/oauth/register/{}", client.client_id)),
+        redirect_uris: if redirect_uris.is_empty() {
+            None
+        } else {
+            Some(redirect_uris)
+        },
+        token_endpoint_auth_method: client.token_endpoint_auth_method.as_str().to_string(),
+        grant_types,
+        response_types,
+        client_name: Some(client.name.clone()),
+        client_uri: metadata_string(&metadata, "client_uri"),
+        logo_uri: metadata_string(&metadata, "logo_uri"),
+        tos_uri: metadata_string(&metadata, "tos_uri"),
+        policy_uri: metadata_string(&metadata, "policy_uri"),
+        scope: metadata_string(&metadata, "scope"),
+        contacts: metadata_string_array(&metadata, "contacts"),
+        jwks: client
+            .jwks
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok()),
+        jwks_uri: client.jwks_uri.clone(),
+        software_id: client.software_id.clone(),
+        software_version: client.software_version.clone(),
+        dpop_bound_access_tokens: if client.dpop_bound_access_tokens {
+            Some(true)
+        } else {
+            None
+        },
+    }
+}
+
+/// Parse a JSON string array from a database column.
+fn parse_json_string_array(json: Option<&str>) -> Vec<String> {
+    json.and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default()
+}
+
+/// Parse the `registration_metadata` JSON blob.
+fn parse_registration_metadata(json: Option<&str>) -> serde_json::Value {
+    json.and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or(serde_json::Value::Null)
+}
+
+/// Extract a string field from the registration metadata JSON object.
+fn metadata_string(metadata: &serde_json::Value, key: &str) -> Option<String> {
+    metadata
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(String::from)
+}
+
+/// Extract a string array field from the registration metadata JSON object.
+fn metadata_string_array(metadata: &serde_json::Value, key: &str) -> Option<Vec<String>> {
+    metadata.get(key).and_then(|v| {
+        v.as_array().map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.as_str().map(String::from))
+                .collect()
+        })
     })
 }
 

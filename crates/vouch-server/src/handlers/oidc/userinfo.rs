@@ -95,8 +95,8 @@ pub async fn userinfo(
 
         let full_uri = format!("{}/oauth/userinfo", state.config().base_url);
         match dpop::validate_dpop_at_resource(
-            dpop_header,
             token,
+            dpop_header,
             method.as_str(),
             &full_uri,
             &state.db,

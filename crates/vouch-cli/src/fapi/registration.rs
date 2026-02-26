@@ -147,6 +147,30 @@ pub async fn register_fapi_client(
     })
 }
 
+/// Check whether a dynamic client registration is still active (RFC 7592).
+///
+/// Calls `GET {registration_client_uri}` with the registration access
+/// token as a Bearer credential. Returns:
+/// - `Ok(true)` if the server confirms the client is active (HTTP 200).
+/// - `Ok(false)` if the server rejects the request (401, 404, etc.).
+/// - `Err` on transport/network errors (server unreachable).
+///
+/// Callers should re-register on `Ok(false)` and gracefully degrade on
+/// `Err` (the subsequent login will fail with a clearer message anyway).
+pub async fn is_client_registered(
+    http_client: &reqwest::Client,
+    registration_client_uri: &str,
+    registration_access_token: &str,
+) -> Result<bool, reqwest::Error> {
+    let response = http_client
+        .get(registration_client_uri)
+        .bearer_auth(registration_access_token)
+        .send()
+        .await?;
+
+    Ok(response.status().is_success())
+}
+
 /// Registration result containing the fields to save.
 #[derive(Debug)]
 pub struct RegistrationResult {

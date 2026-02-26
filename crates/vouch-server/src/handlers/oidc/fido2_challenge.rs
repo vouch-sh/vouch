@@ -22,7 +22,7 @@ use jiff::Timestamp;
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use vouch_common::encoding::Raw;
+use vouch_common::encoding::{Base64Url, ConvertEncoding, Raw};
 use vouch_common::fido2_types::Challenge;
 
 /// State embedded in the challenge JWT.
@@ -40,7 +40,7 @@ struct Fido2ChallengeState {
 #[derive(Debug, Serialize)]
 pub struct Fido2ChallengeResponse {
     /// Base64url-encoded 32-byte challenge.
-    pub challenge: Challenge<Raw>,
+    pub challenge: Challenge<Base64Url>,
     /// Relying Party ID.
     pub rp_id: String,
     /// HS256 state JWT to return with the assertion at the token endpoint.
@@ -104,7 +104,7 @@ pub async fn fido2_challenge(State(state): State<Arc<AppState>>) -> Response {
         StatusCode::OK,
         [("cache-control", "no-store"), ("pragma", "no-cache")],
         Json(Fido2ChallengeResponse {
-            challenge,
+            challenge: challenge.to_base64url(),
             rp_id: state.config().rp_id.clone(),
             state: state_token,
         }),

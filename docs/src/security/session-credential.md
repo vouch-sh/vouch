@@ -24,6 +24,16 @@ In-memory storage via IPC socket:
 - **Memory**: Uses `SecretString` with automatic zeroization
 - **Lifetime**: Cleared on agent shutdown or explicit logout
 
+### Cookie File (`~/.vouch/cookie.txt`)
+
+Netscape-format cookie file for use with `curl -b` and similar tools:
+
+**Security Controls:**
+- **File permissions**: 0600
+- **Format**: Netscape cookie with `vouch_session` cookie name
+- **Contents**: Session token, domain, expiration
+- **Cleared**: On logout via `vouch logout`
+
 ## Client Credential Security
 
 OAuth client credentials issued through the application management UI (`/applications`) or API (`/api/v1/applications`) follow strict security practices.

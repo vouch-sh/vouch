@@ -80,10 +80,16 @@ pub struct ValidatedResourceToken {
 ///
 /// Validates the token as ES256 `at+jwt` (RFC 9068), verifies session
 /// existence in DB, and validates DPoP proof if the token is sender-constrained.
+///
+/// `method` and `uri` are the actual HTTP method and path of the request,
+/// used for DPoP proof validation. Pass empty strings for cookie-only paths
+/// where DPoP validation is skipped.
 pub async fn extract_resource_token(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     jar: &CookieJar,
+    method: &str,
+    uri: &str,
 ) -> Result<ValidatedResourceToken, (StatusCode, Json<vouch_common::ApiError>)> {
     // 1. Extract token from Authorization header or cookie
     let (token, auth_scheme) = extract_token_from_request(headers, jar)?;
@@ -133,12 +139,11 @@ pub async fn extract_resource_token(
                 // Validate DPoP proof header against cnf.jkt
                 let dpop_header = headers.get("DPoP").and_then(|v| v.to_str().ok());
                 if let Some(proof) = dpop_header {
-                    let full_uri = format!("{}{}", config.base_url, extract_request_path(headers));
-                    let method = extract_request_method(headers);
+                    let full_uri = format!("{}{}", config.base_url, uri);
                     match crate::services::oidc::dpop::validate_dpop_at_resource(
                         &token,
                         proof,
-                        &method,
+                        method,
                         &full_uri,
                         &state.db,
                         config.dpop_max_age_seconds,
@@ -157,7 +162,8 @@ pub async fn extract_resource_token(
                                 ));
                             }
                         }
-                        Err(_e) => {
+                        Err(e) => {
+                            tracing::debug!("DPoP validation failed: {e}");
                             return Err(json_error(
                                 StatusCode::UNAUTHORIZED,
                                 "invalid_token",
@@ -175,6 +181,12 @@ pub async fn extract_resource_token(
             }
             AuthScheme::Bearer => {
                 // RFC 9449: Token has cnf.jkt but sent as Bearer → reject
+                tracing::debug!(
+                    sub = %access_claims.sub,
+                    uri = %uri,
+                    "Rejected Bearer auth for sender-constrained token \
+                     (client must use DPoP scheme)"
+                );
                 return Err(json_error(
                     StatusCode::UNAUTHORIZED,
                     "invalid_token",
@@ -209,8 +221,10 @@ pub async fn extract_resource_token_with_email(
     state: &AppState,
     headers: &axum::http::HeaderMap,
     jar: &CookieJar,
+    method: &str,
+    uri: &str,
 ) -> Result<(ValidatedResourceToken, String), (StatusCode, Json<vouch_common::ApiError>)> {
-    let token = extract_resource_token(state, headers, jar).await?;
+    let token = extract_resource_token(state, headers, jar, method, uri).await?;
 
     // If token already has email, use it; otherwise look up from DB
     let email = if let Some(ref email) = token.email {
@@ -245,9 +259,11 @@ pub async fn extract_session_from_cookie(
     state: &AppState,
     jar: &CookieJar,
 ) -> Result<ValidatedResourceToken, (StatusCode, Json<vouch_common::ApiError>)> {
-    // Use an empty header map — cookie path only
+    // Use an empty header map — cookie path only.
+    // DPoP validation is skipped for the Cookie auth scheme, so method and uri
+    // are not used and can be empty strings.
     let empty_headers = axum::http::HeaderMap::new();
-    extract_resource_token(state, &empty_headers, jar).await
+    extract_resource_token(state, &empty_headers, jar, "", "").await
 }
 
 /// Authorization scheme detected from the request.
@@ -291,24 +307,6 @@ fn extract_token_from_request(
         "unauthorized",
         "Missing access token",
     ))
-}
-
-/// Extract the request path from headers (via X-Original-URI or fallback).
-fn extract_request_path(headers: &axum::http::HeaderMap) -> String {
-    headers
-        .get("x-original-uri")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("/")
-        .to_string()
-}
-
-/// Extract the request method from headers (via X-Original-Method or fallback).
-fn extract_request_method(headers: &axum::http::HeaderMap) -> String {
-    headers
-        .get("x-original-method")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("GET")
-        .to_string()
 }
 
 /// Create a session cookie.

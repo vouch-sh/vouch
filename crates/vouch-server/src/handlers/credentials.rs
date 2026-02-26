@@ -6,6 +6,8 @@ use crate::db::{self, GitHubCredentialEventParams};
 use crate::services::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
+use axum::extract::OriginalUri;
+use axum::http::Method;
 use axum::{Json, extract::State, http::HeaderMap, http::StatusCode};
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
@@ -26,13 +28,17 @@ use crate::redact_email;
 /// Requires Bearer token authentication. Signs the provided SSH public key
 /// as a user certificate with principals extracted from the user's email.
 pub async fn issue_ssh_certificate(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
     Json(request): Json<SshCertificateRequest>,
 ) -> Result<Json<SshCertificateResponse>, ServiceError> {
     // Validate token and get user email
-    let (_token, user_email) = extract_resource_token_with_email(&state, &headers, &jar).await?;
+    let (_token, user_email) =
+        extract_resource_token_with_email(&state, &headers, &jar, method.as_str(), uri.path())
+            .await?;
 
     // Get SSH CA
     let ssh_ca = state.ssh_ca.as_ref().ok_or_else(|| {
@@ -207,12 +213,16 @@ pub struct SshRevocationCheckResponse {
 /// Returns an OIDC ID token that can be used with AWS STS to assume a role.
 /// The AWS IAM role must be configured to trust the Vouch OIDC provider.
 pub async fn get_aws_token(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
     // Validate token and get user email
-    let (token, user_email) = extract_resource_token_with_email(&state, &headers, &jar).await?;
+    let (token, user_email) =
+        extract_resource_token_with_email(&state, &headers, &jar, method.as_str(), uri.path())
+            .await?;
 
     // Get user's organization domain (hd claim) if they belong to an org
     let hd = get_user_org_domain(&state, &token.sub).await?;
@@ -317,12 +327,14 @@ async fn get_user_org_domain(
 ///
 /// Returns whether GitHub is configured and connected for the user's organization.
 pub async fn get_github_status(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<GitHubStatusResponse>, ServiceError> {
     // Validate token
-    let token = extract_resource_token(&state, &headers, &jar).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Get user
     let user = db::get_user_by_id(&state.db, &token.sub)
@@ -386,13 +398,15 @@ pub async fn get_github_status(
 /// with Git operations. The token is scoped to the user's organization's
 /// GitHub installation with minimal permissions (contents:write, metadata:read).
 pub async fn get_github_token(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
     Json(request): Json<GitHubTokenRequest>,
 ) -> Result<Json<GitHubTokenResponse>, ServiceError> {
     // Validate token
-    let token = extract_resource_token(&state, &headers, &jar).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Get user
     let user = db::get_user_by_id(&state.db, &token.sub)

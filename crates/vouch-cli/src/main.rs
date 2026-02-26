@@ -288,11 +288,11 @@ async fn run() -> Result<()> {
 
     style::init(cli.color);
 
-    // Initialize logging
+    // Initialize logging: --verbose → debug, else RUST_LOG env → default warn
     let filter = if cli.verbose {
         EnvFilter::new("debug")
     } else {
-        EnvFilter::new("warn")
+        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("warn"))
     };
     tracing_subscriber::fmt().with_env_filter(filter).init();
 
@@ -396,6 +396,7 @@ async fn run() -> Result<()> {
                 )
                 .await
             }
+            CredentialCommands::Token {} => commands::credential::token::run().await,
             CredentialCommands::Codeartifact {
                 domain,
                 domain_owner,

@@ -35,7 +35,11 @@ hex = { workspace = true, features = ["std"] }
 inquire = { workspace = true, features = ["crossterm"] }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
-keyring = { workspace = true }
+keyring = { workspace = true, features = [
+    "apple-native",   # macOS Keychain
+    "windows-native", # Windows Credential Store
+    "linux-native",   # Linux keyutils
+] }
 open = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 roxmltree = { workspace = true, features = ["std"] }

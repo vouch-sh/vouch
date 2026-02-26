@@ -257,11 +257,7 @@ impl Config {
     }
 }
 
-/// FAPI 2.0 dynamic registration fields.
-///
-/// These methods will be called by Phase 2 of the FAPI implementation.
-/// The `dead_code` allow is needed until the registration command is implemented.
-#[allow(dead_code)]
+/// FAPI 2.0 dynamic registration fields (RFC 7591/7592).
 impl Config {
     // =========================================================================
     // FAPI 2.0 fields
@@ -289,6 +285,7 @@ impl Config {
 
     /// Get the DPoP key ID for the stored client keypair.
     #[must_use]
+    #[allow(dead_code)]
     pub fn dpop_key_id(&self) -> Option<&str> {
         self.dpop_key_id.as_deref()
     }

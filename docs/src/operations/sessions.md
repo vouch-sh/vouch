@@ -26,6 +26,7 @@ Sessions are stored in multiple locations for different access patterns:
 |----------|---------|----------|
 | `vouch-agent` memory | Primary access for CLI and credential helpers | In-process, zeroized on drop |
 | `~/.vouch/config.json` | Fallback when agent is not running | File permissions 0600 |
+| `~/.vouch/cookie.txt` | Netscape cookie file for `curl -b` usage | File permissions 0600 |
 | Server database | Server-side session record | Token hash stored, not plaintext |
 
 ## Checking Session Status
@@ -46,6 +47,7 @@ vouch logout
 This clears the session from:
 - Agent memory
 - Config file
+- Cookie file
 - Server-side session record (revoked)
 
 ## Server-Side Session Management
@@ -61,10 +63,19 @@ VOUCH_CLEANUP_INTERVAL=15
 
 ### Admin Operations
 
-Organization administrators (users with `is_org_admin` flag) can view authentication events via the admin API. Log in to the web UI and use your `vouch_session` cookie:
+Organization administrators (users with `is_org_admin` flag) can view authentication events via the admin API.
+
+Using the cookie file (written automatically on login):
 
 ```bash
-curl -b "vouch_session=<your-session-cookie>" \
+curl -b ~/.vouch/cookie.txt \
+  https://auth.example.com/api/v1/org/auth-events
+```
+
+Or using the token command:
+
+```bash
+curl -H "Authorization: Bearer $(vouch credential token)" \
   https://auth.example.com/api/v1/org/auth-events
 ```
 
