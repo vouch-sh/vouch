@@ -174,17 +174,14 @@ pub async fn run_cleanup(
     }
 
     // Clean up old token exchanges (DocumentStore)
-    if let Ok(cutoff) = now.checked_sub(oauth_events_retention_days.days()) {
-        let cutoff_str = cutoff.to_string();
-        cleanup_and_log!(
-            db::delete_old_token_exchanges(store, &cutoff_str),
-            "old token exchange records"
-        );
-    }
+    cleanup_and_log!(
+        db::delete_old_token_exchanges(store),
+        "old token exchange records"
+    );
 
     // Clean up expired JWT assertion JTIs (RFC 7523)
     cleanup_and_log!(
-        db::delete_expired_jwt_assertion_jtis(store, &now_str),
+        db::delete_expired_jwt_assertion_jtis(store),
         "expired JWT assertion JTIs"
     );
 

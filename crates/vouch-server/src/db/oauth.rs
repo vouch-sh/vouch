@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! OAuth Client Application database operations.
 
-use super::audit::AuditStore;
+use super::audit::{AuditEventFilter, AuditStore};
 use super::document_type::{Document, DocumentType};
+use super::documents::audit::OAuthUsageData;
 use super::documents::jwt_assertion_jti::JwtAssertionJtiDoc;
 use super::documents::oauth::{
     AccessScope, FapiProfile, OAuthClientDoc, OAuthClientSecretDoc, OAuthClientType,
@@ -430,22 +431,24 @@ pub async fn record_oauth_event(
     oauth_client_id: &str,
     event_type: OAuthEventType,
     user_id: Option<&str>,
-    _ip_address: Option<&str>,
-    _user_agent: Option<&str>,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
     details: Option<&str>,
 ) -> Result<String> {
-    let data = serde_json::json!({
-        "oauth_client_id": oauth_client_id,
-        "details": details,
-    })
-    .to_string();
+    let data = OAuthUsageData {
+        oauth_client_id: oauth_client_id.to_string(),
+        details: details.map(String::from),
+        ip_address: ip_address.map(String::from),
+        user_agent: user_agent.map(String::from),
+    };
+    let data_json = serde_json::to_string(&data)?;
 
     audit
         .insert_event(
             &format!("oauth_{}", event_type.as_str()),
             user_id,
             None,
-            &data,
+            &data_json,
         )
         .await
 }
@@ -458,15 +461,44 @@ pub struct OAuthUsageStats {
 }
 
 /// Get usage statistics for an OAuth client.
+///
+/// Queries audit events and counts occurrences per event type,
+/// filtering to events matching the given `oauth_client_id`.
 pub async fn get_oauth_usage_stats(
-    _audit: &AuditStore,
-    _oauth_client_id: &str,
-    _since: Option<&str>,
+    audit: &AuditStore,
+    oauth_client_id: &str,
+    since: Option<&str>,
 ) -> Result<Vec<OAuthUsageStats>> {
-    // Audit store doesn't support aggregation queries
-    // directly. Return empty for now — can be implemented
-    // with query_events + manual counting if needed.
-    Ok(Vec::new())
+    let mut stats: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
+
+    for event_type in [
+        "oauth_token_issued",
+        "oauth_token_refreshed",
+        "oauth_token_revoked",
+        "oauth_auth_success",
+        "oauth_auth_failure",
+        "oauth_client_registered",
+    ] {
+        let filter = AuditEventFilter {
+            event_type: Some(event_type.to_string()),
+            since: since.map(String::from),
+            ..AuditEventFilter::default()
+        };
+        let events = audit.query_events(&filter).await?;
+        for event in &events {
+            let Ok(data) = serde_json::from_str::<OAuthUsageData>(&event.data) else {
+                continue;
+            };
+            if data.oauth_client_id == oauth_client_id {
+                *stats.entry(event_type.to_string()).or_default() += 1;
+            }
+        }
+    }
+
+    Ok(stats
+        .into_iter()
+        .map(|(event_type, count)| OAuthUsageStats { event_type, count })
+        .collect())
 }
 
 /// Delete old usage events (for retention policy).
@@ -626,7 +658,7 @@ pub async fn store_jwt_assertion_jti(
 }
 
 /// Delete expired JWT assertion JTI entries.
-pub async fn delete_expired_jwt_assertion_jtis(store: &DocumentStore, _now: &str) -> Result<u64> {
+pub async fn delete_expired_jwt_assertion_jtis(store: &DocumentStore) -> Result<u64> {
     store.delete_expired(JwtAssertionJtiDoc::DOC_TYPE).await
 }
 

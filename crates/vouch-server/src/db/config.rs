@@ -22,7 +22,6 @@ pub enum AuthEventType {
     LoginFailed,
     #[serde(rename = "enrollment")]
     Enrollment,
-    #[allow(dead_code)]
     #[serde(rename = "logout")]
     Logout,
 }
@@ -80,7 +79,6 @@ pub struct AuthEventParams {
 pub struct AuthEventQuery {
     pub user_id: Option<String>,
     pub event_type: Option<String>,
-    pub client_ip: Option<String>,
     pub since: Option<String>,
     pub limit: Option<i64>,
 }

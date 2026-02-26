@@ -3,12 +3,12 @@
 
 use super::audit::AuditStore;
 use super::document_type::Document;
+use super::documents::audit::ScimAuditData;
 use super::documents::scim::{ScimGroupDoc, ScimGroupMemberDoc, ScimTokenDoc};
 use super::documents::user::UserDoc;
 use super::store::DocumentStore;
 use anyhow::Result;
 use jiff::Timestamp;
-use serde::Serialize;
 
 // ============================================================================
 // SCIM Scopes
@@ -244,16 +244,6 @@ pub async fn list_scim_tokens(
 // ============================================================================
 // SCIM Audit → AuditStore
 // ============================================================================
-
-/// SCIM audit event data.
-#[derive(Serialize)]
-struct ScimAuditData {
-    operation: String,
-    resource_type: String,
-    resource_id: String,
-    actor_token_id: Option<String>,
-    details: Option<String>,
-}
 
 /// Insert SCIM audit log entry via AuditStore.
 pub async fn insert_scim_audit(

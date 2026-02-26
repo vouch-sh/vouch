@@ -755,14 +755,23 @@ async fn test_oauth_usage_recording() {
     .await
     .expect("Failed to record event");
 
-    // get_oauth_usage_stats now returns empty (audit store doesn't
-    // support aggregation directly), so just verify it doesn't error
     let stats = get_oauth_usage_stats(&audit, &client.id, None)
         .await
         .expect("Failed to get stats");
 
-    // The new implementation returns empty vec (no aggregation support)
-    assert!(stats.is_empty());
+    // Should have 2 token_issued and 1 token_revoked
+    let issued_count: i64 = stats
+        .iter()
+        .filter(|s| s.event_type == "oauth_token_issued")
+        .map(|s| s.count)
+        .sum();
+    assert_eq!(issued_count, 2);
+    let revoked_count: i64 = stats
+        .iter()
+        .filter(|s| s.event_type == "oauth_token_revoked")
+        .map(|s| s.count)
+        .sum();
+    assert_eq!(revoked_count, 1);
 }
 
 // ========================================================================
@@ -2109,7 +2118,7 @@ async fn test_delete_expired_jwt_assertion_jtis() {
         .await
         .expect("insert valid");
 
-    let deleted = delete_expired_jwt_assertion_jtis(&store, &jiff::Timestamp::now().to_string())
+    let deleted = delete_expired_jwt_assertion_jtis(&store)
         .await
         .expect("delete_expired should not error");
     assert!(deleted >= 1, "Should delete at least the expired JTI");

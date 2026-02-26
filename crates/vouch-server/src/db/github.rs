@@ -3,11 +3,11 @@
 
 use super::audit::AuditStore;
 use super::document_type::Document;
+use super::documents::audit::GitHubCredentialAuditData;
 use super::documents::github::GitHubInstallationDoc;
 use super::store::DocumentStore;
 use anyhow::Result;
 use jiff::Timestamp;
-use serde::Serialize;
 
 // ============================================================================
 // GitHub App Installations
@@ -254,23 +254,6 @@ pub struct GitHubCredentialEventParams<'a> {
     pub error_code: Option<&'a str>,
     pub ip_address: Option<&'a str>,
     pub user_agent: Option<&'a str>,
-}
-
-/// GitHub credential audit event data.
-#[derive(Serialize)]
-struct GitHubCredentialAuditData {
-    event_type: String,
-    org_id: Option<String>,
-    installation_id: Option<i64>,
-    session_id: Option<String>,
-    authenticator_id: Option<String>,
-    repositories: Option<String>,
-    permissions: Option<String>,
-    token_expires_at: Option<String>,
-    success: bool,
-    error_code: Option<String>,
-    ip_address: Option<String>,
-    user_agent: Option<String>,
 }
 
 /// Log a GitHub credential event (audit log).

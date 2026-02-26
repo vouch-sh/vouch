@@ -39,7 +39,7 @@ pub async fn insert_token_exchange(
 }
 
 /// Delete expired token exchange records.
-pub async fn delete_old_token_exchanges(store: &DocumentStore, _before: &str) -> Result<u64> {
+pub async fn delete_old_token_exchanges(store: &DocumentStore) -> Result<u64> {
     store.delete_expired(TokenExchangeDoc::DOC_TYPE).await
 }
 

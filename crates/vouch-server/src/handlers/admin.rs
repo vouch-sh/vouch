@@ -82,10 +82,8 @@ async fn extract_org_admin(
 pub struct AuthEventsQuery {
     /// Filter by user ID.
     user_id: Option<String>,
-    /// Filter by event type (login_success, login_failed, enrollment, logout).
+    /// Filter by event type (login_success, login_failed, enrollment).
     event_type: Option<String>,
-    /// Filter by client IP.
-    client_ip: Option<String>,
     /// Filter by events since this ISO 8601 timestamp.
     since: Option<String>,
     /// Maximum number of events to return (default 100).
@@ -109,7 +107,6 @@ pub async fn list_auth_events(
     let db_query = db::AuthEventQuery {
         user_id: query.user_id.clone(),
         event_type: query.event_type.clone(),
-        client_ip: query.client_ip.clone(),
         since: query.since.clone(),
         limit: query.limit,
     };

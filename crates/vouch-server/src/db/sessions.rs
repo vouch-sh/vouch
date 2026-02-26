@@ -15,6 +15,7 @@ pub use super::documents::session::SessionPurpose;
 pub struct Session {
     pub id: String,
     pub user_id: String,
+    pub user_email: String,
     pub token_hash: String,
     pub authenticator_id: Option<String>,
     pub expires_at: Timestamp,
@@ -27,6 +28,7 @@ impl From<Document<SessionDoc>> for Session {
         Self {
             id: doc.id,
             user_id: doc.data.user_id,
+            user_email: doc.data.user_email,
             token_hash: doc.data.token_hash,
             authenticator_id: doc.data.authenticator_id,
             expires_at: doc.data.expires_at,

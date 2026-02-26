@@ -33,7 +33,6 @@ mod organizations;
 pub(crate) mod par;
 mod pending_oauth;
 pub(crate) mod pool;
-pub(crate) mod schema;
 mod scim;
 mod sessions;
 pub(crate) mod store;
