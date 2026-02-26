@@ -237,7 +237,6 @@ pub struct OAuthClientDoc {
     /// JSON array of redirect URIs.
     pub redirect_uris: String,
     pub active: bool,
-    pub last_used_at: Option<Timestamp>,
     pub access_scope: AccessScope,
     pub org_id: Option<String>,
     /// JSON array of resource URIs (RFC 8707).

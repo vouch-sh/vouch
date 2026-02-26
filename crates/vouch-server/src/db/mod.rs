@@ -151,7 +151,7 @@ pub use credentials::{
     get_delegation_policies, get_enrollment_session_by_token_hash, get_revoked_ssh_certificates,
     get_token_exchanges_for_user, insert_token_exchange, is_ssh_certificate_revoked,
     revoke_all_ssh_certificates_for_user, revoke_ssh_certificate, set_delegation_policy_enabled,
-    touch_enrollment_session, upsert_cloud_integration,
+    upsert_cloud_integration,
 };
 
 // Re-export GitHub types and functions

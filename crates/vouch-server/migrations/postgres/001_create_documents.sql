@@ -7,5 +7,6 @@ CREATE TABLE documents (
     expires_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    version INTEGER NOT NULL DEFAULT 1
+    version INTEGER NOT NULL DEFAULT 1,
+    last_used_at TEXT
 );

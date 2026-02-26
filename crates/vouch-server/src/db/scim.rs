@@ -134,7 +134,7 @@ impl From<Document<ScimTokenDoc>> for ScimToken {
             org_id: doc.data.org_id,
             description: doc.data.description,
             created_at: doc.created_at,
-            last_used_at: doc.data.last_used_at,
+            last_used_at: doc.last_used_at,
             expires_at: doc.data.expires_at,
             scope: doc.data.scope,
         }
@@ -169,13 +169,10 @@ pub async fn get_scim_token_by_hash(
 }
 
 /// Update SCIM token last used timestamp.
+///
+/// Performs a lightweight column-level UPDATE (no encrypt/decrypt).
 pub async fn update_scim_token_last_used(store: &DocumentStore, token_id: &str) -> Result<()> {
-    if let Some(doc) = store.get::<ScimTokenDoc>(token_id).await? {
-        let mut data = doc.data;
-        data.last_used_at = Some(Timestamp::now());
-        store.update(token_id, &data).await?;
-    }
-    Ok(())
+    store.update_last_used_at(token_id).await
 }
 
 /// Create a new SCIM token.
@@ -195,7 +192,6 @@ pub async fn create_scim_token(
         token_hash: token_hash.to_string(),
         org_id: org_id.map(String::from),
         description: description.map(String::from),
-        last_used_at: None,
         expires_at,
         scope: scope_val,
     };

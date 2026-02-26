@@ -213,7 +213,7 @@ pub struct EnrollmentSession {
     #[allow(dead_code)]
     pub created_at: Timestamp,
     #[allow(dead_code)]
-    pub last_used_at: Timestamp,
+    pub last_used_at: Option<Timestamp>,
 }
 
 impl From<Document<EnrollmentSessionDoc>> for EnrollmentSession {
@@ -226,7 +226,7 @@ impl From<Document<EnrollmentSessionDoc>> for EnrollmentSession {
             device_auth_id: doc.data.device_auth_id,
             expires_at: doc.data.expires_at,
             created_at: doc.created_at,
-            last_used_at: doc.data.last_used_at,
+            last_used_at: doc.last_used_at,
         }
     }
 }
@@ -240,15 +240,12 @@ pub async fn create_enrollment_session(
     device_auth_id: Option<&str>,
     expires_at: Timestamp,
 ) -> Result<String> {
-    let now = Timestamp::now();
-
     let doc = EnrollmentSessionDoc {
         user_id: user_id.to_string(),
         user_email: user_email.to_string(),
         session_token_hash: session_token_hash.to_string(),
         device_auth_id: device_auth_id.map(String::from),
         expires_at,
-        last_used_at: now,
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)
@@ -263,16 +260,6 @@ pub async fn get_enrollment_session_by_token_hash(
         .find_one::<EnrollmentSessionDoc>("session_token_hash", token_hash)
         .await?;
     Ok(doc.map(EnrollmentSession::from))
-}
-
-/// Update enrollment session last used timestamp.
-pub async fn touch_enrollment_session(store: &DocumentStore, id: &str) -> Result<()> {
-    if let Some(doc) = store.get::<EnrollmentSessionDoc>(id).await? {
-        let mut data = doc.data;
-        data.last_used_at = Timestamp::now();
-        store.update(id, &data).await?;
-    }
-    Ok(())
 }
 
 /// Delete expired enrollment sessions.

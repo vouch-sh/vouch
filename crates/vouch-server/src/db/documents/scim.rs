@@ -16,7 +16,6 @@ pub struct ScimTokenDoc {
     pub token_hash: String,
     pub org_id: Option<String>,
     pub description: Option<String>,
-    pub last_used_at: Option<Timestamp>,
     pub expires_at: Option<Timestamp>,
     pub scope: String,
 }

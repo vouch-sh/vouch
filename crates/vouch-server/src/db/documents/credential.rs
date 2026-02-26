@@ -42,7 +42,6 @@ pub struct EnrollmentSessionDoc {
     pub session_token_hash: String,
     pub device_auth_id: Option<String>,
     pub expires_at: Timestamp,
-    pub last_used_at: Timestamp,
 }
 
 impl DocumentType for EnrollmentSessionDoc {

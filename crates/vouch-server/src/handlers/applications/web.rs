@@ -261,7 +261,7 @@ pub async fn create_application_form(
         }
     }
 
-    // Create the application
+    // Create the application with FAPI settings included at creation time
     let (client, client_id) = match db::create_oauth_client(
         &state.store,
         &CreateOAuthClientParams {
@@ -273,11 +273,19 @@ pub async fn create_application_form(
             access_scope,
             org_id,
             resource_uris: &resource_uris,
-            token_endpoint_auth_method: None,
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
+            token_endpoint_auth_method: if is_fapi {
+                Some(TokenEndpointAuthMethod::PrivateKeyJwt)
+            } else {
+                None
+            },
+            jwks: if is_fapi { jwks_trimmed } else { None },
+            jwks_uri: if is_fapi { jwks_uri_trimmed } else { None },
+            fapi_profile: if is_fapi {
+                Some(FapiProfile::Fapi2Security)
+            } else {
+                None
+            },
+            dpop_bound_access_tokens: if is_fapi { Some(true) } else { None },
             grant_types: None,
             response_types: None,
             software_id: None,
@@ -300,41 +308,6 @@ pub async fn create_application_form(
             .into_response();
         }
     };
-
-    // If FAPI is enabled, update the client with FAPI settings
-    if is_fapi
-        && let Err(e) = db::update_oauth_client(
-            &state.store,
-            &UpdateOAuthClientParams {
-                id: &client.id,
-                name,
-                description: form.description.as_deref(),
-                redirect_uris: &redirect_uris,
-                access_scope: Some(access_scope),
-                org_id,
-                resource_uris: &resource_uris,
-                token_endpoint_auth_method: TokenEndpointAuthMethod::PrivateKeyJwt,
-                jwks: jwks_trimmed,
-                jwks_uri: jwks_uri_trimmed,
-                fapi_profile: FapiProfile::Fapi2Security,
-                dpop_bound_access_tokens: true,
-            },
-        )
-        .await
-    {
-        tracing::error!("Failed to apply FAPI settings: {}", e);
-        if let Err(cleanup_err) = db::delete_oauth_client(&state.store, &client.id).await {
-            tracing::warn!(
-                "Failed to clean up OAuth client after FAPI settings failure: {cleanup_err}"
-            );
-        }
-        return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "Failed to create application.".to_string(),
-            back_url: "/applications/new".to_string(),
-        }
-        .into_response();
-    }
 
     // Generate client secret for confidential clients (skip for FAPI — they use private_key_jwt)
     let client_secret = if app_type.requires_secret() && !is_fapi {

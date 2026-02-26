@@ -65,7 +65,7 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
             active: doc.data.active,
             created_at: doc.created_at,
             updated_at: doc.updated_at,
-            last_used_at: doc.data.last_used_at,
+            last_used_at: doc.last_used_at,
             access_scope: doc.data.access_scope,
             org_id: doc.data.org_id,
             resource_uris: doc.data.resource_uris,
@@ -161,7 +161,6 @@ pub async fn create_oauth_client(
         application_type: params.application_type,
         redirect_uris: redirect_uris_json,
         active: true,
-        last_used_at: None,
         access_scope: params.access_scope,
         org_id: params.org_id.map(String::from),
         resource_uris: resource_uris_json,
@@ -235,6 +234,9 @@ pub struct UpdateOAuthClientParams<'a> {
 }
 
 /// Update an OAuth client.
+///
+/// Uses [`DocumentStore::modify`] for read-modify-write with automatic
+/// version-conflict retry.
 pub async fn update_oauth_client(
     store: &DocumentStore,
     params: &UpdateOAuthClientParams<'_>,
@@ -242,25 +244,24 @@ pub async fn update_oauth_client(
     let redirect_uris_json = serde_json::to_string(params.redirect_uris)?;
     let resource_uris_json = serde_json::to_string(params.resource_uris)?;
 
-    if let Some(doc) = store.get::<OAuthClientDoc>(params.id).await? {
-        let mut data = doc.data;
-        data.name = params.name.to_string();
-        data.description = params.description.map(String::from);
-        data.redirect_uris = redirect_uris_json;
-        data.resource_uris = resource_uris_json;
-        data.token_endpoint_auth_method = params.token_endpoint_auth_method;
-        data.jwks = params.jwks.map(String::from);
-        data.jwks_uri = params.jwks_uri.map(String::from);
-        data.fapi_profile = params.fapi_profile;
-        data.dpop_bound_access_tokens = params.dpop_bound_access_tokens;
+    store
+        .modify::<OAuthClientDoc, _>(params.id, |data| {
+            data.name = params.name.to_string();
+            data.description = params.description.map(String::from);
+            data.redirect_uris = redirect_uris_json.clone();
+            data.resource_uris = resource_uris_json.clone();
+            data.token_endpoint_auth_method = params.token_endpoint_auth_method;
+            data.jwks = params.jwks.map(String::from);
+            data.jwks_uri = params.jwks_uri.map(String::from);
+            data.fapi_profile = params.fapi_profile;
+            data.dpop_bound_access_tokens = params.dpop_bound_access_tokens;
 
-        if let Some(scope) = params.access_scope {
-            data.access_scope = scope;
-            data.org_id = params.org_id.map(String::from);
-        }
-
-        store.update(params.id, &data).await?;
-    }
+            if let Some(scope) = params.access_scope {
+                data.access_scope = scope;
+                data.org_id = params.org_id.map(String::from);
+            }
+        })
+        .await?;
     Ok(())
 }
 
@@ -283,13 +284,10 @@ pub async fn delete_oauth_client(store: &DocumentStore, id: &str) -> Result<u64>
 }
 
 /// Update last used timestamp for an OAuth client.
+///
+/// Performs a lightweight column-level UPDATE (no encrypt/decrypt).
 pub async fn update_oauth_client_last_used(store: &DocumentStore, id: &str) -> Result<()> {
-    if let Some(doc) = store.get::<OAuthClientDoc>(id).await? {
-        let mut data = doc.data;
-        data.last_used_at = Some(Timestamp::now());
-        store.update(id, &data).await?;
-    }
-    Ok(())
+    store.update_last_used_at(id).await
 }
 
 // ============================================================================
@@ -528,18 +526,23 @@ pub fn get_client_jwks(client: &OAuthClient) -> Option<&str> {
     client.jwks.as_deref().or(client.jwks_uri_cache.as_deref())
 }
 
-/// Update the cached JWKS fetched from a client's jwks_uri.
+/// Update the cached JWKS fetched from a client's `jwks_uri`.
+///
+/// Uses optimistic concurrency control. A version conflict on this
+/// cache update is logged and silently ignored — the next request
+/// will re-fetch the JWKS.
 pub async fn update_client_jwks_cache(
     store: &DocumentStore,
     id: &str,
     jwks_json: &str,
 ) -> Result<()> {
-    if let Some(doc) = store.get::<OAuthClientDoc>(id).await? {
-        let mut data = doc.data;
-        data.jwks_uri_cache = Some(jwks_json.to_string());
-        data.jwks_uri_cached_at = Some(Timestamp::now());
-        store.update(id, &data).await?;
-    }
+    let jwks_owned = jwks_json.to_string();
+    store
+        .modify::<OAuthClientDoc, _>(id, |data| {
+            data.jwks_uri_cache = Some(jwks_owned.clone());
+            data.jwks_uri_cached_at = Some(Timestamp::now());
+        })
+        .await?;
     Ok(())
 }
 

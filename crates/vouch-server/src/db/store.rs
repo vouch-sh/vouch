@@ -40,6 +40,7 @@ enum Documents {
     CreatedAt,
     UpdatedAt,
     Version,
+    LastUsedAt,
 }
 
 #[derive(Iden)]
@@ -68,6 +69,7 @@ struct RawDocumentRow {
     created_at: String,
     updated_at: String,
     version: i64,
+    last_used_at: Option<String>,
 }
 
 /// Raw row with just an id column (for expired doc lookups).
@@ -136,6 +138,14 @@ fn raw_to_document<T: DocumentType>(
         let value: serde_json::Value =
             serde_json::from_slice(&json_bytes).context("failed to parse document JSON")?;
         T::migrate(version, value)?
+    } else if version > T::CURRENT_VERSION {
+        tracing::warn!(
+            doc_type = T::DOC_TYPE,
+            stored_version = version,
+            current_version = T::CURRENT_VERSION,
+            "document has newer schema version than current code"
+        );
+        serde_json::from_slice(&json_bytes).context("failed to deserialize document")?
     } else {
         serde_json::from_slice(&json_bytes).context("failed to deserialize document")?
     };
@@ -153,6 +163,11 @@ fn raw_to_document<T: DocumentType>(
         .map(|s| s.parse::<Timestamp>())
         .transpose()
         .context("failed to parse expires_at timestamp")?;
+    let last_used_at = row
+        .last_used_at
+        .map(|s| s.parse::<Timestamp>())
+        .transpose()
+        .context("failed to parse last_used_at timestamp")?;
 
     Ok(Document {
         id: row.id,
@@ -161,6 +176,7 @@ fn raw_to_document<T: DocumentType>(
         updated_at,
         expires_at,
         version: row.version,
+        last_used_at,
     })
 }
 
@@ -226,11 +242,13 @@ impl DocumentStore {
     /// Returns an error if serialization, encryption, or the database write
     /// fails.
     pub async fn insert<T: DocumentType>(&self, doc: &T) -> Result<Document<T>> {
-        let id = uuid::Uuid::now_v7().to_string();
-        let mut tx = self.begin().await?;
-        let result = tx.insert_with_id(&id, doc).await?;
-        tx.commit().await?;
-        Ok(result)
+        crate::with_dsql_retry!(async {
+            let id = uuid::Uuid::now_v7().to_string();
+            let mut tx = self.begin().await?;
+            let result = tx.insert_with_id(&id, doc).await?;
+            tx.commit().await?;
+            Ok(result)
+        })
     }
 
     /// Insert a new document with a caller-specified ID.
@@ -240,10 +258,12 @@ impl DocumentStore {
     /// Returns an error if serialization, encryption, or the database write
     /// fails.
     pub async fn insert_with_id<T: DocumentType>(&self, id: &str, doc: &T) -> Result<Document<T>> {
-        let mut tx = self.begin().await?;
-        let result = tx.insert_with_id(id, doc).await?;
-        tx.commit().await?;
-        Ok(result)
+        crate::with_dsql_retry!(async {
+            let mut tx = self.begin().await?;
+            let result = tx.insert_with_id(id, doc).await?;
+            tx.commit().await?;
+            Ok(result)
+        })
     }
 
     // ========================================================================
@@ -273,6 +293,7 @@ impl DocumentStore {
                 Documents::CreatedAt,
                 Documents::UpdatedAt,
                 Documents::Version,
+                Documents::LastUsedAt,
             ])
             .from(Documents::Table)
             .and_where(Expr::col(Documents::Id).eq(id))
@@ -310,6 +331,7 @@ impl DocumentStore {
                 Documents::CreatedAt,
                 Documents::UpdatedAt,
                 Documents::Version,
+                Documents::LastUsedAt,
             ])
             .from(Documents::Table)
             .and_where(Expr::col(Documents::Id).is_in(ids.iter().copied()))
@@ -369,6 +391,7 @@ impl DocumentStore {
                 (Documents::Table, Documents::CreatedAt),
                 (Documents::Table, Documents::UpdatedAt),
                 (Documents::Table, Documents::Version),
+                (Documents::Table, Documents::LastUsedAt),
             ])
             .from(Documents::Table)
             .inner_join(
@@ -444,9 +467,70 @@ impl DocumentStore {
     /// Returns an error if serialization, encryption, or the database write
     /// fails.
     pub async fn update<T: DocumentType>(&self, id: &str, doc: &T) -> Result<()> {
-        let mut tx = self.begin().await?;
-        tx.update(id, doc).await?;
-        tx.commit().await
+        crate::with_dsql_retry!(async {
+            let mut tx = self.begin().await?;
+            tx.update(id, doc).await?;
+            tx.commit().await
+        })
+    }
+
+    /// Update only the `last_used_at` column for a document.
+    ///
+    /// This is a lightweight operation that does not touch the encrypted
+    /// data, version, or `updated_at` columns — no decrypt/encrypt cycle.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database write fails.
+    pub async fn update_last_used_at(&self, id: &str) -> Result<()> {
+        crate::with_dsql_retry!(async {
+            let now_str = Timestamp::now().to_string();
+            let db_type = self.pool.db_type();
+            let sql = {
+                let mut q = Query::update();
+                q.table(Documents::Table)
+                    .value(Documents::LastUsedAt, Expr::val(now_str.as_str()))
+                    .and_where(Expr::col(Documents::Id).eq(id));
+                q.build_sql(db_type)
+            };
+            crate::db_execute!(&self.pool, sqlx::query(&sql))?;
+            Ok(())
+        })
+    }
+
+    /// Read a document, apply a modifier, and write it back.
+    ///
+    /// On version conflict the document is re-read and the modifier is
+    /// re-applied, up to [`MAX_DSQL_RETRIES`](super::pool::MAX_DSQL_RETRIES)
+    /// times.  Transient DSQL errors are handled by `compare_and_update`
+    /// internally.
+    ///
+    /// Returns `false` if the document does not exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the operation fails after retries.
+    pub async fn modify<T, F>(&self, id: &str, modifier: F) -> Result<bool>
+    where
+        T: DocumentType,
+        F: Fn(&mut T),
+    {
+        for attempt in 0..=super::pool::MAX_DSQL_RETRIES {
+            let Some(doc) = self.get::<T>(id).await? else {
+                return Ok(false);
+            };
+            let version = doc.version;
+            let mut data = doc.data;
+            modifier(&mut data);
+            if self.compare_and_update(id, version, &data).await? {
+                return Ok(true);
+            }
+            if attempt < super::pool::MAX_DSQL_RETRIES {
+                tracing::debug!(doc_id = id, attempt, "version conflict in modify, retrying");
+                tokio::time::sleep(super::pool::retry_backoff(attempt)).await;
+            }
+        }
+        anyhow::bail!("version conflict after retries for document {id}")
     }
 
     /// Conditionally update a document only if its version matches.
@@ -465,86 +549,92 @@ impl DocumentStore {
         expected_version: i64,
         doc: &T,
     ) -> Result<bool> {
-        let json = serde_json::to_vec(doc).context("failed to serialize document")?;
-        let encrypted = self
-            .crypto
-            .seal(T::DOC_TYPE.as_bytes(), id.as_bytes(), &json)?;
+        crate::with_dsql_retry!(async {
+            let json = serde_json::to_vec(doc).context("failed to serialize document")?;
+            let encrypted = self
+                .crypto
+                .seal(T::DOC_TYPE.as_bytes(), id.as_bytes(), &json)?;
 
-        let now_str = Timestamp::now().to_string();
-        let expires = doc.expires_at();
-        let indexes = doc.index_entries();
-        let db_type = self.pool.db_type();
+            let now_str = Timestamp::now().to_string();
+            let expires = doc.expires_at();
+            let indexes = doc.index_entries();
+            let db_type = self.pool.db_type();
 
-        let encapped: Option<&str> = encrypted.encapped_key.as_deref();
-        let expires_str = expires.map(|ts| ts.to_string());
-        let expires_ref: Option<&str> = expires_str.as_deref();
+            let encapped: Option<&str> = encrypted.encapped_key.as_deref();
+            let expires_str = expires.map(|ts| ts.to_string());
+            let expires_ref: Option<&str> = expires_str.as_deref();
 
-        let mut tx = self.pool.begin().await?;
+            let mut tx = self.pool.begin().await?;
 
-        // UPDATE with version guard (optimistic concurrency)
-        let update_sql = {
-            let mut q = Query::update();
-            q.table(Documents::Table)
-                .value(Documents::Data, Expr::val(encrypted.data.as_str()))
-                .value(Documents::EncappedKey, Expr::val(encapped))
-                .value(Documents::ExpiresAt, Expr::val(expires_ref))
-                .value(
-                    Documents::SchemaVersion,
-                    Expr::val(i64::from(T::CURRENT_VERSION)),
-                )
-                .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
-                .value(Documents::Version, Expr::val(expected_version + 1))
-                .and_where(Expr::col(Documents::Id).eq(id))
-                .and_where(Expr::col(Documents::Version).eq(expected_version));
-            q.build_sql(db_type)
-        };
+            // UPDATE with version guard (optimistic concurrency)
+            let update_sql = {
+                let mut q = Query::update();
+                q.table(Documents::Table)
+                    .value(Documents::Data, Expr::val(encrypted.data.as_str()))
+                    .value(Documents::EncappedKey, Expr::val(encapped))
+                    .value(Documents::ExpiresAt, Expr::val(expires_ref))
+                    .value(
+                        Documents::SchemaVersion,
+                        Expr::val(i64::from(T::CURRENT_VERSION)),
+                    )
+                    .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
+                    .value(Documents::Version, Expr::val(expected_version + 1))
+                    .and_where(Expr::col(Documents::Id).eq(id))
+                    .and_where(Expr::col(Documents::Version).eq(expected_version));
+                q.build_sql(db_type)
+            };
 
-        let result = crate::tx_execute!(tx, sqlx::query(&update_sql))?;
+            let result = crate::tx_execute!(tx, sqlx::query(&update_sql))?;
 
-        if result.rows_affected() == 0 {
-            // Version mismatch — concurrent modification detected
-            return Ok(false);
-        }
+            if result.rows_affected() == 0 {
+                // Version mismatch — concurrent modification detected
+                return Ok(false);
+            }
 
-        // DELETE old indexes
-        let delete_idx_sql = Query::delete()
-            .from_table(DocumentIndexes::Table)
-            .and_where(Expr::col(DocumentIndexes::DocumentId).eq(id))
-            .build_sql(db_type);
-
-        crate::tx_execute!(tx, sqlx::query(&delete_idx_sql))?;
-
-        // INSERT new indexes
-        for entry in &indexes {
-            let index_id = uuid::Uuid::now_v7().to_string();
-            let hashed_value = self.crypto.hmac_index(&entry.value);
-            let idx_sql = Query::insert()
-                .into_table(DocumentIndexes::Table)
-                .columns([
-                    DocumentIndexes::Id,
-                    DocumentIndexes::DocumentId,
-                    DocumentIndexes::IndexField,
-                    DocumentIndexes::IndexValue,
-                ])
-                .values_panic([
-                    index_id.as_str().into(),
-                    id.into(),
-                    entry.field.into(),
-                    hashed_value.as_str().into(),
-                ])
+            // DELETE old indexes
+            let delete_idx_sql = Query::delete()
+                .from_table(DocumentIndexes::Table)
+                .and_where(Expr::col(DocumentIndexes::DocumentId).eq(id))
                 .build_sql(db_type);
 
-            crate::tx_execute!(tx, sqlx::query(&idx_sql))?;
-        }
+            crate::tx_execute!(tx, sqlx::query(&delete_idx_sql))?;
 
-        tx.commit().await?;
-        Ok(true)
+            // INSERT new indexes
+            for entry in &indexes {
+                let index_id = uuid::Uuid::now_v7().to_string();
+                let hashed_value = self.crypto.hmac_index(&entry.value);
+                let idx_sql = Query::insert()
+                    .into_table(DocumentIndexes::Table)
+                    .columns([
+                        DocumentIndexes::Id,
+                        DocumentIndexes::DocumentId,
+                        DocumentIndexes::IndexField,
+                        DocumentIndexes::IndexValue,
+                    ])
+                    .values_panic([
+                        index_id.as_str().into(),
+                        id.into(),
+                        entry.field.into(),
+                        hashed_value.as_str().into(),
+                    ])
+                    .build_sql(db_type);
+
+                crate::tx_execute!(tx, sqlx::query(&idx_sql))?;
+            }
+
+            tx.commit().await?;
+            Ok(true)
+        })
     }
 
     /// Update all documents matching an index, applying a modifier function.
     ///
     /// Decrypts each matching document, applies the modifier, re-encrypts,
-    /// and updates. Returns the number of documents updated.
+    /// and updates within batched transactions. Each batch processes up to
+    /// 500 documents (~3 statements per doc) to stay within DSQL's
+    /// 3,000-statement transaction limit.
+    ///
+    /// Returns the number of documents updated.
     ///
     /// # Errors
     ///
@@ -554,13 +644,19 @@ impl DocumentStore {
         T: DocumentType,
         F: Fn(&mut T),
     {
-        let docs = self.find_all::<T>(field, value).await?;
-        let count = docs.len() as u64;
-        for mut doc in docs {
-            modifier(&mut doc.data);
-            self.update(&doc.id, &doc.data).await?;
-        }
-        Ok(count)
+        crate::with_dsql_retry!(async {
+            let mut docs = self.find_all::<T>(field, value).await?;
+            let count = docs.len() as u64;
+            for batch in docs.chunks_mut(500) {
+                let mut tx = self.begin().await?;
+                for doc in batch.iter_mut() {
+                    modifier(&mut doc.data);
+                    tx.update(&doc.id, &doc.data).await?;
+                }
+                tx.commit().await?;
+            }
+            Ok(count)
+        })
     }
 
     // ========================================================================
@@ -573,9 +669,11 @@ impl DocumentStore {
     ///
     /// Returns an error if the database operation fails.
     pub async fn delete(&self, id: &str) -> Result<()> {
-        let mut tx = self.begin().await?;
-        tx.delete(id).await?;
-        tx.commit().await
+        crate::with_dsql_retry!(async {
+            let mut tx = self.begin().await?;
+            tx.delete(id).await?;
+            tx.commit().await
+        })
     }
 
     /// Delete all documents matching an index entry.
@@ -586,10 +684,12 @@ impl DocumentStore {
     ///
     /// Returns an error if the database operation fails.
     pub async fn delete_by_index<T: DocumentType>(&self, field: &str, value: &str) -> Result<u64> {
-        let mut tx = self.begin().await?;
-        let total = tx.delete_by_index::<T>(field, value).await?;
-        tx.commit().await?;
-        Ok(total)
+        crate::with_dsql_retry!(async {
+            let mut tx = self.begin().await?;
+            let total = tx.delete_by_index::<T>(field, value).await?;
+            tx.commit().await?;
+            Ok(total)
+        })
     }
 
     /// Delete all expired documents of a given type.
@@ -604,42 +704,45 @@ impl DocumentStore {
     ///
     /// Returns an error if the database operation fails.
     pub async fn delete_expired(&self, doc_type: &str) -> Result<u64> {
-        let db_type = self.pool.db_type();
-        let now = jiff::Timestamp::now().to_string();
+        crate::with_dsql_retry!(async {
+            let db_type = self.pool.db_type();
+            let now = jiff::Timestamp::now().to_string();
 
-        // Find expired document IDs
-        let select_sql = Query::select()
-            .column(Documents::Id)
-            .from(Documents::Table)
-            .and_where(Expr::col(Documents::DocType).eq(doc_type))
-            .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
-            .and_where(Expr::col(Documents::ExpiresAt).lt(now.as_str()))
-            .build_sql(db_type);
-
-        let rows: Vec<IdRow> = crate::db_fetch_all!(&self.pool, sqlx::query_as(&select_sql))?;
-
-        let total = rows.len() as u64;
-        // Batch deletes: 1,000 docs per tx (2 DELETE statements each)
-        for batch in rows.chunks(1000) {
-            let ids: Vec<sea_query::Value> = batch.iter().map(|r| r.id.as_str().into()).collect();
-
-            let mut tx = self.pool.begin().await?;
-
-            let del_idx = Query::delete()
-                .from_table(DocumentIndexes::Table)
-                .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids.clone()))
+            // Find expired document IDs
+            let select_sql = Query::select()
+                .column(Documents::Id)
+                .from(Documents::Table)
+                .and_where(Expr::col(Documents::DocType).eq(doc_type))
+                .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
+                .and_where(Expr::col(Documents::ExpiresAt).lt(now.as_str()))
                 .build_sql(db_type);
-            crate::tx_execute!(tx, sqlx::query(&del_idx))?;
 
-            let del_doc = Query::delete()
-                .from_table(Documents::Table)
-                .and_where(Expr::col(Documents::Id).is_in(ids))
-                .build_sql(db_type);
-            crate::tx_execute!(tx, sqlx::query(&del_doc))?;
+            let rows: Vec<IdRow> = crate::db_fetch_all!(&self.pool, sqlx::query_as(&select_sql))?;
 
-            tx.commit().await?;
-        }
-        Ok(total)
+            let total = rows.len() as u64;
+            // Batch deletes: 1,000 docs per tx (2 DELETE statements each)
+            for batch in rows.chunks(1000) {
+                let ids: Vec<sea_query::Value> =
+                    batch.iter().map(|r| r.id.as_str().into()).collect();
+
+                let mut tx = self.pool.begin().await?;
+
+                let del_idx = Query::delete()
+                    .from_table(DocumentIndexes::Table)
+                    .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids.clone()))
+                    .build_sql(db_type);
+                crate::tx_execute!(tx, sqlx::query(&del_idx))?;
+
+                let del_doc = Query::delete()
+                    .from_table(Documents::Table)
+                    .and_where(Expr::col(Documents::Id).is_in(ids))
+                    .build_sql(db_type);
+                crate::tx_execute!(tx, sqlx::query(&del_doc))?;
+
+                tx.commit().await?;
+            }
+            Ok(total)
+        })
     }
 
     // ========================================================================
@@ -736,6 +839,7 @@ impl DocumentStore {
                 Documents::CreatedAt,
                 Documents::UpdatedAt,
                 Documents::Version,
+                Documents::LastUsedAt,
             ])
             .from(Documents::Table)
             .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
@@ -777,6 +881,7 @@ impl DocumentStore {
                 Documents::CreatedAt,
                 Documents::UpdatedAt,
                 Documents::Version,
+                Documents::LastUsedAt,
             ])
             .from(Documents::Table)
             .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
@@ -882,6 +987,7 @@ impl<'a> StoreTransaction<'a> {
                 Documents::CreatedAt,
                 Documents::UpdatedAt,
                 Documents::Version,
+                Documents::LastUsedAt,
             ])
             .values_panic([
                 id.into(),
@@ -893,6 +999,7 @@ impl<'a> StoreTransaction<'a> {
                 now_str.as_str().into(),
                 now_str.as_str().into(),
                 1_i64.into(),
+                Option::<&str>::None.into(),
             ])
             .build_sql(db_type);
 
@@ -934,6 +1041,7 @@ impl<'a> StoreTransaction<'a> {
             updated_at: now,
             expires_at,
             version: 1,
+            last_used_at: None,
         })
     }
 
@@ -962,6 +1070,7 @@ impl<'a> StoreTransaction<'a> {
                 Documents::CreatedAt,
                 Documents::UpdatedAt,
                 Documents::Version,
+                Documents::LastUsedAt,
             ])
             .from(Documents::Table)
             .and_where(Expr::col(Documents::Id).eq(id))
@@ -1020,6 +1129,7 @@ impl<'a> StoreTransaction<'a> {
                 (Documents::Table, Documents::CreatedAt),
                 (Documents::Table, Documents::UpdatedAt),
                 (Documents::Table, Documents::Version),
+                (Documents::Table, Documents::LastUsedAt),
             ])
             .from(Documents::Table)
             .inner_join(
@@ -1434,7 +1544,8 @@ mod tests {
                     expires_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL,
-                    version INTEGER NOT NULL DEFAULT 1
+                    version INTEGER NOT NULL DEFAULT 1,
+                    last_used_at TEXT
                 )"
             )
         )

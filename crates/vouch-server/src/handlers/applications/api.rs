@@ -231,7 +231,7 @@ pub async fn create_application_api(
         }
     }
 
-    // Create the application
+    // Create the application with FAPI settings included at creation time
     let (client, client_id) = db::create_oauth_client(
         &state.store,
         &CreateOAuthClientParams {
@@ -243,11 +243,19 @@ pub async fn create_application_api(
             access_scope,
             org_id,
             resource_uris,
-            token_endpoint_auth_method: None,
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
+            token_endpoint_auth_method: if is_fapi {
+                Some(TokenEndpointAuthMethod::PrivateKeyJwt)
+            } else {
+                None
+            },
+            jwks: if is_fapi { jwks_trimmed } else { None },
+            jwks_uri: if is_fapi { jwks_uri_trimmed } else { None },
+            fapi_profile: if is_fapi {
+                Some(FapiProfile::Fapi2Security)
+            } else {
+                None
+            },
+            dpop_bound_access_tokens: if is_fapi { Some(true) } else { None },
             grant_types: None,
             response_types: None,
             software_id: None,
@@ -266,36 +274,6 @@ pub async fn create_application_api(
             "Internal database error",
         )
     })?;
-
-    // If FAPI is enabled, update the client with FAPI settings
-    if is_fapi {
-        db::update_oauth_client(
-            &state.store,
-            &UpdateOAuthClientParams {
-                id: &client.id,
-                name,
-                description: req.description.as_deref(),
-                redirect_uris: &req.redirect_uris,
-                access_scope: Some(access_scope),
-                org_id,
-                resource_uris,
-                token_endpoint_auth_method: TokenEndpointAuthMethod::PrivateKeyJwt,
-                jwks: jwks_trimmed,
-                jwks_uri: jwks_uri_trimmed,
-                fapi_profile: FapiProfile::Fapi2Security,
-                dpop_bound_access_tokens: true,
-            },
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to apply FAPI settings: {e}");
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?;
-    }
 
     // Generate client secret for confidential clients (skip for FAPI — they use private_key_jwt)
     let client_secret = if app_type.requires_secret() && !is_fapi {
@@ -324,44 +302,21 @@ pub async fn create_application_api(
         None
     };
 
-    // Re-fetch to get final state (with FAPI settings applied)
-    let final_client = if is_fapi {
-        db::get_oauth_client_by_id(&state.store, &client.id)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to refetch client: {e}");
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    "Internal database error",
-                )
-            })?
-            .ok_or_else(|| {
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    "Internal database error",
-                )
-            })?
-    } else {
-        client
-    };
-
     tracing::info!("Created OAuth application: {} ({})", name, client_id);
 
-    let jwks_configured = final_client.jwks.is_some() || final_client.jwks_uri.is_some();
-    let response_jwks_uri = final_client.jwks_uri.clone();
+    let jwks_configured = client.jwks.is_some() || client.jwks_uri.is_some();
+    let response_jwks_uri = client.jwks_uri.clone();
 
     Ok(Json(CreateApplicationResponse {
-        id: final_client.id,
+        id: client.id,
         client_id,
         client_secret,
         name: name.to_string(),
         application_type: req.application_type,
         access_scope: access_scope.as_str().to_string(),
         resource_uris: resource_uris.to_vec(),
-        token_endpoint_auth_method: final_client.token_endpoint_auth_method.as_str().to_string(),
-        fapi_profile: final_client.fapi_profile.as_str().to_string(),
+        token_endpoint_auth_method: client.token_endpoint_auth_method.as_str().to_string(),
+        fapi_profile: client.fapi_profile.as_str().to_string(),
         jwks_configured,
         jwks_uri: response_jwks_uri,
     }))

@@ -12,7 +12,8 @@ CREATE TABLE IF NOT EXISTS documents (
     expires_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    version INTEGER NOT NULL DEFAULT 1
+    version INTEGER NOT NULL DEFAULT 1,
+    last_used_at TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_documents_doc_type ON documents(doc_type);
