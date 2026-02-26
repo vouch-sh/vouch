@@ -40,7 +40,7 @@ pub async fn list_applications_api(
 ) -> Result<Json<ListApplicationsResponse>, (StatusCode, Json<ApiError>)> {
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    let applications = db::get_oauth_clients_for_user(&state.db, &token.sub)
+    let applications = db::get_oauth_clients_for_user(&state.store, &token.sub)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list applications: {e}");
@@ -79,23 +79,26 @@ pub async fn create_application_api(
         ));
     }
 
-    let app_type = OAuthClientType::from_str(&req.application_type).ok_or_else(|| {
-        json_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_type",
-            "Invalid application type. Must be: web, native, spa, or service",
-        )
-    })?;
+    let app_type = req
+        .application_type
+        .parse::<OAuthClientType>()
+        .map_err(|_| {
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_type",
+                "Invalid application type. Must be: web, native, spa, or service",
+            )
+        })?;
 
     // Parse access scope (default to personal if not provided)
     let access_scope = req
         .access_scope
         .as_ref()
-        .and_then(|s| AccessScope::from_str(s))
+        .and_then(|s| s.parse::<AccessScope>().ok())
         .unwrap_or_default();
 
     // Get user to check org membership
-    let user = db::get_user_by_id(&state.db, &token.sub)
+    let user = db::get_user_by_id(&state.store, &token.sub)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get user: {e}");
@@ -228,9 +231,9 @@ pub async fn create_application_api(
         }
     }
 
-    // Create the application
+    // Create the application with FAPI settings included at creation time
     let (client, client_id) = db::create_oauth_client(
-        &state.db,
+        &state.store,
         &CreateOAuthClientParams {
             user_id: Some(&token.sub),
             name,
@@ -240,11 +243,19 @@ pub async fn create_application_api(
             access_scope,
             org_id,
             resource_uris,
-            token_endpoint_auth_method: None,
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
+            token_endpoint_auth_method: if is_fapi {
+                Some(TokenEndpointAuthMethod::PrivateKeyJwt)
+            } else {
+                None
+            },
+            jwks: if is_fapi { jwks_trimmed } else { None },
+            jwks_uri: if is_fapi { jwks_uri_trimmed } else { None },
+            fapi_profile: if is_fapi {
+                Some(FapiProfile::Fapi2Security)
+            } else {
+                None
+            },
+            dpop_bound_access_tokens: if is_fapi { Some(true) } else { None },
             grant_types: None,
             response_types: None,
             software_id: None,
@@ -264,43 +275,13 @@ pub async fn create_application_api(
         )
     })?;
 
-    // If FAPI is enabled, update the client with FAPI settings
-    if is_fapi {
-        db::update_oauth_client(
-            &state.db,
-            &UpdateOAuthClientParams {
-                id: &client.id,
-                name,
-                description: req.description.as_deref(),
-                redirect_uris: &req.redirect_uris,
-                access_scope: Some(access_scope),
-                org_id,
-                resource_uris,
-                token_endpoint_auth_method: TokenEndpointAuthMethod::PrivateKeyJwt,
-                jwks: jwks_trimmed,
-                jwks_uri: jwks_uri_trimmed,
-                fapi_profile: FapiProfile::Fapi2Security,
-                dpop_bound_access_tokens: true,
-            },
-        )
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to apply FAPI settings: {e}");
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?;
-    }
-
     // Generate client secret for confidential clients (skip for FAPI — they use private_key_jwt)
     let client_secret = if app_type.requires_secret() && !is_fapi {
         let secret = generate_client_secret();
         let secret_hash = hash_token(&secret);
 
         db::create_oauth_client_secret(
-            &state.db,
+            &state.store,
             &client.id,
             &secret_hash,
             Some("Initial secret"),
@@ -321,44 +302,21 @@ pub async fn create_application_api(
         None
     };
 
-    // Re-fetch to get final state (with FAPI settings applied)
-    let final_client = if is_fapi {
-        db::get_oauth_client_by_id(&state.db, &client.id)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to refetch client: {e}");
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    "Internal database error",
-                )
-            })?
-            .ok_or_else(|| {
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    "Internal database error",
-                )
-            })?
-    } else {
-        client
-    };
-
     tracing::info!("Created OAuth application: {} ({})", name, client_id);
 
-    let jwks_configured = final_client.jwks.is_some() || final_client.jwks_uri.is_some();
-    let response_jwks_uri = final_client.jwks_uri.clone();
+    let jwks_configured = client.jwks.is_some() || client.jwks_uri.is_some();
+    let response_jwks_uri = client.jwks_uri.clone();
 
     Ok(Json(CreateApplicationResponse {
-        id: final_client.id,
+        id: client.id,
         client_id,
         client_secret,
         name: name.to_string(),
         application_type: req.application_type,
         access_scope: access_scope.as_str().to_string(),
         resource_uris: resource_uris.to_vec(),
-        token_endpoint_auth_method: final_client.token_endpoint_auth_method.as_str().to_string(),
-        fapi_profile: final_client.fapi_profile.as_str().to_string(),
+        token_endpoint_auth_method: client.token_endpoint_auth_method.as_str().to_string(),
+        fapi_profile: client.fapi_profile.as_str().to_string(),
         jwks_configured,
         jwks_uri: response_jwks_uri,
     }))
@@ -376,7 +334,7 @@ pub async fn get_application_api(
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    let client = db::get_oauth_client_by_id(&state.db, &app_id)
+    let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get application: {e}");
@@ -389,7 +347,7 @@ pub async fn get_application_api(
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
 
     // Verify ownership
-    if client.user_id != token.sub {
+    if client.user_id.as_deref() != Some(token.sub.as_str()) {
         return Err(json_error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -414,7 +372,7 @@ pub async fn update_application_api(
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Get existing application
-    let client = db::get_oauth_client_by_id(&state.db, &app_id)
+    let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get application for update: {e}");
@@ -427,7 +385,7 @@ pub async fn update_application_api(
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
 
     // Verify ownership
-    if client.user_id != token.sub {
+    if client.user_id.as_deref() != Some(token.sub.as_str()) {
         return Err(json_error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -439,12 +397,12 @@ pub async fn update_application_api(
     let access_scope = req
         .access_scope
         .as_ref()
-        .and_then(|s| AccessScope::from_str(s));
+        .and_then(|s| s.parse::<AccessScope>().ok());
 
     // Get user to check org membership if changing to organization scope
     let user = if access_scope == Some(AccessScope::Organization) {
         Some(
-            db::get_user_by_id(&state.db, &token.sub)
+            db::get_user_by_id(&state.store, &token.sub)
                 .await
                 .map_err(|e| {
                     tracing::error!("Failed to get user for scope validation: {e}");
@@ -640,7 +598,7 @@ pub async fn update_application_api(
     };
 
     db::update_oauth_client(
-        &state.db,
+        &state.store,
         &UpdateOAuthClientParams {
             id: &app_id,
             name,
@@ -667,7 +625,7 @@ pub async fn update_application_api(
     })?;
 
     // Fetch updated client
-    let updated = db::get_oauth_client_by_id(&state.db, &app_id)
+    let updated = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to fetch updated application: {e}");
@@ -697,7 +655,7 @@ pub async fn delete_application_api(
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Verify ownership
-    let client = db::get_oauth_client_by_id(&state.db, &app_id)
+    let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get application for deletion: {e}");
@@ -709,7 +667,7 @@ pub async fn delete_application_api(
         })?
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
 
-    if client.user_id != token.sub {
+    if client.user_id.as_deref() != Some(token.sub.as_str()) {
         return Err(json_error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -717,7 +675,7 @@ pub async fn delete_application_api(
         ));
     }
 
-    db::delete_oauth_client(&state.db, &app_id)
+    db::delete_oauth_client(&state.store, &app_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete OAuth client: {e}");
@@ -746,7 +704,7 @@ pub async fn rotate_secret_api(
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Verify ownership
-    let client = db::get_oauth_client_by_id(&state.db, &app_id)
+    let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get application for secret rotation: {e}");
@@ -758,7 +716,7 @@ pub async fn rotate_secret_api(
         })?
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
 
-    if client.user_id != token.sub {
+    if client.user_id.as_deref() != Some(token.sub.as_str()) {
         return Err(json_error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -780,7 +738,7 @@ pub async fn rotate_secret_api(
     let secret_hash = hash_token(&secret);
 
     // Revoke old secrets
-    db::revoke_all_oauth_client_secrets(&state.db, &app_id)
+    db::revoke_all_oauth_client_secrets(&state.store, &app_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to revoke old secrets: {e}");
@@ -793,7 +751,7 @@ pub async fn rotate_secret_api(
 
     // Create new secret
     let secret_record = db::create_oauth_client_secret(
-        &state.db,
+        &state.store,
         &app_id,
         &secret_hash,
         Some("Rotated secret"),
@@ -813,8 +771,8 @@ pub async fn rotate_secret_api(
 
     Ok(Json(RotateSecretResponse {
         client_secret: secret,
-        created_at: secret_record.created_at.to_jiff().to_string(),
-        expires_at: secret_record.expires_at.map(|ts| ts.to_jiff().to_string()),
+        created_at: secret_record.created_at,
+        expires_at: secret_record.expires_at,
     }))
 }
 
@@ -831,7 +789,7 @@ pub async fn revoke_tokens_api(
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Verify ownership
-    let client = db::get_oauth_client_by_id(&state.db, &app_id)
+    let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get application for token revocation: {e}");
@@ -843,7 +801,7 @@ pub async fn revoke_tokens_api(
         })?
         .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
 
-    if client.user_id != token.sub {
+    if client.user_id.as_deref() != Some(token.sub.as_str()) {
         return Err(json_error(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -852,7 +810,7 @@ pub async fn revoke_tokens_api(
     }
 
     // Revoke all secrets (effectively revoking all tokens)
-    db::revoke_all_oauth_client_secrets(&state.db, &app_id)
+    db::revoke_all_oauth_client_secrets(&state.store, &app_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to revoke all secrets: {e}");
@@ -865,7 +823,7 @@ pub async fn revoke_tokens_api(
 
     // Log the event
     if let Err(e) = db::record_oauth_event(
-        &state.db,
+        &state.audit,
         &app_id,
         OAuthEventType::TokenRevoked,
         Some(&token.sub),

@@ -5,7 +5,7 @@
 //! It is used by both the API key handlers (Bearer token auth) and the enrollment
 //! key handlers (cookie-based auth).
 
-use crate::db::{self, Pool};
+use crate::db::{self, store::DocumentStore};
 use crate::services::error::ServiceError;
 use vouch_common::{KeyInfo, lookup_device_model};
 
@@ -42,11 +42,11 @@ pub fn require_fresh_timestamp(issued_at: i64, max_age_secs: i64) -> Result<(), 
 ///
 /// Returns `ServiceError::Internal` if the database query fails.
 pub async fn list_keys_for_user(
-    db: &Pool,
+    store: &DocumentStore,
     user_id: &str,
     current_authenticator_id: Option<&str>,
 ) -> Result<Vec<KeyInfo>, ServiceError> {
-    let authenticators = db::get_authenticators_for_user(db, user_id)
+    let authenticators = db::get_authenticators_for_user(store, user_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get authenticators for user {user_id}: {e}");
@@ -64,7 +64,7 @@ pub async fn list_keys_for_user(
             KeyInfo {
                 id: a.id.clone(),
                 name: a.name,
-                created_at: a.created_at.to_jiff().to_string(),
+                created_at: a.created_at,
                 is_current_session: current_authenticator_id == Some(a.id.as_str()),
                 device_model,
                 aaguid: a.aaguid,
@@ -85,7 +85,7 @@ pub async fn list_keys_for_user(
 /// - `ServiceError::Forbidden` if the key does not belong to the user.
 /// - `ServiceError::Internal` on database errors.
 pub async fn rename_key(
-    db: &Pool,
+    store: &DocumentStore,
     user_id: &str,
     key_id: &str,
     new_name: &str,
@@ -102,7 +102,7 @@ pub async fn rename_key(
     }
 
     // Get the authenticator to verify ownership
-    let authenticator = db::get_authenticator_by_id(db, key_id)
+    let authenticator = db::get_authenticator_by_id(store, key_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get authenticator {key_id}: {e}");
@@ -120,7 +120,7 @@ pub async fn rename_key(
     }
 
     // Update the name
-    db::update_authenticator_name(db, key_id, name)
+    db::update_authenticator_name(store, key_id, name)
         .await
         .map_err(|e| {
             tracing::error!("Failed to rename authenticator {key_id}: {e}");
@@ -146,12 +146,12 @@ pub async fn rename_key(
 /// - `ServiceError::Validation` if this is the user's last key.
 /// - `ServiceError::Internal` on database errors.
 pub async fn delete_key(
-    db: &Pool,
+    store: &DocumentStore,
     user_id: &str,
     key_id: &str,
 ) -> Result<(String, u64), ServiceError> {
     // Get the authenticator to verify ownership
-    let authenticator = db::get_authenticator_by_id(db, key_id)
+    let authenticator = db::get_authenticator_by_id(store, key_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get authenticator {key_id}: {e}");
@@ -169,7 +169,7 @@ pub async fn delete_key(
     }
 
     // Check that this isn't the user's last key
-    let key_count = db::count_authenticators_for_user(db, user_id)
+    let key_count = db::count_authenticators_for_user(store, user_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to count authenticators for user {user_id}: {e}");
@@ -185,7 +185,7 @@ pub async fn delete_key(
     }
 
     // Count sessions that will be revoked
-    let sessions_revoked = db::count_sessions_for_authenticator(db, key_id)
+    let sessions_revoked = db::count_sessions_for_authenticator(store, key_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to count sessions for authenticator {key_id}: {e}");
@@ -193,7 +193,7 @@ pub async fn delete_key(
         })?;
 
     // Delete the authenticator (CASCADE will delete sessions)
-    db::delete_authenticator(db, key_id).await.map_err(|e| {
+    db::delete_authenticator(store, key_id).await.map_err(|e| {
         tracing::error!("Failed to delete authenticator {key_id}: {e}");
         ServiceError::Internal("Failed to delete key".to_string())
     })?;

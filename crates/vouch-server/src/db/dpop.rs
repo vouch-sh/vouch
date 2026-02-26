@@ -1,21 +1,16 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! DPoP nonce and JTI database operations (RFC 9449).
 
-use super::Pool;
-use super::schema::{DpopJtiCache, DpopNonces};
-use super::types::BuildSql;
-use crate::db_execute;
-use anyhow::Result;
+use super::document_type::DocumentType;
+use super::documents::dpop::{DpopJtiDoc, DpopNonceDoc};
+use super::store::DocumentStore;
+use anyhow::{Context, Result};
 use aws_lc_rs::rand as aws_rand;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Timestamp, ToSpan};
-use sea_query::{Expr, Query};
-use uuid::Uuid;
 
 /// Generate a random URL-safe string.
-///
-/// Returns an error if the system RNG fails.
 fn generate_random_string(len: usize) -> Result<String> {
     let mut bytes = vec![0u8; len];
     aws_rand::fill(&mut bytes).map_err(|_| anyhow::anyhow!("RNG failure"))?;
@@ -23,99 +18,74 @@ fn generate_random_string(len: usize) -> Result<String> {
 }
 
 /// Generate and store a DPoP nonce. Returns the nonce string.
-pub async fn generate_dpop_nonce(pool: &Pool, validity_seconds: i64) -> Result<String> {
-    let id = Uuid::now_v7().to_string();
+pub async fn generate_dpop_nonce(store: &DocumentStore, validity_seconds: i64) -> Result<String> {
     let nonce = generate_random_string(32)?;
-    let db_type = pool.db_type();
     let now = Timestamp::now();
-    let now_str = now.to_string();
     let expires_at = now
         .checked_add(validity_seconds.seconds())
-        .unwrap_or(now)
-        .to_string();
+        .context("DPoP nonce expiry timestamp overflow")?;
 
-    let sql = {
-        let query = Query::insert()
-            .into_table(DpopNonces::Table)
-            .columns([
-                DpopNonces::Id,
-                DpopNonces::Nonce,
-                DpopNonces::CreatedAt,
-                DpopNonces::ExpiresAt,
-            ])
-            .values_panic([
-                id.into(),
-                nonce.clone().into(),
-                now_str.as_str().into(),
-                expires_at.as_str().into(),
-            ])
-            .to_owned();
-        query.build_sql(db_type)
+    let doc = DpopNonceDoc {
+        nonce: nonce.clone(),
+        expires_at,
     };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
+    store.insert(&doc).await?;
     Ok(nonce)
 }
 
-/// Validate and consume a nonce (atomic DELETE WHERE nonce=? AND expires_at > now).
+/// Validate and consume a nonce.
 ///
 /// Returns `true` if valid and consumed, `false` if not found or expired.
-pub async fn validate_and_consume_dpop_nonce(pool: &Pool, nonce: &str) -> Result<bool> {
-    let db_type = pool.db_type();
-    let now_str = Timestamp::now().to_string();
+pub async fn validate_and_consume_dpop_nonce(store: &DocumentStore, nonce: &str) -> Result<bool> {
+    let now = Timestamp::now();
 
-    let sql = {
-        let query = Query::delete()
-            .from_table(DpopNonces::Table)
-            .and_where(Expr::col(DpopNonces::Nonce).eq(nonce))
-            .and_where(Expr::col(DpopNonces::ExpiresAt).gt(now_str.as_str()))
-            .to_owned();
-        query.build_sql(db_type)
+    let doc = store.find_one::<DpopNonceDoc>("nonce", nonce).await?;
+
+    let Some(doc) = doc else {
+        return Ok(false);
     };
 
-    let result = db_execute!(pool, sqlx::query(&sql))?;
+    // Check expiry
+    if doc.data.expires_at <= now {
+        // Expired — delete it and return false
+        store.delete(&doc.id).await?;
+        return Ok(false);
+    }
 
-    Ok(result.rows_affected() > 0)
+    // Valid — consume by deleting
+    store.delete(&doc.id).await?;
+    Ok(true)
 }
 
-/// Check if JTI exists (replay) and store it. Returns `true` if new, `false` if replay.
+/// Check if JTI exists (replay) and store it.
+/// Returns `true` if new, `false` if replay.
 ///
-/// Uses INSERT with conflict detection on PRIMARY KEY (jti).
+/// Uses the JTI as the document ID for uniqueness.
 pub async fn check_and_store_dpop_jti(
-    pool: &Pool,
+    store: &DocumentStore,
     jti: &str,
     validity_seconds: i64,
 ) -> Result<bool> {
-    let db_type = pool.db_type();
     let now = Timestamp::now();
-    let now_str = now.to_string();
     let expires_at = now
         .checked_add(validity_seconds.seconds())
-        .unwrap_or(now)
-        .to_string();
+        .context("DPoP JTI expiry timestamp overflow")?;
 
-    let sql = {
-        let query = Query::insert()
-            .into_table(DpopJtiCache::Table)
-            .columns([
-                DpopJtiCache::Jti,
-                DpopJtiCache::CreatedAt,
-                DpopJtiCache::ExpiresAt,
-            ])
-            .values_panic([
-                jti.into(),
-                now_str.as_str().into(),
-                expires_at.as_str().into(),
-            ])
-            .to_owned();
-        query.build_sql(db_type)
+    // Check if JTI already exists by looking up the index
+    let existing = store.find_one::<DpopJtiDoc>("jti", jti).await?;
+    if existing.is_some() {
+        return Ok(false);
+    }
+
+    let doc = DpopJtiDoc {
+        jti: jti.to_string(),
+        expires_at,
     };
 
-    match db_execute!(pool, sqlx::query(&sql)) {
+    // Insert — if a race causes a duplicate, treat as replay
+    match store.insert(&doc).await {
         Ok(_) => Ok(true),
         Err(e) => {
-            // Check for unique/primary key constraint violation (replay)
             let err_str = e.to_string();
             if err_str.contains("UNIQUE")
                 || err_str.contains("duplicate key")
@@ -123,42 +93,18 @@ pub async fn check_and_store_dpop_jti(
             {
                 Ok(false)
             } else {
-                Err(e.into())
+                Err(e)
             }
         }
     }
 }
 
 /// Delete expired nonces. Returns count deleted.
-pub async fn delete_expired_dpop_nonces(pool: &Pool, now: &str) -> Result<u64> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::delete()
-            .from_table(DpopNonces::Table)
-            .and_where(Expr::col(DpopNonces::ExpiresAt).lte(now))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let result = db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(result.rows_affected())
+pub async fn delete_expired_dpop_nonces(store: &DocumentStore, _now: &str) -> Result<u64> {
+    store.delete_expired(DpopNonceDoc::DOC_TYPE).await
 }
 
 /// Delete expired JTIs. Returns count deleted.
-pub async fn delete_expired_dpop_jtis(pool: &Pool, now: &str) -> Result<u64> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::delete()
-            .from_table(DpopJtiCache::Table)
-            .and_where(Expr::col(DpopJtiCache::ExpiresAt).lte(now))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let result = db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(result.rows_affected())
+pub async fn delete_expired_dpop_jtis(store: &DocumentStore, _now: &str) -> Result<u64> {
+    store.delete_expired(DpopJtiDoc::DOC_TYPE).await
 }

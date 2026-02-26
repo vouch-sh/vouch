@@ -612,14 +612,14 @@ pub async fn issue_authorization_code(
 
     // RFC 6749 Section 10.5: Store code hash for single-use enforcement.
     let code_hash = crate::crypto::hash_token(&code);
-    let expires_at = Timestamp::from_second(exp).unwrap_or(now).to_string();
+    let expires_at = Timestamp::from_second(exp).unwrap_or(now);
 
     if let Err(e) = crate::db::store_authorization_code(
-        &state.db,
+        &state.store,
         &code_hash,
         params.client_id,
         params.user_id,
-        &expires_at,
+        expires_at,
     )
     .await
     {
@@ -701,7 +701,7 @@ pub fn check_client_access(client: &OAuthClient, user: &User) -> ServiceResult<(
         }
         AccessScope::Personal => {
             // Only the creator can access personal apps
-            if user.id == client.user_id {
+            if client.user_id.as_deref() == Some(user.id.as_str()) {
                 Ok(())
             } else {
                 Err(ServiceError::oauth(
@@ -731,7 +731,7 @@ pub fn check_client_access(client: &OAuthClient, user: &User) -> ServiceResult<(
                 (None, _) => {
                     // App has no org_id (shouldn't happen for org-scoped apps, but handle gracefully)
                     // Fall back to personal scope behavior
-                    if user.id == client.user_id {
+                    if client.user_id.as_deref() == Some(user.id.as_str()) {
                         Ok(())
                     } else {
                         Err(ServiceError::oauth(
@@ -750,22 +750,21 @@ pub fn check_client_access(client: &OAuthClient, user: &User) -> ServiceResult<(
 mod tests {
     use super::*;
     use crate::db::{FapiProfile, OAuthClientType, TokenEndpointAuthMethod};
-    use jiff_sqlx::ToSqlx;
 
     // Helper to create a test OAuthClient
     fn test_client(user_id: &str, access_scope: AccessScope, org_id: Option<&str>) -> OAuthClient {
-        let ts = jiff::Timestamp::now().to_sqlx();
+        let now = jiff::Timestamp::now();
         OAuthClient {
             id: "client-1".to_string(),
-            user_id: user_id.to_string(),
+            user_id: Some(user_id.to_string()),
             client_id: "test-client-id".to_string(),
             name: "Test App".to_string(),
             description: None,
             application_type: OAuthClientType::Web,
             redirect_uris: "[]".to_string(),
             active: true,
-            created_at: ts,
-            updated_at: ts,
+            created_at: now,
+            updated_at: now,
             last_used_at: None,
             access_scope,
             org_id: org_id.map(String::from),
@@ -797,6 +796,8 @@ mod tests {
             name: Some("Test User".to_string()),
             org_id: org_id.map(String::from),
             is_org_admin: false,
+            active: true,
+            external_id: None,
             github_id: None,
             github_login: None,
             github_refresh_token: None,

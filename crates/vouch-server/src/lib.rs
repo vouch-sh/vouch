@@ -62,8 +62,12 @@ pub(crate) fn redact_email(email: &str) -> String {
 
 /// Shared application state.
 pub struct AppState {
-    /// Database connection pool.
+    /// Database connection pool (kept for migrations).
     pub db: Pool,
+    /// Encrypted document store for domain data.
+    pub store: db::store::DocumentStore,
+    /// Audit event store.
+    pub audit: db::audit::AuditStore,
     /// Server configuration (wrapped in ArcSwap for lock-free dynamic updates).
     pub config: Arc<ArcSwap<ServerConfig>>,
     /// WebAuthn instance.
@@ -212,8 +216,16 @@ mod redirect_tests {
         .build()
         .unwrap();
 
+        let pool = Pool::new_test();
+        let crypto: std::sync::Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+            std::sync::Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
+        let store = db::store::DocumentStore::new(pool.clone(), crypto.clone());
+        let audit = db::audit::AuditStore::new(pool.clone(), crypto);
+
         AppState {
-            db: Pool::new_test(),
+            db: pool,
+            store,
+            audit,
             config: Arc::new(ArcSwap::from_pointee(config)),
             webauthn,
             ssh_ca: None,

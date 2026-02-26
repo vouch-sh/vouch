@@ -198,7 +198,7 @@ pub async fn device_verify_submit(
     };
 
     // Look up device auth request
-    let request = match db::get_device_auth_by_user_code(&state.db, &user_code).await {
+    let request = match db::get_device_auth_by_user_code(&state.store, &user_code).await {
         Ok(Some(req)) => req,
         Ok(None) => {
             return DeviceVerifyTemplate {
@@ -216,9 +216,7 @@ pub async fn device_verify_submit(
 
     // Check if expired
     let now = Timestamp::now();
-    let expires_at = request.expires_at.to_jiff();
-
-    if now > expires_at {
+    if now > request.expires_at {
         return DeviceVerifyTemplate {
             error: Some("This code has expired. Please request a new one.".to_string()),
         }
@@ -254,11 +252,11 @@ pub async fn device_verify_submit(
         let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
 
         if let Err(e) = db::create_oidc_state(
-            &state.db,
+            &state.store,
             &oidc_state,
             &request.id,
             "", // No nonce for non-OIDC flow
-            &state_expires.to_string(),
+            state_expires,
         )
         .await
         {
@@ -304,11 +302,11 @@ pub async fn device_verify_submit(
     let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
 
     if let Err(e) = db::create_oidc_state(
-        &state.db,
+        &state.store,
         &oidc_state,
         &request.id,
         &nonce,
-        &state_expires.to_string(),
+        state_expires,
     )
     .await
     {
@@ -379,7 +377,7 @@ pub async fn oidc_callback(
     };
 
     // Verify state
-    let stored_state = match db::get_oidc_state(&state.db, &oidc_state).await {
+    let stored_state = match db::get_oidc_state(&state.store, &oidc_state).await {
         Ok(Some(s)) => s,
         Ok(None) => {
             return ErrorTemplate {
@@ -401,9 +399,7 @@ pub async fn oidc_callback(
 
     // Check if state expired
     let now = Timestamp::now();
-    let expires_at = stored_state.expires_at.to_jiff();
-
-    if now > expires_at {
+    if now > stored_state.expires_at {
         return ErrorTemplate {
             title: "Error".to_string(),
             message: "State has expired".to_string(),
@@ -540,25 +536,21 @@ pub async fn oidc_callback(
     // Enroll user with organization in a single atomic transaction.
     // This ensures that if org creation succeeds but user creation fails,
     // the entire operation is rolled back to prevent orphaned state.
-    let enrollment = match db::enroll_user_with_org(
-        &state.db,
-        &claims.email,
-        None,
-        claims.hd.as_deref(),
-    )
-    .await
-    {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::error!("Failed to enroll user: {}", e);
-            return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to create user".to_string(),
-                back_url: None,
+    let enrollment =
+        match db::enroll_user_with_org(&state.store, &claims.email, None, claims.hd.as_deref())
+            .await
+        {
+            Ok(e) => e,
+            Err(e) => {
+                tracing::error!("Failed to enroll user: {}", e);
+                return ErrorTemplate {
+                    title: "Error".to_string(),
+                    message: "Failed to create user".to_string(),
+                    back_url: None,
+                }
+                .into_response();
             }
-            .into_response();
-        }
-    };
+        };
 
     let user = enrollment.user;
 
@@ -580,7 +572,7 @@ pub async fn oidc_callback(
     };
 
     // Get authenticator (if any) for session claims
-    let existing_auths = db::get_authenticators_for_user(&state.db, &user.id)
+    let existing_auths = db::get_authenticators_for_user(&state.store, &user.id)
         .await
         .unwrap_or_default();
     let authenticator_id = existing_auths.first().map(|a| a.id.clone());
@@ -628,7 +620,7 @@ pub async fn oidc_callback(
             // User already has a registered key — authorize the device auth
             // immediately so the CLI stops polling.
             if let Err(e) = db::authorize_device_auth(
-                &state.db,
+                &state.store,
                 &stored_state.device_auth_id,
                 &user.id,
                 &claims.email,
@@ -642,12 +634,12 @@ pub async fn oidc_callback(
             // No key yet — store the device_auth_id in an enrollment session
             // so browser_register_complete can authorize it after WebAuthn registration.
             if let Err(e) = db::create_enrollment_session(
-                &state.db,
+                &state.store,
                 &user.id,
                 &claims.email,
                 &token_hash,
                 Some(&stored_state.device_auth_id),
-                &expires.to_string(),
+                expires,
             )
             .await
             {
@@ -657,7 +649,7 @@ pub async fn oidc_callback(
     }
 
     // Delete the OIDC state (it's been consumed)
-    if let Err(e) = db::delete_oidc_state(&state.db, &oidc_state).await {
+    if let Err(e) = db::delete_oidc_state(&state.store, &oidc_state).await {
         tracing::warn!("Failed to delete OIDC state: {e}");
     }
 
@@ -690,7 +682,7 @@ pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar
                 redact_email(&email)
             );
             // Look up user to check org membership
-            let (has_org, is_org_admin) = match db::get_user_by_id(&state.db, &token.sub).await {
+            let (has_org, is_org_admin) = match db::get_user_by_id(&state.store, &token.sub).await {
                 Ok(Some(user)) => (user.org_id.is_some(), user.is_org_admin),
                 _ => (false, false),
             };
@@ -754,7 +746,7 @@ pub async fn browser_register_start(
         Some(cookie_val) => {
             let token_hash = hash_token(cookie_val);
             let enrollment_session =
-                db::get_enrollment_session_by_token_hash(&state.db, &token_hash)
+                db::get_enrollment_session_by_token_hash(&state.store, &token_hash)
                     .await
                     .map_err(|e| {
                         tracing::error!("Failed to look up enrollment session: {}", e);
@@ -781,7 +773,7 @@ pub async fn browser_register_start(
     );
 
     // Get any existing credentials for this user to exclude them
-    let existing_auths = db::get_authenticators_for_user(&state.db, &token.sub)
+    let existing_auths = db::get_authenticators_for_user(&state.store, &token.sub)
         .await
         .map_err(|e| {
             json_error(
@@ -897,15 +889,16 @@ pub async fn browser_register_complete(
     })?;
 
     // Check for duplicate credential registration before proceeding
-    if let Some(_existing) = db::get_authenticator_by_credential_id(&state.db, &credential_id_bytes)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
+    if let Some(_existing) =
+        db::get_authenticator_by_credential_id(&state.store, &credential_id_bytes)
+            .await
+            .map_err(|e| {
+                json_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    &e.to_string(),
+                )
+            })?
     {
         tracing::warn!(
             "Rejected duplicate credential registration for user: {}",
@@ -994,8 +987,9 @@ pub async fn browser_register_complete(
     // user_handle is the user_id as bytes (for discoverable credentials)
     let user_handle = reg_state.user_id.as_bytes().to_vec();
     let authenticator_id = db::create_authenticator(
-        &state.db,
+        &state.store,
         &reg_state.user_id.to_string(),
+        &reg_state.user_email,
         &validated.device_name,
         &cred_id_to_store,
         &public_key_cbor,
@@ -1019,7 +1013,7 @@ pub async fn browser_register_complete(
         );
     } else {
         db::authorize_device_auth(
-            &state.db,
+            &state.store,
             &reg_state.device_auth_id,
             &reg_state.user_id.to_string(),
             &reg_state.user_email,
@@ -1054,9 +1048,12 @@ pub async fn browser_register_complete(
         success: true,
         failure_reason: None,
     };
-    let db = state.db.clone();
+    let audit = state.audit.clone();
+    let user_email_for_audit = reg_state.user_email.clone();
     tokio::spawn(async move {
-        if let Err(e) = db::insert_auth_event(&db, &auth_event_params).await {
+        if let Err(e) =
+            db::insert_auth_event(&audit, &auth_event_params, Some(&user_email_for_audit)).await
+        {
             tracing::warn!("Failed to log enrollment event: {}", e);
         }
     });
@@ -1155,10 +1152,7 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
 
     // Create a "virtual" device auth request for direct enrollment
     // This allows us to reuse the existing OIDC callback flow
-    let expires_at = now
-        .checked_add(Span::new().minutes(10))
-        .unwrap_or(now)
-        .to_string();
+    let expires_at = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
 
     // Generate unique codes for this direct enrollment attempt
     // user_code needs to be unique per the database constraint
@@ -1182,10 +1176,10 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
     );
 
     let device_auth_id = match db::create_device_auth_request(
-        &state.db,
+        &state.store,
         &device_code_hash,
         &user_code,
-        &expires_at,
+        expires_at,
         5,
     )
     .await
@@ -1226,11 +1220,11 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
     let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
 
     if let Err(e) = db::create_oidc_state(
-        &state.db,
+        &state.store,
         &oidc_state,
         &device_auth_id,
         &nonce,
-        &state_expires.to_string(),
+        state_expires,
     )
     .await
     {

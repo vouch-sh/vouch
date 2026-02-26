@@ -31,8 +31,8 @@ async fn test_rfc8725_cross_type_token_substitution() {
     );
 
     // Valid OAuth access token (ES256, at+jwt) should work
-    let user = create_test_user(&state.db, "cross-type@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "cross-type@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     let (status, _body) = http_get(
@@ -152,9 +152,9 @@ async fn test_rfc8725_id_token_rejected_at_resource_endpoint() {
     // This is the same-key-different-type substitution attack.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "id-token-sub@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "id-token-sub@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue a real ID token through the auth code flow
     let (_access_token, id_token) =
@@ -188,9 +188,9 @@ async fn test_rfc8725_access_token_not_accepted_at_par_as_id_token() {
     // (per OIDC Core, id_token_hint is optional), not cause elevated access.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-hint@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-hint@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     // Submit an access token as id_token_hint to PAR endpoint

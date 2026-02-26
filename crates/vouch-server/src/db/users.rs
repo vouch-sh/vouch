@@ -1,449 +1,209 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! User database operations.
 
-use super::Pool;
-use super::schema::{
-    AuthEvents, Authenticators, DeviceAuthRequests, EnrollmentSessions, OAuthClientSecrets,
-    OAuthClients, OAuthUsageEvents, ScimGroupMembers, Sessions, SshRevokedCertificates,
-    TokenExchanges, Users,
-};
-use super::types::BuildSql;
-#[cfg(any(test, feature = "test-utils"))]
-use crate::{db_execute, db_fetch_one};
-use crate::{db_execute as db_execute_prod, db_fetch_optional, tx_execute, tx_fetch_all};
-use anyhow::Result;
-#[cfg(any(test, feature = "test-utils"))]
-use jiff::Timestamp;
-#[cfg(any(test, feature = "test-utils"))]
-use sea_query::OnConflict;
-use sea_query::{Expr, Query};
-#[cfg(any(test, feature = "test-utils"))]
-use uuid::Uuid;
-
-/// Standard set of columns for `SELECT ... FROM users` queries.
-///
-/// Used by all user-fetching functions to ensure consistent field lists.
-const USER_SELECT_COLUMNS: [Users; 8] = [
-    Users::Id,
-    Users::Email,
-    Users::Name,
-    Users::OrgId,
-    Users::IsOrgAdmin,
-    Users::GitHubId,
-    Users::GitHubLogin,
-    Users::GitHubRefreshToken,
-];
+use super::document_type::Document;
+use super::documents::user::UserDoc;
+use super::store::DocumentStore;
+use anyhow::{Context, Result};
 
 /// User record.
-#[derive(sqlx::FromRow)]
+#[derive(Debug)]
 pub struct User {
     pub id: String,
     pub email: String,
-    #[allow(dead_code)]
     pub name: Option<String>,
-    /// Organization ID (NULL for personal accounts like gmail.com).
     pub org_id: Option<String>,
-    /// Whether this user is an admin of their organization.
     pub is_org_admin: bool,
-    /// GitHub user ID (for OAuth linking).
+    pub active: bool,
+    pub external_id: Option<String>,
     pub github_id: Option<i64>,
-    /// GitHub username (for OAuth linking).
     pub github_login: Option<String>,
-    /// GitHub OAuth refresh token (for getting new access tokens).
-    #[allow(dead_code)]
     pub github_refresh_token: Option<String>,
 }
 
-// Custom Debug that redacts github_refresh_token to prevent accidental log exposure.
-impl std::fmt::Debug for User {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("User")
-            .field("id", &self.id)
-            .field("email", &self.email)
-            .field("name", &self.name)
-            .field("org_id", &self.org_id)
-            .field("is_org_admin", &self.is_org_admin)
-            .field("github_id", &self.github_id)
-            .field("github_login", &self.github_login)
-            .field("github_refresh_token", &"[REDACTED]")
-            .finish()
+impl From<Document<UserDoc>> for User {
+    fn from(doc: Document<UserDoc>) -> Self {
+        Self {
+            id: doc.id,
+            email: doc.data.email,
+            name: doc.data.name,
+            org_id: doc.data.org_id,
+            is_org_admin: doc.data.is_org_admin,
+            active: doc.data.active,
+            external_id: doc.data.external_id,
+            github_id: doc.data.github_id,
+            github_login: doc.data.github_login,
+            github_refresh_token: doc.data.github_refresh_token,
+        }
     }
 }
 
-/// Create or get a user by email.
+/// Create or find a user by email. Returns (user_id, was_created).
 ///
-/// Note: This function is only used in tests. Production code uses the
-/// transactional `enroll_user_with_org` function.
+/// Note: Only used in tests. Production code uses the transactional
+/// `enroll_user_with_org` function.
 #[cfg(any(test, feature = "test-utils"))]
-pub async fn upsert_user(pool: &Pool, email: &str, name: Option<&str>) -> Result<User> {
-    let id = Uuid::now_v7().to_string();
-    let now = Timestamp::now().to_string();
-    let db_type = pool.db_type();
-
-    // Try to insert, ignore if exists using sea-query
-    // Build SQL in a block to ensure query is dropped before await
-    let sql = {
-        let query = Query::insert()
-            .into_table(Users::Table)
-            .columns([Users::Id, Users::Email, Users::Name, Users::CreatedAt])
-            .values_panic([
-                id.clone().into(),
-                email.into(),
-                name.into(),
-                now.as_str().into(),
-            ])
-            .on_conflict(OnConflict::new().do_nothing().to_owned())
-            .to_owned();
-        query.build_sql(db_type)
+pub async fn upsert_user(
+    store: &DocumentStore,
+    email: &str,
+    name: Option<&str>,
+) -> Result<(String, bool)> {
+    if let Some(doc) = store.find_one::<UserDoc>("email", email).await? {
+        return Ok((doc.id, false));
+    }
+    let user_doc = UserDoc {
+        email: email.to_string(),
+        name: name.map(String::from),
+        org_id: None,
+        is_org_admin: false,
+        active: true,
+        external_id: None,
+        github_id: None,
+        github_login: None,
+        github_refresh_token: None,
     };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    // Fetch the user
-    let fetch_sql = {
-        let query = Query::select()
-            .columns(USER_SELECT_COLUMNS)
-            .from(Users::Table)
-            .and_where(Expr::col(Users::Email).eq(email))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let user = db_fetch_one!(pool, sqlx::query_as::<_, User>(&fetch_sql))?;
-
-    Ok(user)
+    let doc = store.insert(&user_doc).await?;
+    Ok((doc.id, true))
 }
 
-/// Create or get a user by email, associating them with an organization.
+/// Create or find a user by email, with an organization.
 ///
-/// Note: This function is only used in tests. Production code uses the
-/// transactional `enroll_user_with_org` function which handles organization
-/// and user creation atomically.
+/// Note: Only used in tests. Production code uses `enroll_user_with_org`.
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn upsert_user_with_org(
-    pool: &Pool,
+    store: &DocumentStore,
     email: &str,
     name: Option<&str>,
     org_id: Option<&str>,
     is_org_admin: bool,
-) -> Result<User> {
-    let id = Uuid::now_v7().to_string();
-    let now = Timestamp::now().to_string();
-    let db_type = pool.db_type();
-
-    // Try to insert with org info, ignore if exists using sea-query
-    // Build SQL in a block to ensure query is dropped before await
-    let sql = {
-        let query = Query::insert()
-            .into_table(Users::Table)
-            .columns([
-                Users::Id,
-                Users::Email,
-                Users::Name,
-                Users::OrgId,
-                Users::IsOrgAdmin,
-                Users::CreatedAt,
-            ])
-            .values_panic([
-                id.clone().into(),
-                email.into(),
-                name.into(),
-                org_id.into(),
-                is_org_admin.into(),
-                now.as_str().into(),
-            ])
-            .on_conflict(OnConflict::new().do_nothing().to_owned())
-            .to_owned();
-        query.build_sql(db_type)
+) -> Result<(String, bool)> {
+    if let Some(doc) = store.find_one::<UserDoc>("email", email).await? {
+        return Ok((doc.id, false));
+    }
+    let user_doc = UserDoc {
+        email: email.to_string(),
+        name: name.map(String::from),
+        org_id: org_id.map(String::from),
+        is_org_admin,
+        active: true,
+        external_id: None,
+        github_id: None,
+        github_login: None,
+        github_refresh_token: None,
     };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    // Fetch the user
-    let fetch_sql = {
-        let query = Query::select()
-            .columns(USER_SELECT_COLUMNS)
-            .from(Users::Table)
-            .and_where(Expr::col(Users::Email).eq(email))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let user = db_fetch_one!(pool, sqlx::query_as::<_, User>(&fetch_sql))?;
-
-    Ok(user)
+    let doc = store.insert(&user_doc).await?;
+    Ok((doc.id, true))
 }
 
 /// Get a user by email.
-#[allow(dead_code)]
-pub async fn get_user_by_email(pool: &Pool, email: &str) -> Result<Option<User>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .columns(USER_SELECT_COLUMNS)
-            .from(Users::Table)
-            .and_where(Expr::col(Users::Email).eq(email))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let user = db_fetch_optional!(pool, sqlx::query_as::<_, User>(&sql))?;
-
-    Ok(user)
+pub async fn get_user_by_email(store: &DocumentStore, email: &str) -> Result<Option<User>> {
+    let doc = store.find_one::<UserDoc>("email", email).await?;
+    Ok(doc.map(User::from))
 }
 
 /// Get a user by ID.
-pub async fn get_user_by_id(pool: &Pool, user_id: &str) -> Result<Option<User>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .columns(USER_SELECT_COLUMNS)
-            .from(Users::Table)
-            .and_where(Expr::col(Users::Id).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let user = db_fetch_optional!(pool, sqlx::query_as::<_, User>(&sql))?;
-
-    Ok(user)
+pub async fn get_user_by_id(store: &DocumentStore, user_id: &str) -> Result<Option<User>> {
+    let doc = store.get::<UserDoc>(user_id).await?;
+    Ok(doc.map(User::from))
 }
 
-/// Delete a user and all associated data.
+/// Delete a user and all associated data atomically.
 ///
-/// Performs application-level cascade deletes for DSQL compatibility.
-/// Order matters - child records must be deleted before parent records.
-pub async fn delete_user(pool: &Pool, user_id: &str) -> Result<()> {
-    let mut tx = pool.begin().await?;
-    let db_type = tx.db_type();
+/// Wraps all cascade deletes in a single transaction so that a partial
+/// failure leaves no orphaned records.
+///
+/// Steps performed:
+/// 1. Delete sessions
+/// 2. Delete enrollment sessions
+/// 3. Delete authenticators (and their related device_auth refs)
+/// 4. Delete SSH revoked certificates
+/// 5. Delete token exchanges
+/// 6. Unlink OAuth clients (set user_id to None)
+/// 7. Delete the user
+pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
+    use super::documents::authenticator::AuthenticatorDoc;
+    use super::documents::credential::{EnrollmentSessionDoc, SshRevokedCertDoc};
+    use super::documents::device_auth::DeviceAuthRequestDoc;
+    use super::documents::oauth::OAuthClientDoc;
+    use super::documents::oauth::TokenExchangeDoc;
+    use super::documents::session::SessionDoc;
 
-    // 1. Delete sessions (references user_id and authenticator_id)
-    let sql1 = {
-        let query = Query::delete()
-            .from_table(Sessions::Table)
-            .and_where(Expr::col(Sessions::UserId).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    tx_execute!(tx, sqlx::query(&sql1))?;
+    let mut tx = store.begin().await?;
+
+    // 1. Delete sessions
+    tx.delete_by_index::<SessionDoc>("user_id", user_id).await?;
 
     // 2. Delete enrollment sessions
-    let sql2 = {
-        let query = Query::delete()
-            .from_table(EnrollmentSessions::Table)
-            .and_where(Expr::col(EnrollmentSessions::UserId).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    tx_execute!(tx, sqlx::query(&sql2))?;
+    tx.delete_by_index::<EnrollmentSessionDoc>("user_id", user_id)
+        .await?;
 
-    // 3. Delete auth events
-    let sql3 = {
-        let query = Query::delete()
-            .from_table(AuthEvents::Table)
-            .and_where(Expr::col(AuthEvents::UserId).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    tx_execute!(tx, sqlx::query(&sql3))?;
-
-    // 4. Delete SCIM group memberships
-    let sql4 = {
-        let query = Query::delete()
-            .from_table(ScimGroupMembers::Table)
-            .and_where(Expr::col(ScimGroupMembers::UserId).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    tx_execute!(tx, sqlx::query(&sql4))?;
-
-    // 5. Handle token exchanges - SET NULL for actor, DELETE for subject
-    let sql5a = {
-        let query = Query::update()
-            .table(TokenExchanges::Table)
-            .value(TokenExchanges::ActorUserId, Option::<String>::None)
-            .and_where(Expr::col(TokenExchanges::ActorUserId).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    tx_execute!(tx, sqlx::query(&sql5a))?;
-
-    let sql5b = {
-        let query = Query::delete()
-            .from_table(TokenExchanges::Table)
-            .and_where(Expr::col(TokenExchanges::SubjectUserId).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    tx_execute!(tx, sqlx::query(&sql5b))?;
-
-    // 6. Delete SSH revoked certificates
-    let sql6 = {
-        let query = Query::delete()
-            .from_table(SshRevokedCertificates::Table)
-            .and_where(Expr::col(SshRevokedCertificates::UserId).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    tx_execute!(tx, sqlx::query(&sql6))?;
-
-    // 7. Delete OAuth clients and their children
-    // First get all client IDs owned by this user
-    let sql7_select = {
-        let query = Query::select()
-            .column(OAuthClients::Id)
-            .from(OAuthClients::Table)
-            .and_where(Expr::col(OAuthClients::UserId).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    let client_ids: Vec<(String,)> = tx_fetch_all!(tx, sqlx::query_as(&sql7_select))?;
-
-    for (client_id,) in client_ids {
-        // Delete usage events first
-        let sql_usage = {
-            let query = Query::delete()
-                .from_table(OAuthUsageEvents::Table)
-                .and_where(Expr::col(OAuthUsageEvents::OAuthClientId).eq(&client_id))
-                .to_owned();
-            query.build_sql(db_type)
-        };
-        tx_execute!(tx, sqlx::query(&sql_usage))?;
-
-        // Delete secrets
-        let sql_secrets = {
-            let query = Query::delete()
-                .from_table(OAuthClientSecrets::Table)
-                .and_where(Expr::col(OAuthClientSecrets::OAuthClientId).eq(&client_id))
-                .to_owned();
-            query.build_sql(db_type)
-        };
-        tx_execute!(tx, sqlx::query(&sql_secrets))?;
-
-        // Delete client
-        let sql_client = {
-            let query = Query::delete()
-                .from_table(OAuthClients::Table)
-                .and_where(Expr::col(OAuthClients::Id).eq(&client_id))
-                .to_owned();
-            query.build_sql(db_type)
-        };
-        tx_execute!(tx, sqlx::query(&sql_client))?;
+    // 3. Clear authenticator_id references in device_auth_requests,
+    //    then delete authenticators
+    let authenticators = tx.find_all::<AuthenticatorDoc>("user_id", user_id).await?;
+    for auth in &authenticators {
+        tx.update_by_index::<DeviceAuthRequestDoc, _>("authenticator_id", &auth.id, |d| {
+            d.authenticator_id = None;
+        })
+        .await?;
+        tx.delete(&auth.id).await?;
     }
 
-    // 8. Clear authenticator references in device_auth_requests, then delete authenticators
-    // For the subquery, we need to use raw SQL as sea-query subqueries are complex
-    let sql8a = {
-        let subquery = Query::select()
-            .column(Authenticators::Id)
-            .from(Authenticators::Table)
-            .and_where(Expr::col(Authenticators::UserId).eq(user_id))
-            .to_owned();
-        let query = Query::update()
-            .table(DeviceAuthRequests::Table)
-            .value(DeviceAuthRequests::AuthenticatorId, Option::<String>::None)
-            .and_where(Expr::col(DeviceAuthRequests::AuthenticatorId).in_subquery(subquery))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    tx_execute!(tx, sqlx::query(&sql8a))?;
+    // 4. Delete SSH revoked certificates
+    tx.delete_by_index::<SshRevokedCertDoc>("user_id", user_id)
+        .await?;
 
-    let sql8b = {
-        let query = Query::delete()
-            .from_table(Authenticators::Table)
-            .and_where(Expr::col(Authenticators::UserId).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    tx_execute!(tx, sqlx::query(&sql8b))?;
+    // 5. Delete token exchanges
+    tx.delete_by_index::<TokenExchangeDoc>("subject_user_id", user_id)
+        .await?;
 
-    // 9. Finally delete the user
-    let sql9 = {
-        let query = Query::delete()
-            .from_table(Users::Table)
-            .and_where(Expr::col(Users::Id).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    tx_execute!(tx, sqlx::query(&sql9))?;
+    // 6. Unlink OAuth clients (set user_id to None)
+    tx.update_by_index::<OAuthClientDoc, _>("user_id", user_id, |d| {
+        d.user_id = None;
+    })
+    .await?;
+
+    // 7. Delete the user
+    tx.delete(user_id).await?;
 
     tx.commit().await?;
-    Ok(())
+    Ok(true)
 }
 
-/// Update a user's GitHub identity (after OAuth linking).
-///
-/// # Arguments
-/// * `pool` - Database connection pool
-/// * `user_id` - User ID to update
-/// * `github_id` - GitHub user ID
-/// * `github_login` - GitHub username
-/// * `refresh_token` - Optional OAuth refresh token for getting new access tokens
+/// Update a user's GitHub identity.
 pub async fn update_user_github_identity(
-    pool: &Pool,
+    store: &DocumentStore,
     user_id: &str,
     github_id: i64,
     github_login: &str,
-    refresh_token: Option<&str>,
-) -> Result<bool> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let mut query = Query::update()
-            .table(Users::Table)
-            .value(Users::GitHubId, github_id)
-            .value(Users::GitHubLogin, github_login)
-            .and_where(Expr::col(Users::Id).eq(user_id))
-            .to_owned();
-
-        if let Some(token) = refresh_token {
-            query = query.value(Users::GitHubRefreshToken, token).to_owned();
-        }
-
-        query.build_sql(db_type)
-    };
-
-    let result = db_execute_prod!(pool, sqlx::query(&sql))?;
-
-    Ok(result.rows_affected() > 0)
+    github_refresh_token: Option<&str>,
+) -> Result<()> {
+    let doc = store
+        .get::<UserDoc>(user_id)
+        .await?
+        .context("user not found")?;
+    let mut data = doc.data;
+    data.github_id = Some(github_id);
+    data.github_login = Some(github_login.to_string());
+    data.github_refresh_token = github_refresh_token.map(String::from);
+    store.update(user_id, &data).await?;
+    Ok(())
 }
 
 /// Get a user's GitHub refresh token.
-pub async fn get_user_github_refresh_token(pool: &Pool, user_id: &str) -> Result<Option<String>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .column(Users::GitHubRefreshToken)
-            .from(Users::Table)
-            .and_where(Expr::col(Users::Id).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let token = db_fetch_optional!(pool, sqlx::query_scalar::<_, Option<String>>(&sql))?;
-
-    Ok(token.flatten())
+pub async fn get_user_github_refresh_token(
+    store: &DocumentStore,
+    user_id: &str,
+) -> Result<Option<String>> {
+    let doc = store.get::<UserDoc>(user_id).await?;
+    Ok(doc.and_then(|d| d.data.github_refresh_token))
 }
 
 /// Clear a user's GitHub refresh token.
-///
-/// Used during SCIM deactivation to prevent further GitHub API access.
-pub async fn clear_user_github_refresh_token(pool: &Pool, user_id: &str) -> Result<bool> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::update()
-            .table(Users::Table)
-            .value(Users::GitHubRefreshToken, Option::<String>::None)
-            .and_where(Expr::col(Users::Id).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let result = db_execute_prod!(pool, sqlx::query(&sql))?;
-
-    Ok(result.rows_affected() > 0)
+pub async fn clear_user_github_refresh_token(store: &DocumentStore, user_id: &str) -> Result<()> {
+    if let Some(doc) = store.get::<UserDoc>(user_id).await? {
+        let mut data = doc.data;
+        data.github_refresh_token = None;
+        store.update(user_id, &data).await?;
+    }
+    Ok(())
 }

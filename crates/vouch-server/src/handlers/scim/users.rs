@@ -40,27 +40,28 @@ pub async fn list_users(
     let count = query.count.unwrap_or(100).min(100);
 
     // Get users from database
-    let users =
-        match db::list_scim_users(&state.db, query.filter.as_deref(), start_index, count).await {
-            Ok(users) => users,
-            Err(e) => {
-                if e.downcast_ref::<ScimFilterError>().is_some() {
-                    return (
-                        StatusCode::BAD_REQUEST,
-                        Json(ScimError::new(400, e.to_string()).with_type("invalidFilter")),
-                    )
-                        .into_response();
-                }
-                tracing::error!("Failed to list users: {e}");
+    let users = match db::list_scim_users(&state.store, query.filter.as_deref(), start_index, count)
+        .await
+    {
+        Ok(users) => users,
+        Err(e) => {
+            if e.downcast_ref::<ScimFilterError>().is_some() {
                 return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ScimError::new(500, "Failed to list users")),
+                    StatusCode::BAD_REQUEST,
+                    Json(ScimError::new(400, e.to_string()).with_type("invalidFilter")),
                 )
                     .into_response();
             }
-        };
+            tracing::error!("Failed to list users: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ScimError::new(500, "Failed to list users")),
+            )
+                .into_response();
+        }
+    };
 
-    let total = match db::count_scim_users(&state.db, query.filter.as_deref()).await {
+    let total = match db::count_scim_users(&state.store, query.filter.as_deref()).await {
         Ok(count) => count,
         Err(_) => users.len(),
     };
@@ -73,7 +74,7 @@ pub async fn list_users(
 
     // Audit log
     if let Err(e) = db::insert_scim_audit(
-        &state.db,
+        &state.audit,
         "list",
         "User",
         "*",
@@ -141,7 +142,7 @@ pub async fn create_user(
 
     // Create user
     let db_user = match db::create_scim_user(
-        &state.db,
+        &state.store,
         &email,
         name.as_deref(),
         user.external_id.as_deref(),
@@ -168,7 +169,7 @@ pub async fn create_user(
 
     // Audit log
     if let Err(e) = db::insert_scim_audit(
-        &state.db,
+        &state.audit,
         "create",
         "User",
         &db_user.id,
@@ -203,7 +204,7 @@ pub async fn get_user(
         return (status, json).into_response();
     }
 
-    let user = match db::get_scim_user(&state.db, &id).await {
+    let user = match db::get_scim_user(&state.store, &id).await {
         Ok(Some(u)) => u,
         Ok(None) => {
             return (
@@ -247,7 +248,7 @@ pub async fn patch_user(
     }
 
     // Get existing user
-    let user = match db::get_scim_user(&state.db, &id).await {
+    let user = match db::get_scim_user(&state.store, &id).await {
         Ok(Some(u)) => u,
         Ok(None) => {
             return (
@@ -344,7 +345,7 @@ pub async fn patch_user(
 
     // Update user in database
     if let Err(e) = db::update_scim_user(
-        &state.db,
+        &state.store,
         &id,
         name.as_deref(),
         external_id.as_deref(),
@@ -366,12 +367,12 @@ pub async fn patch_user(
             "User {} deactivated via SCIM, invalidating sessions and revoking SSH certificates",
             id
         );
-        if let Err(e) = db::delete_sessions_for_user(&state.db, &id).await {
+        if let Err(e) = db::delete_sessions_for_user(&state.store, &id).await {
             tracing::error!("Failed to delete sessions for deactivated user: {e}");
         }
         // Revoke all SSH certificates for this user
         if let Err(e) = db::revoke_all_ssh_certificates_for_user(
-            &state.db,
+            &state.store,
             &id,
             Some("User deactivated via SCIM"),
             Some("scim"),
@@ -381,14 +382,14 @@ pub async fn patch_user(
             tracing::error!("Failed to revoke SSH certificates for deactivated user: {e}");
         }
         // Clear GitHub refresh token to prevent further API access
-        if let Err(e) = db::clear_user_github_refresh_token(&state.db, &id).await {
+        if let Err(e) = db::clear_user_github_refresh_token(&state.store, &id).await {
             tracing::error!("Failed to clear GitHub refresh token for deactivated user: {e}");
         }
     }
 
     // Audit log
     if let Err(e) = db::insert_scim_audit(
-        &state.db,
+        &state.audit,
         "update",
         "User",
         &id,
@@ -401,7 +402,7 @@ pub async fn patch_user(
     }
 
     // Return updated user
-    let updated = match db::get_scim_user(&state.db, &id).await {
+    let updated = match db::get_scim_user(&state.store, &id).await {
         Ok(Some(u)) => u,
         Ok(None) | Err(_) => {
             return (
@@ -435,7 +436,7 @@ pub async fn delete_user(
     };
 
     // Check user exists
-    let user = match db::get_scim_user(&state.db, &id).await {
+    let user = match db::get_scim_user(&state.store, &id).await {
         Ok(Some(u)) => u,
         Ok(None) => {
             return (
@@ -460,13 +461,13 @@ pub async fn delete_user(
         id,
         redact_email(&user.email)
     );
-    if let Err(e) = db::delete_sessions_for_user(&state.db, &id).await {
+    if let Err(e) = db::delete_sessions_for_user(&state.store, &id).await {
         tracing::error!("Failed to delete sessions: {e}");
     }
 
     // Revoke all SSH certificates for this user
     if let Err(e) = db::revoke_all_ssh_certificates_for_user(
-        &state.db,
+        &state.store,
         &id,
         Some("User deleted via SCIM"),
         Some("scim"),
@@ -477,7 +478,7 @@ pub async fn delete_user(
     }
 
     // Delete user (cascades to authenticators)
-    if let Err(e) = db::delete_user(&state.db, &id).await {
+    if let Err(e) = db::delete_user(&state.store, &id).await {
         tracing::error!("Failed to delete user: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -488,7 +489,7 @@ pub async fn delete_user(
 
     // Audit log
     if let Err(e) = db::insert_scim_audit(
-        &state.db,
+        &state.audit,
         "delete",
         "User",
         &id,
@@ -523,8 +524,8 @@ pub fn db_user_to_scim(base_url: &str, user: db::ScimUserRecord) -> ScimUser {
         active: user.active,
         meta: Some(ScimMeta {
             resource_type: "User".to_string(),
-            created: user.created_at.to_jiff().to_string(),
-            last_modified: Some(user.created_at.to_jiff().to_string()),
+            created: user.created_at,
+            last_modified: Some(user.created_at),
             location: format!("{base_url}/scim/v2/Users/{}", user.id),
         }),
     }

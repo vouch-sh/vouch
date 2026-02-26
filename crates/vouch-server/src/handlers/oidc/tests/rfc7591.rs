@@ -15,8 +15,8 @@ use super::helpers::*;
 
 /// Create a user + authenticator + session and return a `Bearer <token>` header value.
 async fn bearer_token(app_state: &std::sync::Arc<crate::AppState>) -> String {
-    let user = create_test_user(&app_state.db, "rfc7591-test@example.com").await;
-    let auth_id = create_test_authenticator(&app_state.db, &user.id).await;
+    let user = create_test_user(&app_state.store, "rfc7591-test@example.com").await;
+    let auth_id = create_test_authenticator(&app_state.store, &user.id).await;
     let token = create_test_session(app_state, &user.id, &user.email, &auth_id).await;
     format!("Bearer {token}")
 }
@@ -24,8 +24,8 @@ async fn bearer_token(app_state: &std::sync::Arc<crate::AppState>) -> String {
 /// Create a user with a unique email and return a `Bearer <token>` header value.
 async fn bearer_token_unique(app_state: &std::sync::Arc<crate::AppState>, suffix: &str) -> String {
     let email = format!("rfc7591-{suffix}@example.com");
-    let user = create_test_user(&app_state.db, &email).await;
-    let auth_id = create_test_authenticator(&app_state.db, &user.id).await;
+    let user = create_test_user(&app_state.store, &email).await;
+    let auth_id = create_test_authenticator(&app_state.store, &user.id).await;
     let token = create_test_session(app_state, &user.id, &user.email, &auth_id).await;
     format!("Bearer {token}")
 }
@@ -65,13 +65,13 @@ async fn test_rfc7591_register_rejects_expired_token() {
     // Simulate a revoked token by creating a real session then deleting it from the DB.
     // The token is a valid ES256 JWT but has no matching session record, so validation fails.
     let (app, state) = test_app().await;
-    let user = create_test_user(&state.db, "rfc7591-expired@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "rfc7591-expired@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     // Delete the session to simulate revocation/expiry
     let token_hash = crate::crypto::hash_token(&token);
-    crate::db::delete_session_by_token_hash(&state.db, &token_hash)
+    crate::db::delete_session_by_token_hash(&state.store, &token_hash)
         .await
         .expect("Failed to delete session");
 
@@ -695,7 +695,7 @@ async fn test_rfc7591_registered_client_persisted_in_db() {
     let client_id = json["client_id"].as_str().unwrap();
 
     // Verify the client exists in the database
-    let db_client = db::get_oauth_client_by_client_id(&state.db, client_id)
+    let db_client = db::get_oauth_client_by_client_id(&state.store, client_id)
         .await
         .expect("DB lookup should succeed")
         .expect("Client must exist in DB");
@@ -1116,8 +1116,8 @@ async fn test_rfc7591_e2e_registered_client_auth_code_flow() {
     };
 
     // Step 2: Create a user and issue an authorization code for this client
-    let user = create_test_user(&state.db, "e2e-dynamic-user@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "e2e-dynamic-user@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     let scope_set = ScopeSet::parse("openid email");
     let code_params = AuthorizationCodeParams {

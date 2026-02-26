@@ -127,7 +127,7 @@ pub struct SshKrlResponse {
     /// Total number of revoked certificates.
     pub total: usize,
     /// Timestamp when the list was generated.
-    pub generated_at: String,
+    pub generated_at: Timestamp,
 }
 
 /// Get the SSH Key Revocation List.
@@ -143,7 +143,7 @@ pub async fn get_ssh_krl(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<SshKrlResponse>, ServiceError> {
     // Get all revoked certificates
-    let certs = db::get_revoked_ssh_certificates(&state.db)
+    let certs = db::get_revoked_ssh_certificates(&state.store)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get revoked certificates: {e}");
@@ -160,7 +160,7 @@ pub async fn get_ssh_krl(
     Ok(Json(SshKrlResponse {
         revoked_serials,
         total,
-        generated_at: Timestamp::now().to_string(),
+        generated_at: Timestamp::now(),
     }))
 }
 
@@ -173,7 +173,7 @@ pub async fn check_ssh_revocation(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(serial): axum::extract::Path<String>,
 ) -> Result<Json<SshRevocationCheckResponse>, ServiceError> {
-    let revoked = db::is_ssh_certificate_revoked(&state.db, &serial)
+    let revoked = db::is_ssh_certificate_revoked(&state.store, &serial)
         .await
         .map_err(|e| {
             tracing::error!("Failed to check revocation status: {e}");
@@ -187,7 +187,7 @@ pub async fn check_ssh_revocation(
     Ok(Json(SshRevocationCheckResponse {
         serial,
         revoked,
-        checked_at: Timestamp::now().to_string(),
+        checked_at: Timestamp::now(),
     }))
 }
 
@@ -199,7 +199,7 @@ pub struct SshRevocationCheckResponse {
     /// Whether the certificate is revoked.
     pub revoked: bool,
     /// Timestamp when the check was performed.
-    pub checked_at: String,
+    pub checked_at: Timestamp,
 }
 
 // ============================================================================
@@ -230,7 +230,7 @@ pub async fn get_aws_token(
     // Issue AWS token
     let config = state.config();
     let result = issue_aws_token(
-        &state.db,
+        &state.store,
         &config.base_url,
         config.session_hours,
         &state.oidc_key,
@@ -288,20 +288,22 @@ async fn get_user_org_domain(
     user_id: &str,
 ) -> Result<Option<String>, ServiceError> {
     // Get user to find their org_id
-    let user = db::get_user_by_id(&state.db, user_id).await.map_err(|e| {
-        tracing::error!("Failed to get user by ID: {e}");
-        ServiceError::http(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db_error",
-            "Internal database error",
-        )
-    })?;
+    let user = db::get_user_by_id(&state.store, user_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user by ID: {e}");
+            ServiceError::http(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?;
 
     // If user has an org, get the org's domain
     if let Some(user) = user
         && let Some(org_id) = user.org_id
     {
-        let domain = db::get_organization_domain(&state.db, &org_id)
+        let domain = db::get_organization_domain(&state.store, &org_id)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to get organization domain: {e}");
@@ -337,7 +339,7 @@ pub async fn get_github_status(
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Get user
-    let user = db::get_user_by_id(&state.db, &token.sub)
+    let user = db::get_user_by_id(&state.store, &token.sub)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get user by ID: {e}");
@@ -356,7 +358,7 @@ pub async fn get_github_status(
 
     // Get all GitHub installations for user's organization
     let github_accounts = if let Some(org_id) = &user.org_id {
-        db::get_github_installations_by_org(&state.db, org_id)
+        db::get_github_installations_by_org(&state.store, org_id)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to get GitHub installations for org {org_id}: {e}");
@@ -409,7 +411,7 @@ pub async fn get_github_token(
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Get user
-    let user = db::get_user_by_id(&state.db, &token.sub)
+    let user = db::get_user_by_id(&state.store, &token.sub)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get user by ID: {e}");
@@ -465,7 +467,7 @@ pub async fn get_github_token(
     // Look up installation
     let installation = if let Some(owner) = &github_owner {
         // Specific owner requested
-        db::get_github_installation_by_org_and_account(&state.db, org_id, owner)
+        db::get_github_installation_by_org_and_account(&state.store, org_id, owner)
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -486,7 +488,7 @@ pub async fn get_github_token(
             })?
     } else {
         // No specific owner - get all installations and require exactly one
-        let installations = db::get_github_installations_by_org(&state.db, org_id)
+        let installations = db::get_github_installations_by_org(&state.store, org_id)
             .await
             .map_err(|e| {
                 tracing::error!("Failed to get GitHub installations for org {org_id}: {e}");
@@ -566,7 +568,7 @@ pub async fn get_github_token(
         })?;
 
     // Calculate expires_in from expires_at
-    let expires_at_ts: Timestamp = gh_token.expires_at.parse().unwrap_or_else(|e| {
+    let expires_at: Timestamp = gh_token.expires_at.parse().unwrap_or_else(|e| {
         tracing::warn!(
             "Failed to parse token expires_at '{}': {e}",
             gh_token.expires_at
@@ -574,7 +576,7 @@ pub async fn get_github_token(
         Timestamp::now()
     });
     let now = Timestamp::now();
-    let expires_in = expires_at_ts
+    let expires_in = expires_at
         .as_second()
         .saturating_sub(now.as_second())
         .max(0) as u64;
@@ -588,7 +590,7 @@ pub async fn get_github_token(
 
     // Log audit event
     if let Err(e) = db::log_github_credential_event(
-        &state.db,
+        &state.audit,
         GitHubCredentialEventParams {
             event_type: "token_issued",
             user_id: &user.id,
@@ -625,7 +627,7 @@ pub async fn get_github_token(
 
     Ok(Json(GitHubTokenResponse {
         token: gh_token.token,
-        expires_at: gh_token.expires_at,
+        expires_at,
         expires_in,
         permissions: gh_token.permissions,
         repositories,

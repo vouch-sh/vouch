@@ -230,7 +230,7 @@ pub async fn authorize(
     // RFC 6749 Section 4.1.2.1: If the client identifier is invalid, the authorization
     // server MUST NOT automatically redirect the user-agent to the invalid redirection URI.
     let oauth_client =
-        match db::get_oauth_client_by_client_id(&state.db, validated.client_id()).await {
+        match db::get_oauth_client_by_client_id(&state.store, validated.client_id()).await {
             Ok(Some(client)) => client,
             Ok(None) => {
                 return AuthorizeDeniedTemplate {
@@ -334,9 +334,8 @@ pub async fn authorize(
             // the user must re-authenticate with their FIDO2 key.
             let needs_reauth = validated.prompt() == Some(Prompt::Login)
                 || validated.max_age().is_some_and(|max_age| {
-                    let auth_time = auth_session.created_at.to_jiff();
                     let age_secs = jiff::Timestamp::now()
-                        .duration_since(auth_time)
+                        .duration_since(auth_session.created_at)
                         .as_secs()
                         .max(0);
                     let Ok(age) = u64::try_from(age_secs) else {
@@ -469,7 +468,7 @@ async fn store_pending_and_redirect(
         dpop_jkt,
     };
 
-    match db::create_pending_oauth_authorization(&state.db, pending_params).await {
+    match db::create_pending_oauth_authorization(&state.store, pending_params).await {
         // axum's Redirect::to() produces a 303 See Other, which is correct for
         // FAPI 2.0 and best-practice for POST-redirect-GET patterns (RFC 9700).
         Ok(pending_id) => Redirect::to(&format!(
@@ -493,7 +492,7 @@ async fn store_pending_and_redirect(
 /// Handle returning from login with a pending auth ID.
 async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &CookieJar) -> Response {
     // Consume the pending auth (single-use)
-    let pending = match db::consume_pending_oauth_authorization(&state.db, pending_id).await {
+    let pending = match db::consume_pending_oauth_authorization(&state.store, pending_id).await {
         Ok(Some(p)) => p,
         Ok(None) => {
             tracing::warn!(
@@ -517,28 +516,28 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
     };
 
     // Look up the OAuth client
-    let oauth_client = match db::get_oauth_client_by_client_id(&state.db, &pending.client_id).await
-    {
-        Ok(Some(client)) => client,
-        Ok(None) => {
-            return oauth_error_redirect(
-                &pending.redirect_uri,
-                "invalid_client",
-                "Unknown client_id",
-                pending.state.as_deref(),
-                &state.config().base_url,
-            );
-        }
-        Err(_) => {
-            return oauth_error_redirect(
-                &pending.redirect_uri,
-                "server_error",
-                "Database error",
-                pending.state.as_deref(),
-                &state.config().base_url,
-            );
-        }
-    };
+    let oauth_client =
+        match db::get_oauth_client_by_client_id(&state.store, &pending.client_id).await {
+            Ok(Some(client)) => client,
+            Ok(None) => {
+                return oauth_error_redirect(
+                    &pending.redirect_uri,
+                    "invalid_client",
+                    "Unknown client_id",
+                    pending.state.as_deref(),
+                    &state.config().base_url,
+                );
+            }
+            Err(_) => {
+                return oauth_error_redirect(
+                    &pending.redirect_uri,
+                    "server_error",
+                    "Database error",
+                    pending.state.as_deref(),
+                    &state.config().base_url,
+                );
+            }
+        };
 
     // Get session from cookie (should exist after login)
     let session_token = jar.get("vouch_session").map(|c| c.value());
@@ -622,7 +621,7 @@ async fn handle_jar_request(
     jar: CookieJar,
 ) -> Response {
     // Look up the OAuth client
-    let oauth_client = match db::get_oauth_client_by_client_id(&state.db, client_id).await {
+    let oauth_client = match db::get_oauth_client_by_client_id(&state.store, client_id).await {
         Ok(Some(client)) => client,
         Ok(None) => {
             return AuthorizeDeniedTemplate {
@@ -749,9 +748,8 @@ async fn handle_jar_request(
             // RFC 9470: Check if re-authentication is required
             let needs_reauth = validated.prompt() == Some(Prompt::Login)
                 || validated.max_age().is_some_and(|max_age| {
-                    let auth_time = auth_session.created_at.to_jiff();
                     let age_secs = jiff::Timestamp::now()
-                        .duration_since(auth_time)
+                        .duration_since(auth_session.created_at)
                         .as_secs()
                         .max(0);
                     let Ok(age) = u64::try_from(age_secs) else {
@@ -858,7 +856,7 @@ async fn handle_par_request(
     jar: CookieJar,
 ) -> Response {
     // Consume the PAR (single-use, client-bound)
-    let par = match db::consume_pushed_authorization_request(&state.db, request_uri, client_id)
+    let par = match db::consume_pushed_authorization_request(&state.store, request_uri, client_id)
         .await
     {
         Ok(Some(p)) => p,
@@ -931,7 +929,7 @@ async fn handle_par_request(
 
     // Look up the OAuth client
     let oauth_client =
-        match db::get_oauth_client_by_client_id(&state.db, validated.client_id()).await {
+        match db::get_oauth_client_by_client_id(&state.store, validated.client_id()).await {
             Ok(Some(client)) => client,
             Ok(None) => {
                 return AuthorizeDeniedTemplate {
@@ -989,9 +987,8 @@ async fn handle_par_request(
             // RFC 9470: Check if re-authentication is required
             let needs_reauth = validated.prompt() == Some(Prompt::Login)
                 || validated.max_age().is_some_and(|max_age| {
-                    let auth_time = auth_session.created_at.to_jiff();
                     let age_secs = jiff::Timestamp::now()
-                        .duration_since(auth_time)
+                        .duration_since(auth_session.created_at)
                         .as_secs()
                         .max(0);
                     let Ok(age) = u64::try_from(age_secs) else {

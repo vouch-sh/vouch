@@ -248,14 +248,13 @@ pub fn auth_code_lifetime_seconds(client: &OAuthClient) -> i64 {
 mod tests {
     use super::*;
     use crate::db::{AccessScope, FapiProfile, OAuthClientType};
-    use jiff_sqlx::ToSqlx;
 
     /// Create a minimal FAPI 2.0 confidential client for testing.
     fn fapi_client() -> OAuthClient {
-        let now = jiff::Timestamp::now().to_sqlx();
+        let now = jiff::Timestamp::now();
         OAuthClient {
             id: "test-fapi-id".to_string(),
-            user_id: "test-user".to_string(),
+            user_id: Some("test-user".to_string()),
             client_id: "fapi-client-id".to_string(),
             name: "FAPI Test Client".to_string(),
             description: None,
@@ -289,10 +288,10 @@ mod tests {
 
     /// Create a minimal standard (non-FAPI) client for testing.
     fn standard_client() -> OAuthClient {
-        let now = jiff::Timestamp::now().to_sqlx();
+        let now = jiff::Timestamp::now();
         OAuthClient {
             id: "test-standard-id".to_string(),
-            user_id: "test-user".to_string(),
+            user_id: Some("test-user".to_string()),
             client_id: "standard-client-id".to_string(),
             name: "Standard Test Client".to_string(),
             description: None,

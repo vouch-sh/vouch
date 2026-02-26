@@ -9,8 +9,8 @@ async fn test_rfc8707_invalid_resource_uri() {
     // returns invalid_target error.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "resource-invalid@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "resource-invalid@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Use a non-absolute URI as resource
     let response = http_get_full(
@@ -46,9 +46,9 @@ async fn test_rfc8707_resource_passthrough_authorize_to_token() {
     // should flow through to the access token audience.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "resource-pass@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "resource-pass@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let resource_uri = "https://api.example.com";
 
@@ -115,8 +115,8 @@ async fn test_rfc8707_resource_uri_with_fragment_rejected() {
     // RFC 8707 Section 2: Resource URI MUST NOT contain a fragment component.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "resource-frag@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "resource-frag@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let response = http_get_full(
         &app,
@@ -161,9 +161,9 @@ async fn test_rfc8707_resource_in_token_exchange() {
     // of the exchanged token.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "resource-exchange@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "resource-exchange@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 

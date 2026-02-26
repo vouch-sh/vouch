@@ -30,7 +30,7 @@
 //! }
 //! ```
 
-use crate::db::{self, Authenticator, Pool};
+use crate::db::{self, Authenticator, store::DocumentStore};
 use crate::redact_email;
 use crate::services::oidc::OidcIdTokenClaimsBuilder;
 use crate::services::oidc::OidcSigningKey;
@@ -86,7 +86,7 @@ pub struct AwsTokenResult {
 /// * `authenticator_id` - The authenticator ID from the session (for AAGUID lookup)
 /// * `hd` - The user's organization domain (Google Workspace hosted domain)
 pub async fn issue_aws_token(
-    db: &Pool,
+    store: &DocumentStore,
     base_url: &str,
     session_hours: u64,
     oidc_key: &OidcSigningKey,
@@ -95,7 +95,7 @@ pub async fn issue_aws_token(
     hd: Option<String>,
 ) -> AwsResult<AwsTokenResult> {
     // Get authenticator info for AAGUID
-    let authenticator = get_authenticator(db, authenticator_id).await?;
+    let authenticator = get_authenticator(store, authenticator_id).await?;
 
     // Token validity matches session duration
     let expires_in = session_hours * 3600;
@@ -124,14 +124,14 @@ pub async fn issue_aws_token(
 
 /// Get authenticator info for AAGUID lookup.
 async fn get_authenticator(
-    db: &Pool,
+    store: &DocumentStore,
     authenticator_id: Option<&str>,
 ) -> AwsResult<Option<Authenticator>> {
     let Some(id) = authenticator_id else {
         return Err(AwsError::NoAuthenticator);
     };
 
-    db::get_authenticator_by_id(db, id)
+    db::get_authenticator_by_id(store, id)
         .await
         .map_err(AwsError::Database)
 }

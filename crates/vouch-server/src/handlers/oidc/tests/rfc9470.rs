@@ -17,9 +17,9 @@ async fn test_rfc9470_acr_values_aal3_accepted() {
     // should succeed for an authenticated user.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "acr-aal3@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "acr-aal3@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
@@ -68,9 +68,9 @@ async fn test_rfc9470_acr_values_unsupported_returns_error() {
     // Vouch only supports AAL3, so requesting only AAL2 should fail.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "acr-unsupported@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "acr-unsupported@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
@@ -133,9 +133,9 @@ async fn test_rfc9470_acr_values_multiple_with_aal3_accepted() {
     // values, Vouch can satisfy it even if other ACRs are also listed.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "acr-multi@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "acr-multi@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
@@ -184,8 +184,8 @@ async fn test_rfc9470_acr_values_too_long_rejected() {
     // Validation: acr_values exceeding 512 characters should be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "acr-long@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "acr-long@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let long_acr = "x".repeat(600);
 
@@ -234,9 +234,9 @@ async fn test_rfc9470_max_age_zero_forces_reauth() {
     // should store OAuth params and redirect to /login.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "maxage-zero@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "maxage-zero@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
@@ -287,9 +287,9 @@ async fn test_rfc9470_max_age_large_value_allows_fresh_session() {
     // created session without requiring re-authentication.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "maxage-large@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "maxage-large@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
@@ -339,9 +339,9 @@ async fn test_rfc9470_prompt_login_forces_reauth() {
     // re-authenticate even if they have a valid session.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "prompt-login@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "prompt-login@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
@@ -391,9 +391,9 @@ async fn test_rfc9470_prompt_none_with_valid_session_succeeds() {
     // With a valid session, authorization should proceed normally.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "prompt-none-ok@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "prompt-none-ok@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
@@ -439,8 +439,8 @@ async fn test_rfc9470_prompt_none_without_session_returns_login_required() {
     // return error=login_required (not redirect to login).
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "prompt-none-noauth@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "prompt-none-noauth@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -499,9 +499,9 @@ async fn test_rfc9470_prompt_none_with_max_age_zero_returns_login_required() {
     // "re-auth is needed but don't show UI" — must return login_required.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "prompt-none-maxage@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "prompt-none-maxage@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
@@ -555,8 +555,8 @@ async fn test_rfc9470_unsupported_prompt_value_rejected() {
     // Vouch supports only "login" and "none".
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "prompt-bad@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "prompt-bad@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -607,9 +607,9 @@ async fn test_rfc9470_acr_values_carried_to_token() {
     // The access token should contain the acr claim.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "acr-token@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "acr-token@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let acr = "urn:nist:authentication:assurance-level:aal3";
     let scope_set = ScopeSet::parse("openid");
@@ -678,9 +678,9 @@ async fn test_rfc9470_unsatisfiable_acr_in_token_exchange_rejected() {
     // reject the exchange with unmet_authentication_requirements.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "acr-reject-token@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "acr-reject-token@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue a code with an ACR that Vouch cannot satisfy (simulates a bug
     // or bypass at the authorization endpoint).
@@ -747,10 +747,10 @@ async fn test_rfc9470_key_delete_requires_step_up() {
     // must return 401 with WWW-Authenticate containing insufficient_user_authentication.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "stepup-delete@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "stepup-delete@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     // Add a second key so delete doesn't fail with "last key" error
-    let auth_id2 = create_test_authenticator(&state.db, &user.id).await;
+    let auth_id2 = create_test_authenticator(&state.store, &user.id).await;
 
     // Create a session with iat 10 minutes in the past (well beyond 60s max_age)
     let stale_iat = jiff::Timestamp::now().as_second() - 600;
@@ -804,10 +804,10 @@ async fn test_rfc9470_key_delete_with_fresh_session_succeeds() {
     // should succeed without step-up challenge.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "stepup-fresh@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "stepup-fresh@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     // Add a second key so we can delete one
-    let auth_id2 = create_test_authenticator(&state.db, &user.id).await;
+    let auth_id2 = create_test_authenticator(&state.store, &user.id).await;
 
     // Fresh session — iat is now
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
@@ -839,10 +839,10 @@ async fn test_rfc9470_key_delete_self_deletion_after_step_up() {
     // even though the authenticator backing the session is being removed.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "stepup-self@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "stepup-self@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     // Need at least 2 keys to allow deletion
-    let _auth_id2 = create_test_authenticator(&state.db, &user.id).await;
+    let _auth_id2 = create_test_authenticator(&state.store, &user.id).await;
 
     // Fresh session authenticated with auth_id
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;

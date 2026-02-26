@@ -349,12 +349,11 @@ pub async fn rename(server: &str, key_id: &str, new_name: &str) -> Result<()> {
 }
 
 /// Format a timestamp for display.
-fn format_timestamp(timestamp: &str) -> String {
-    // SQLite datetime format is "YYYY-MM-DD HH:MM:SS"
-    // Just truncate to "YYYY-MM-DD HH:MM" by taking first 16 chars
-    if timestamp.len() >= 16 {
-        return timestamp.chars().take(16).collect();
+fn format_timestamp(timestamp: &jiff::Timestamp) -> String {
+    let s = timestamp.to_string();
+    // Truncate to "YYYY-MM-DDTHH:MM" (first 16 chars of RFC 3339).
+    if s.len() >= 16 {
+        return s.chars().take(16).collect();
     }
-    // Fall back to showing the raw timestamp
-    timestamp.to_string()
+    s
 }

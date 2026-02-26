@@ -9,8 +9,8 @@ async fn test_rfc8628_device_authorization_response_format() {
     // required fields: device_code, user_code, verification_uri, expires_in, interval.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "device-resp@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "device-resp@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (status, body) = http_post_form(
         &app,
@@ -42,8 +42,8 @@ async fn test_rfc8628_verification_uri_complete() {
     // RFC 8628 Section 3.2: Response SHOULD include verification_uri_complete.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "device-complete@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "device-complete@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (status, body) = http_post_form(
         &app,
@@ -76,8 +76,8 @@ async fn test_rfc8628_pending_token_request() {
     // RFC 8628 Section 3.5: Polling before user authorizes returns authorization_pending.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "device-pending@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "device-pending@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Get device code
     let (status, body) = http_post_form(

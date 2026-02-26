@@ -59,12 +59,12 @@ pub async fn lookup_and_verify_authenticator(
     params: AuthenticatorLookupParams<'_>,
 ) -> ServiceResult<AuthenticatorLookupResult> {
     // Get the authenticator and user in a single JOIN query
-    let row = db::get_authenticator_with_user_by_credential_id(&state.db, params.credential_id)
+    let row = db::get_authenticator_with_user_by_credential_id(&state.store, params.credential_id)
         .await
         .map_err(|e| ServiceError::Internal(e.to_string()))?
         .ok_or(ServiceError::NotFound("credential"))?;
 
-    let (authenticator, user) = row.into_parts();
+    let (authenticator, user) = (row.authenticator, row.user);
 
     // Verify authenticator belongs to this user (from user_handle)
     if authenticator.user_id != params.user_id.to_string() {
@@ -345,11 +345,12 @@ pub async fn create_oauth_access_token(
     // Store session in database (authenticator_id is server-side only)
     let token_hash = hash_token(&token);
     db::create_session(
-        &state.db,
+        &state.store,
         params.user_id,
+        params.email,
         &token_hash,
         params.authenticator_id,
-        &expires.to_string(),
+        expires,
         SessionPurpose::OAuthAccessToken,
     )
     .await

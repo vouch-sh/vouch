@@ -11,6 +11,7 @@ use axum::{
     http::StatusCode,
     response::{Html, IntoResponse, Response},
 };
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::super::session::AuthContext;
@@ -37,8 +38,8 @@ pub struct ApplicationInfo {
     pub application_type: String,
     pub redirect_uris: Vec<String>,
     pub active: bool,
-    pub created_at: String,
-    pub last_used_at: Option<String>,
+    pub created_at: Timestamp,
+    pub last_used_at: Option<Timestamp>,
     pub access_scope: AccessScope,
     pub org_id: Option<String>,
     /// RFC 8707: Registered resource URIs.
@@ -69,8 +70,8 @@ impl From<OAuthClient> for ApplicationInfo {
             application_type: client.application_type.as_str().to_string(),
             redirect_uris,
             active: client.active,
-            created_at: client.created_at.to_jiff().to_string(),
-            last_used_at: client.last_used_at.map(|ts| ts.to_jiff().to_string()),
+            created_at: client.created_at,
+            last_used_at: client.last_used_at,
             access_scope: client.access_scope,
             org_id: client.org_id,
             resource_uris,
@@ -295,9 +296,9 @@ pub struct ApplicationResponse {
     pub application_type: String,
     pub redirect_uris: Vec<String>,
     pub active: bool,
-    pub created_at: String,
-    pub updated_at: String,
-    pub last_used_at: Option<String>,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+    pub last_used_at: Option<Timestamp>,
     pub access_scope: String,
     pub org_id: Option<String>,
     /// RFC 8707: Registered resource URIs.
@@ -326,9 +327,9 @@ impl From<OAuthClient> for ApplicationResponse {
             application_type: client.application_type.as_str().to_string(),
             redirect_uris,
             active: client.active,
-            created_at: client.created_at.to_jiff().to_string(),
-            updated_at: client.updated_at.to_jiff().to_string(),
-            last_used_at: client.last_used_at.map(|ts| ts.to_jiff().to_string()),
+            created_at: client.created_at,
+            updated_at: client.updated_at,
+            last_used_at: client.last_used_at,
             access_scope: client.access_scope.as_str().to_string(),
             org_id: client.org_id,
             resource_uris,
@@ -350,6 +351,6 @@ pub struct ListApplicationsResponse {
 #[derive(Debug, Serialize)]
 pub struct RotateSecretResponse {
     pub client_secret: String,
-    pub created_at: String,
-    pub expires_at: Option<String>,
+    pub created_at: Timestamp,
+    pub expires_at: Option<Timestamp>,
 }

@@ -12,7 +12,9 @@
 //! - Old token exchange records
 //! - DPoP nonces and JTI cache
 
-use crate::db::{self, Pool};
+use crate::db;
+use crate::db::audit::AuditStore;
+use crate::db::store::DocumentStore;
 use aws_lc_rs::rand as aws_rand;
 use jiff::{Timestamp, ToSpan};
 use tokio::task::JoinHandle;
@@ -56,7 +58,8 @@ fn random_jitter(max_jitter_secs: u64) -> std::time::Duration {
 /// 20% of the interval. This staggers cleanup across multiple server instances
 /// to avoid thundering-herd database pressure.
 pub fn start_cleanup_task(
-    db: Pool,
+    store: DocumentStore,
+    audit: AuditStore,
     interval_minutes: u64,
     auth_events_retention_days: i64,
     oauth_events_retention_days: i64,
@@ -82,7 +85,13 @@ pub fn start_cleanup_task(
             tracing::debug!("Running background cleanup tasks");
 
             // Run all cleanup tasks
-            run_cleanup(&db, auth_events_retention_days, oauth_events_retention_days).await;
+            run_cleanup(
+                &store,
+                &audit,
+                auth_events_retention_days,
+                oauth_events_retention_days,
+            )
+            .await;
 
             // Sleep with jitter before the next run
             let jitter = random_jitter(max_jitter_secs);
@@ -100,102 +109,95 @@ pub fn start_cleanup_task(
 
 /// Run all cleanup tasks once.
 pub async fn run_cleanup(
-    db: &Pool,
+    store: &DocumentStore,
+    audit: &AuditStore,
     auth_events_retention_days: i64,
     oauth_events_retention_days: i64,
 ) {
     let now = Timestamp::now();
     let now_str = now.to_string();
 
-    // Clean up expired data
+    // Clean up expired data (DocumentStore)
     cleanup_and_log!(
-        db::delete_expired_sessions(db, &now_str),
+        db::delete_expired_sessions(store, &now_str),
         "expired sessions"
     );
     cleanup_and_log!(
-        db::delete_expired_device_auth_requests(db, &now_str),
+        db::delete_expired_device_auth_requests(store, &now_str),
         "expired device auth requests"
     );
     cleanup_and_log!(
-        db::delete_expired_oidc_states(db, &now_str),
+        db::delete_expired_oidc_states(store, &now_str),
         "expired OIDC states"
     );
     cleanup_and_log!(
-        db::delete_expired_pending_oauth_authorizations(db, &now_str),
+        db::delete_expired_pending_oauth_authorizations(store, &now_str),
         "expired pending OAuth authorizations"
     );
     cleanup_and_log!(
-        db::delete_expired_pushed_authorization_requests(db, &now_str),
+        db::delete_expired_pushed_authorization_requests(store, &now_str),
         "expired pushed authorization requests"
     );
     cleanup_and_log!(
-        db::delete_expired_authorization_codes(db),
+        db::delete_expired_authorization_codes(store),
         "expired authorization codes"
     );
     cleanup_and_log!(
-        db::delete_expired_enrollment_sessions(db),
+        db::delete_expired_enrollment_sessions(store),
         "expired enrollment sessions"
     );
 
-    // Clean up old events with retention cutoffs
+    // Clean up old audit events with retention cutoffs (AuditStore)
     if let Ok(cutoff) = now.checked_sub(auth_events_retention_days.days()) {
-        let cutoff_str = cutoff.to_string();
-        cleanup_and_log!(
-            db::delete_old_auth_events(db, &cutoff_str),
-            "old auth events"
-        );
+        cleanup_and_log!(db::delete_old_auth_events(audit, cutoff), "old auth events");
     }
 
     if let Ok(cutoff) = now.checked_sub(oauth_events_retention_days.days()) {
-        let cutoff_str = cutoff.to_string();
         cleanup_and_log!(
-            db::delete_old_oauth_usage_events(db, &cutoff_str),
+            db::delete_old_oauth_usage_events(audit, cutoff),
             "old OAuth usage events"
         );
     }
 
     if let Ok(cutoff) = now.checked_sub(oauth_events_retention_days.days()) {
         cleanup_and_log!(
-            db::delete_old_github_credential_events(db, &cutoff),
+            db::delete_old_github_credential_events(audit, cutoff),
             "old GitHub credential events"
         );
     }
 
     if let Ok(cutoff) = now.checked_sub(auth_events_retention_days.days()) {
-        let cutoff_str = cutoff.to_string();
         cleanup_and_log!(
-            db::delete_old_scim_audit_logs(db, &cutoff_str),
+            db::delete_old_scim_audit_logs(audit, cutoff),
             "old SCIM audit logs"
         );
     }
 
-    if let Ok(cutoff) = now.checked_sub(oauth_events_retention_days.days()) {
-        let cutoff_str = cutoff.to_string();
-        cleanup_and_log!(
-            db::delete_old_token_exchanges(db, &cutoff_str),
-            "old token exchange records"
-        );
-    }
+    // Clean up old token exchanges (DocumentStore)
+    cleanup_and_log!(
+        db::delete_old_token_exchanges(store),
+        "old token exchange records"
+    );
 
     // Clean up expired JWT assertion JTIs (RFC 7523)
     cleanup_and_log!(
-        db::delete_expired_jwt_assertion_jtis(db, &now_str),
+        db::delete_expired_jwt_assertion_jtis(store),
         "expired JWT assertion JTIs"
     );
 
     // Clean up expired DPoP nonces and JTIs (RFC 9449)
     cleanup_and_log!(
-        db::delete_expired_dpop_nonces(db, &now_str),
+        db::delete_expired_dpop_nonces(store, &now_str),
         "expired DPoP nonces"
     );
     cleanup_and_log!(
-        db::delete_expired_dpop_jtis(db, &now_str),
+        db::delete_expired_dpop_jtis(store, &now_str),
         "expired DPoP JTIs"
     );
 
     // Clean up expired SSH certificate revocations
     cleanup_and_log!(
-        db::delete_expired_ssh_revocations(db),
+        db::delete_expired_ssh_revocations(store),
         "expired SSH certificate revocations"
     );
 

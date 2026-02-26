@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! SCIM 2.0 types (RFC 7643).
 
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 /// SCIM error response (RFC 7644 Section 3.12).
@@ -93,9 +94,9 @@ pub struct ScimEmail {
 #[serde(rename_all = "camelCase")]
 pub struct ScimMeta {
     pub resource_type: String,
-    pub created: String,
+    pub created: Timestamp,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_modified: Option<String>,
+    pub last_modified: Option<Timestamp>,
     pub location: String,
 }
 

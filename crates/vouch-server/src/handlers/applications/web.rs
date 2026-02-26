@@ -41,7 +41,7 @@ pub async fn list_applications_page(
     };
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
-    let applications = match db::get_oauth_clients_for_user(&state.db, user_id).await {
+    let applications = match db::get_oauth_clients_for_user(&state.store, user_id).await {
         Ok(apps) => apps.into_iter().map(ApplicationInfo::from).collect(),
         Err(e) => {
             tracing::error!("Failed to list applications: {}", e);
@@ -95,7 +95,7 @@ pub async fn create_application_form(
         .into_response();
     }
 
-    let Some(app_type) = OAuthClientType::from_str(&form.application_type) else {
+    let Some(app_type) = form.application_type.parse::<OAuthClientType>().ok() else {
         return ApplicationErrorTemplate {
             title: "Invalid Input".to_string(),
             message: "Invalid application type.".to_string(),
@@ -105,7 +105,7 @@ pub async fn create_application_form(
     };
 
     // Parse and validate access scope
-    let access_scope = AccessScope::from_str(&form.access_scope).unwrap_or_default();
+    let access_scope = form.access_scope.parse::<AccessScope>().unwrap_or_default();
 
     // Validate: Organization scope requires user to have an org
     if access_scope == AccessScope::Organization && !auth.has_org {
@@ -120,7 +120,7 @@ pub async fn create_application_form(
     // Get user's org_id for org-scoped apps
     let user_org_id = if auth.has_org {
         // Fetch user to get org_id
-        match db::get_user_by_id(&state.db, user_id).await {
+        match db::get_user_by_id(&state.store, user_id).await {
             Ok(Some(user)) => user.org_id,
             _ => None,
         }
@@ -261,9 +261,9 @@ pub async fn create_application_form(
         }
     }
 
-    // Create the application
+    // Create the application with FAPI settings included at creation time
     let (client, client_id) = match db::create_oauth_client(
-        &state.db,
+        &state.store,
         &CreateOAuthClientParams {
             user_id: Some(user_id),
             name,
@@ -273,11 +273,19 @@ pub async fn create_application_form(
             access_scope,
             org_id,
             resource_uris: &resource_uris,
-            token_endpoint_auth_method: None,
-            jwks: None,
-            jwks_uri: None,
-            fapi_profile: None,
-            dpop_bound_access_tokens: None,
+            token_endpoint_auth_method: if is_fapi {
+                Some(TokenEndpointAuthMethod::PrivateKeyJwt)
+            } else {
+                None
+            },
+            jwks: if is_fapi { jwks_trimmed } else { None },
+            jwks_uri: if is_fapi { jwks_uri_trimmed } else { None },
+            fapi_profile: if is_fapi {
+                Some(FapiProfile::Fapi2Security)
+            } else {
+                None
+            },
+            dpop_bound_access_tokens: if is_fapi { Some(true) } else { None },
             grant_types: None,
             response_types: None,
             software_id: None,
@@ -301,48 +309,13 @@ pub async fn create_application_form(
         }
     };
 
-    // If FAPI is enabled, update the client with FAPI settings
-    if is_fapi
-        && let Err(e) = db::update_oauth_client(
-            &state.db,
-            &UpdateOAuthClientParams {
-                id: &client.id,
-                name,
-                description: form.description.as_deref(),
-                redirect_uris: &redirect_uris,
-                access_scope: Some(access_scope),
-                org_id,
-                resource_uris: &resource_uris,
-                token_endpoint_auth_method: TokenEndpointAuthMethod::PrivateKeyJwt,
-                jwks: jwks_trimmed,
-                jwks_uri: jwks_uri_trimmed,
-                fapi_profile: FapiProfile::Fapi2Security,
-                dpop_bound_access_tokens: true,
-            },
-        )
-        .await
-    {
-        tracing::error!("Failed to apply FAPI settings: {}", e);
-        if let Err(cleanup_err) = db::delete_oauth_client(&state.db, &client.id).await {
-            tracing::warn!(
-                "Failed to clean up OAuth client after FAPI settings failure: {cleanup_err}"
-            );
-        }
-        return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "Failed to create application.".to_string(),
-            back_url: "/applications/new".to_string(),
-        }
-        .into_response();
-    }
-
     // Generate client secret for confidential clients (skip for FAPI — they use private_key_jwt)
     let client_secret = if app_type.requires_secret() && !is_fapi {
         let secret = generate_client_secret();
         let secret_hash = hash_token(&secret);
 
         if let Err(e) = db::create_oauth_client_secret(
-            &state.db,
+            &state.store,
             &client.id,
             &secret_hash,
             Some("Initial secret"),
@@ -352,7 +325,7 @@ pub async fn create_application_form(
         {
             tracing::error!("Failed to create client secret: {}", e);
             // Clean up the client
-            if let Err(cleanup_err) = db::delete_oauth_client(&state.db, &client.id).await {
+            if let Err(cleanup_err) = db::delete_oauth_client(&state.store, &client.id).await {
                 tracing::warn!(
                     "Failed to clean up OAuth client after secret creation failure: {cleanup_err}"
                 );
@@ -397,8 +370,8 @@ pub async fn detail_application_page(
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
     // Get the application
-    let client = match db::get_oauth_client_by_id(&state.db, &app_id).await {
-        Ok(Some(c)) if c.user_id == user_id => c,
+    let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
+        Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         Ok(Some(_)) => {
             return ApplicationErrorTemplate {
                 title: "Not Found".to_string(),
@@ -427,13 +400,13 @@ pub async fn detail_application_page(
     };
 
     // Get secrets count
-    let secrets_count = match db::get_oauth_client_secrets(&state.db, &app_id).await {
+    let secrets_count = match db::get_oauth_client_secrets(&state.store, &app_id).await {
         Ok(s) => s.iter().filter(|s| s.revoked_at.is_none()).count(),
         Err(_) => 0,
     };
 
     // Get usage stats
-    let usage_stats = match db::get_oauth_usage_stats(&state.db, &app_id, None).await {
+    let usage_stats = match db::get_oauth_usage_stats(&state.audit, &app_id, None).await {
         Ok(stats) => stats
             .into_iter()
             .map(|s| UsageStat {
@@ -468,8 +441,8 @@ pub async fn update_application_form(
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
     // Verify ownership
-    let client = match db::get_oauth_client_by_id(&state.db, &app_id).await {
-        Ok(Some(c)) if c.user_id == user_id => c,
+    let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
+        Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         _ => {
             return ApplicationErrorTemplate {
                 title: "Not Found".to_string(),
@@ -495,7 +468,7 @@ pub async fn update_application_form(
     let access_scope = form
         .access_scope
         .as_ref()
-        .and_then(|s| AccessScope::from_str(s));
+        .and_then(|s| s.parse::<AccessScope>().ok());
 
     // Validate: Organization scope requires user to have an org
     if access_scope == Some(AccessScope::Organization) && !auth.has_org {
@@ -509,7 +482,7 @@ pub async fn update_application_form(
 
     // Get user's org_id for org-scoped apps
     let user_org_id = if auth.has_org {
-        match db::get_user_by_id(&state.db, user_id).await {
+        match db::get_user_by_id(&state.store, user_id).await {
             Ok(Some(user)) => user.org_id,
             _ => None,
         }
@@ -689,7 +662,7 @@ pub async fn update_application_form(
 
     // Update the application
     if let Err(e) = db::update_oauth_client(
-        &state.db,
+        &state.store,
         &UpdateOAuthClientParams {
             id: &app_id,
             name,
@@ -735,8 +708,8 @@ pub async fn delete_application_form(
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
     // Verify ownership
-    let client = match db::get_oauth_client_by_id(&state.db, &app_id).await {
-        Ok(Some(c)) if c.user_id == user_id => c,
+    let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
+        Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         _ => {
             return ApplicationErrorTemplate {
                 title: "Not Found".to_string(),
@@ -748,7 +721,7 @@ pub async fn delete_application_form(
     };
 
     // Delete the application
-    if let Err(e) = db::delete_oauth_client(&state.db, &app_id).await {
+    if let Err(e) = db::delete_oauth_client(&state.store, &app_id).await {
         tracing::error!("Failed to delete application: {}", e);
         return ApplicationErrorTemplate {
             title: "Error".to_string(),
@@ -777,8 +750,8 @@ pub async fn rotate_secret_form(
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
     // Verify ownership
-    let client = match db::get_oauth_client_by_id(&state.db, &app_id).await {
-        Ok(Some(c)) if c.user_id == user_id => c,
+    let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
+        Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         _ => {
             return ApplicationErrorTemplate {
                 title: "Not Found".to_string(),
@@ -804,13 +777,13 @@ pub async fn rotate_secret_form(
     let secret_hash = hash_token(&secret);
 
     // Revoke old secrets
-    if let Err(e) = db::revoke_all_oauth_client_secrets(&state.db, &app_id).await {
+    if let Err(e) = db::revoke_all_oauth_client_secrets(&state.store, &app_id).await {
         tracing::error!("Failed to revoke old secrets: {}", e);
     }
 
     // Create new secret
     if let Err(e) = db::create_oauth_client_secret(
-        &state.db,
+        &state.store,
         &app_id,
         &secret_hash,
         Some("Rotated secret"),

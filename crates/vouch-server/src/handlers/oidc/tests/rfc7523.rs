@@ -58,14 +58,17 @@ fn sign_jwt_assertion(
 
 /// Create a test OAuth client configured for `private_key_jwt` auth with inline JWKS.
 /// Returns (TestOAuthClient, pkcs8_bytes) where pkcs8_bytes is the ES256 signing key.
-async fn create_test_jwt_client(pool: &db::Pool, user_id: &str) -> (TestOAuthClient, Vec<u8>) {
+async fn create_test_jwt_client(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+) -> (TestOAuthClient, Vec<u8>) {
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
 
     // Create the client first
-    let client = create_test_oauth_client(pool, user_id).await;
+    let client = create_test_oauth_client(store, user_id).await;
 
     // Get the internal ID for the client
-    let oauth_client = db::get_oauth_client_by_client_id(pool, &client.client_id)
+    let oauth_client = db::get_oauth_client_by_client_id(store, &client.client_id)
         .await
         .expect("DB error")
         .expect("Client not found");
@@ -75,12 +78,12 @@ async fn create_test_jwt_client(pool: &db::Pool, user_id: &str) -> (TestOAuthCli
         "keys": [jwk]
     }))
     .unwrap();
-    db::update_oauth_client_jwks(pool, &oauth_client.id, &jwks_json)
+    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_json)
         .await
         .expect("Failed to set JWKS");
 
     // Set auth method to private_key_jwt
-    db::update_oauth_client_auth_method(pool, &oauth_client.id, "private_key_jwt")
+    db::update_oauth_client_auth_method(store, &oauth_client.id, "private_key_jwt")
         .await
         .expect("Failed to set auth method");
 
@@ -175,8 +178,8 @@ async fn test_rfc7521_mutual_exclusion_of_client_auth() {
     // RFC 7521 Section 4.2: Sending both client_secret and client_assertion must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "mutual-excl@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "mutual-excl@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (status, body) = http_post_form(
         &app,
@@ -202,8 +205,8 @@ async fn test_rfc7521_basic_auth_and_assertion_mutual_exclusion() {
     // RFC 7521 Section 4.2: Basic auth header + client_assertion must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "basic-assert@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "basic-assert@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     let (status, body) = http_post_form(
@@ -253,9 +256,9 @@ async fn test_rfc7523_private_key_jwt_client_auth_full_flow() {
     // client authentication combined with authorization_code grant.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jwt-auth-full@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jwt_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jwt-auth-full@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
     // Issue an authorization code
     let scope_set = ScopeSet::parse("openid email");
@@ -314,9 +317,9 @@ async fn test_rfc7523_private_key_jwt_jti_replay_rejected() {
     // RFC 7523 Section 3: JTI replay must be rejected at the handler level.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jwt-replay@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jwt_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jwt-replay@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
     let token_endpoint = format!("{}/oauth/token", state.config().base_url);
     let fixed_jti = "replay-test-jti-12345";
@@ -396,9 +399,9 @@ async fn test_rfc7523_private_key_jwt_expired_assertion_rejected() {
     // RFC 7523 Section 3: Expired JWT assertion must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jwt-expired@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jwt_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jwt-expired@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
     let scope_set = ScopeSet::parse("openid");
     let code = issue_authorization_code(
@@ -462,9 +465,9 @@ async fn test_rfc7523_private_key_jwt_wrong_audience() {
     // RFC 7523 Section 3: JWT assertion with wrong audience must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jwt-wrong-aud@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jwt_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jwt-wrong-aud@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
     let scope_set = ScopeSet::parse("openid");
     let code = issue_authorization_code(
@@ -519,9 +522,9 @@ async fn test_rfc7523_private_key_jwt_wrong_key() {
     // RFC 7523 Section 3: JWT assertion signed with wrong key must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jwt-wrong-key@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, _correct_pkcs8) = create_test_jwt_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jwt-wrong-key@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, _correct_pkcs8) = create_test_jwt_client(&state.store, &user.id).await;
 
     // Generate a different key pair (not the one registered with the client)
     let (wrong_pkcs8, _wrong_jwk) = generate_es256_signing_key();
@@ -574,9 +577,9 @@ async fn test_rfc7523_private_key_jwt_iss_sub_mismatch() {
     // RFC 7523 Section 3: For client auth, iss MUST equal sub.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jwt-iss-sub@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jwt_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jwt-iss-sub@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
     let scope_set = ScopeSet::parse("openid");
     let code = issue_authorization_code(
@@ -641,9 +644,9 @@ async fn test_rfc7521_mutual_exclusion_secret_and_assertion() {
     // client_secret or Basic auth.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jwt-mutual-excl@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jwt_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jwt-mutual-excl@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
 
     let scope_set = ScopeSet::parse("openid");
     let code = issue_authorization_code(
@@ -711,7 +714,7 @@ async fn test_rfc7523_jwt_bearer_grant_with_trusted_issuer() {
     let (app, state) = test_app().await;
 
     // Create user that the JWT subject will map to
-    let user = create_test_user(&state.db, "jwt-bearer-user@example.com").await;
+    let user = create_test_user(&state.store, "jwt-bearer-user@example.com").await;
 
     // Generate ES256 key pair for the trusted issuer
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
@@ -719,7 +722,7 @@ async fn test_rfc7523_jwt_bearer_grant_with_trusted_issuer() {
     // Create trusted issuer
     let issuer_url = "https://trusted-issuer.example.com";
     let issuer = db::create_trusted_jwt_issuer(
-        &state.db,
+        &state.store,
         issuer_url,
         "Test Trusted Issuer",
         None,
@@ -736,7 +739,7 @@ async fn test_rfc7523_jwt_bearer_grant_with_trusted_issuer() {
         "keys": [jwk]
     }))
     .unwrap();
-    db::update_issuer_jwks_cache(&state.db, &issuer.id, &jwks_json)
+    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_json)
         .await
         .expect("Failed to update JWKS cache");
 
@@ -783,12 +786,12 @@ async fn test_rfc7523_jwt_bearer_grant_jti_replay() {
     // RFC 7523 Section 3: JTI replay detection for JWT bearer grants.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jwt-bearer-replay@example.com").await;
+    let user = create_test_user(&state.store, "jwt-bearer-replay@example.com").await;
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
 
     let issuer_url = "https://replay-issuer.example.com";
     let issuer = db::create_trusted_jwt_issuer(
-        &state.db,
+        &state.store,
         issuer_url,
         "Replay Test Issuer",
         None,
@@ -801,7 +804,7 @@ async fn test_rfc7523_jwt_bearer_grant_jti_replay() {
     .expect("Failed to create issuer");
 
     let jwks_json = serde_json::to_string(&serde_json::json!({ "keys": [jwk] })).unwrap();
-    db::update_issuer_jwks_cache(&state.db, &issuer.id, &jwks_json)
+    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_json)
         .await
         .expect("Failed to update cache");
 
@@ -883,7 +886,7 @@ async fn test_rfc7523_jwt_bearer_grant_user_not_found() {
 
     let issuer_url = "https://no-user-issuer.example.com";
     let issuer = db::create_trusted_jwt_issuer(
-        &state.db,
+        &state.store,
         issuer_url,
         "No User Issuer",
         None,
@@ -896,7 +899,7 @@ async fn test_rfc7523_jwt_bearer_grant_user_not_found() {
     .expect("Failed to create issuer");
 
     let jwks_json = serde_json::to_string(&serde_json::json!({ "keys": [jwk] })).unwrap();
-    db::update_issuer_jwks_cache(&state.db, &issuer.id, &jwks_json)
+    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_json)
         .await
         .expect("Failed to update cache");
 
@@ -948,12 +951,12 @@ async fn test_rfc7523_jwt_bearer_grant_lifetime_exceeded() {
     // RFC 7523 Section 3: JWT assertion lifetime exceeding issuer max must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jwt-bearer-long@example.com").await;
+    let user = create_test_user(&state.store, "jwt-bearer-long@example.com").await;
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
 
     let issuer_url = "https://short-lifetime-issuer.example.com";
     let issuer = db::create_trusted_jwt_issuer(
-        &state.db,
+        &state.store,
         issuer_url,
         "Short Lifetime Issuer",
         None,
@@ -966,7 +969,7 @@ async fn test_rfc7523_jwt_bearer_grant_lifetime_exceeded() {
     .expect("Failed to create issuer");
 
     let jwks_json = serde_json::to_string(&serde_json::json!({ "keys": [jwk] })).unwrap();
-    db::update_issuer_jwks_cache(&state.db, &issuer.id, &jwks_json)
+    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_json)
         .await
         .expect("Failed to update cache");
 

@@ -75,7 +75,7 @@ pub async fn status(
 
     // Check session exists in database
     let token_hash = hash_token(token);
-    let session = db::get_session_by_token_hash(&state.db, &token_hash)
+    let session = db::get_session_by_token_hash(&state.store, &token_hash)
         .await
         .map_err(|e| {
             json_error(
@@ -96,7 +96,7 @@ pub async fn status(
 
     // Get authenticator name from server-side session record
     let device_name = match session.and_then(|s| s.authenticator_id) {
-        Some(auth_id) => db::get_authenticator_by_id(&state.db, &auth_id)
+        Some(auth_id) => db::get_authenticator_by_id(&state.store, &auth_id)
             .await
             .ok()
             .flatten()
@@ -126,10 +126,36 @@ pub async fn logout(State(state): State<Arc<AppState>>, jar: CookieJar) -> Respo
     // Get session from vouch_session cookie and delete it from database
     if let Some(token) = jar.get("vouch_session").map(|c| c.value()) {
         let token_hash = hash_token(token);
-        match db::delete_session_by_token_hash(&state.db, &token_hash).await {
+
+        // Look up session before deletion to capture user info for audit
+        let session_info = db::get_session_by_token_hash(&state.store, &token_hash)
+            .await
+            .ok()
+            .flatten();
+
+        match db::delete_session_by_token_hash(&state.store, &token_hash).await {
             Ok(deleted) => {
                 if deleted {
                     tracing::info!("Session deleted during logout");
+
+                    // Fire-and-forget logout audit event
+                    if let Some(session) = session_info {
+                        let audit = state.audit.clone();
+                        let user_email = session.user_email.clone();
+                        let params = db::AuthEventParams {
+                            user_id: session.user_id.clone(),
+                            event_type: db::AuthEventType::Logout,
+                            success: true,
+                            ..Default::default()
+                        };
+                        tokio::spawn(async move {
+                            if let Err(e) =
+                                db::insert_auth_event(&audit, &params, Some(&user_email)).await
+                            {
+                                tracing::warn!("Failed to log logout event: {}", e,);
+                            }
+                        });
+                    }
                 }
             }
             Err(e) => {

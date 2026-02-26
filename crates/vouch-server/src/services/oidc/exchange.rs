@@ -125,7 +125,7 @@ pub async fn exchange_token(
 
     // Verify the subject token's session exists
     let subject_token_hash = hash_token(params.subject_token);
-    let subject_session = db::get_session_by_token_hash(&state.db, &subject_token_hash)
+    let subject_session = db::get_session_by_token_hash(&state.store, &subject_token_hash)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| {
@@ -139,7 +139,7 @@ pub async fn exchange_token(
     // the exchanged token. For access tokens, the email may not be in the
     // JWT (e.g., when only "openid" scope was granted), so we always use
     // the canonical email from the user record.
-    let subject_user = db::get_user_by_id(&state.db, &subject_session.user_id)
+    let subject_user = db::get_user_by_id(&state.store, &subject_session.user_id)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| {
@@ -171,7 +171,7 @@ pub async fn exchange_token(
         // Verify the actor token's session exists in the database
         let actor_token_hash = hash_token(actor_token);
         if !matches!(
-            db::get_session_by_token_hash(&state.db, &actor_token_hash).await,
+            db::get_session_by_token_hash(&state.store, &actor_token_hash).await,
             Ok(Some(_))
         ) {
             return Err(ServiceError::oauth(
@@ -184,7 +184,7 @@ pub async fn exchange_token(
         let actor_email = if let Some(email) = actor_decoded.email() {
             email.to_string()
         } else {
-            let actor_user = db::get_user_by_id(&state.db, actor_decoded.sub())
+            let actor_user = db::get_user_by_id(&state.store, actor_decoded.sub())
                 .await
                 .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
                 .ok_or_else(|| {
@@ -218,7 +218,7 @@ pub async fn exchange_token(
 
     // Check delegation policy if audience is specified
     let max_ttl_override = if params.audience.is_some() {
-        let policy = db::check_delegation_policy(&state.db, subject_email, params.audience)
+        let policy = db::check_delegation_policy(&state.store, subject_email, params.audience)
             .await
             .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?;
 
@@ -234,7 +234,7 @@ pub async fn exchange_token(
             }
             None => {
                 // No matching policy - check if any policies exist
-                let all_policies = db::get_delegation_policies(&state.db)
+                let all_policies = db::get_delegation_policies(&state.store)
                     .await
                     .unwrap_or_default();
 
@@ -320,19 +320,19 @@ pub async fn exchange_token(
         && let Some(exp) = now.as_second().checked_add(expires_seconds)
         && let Ok(ts) = Timestamp::from_second(exp)
     {
-        ts.to_string()
+        ts
     } else {
-        now.to_string()
+        now
     };
     if let Err(e) = db::insert_token_exchange(
-        &state.db,
+        &state.store,
         &subject_session.user_id,
         &subject_token_hash,
         None, // actor_user_id
         &issued_token_hash,
         params.audience,
         scope_string.as_deref(),
-        &expires_at,
+        expires_at,
     )
     .await
     {

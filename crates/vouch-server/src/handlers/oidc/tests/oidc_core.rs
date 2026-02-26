@@ -13,9 +13,9 @@ async fn test_oidc_id_token_at_hash_claim() {
     // ID token must include at_hash claim.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "at-hash@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "at-hash@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (_access_token, id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -34,9 +34,9 @@ async fn test_oidc_id_token_nonce_echo() {
     // OIDC Core Section 3.1.2.1: Nonce from auth request must appear in ID token.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "nonce-echo@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "nonce-echo@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let test_nonce = "unique-nonce-value-12345";
     let scope_set = ScopeSet::parse("openid");
@@ -92,9 +92,9 @@ async fn test_oidc_id_token_required_claims() {
     // OIDC Core Section 2: ID token must contain iss, sub, aud, exp, iat.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "id-token-claims@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "id-token-claims@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (_access_token, id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -112,9 +112,9 @@ async fn test_oidc_id_token_aud_contains_client_id() {
     // OIDC Core Section 2: Audience must include the requesting client_id.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "id-token-aud@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "id-token-aud@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (_access_token, id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -145,9 +145,9 @@ async fn test_oidc_userinfo_sub_matches_id_token() {
     // OIDC Core Section 5.3.2: UserInfo sub must match ID token sub.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "userinfo-sub@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "userinfo-sub@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -176,9 +176,9 @@ async fn test_oidc_scope_based_claim_filtering() {
     // Request with "openid email" scope should include email in ID token.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "scope-filter@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "scope-filter@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue with "openid email" scope
     let scope_set = ScopeSet::parse("openid email");
@@ -238,9 +238,9 @@ async fn test_oidc_id_token_all_required_claims() {
     // OIDC Core 1.0 Section 2: ID Token must contain required claims.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "idtoken-claims@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "idtoken-claims@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (_, id_token) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -258,9 +258,9 @@ async fn test_oidc_id_token_audience_includes_client_id() {
     // OIDC Core 1.0 Section 2: ID Token aud MUST include the client_id.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "idtoken-aud@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "idtoken-aud@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (_, id_token) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -290,9 +290,9 @@ async fn test_oidc_id_token_at_hash() {
     // ID token should include at_hash.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "idtoken-athash@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "idtoken-athash@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (_, id_token) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -312,9 +312,9 @@ async fn test_oidc_userinfo_sub_consistent_with_id_token() {
     // OIDC Core 1.0 Section 5.3.2: UserInfo sub must match ID token sub.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "userinfo-sub@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "userinfo-sub@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -342,9 +342,9 @@ async fn test_oidc_scope_based_claims_email() {
     // OIDC Core 1.0 Section 5.4: email scope adds email claims.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "scope-email@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "scope-email@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue with "openid email" scope
     let (access_token, _) =
@@ -371,9 +371,9 @@ async fn test_oidc_nonce_echo_in_id_token() {
     // OIDC Core 1.0 Section 3.1.2.1: Nonce from auth request appears in ID token.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "nonce-echo@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "nonce-echo@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let nonce_value = "test-nonce-abc123";
     let scope_set = ScopeSet::parse("openid");

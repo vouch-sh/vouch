@@ -16,7 +16,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 
-use crate::db::{self, Pool};
+use crate::db::{self, store::DocumentStore};
 
 /// Nonce validity in seconds (5 minutes).
 const NONCE_VALIDITY_SECONDS: i64 = 300;
@@ -421,7 +421,7 @@ async fn validate_dpop_common(
     proof: &str,
     expected_method: &str,
     expected_uri: &str,
-    pool: &Pool,
+    store: &DocumentStore,
     config_max_age: i64,
     expected_ath: Option<&str>,
     require_nonce: bool,
@@ -430,7 +430,7 @@ async fn validate_dpop_common(
     let (header, claims) = parse_and_verify_dpop_proof(proof)?;
 
     // Check for replay (JTI must be unique) — atomic INSERT on PRIMARY KEY
-    let is_new = db::check_and_store_dpop_jti(pool, &claims.jti, config_max_age)
+    let is_new = db::check_and_store_dpop_jti(store, &claims.jti, config_max_age)
         .await
         .map_err(|e| DpopError::InvalidFormat(format!("JTI check failed: {e}")))?;
     if !is_new {
@@ -441,7 +441,7 @@ async fn validate_dpop_common(
     // where precomputation attacks are a concern. Resource endpoints use
     // `ath` (access token hash) for binding, so nonces are optional there.
     if require_nonce && claims.nonce.is_none() {
-        let new_nonce = db::generate_dpop_nonce(pool, NONCE_VALIDITY_SECONDS)
+        let new_nonce = db::generate_dpop_nonce(store, NONCE_VALIDITY_SECONDS)
             .await
             .map_err(|e| DpopError::InvalidFormat(format!("nonce generation failed: {e}")))?;
         return Err(DpopError::UseNonce(new_nonce));
@@ -461,11 +461,11 @@ async fn validate_dpop_common(
 
     // Validate nonce via database if provided — atomic DELETE WHERE nonce=? AND expires_at > now
     if let Some(nonce) = claims.nonce.as_deref() {
-        let valid = db::validate_and_consume_dpop_nonce(pool, nonce)
+        let valid = db::validate_and_consume_dpop_nonce(store, nonce)
             .await
             .map_err(|e| DpopError::InvalidFormat(format!("nonce validation failed: {e}")))?;
         if !valid {
-            let new_nonce = db::generate_dpop_nonce(pool, NONCE_VALIDITY_SECONDS)
+            let new_nonce = db::generate_dpop_nonce(store, NONCE_VALIDITY_SECONDS)
                 .await
                 .map_err(|e| DpopError::InvalidFormat(format!("nonce generation failed: {e}")))?;
             return Err(DpopError::UseNonce(new_nonce));
@@ -490,14 +490,14 @@ pub async fn validate_dpop_proof(
     proof: &str,
     expected_method: &str,
     expected_uri: &str,
-    pool: &Pool,
+    store: &DocumentStore,
     config_max_age: i64,
 ) -> Result<ValidatedDpopProof, DpopError> {
     validate_dpop_common(
         proof,
         expected_method,
         expected_uri,
-        pool,
+        store,
         config_max_age,
         None, // No access token hash for token endpoint
         true, // Require nonce at token endpoint
@@ -523,7 +523,7 @@ pub async fn validate_dpop_at_resource(
     proof: &str,
     method: &str,
     uri: &str,
-    pool: &Pool,
+    store: &DocumentStore,
     config_max_age: i64,
 ) -> Result<ValidatedDpopProof, DpopError> {
     let expected_ath = compute_access_token_hash(access_token);
@@ -531,7 +531,7 @@ pub async fn validate_dpop_at_resource(
         proof,
         method,
         uri,
-        pool,
+        store,
         config_max_age,
         Some(&expected_ath),
         false, // Nonces optional at resource endpoints (ath provides binding)

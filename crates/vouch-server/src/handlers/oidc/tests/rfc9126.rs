@@ -107,9 +107,9 @@ async fn test_rfc9126_par_accepts_basic_auth() {
     // RFC 9126 Section 2: client_secret_basic authentication.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-basic@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-basic@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -152,9 +152,9 @@ async fn test_rfc9126_par_accepts_post_body_auth() {
     // RFC 9126 Section 2: client_secret_post authentication.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-post@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-post@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -187,9 +187,9 @@ async fn test_rfc9126_par_rejects_invalid_client_secret() {
     // RFC 9126 Section 2: Invalid client credentials MUST be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-badsecret@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-badsecret@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let wrong_creds = format!("{}:wrong-secret", client.client_id);
     let encoded = base64::engine::general_purpose::STANDARD.encode(wrong_creds.as_bytes());
@@ -251,9 +251,9 @@ async fn test_rfc9126_par_returns_201_created() {
     // RFC 9126 Section 2.2: Successful PAR returns 201 Created.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-201@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-201@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -288,9 +288,9 @@ async fn test_rfc9126_par_returns_request_uri_with_correct_prefix() {
     // "urn:ietf:params:oauth:request_uri:".
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-prefix@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-prefix@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -331,9 +331,9 @@ async fn test_rfc9126_par_returns_expires_in() {
     // RFC 9126 Section 2.2: The response MUST include expires_in.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-expires@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-expires@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -376,9 +376,9 @@ async fn test_rfc9126_par_generates_unique_request_uris() {
     // Each PAR request MUST generate a unique request_uri.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-unique@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-unique@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -429,9 +429,9 @@ async fn test_rfc9126_par_rejects_request_containing_request_uri() {
     // RFC 9126 Section 2.1: The PAR request MUST NOT contain request_uri.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-recursive@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-recursive@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let body = format!(
         "response_type=code\
@@ -467,9 +467,9 @@ async fn test_rfc9126_par_rejects_missing_response_type() {
     // response_type is required at the authorization endpoint per RFC 6749.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-nort@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-nort@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let body = format!(
         "client_id={}\
@@ -501,9 +501,9 @@ async fn test_rfc9126_par_rejects_missing_pkce() {
     // RFC 9700 / project policy: PKCE is required.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-nopkce@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-nopkce@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let body = format!(
         "response_type=code\
@@ -535,9 +535,9 @@ async fn test_rfc9126_par_rejects_unregistered_redirect_uri() {
     // redirect_uri must be registered for the client.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-baduri@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-baduri@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -609,9 +609,9 @@ async fn test_rfc9126_authorize_resolves_request_uri() {
     // request_uri to the stored PAR parameters.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-resolve@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-resolve@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     let request_uri = create_par_request(&app, &client).await;
@@ -712,9 +712,9 @@ async fn test_rfc9126_request_uri_is_single_use() {
     // RFC 9126 Section 2.3: request_uri MUST be consumed on first use.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-single@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-single@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     let request_uri = create_par_request(&app, &client).await;
@@ -772,10 +772,10 @@ async fn test_rfc9126_request_uri_is_client_bound() {
     // created it. A different client MUST NOT be able to use it.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-binding@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client_a = create_test_oauth_client(&state.db, &user.id).await;
-    let client_b = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-binding@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client_a = create_test_oauth_client(&state.store, &user.id).await;
+    let client_b = create_test_oauth_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     // Create PAR with client_a
@@ -812,10 +812,10 @@ async fn test_rfc9126_client_binding_failure_does_not_consume() {
     // The original client should still be able to use it.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "par-nocon@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client_a = create_test_oauth_client(&state.db, &user.id).await;
-    let client_b = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "par-nocon@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client_a = create_test_oauth_client(&state.store, &user.id).await;
+    let client_b = create_test_oauth_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     let request_uri = create_par_request(&app, &client_a).await;

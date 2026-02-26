@@ -13,10 +13,10 @@ async fn test_revoke_valid_token() {
     let (app, state) = test_app().await;
 
     // Create a test session and OAuth client for authentication
-    let user = create_test_user(&state.db, "revoke@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "revoke@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     // Verify token works before revocation
@@ -74,10 +74,10 @@ async fn test_revoke_token_invalidates_session() {
     let (app, state) = test_app().await;
 
     // Create a test session and OAuth client for authentication
-    let user = create_test_user(&state.db, "revoke-check@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "revoke-check@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     // Verify token works before revocation
@@ -122,9 +122,9 @@ async fn test_auth_code_flow_token_revocation() {
     // Issue auth code → exchange → verify userinfo works → revoke → verify 401
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "oauth-revoke@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "oauth-revoke@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -176,8 +176,8 @@ async fn test_rfc7009_revocation_200_ok_regardless() {
     // RFC 7009 Section 2: Revocation always returns 200 OK regardless of token validity.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "revoke-ok@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "revoke-ok@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     // Revoke a nonexistent token
@@ -207,9 +207,9 @@ async fn test_rfc7009_token_type_hint_handling() {
     // RFC 7009 Section 2: token_type_hint is accepted but not required.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "revoke-hint@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "revoke-hint@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -245,8 +245,8 @@ async fn test_rfc7009_invalid_hint_still_processes() {
     // RFC 7009 Section 2.1: Invalid token_type_hint should still process.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "revoke-bad-hint@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "revoke-bad-hint@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     let response = http_post_form_full(
@@ -273,9 +273,9 @@ async fn test_rfc7009_revocation_with_token_type_hint() {
     // RFC 7009 Section 2: token_type_hint is accepted but not required.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "revoke-hint@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "revoke-hint@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -302,9 +302,9 @@ async fn test_rfc7009_revocation_with_invalid_hint() {
     // RFC 7009 Section 2: Invalid hint is accepted (server ignores it).
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "revoke-bad-hint@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "revoke-bad-hint@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -330,9 +330,9 @@ async fn test_rfc7009_revocation_client_auth_required() {
     // for confidential clients.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "revoke-noauth@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "revoke-noauth@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 

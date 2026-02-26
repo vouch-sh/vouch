@@ -113,10 +113,10 @@ pub async fn device_code(
 
     // Store in database
     db::create_device_auth_request(
-        &state.db,
+        &state.store,
         &device_code_hash,
         &user_code,
-        &expires_at.to_string(),
+        expires_at,
         interval_seconds,
     )
     .await
@@ -169,7 +169,7 @@ pub async fn device_token(
 
     // Hash the device code and look it up
     let device_code_hash = hash_device_code(&req.device_code);
-    let request = db::get_device_auth_by_code_hash(&state.db, &device_code_hash)
+    let request = db::get_device_auth_by_code_hash(&state.store, &device_code_hash)
         .await
         .map_err(|_| {
             oauth_error(
@@ -181,9 +181,8 @@ pub async fn device_token(
 
     // Check if expired
     let now = Timestamp::now();
-    let expires_at = request.expires_at.to_jiff();
 
-    if now > expires_at {
+    if now > request.expires_at {
         return Err(oauth_error(
             StatusCode::BAD_REQUEST,
             OAuthError::expired_token(),
@@ -192,7 +191,7 @@ pub async fn device_token(
 
     // Check polling rate
     let allowed =
-        db::update_device_auth_poll_time(&state.db, &request.id, request.interval_seconds)
+        db::update_device_auth_poll_time(&state.store, &request.id, request.interval_seconds)
             .await
             .map_err(|_| {
                 oauth_error(
@@ -476,9 +475,9 @@ mod tests {
         let user_code = "EXPD-CODE";
 
         // Set expiration in the past
-        let expires_at = "2020-01-01T00:00:00Z";
+        let expires_at: Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
         crate::db::create_device_auth_request(
-            &state.db,
+            &state.store,
             &device_code_hash,
             user_code,
             expires_at,
@@ -518,20 +517,20 @@ mod tests {
         let user_code = "DENY-CODE";
 
         let now = Timestamp::now();
-        let expires_at = now.checked_add(Span::new().hours(1)).unwrap().to_string();
+        let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
 
         let id = crate::db::create_device_auth_request(
-            &state.db,
+            &state.store,
             &device_code_hash,
             user_code,
-            &expires_at,
+            expires_at,
             5,
         )
         .await
         .expect("Failed to create device auth request");
 
         // Mark as denied
-        crate::db::deny_device_auth(&state.db, &id)
+        crate::db::deny_device_auth(&state.store, &id)
             .await
             .expect("Failed to update status");
 
@@ -587,23 +586,23 @@ mod tests {
         let user_code = "SUCC-CODE";
 
         let now = Timestamp::now();
-        let expires_at = now.checked_add(Span::new().hours(1)).unwrap().to_string();
+        let expires_at = now.checked_add(Span::new().hours(1)).unwrap();
 
         let id = crate::db::create_device_auth_request(
-            &state.db,
+            &state.store,
             &device_code_hash,
             user_code,
-            &expires_at,
+            expires_at,
             5,
         )
         .await
         .expect("Failed to create device auth request");
 
         // Create a user and authorize the request
-        let user = create_test_user(&state.db, "device-success@example.com").await;
-        let auth_id = create_test_authenticator(&state.db, &user.id).await;
+        let user = create_test_user(&state.store, "device-success@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-        crate::db::authorize_device_auth(&state.db, &id, &user.id, &user.email, &auth_id)
+        crate::db::authorize_device_auth(&state.store, &id, &user.id, &user.email, &auth_id)
             .await
             .expect("Failed to authorize device");
 

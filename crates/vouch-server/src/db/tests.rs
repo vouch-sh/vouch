@@ -3,10 +3,18 @@
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 
+use std::sync::Arc;
+
 use super::*;
+use crate::crypto::document_crypto::PlaintextDocumentCrypto;
+use crate::db::audit::AuditStore;
+use crate::db::store::DocumentStore;
 
 /// Create an in-memory SQLite database for testing.
-async fn test_db() -> Pool {
+///
+/// Returns a `(DocumentStore, AuditStore)` pair backed by the same
+/// in-memory pool with migrations applied.
+async fn test_db() -> (DocumentStore, AuditStore) {
     let pool = Pool::connect("sqlite::memory:")
         .await
         .expect("Failed to create test database");
@@ -23,54 +31,67 @@ async fn test_db() -> Pool {
             .expect("Failed to run migrations"),
     }
 
-    pool
+    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+        Arc::new(PlaintextDocumentCrypto);
+    let store = DocumentStore::new(pool.clone(), crypto.clone());
+    let audit = AuditStore::new(pool, crypto);
+    (store, audit)
 }
 
 #[tokio::test]
 async fn test_upsert_and_get_user() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Create a user
-    let user = upsert_user(&pool, "test@example.com", Some("Test User"))
+    let (user_id, created) = upsert_user(&store, "test@example.com", Some("Test User"))
         .await
         .expect("Failed to create user");
 
-    assert!(!user.id.is_empty());
+    assert!(!user_id.is_empty());
+    assert!(created);
+
+    // Get the full user to check fields
+    let user = get_user_by_id(&store, &user_id)
+        .await
+        .expect("Failed to get user")
+        .expect("User should exist");
     assert_eq!(user.email, "test@example.com");
     assert_eq!(user.name.as_deref(), Some("Test User"));
 
-    // Get the user
-    let fetched = get_user_by_email(&pool, "test@example.com")
+    // Get the user by email
+    let fetched = get_user_by_email(&store, "test@example.com")
         .await
         .expect("Failed to get user")
         .expect("User should exist");
 
-    assert_eq!(fetched.id, user.id);
+    assert_eq!(fetched.id, user_id);
     assert_eq!(fetched.email, "test@example.com");
 }
 
 #[tokio::test]
 async fn test_upsert_idempotent() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // First call creates user
-    let user1 = upsert_user(&pool, "new@example.com", Some("New User"))
+    let (user_id1, created1) = upsert_user(&store, "new@example.com", Some("New User"))
         .await
         .expect("Failed to upsert user");
+    assert!(created1);
 
     // Second call returns same user
-    let user2 = upsert_user(&pool, "new@example.com", Some("Different Name"))
+    let (user_id2, created2) = upsert_user(&store, "new@example.com", Some("Different Name"))
         .await
         .expect("Failed to upsert user");
+    assert!(!created2);
 
-    assert_eq!(user1.id, user2.id);
+    assert_eq!(user_id1, user_id2);
 }
 
 #[tokio::test]
 async fn test_user_not_found() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
-    let user = get_user_by_email(&pool, "nonexistent@example.com")
+    let user = get_user_by_email(&store, "nonexistent@example.com")
         .await
         .expect("Query should succeed");
 
@@ -79,18 +100,18 @@ async fn test_user_not_found() {
 
 #[tokio::test]
 async fn test_session_lifecycle() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Create user
-    let user = upsert_user(&pool, "session@example.com", None)
+    let (user_id, _) = upsert_user(&store, "session@example.com", None)
         .await
         .expect("Failed to create user");
-    let user_id = user.id;
 
-    // Create authenticator (simplified - normally needs more fields)
+    // Create authenticator (with user_email parameter)
     let auth_id = create_authenticator(
-        &pool,
+        &store,
         &user_id,
+        "session@example.com",
         "Test Key",
         b"test-cred-id",
         &[0u8; 32],
@@ -100,14 +121,15 @@ async fn test_session_lifecycle() {
     .await
     .expect("Failed to create authenticator");
 
-    // Create session
+    // Create session (with user_email parameter)
     let token_hash = "test_token_hash_123";
     let session_id = create_session(
-        &pool,
+        &store,
         &user_id,
+        "session@example.com",
         token_hash,
         Some(&auth_id),
-        "2099-12-31T23:59:59Z",
+        "2099-12-31T23:59:59Z".parse().unwrap(),
         SessionPurpose::OAuthAccessToken,
     )
     .await
@@ -116,7 +138,7 @@ async fn test_session_lifecycle() {
     assert!(!session_id.is_empty());
 
     // Get session
-    let session = get_session_by_token_hash(&pool, token_hash)
+    let session = get_session_by_token_hash(&store, token_hash)
         .await
         .expect("Failed to get session")
         .expect("Session should exist");
@@ -124,14 +146,14 @@ async fn test_session_lifecycle() {
     assert_eq!(session.user_id, user_id);
 
     // Delete session
-    let deleted = delete_session_by_token_hash(&pool, token_hash)
+    let deleted = delete_session_by_token_hash(&store, token_hash)
         .await
         .expect("Failed to delete session");
 
     assert!(deleted);
 
     // Session should no longer exist
-    let session = get_session_by_token_hash(&pool, token_hash)
+    let session = get_session_by_token_hash(&store, token_hash)
         .await
         .expect("Failed to get session");
 
@@ -144,22 +166,22 @@ async fn test_session_lifecycle() {
 
 #[tokio::test]
 async fn test_device_auth_request_lifecycle() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Create device auth request
     let device_code_hash = "hashed_device_code_123";
     let user_code = "ABCD-1234";
-    let expires_at = "2099-12-31T23:59:59Z";
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
     let interval = 5;
 
-    let id = create_device_auth_request(&pool, device_code_hash, user_code, expires_at, interval)
+    let id = create_device_auth_request(&store, device_code_hash, user_code, expires_at, interval)
         .await
         .expect("Failed to create device auth request");
 
     assert!(!id.is_empty());
 
     // Get by device code hash
-    let request = get_device_auth_by_code_hash(&pool, device_code_hash)
+    let request = get_device_auth_by_code_hash(&store, device_code_hash)
         .await
         .expect("Failed to get device auth")
         .expect("Device auth should exist");
@@ -169,7 +191,7 @@ async fn test_device_auth_request_lifecycle() {
     assert!(request.user_id.is_none());
 
     // Get by user code
-    let request = get_device_auth_by_user_code(&pool, user_code)
+    let request = get_device_auth_by_user_code(&store, user_code)
         .await
         .expect("Failed to get device auth by user code")
         .expect("Should find by user code");
@@ -177,7 +199,7 @@ async fn test_device_auth_request_lifecycle() {
     assert_eq!(request.device_code_hash, device_code_hash);
 
     // Get by ID
-    let request = get_device_auth_by_id(&pool, &id)
+    let request = get_device_auth_by_id(&store, &id)
         .await
         .expect("Failed to get device auth by ID")
         .expect("Should find by ID");
@@ -187,22 +209,27 @@ async fn test_device_auth_request_lifecycle() {
 
 #[tokio::test]
 async fn test_device_auth_authorization_flow() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Create user first
-    let user = upsert_user(&pool, "device@example.com", Some("Device User"))
+    let (user_id, _) = upsert_user(&store, "device@example.com", Some("Device User"))
         .await
         .expect("Failed to create user");
+    let user = get_user_by_id(&store, &user_id)
+        .await
+        .expect("Failed to get user")
+        .expect("User should exist");
 
     // Create authenticator
     let auth_id = create_authenticator(
-        &pool,
-        &user.id,
+        &store,
+        &user_id,
+        "device@example.com",
         "Test Key",
         b"test-cred-id-device",
         &[0u8; 32],
         None,
-        Some(user.id.as_bytes()),
+        Some(user_id.as_bytes()),
     )
     .await
     .expect("Failed to create authenticator");
@@ -211,64 +238,64 @@ async fn test_device_auth_authorization_flow() {
     let device_code_hash = "hashed_device_code_456";
     let user_code = "EFGH-5678";
     let id = create_device_auth_request(
-        &pool,
+        &store,
         device_code_hash,
         user_code,
-        "2099-12-31T23:59:59Z",
+        "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
     .await
     .expect("Failed to create device auth request");
 
     // Verify initially pending
-    let request = get_device_auth_by_id(&pool, &id)
+    let request = get_device_auth_by_id(&store, &id)
         .await
         .expect("Failed to get request")
         .expect("Should exist");
     assert_eq!(request.status, DeviceAuthStatus::Pending);
 
     // Authorize the request
-    authorize_device_auth(&pool, &id, &user.id, &user.email, &auth_id)
+    authorize_device_auth(&store, &id, &user_id, &user.email, &auth_id)
         .await
         .expect("Failed to authorize");
 
     // Verify status changed to authorized
-    let request = get_device_auth_by_id(&pool, &id)
+    let request = get_device_auth_by_id(&store, &id)
         .await
         .expect("Failed to get request")
         .expect("Should exist");
     assert_eq!(request.status, DeviceAuthStatus::Authorized);
-    assert_eq!(request.user_id, Some(user.id.clone()));
+    assert_eq!(request.user_id, Some(user_id.clone()));
     assert_eq!(request.user_email, Some(user.email.clone()));
     assert_eq!(request.authenticator_id, Some(auth_id));
 }
 
 #[tokio::test]
 async fn test_device_auth_polling_rate_limit() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     let device_code_hash = "rate_limit_test";
     let user_code = "RATE-1234";
     let interval = 5; // 5 seconds
 
     let id = create_device_auth_request(
-        &pool,
+        &store,
         device_code_hash,
         user_code,
-        "2099-12-31T23:59:59Z",
+        "2099-12-31T23:59:59Z".parse().unwrap(),
         interval,
     )
     .await
     .expect("Failed to create device auth request");
 
     // First poll should succeed
-    let allowed = update_device_auth_poll_time(&pool, &id, interval)
+    let allowed = update_device_auth_poll_time(&store, &id, interval)
         .await
         .expect("Failed to update poll time");
     assert!(allowed, "First poll should be allowed");
 
     // Immediate second poll should be rate limited
-    let allowed = update_device_auth_poll_time(&pool, &id, interval)
+    let allowed = update_device_auth_poll_time(&store, &id, interval)
         .await
         .expect("Failed to update poll time");
     assert!(!allowed, "Immediate second poll should be rate limited");
@@ -276,15 +303,15 @@ async fn test_device_auth_polling_rate_limit() {
 
 #[tokio::test]
 async fn test_device_auth_not_found() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Get nonexistent device auth
-    let request = get_device_auth_by_code_hash(&pool, "nonexistent")
+    let request = get_device_auth_by_code_hash(&store, "nonexistent")
         .await
         .expect("Query should succeed");
     assert!(request.is_none());
 
-    let request = get_device_auth_by_user_code(&pool, "XXXX-0000")
+    let request = get_device_auth_by_user_code(&store, "XXXX-0000")
         .await
         .expect("Query should succeed");
     assert!(request.is_none());
@@ -296,14 +323,14 @@ async fn test_device_auth_not_found() {
 
 #[tokio::test]
 async fn test_oidc_state_lifecycle() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Create device auth request first (FK reference)
     let device_auth_id = create_device_auth_request(
-        &pool,
+        &store,
         "device_hash_for_oidc",
         "OIDC-1234",
-        "2099-12-31T23:59:59Z",
+        "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
     .await
@@ -312,15 +339,15 @@ async fn test_oidc_state_lifecycle() {
     // Create OIDC state
     let state = "random_state_12345";
     let nonce = "nonce_67890";
-    let expires_at = "2099-12-31T23:59:59Z";
+    let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
 
-    let id = create_oidc_state(&pool, state, &device_auth_id, nonce, expires_at)
+    let id = create_oidc_state(&store, state, &device_auth_id, nonce, expires_at)
         .await
         .expect("Failed to create OIDC state");
     assert!(!id.is_empty());
 
     // Get OIDC state
-    let oidc_state = get_oidc_state(&pool, state)
+    let oidc_state = get_oidc_state(&store, state)
         .await
         .expect("Failed to get OIDC state")
         .expect("Should exist");
@@ -330,12 +357,12 @@ async fn test_oidc_state_lifecycle() {
     assert_eq!(oidc_state.nonce, nonce);
 
     // Delete OIDC state
-    delete_oidc_state(&pool, state)
+    delete_oidc_state(&store, state)
         .await
         .expect("Failed to delete OIDC state");
 
     // Verify deleted
-    let oidc_state = get_oidc_state(&pool, state)
+    let oidc_state = get_oidc_state(&store, state)
         .await
         .expect("Query should succeed");
     assert!(oidc_state.is_none());
@@ -347,19 +374,19 @@ async fn test_oidc_state_lifecycle() {
 
 #[tokio::test]
 async fn test_oauth_client_crud() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Create user
-    let user = upsert_user(&pool, "developer@example.com", Some("Developer"))
+    let (user_id, _) = upsert_user(&store, "developer@example.com", Some("Developer"))
         .await
         .expect("Failed to create user");
 
     // Create OAuth client
     let redirect_uris = vec!["https://example.com/callback".to_string()];
     let (client, client_id) = create_oauth_client(
-        &pool,
+        &store,
         &CreateOAuthClientParams {
-            user_id: Some(&user.id),
+            user_id: Some(&user_id),
             name: "My App",
             description: Some("A test application"),
             application_type: OAuthClientType::Web,
@@ -390,14 +417,14 @@ async fn test_oauth_client_crud() {
     assert!(client.active);
 
     // Get by ID
-    let fetched = get_oauth_client_by_id(&pool, &client.id)
+    let fetched = get_oauth_client_by_id(&store, &client.id)
         .await
         .expect("Failed to get client")
         .expect("Client should exist");
     assert_eq!(fetched.client_id, client_id);
 
     // Get by client_id
-    let fetched = get_oauth_client_by_client_id(&pool, &client_id)
+    let fetched = get_oauth_client_by_client_id(&store, &client_id)
         .await
         .expect("Failed to get client")
         .expect("Client should exist");
@@ -409,7 +436,7 @@ async fn test_oauth_client_crud() {
         "https://example.com/callback2".to_string(),
     ];
     update_oauth_client(
-        &pool,
+        &store,
         &UpdateOAuthClientParams {
             id: &client.id,
             name: "My Updated App",
@@ -428,7 +455,7 @@ async fn test_oauth_client_crud() {
     .await
     .expect("Failed to update client");
 
-    let updated = get_oauth_client_by_id(&pool, &client.id)
+    let updated = get_oauth_client_by_id(&store, &client.id)
         .await
         .expect("Failed to get client")
         .expect("Client should exist");
@@ -436,13 +463,13 @@ async fn test_oauth_client_crud() {
     assert_eq!(updated.get_redirect_uris().len(), 2);
 
     // Delete client
-    let deleted = delete_oauth_client(&pool, &client.id)
+    let deleted = delete_oauth_client(&store, &client.id)
         .await
         .expect("Failed to delete client");
     assert_eq!(deleted, 1);
 
     // Verify deleted
-    let client = get_oauth_client_by_id(&pool, &client.id)
+    let client = get_oauth_client_by_id(&store, &client.id)
         .await
         .expect("Query should succeed");
     assert!(client.is_none());
@@ -450,9 +477,9 @@ async fn test_oauth_client_crud() {
 
 #[tokio::test]
 async fn test_oauth_client_types() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
-    let user = upsert_user(&pool, "types@example.com", None)
+    let (user_id, _) = upsert_user(&store, "types@example.com", None)
         .await
         .expect("Failed to create user");
 
@@ -464,9 +491,9 @@ async fn test_oauth_client_types() {
         OAuthClientType::Service,
     ] {
         let (client, _) = create_oauth_client(
-            &pool,
+            &store,
             &CreateOAuthClientParams {
-                user_id: Some(&user.id),
+                user_id: Some(&user_id),
                 name: &format!("{:?} App", app_type),
                 description: None,
                 application_type: app_type,
@@ -504,21 +531,21 @@ async fn test_oauth_client_types() {
 
 #[tokio::test]
 async fn test_oauth_client_list_for_user() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
-    let user1 = upsert_user(&pool, "user1@example.com", None)
+    let (user_id1, _) = upsert_user(&store, "user1@example.com", None)
         .await
         .expect("Failed to create user");
-    let user2 = upsert_user(&pool, "user2@example.com", None)
+    let (user_id2, _) = upsert_user(&store, "user2@example.com", None)
         .await
         .expect("Failed to create user");
 
     // Create clients for user1
     for i in 0..3 {
         create_oauth_client(
-            &pool,
+            &store,
             &CreateOAuthClientParams {
-                user_id: Some(&user1.id),
+                user_id: Some(&user_id1),
                 name: &format!("App {}", i),
                 description: None,
                 application_type: OAuthClientType::Web,
@@ -546,9 +573,9 @@ async fn test_oauth_client_list_for_user() {
 
     // Create client for user2
     create_oauth_client(
-        &pool,
+        &store,
         &CreateOAuthClientParams {
-            user_id: Some(&user2.id),
+            user_id: Some(&user_id2),
             name: "Other App",
             description: None,
             application_type: OAuthClientType::Web,
@@ -574,13 +601,13 @@ async fn test_oauth_client_list_for_user() {
     .expect("Failed to create client");
 
     // Get user1's clients
-    let clients = get_oauth_clients_for_user(&pool, &user1.id)
+    let clients = get_oauth_clients_for_user(&store, &user_id1)
         .await
         .expect("Failed to get clients");
     assert_eq!(clients.len(), 3);
 
     // Get user2's clients
-    let clients = get_oauth_clients_for_user(&pool, &user2.id)
+    let clients = get_oauth_clients_for_user(&store, &user_id2)
         .await
         .expect("Failed to get clients");
     assert_eq!(clients.len(), 1);
@@ -588,16 +615,16 @@ async fn test_oauth_client_list_for_user() {
 
 #[tokio::test]
 async fn test_oauth_client_secret_management() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
-    let user = upsert_user(&pool, "secrets@example.com", None)
+    let (user_id, _) = upsert_user(&store, "secrets@example.com", None)
         .await
         .expect("Failed to create user");
 
     let (client, _) = create_oauth_client(
-        &pool,
+        &store,
         &CreateOAuthClientParams {
-            user_id: Some(&user.id),
+            user_id: Some(&user_id),
             name: "Secret App",
             description: None,
             application_type: OAuthClientType::Web,
@@ -624,29 +651,34 @@ async fn test_oauth_client_secret_management() {
 
     // Create a secret
     let secret_hash = "hashed_secret_12345";
-    let secret =
-        create_oauth_client_secret(&pool, &client.id, secret_hash, Some("Initial secret"), None)
-            .await
-            .expect("Failed to create secret");
+    let secret = create_oauth_client_secret(
+        &store,
+        &client.id,
+        secret_hash,
+        Some("Initial secret"),
+        None,
+    )
+    .await
+    .expect("Failed to create secret");
 
     assert!(!secret.id.is_empty());
     assert_eq!(secret.oauth_client_id, client.id);
     assert!(secret.revoked_at.is_none());
 
     // Get secrets
-    let secrets = get_oauth_client_secrets(&pool, &client.id)
+    let secrets = get_oauth_client_secrets(&store, &client.id)
         .await
         .expect("Failed to get secrets");
     assert_eq!(secrets.len(), 1);
 
     // Revoke all secrets
-    let revoked_count = revoke_all_oauth_client_secrets(&pool, &client.id)
+    let revoked_count = revoke_all_oauth_client_secrets(&store, &client.id)
         .await
         .expect("Failed to revoke secrets");
     assert_eq!(revoked_count, 1);
 
     // Verify revoked
-    let secrets = get_oauth_client_secrets(&pool, &client.id)
+    let secrets = get_oauth_client_secrets(&store, &client.id)
         .await
         .expect("Failed to get secrets");
     assert!(secrets[0].revoked_at.is_some());
@@ -654,16 +686,16 @@ async fn test_oauth_client_secret_management() {
 
 #[tokio::test]
 async fn test_oauth_usage_recording() {
-    let pool = test_db().await;
+    let (store, audit) = test_db().await;
 
-    let user = upsert_user(&pool, "usage@example.com", None)
+    let (user_id, _) = upsert_user(&store, "usage@example.com", None)
         .await
         .expect("Failed to create user");
 
     let (client, _) = create_oauth_client(
-        &pool,
+        &store,
         &CreateOAuthClientParams {
-            user_id: Some(&user.id),
+            user_id: Some(&user_id),
             name: "Usage App",
             description: None,
             application_type: OAuthClientType::Web,
@@ -688,12 +720,12 @@ async fn test_oauth_usage_recording() {
     .await
     .expect("Failed to create client");
 
-    // Record some events
+    // Record some events (now uses AuditStore)
     record_oauth_event(
-        &pool,
+        &audit,
         &client.id,
         OAuthEventType::TokenIssued,
-        Some(&user.id),
+        Some(&user_id),
         None,
         None,
         None,
@@ -701,10 +733,10 @@ async fn test_oauth_usage_recording() {
     .await
     .expect("Failed to record event");
     record_oauth_event(
-        &pool,
+        &audit,
         &client.id,
         OAuthEventType::TokenIssued,
-        Some(&user.id),
+        Some(&user_id),
         None,
         None,
         None,
@@ -712,10 +744,10 @@ async fn test_oauth_usage_recording() {
     .await
     .expect("Failed to record event");
     record_oauth_event(
-        &pool,
+        &audit,
         &client.id,
         OAuthEventType::TokenRevoked,
-        Some(&user.id),
+        Some(&user_id),
         None,
         None,
         None,
@@ -723,24 +755,23 @@ async fn test_oauth_usage_recording() {
     .await
     .expect("Failed to record event");
 
-    // Get usage stats
-    let stats = get_oauth_usage_stats(&pool, &client.id, None)
+    let stats = get_oauth_usage_stats(&audit, &client.id, None)
         .await
         .expect("Failed to get stats");
 
-    assert_eq!(stats.len(), 2); // token_issued and token_revoked
-
-    let token_issued = stats
+    // Should have 2 token_issued and 1 token_revoked
+    let issued_count: i64 = stats
         .iter()
-        .find(|s| s.event_type == "token_issued")
-        .unwrap();
-    assert_eq!(token_issued.count, 2);
-
-    let token_revoked = stats
+        .filter(|s| s.event_type == "oauth_token_issued")
+        .map(|s| s.count)
+        .sum();
+    assert_eq!(issued_count, 2);
+    let revoked_count: i64 = stats
         .iter()
-        .find(|s| s.event_type == "token_revoked")
-        .unwrap();
-    assert_eq!(token_revoked.count, 1);
+        .filter(|s| s.event_type == "oauth_token_revoked")
+        .map(|s| s.count)
+        .sum();
+    assert_eq!(revoked_count, 1);
 }
 
 // ========================================================================
@@ -749,11 +780,11 @@ async fn test_oauth_usage_recording() {
 
 #[tokio::test]
 async fn test_scim_user_crud() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Create SCIM user
     let user = create_scim_user(
-        &pool,
+        &store,
         "scim@example.com",
         Some("SCIM User"),
         Some("ext-123"),
@@ -769,7 +800,7 @@ async fn test_scim_user_crud() {
     assert!(user.active);
 
     // Get SCIM user
-    let fetched = get_scim_user(&pool, &user.id)
+    let fetched = get_scim_user(&store, &user.id)
         .await
         .expect("Failed to get SCIM user")
         .expect("User should exist");
@@ -777,7 +808,7 @@ async fn test_scim_user_crud() {
 
     // Update SCIM user
     update_scim_user(
-        &pool,
+        &store,
         &user.id,
         Some("Updated Name"),
         Some("ext-456"),
@@ -786,7 +817,7 @@ async fn test_scim_user_crud() {
     .await
     .expect("Failed to update SCIM user");
 
-    let updated = get_scim_user(&pool, &user.id)
+    let updated = get_scim_user(&store, &user.id)
         .await
         .expect("Failed to get user")
         .expect("User should exist");
@@ -797,41 +828,41 @@ async fn test_scim_user_crud() {
 
 #[tokio::test]
 async fn test_scim_user_list_and_filter() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Create multiple users
     for i in 0..5 {
-        create_scim_user(&pool, &format!("user{}@example.com", i), None, None, true)
+        create_scim_user(&store, &format!("user{}@example.com", i), None, None, true)
             .await
             .expect("Failed to create user");
     }
 
     // List all users
-    let users = list_scim_users(&pool, None, 1, 100)
+    let users = list_scim_users(&store, None, 1, 100)
         .await
         .expect("Failed to list users");
     assert_eq!(users.len(), 5);
 
     // Count users
-    let count = count_scim_users(&pool, None)
+    let count = count_scim_users(&store, None)
         .await
         .expect("Failed to count users");
     assert_eq!(count, 5);
 
     // Filter by userName (email)
-    let users = list_scim_users(&pool, Some("userName eq \"user2@example.com\""), 1, 100)
+    let users = list_scim_users(&store, Some("userName eq \"user2@example.com\""), 1, 100)
         .await
         .expect("Failed to filter users");
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].email, "user2@example.com");
 
     // Pagination
-    let page1 = list_scim_users(&pool, None, 1, 2)
+    let page1 = list_scim_users(&store, None, 1, 2)
         .await
         .expect("Failed to paginate");
     assert_eq!(page1.len(), 2);
 
-    let page2 = list_scim_users(&pool, None, 3, 2)
+    let page2 = list_scim_users(&store, None, 3, 2)
         .await
         .expect("Failed to paginate");
     assert_eq!(page2.len(), 2);
@@ -839,17 +870,18 @@ async fn test_scim_user_list_and_filter() {
 
 #[tokio::test]
 async fn test_scim_session_invalidation_on_deactivation() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Create user with session
-    let user = create_scim_user(&pool, "invalidate@example.com", None, None, true)
+    let user = create_scim_user(&store, "invalidate@example.com", None, None, true)
         .await
         .expect("Failed to create user");
 
-    // Create authenticator
+    // Create authenticator (with user_email parameter)
     let auth_id = create_authenticator(
-        &pool,
+        &store,
         &user.id,
+        "invalidate@example.com",
         "SCIM Key",
         b"scim-cred-id",
         &[0u8; 32],
@@ -859,32 +891,33 @@ async fn test_scim_session_invalidation_on_deactivation() {
     .await
     .expect("Failed to create authenticator");
 
-    // Create session
+    // Create session (with user_email parameter)
     create_session(
-        &pool,
+        &store,
         &user.id,
+        "invalidate@example.com",
         "scim_token_hash",
         Some(&auth_id),
-        "2099-12-31T23:59:59Z",
+        "2099-12-31T23:59:59Z".parse().unwrap(),
         SessionPurpose::OAuthAccessToken,
     )
     .await
     .expect("Failed to create session");
 
     // Verify session exists
-    let session = get_session_by_token_hash(&pool, "scim_token_hash")
+    let session = get_session_by_token_hash(&store, "scim_token_hash")
         .await
         .expect("Failed to get session");
     assert!(session.is_some());
 
     // Delete all sessions for user (as SCIM would do on deactivation)
-    let deleted = delete_sessions_for_user(&pool, &user.id)
+    let deleted = delete_sessions_for_user(&store, &user.id)
         .await
         .expect("Failed to delete sessions");
     assert_eq!(deleted, 1);
 
     // Verify session deleted
-    let session = get_session_by_token_hash(&pool, "scim_token_hash")
+    let session = get_session_by_token_hash(&store, "scim_token_hash")
         .await
         .expect("Failed to get session");
     assert!(session.is_none());
@@ -892,27 +925,15 @@ async fn test_scim_session_invalidation_on_deactivation() {
 
 #[tokio::test]
 async fn test_scim_audit_logging() {
-    let pool = test_db().await;
+    let (_store, audit) = test_db().await;
 
-    // Create a SCIM token first (required for foreign key constraint)
-    let token_id = create_scim_token(
-        &pool,
-        "test_token_hash",
-        Some("Test token"),
-        None,
-        None,
-        None,
-    )
-    .await
-    .expect("Failed to create SCIM token");
-
-    // Insert audit log with token reference
+    // Insert audit log (insert_scim_audit now uses AuditStore directly)
     let audit_id = insert_scim_audit(
-        &pool,
+        &audit,
         "CREATE",
         "User",
         "user-123",
-        Some(&token_id),
+        Some("token-123"),
         Some("Created user via SCIM"),
     )
     .await
@@ -921,7 +942,7 @@ async fn test_scim_audit_logging() {
     assert!(!audit_id.is_empty());
 
     // Insert another audit log without token (None is valid)
-    let audit_id2 = insert_scim_audit(&pool, "DELETE", "User", "user-789", None, None)
+    let audit_id2 = insert_scim_audit(&audit, "DELETE", "User", "user-789", None, None)
         .await
         .expect("Failed to insert audit log");
 
@@ -935,17 +956,17 @@ async fn test_scim_audit_logging() {
 
 #[tokio::test]
 async fn test_auth_event_logging() {
-    let pool = test_db().await;
+    let (store, audit) = test_db().await;
 
-    let user = upsert_user(&pool, "events@example.com", None)
+    let (user_id, _) = upsert_user(&store, "events@example.com", None)
         .await
         .expect("Failed to create user");
 
-    // Log successful login
+    // Log successful login (insert_auth_event now uses AuditStore)
     let event_id = insert_auth_event(
-        &pool,
+        &audit,
         &AuthEventParams {
-            user_id: user.id.clone(),
+            user_id: user_id.clone(),
             event_type: AuthEventType::LoginSuccess,
             authenticator_id: Some("auth-123".to_string()),
             client_ip: Some("192.168.1.1".to_string()),
@@ -953,6 +974,7 @@ async fn test_auth_event_logging() {
             success: true,
             ..Default::default()
         },
+        Some("events@example.com"),
     )
     .await
     .expect("Failed to insert auth event");
@@ -961,24 +983,25 @@ async fn test_auth_event_logging() {
 
     // Log failed login
     insert_auth_event(
-        &pool,
+        &audit,
         &AuthEventParams {
-            user_id: user.id.clone(),
+            user_id: user_id.clone(),
             event_type: AuthEventType::LoginFailed,
             client_ip: Some("192.168.1.1".to_string()),
             success: false,
             failure_reason: Some("Invalid credential".to_string()),
             ..Default::default()
         },
+        Some("events@example.com"),
     )
     .await
     .expect("Failed to insert auth event");
 
-    // Query events for user
+    // Query events for user (get_auth_events now uses AuditStore)
     let events = get_auth_events(
-        &pool,
+        &audit,
         &AuthEventQuery {
-            user_id: Some(user.id.clone()),
+            user_id: Some(user_id.clone()),
             limit: Some(10),
             ..Default::default()
         },
@@ -990,7 +1013,7 @@ async fn test_auth_event_logging() {
 
     // Query by event type
     let events = get_auth_events(
-        &pool,
+        &audit,
         &AuthEventQuery {
             event_type: Some("login_success".to_string()),
             limit: Some(10),
@@ -1010,20 +1033,21 @@ async fn test_auth_event_logging() {
 
 #[tokio::test]
 async fn test_authenticator_crud() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
-    let user = upsert_user(&pool, "auth@example.com", None)
+    let (user_id, _) = upsert_user(&store, "auth@example.com", None)
         .await
         .expect("Failed to create user");
 
-    // Create authenticator
+    // Create authenticator (with user_email parameter)
     let credential_id = vec![1u8, 2, 3, 4, 5];
     let public_key = vec![10u8; 65];
     let user_handle = vec![20u8; 32];
 
     let auth_id = create_authenticator(
-        &pool,
-        &user.id,
+        &store,
+        &user_id,
+        "auth@example.com",
         "YubiKey 5C",
         &credential_id,
         &public_key,
@@ -1036,7 +1060,7 @@ async fn test_authenticator_crud() {
     assert!(!auth_id.is_empty());
 
     // Get by ID
-    let auth = get_authenticator_by_id(&pool, &auth_id)
+    let auth = get_authenticator_by_id(&store, &auth_id)
         .await
         .expect("Failed to get authenticator")
         .expect("Authenticator should exist");
@@ -1046,7 +1070,7 @@ async fn test_authenticator_crud() {
     assert_eq!(auth.counter, 0);
 
     // Get by credential ID
-    let auth = get_authenticator_by_credential_id(&pool, &credential_id)
+    let auth = get_authenticator_by_credential_id(&store, &credential_id)
         .await
         .expect("Failed to get authenticator")
         .expect("Authenticator should exist");
@@ -1054,18 +1078,18 @@ async fn test_authenticator_crud() {
     assert_eq!(auth.id, auth_id);
 
     // Get all for user
-    let auths = get_authenticators_for_user(&pool, &user.id)
+    let auths = get_authenticators_for_user(&store, &user_id)
         .await
         .expect("Failed to get authenticators");
 
     assert_eq!(auths.len(), 1);
 
     // Update counter
-    update_authenticator_counter(&pool, &auth_id, 42)
+    update_authenticator_counter(&store, &auth_id, 42)
         .await
         .expect("Failed to update counter");
 
-    let auth = get_authenticator_by_id(&pool, &auth_id)
+    let auth = get_authenticator_by_id(&store, &auth_id)
         .await
         .expect("Failed to get authenticator")
         .expect("Authenticator should exist");
@@ -1073,14 +1097,14 @@ async fn test_authenticator_crud() {
     assert_eq!(auth.counter, 42);
 
     // Delete authenticator
-    let deleted = delete_authenticator(&pool, &auth_id)
+    let deleted = delete_authenticator(&store, &auth_id)
         .await
         .expect("Failed to delete authenticator");
 
     assert_eq!(deleted, 1);
 
     // Verify deleted
-    let auth = get_authenticator_by_id(&pool, &auth_id)
+    let auth = get_authenticator_by_id(&store, &auth_id)
         .await
         .expect("Query should succeed");
 
@@ -1089,23 +1113,24 @@ async fn test_authenticator_crud() {
 
 #[tokio::test]
 async fn test_authenticator_count() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
-    let user = upsert_user(&pool, "count@example.com", None)
+    let (user_id, _) = upsert_user(&store, "count@example.com", None)
         .await
         .expect("Failed to create user");
 
     // Initially 0 authenticators
-    let count = count_authenticators_for_user(&pool, &user.id)
+    let count = count_authenticators_for_user(&store, &user_id)
         .await
         .expect("Failed to count");
     assert_eq!(count, 0);
 
-    // Add authenticators
+    // Add authenticators (with user_email parameter)
     for i in 0..3 {
         create_authenticator(
-            &pool,
-            &user.id,
+            &store,
+            &user_id,
+            "count@example.com",
             &format!("Key {}", i),
             &[i as u8; 10],
             &[0u8; 32],
@@ -1116,7 +1141,7 @@ async fn test_authenticator_count() {
         .expect("Failed to create authenticator");
     }
 
-    let count = count_authenticators_for_user(&pool, &user.id)
+    let count = count_authenticators_for_user(&store, &user_id)
         .await
         .expect("Failed to count");
     assert_eq!(count, 3);
@@ -1128,10 +1153,10 @@ async fn test_authenticator_count() {
 
 #[tokio::test]
 async fn test_scim_token_management() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
-    // Create org for SCIM token
-    let org = create_organization(&pool, "test.com", Some("Test Org"), None)
+    // Create org for SCIM token (new signature: domain, name, created_by_user_id)
+    let org = create_organization(&store, "test.com", Some("Test Org"), None)
         .await
         .expect("Failed to create org");
     let org_id = &org.id;
@@ -1139,7 +1164,7 @@ async fn test_scim_token_management() {
     // Create SCIM token with org
     let token_hash = "hashed_scim_token";
     let token_id = create_scim_token(
-        &pool,
+        &store,
         token_hash,
         Some("Admin token"),
         None,
@@ -1152,7 +1177,7 @@ async fn test_scim_token_management() {
     assert!(!token_id.is_empty());
 
     // Get by hash
-    let token = get_scim_token_by_hash(&pool, token_hash)
+    let token = get_scim_token_by_hash(&store, token_hash)
         .await
         .expect("Failed to get token")
         .expect("Token should exist");
@@ -1161,11 +1186,11 @@ async fn test_scim_token_management() {
     assert!(token.last_used_at.is_none());
 
     // Update last used
-    update_scim_token_last_used(&pool, &token.id)
+    update_scim_token_last_used(&store, &token.id)
         .await
         .expect("Failed to update last used");
 
-    let token = get_scim_token_by_hash(&pool, token_hash)
+    let token = get_scim_token_by_hash(&store, token_hash)
         .await
         .expect("Failed to get token")
         .expect("Token should exist");
@@ -1173,14 +1198,14 @@ async fn test_scim_token_management() {
     assert!(token.last_used_at.is_some());
 
     // List tokens
-    let tokens = list_scim_tokens(&pool, None)
+    let tokens = list_scim_tokens(&store, None)
         .await
         .expect("Failed to list tokens");
 
     assert_eq!(tokens.len(), 1);
 
     // Attempt delete with wrong org (should not delete)
-    let deleted = delete_scim_token(&pool, &token_id, "wrong-org")
+    let deleted = delete_scim_token(&store, &token_id, "wrong-org")
         .await
         .expect("Query should succeed");
     assert!(
@@ -1189,7 +1214,7 @@ async fn test_scim_token_management() {
     );
 
     // Verify token still exists
-    let token = get_scim_token_by_hash(&pool, token_hash)
+    let token = get_scim_token_by_hash(&store, token_hash)
         .await
         .expect("Query should succeed");
     assert!(
@@ -1198,12 +1223,12 @@ async fn test_scim_token_management() {
     );
 
     // Delete token with correct org
-    let deleted = delete_scim_token(&pool, &token_id, org_id)
+    let deleted = delete_scim_token(&store, &token_id, org_id)
         .await
         .expect("Failed to delete token");
     assert!(deleted, "Should delete token belonging to correct org");
 
-    let token = get_scim_token_by_hash(&pool, token_hash)
+    let token = get_scim_token_by_hash(&store, token_hash)
         .await
         .expect("Query should succeed");
 
@@ -1216,16 +1241,17 @@ async fn test_scim_token_management() {
 
 #[tokio::test]
 async fn test_user_cascade_delete() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Create user with authenticators and sessions
-    let user = upsert_user(&pool, "cascade@example.com", None)
+    let (user_id, _) = upsert_user(&store, "cascade@example.com", None)
         .await
         .expect("Failed to create user");
 
     let auth_id = create_authenticator(
-        &pool,
-        &user.id,
+        &store,
+        &user_id,
+        "cascade@example.com",
         "Cascade Key",
         &[99u8; 10],
         &[0u8; 32],
@@ -1236,11 +1262,12 @@ async fn test_user_cascade_delete() {
     .expect("Failed to create authenticator");
 
     create_session(
-        &pool,
-        &user.id,
+        &store,
+        &user_id,
+        "cascade@example.com",
         "cascade_token",
         Some(&auth_id),
-        "2099-12-31T23:59:59Z",
+        "2099-12-31T23:59:59Z".parse().unwrap(),
         SessionPurpose::OAuthAccessToken,
     )
     .await
@@ -1248,51 +1275,51 @@ async fn test_user_cascade_delete() {
 
     // Verify everything exists
     assert!(
-        get_authenticator_by_id(&pool, &auth_id)
+        get_authenticator_by_id(&store, &auth_id)
             .await
             .unwrap()
             .is_some()
     );
     assert!(
-        get_session_by_token_hash(&pool, "cascade_token")
+        get_session_by_token_hash(&store, "cascade_token")
             .await
             .unwrap()
             .is_some()
     );
 
     // Delete user
-    delete_user(&pool, &user.id)
+    delete_user(&store, &user_id)
         .await
         .expect("Failed to delete user");
 
     // Verify cascade (authenticators and sessions should be deleted)
     assert!(
-        get_authenticator_by_id(&pool, &auth_id)
+        get_authenticator_by_id(&store, &auth_id)
             .await
             .unwrap()
             .is_none()
     );
     assert!(
-        get_session_by_token_hash(&pool, "cascade_token")
+        get_session_by_token_hash(&store, "cascade_token")
             .await
             .unwrap()
             .is_none()
     );
-    assert!(get_user_by_id(&pool, &user.id).await.unwrap().is_none());
+    assert!(get_user_by_id(&store, &user_id).await.unwrap().is_none());
 }
 
 #[tokio::test]
 async fn test_oauth_client_cascade_delete() {
-    let pool = test_db().await;
+    let (store, audit) = test_db().await;
 
-    let user = upsert_user(&pool, "oauth_cascade@example.com", None)
+    let (user_id, _) = upsert_user(&store, "oauth_cascade@example.com", None)
         .await
         .expect("Failed to create user");
 
     let (client, _) = create_oauth_client(
-        &pool,
+        &store,
         &CreateOAuthClientParams {
-            user_id: Some(&user.id),
+            user_id: Some(&user_id),
             name: "Cascade App",
             description: None,
             application_type: OAuthClientType::Web,
@@ -1318,12 +1345,12 @@ async fn test_oauth_client_cascade_delete() {
     .expect("Failed to create client");
 
     // Add secrets and usage events
-    create_oauth_client_secret(&pool, &client.id, "secret_hash", None, None)
+    create_oauth_client_secret(&store, &client.id, "secret_hash", None, None)
         .await
         .expect("Failed to create secret");
 
     record_oauth_event(
-        &pool,
+        &audit,
         &client.id,
         OAuthEventType::TokenIssued,
         None,
@@ -1335,12 +1362,12 @@ async fn test_oauth_client_cascade_delete() {
     .expect("Failed to record event");
 
     // Delete client
-    delete_oauth_client(&pool, &client.id)
+    delete_oauth_client(&store, &client.id)
         .await
         .expect("Failed to delete client");
 
-    // Verify cascade (secrets should be deleted due to ON DELETE CASCADE)
-    let secrets = get_oauth_client_secrets(&pool, &client.id)
+    // Verify cascade (secrets should be deleted)
+    let secrets = get_oauth_client_secrets(&store, &client.id)
         .await
         .expect("Failed to get secrets");
     assert!(secrets.is_empty());
@@ -1352,20 +1379,20 @@ async fn test_oauth_client_cascade_delete() {
 
 #[tokio::test]
 async fn test_cloud_integration_crud() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Create an organization first
-    let org = create_organization(&pool, "test.com", Some("Test Org"), None)
+    let org = create_organization(&store, "test.com", Some("Test Org"), None)
         .await
         .expect("Failed to create org");
 
     // Create a user in the org
-    let user = upsert_user_with_org(&pool, "admin@test.com", None, Some(&org.id), true)
+    let (user_id, _) = upsert_user_with_org(&store, "admin@test.com", None, Some(&org.id), true)
         .await
         .expect("Failed to create user");
 
     // Initially no GCP config
-    let config = get_cloud_integration(&pool, &org.id, "gcp")
+    let config = get_cloud_integration(&store, &org.id, "gcp")
         .await
         .expect("Failed to get config");
     assert!(config.is_none());
@@ -1373,17 +1400,17 @@ async fn test_cloud_integration_crud() {
     // Create GCP config
     let gcp_config =
         r#"{"project_number":"123456789","pool_id":"vouch-pool","provider_id":"vouch-provider"}"#;
-    let integration = upsert_cloud_integration(&pool, &org.id, "gcp", gcp_config, &user.id)
+    let integration = upsert_cloud_integration(&store, &org.id, "gcp", gcp_config, &user_id)
         .await
         .expect("Failed to create config");
 
     assert_eq!(integration.org_id, org.id);
     assert_eq!(integration.provider, "gcp");
     assert_eq!(integration.config, gcp_config);
-    assert_eq!(integration.created_by_user_id, Some(user.id.clone()));
+    assert_eq!(integration.created_by_user_id, Some(user_id.clone()));
 
     // Get the config back
-    let config = get_cloud_integration(&pool, &org.id, "gcp")
+    let config = get_cloud_integration(&store, &org.id, "gcp")
         .await
         .expect("Failed to get config")
         .expect("Config should exist");
@@ -1395,26 +1422,26 @@ async fn test_cloud_integration_crud() {
     // Update the config
     let updated_config =
         r#"{"project_number":"987654321","pool_id":"new-pool","provider_id":"new-provider"}"#;
-    let updated = upsert_cloud_integration(&pool, &org.id, "gcp", updated_config, &user.id)
+    let updated = upsert_cloud_integration(&store, &org.id, "gcp", updated_config, &user_id)
         .await
         .expect("Failed to update config");
 
     assert_eq!(updated.config, updated_config);
 
     // Delete the config
-    let deleted = delete_cloud_integration(&pool, &org.id, "gcp")
+    let deleted = delete_cloud_integration(&store, &org.id, "gcp")
         .await
         .expect("Failed to delete config");
     assert!(deleted);
 
     // Config should be gone
-    let config = get_cloud_integration(&pool, &org.id, "gcp")
+    let config = get_cloud_integration(&store, &org.id, "gcp")
         .await
         .expect("Failed to get config");
     assert!(config.is_none());
 
     // Delete non-existent should return false
-    let deleted_again = delete_cloud_integration(&pool, &org.id, "gcp")
+    let deleted_again = delete_cloud_integration(&store, &org.id, "gcp")
         .await
         .expect("Failed to delete config");
     assert!(!deleted_again);
@@ -1422,14 +1449,14 @@ async fn test_cloud_integration_crud() {
 
 #[tokio::test]
 async fn test_cloud_integration_multiple_providers() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Create an organization
-    let org = create_organization(&pool, "multi.com", Some("Multi Org"), None)
+    let org = create_organization(&store, "multi.com", Some("Multi Org"), None)
         .await
         .expect("Failed to create org");
 
-    let user = upsert_user_with_org(&pool, "admin@multi.com", None, Some(&org.id), true)
+    let (user_id, _) = upsert_user_with_org(&store, "admin@multi.com", None, Some(&org.id), true)
         .await
         .expect("Failed to create user");
 
@@ -1437,38 +1464,38 @@ async fn test_cloud_integration_multiple_providers() {
     let gcp_config = r#"{"project_number":"111","pool_id":"pool","provider_id":"provider"}"#;
     let aws_config = r#"{"default_role_arn":"arn:aws:iam::123:role/Test"}"#;
 
-    upsert_cloud_integration(&pool, &org.id, "gcp", gcp_config, &user.id)
+    upsert_cloud_integration(&store, &org.id, "gcp", gcp_config, &user_id)
         .await
         .expect("Failed to create GCP config");
 
-    upsert_cloud_integration(&pool, &org.id, "aws", aws_config, &user.id)
+    upsert_cloud_integration(&store, &org.id, "aws", aws_config, &user_id)
         .await
         .expect("Failed to create AWS config");
 
     // Both should exist independently
-    let gcp = get_cloud_integration(&pool, &org.id, "gcp")
+    let gcp = get_cloud_integration(&store, &org.id, "gcp")
         .await
         .expect("Failed to get GCP config")
         .expect("GCP config should exist");
     assert_eq!(gcp.config, gcp_config);
 
-    let aws = get_cloud_integration(&pool, &org.id, "aws")
+    let aws = get_cloud_integration(&store, &org.id, "aws")
         .await
         .expect("Failed to get AWS config")
         .expect("AWS config should exist");
     assert_eq!(aws.config, aws_config);
 
     // Delete GCP should not affect AWS
-    delete_cloud_integration(&pool, &org.id, "gcp")
+    delete_cloud_integration(&store, &org.id, "gcp")
         .await
         .expect("Failed to delete GCP config");
 
-    let gcp = get_cloud_integration(&pool, &org.id, "gcp")
+    let gcp = get_cloud_integration(&store, &org.id, "gcp")
         .await
         .expect("Failed to get GCP config");
     assert!(gcp.is_none());
 
-    let aws = get_cloud_integration(&pool, &org.id, "aws")
+    let aws = get_cloud_integration(&store, &org.id, "aws")
         .await
         .expect("Failed to get AWS config")
         .expect("AWS config should still exist");
@@ -1477,59 +1504,59 @@ async fn test_cloud_integration_multiple_providers() {
 
 #[tokio::test]
 async fn test_cloud_integration_org_isolation() {
-    let pool = test_db().await;
+    let (store, _audit) = test_db().await;
 
     // Create two organizations
-    let org1 = create_organization(&pool, "org1.com", Some("Org 1"), None)
+    let org1 = create_organization(&store, "org1.com", Some("Org 1"), None)
         .await
         .expect("Failed to create org1");
-    let org2 = create_organization(&pool, "org2.com", Some("Org 2"), None)
+    let org2 = create_organization(&store, "org2.com", Some("Org 2"), None)
         .await
         .expect("Failed to create org2");
 
-    let user1 = upsert_user_with_org(&pool, "admin@org1.com", None, Some(&org1.id), true)
+    let (user_id1, _) = upsert_user_with_org(&store, "admin@org1.com", None, Some(&org1.id), true)
         .await
         .expect("Failed to create user1");
-    let user2 = upsert_user_with_org(&pool, "admin@org2.com", None, Some(&org2.id), true)
+    let (user_id2, _) = upsert_user_with_org(&store, "admin@org2.com", None, Some(&org2.id), true)
         .await
         .expect("Failed to create user2");
 
     // Create GCP config for org1
     let config1 = r#"{"project_number":"111","pool_id":"pool1","provider_id":"provider1"}"#;
-    upsert_cloud_integration(&pool, &org1.id, "gcp", config1, &user1.id)
+    upsert_cloud_integration(&store, &org1.id, "gcp", config1, &user_id1)
         .await
         .expect("Failed to create config for org1");
 
     // Create GCP config for org2
     let config2 = r#"{"project_number":"222","pool_id":"pool2","provider_id":"provider2"}"#;
-    upsert_cloud_integration(&pool, &org2.id, "gcp", config2, &user2.id)
+    upsert_cloud_integration(&store, &org2.id, "gcp", config2, &user_id2)
         .await
         .expect("Failed to create config for org2");
 
     // Each org should only see its own config
-    let gcp1 = get_cloud_integration(&pool, &org1.id, "gcp")
+    let gcp1 = get_cloud_integration(&store, &org1.id, "gcp")
         .await
         .expect("Failed to get config for org1")
         .expect("Config should exist");
     assert_eq!(gcp1.config, config1);
 
-    let gcp2 = get_cloud_integration(&pool, &org2.id, "gcp")
+    let gcp2 = get_cloud_integration(&store, &org2.id, "gcp")
         .await
         .expect("Failed to get config for org2")
         .expect("Config should exist");
     assert_eq!(gcp2.config, config2);
 
     // Deleting org1's config should not affect org2
-    delete_cloud_integration(&pool, &org1.id, "gcp")
+    delete_cloud_integration(&store, &org1.id, "gcp")
         .await
         .expect("Failed to delete config for org1");
 
-    let gcp1 = get_cloud_integration(&pool, &org1.id, "gcp")
+    let gcp1 = get_cloud_integration(&store, &org1.id, "gcp")
         .await
         .expect("Failed to get config");
     assert!(gcp1.is_none());
 
-    let gcp2 = get_cloud_integration(&pool, &org2.id, "gcp")
+    let gcp2 = get_cloud_integration(&store, &org2.id, "gcp")
         .await
         .expect("Failed to get config")
         .expect("Org2 config should still exist");
@@ -1602,4 +1629,677 @@ fn test_scim_scope_set_contains() {
 #[test]
 fn test_scim_scope_set_default_is_all() {
     assert_eq!(ScimScopeSet::default(), ScimScopeSet::all());
+}
+
+// ========================================================================
+// DocumentStore — gaps in store.rs tests
+// ========================================================================
+
+#[tokio::test]
+async fn test_store_get_many_empty_slice() {
+    let (store, _audit) = test_db().await;
+
+    // get_many with an empty id slice must return an empty vec, not error
+    let result = store
+        .list_all::<crate::db::documents::user::UserDoc>()
+        .await
+        .expect("list_all should succeed");
+    assert!(result.is_empty());
+}
+
+#[tokio::test]
+async fn test_store_count_zero_for_no_matches() {
+    let (store, _audit) = test_db().await;
+
+    // Newly-initialised DB has no sessions; count should be 0
+    let count = store
+        .count::<crate::db::documents::session::SessionDoc>("token_hash", "nonexistent")
+        .await
+        .expect("count should not error");
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn test_store_delete_cleans_up_indexes() {
+    let (store, _audit) = test_db().await;
+
+    // Create a user so we have something with index entries
+    let (user_id, _) = upsert_user(&store, "index-cleanup@example.com", None)
+        .await
+        .expect("upsert failed");
+
+    // The document is findable by its email index
+    let found = get_user_by_email(&store, "index-cleanup@example.com")
+        .await
+        .expect("query failed");
+    assert!(found.is_some());
+
+    // Delete the document
+    delete_user(&store, &user_id).await.expect("delete failed");
+
+    // Document is gone
+    assert!(
+        get_user_by_id(&store, &user_id)
+            .await
+            .expect("query failed")
+            .is_none()
+    );
+
+    // Index entry is also gone: find_one should return None
+    let found_after = get_user_by_email(&store, "index-cleanup@example.com")
+        .await
+        .expect("query failed");
+    assert!(
+        found_after.is_none(),
+        "index entry should be deleted with the document"
+    );
+}
+
+#[tokio::test]
+async fn test_store_delete_expired_cleans_up_indexes() {
+    let (store, _audit) = test_db().await;
+
+    // Create a device-auth request with a past expiry (expired)
+    let id = create_device_auth_request(
+        &store,
+        "expired-code-hash",
+        "EXPR-0001",
+        "2020-01-01T00:00:00Z".parse().unwrap(), // past
+        5,
+    )
+    .await
+    .expect("create failed");
+
+    // Confirm it is findable by its user-code index
+    let found = get_device_auth_by_user_code(&store, "EXPR-0001")
+        .await
+        .expect("query failed");
+    assert!(found.is_some());
+
+    // Run the cleanup
+    let now_str = jiff::Timestamp::now().to_string();
+    let deleted = delete_expired_device_auth_requests(&store, &now_str)
+        .await
+        .expect("cleanup failed");
+    assert!(deleted >= 1);
+
+    // Now the document should be gone
+    assert!(
+        get_device_auth_by_id(&store, &id)
+            .await
+            .expect("query failed")
+            .is_none()
+    );
+
+    // And the index entry should also be gone
+    let found_after = get_device_auth_by_user_code(&store, "EXPR-0001")
+        .await
+        .expect("query failed");
+    assert!(
+        found_after.is_none(),
+        "index entry should be cleaned up after delete_expired"
+    );
+}
+
+// ========================================================================
+// SCIM — application-level uniqueness check
+// ========================================================================
+
+#[tokio::test]
+async fn test_create_scim_user_duplicate_email_rejected() {
+    let (store, _audit) = test_db().await;
+
+    // First creation succeeds
+    create_scim_user(&store, "dup@example.com", Some("Original"), None, true)
+        .await
+        .expect("First creation should succeed");
+
+    // Second creation with the same email must fail with a UNIQUE error
+    let result = create_scim_user(&store, "dup@example.com", Some("Duplicate"), None, true).await;
+    assert!(result.is_err(), "Duplicate email should be rejected");
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("UNIQUE"),
+        "Error message should mention UNIQUE; got: {err}"
+    );
+}
+
+// ========================================================================
+// SCIM groups — full lifecycle
+// ========================================================================
+
+#[tokio::test]
+async fn test_scim_group_lifecycle() {
+    let (store, _audit) = test_db().await;
+
+    // Create
+    let group = create_scim_group(&store, "Engineering", Some("ext-grp-1"))
+        .await
+        .expect("create_scim_group failed");
+    assert!(!group.id.is_empty());
+    assert_eq!(group.display_name, "Engineering");
+    assert_eq!(group.external_id.as_deref(), Some("ext-grp-1"));
+
+    // Get by ID
+    let fetched = get_scim_group(&store, &group.id)
+        .await
+        .expect("get_scim_group failed")
+        .expect("group should exist");
+    assert_eq!(fetched.display_name, "Engineering");
+
+    // Get by display name
+    let by_name = get_scim_group_by_name(&store, "Engineering")
+        .await
+        .expect("get_scim_group_by_name failed")
+        .expect("should find by name");
+    assert_eq!(by_name.id, group.id);
+
+    // Update
+    update_scim_group(&store, &group.id, Some("Platform"), Some("ext-grp-2"))
+        .await
+        .expect("update_scim_group failed");
+    let updated = get_scim_group(&store, &group.id)
+        .await
+        .expect("get_scim_group failed")
+        .expect("group should still exist");
+    assert_eq!(updated.display_name, "Platform");
+    assert_eq!(updated.external_id.as_deref(), Some("ext-grp-2"));
+
+    // List
+    let groups = list_scim_groups(&store, None, 1, 100)
+        .await
+        .expect("list_scim_groups failed");
+    assert_eq!(groups.len(), 1);
+
+    let count = count_scim_groups(&store, None)
+        .await
+        .expect("count_scim_groups failed");
+    assert_eq!(count, 1);
+
+    // Delete
+    let deleted = delete_scim_group(&store, &group.id)
+        .await
+        .expect("delete_scim_group failed");
+    assert!(deleted);
+
+    // Gone
+    let missing = get_scim_group(&store, &group.id)
+        .await
+        .expect("query should succeed");
+    assert!(missing.is_none());
+
+    // Delete again returns false
+    let deleted_again = delete_scim_group(&store, &group.id)
+        .await
+        .expect("delete should not error");
+    assert!(!deleted_again);
+}
+
+#[tokio::test]
+async fn test_scim_group_member_add_remove() {
+    let (store, _audit) = test_db().await;
+
+    let group = create_scim_group(&store, "Beta", None)
+        .await
+        .expect("create group");
+    let user = create_scim_user(&store, "member@example.com", None, None, true)
+        .await
+        .expect("create user");
+
+    // Add member
+    add_scim_group_member(&store, &group.id, &user.id)
+        .await
+        .expect("add_scim_group_member failed");
+
+    // Member appears in group
+    let members = get_scim_group_members(&store, &group.id)
+        .await
+        .expect("get_scim_group_members failed");
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].id, user.id);
+
+    // Add again is idempotent
+    add_scim_group_member(&store, &group.id, &user.id)
+        .await
+        .expect("idempotent add failed");
+    let members_after = get_scim_group_members(&store, &group.id)
+        .await
+        .expect("get members");
+    assert_eq!(
+        members_after.len(),
+        1,
+        "idempotent add should not duplicate"
+    );
+
+    // User's groups
+    let user_groups = get_user_scim_groups(&store, &user.id)
+        .await
+        .expect("get_user_scim_groups failed");
+    assert_eq!(user_groups.len(), 1);
+    assert_eq!(user_groups[0].id, group.id);
+
+    // Remove member
+    let removed = remove_scim_group_member(&store, &group.id, &user.id)
+        .await
+        .expect("remove_scim_group_member failed");
+    assert!(removed);
+
+    // Group is now empty
+    let members_final = get_scim_group_members(&store, &group.id)
+        .await
+        .expect("get members after remove");
+    assert!(members_final.is_empty());
+
+    // Remove again returns false
+    let removed_again = remove_scim_group_member(&store, &group.id, &user.id)
+        .await
+        .expect("remove should not error");
+    assert!(!removed_again);
+}
+
+#[tokio::test]
+async fn test_scim_group_replace_members() {
+    let (store, _audit) = test_db().await;
+
+    let group = create_scim_group(&store, "Gamma", None)
+        .await
+        .expect("create group");
+    let user1 = create_scim_user(&store, "u1@example.com", None, None, true)
+        .await
+        .expect("create user1");
+    let user2 = create_scim_user(&store, "u2@example.com", None, None, true)
+        .await
+        .expect("create user2");
+    let user3 = create_scim_user(&store, "u3@example.com", None, None, true)
+        .await
+        .expect("create user3");
+
+    // Start with user1 and user2
+    replace_scim_group_members(&store, &group.id, &[user1.id.clone(), user2.id.clone()])
+        .await
+        .expect("replace members");
+    let members = get_scim_group_members(&store, &group.id)
+        .await
+        .expect("get members");
+    assert_eq!(members.len(), 2);
+
+    // Replace with just user3
+    replace_scim_group_members(&store, &group.id, std::slice::from_ref(&user3.id))
+        .await
+        .expect("replace members");
+    let members_after = get_scim_group_members(&store, &group.id)
+        .await
+        .expect("get members");
+    assert_eq!(members_after.len(), 1);
+    assert_eq!(members_after[0].id, user3.id);
+
+    // Replace with empty list
+    replace_scim_group_members(&store, &group.id, &[])
+        .await
+        .expect("replace with empty");
+    let empty = get_scim_group_members(&store, &group.id)
+        .await
+        .expect("get members");
+    assert!(empty.is_empty());
+}
+
+#[tokio::test]
+async fn test_scim_group_delete_cascades_members() {
+    let (store, _audit) = test_db().await;
+
+    let group = create_scim_group(&store, "ToBeCascaded", None)
+        .await
+        .expect("create group");
+    let user = create_scim_user(&store, "cascade-member@example.com", None, None, true)
+        .await
+        .expect("create user");
+
+    add_scim_group_member(&store, &group.id, &user.id)
+        .await
+        .expect("add member");
+
+    // Delete the group
+    delete_scim_group(&store, &group.id)
+        .await
+        .expect("delete group");
+
+    // User should still exist
+    let user_exists = get_scim_user(&store, &user.id).await.expect("query user");
+    assert!(
+        user_exists.is_some(),
+        "user should not be deleted when group is deleted"
+    );
+
+    // User's group memberships should be cleaned up
+    let user_groups = get_user_scim_groups(&store, &user.id)
+        .await
+        .expect("get user groups");
+    assert!(
+        user_groups.is_empty(),
+        "group membership should be cascade-deleted with the group"
+    );
+}
+
+// ========================================================================
+// OAuthClientSecret — is_valid edge cases
+// ========================================================================
+
+#[test]
+fn test_oauth_client_secret_is_valid_revoked() {
+    let now = jiff::Timestamp::now();
+    let secret = OAuthClientSecret {
+        id: "s1".into(),
+        oauth_client_id: "c1".into(),
+        secret_hash: "h1".into(),
+        description: None,
+        created_at: now,
+        expires_at: None,
+        revoked_at: Some(now), // revoked
+    };
+    assert!(!secret.is_valid(&now), "Revoked secret must be invalid");
+}
+
+#[test]
+fn test_oauth_client_secret_is_valid_expired() {
+    let now = jiff::Timestamp::now();
+    let past: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
+    let secret = OAuthClientSecret {
+        id: "s2".into(),
+        oauth_client_id: "c1".into(),
+        secret_hash: "h2".into(),
+        description: None,
+        created_at: past,
+        expires_at: Some(past), // already expired
+        revoked_at: None,
+    };
+    assert!(!secret.is_valid(&now), "Expired secret must be invalid");
+}
+
+#[test]
+fn test_oauth_client_secret_is_valid_not_expired() {
+    let now = jiff::Timestamp::now();
+    let future: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
+    let secret = OAuthClientSecret {
+        id: "s3".into(),
+        oauth_client_id: "c1".into(),
+        secret_hash: "h3".into(),
+        description: None,
+        created_at: now,
+        expires_at: Some(future),
+        revoked_at: None,
+    };
+    assert!(
+        secret.is_valid(&now),
+        "Non-expired, non-revoked secret must be valid"
+    );
+}
+
+#[test]
+fn test_oauth_client_secret_is_valid_no_expiry() {
+    let now = jiff::Timestamp::now();
+    let secret = OAuthClientSecret {
+        id: "s4".into(),
+        oauth_client_id: "c1".into(),
+        secret_hash: "h4".into(),
+        description: None,
+        created_at: now,
+        expires_at: None,
+        revoked_at: None,
+    };
+    assert!(
+        secret.is_valid(&now),
+        "Secret with no expiry and not revoked must be valid"
+    );
+}
+
+// ========================================================================
+// JWT assertion JTI — replay prevention and expiry cleanup
+// ========================================================================
+
+#[tokio::test]
+async fn test_store_jwt_assertion_jti_replay_prevention() {
+    let (store, _audit) = test_db().await;
+
+    let expires: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
+
+    // First use returns true
+    let stored = store_jwt_assertion_jti(&store, "jti-abc", "client-1", expires)
+        .await
+        .expect("first store should not error");
+    assert!(stored, "First use of a JTI should be accepted");
+
+    // Replay with same jti + client_id returns false
+    let replayed = store_jwt_assertion_jti(&store, "jti-abc", "client-1", expires)
+        .await
+        .expect("replay check should not error");
+    assert!(!replayed, "Replay of same JTI+client_id should be rejected");
+
+    // Same JTI from a different client_id is allowed
+    let different_client = store_jwt_assertion_jti(&store, "jti-abc", "client-2", expires)
+        .await
+        .expect("different client should not error");
+    assert!(
+        different_client,
+        "Same JTI from a different client should be accepted"
+    );
+}
+
+#[tokio::test]
+async fn test_store_jwt_assertion_jti_too_long() {
+    let (store, _audit) = test_db().await;
+
+    // JTI longer than MAX_JTI_LENGTH (256) must be rejected immediately
+    let long_jti = "x".repeat(257);
+    let result = store_jwt_assertion_jti(
+        &store,
+        &long_jti,
+        "client-1",
+        "2099-01-01T00:00:00Z".parse().unwrap(),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "JTI exceeding max length must return an error"
+    );
+}
+
+#[tokio::test]
+async fn test_delete_expired_jwt_assertion_jtis() {
+    let (store, _audit) = test_db().await;
+
+    let past_expires: jiff::Timestamp = "2020-01-01T00:00:00Z".parse().unwrap();
+    let future_expires: jiff::Timestamp = "2099-01-01T00:00:00Z".parse().unwrap();
+
+    // Insert one expired and one valid JTI
+    store_jwt_assertion_jti(&store, "expired-jti", "c1", past_expires)
+        .await
+        .expect("insert expired");
+    store_jwt_assertion_jti(&store, "valid-jti", "c1", future_expires)
+        .await
+        .expect("insert valid");
+
+    let deleted = delete_expired_jwt_assertion_jtis(&store)
+        .await
+        .expect("delete_expired should not error");
+    assert!(deleted >= 1, "Should delete at least the expired JTI");
+
+    // The valid one is still usable (replay returns false only if it exists)
+    let still_stored = store_jwt_assertion_jti(&store, "valid-jti", "c1", future_expires)
+        .await
+        .expect("check");
+    assert!(!still_stored, "Valid JTI should still block replay");
+
+    // The expired one was deleted and can be reused
+    let reused = store_jwt_assertion_jti(&store, "expired-jti", "c1", future_expires)
+        .await
+        .expect("reuse after expiry cleanup");
+    assert!(
+        reused,
+        "Expired+deleted JTI should be accepted again after cleanup"
+    );
+}
+
+// ========================================================================
+// AuditStore — since filter
+// ========================================================================
+
+#[tokio::test]
+async fn test_audit_store_since_filter() {
+    let (store, audit) = test_db().await;
+
+    let (user_id, _) = upsert_user(&store, "since-filter@example.com", None)
+        .await
+        .expect("upsert user");
+
+    // Insert an event
+    insert_auth_event(
+        &audit,
+        &AuthEventParams {
+            user_id: user_id.clone(),
+            event_type: AuthEventType::LoginSuccess,
+            success: true,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .expect("insert event");
+
+    // Query with a future `since` timestamp — should return no events
+    let no_events = get_auth_events(
+        &audit,
+        &AuthEventQuery {
+            since: Some("2099-01-01T00:00:00Z".to_string()),
+            limit: Some(100),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("query failed");
+    assert!(
+        no_events.is_empty(),
+        "`since` in the future should exclude all events"
+    );
+
+    // Query with a past `since` timestamp — should return the event
+    let all_events = get_auth_events(
+        &audit,
+        &AuthEventQuery {
+            since: Some("2000-01-01T00:00:00Z".to_string()),
+            limit: Some(100),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("query failed");
+    assert!(
+        !all_events.is_empty(),
+        "`since` in the past should include events"
+    );
+}
+
+// ========================================================================
+// SCIM filter parsing — co / sw operators and error path
+// ========================================================================
+
+#[test]
+fn test_scim_filter_parse_co_operator() {
+    use crate::db::scim::{ScimFilterOp, parse_scim_filter};
+
+    let result =
+        parse_scim_filter(r#"userName co "smith""#, "userName").expect("parse should succeed");
+    let filter = result.expect("filter should be present");
+    assert_eq!(filter.op, ScimFilterOp::Co);
+    assert_eq!(filter.value, "smith");
+}
+
+#[test]
+fn test_scim_filter_parse_sw_operator() {
+    use crate::db::scim::{ScimFilterOp, parse_scim_filter};
+
+    let result =
+        parse_scim_filter(r#"userName sw "alice""#, "userName").expect("parse should succeed");
+    let filter = result.expect("filter should be present");
+    assert_eq!(filter.op, ScimFilterOp::Sw);
+    assert_eq!(filter.value, "alice");
+}
+
+#[test]
+fn test_scim_filter_parse_unsupported_operator_returns_error() {
+    use crate::db::scim::parse_scim_filter;
+
+    let result = parse_scim_filter(r#"userName gt "alice""#, "userName");
+    assert!(result.is_err(), "Unsupported operator should return Err");
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("gt"),
+        "Error should mention the unsupported operator"
+    );
+}
+
+#[test]
+fn test_scim_filter_parse_no_match_for_other_attribute() {
+    use crate::db::scim::parse_scim_filter;
+
+    let result =
+        parse_scim_filter(r#"externalId eq "ext-1""#, "userName").expect("parse should not error");
+    assert!(
+        result.is_none(),
+        "Filter for different attribute should return None"
+    );
+}
+
+// ========================================================================
+// SCIM list — co / sw filter operators applied in app code
+// ========================================================================
+
+#[tokio::test]
+async fn test_scim_user_list_filter_co_operator() {
+    let (store, _audit) = test_db().await;
+
+    create_scim_user(&store, "alice@example.com", None, None, true)
+        .await
+        .expect("create alice");
+    create_scim_user(&store, "bob@example.com", None, None, true)
+        .await
+        .expect("create bob");
+    create_scim_user(&store, "alicia@example.com", None, None, true)
+        .await
+        .expect("create alicia");
+
+    // "userName co \"alic\"" should match alice and alicia
+    let results = list_scim_users(&store, Some(r#"userName co "alic""#), 1, 100)
+        .await
+        .expect("list_scim_users failed");
+    assert_eq!(
+        results.len(),
+        2,
+        "co filter should match two users; got {}",
+        results.len()
+    );
+    let emails: Vec<&str> = results.iter().map(|u| u.email.as_str()).collect();
+    assert!(emails.contains(&"alice@example.com"));
+    assert!(emails.contains(&"alicia@example.com"));
+}
+
+#[tokio::test]
+async fn test_scim_user_list_filter_sw_operator() {
+    let (store, _audit) = test_db().await;
+
+    create_scim_user(&store, "zara@example.com", None, None, true)
+        .await
+        .expect("create zara");
+    create_scim_user(&store, "zebra@example.com", None, None, true)
+        .await
+        .expect("create zebra");
+    create_scim_user(&store, "anna@example.com", None, None, true)
+        .await
+        .expect("create anna");
+
+    // "userName sw \"ze\"" should match zara? no — "ze" prefix: zebra matches, zara does not.
+    let results = list_scim_users(&store, Some(r#"userName sw "ze""#), 1, 100)
+        .await
+        .expect("list_scim_users failed");
+    assert_eq!(results.len(), 1, "sw filter should match zebra only");
+    assert_eq!(results[0].email, "zebra@example.com");
 }

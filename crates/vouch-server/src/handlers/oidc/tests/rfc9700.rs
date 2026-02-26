@@ -9,8 +9,8 @@ async fn test_rfc9700_pkce_required_at_handler_level() {
     // The authorize endpoint requires PKCE (S256) for all clients.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-required@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-required@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Authorize request without code_challenge — should redirect with error
     let response = http_get_full(
@@ -55,10 +55,10 @@ async fn test_rfc9700_client_id_matching_at_token_endpoint() {
     // Code issued to client A cannot be exchanged by client B.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "client-mismatch@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client_a = create_test_oauth_client(&state.db, &user.id).await;
-    let client_b = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "client-mismatch@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client_a = create_test_oauth_client(&state.store, &user.id).await;
+    let client_b = create_test_oauth_client(&state.store, &user.id).await;
 
     let scope_set = ScopeSet::parse("openid");
     let code = issue_authorization_code(
@@ -111,9 +111,9 @@ async fn test_rfc9700_redirect_uri_exact_match_at_token() {
     // exactly match the one used during authorization.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "redirect-mismatch@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "redirect-mismatch@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let scope_set = ScopeSet::parse("openid");
     let code = issue_authorization_code(
@@ -167,9 +167,9 @@ async fn test_rfc9700_redirect_uri_required_when_present_in_auth() {
     // it MUST be present at token request too.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "redirect-required@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "redirect-required@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let scope_set = ScopeSet::parse("openid");
     let code = issue_authorization_code(
@@ -223,9 +223,9 @@ async fn test_rfc9700_authorization_code_single_use() {
     // Using the same authorization code twice must fail.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "single-use@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "single-use@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let scope_set = ScopeSet::parse("openid email");
     let code = issue_authorization_code(
@@ -296,8 +296,8 @@ async fn test_rfc9700_authorize_pkce_required_without_challenge() {
     // Missing code_challenge must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "authorize-nopkce@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "authorize-nopkce@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let state_param = "teststate-nopkce";
 
     let response = http_get_full(

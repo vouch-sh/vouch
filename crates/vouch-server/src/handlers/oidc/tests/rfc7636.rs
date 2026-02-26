@@ -33,9 +33,9 @@ async fn test_rfc7636_code_verifier_too_short() {
     // RFC 7636 Section 4.1: code_verifier must be 43-128 chars.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-short@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-short@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Create valid challenge from a valid verifier, but present a too-short verifier
     let valid_verifier = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij"; // 47 chars
@@ -99,8 +99,8 @@ async fn test_rfc7636_plain_method_rejection() {
     // RFC 9700 / RFC 7636 Section 4.2: plain method must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-plain@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-plain@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let response = http_get_full(
         &app,
@@ -135,9 +135,9 @@ async fn test_rfc7636_end_to_end_pkce_flow() {
     // RFC 7636 Section 4.6: Full PKCE flow: authorize with challenge, exchange with verifier.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-e2e@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-e2e@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Generate a valid PKCE pair
     let code_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk_abcdefg"; // >= 43 chars
@@ -201,9 +201,9 @@ async fn test_rfc7636_wrong_verifier_rejected() {
     // RFC 7636: Wrong code_verifier must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-wrong@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-wrong@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let correct_verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk_wrong123";
     let challenge = sha256_base64url(correct_verifier);
@@ -266,9 +266,9 @@ async fn test_rfc7636_code_verifier_length_too_short() {
     // RFC 7636 Section 4.1: code_verifier must be 43-128 characters.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-short@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-short@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Generate a proper challenge from a short verifier
     let short_verifier = "abcdef"; // Too short (< 43 chars)
@@ -326,9 +326,9 @@ async fn test_rfc7636_code_verifier_too_long() {
     // RFC 7636 Section 4.1: code_verifier must be 43-128 characters.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-long@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-long@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // 129-character verifier (exceeds max of 128)
     let long_verifier = "a".repeat(129);
@@ -385,9 +385,9 @@ async fn test_rfc7636_complete_pkce_s256_flow() {
     // exchange with verifier.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-e2e@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-e2e@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Generate valid PKCE verifier (43-128 chars, unreserved characters)
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"; // 43 chars
@@ -483,9 +483,9 @@ async fn test_rfc7636_code_verifier_invalid_char_space() {
     // [A-Za-z0-9\-._~]. Space is NOT allowed.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-space@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-space@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Build a 44-char verifier with a space embedded.
     // The hash is computed from the exact verifier so the server would normally accept it
@@ -525,9 +525,9 @@ async fn test_rfc7636_code_verifier_invalid_char_exclamation() {
     // RFC 7636 Section 4.1: '!' is not in [A-Za-z0-9\-._~] — must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-excl@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-excl@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // 43-char verifier with '!' character
     let verifier = "abcdefghijklmnopqrstuvwxyz0123456789abcdef!"; // 43 chars, '!' at end
@@ -564,9 +564,9 @@ async fn test_rfc7636_code_verifier_invalid_char_at_sign() {
     // RFC 7636 Section 4.1: '@' (common in email) is not in [A-Za-z0-9\-._~].
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-at@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-at@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // 43-char verifier with '@' character
     let verifier = "abcdefghijklmnopqrstuvwxyz0123456789abcde@f"; // 43 chars
@@ -603,9 +603,9 @@ async fn test_rfc7636_code_verifier_invalid_char_unicode() {
     // RFC 7636 Section 4.1: Unicode characters (outside ASCII unreserved) must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-unicode@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-unicode@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // 43+ char verifier with a Unicode char (é = U+00E9, 2 bytes in UTF-8)
     // This results in a string > 43 bytes but has invalid characters
@@ -643,9 +643,9 @@ async fn test_rfc7636_code_verifier_minimum_length_43_accepted() {
     // RFC 7636 Section 4.1: code_verifier of exactly 43 chars (minimum) must be accepted.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-min43@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-min43@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Exactly 43 chars, all valid unreserved characters
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"; // RFC 7636 Appendix B
@@ -684,9 +684,9 @@ async fn test_rfc7636_code_verifier_maximum_length_128_accepted() {
     // RFC 7636 Section 4.1: code_verifier of exactly 128 chars (maximum) must be accepted.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-max128@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-max128@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Exactly 128 valid unreserved chars
     let verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
@@ -738,9 +738,9 @@ async fn test_rfc7636_code_verifier_all_allowed_char_classes() {
     // RFC 7636 Section 4.1: All character classes from [A-Za-z0-9\-._~] must be accepted.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "pkce-allchars@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "pkce-allchars@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Use all allowed character classes in a 50-char verifier
     // Uppercase, lowercase, digits, hyphen, dot, underscore, tilde

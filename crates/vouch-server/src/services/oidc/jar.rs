@@ -208,12 +208,15 @@ pub async fn validate_request_object(
 
     // 3. Resolve client JWKS and find matching key
     let jwks = resolve_client_jwks(
-        &state.db,
+        &state.store,
         &client.id,
         client.jwks.as_deref(),
         client.jwks_uri.as_deref(),
         client.jwks_uri_cache.as_deref(),
-        client.jwks_uri_cached_at.as_ref(),
+        client
+            .jwks_uri_cached_at
+            .map(|ts| ts.to_string())
+            .as_deref(),
         &state.http_client,
     )
     .await

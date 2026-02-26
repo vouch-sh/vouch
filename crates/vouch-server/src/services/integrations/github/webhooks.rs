@@ -210,9 +210,12 @@ impl GitHubService<'_> {
                         installation.account.login,
                         repo_names.len()
                     );
-                    if let Err(e) =
-                        db::update_github_installation_repos(self.db, installation_id, &repo_names)
-                            .await
+                    if let Err(e) = db::update_github_installation_repos(
+                        self.store,
+                        installation_id,
+                        &repo_names,
+                    )
+                    .await
                     {
                         tracing::error!(
                             "Failed to update repos for installation {}: {}",
@@ -230,7 +233,7 @@ impl GitHubService<'_> {
                     installation.account.login
                 );
                 if let Err(e) =
-                    db::delete_github_installation_by_installation_id(self.db, installation_id)
+                    db::delete_github_installation_by_installation_id(self.store, installation_id)
                         .await
                 {
                     tracing::error!("Failed to delete installation {}: {}", installation_id, e);
@@ -243,7 +246,7 @@ impl GitHubService<'_> {
                     installation_id,
                     installation.account.login
                 );
-                if let Err(e) = db::suspend_github_installation(self.db, installation_id).await {
+                if let Err(e) = db::suspend_github_installation(self.store, installation_id).await {
                     tracing::error!("Failed to suspend installation {}: {}", installation_id, e);
                 }
             }
@@ -254,7 +257,8 @@ impl GitHubService<'_> {
                     installation_id,
                     installation.account.login
                 );
-                if let Err(e) = db::unsuspend_github_installation(self.db, installation_id).await {
+                if let Err(e) = db::unsuspend_github_installation(self.store, installation_id).await
+                {
                     tracing::error!(
                         "Failed to unsuspend installation {}: {}",
                         installation_id,
@@ -317,7 +321,7 @@ impl GitHubService<'_> {
         );
 
         if let Err(e) = db::update_github_installation_repos_delta(
-            self.db,
+            self.store,
             installation_id,
             &added_names,
             &removed_names,

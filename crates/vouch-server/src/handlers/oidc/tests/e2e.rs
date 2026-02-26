@@ -14,15 +14,15 @@ async fn test_client_secret_hash_roundtrip() {
     // at creation but base64url at validation, so authentication always failed.
     let (_app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "secret-roundtrip@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "secret-roundtrip@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // The test helper uses hash_token() (base64url). Validate that
     // db::validate_oauth_client_credentials finds the secret when we
     // hash the plaintext secret with the same function.
     let secret_hash = crate::handlers::hash_token(&client.client_secret);
     let result =
-        crate::db::validate_oauth_client_credentials(&state.db, &client.client_id, &secret_hash)
+        crate::db::validate_oauth_client_credentials(&state.store, &client.client_id, &secret_hash)
             .await
             .expect("DB query should succeed");
 
@@ -41,9 +41,9 @@ async fn test_auth_code_flow_token_works_with_userinfo() {
     // Full OIDC flow: issue auth code → exchange → call /oauth/userinfo → assert 200
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "oauth-userinfo@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "oauth-userinfo@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -74,8 +74,8 @@ async fn test_oauth_token_works_at_management_endpoints() {
     // Verify OAuth access tokens work at management endpoints
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "oauth-mgmt@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "oauth-mgmt@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     // Call key listing endpoint with OAuth access token (should succeed)
@@ -102,9 +102,9 @@ async fn test_userinfo_respects_openid_only_scope() {
     // OIDC Core Section 5.4: Without email scope, email claims should be omitted
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "scope-openid@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "scope-openid@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue token with only "openid" scope (no "email")
     let (access_token, _id_token) =
@@ -135,9 +135,9 @@ async fn test_userinfo_includes_email_with_email_scope() {
     // OIDC Core Section 5.4: With email scope, email claims should be present
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "scope-email@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "scope-email@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue token with "openid email" scope
     let (access_token, _id_token) =
@@ -170,9 +170,9 @@ async fn test_id_token_scope_aware() {
     // OIDC Core Section 5.4: ID token should only include email when scope grants it
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "idtoken-scope@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "idtoken-scope@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue token with only "openid" scope (no email)
     let (_access_token, id_token) =
@@ -223,9 +223,9 @@ async fn test_create_test_session_for_client_produces_client_bound_token() {
 
     let (_app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "client-bound@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "client-bound@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Use the helper — token's client_id must match client.client_id
     let token =
@@ -257,8 +257,8 @@ async fn test_unified_token_hardware_verified_claim_always_set() {
 
     let (_app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "hw-verified@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "hw-verified@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     let config = state.config();
@@ -285,8 +285,8 @@ async fn test_unified_token_typ_header_is_at_jwt() {
 
     let (_app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "typ-header@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "typ-header@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     // Peek at the header without full validation
@@ -310,8 +310,8 @@ async fn test_legacy_register_routes_removed() {
     // so clients cannot accidentally rely on removed endpoints.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "legacy-route@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "legacy-route@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
     let auth = format!("Bearer {token}");
 
@@ -383,8 +383,8 @@ async fn test_decoded_token_enum_single_variant_destructuring() {
 
     let (_app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "enum-destr@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "enum-destr@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     let config = state.config();

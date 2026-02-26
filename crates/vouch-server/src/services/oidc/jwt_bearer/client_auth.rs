@@ -66,7 +66,7 @@ pub async fn authenticate_client_jwt(
     }
 
     // 3. Look up client
-    let client = db::get_oauth_client_by_client_id(&state.db, assertion_client_id)
+    let client = db::get_oauth_client_by_client_id(&state.store, assertion_client_id)
         .await
         .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?
         .ok_or(ClientAuthError::InvalidClient)?;
@@ -87,12 +87,15 @@ pub async fn authenticate_client_jwt(
 
     // 5. Resolve client's JWKS (inline or from URI)
     let jwks = resolve_client_jwks(
-        &state.db,
+        &state.store,
         &client.id,
         client.jwks.as_deref(),
         client.jwks_uri.as_deref(),
         client.jwks_uri_cache.as_deref(),
-        client.jwks_uri_cached_at.as_ref(),
+        client
+            .jwks_uri_cached_at
+            .map(|ts| ts.to_string())
+            .as_deref(),
         &state.http_client,
     )
     .await
@@ -136,10 +139,9 @@ pub async fn authenticate_client_jwt(
     if let Some(ref jti) = validated.claims.jti {
         let expires_at = Timestamp::now()
             .checked_add(max_lifetime.seconds())
-            .map(|t| t.to_string())
-            .unwrap_or_else(|_| Timestamp::now().to_string());
+            .unwrap_or_else(|_| Timestamp::now());
 
-        let is_new = db::store_jwt_assertion_jti(&state.db, jti, &client.client_id, &expires_at)
+        let is_new = db::store_jwt_assertion_jti(&state.store, jti, &client.client_id, expires_at)
             .await
             .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
 
@@ -154,7 +156,7 @@ pub async fn authenticate_client_jwt(
     }
 
     // Update last used timestamp
-    if let Err(e) = db::update_oauth_client_last_used(&state.db, &client.id).await {
+    if let Err(e) = db::update_oauth_client_last_used(&state.store, &client.id).await {
         tracing::warn!("Failed to update OAuth client last_used: {e}");
     }
 

@@ -23,8 +23,8 @@ async fn test_migration_unified_token_is_es256() {
     // Any HS256 Fido2Session token must be permanently rejected.
     let (_app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "migration-es256@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "migration-es256@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     let header = jsonwebtoken::decode_header(&token).expect("valid JWT");
@@ -45,7 +45,7 @@ async fn test_migration_hs256_session_token_permanently_rejected() {
     // Forge an HS256 JWT that mimics a pre-migration Fido2Session token.
     // The typ header "vouch-session+jwt" is the legacy value — it is no longer
     // a known JwtType variant, so from_header_str returns None.
-    let user = create_test_user(&state.db, "hs256-reject@example.com").await;
+    let user = create_test_user(&state.store, "hs256-reject@example.com").await;
     let secret = state.config().jwt_secret_bytes().to_vec();
 
     #[derive(serde::Serialize)]
@@ -167,9 +167,9 @@ async fn test_create_test_session_for_client_stores_session_in_db() {
     // database, so the token can be validated end-to-end (not just as a JWT).
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "sess-stored@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "sess-stored@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let token =
         create_test_session_for_client(&state, &user.id, &user.email, &auth_id, &client.client_id)
@@ -196,10 +196,10 @@ async fn test_create_test_session_for_client_client_id_in_jwt() {
     // This is what allows the cross-client introspection check to work correctly.
     let (_app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jwt-client-id@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client_a = create_test_oauth_client(&state.db, &user.id).await;
-    let client_b = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jwt-client-id@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client_a = create_test_oauth_client(&state.store, &user.id).await;
+    let client_b = create_test_oauth_client(&state.store, &user.id).await;
 
     // Create tokens bound to different clients
     let token_a = create_test_session_for_client(
@@ -315,11 +315,11 @@ async fn test_migration_013_oauth_clients_schema_has_all_columns() {
     // error (which would happen if a column was missing).
     let (_app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "schema-check@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "schema-check@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // get_oauth_client_by_client_id reads all columns including the 5 added ones.
-    let result = db::get_oauth_client_by_client_id(&state.db, &client.client_id)
+    let result = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
         .await
         .expect("DB query must succeed — migration 013 must have all columns");
 

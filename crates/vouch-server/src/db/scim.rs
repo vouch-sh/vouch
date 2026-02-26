@@ -1,18 +1,17 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! SCIM 2.0 (RFC 7643/7644) database operations.
 
-use super::Pool;
-use super::schema::{ScimAuditLog, ScimGroupMembers, ScimGroups, ScimTokens, Users};
-use super::types::BuildSql;
-use super::types::DbTimestamp;
-use crate::{db_execute, db_fetch_all, db_fetch_one, db_fetch_optional, tx_execute};
+use super::audit::AuditStore;
+use super::document_type::Document;
+use super::documents::audit::ScimAuditData;
+use super::documents::scim::{ScimGroupDoc, ScimGroupMemberDoc, ScimTokenDoc};
+use super::documents::user::UserDoc;
+use super::store::DocumentStore;
 use anyhow::Result;
 use jiff::Timestamp;
-use sea_query::{Alias, Asterisk, Expr, Func, JoinType, LikeExpr, OnConflict, Order, Query};
-use uuid::Uuid;
 
 // ============================================================================
-// SCIM Tokens
+// SCIM Scopes
 // ============================================================================
 
 /// Individual SCIM permission scope.
@@ -53,7 +52,8 @@ impl ScimScope {
     }
 }
 
-/// A set of SCIM permission scopes, stored as comma-separated in the database.
+/// A set of SCIM permission scopes, stored as comma-separated
+/// in the database.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScimScopeSet {
     scopes: Vec<ScimScope>,
@@ -108,349 +108,383 @@ impl Default for ScimScopeSet {
     }
 }
 
+// ============================================================================
+// SCIM Tokens
+// ============================================================================
+
 /// SCIM token record.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 #[allow(dead_code)]
 pub struct ScimToken {
     pub id: String,
     pub token_hash: String,
     pub org_id: Option<String>,
     pub description: Option<String>,
-    pub created_at: DbTimestamp,
-    pub last_used_at: Option<DbTimestamp>,
-    pub expires_at: Option<DbTimestamp>,
+    pub created_at: Timestamp,
+    pub last_used_at: Option<Timestamp>,
+    pub expires_at: Option<Timestamp>,
     pub scope: String,
+}
+
+impl From<Document<ScimTokenDoc>> for ScimToken {
+    fn from(doc: Document<ScimTokenDoc>) -> Self {
+        Self {
+            id: doc.id,
+            token_hash: doc.data.token_hash,
+            org_id: doc.data.org_id,
+            description: doc.data.description,
+            created_at: doc.created_at,
+            last_used_at: doc.last_used_at,
+            expires_at: doc.data.expires_at,
+            scope: doc.data.scope,
+        }
+    }
 }
 
 /// Get a SCIM token by its hash.
 ///
-/// Only returns tokens that are not expired. Tokens with `expires_at IS NULL`
-/// (no expiration) are always returned.
-pub async fn get_scim_token_by_hash(pool: &Pool, token_hash: &str) -> Result<Option<ScimToken>> {
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
+/// Only returns tokens that are not expired. Tokens with no
+/// expiration are always returned.
+pub async fn get_scim_token_by_hash(
+    store: &DocumentStore,
+    token_hash: &str,
+) -> Result<Option<ScimToken>> {
+    let doc = store
+        .find_one::<ScimTokenDoc>("token_hash", token_hash)
+        .await?;
 
-    let sql = {
-        let query = Query::select()
-            .columns([
-                ScimTokens::Id,
-                ScimTokens::TokenHash,
-                ScimTokens::OrgId,
-                ScimTokens::Description,
-                ScimTokens::CreatedAt,
-                ScimTokens::LastUsedAt,
-                ScimTokens::ExpiresAt,
-                ScimTokens::Scope,
-            ])
-            .from(ScimTokens::Table)
-            .and_where(Expr::col(ScimTokens::TokenHash).eq(token_hash))
-            // Enforce token expiration: only return non-expired tokens
-            .and_where(
-                Expr::col(ScimTokens::ExpiresAt)
-                    .is_null()
-                    .or(Expr::col(ScimTokens::ExpiresAt).gt(now.as_str())),
-            )
-            .to_owned();
-        query.build_sql(db_type)
+    let Some(doc) = doc else {
+        return Ok(None);
     };
 
-    let token = db_fetch_optional!(pool, sqlx::query_as::<_, ScimToken>(&sql))?;
+    // Check expiration
+    let now = Timestamp::now();
+    if let Some(expires_at) = doc.data.expires_at
+        && expires_at <= now
+    {
+        return Ok(None);
+    }
 
-    Ok(token)
+    Ok(Some(ScimToken::from(doc)))
 }
 
 /// Update SCIM token last used timestamp.
-pub async fn update_scim_token_last_used(pool: &Pool, token_id: &str) -> Result<()> {
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
-
-    let sql = {
-        let query = Query::update()
-            .table(ScimTokens::Table)
-            .value(ScimTokens::LastUsedAt, now.as_str())
-            .and_where(Expr::col(ScimTokens::Id).eq(token_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(())
+///
+/// Performs a lightweight column-level UPDATE (no encrypt/decrypt).
+pub async fn update_scim_token_last_used(store: &DocumentStore, token_id: &str) -> Result<()> {
+    store.update_last_used_at(token_id).await
 }
 
 /// Create a new SCIM token.
 #[allow(dead_code)]
 pub async fn create_scim_token(
-    pool: &Pool,
+    store: &DocumentStore,
     token_hash: &str,
     description: Option<&str>,
-    expires_at: Option<&str>,
+    expires_at: Option<Timestamp>,
     org_id: Option<&str>,
     scope: Option<&ScimScopeSet>,
 ) -> Result<String> {
-    let id = Uuid::now_v7().to_string();
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
     let default_scope = ScimScopeSet::default();
     let scope_val = scope.unwrap_or(&default_scope).as_db_string();
 
-    let sql = {
-        let query = Query::insert()
-            .into_table(ScimTokens::Table)
-            .columns([
-                ScimTokens::Id,
-                ScimTokens::TokenHash,
-                ScimTokens::OrgId,
-                ScimTokens::Description,
-                ScimTokens::ExpiresAt,
-                ScimTokens::CreatedAt,
-                ScimTokens::Scope,
-            ])
-            .values_panic([
-                id.clone().into(),
-                token_hash.into(),
-                org_id.into(),
-                description.into(),
-                expires_at.into(),
-                now.as_str().into(),
-                scope_val.as_str().into(),
-            ])
-            .to_owned();
-        query.build_sql(db_type)
+    let doc = ScimTokenDoc {
+        token_hash: token_hash.to_string(),
+        org_id: org_id.map(String::from),
+        description: description.map(String::from),
+        expires_at,
+        scope: scope_val,
     };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(id)
+    let result = store.insert(&doc).await?;
+    Ok(result.id)
 }
 
 /// Delete a SCIM token, scoped to the given organization.
 ///
-/// Performs application-level SET NULL for DSQL compatibility:
-/// 1. Set scim_audit_log.actor_token_id to NULL for this token
-/// 2. Delete the token (only if it belongs to the specified org)
-///
-/// Returns `Ok(true)` if a token was deleted, `Ok(false)` if no matching
-/// token was found for the given org (prevents cross-org deletion).
+/// Returns `Ok(true)` if a token was deleted, `Ok(false)` if no
+/// matching token was found for the given org (prevents cross-org
+/// deletion).
 #[allow(dead_code)]
-pub async fn delete_scim_token(pool: &Pool, token_id: &str, org_id: &str) -> Result<bool> {
-    let mut tx = pool.begin().await?;
-    let db_type = tx.db_type();
-
-    // 1. SET NULL for audit log references (preserves audit trail)
-    let sql1 = {
-        let query = Query::update()
-            .table(ScimAuditLog::Table)
-            .value(ScimAuditLog::ActorTokenId, Option::<String>::None)
-            .and_where(Expr::col(ScimAuditLog::ActorTokenId).eq(token_id))
-            .to_owned();
-        query.build_sql(db_type)
+pub async fn delete_scim_token(
+    store: &DocumentStore,
+    token_id: &str,
+    org_id: &str,
+) -> Result<bool> {
+    let Some(doc) = store.get::<ScimTokenDoc>(token_id).await? else {
+        return Ok(false);
     };
-    tx_execute!(tx, sqlx::query(&sql1))?;
 
-    // 2. Delete the token (scoped to org to prevent cross-org deletion)
-    let sql2 = {
-        let query = Query::delete()
-            .from_table(ScimTokens::Table)
-            .and_where(Expr::col(ScimTokens::Id).eq(token_id))
-            .and_where(Expr::col(ScimTokens::OrgId).eq(org_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    let result = tx_execute!(tx, sqlx::query(&sql2))?;
+    // Prevent cross-org deletion
+    if doc.data.org_id.as_deref() != Some(org_id) {
+        return Ok(false);
+    }
 
-    tx.commit().await?;
-    Ok(result.rows_affected() > 0)
+    store.delete(token_id).await?;
+    Ok(true)
 }
 
 /// List SCIM tokens, optionally filtered by organization.
 #[allow(dead_code)]
-pub async fn list_scim_tokens(pool: &Pool, org_id: Option<&str>) -> Result<Vec<ScimToken>> {
-    let db_type = pool.db_type();
-
-    let tokens = if let Some(org_id) = org_id {
-        let sql = {
-            let query = Query::select()
-                .columns([
-                    ScimTokens::Id,
-                    ScimTokens::TokenHash,
-                    ScimTokens::OrgId,
-                    ScimTokens::Description,
-                    ScimTokens::CreatedAt,
-                    ScimTokens::LastUsedAt,
-                    ScimTokens::ExpiresAt,
-                    ScimTokens::Scope,
-                ])
-                .from(ScimTokens::Table)
-                .and_where(Expr::col(ScimTokens::OrgId).eq(org_id))
-                .order_by(ScimTokens::CreatedAt, Order::Desc)
-                .to_owned();
-            query.build_sql(db_type)
-        };
-        db_fetch_all!(pool, sqlx::query_as::<_, ScimToken>(&sql))?
+pub async fn list_scim_tokens(
+    store: &DocumentStore,
+    org_id: Option<&str>,
+) -> Result<Vec<ScimToken>> {
+    let docs = if let Some(org_id) = org_id {
+        store.find_all::<ScimTokenDoc>("org_id", org_id).await?
     } else {
-        let sql = {
-            let query = Query::select()
-                .columns([
-                    ScimTokens::Id,
-                    ScimTokens::TokenHash,
-                    ScimTokens::OrgId,
-                    ScimTokens::Description,
-                    ScimTokens::CreatedAt,
-                    ScimTokens::LastUsedAt,
-                    ScimTokens::ExpiresAt,
-                    ScimTokens::Scope,
-                ])
-                .from(ScimTokens::Table)
-                .order_by(ScimTokens::CreatedAt, Order::Desc)
-                .to_owned();
-            query.build_sql(db_type)
-        };
-        db_fetch_all!(pool, sqlx::query_as::<_, ScimToken>(&sql))?
+        store.list_all::<ScimTokenDoc>().await?
     };
-
-    Ok(tokens)
+    Ok(docs.into_iter().map(ScimToken::from).collect())
 }
 
-/// Insert SCIM audit log entry.
+// ============================================================================
+// SCIM Audit → AuditStore
+// ============================================================================
+
+/// Insert SCIM audit log entry via AuditStore.
 pub async fn insert_scim_audit(
-    pool: &Pool,
+    audit: &AuditStore,
     operation: &str,
     resource_type: &str,
     resource_id: &str,
     actor_token_id: Option<&str>,
     details: Option<&str>,
 ) -> Result<String> {
-    let id = Uuid::now_v7().to_string();
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
-
-    let sql = {
-        let query = Query::insert()
-            .into_table(ScimAuditLog::Table)
-            .columns([
-                ScimAuditLog::Id,
-                ScimAuditLog::Operation,
-                ScimAuditLog::ResourceType,
-                ScimAuditLog::ResourceId,
-                ScimAuditLog::ActorTokenId,
-                ScimAuditLog::Details,
-                ScimAuditLog::CreatedAt,
-            ])
-            .values_panic([
-                id.clone().into(),
-                operation.into(),
-                resource_type.into(),
-                resource_id.into(),
-                actor_token_id.into(),
-                details.into(),
-                now.as_str().into(),
-            ])
-            .to_owned();
-        query.build_sql(db_type)
+    let data = ScimAuditData {
+        operation: operation.to_string(),
+        resource_type: resource_type.to_string(),
+        resource_id: resource_id.to_string(),
+        actor_token_id: actor_token_id.map(String::from),
+        details: details.map(String::from),
     };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(id)
+    let data_json = serde_json::to_string(&data)?;
+    audit
+        .insert_event("scim_operation", None, None, &data_json)
+        .await
 }
 
-/// Delete SCIM audit log entries older than the specified timestamp.
-pub async fn delete_old_scim_audit_logs(pool: &Pool, before: &str) -> Result<u64> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::delete()
-            .from_table(ScimAuditLog::Table)
-            .and_where(Expr::col(ScimAuditLog::CreatedAt).lt(before))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let result = db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(result.rows_affected())
+/// Delete SCIM audit log entries older than the given timestamp.
+pub async fn delete_old_scim_audit_logs(audit: &AuditStore, before: Timestamp) -> Result<u64> {
+    let before_str = before.to_string();
+    audit.delete_old_events("scim_operation", &before_str).await
 }
 
 // ============================================================================
-// SCIM Users
+// SCIM Users (operate on UserDoc via DocumentStore)
 // ============================================================================
 
-/// SCIM user record (includes active and external_id fields).
-#[derive(Debug, sqlx::FromRow)]
+/// SCIM user record.
+#[derive(Debug)]
 pub struct ScimUserRecord {
     pub id: String,
     pub email: String,
     pub name: Option<String>,
-    pub created_at: DbTimestamp,
+    pub created_at: Timestamp,
     pub active: bool,
     pub external_id: Option<String>,
 }
 
+impl From<Document<UserDoc>> for ScimUserRecord {
+    fn from(doc: Document<UserDoc>) -> Self {
+        Self {
+            id: doc.id,
+            email: doc.data.email,
+            name: doc.data.name,
+            created_at: doc.created_at,
+            active: doc.data.active,
+            external_id: doc.data.external_id,
+        }
+    }
+}
+
 /// List users for SCIM with optional filter.
 pub async fn list_scim_users(
-    pool: &Pool,
+    store: &DocumentStore,
     filter: Option<&str>,
     start_index: usize,
     count: usize,
 ) -> Result<Vec<ScimUserRecord>> {
-    let db_type = pool.db_type();
-    let offset = start_index.saturating_sub(1); // SCIM is 1-indexed
+    let offset = start_index.saturating_sub(1); // SCIM 1-indexed
 
-    let sql = {
-        let mut query = Query::select()
-            .columns([
-                Users::Id,
-                Users::Email,
-                Users::Name,
-                Users::CreatedAt,
-                Users::Active,
-                Users::ExternalId,
-            ])
-            .from(Users::Table)
-            .to_owned();
+    // Try indexed eq lookup first for efficiency
+    if let Some(f) = filter
+        && let Some(result) = try_indexed_user_lookup(store, f).await?
+    {
+        return Ok(result.into_iter().skip(offset).take(count).collect());
+    }
 
+    // Non-indexed filter: must load all and filter in app
+    if filter.is_some() {
+        let all_docs = store.list_all::<UserDoc>().await?;
+        let mut records: Vec<ScimUserRecord> =
+            all_docs.into_iter().map(ScimUserRecord::from).collect();
         if let Some(f) = filter {
-            apply_user_filter(&mut query, f)?;
+            records = apply_scim_user_filter(records, f)?;
         }
+        records.sort_by(|a, b| a.email.cmp(&b.email));
+        return Ok(records.into_iter().skip(offset).take(count).collect());
+    }
 
-        query = query
-            .order_by(Users::Email, Order::Asc)
-            .limit(count as u64)
-            .offset(offset as u64)
-            .to_owned();
-
-        query.build_sql(db_type)
-    };
-
-    let users = db_fetch_all!(pool, sqlx::query_as::<_, ScimUserRecord>(&sql))?;
-
-    Ok(users)
+    // No filter: use DB-level pagination
+    let docs = store
+        .list_all_paginated::<UserDoc>(offset as u64, count as u64)
+        .await?;
+    Ok(docs.into_iter().map(ScimUserRecord::from).collect())
 }
 
 /// Count users for SCIM pagination.
-pub async fn count_scim_users(pool: &Pool, filter: Option<&str>) -> Result<usize> {
-    let db_type = pool.db_type();
+pub async fn count_scim_users(store: &DocumentStore, filter: Option<&str>) -> Result<usize> {
+    if let Some(f) = filter
+        && let Some(result) = try_indexed_user_lookup(store, f).await?
+    {
+        return Ok(result.len());
+    }
 
-    let sql = {
-        let mut query = Query::select()
-            .expr_as(Func::count(Expr::col(Asterisk)), Alias::new("count"))
-            .from(Users::Table)
-            .to_owned();
+    // Non-indexed filter: load all and count after filtering
+    if let Some(f) = filter {
+        let all_docs = store.list_all::<UserDoc>().await?;
+        let records: Vec<ScimUserRecord> = all_docs.into_iter().map(ScimUserRecord::from).collect();
+        let filtered = apply_scim_user_filter(records, f)?;
+        return Ok(filtered.len());
+    }
 
-        if let Some(f) = filter {
-            apply_user_filter(&mut query, f)?;
-        }
-
-        query.build_sql(db_type)
-    };
-
-    let count: (i64,) = db_fetch_one!(pool, sqlx::query_as(&sql))?;
-
-    Ok(count.0 as usize)
+    // No filter: use SQL COUNT
+    let count = store.count_all::<UserDoc>().await?;
+    Ok(count as usize)
 }
 
-/// SCIM filter operator (RFC 7644 Section 3.4.2).
+/// Try indexed eq lookups for SCIM user filters.
+async fn try_indexed_user_lookup(
+    store: &DocumentStore,
+    filter: &str,
+) -> Result<Option<Vec<ScimUserRecord>>> {
+    // userName/email eq → find_one by email index
+    for attr in &["userName", "email"] {
+        if let Some(f) = parse_scim_filter(filter, attr)?
+            && f.op == ScimFilterOp::Eq
+        {
+            let doc = store.find_one::<UserDoc>("email", &f.value).await?;
+            return Ok(Some(doc.into_iter().map(ScimUserRecord::from).collect()));
+        }
+    }
+
+    // externalId eq → find_one by external_id index
+    if let Some(f) = parse_scim_filter(filter, "externalId")?
+        && f.op == ScimFilterOp::Eq
+    {
+        let doc = store.find_one::<UserDoc>("external_id", &f.value).await?;
+        return Ok(Some(doc.into_iter().map(ScimUserRecord::from).collect()));
+    }
+
+    Ok(None)
+}
+
+/// Apply SCIM filter to user records in application code.
+fn apply_scim_user_filter(
+    records: Vec<ScimUserRecord>,
+    filter: &str,
+) -> Result<Vec<ScimUserRecord>> {
+    for attr in &["userName", "email"] {
+        if let Some(f) = parse_scim_filter(filter, attr)? {
+            return Ok(records
+                .into_iter()
+                .filter(|r| match_filter_value(&r.email, &f))
+                .collect());
+        }
+    }
+
+    if let Some(f) = parse_scim_filter(filter, "externalId")? {
+        return Ok(records
+            .into_iter()
+            .filter(|r| {
+                r.external_id
+                    .as_deref()
+                    .is_some_and(|eid| match_filter_value(eid, &f))
+            })
+            .collect());
+    }
+
+    // No recognized filter — return all
+    Ok(records)
+}
+
+/// Check if a value matches a SCIM filter.
+fn match_filter_value(value: &str, filter: &ScimFilter) -> bool {
+    let value_lower = value.to_lowercase();
+    let filter_lower = filter.value.to_lowercase();
+    match filter.op {
+        ScimFilterOp::Eq => value_lower == filter_lower,
+        ScimFilterOp::Co => value_lower.contains(&filter_lower),
+        ScimFilterOp::Sw => value_lower.starts_with(&filter_lower),
+    }
+}
+
+/// Get a user by ID for SCIM.
+pub async fn get_scim_user(store: &DocumentStore, user_id: &str) -> Result<Option<ScimUserRecord>> {
+    let doc = store.get::<UserDoc>(user_id).await?;
+    Ok(doc.map(ScimUserRecord::from))
+}
+
+/// Create a user via SCIM.
+///
+/// Returns an error containing "UNIQUE" if a user with the same
+/// email already exists (application-level uniqueness enforcement).
+/// The duplicate check and insert run within a single transaction to
+/// prevent concurrent duplicate inserts.
+pub async fn create_scim_user(
+    store: &DocumentStore,
+    email: &str,
+    name: Option<&str>,
+    external_id: Option<&str>,
+    active: bool,
+) -> Result<ScimUserRecord> {
+    let mut tx = store.begin().await?;
+
+    // Check for duplicates within the transaction
+    if tx.find_one::<UserDoc>("email", email).await?.is_some() {
+        anyhow::bail!("UNIQUE constraint failed: user with email already exists");
+    }
+
+    let doc = UserDoc {
+        email: email.to_string(),
+        name: name.map(String::from),
+        org_id: None,
+        is_org_admin: false,
+        active,
+        external_id: external_id.map(String::from),
+        github_id: None,
+        github_login: None,
+        github_refresh_token: None,
+    };
+    let result = tx.insert(&doc).await?;
+
+    tx.commit().await?;
+    Ok(ScimUserRecord::from(result))
+}
+
+/// Update a user via SCIM.
+pub async fn update_scim_user(
+    store: &DocumentStore,
+    user_id: &str,
+    name: Option<&str>,
+    external_id: Option<&str>,
+    active: bool,
+) -> Result<()> {
+    if let Some(doc) = store.get::<UserDoc>(user_id).await? {
+        let mut data = doc.data;
+        data.name = name.map(String::from);
+        data.external_id = external_id.map(String::from);
+        data.active = active;
+        store.update(user_id, &data).await?;
+    }
+    Ok(())
+}
+
+// ============================================================================
+// SCIM Filter Parsing (RFC 7644 Section 3.4.2)
+// ============================================================================
+
+/// SCIM filter operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ScimFilterOp {
     /// Equal — exact match.
@@ -491,9 +525,10 @@ impl std::error::Error for ScimFilterError {}
 
 /// Parse a SCIM filter expression for the given attribute.
 ///
-/// Supports `eq`, `co`, and `sw` operators (RFC 7644 Section 3.4.2).
-/// Returns `Ok(Some(filter))` on match, `Ok(None)` if the attribute doesn't
-/// match, and `Err` for unsupported operators.
+/// Supports `eq`, `co`, and `sw` operators (RFC 7644 Section
+/// 3.4.2). Returns `Ok(Some(filter))` on match, `Ok(None)` if
+/// the attribute doesn't match, and `Err` for unsupported
+/// operators.
 pub(crate) fn parse_scim_filter(
     filter: &str,
     attr: &str,
@@ -501,12 +536,10 @@ pub(crate) fn parse_scim_filter(
     let filter_lower = filter.to_lowercase();
     let attr_lower = attr.to_lowercase();
 
-    // Does this filter reference the given attribute?
     let Some(attr_pos) = filter_lower.find(&attr_lower) else {
         return Ok(None);
     };
 
-    // Extract the operator word and remaining text after the attribute
     let after_attr = filter_lower
         .get(attr_pos + attr_lower.len()..)
         .unwrap_or("");
@@ -519,7 +552,6 @@ pub(crate) fn parse_scim_filter(
         return Ok(None);
     };
 
-    // Match the operator (case-insensitive — we're already lowercased)
     let op = match op_word {
         "eq" => ScimFilterOp::Eq,
         "co" => ScimFilterOp::Co,
@@ -527,8 +559,8 @@ pub(crate) fn parse_scim_filter(
         other => return Err(ScimFilterError::UnsupportedOperator(other.to_string())),
     };
 
-    // Extract the quoted value from the original filter (preserving case).
-    // Build the full `attr op ` pattern to locate the value portion.
+    // Extract quoted value from the original filter
+    // (preserving case).
     let pattern = format!("{attr} {op_word} ");
     let pattern_lower = pattern.to_lowercase();
 
@@ -547,713 +579,337 @@ pub(crate) fn parse_scim_filter(
     Ok(None)
 }
 
-/// The escape character used in LIKE patterns.
-///
-/// We use `\` and attach an explicit `ESCAPE '\'` clause via sea-query's
-/// `LikeExpr::escape()`. This is required for SQLite (which does not treat
-/// `\` as an escape by default) and is supported by PostgreSQL / Aurora DSQL.
-const LIKE_ESCAPE_CHAR: char = '\\';
-
-/// Escape special SQL LIKE characters (`%` and `_`) in a value using
-/// [`LIKE_ESCAPE_CHAR`].
-fn escape_like_value(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        if ch == '%' || ch == '_' || ch == LIKE_ESCAPE_CHAR {
-            out.push(LIKE_ESCAPE_CHAR);
-        }
-        out.push(ch);
-    }
-    out
-}
-
-/// Build a sea-query `LikeExpr` with the explicit `ESCAPE` clause.
-fn like_expr(pattern: String) -> LikeExpr {
-    LikeExpr::new(pattern).escape(LIKE_ESCAPE_CHAR)
-}
-
-/// Build the sea-query condition for a SCIM filter and column.
-fn scim_filter_condition(
-    column: impl sea_query::IntoColumnRef,
-    filter: &ScimFilter,
-) -> sea_query::SimpleExpr {
-    match filter.op {
-        ScimFilterOp::Eq => Expr::col(column).eq(&filter.value),
-        ScimFilterOp::Co => {
-            let pattern = format!("%{}%", escape_like_value(&filter.value));
-            Expr::col(column).like(like_expr(pattern))
-        }
-        ScimFilterOp::Sw => {
-            let pattern = format!("{}%", escape_like_value(&filter.value));
-            Expr::col(column).like(like_expr(pattern))
-        }
-    }
-}
-
-/// Try to apply a SCIM filter for a single attribute.
-///
-/// Returns `Ok(true)` if the filter matched and was applied, `Ok(false)` if
-/// the attribute was not referenced, or `Err` for unsupported operators.
-fn try_apply_attr_filter(
-    query: &mut sea_query::SelectStatement,
-    filter: &str,
-    attr: &str,
-    column: impl sea_query::IntoColumnRef,
-) -> Result<bool> {
-    match parse_scim_filter(filter, attr) {
-        Ok(Some(f)) => {
-            *query = query
-                .and_where(scim_filter_condition(column, &f))
-                .to_owned();
-            Ok(true)
-        }
-        Err(e) => Err(e.into()),
-        Ok(None) => Ok(false),
-    }
-}
-
-/// Apply a SCIM filter to a user query.
-///
-/// Checks `userName`, `email`, and `externalId` attributes.
-fn apply_user_filter(query: &mut sea_query::SelectStatement, filter: &str) -> Result<()> {
-    if try_apply_attr_filter(query, filter, "userName", Users::Email)? {
-        return Ok(());
-    }
-    if try_apply_attr_filter(query, filter, "email", Users::Email)? {
-        return Ok(());
-    }
-    let _ = try_apply_attr_filter(query, filter, "externalId", Users::ExternalId)?;
-    Ok(())
-}
-
-/// Apply a SCIM filter to a group query.
-///
-/// Checks `displayName` and `externalId` attributes.
-fn apply_group_filter(query: &mut sea_query::SelectStatement, filter: &str) -> Result<()> {
-    if try_apply_attr_filter(query, filter, "displayName", ScimGroups::DisplayName)? {
-        return Ok(());
-    }
-    let _ = try_apply_attr_filter(query, filter, "externalId", ScimGroups::ExternalId)?;
-    Ok(())
-}
-
-/// Get a user by ID for SCIM.
-pub async fn get_scim_user(pool: &Pool, user_id: &str) -> Result<Option<ScimUserRecord>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .columns([
-                Users::Id,
-                Users::Email,
-                Users::Name,
-                Users::CreatedAt,
-                Users::Active,
-                Users::ExternalId,
-            ])
-            .from(Users::Table)
-            .and_where(Expr::col(Users::Id).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let user = db_fetch_optional!(pool, sqlx::query_as::<_, ScimUserRecord>(&sql))?;
-
-    Ok(user)
-}
-
-/// Create a user via SCIM.
-pub async fn create_scim_user(
-    pool: &Pool,
-    email: &str,
-    name: Option<&str>,
-    external_id: Option<&str>,
-    active: bool,
-) -> Result<ScimUserRecord> {
-    let id = Uuid::now_v7().to_string();
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
-
-    let insert_sql = {
-        let query = Query::insert()
-            .into_table(Users::Table)
-            .columns([
-                Users::Id,
-                Users::Email,
-                Users::Name,
-                Users::ExternalId,
-                Users::Active,
-                Users::CreatedAt,
-            ])
-            .values_panic([
-                id.clone().into(),
-                email.into(),
-                name.into(),
-                external_id.into(),
-                active.into(),
-                now.as_str().into(),
-            ])
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    db_execute!(pool, sqlx::query(&insert_sql))?;
-
-    // Fetch and return the created user
-    let select_sql = {
-        let query = Query::select()
-            .columns([
-                Users::Id,
-                Users::Email,
-                Users::Name,
-                Users::CreatedAt,
-                Users::Active,
-                Users::ExternalId,
-            ])
-            .from(Users::Table)
-            .and_where(Expr::col(Users::Id).eq(&id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let user = db_fetch_one!(pool, sqlx::query_as::<_, ScimUserRecord>(&select_sql))?;
-
-    Ok(user)
-}
-
-/// Update a user via SCIM.
-pub async fn update_scim_user(
-    pool: &Pool,
-    user_id: &str,
-    name: Option<&str>,
-    external_id: Option<&str>,
-    active: bool,
-) -> Result<()> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::update()
-            .table(Users::Table)
-            .value(Users::Name, name)
-            .value(Users::ExternalId, external_id)
-            .value(Users::Active, active)
-            .and_where(Expr::col(Users::Id).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(())
-}
-
 // ============================================================================
 // SCIM Groups
 // ============================================================================
 
 /// SCIM Group record.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 pub struct ScimGroupRecord {
     pub id: String,
     pub display_name: String,
     pub external_id: Option<String>,
-    pub created_at: DbTimestamp,
-    pub updated_at: DbTimestamp,
+    pub created_at: Timestamp,
+    pub updated_at: Timestamp,
+}
+
+impl From<Document<ScimGroupDoc>> for ScimGroupRecord {
+    fn from(doc: Document<ScimGroupDoc>) -> Self {
+        Self {
+            id: doc.id,
+            display_name: doc.data.display_name,
+            external_id: doc.data.external_id,
+            created_at: doc.created_at,
+            updated_at: doc.updated_at,
+        }
+    }
 }
 
 /// SCIM Group member record.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 #[allow(dead_code)]
 pub struct ScimGroupMemberRecord {
     pub group_id: String,
     pub user_id: String,
-    pub created_at: DbTimestamp,
+    pub created_at: Timestamp,
+}
+
+impl From<Document<ScimGroupMemberDoc>> for ScimGroupMemberRecord {
+    fn from(doc: Document<ScimGroupMemberDoc>) -> Self {
+        Self {
+            group_id: doc.data.group_id,
+            user_id: doc.data.user_id,
+            created_at: doc.created_at,
+        }
+    }
 }
 
 /// Create a new SCIM group.
 pub async fn create_scim_group(
-    pool: &Pool,
+    store: &DocumentStore,
     display_name: &str,
     external_id: Option<&str>,
 ) -> Result<ScimGroupRecord> {
-    let id = Uuid::now_v7().to_string();
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
-
-    let sql = {
-        let query = Query::insert()
-            .into_table(ScimGroups::Table)
-            .columns([
-                ScimGroups::Id,
-                ScimGroups::DisplayName,
-                ScimGroups::ExternalId,
-                ScimGroups::CreatedAt,
-                ScimGroups::UpdatedAt,
-            ])
-            .values_panic([
-                id.clone().into(),
-                display_name.into(),
-                external_id.into(),
-                now.as_str().into(),
-                now.as_str().into(),
-            ])
-            .to_owned();
-        query.build_sql(db_type)
+    let doc = ScimGroupDoc {
+        display_name: display_name.to_string(),
+        external_id: external_id.map(String::from),
     };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    // Return the created group
-    get_scim_group(pool, &id)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("Failed to retrieve created group"))
+    let result = store.insert(&doc).await?;
+    Ok(ScimGroupRecord::from(result))
 }
 
 /// Get a SCIM group by ID.
-pub async fn get_scim_group(pool: &Pool, id: &str) -> Result<Option<ScimGroupRecord>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .columns([
-                ScimGroups::Id,
-                ScimGroups::DisplayName,
-                ScimGroups::ExternalId,
-                ScimGroups::CreatedAt,
-                ScimGroups::UpdatedAt,
-            ])
-            .from(ScimGroups::Table)
-            .and_where(Expr::col(ScimGroups::Id).eq(id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let group = db_fetch_optional!(pool, sqlx::query_as::<_, ScimGroupRecord>(&sql))?;
-
-    Ok(group)
+pub async fn get_scim_group(store: &DocumentStore, id: &str) -> Result<Option<ScimGroupRecord>> {
+    let doc = store.get::<ScimGroupDoc>(id).await?;
+    Ok(doc.map(ScimGroupRecord::from))
 }
 
 /// Get a SCIM group by display name.
 #[allow(dead_code)]
 pub async fn get_scim_group_by_name(
-    pool: &Pool,
+    store: &DocumentStore,
     display_name: &str,
 ) -> Result<Option<ScimGroupRecord>> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::select()
-            .columns([
-                ScimGroups::Id,
-                ScimGroups::DisplayName,
-                ScimGroups::ExternalId,
-                ScimGroups::CreatedAt,
-                ScimGroups::UpdatedAt,
-            ])
-            .from(ScimGroups::Table)
-            .and_where(Expr::col(ScimGroups::DisplayName).eq(display_name))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let group = db_fetch_optional!(pool, sqlx::query_as::<_, ScimGroupRecord>(&sql))?;
-
-    Ok(group)
+    let doc = store
+        .find_one::<ScimGroupDoc>("display_name", display_name)
+        .await?;
+    Ok(doc.map(ScimGroupRecord::from))
 }
 
 /// List SCIM groups with pagination.
 pub async fn list_scim_groups(
-    pool: &Pool,
+    store: &DocumentStore,
     filter: Option<&str>,
     start_index: usize,
     count: usize,
 ) -> Result<Vec<ScimGroupRecord>> {
-    let db_type = pool.db_type();
     let offset = if start_index > 0 { start_index - 1 } else { 0 };
 
-    let sql = {
-        let mut query = Query::select()
-            .columns([
-                ScimGroups::Id,
-                ScimGroups::DisplayName,
-                ScimGroups::ExternalId,
-                ScimGroups::CreatedAt,
-                ScimGroups::UpdatedAt,
-            ])
-            .from(ScimGroups::Table)
-            .to_owned();
+    // Try indexed eq lookup first
+    if let Some(f) = filter
+        && let Some(result) = try_indexed_group_lookup(store, f).await?
+    {
+        return Ok(result.into_iter().skip(offset).take(count).collect());
+    }
 
-        if let Some(filter_str) = filter {
-            apply_group_filter(&mut query, filter_str)?;
+    // Non-indexed filter: must load all and filter in app
+    if filter.is_some() {
+        let all_docs = store.list_all::<ScimGroupDoc>().await?;
+        let mut records: Vec<ScimGroupRecord> =
+            all_docs.into_iter().map(ScimGroupRecord::from).collect();
+        if let Some(f) = filter {
+            records = apply_scim_group_filter(records, f)?;
         }
+        records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        return Ok(records.into_iter().skip(offset).take(count).collect());
+    }
 
-        query = query
-            .order_by(ScimGroups::CreatedAt, Order::Desc)
-            .limit(count as u64)
-            .offset(offset as u64)
-            .to_owned();
-
-        query.build_sql(db_type)
-    };
-
-    let groups = db_fetch_all!(pool, sqlx::query_as::<_, ScimGroupRecord>(&sql))?;
-
-    Ok(groups)
+    // No filter: use DB-level pagination
+    let docs = store
+        .list_all_paginated::<ScimGroupDoc>(offset as u64, count as u64)
+        .await?;
+    Ok(docs.into_iter().map(ScimGroupRecord::from).collect())
 }
 
 /// Count SCIM groups (for pagination).
-pub async fn count_scim_groups(pool: &Pool, filter: Option<&str>) -> Result<usize> {
-    let db_type = pool.db_type();
+pub async fn count_scim_groups(store: &DocumentStore, filter: Option<&str>) -> Result<usize> {
+    if let Some(f) = filter
+        && let Some(result) = try_indexed_group_lookup(store, f).await?
+    {
+        return Ok(result.len());
+    }
 
-    let sql = {
-        let mut query = Query::select()
-            .expr_as(Func::count(Expr::col(Asterisk)), Alias::new("count"))
-            .from(ScimGroups::Table)
-            .to_owned();
+    // Non-indexed filter: load all and count after filtering
+    if let Some(f) = filter {
+        let all_docs = store.list_all::<ScimGroupDoc>().await?;
+        let records: Vec<ScimGroupRecord> =
+            all_docs.into_iter().map(ScimGroupRecord::from).collect();
+        let filtered = apply_scim_group_filter(records, f)?;
+        return Ok(filtered.len());
+    }
 
-        if let Some(filter_str) = filter {
-            apply_group_filter(&mut query, filter_str)?;
-        }
+    // No filter: use SQL COUNT
+    let count = store.count_all::<ScimGroupDoc>().await?;
+    Ok(count as usize)
+}
 
-        query.build_sql(db_type)
-    };
+/// Try indexed eq lookups for SCIM group filters.
+async fn try_indexed_group_lookup(
+    store: &DocumentStore,
+    filter: &str,
+) -> Result<Option<Vec<ScimGroupRecord>>> {
+    if let Some(f) = parse_scim_filter(filter, "displayName")?
+        && f.op == ScimFilterOp::Eq
+    {
+        let doc = store
+            .find_one::<ScimGroupDoc>("display_name", &f.value)
+            .await?;
+        return Ok(Some(doc.into_iter().map(ScimGroupRecord::from).collect()));
+    }
 
-    let count: (i64,) = db_fetch_one!(pool, sqlx::query_as(&sql))?;
+    if let Some(f) = parse_scim_filter(filter, "externalId")?
+        && f.op == ScimFilterOp::Eq
+    {
+        let doc = store
+            .find_one::<ScimGroupDoc>("external_id", &f.value)
+            .await?;
+        return Ok(Some(doc.into_iter().map(ScimGroupRecord::from).collect()));
+    }
 
-    Ok(count.0 as usize)
+    Ok(None)
+}
+
+/// Apply SCIM filter to group records in application code.
+fn apply_scim_group_filter(
+    records: Vec<ScimGroupRecord>,
+    filter: &str,
+) -> Result<Vec<ScimGroupRecord>> {
+    if let Some(f) = parse_scim_filter(filter, "displayName")? {
+        return Ok(records
+            .into_iter()
+            .filter(|r| match_filter_value(&r.display_name, &f))
+            .collect());
+    }
+
+    if let Some(f) = parse_scim_filter(filter, "externalId")? {
+        return Ok(records
+            .into_iter()
+            .filter(|r| {
+                r.external_id
+                    .as_deref()
+                    .is_some_and(|eid| match_filter_value(eid, &f))
+            })
+            .collect());
+    }
+
+    Ok(records)
 }
 
 /// Update a SCIM group.
-/// Only updates fields that are provided (Some), leaving others unchanged.
 pub async fn update_scim_group(
-    pool: &Pool,
+    store: &DocumentStore,
     id: &str,
     display_name: Option<&str>,
     external_id: Option<&str>,
 ) -> Result<()> {
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
-
-    // Build update query conditionally - only include fields that are Some
-    let sql = {
-        let mut query = Query::update()
-            .table(ScimGroups::Table)
-            .value(ScimGroups::UpdatedAt, now.as_str())
-            .and_where(Expr::col(ScimGroups::Id).eq(id))
-            .to_owned();
-
+    if let Some(doc) = store.get::<ScimGroupDoc>(id).await? {
+        let mut data = doc.data;
         if let Some(name) = display_name {
-            query = query.value(ScimGroups::DisplayName, name).to_owned();
+            data.display_name = name.to_string();
         }
         if let Some(ext_id) = external_id {
-            query = query.value(ScimGroups::ExternalId, ext_id).to_owned();
+            data.external_id = Some(ext_id.to_string());
         }
-
-        query.build_sql(db_type)
-    };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
+        store.update(id, &data).await?;
+    }
     Ok(())
 }
 
-/// Delete a SCIM group.
+/// Delete a SCIM group atomically.
 ///
-/// Performs application-level cascade deletes for DSQL compatibility:
-/// 1. Delete group memberships
-/// 2. Delete the group
-pub async fn delete_scim_group(pool: &Pool, id: &str) -> Result<bool> {
-    let mut tx = pool.begin().await?;
-    let db_type = tx.db_type();
+/// Performs application-level cascade within a single transaction:
+/// deletes group memberships first, then the group itself.
+pub async fn delete_scim_group(store: &DocumentStore, id: &str) -> Result<bool> {
+    let mut tx = store.begin().await?;
 
     // 1. Delete group memberships
-    let sql1 = {
-        let query = Query::delete()
-            .from_table(ScimGroupMembers::Table)
-            .and_where(Expr::col(ScimGroupMembers::GroupId).eq(id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    tx_execute!(tx, sqlx::query(&sql1))?;
+    tx.delete_by_index::<ScimGroupMemberDoc>("group_id", id)
+        .await?;
 
     // 2. Delete the group
-    let sql2 = {
-        let query = Query::delete()
-            .from_table(ScimGroups::Table)
-            .and_where(Expr::col(ScimGroups::Id).eq(id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    let result = tx_execute!(tx, sqlx::query(&sql2))?;
+    let existed = tx.get::<ScimGroupDoc>(id).await?.is_some();
+    if existed {
+        tx.delete(id).await?;
+    }
 
     tx.commit().await?;
-    Ok(result.rows_affected() > 0)
+    Ok(existed)
 }
 
 /// Add a member to a SCIM group.
-/// This operation is atomic - both the insert and timestamp update happen together.
-pub async fn add_scim_group_member(pool: &Pool, group_id: &str, user_id: &str) -> Result<()> {
-    let mut tx = pool.begin().await?;
-    let db_type = tx.db_type();
-    let now = Timestamp::now().to_string();
+pub async fn add_scim_group_member(
+    store: &DocumentStore,
+    group_id: &str,
+    user_id: &str,
+) -> Result<()> {
+    // Check if already a member (idempotent)
+    let existing = store
+        .find_by_indexes::<ScimGroupMemberDoc>(&[("group_id", group_id), ("user_id", user_id)])
+        .await?;
 
-    // Insert member using sea-query
-    // Build SQL in a block to ensure query is dropped before await
-    let insert_sql = {
-        let insert_query = Query::insert()
-            .into_table(ScimGroupMembers::Table)
-            .columns([ScimGroupMembers::GroupId, ScimGroupMembers::UserId])
-            .values_panic([group_id.into(), user_id.into()])
-            .on_conflict(OnConflict::new().do_nothing().to_owned())
-            .to_owned();
-        insert_query.build_sql(db_type)
-    };
+    if existing.is_empty() {
+        let doc = ScimGroupMemberDoc {
+            group_id: group_id.to_string(),
+            user_id: user_id.to_string(),
+        };
+        store.insert(&doc).await?;
+    }
 
-    tx_execute!(tx, sqlx::query(&insert_sql))?;
-
-    // Update group's updated_at using sea-query
-    let update_sql = {
-        let query = Query::update()
-            .table(ScimGroups::Table)
-            .value(ScimGroups::UpdatedAt, now.as_str())
-            .and_where(Expr::col(ScimGroups::Id).eq(group_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    tx_execute!(tx, sqlx::query(&update_sql))?;
-
-    tx.commit().await?;
     Ok(())
 }
 
 /// Remove a member from a SCIM group.
-/// This operation is atomic - both the delete and timestamp update happen together.
-pub async fn remove_scim_group_member(pool: &Pool, group_id: &str, user_id: &str) -> Result<bool> {
-    let mut tx = pool.begin().await?;
-    let db_type = tx.db_type();
-    let now = Timestamp::now().to_string();
+pub async fn remove_scim_group_member(
+    store: &DocumentStore,
+    group_id: &str,
+    user_id: &str,
+) -> Result<bool> {
+    let existing = store
+        .find_by_indexes::<ScimGroupMemberDoc>(&[("group_id", group_id), ("user_id", user_id)])
+        .await?;
 
-    let delete_sql = {
-        let query = Query::delete()
-            .from_table(ScimGroupMembers::Table)
-            .and_where(Expr::col(ScimGroupMembers::GroupId).eq(group_id))
-            .and_where(Expr::col(ScimGroupMembers::UserId).eq(user_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let result = tx_execute!(tx, sqlx::query(&delete_sql))?;
-
-    if result.rows_affected() > 0 {
-        // Update group's updated_at
-        let update_sql = {
-            let query = Query::update()
-                .table(ScimGroups::Table)
-                .value(ScimGroups::UpdatedAt, now.as_str())
-                .and_where(Expr::col(ScimGroups::Id).eq(group_id))
-                .to_owned();
-            query.build_sql(db_type)
-        };
-        tx_execute!(tx, sqlx::query(&update_sql))?;
-        tx.commit().await?;
-        Ok(true)
-    } else {
-        tx.commit().await?;
-        Ok(false)
+    if let Some(doc) = existing.into_iter().next() {
+        store.delete(&doc.id).await?;
+        return Ok(true);
     }
+    Ok(false)
 }
 
 /// Get all members of a SCIM group.
-pub async fn get_scim_group_members(pool: &Pool, group_id: &str) -> Result<Vec<ScimUserRecord>> {
-    let db_type = pool.db_type();
+pub async fn get_scim_group_members(
+    store: &DocumentStore,
+    group_id: &str,
+) -> Result<Vec<ScimUserRecord>> {
+    let member_docs = store
+        .find_all::<ScimGroupMemberDoc>("group_id", group_id)
+        .await?;
 
-    let sql = {
-        let query = Query::select()
-            .column((Users::Table, Users::Id))
-            .column((Users::Table, Users::Email))
-            .column((Users::Table, Users::Name))
-            .column((Users::Table, Users::ExternalId))
-            .column((Users::Table, Users::Active))
-            .column((Users::Table, Users::CreatedAt))
-            .from(Users::Table)
-            .join(
-                JoinType::InnerJoin,
-                ScimGroupMembers::Table,
-                Expr::col((ScimGroupMembers::Table, ScimGroupMembers::UserId))
-                    .equals((Users::Table, Users::Id)),
-            )
-            .and_where(Expr::col((ScimGroupMembers::Table, ScimGroupMembers::GroupId)).eq(group_id))
-            .order_by((Users::Table, Users::Email), Order::Asc)
-            .to_owned();
-        query.build_sql(db_type)
-    };
+    let mut users = Vec::with_capacity(member_docs.len());
+    for member in &member_docs {
+        if let Some(user_doc) = store.get::<UserDoc>(&member.data.user_id).await? {
+            users.push(ScimUserRecord::from(user_doc));
+        }
+    }
 
-    let users = db_fetch_all!(pool, sqlx::query_as::<_, ScimUserRecord>(&sql))?;
-
+    users.sort_by(|a, b| a.email.cmp(&b.email));
     Ok(users)
 }
 
 /// Get all groups a user belongs to.
 #[allow(dead_code)]
-pub async fn get_user_scim_groups(pool: &Pool, user_id: &str) -> Result<Vec<ScimGroupRecord>> {
-    let db_type = pool.db_type();
+pub async fn get_user_scim_groups(
+    store: &DocumentStore,
+    user_id: &str,
+) -> Result<Vec<ScimGroupRecord>> {
+    let member_docs = store
+        .find_all::<ScimGroupMemberDoc>("user_id", user_id)
+        .await?;
 
-    let sql = {
-        let query = Query::select()
-            .column((ScimGroups::Table, ScimGroups::Id))
-            .column((ScimGroups::Table, ScimGroups::DisplayName))
-            .column((ScimGroups::Table, ScimGroups::ExternalId))
-            .column((ScimGroups::Table, ScimGroups::CreatedAt))
-            .column((ScimGroups::Table, ScimGroups::UpdatedAt))
-            .from(ScimGroups::Table)
-            .join(
-                JoinType::InnerJoin,
-                ScimGroupMembers::Table,
-                Expr::col((ScimGroupMembers::Table, ScimGroupMembers::GroupId))
-                    .equals((ScimGroups::Table, ScimGroups::Id)),
-            )
-            .and_where(Expr::col((ScimGroupMembers::Table, ScimGroupMembers::UserId)).eq(user_id))
-            .order_by((ScimGroups::Table, ScimGroups::DisplayName), Order::Asc)
-            .to_owned();
-        query.build_sql(db_type)
-    };
+    let mut groups = Vec::with_capacity(member_docs.len());
+    for member in &member_docs {
+        if let Some(group_doc) = store.get::<ScimGroupDoc>(&member.data.group_id).await? {
+            groups.push(ScimGroupRecord::from(group_doc));
+        }
+    }
 
-    let groups = db_fetch_all!(pool, sqlx::query_as::<_, ScimGroupRecord>(&sql))?;
-
+    groups.sort_by(|a, b| a.display_name.cmp(&b.display_name));
     Ok(groups)
 }
 
-/// Maximum number of rows that can be modified in a single DSQL transaction.
-/// DSQL limits transactions to 3,000 rows; we use 2,000 to leave margin for
-/// the delete operation and updated_at update.
-const DSQL_BATCH_SIZE: usize = 2000;
-
-/// Replace all members of a SCIM group.
+/// Replace all members of a SCIM group atomically.
 ///
-/// For small groups (≤ `DSQL_BATCH_SIZE` members), this operation is atomic.
-/// For larger groups, members are added in batches. The delete and first batch
-/// are atomic, but subsequent batches are separate transactions.
-///
-/// # Note on atomicity for large groups
-///
-/// If a failure occurs mid-way through processing a large group, the group
-/// will be left in a partially-updated state. The SCIM client should retry
-/// the PUT request to complete the update.
+/// Deletes all existing members and inserts the new list within a
+/// single transaction so the group is never left in a partial state.
 pub async fn replace_scim_group_members(
-    pool: &Pool,
+    store: &DocumentStore,
     group_id: &str,
     user_ids: &[String],
 ) -> Result<()> {
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
+    let mut tx = store.begin().await?;
 
-    // For small groups, do everything in one transaction (atomic)
-    if user_ids.len() <= DSQL_BATCH_SIZE {
-        let mut tx = pool.begin().await?;
+    // Delete all existing members
+    tx.delete_by_index::<ScimGroupMemberDoc>("group_id", group_id)
+        .await?;
 
-        // Delete all existing members
-        let delete_sql = {
-            let query = Query::delete()
-                .from_table(ScimGroupMembers::Table)
-                .and_where(Expr::col(ScimGroupMembers::GroupId).eq(group_id))
-                .to_owned();
-            query.build_sql(db_type)
+    // Insert new members
+    for user_id in user_ids {
+        let doc = ScimGroupMemberDoc {
+            group_id: group_id.to_string(),
+            user_id: user_id.clone(),
         };
-        tx_execute!(tx, sqlx::query(&delete_sql))?;
-
-        // Add new members
-        for user_id in user_ids {
-            let insert_sql = {
-                let insert_query = Query::insert()
-                    .into_table(ScimGroupMembers::Table)
-                    .columns([ScimGroupMembers::GroupId, ScimGroupMembers::UserId])
-                    .values_panic([group_id.into(), user_id.clone().into()])
-                    .on_conflict(OnConflict::new().do_nothing().to_owned())
-                    .to_owned();
-                insert_query.build_sql(db_type)
-            };
-            tx_execute!(tx, sqlx::query(&insert_sql))?;
-        }
-
-        // Update group's updated_at
-        let update_sql = {
-            let query = Query::update()
-                .table(ScimGroups::Table)
-                .value(ScimGroups::UpdatedAt, now.as_str())
-                .and_where(Expr::col(ScimGroups::Id).eq(group_id))
-                .to_owned();
-            query.build_sql(db_type)
-        };
-        tx_execute!(tx, sqlx::query(&update_sql))?;
-
-        tx.commit().await?;
-        return Ok(());
+        tx.insert(&doc).await?;
     }
 
-    // For large groups, process in batches
-    // First batch: delete existing + add first batch (atomic)
-    {
-        let mut tx = pool.begin().await?;
-
-        let delete_sql = {
-            let query = Query::delete()
-                .from_table(ScimGroupMembers::Table)
-                .and_where(Expr::col(ScimGroupMembers::GroupId).eq(group_id))
-                .to_owned();
-            query.build_sql(db_type)
-        };
-        tx_execute!(tx, sqlx::query(&delete_sql))?;
-
-        for user_id in user_ids.iter().take(DSQL_BATCH_SIZE) {
-            let insert_sql = {
-                let insert_query = Query::insert()
-                    .into_table(ScimGroupMembers::Table)
-                    .columns([ScimGroupMembers::GroupId, ScimGroupMembers::UserId])
-                    .values_panic([group_id.into(), user_id.clone().into()])
-                    .on_conflict(OnConflict::new().do_nothing().to_owned())
-                    .to_owned();
-                insert_query.build_sql(db_type)
-            };
-            tx_execute!(tx, sqlx::query(&insert_sql))?;
-        }
-
-        tx.commit().await?;
-    }
-
-    // Subsequent batches: each in its own transaction
-    for chunk in user_ids
-        .get(DSQL_BATCH_SIZE..)
-        .unwrap_or(&[])
-        .chunks(DSQL_BATCH_SIZE)
-    {
-        let mut tx = pool.begin().await?;
-
-        for user_id in chunk {
-            let insert_sql = {
-                let insert_query = Query::insert()
-                    .into_table(ScimGroupMembers::Table)
-                    .columns([ScimGroupMembers::GroupId, ScimGroupMembers::UserId])
-                    .values_panic([group_id.into(), user_id.clone().into()])
-                    .on_conflict(OnConflict::new().do_nothing().to_owned())
-                    .to_owned();
-                insert_query.build_sql(db_type)
-            };
-            tx_execute!(tx, sqlx::query(&insert_sql))?;
-        }
-
-        tx.commit().await?;
-    }
-
-    // Update group's updated_at after all batches complete
-    let update_sql = {
-        let query = Query::update()
-            .table(ScimGroups::Table)
-            .value(ScimGroups::UpdatedAt, now.as_str())
-            .and_where(Expr::col(ScimGroups::Id).eq(group_id))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    db_execute!(pool, sqlx::query(&update_sql))?;
-
+    tx.commit().await?;
     Ok(())
 }

@@ -1,35 +1,33 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Server configuration and authentication event database operations.
+//!
+//! Auth events are now stored via `AuditStore`. This module provides the
+//! domain types and a convenience wrapper.
 
-use super::Pool;
-use super::schema::AuthEvents;
-use super::types::BuildSql;
-use super::types::DbTimestamp;
-use crate::{db_execute, db_fetch_all};
+use super::audit::{AuditEventFilter, AuditStore};
 use anyhow::Result;
-use jiff::Timestamp;
-use sea_query::{Expr, Order, Query};
-use uuid::Uuid;
+use serde::{Deserialize, Serialize};
 
 // ============================================================================
 // Authentication Events
 // ============================================================================
 
 /// Authentication event types.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, sqlx::Type)]
-#[sqlx(type_name = "text")]
-#[sqlx(rename_all = "snake_case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub enum AuthEventType {
     #[default]
+    #[serde(rename = "login_success")]
     LoginSuccess,
+    #[serde(rename = "login_failed")]
     LoginFailed,
+    #[serde(rename = "enrollment")]
     Enrollment,
-    #[allow(dead_code)]
+    #[serde(rename = "logout")]
     Logout,
 }
 
 impl AuthEventType {
-    /// Return the string representation for sea-query values.
+    /// Return the string representation.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -41,8 +39,8 @@ impl AuthEventType {
     }
 }
 
-/// Authentication event record.
-#[derive(Debug, sqlx::FromRow)]
+/// Authentication event record (retrieved from audit store).
+#[derive(Debug)]
 pub struct AuthEvent {
     pub id: String,
     pub user_id: String,
@@ -56,13 +54,14 @@ pub struct AuthEvent {
     pub client_version: Option<String>,
     pub success: bool,
     pub failure_reason: Option<String>,
-    pub created_at: DbTimestamp,
+    pub created_at: jiff::Timestamp,
 }
 
 /// Parameters for creating an authentication event.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct AuthEventParams {
     pub user_id: String,
+    #[serde(skip)]
     pub event_type: AuthEventType,
     pub authenticator_id: Option<String>,
     pub client_ip: Option<String>,
@@ -75,141 +74,87 @@ pub struct AuthEventParams {
     pub failure_reason: Option<String>,
 }
 
-/// Insert a new authentication event.
-pub async fn insert_auth_event(pool: &Pool, params: &AuthEventParams) -> Result<String> {
-    let id = Uuid::now_v7().to_string();
-    let db_type = pool.db_type();
-    let now = Timestamp::now().to_string();
-
-    // Build SQL in a block to ensure query is dropped before await
-    let sql = {
-        let query = Query::insert()
-            .into_table(AuthEvents::Table)
-            .columns([
-                AuthEvents::Id,
-                AuthEvents::UserId,
-                AuthEvents::EventType,
-                AuthEvents::AuthenticatorId,
-                AuthEvents::ClientIp,
-                AuthEvents::UserAgent,
-                AuthEvents::ClientHostname,
-                AuthEvents::ClientOs,
-                AuthEvents::ClientArch,
-                AuthEvents::ClientVersion,
-                AuthEvents::Success,
-                AuthEvents::FailureReason,
-                AuthEvents::CreatedAt,
-            ])
-            .values_panic([
-                id.clone().into(),
-                params.user_id.clone().into(),
-                params.event_type.as_str().into(),
-                params.authenticator_id.clone().into(),
-                params.client_ip.clone().into(),
-                params.user_agent.clone().into(),
-                params.client_hostname.clone().into(),
-                params.client_os.clone().into(),
-                params.client_arch.clone().into(),
-                params.client_version.clone().into(),
-                params.success.into(),
-                params.failure_reason.clone().into(),
-                now.as_str().into(),
-            ])
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(id)
-}
-
 /// Query parameters for listing authentication events.
 #[derive(Debug, Default)]
 pub struct AuthEventQuery {
     pub user_id: Option<String>,
     pub event_type: Option<String>,
-    pub client_ip: Option<String>,
     pub since: Option<String>,
     pub limit: Option<i64>,
 }
 
+/// Insert a new authentication event via the audit store.
+pub async fn insert_auth_event(
+    audit: &AuditStore,
+    params: &AuthEventParams,
+    email: Option<&str>,
+) -> Result<String> {
+    let data_json = serde_json::to_string(params)
+        .map_err(|e| anyhow::anyhow!("Failed to serialize auth event: {e}"))?;
+    audit
+        .insert_event(
+            params.event_type.as_str(),
+            Some(&params.user_id),
+            email,
+            &data_json,
+        )
+        .await
+}
+
 /// Get authentication events with optional filtering.
-pub async fn get_auth_events(pool: &Pool, query_params: &AuthEventQuery) -> Result<Vec<AuthEvent>> {
-    let db_type = pool.db_type();
-    let limit = query_params.limit.unwrap_or(100);
-
-    let sql = {
-        let mut query = Query::select()
-            .columns([
-                AuthEvents::Id,
-                AuthEvents::UserId,
-                AuthEvents::EventType,
-                AuthEvents::AuthenticatorId,
-                AuthEvents::ClientIp,
-                AuthEvents::UserAgent,
-                AuthEvents::ClientHostname,
-                AuthEvents::ClientOs,
-                AuthEvents::ClientArch,
-                AuthEvents::ClientVersion,
-                AuthEvents::Success,
-                AuthEvents::FailureReason,
-                AuthEvents::CreatedAt,
-            ])
-            .from(AuthEvents::Table)
-            .to_owned();
-
-        if let Some(user_id) = &query_params.user_id {
-            query = query
-                .and_where(Expr::col(AuthEvents::UserId).eq(user_id.as_str()))
-                .to_owned();
-        }
-
-        if let Some(event_type) = &query_params.event_type {
-            query = query
-                .and_where(Expr::col(AuthEvents::EventType).eq(event_type.as_str()))
-                .to_owned();
-        }
-
-        if let Some(client_ip) = &query_params.client_ip {
-            query = query
-                .and_where(Expr::col(AuthEvents::ClientIp).eq(client_ip.as_str()))
-                .to_owned();
-        }
-
-        if let Some(since) = &query_params.since {
-            query = query
-                .and_where(Expr::col(AuthEvents::CreatedAt).gte(since.as_str()))
-                .to_owned();
-        }
-
-        query = query
-            .order_by(AuthEvents::CreatedAt, Order::Desc)
-            .limit(limit as u64)
-            .to_owned();
-
-        query.build_sql(db_type)
+pub async fn get_auth_events(
+    audit: &AuditStore,
+    query_params: &AuthEventQuery,
+) -> Result<Vec<AuthEvent>> {
+    let filter = AuditEventFilter {
+        event_type: query_params.event_type.clone(),
+        user_id: query_params.user_id.clone(),
+        email: None,
+        since: query_params.since.clone(),
+        limit: query_params.limit.map(|l| l as u64),
     };
 
-    let events = db_fetch_all!(pool, sqlx::query_as::<_, AuthEvent>(&sql))?;
-
-    Ok(events)
+    let events = audit.query_events(&filter).await?;
+    let mut result = Vec::with_capacity(events.len());
+    for event in events {
+        // Deserialize the data JSON to extract auth event fields
+        let params: AuthEventParams = serde_json::from_str(&event.data).unwrap_or_default();
+        let event_type = match event.event_type.as_str() {
+            "login_success" => AuthEventType::LoginSuccess,
+            "login_failed" => AuthEventType::LoginFailed,
+            "enrollment" => AuthEventType::Enrollment,
+            "logout" => AuthEventType::Logout,
+            _ => AuthEventType::LoginSuccess,
+        };
+        result.push(AuthEvent {
+            id: event.id,
+            user_id: params.user_id,
+            event_type,
+            authenticator_id: params.authenticator_id,
+            client_ip: params.client_ip,
+            user_agent: params.user_agent,
+            client_hostname: params.client_hostname,
+            client_os: params.client_os,
+            client_arch: params.client_arch,
+            client_version: params.client_version,
+            success: params.success,
+            failure_reason: params.failure_reason,
+            created_at: event
+                .created_at
+                .parse::<jiff::Timestamp>()
+                .unwrap_or_else(|_| jiff::Timestamp::now()),
+        });
+    }
+    Ok(result)
 }
 
 /// Delete authentication events older than the specified timestamp.
-/// Use for retention policy enforcement (e.g., delete events older than 90 days).
-pub async fn delete_old_auth_events(pool: &Pool, before: &str) -> Result<u64> {
-    let db_type = pool.db_type();
-
-    let sql = {
-        let query = Query::delete()
-            .from_table(AuthEvents::Table)
-            .and_where(Expr::col(AuthEvents::CreatedAt).lt(before))
-            .to_owned();
-        query.build_sql(db_type)
-    };
-
-    let result = db_execute!(pool, sqlx::query(&sql))?;
-
-    Ok(result.rows_affected())
+pub async fn delete_old_auth_events(audit: &AuditStore, before: jiff::Timestamp) -> Result<u64> {
+    let before_str = before.to_string();
+    // Delete all auth event types
+    let mut total = 0;
+    for event_type in ["login_success", "login_failed", "enrollment", "logout"] {
+        total += audit.delete_old_events(event_type, &before_str).await?;
+    }
+    Ok(total)
 }

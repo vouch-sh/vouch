@@ -9,9 +9,9 @@ async fn test_rfc8176_amr_in_access_token() {
     // with FIDO2 authentication methods.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "amr-claims@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "amr-claims@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -46,9 +46,9 @@ async fn test_rfc8176_acr_in_access_token() {
     // indicating NIST AAL3 for FIDO2 hardware authentication.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "acr-claims@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "acr-claims@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -71,9 +71,9 @@ async fn test_rfc8176_amr_claim_format_in_access_token() {
     // RFC 8176: FIDO2-issued access tokens should include amr claim.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "amr-at@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "amr-at@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -101,9 +101,9 @@ async fn test_rfc8176_acr_claim_type_in_access_token() {
     // RFC 8176: FIDO2-issued access tokens should include acr claim.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "acr-at@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "acr-at@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 

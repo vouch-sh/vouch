@@ -22,6 +22,9 @@ use secrecy::SecretString;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+use crate::crypto::document_crypto::PlaintextDocumentCrypto;
+use crate::db::audit::AuditStore;
+use crate::db::store::DocumentStore;
 use crate::db::{CreateOAuthClientParams, Pool, RegistrationSource};
 
 use crate::AppState;
@@ -109,8 +112,15 @@ pub async fn test_app_state() -> Arc<AppState> {
     // Generate OIDC signing key for tests
     let oidc_key = OidcSigningKey::generate().expect("Failed to generate test OIDC key");
 
+    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+        Arc::new(PlaintextDocumentCrypto);
+    let store = DocumentStore::new(pool.clone(), crypto.clone());
+    let audit = AuditStore::new(pool.clone(), crypto);
+
     Arc::new(AppState {
         db: pool,
+        store,
+        audit,
         config: Arc::new(ArcSwap::from_pointee(config)),
         webauthn,
         ssh_ca: None,
@@ -443,36 +453,46 @@ pub async fn http_delete_full(app: &Router, uri: &str, headers: &[(&str, &str)])
 }
 
 /// Create a test user in the database.
-pub async fn create_test_user(pool: &Pool, email: &str) -> crate::db::User {
-    crate::db::upsert_user(pool, email, Some("Test User"))
+pub async fn create_test_user(store: &DocumentStore, email: &str) -> crate::db::User {
+    let (user_id, _created) = crate::db::upsert_user(store, email, Some("Test User"))
         .await
-        .expect("Failed to create test user")
+        .expect("Failed to create test user");
+    crate::db::get_user_by_id(store, &user_id)
+        .await
+        .expect("Failed to fetch test user")
+        .expect("Test user not found after creation")
 }
 
 /// Create a test organization in the database.
-pub async fn create_test_org(pool: &Pool, domain: &str) -> crate::db::Organization {
-    crate::db::create_organization(pool, domain, Some("Test Org"), None)
+pub async fn create_test_org(store: &DocumentStore, domain: &str) -> crate::db::Organization {
+    crate::db::create_organization(store, domain, Some("Test Org"), None)
         .await
         .expect("Failed to create test org")
 }
 
 /// Create a test user with organization membership.
 pub async fn create_test_user_in_org(
-    pool: &Pool,
+    store: &DocumentStore,
     email: &str,
     org_id: &str,
     is_admin: bool,
 ) -> crate::db::User {
-    crate::db::upsert_user_with_org(pool, email, Some("Test User"), Some(org_id), is_admin)
+    let (user_id, _created) =
+        crate::db::upsert_user_with_org(store, email, Some("Test User"), Some(org_id), is_admin)
+            .await
+            .expect("Failed to create test user in org");
+    crate::db::get_user_by_id(store, &user_id)
         .await
-        .expect("Failed to create test user in org")
+        .expect("Failed to fetch test user")
+        .expect("Test user not found after creation")
 }
 
 /// Create a test authenticator for a user.
-pub async fn create_test_authenticator(pool: &Pool, user_id: &str) -> String {
+pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> String {
     crate::db::create_authenticator(
-        pool,
+        store,
         user_id,
+        "test@example.com",
         "Test Key",
         format!("test-cred-{}", uuid::Uuid::now_v7()).as_bytes(),
         &[0u8; 32],
@@ -595,7 +615,7 @@ pub async fn create_test_session_for_client(
 }
 
 /// Create a SCIM bearer token for testing.
-pub async fn create_test_scim_token(pool: &Pool, description: &str) -> String {
+pub async fn create_test_scim_token(store: &DocumentStore, description: &str) -> String {
     use aws_lc_rs::digest::{self, SHA256};
     use aws_lc_rs::rand as aws_rand;
     use base64::Engine;
@@ -610,7 +630,7 @@ pub async fn create_test_scim_token(pool: &Pool, description: &str) -> String {
     let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
 
     // Store in database
-    crate::db::create_scim_token(pool, &token_hash, Some(description), None, None, None)
+    crate::db::create_scim_token(store, &token_hash, Some(description), None, None, None)
         .await
         .expect("Failed to create SCIM token");
 
@@ -636,13 +656,13 @@ impl TestOAuthClient {
 }
 
 /// Create a test OAuth client with a secret for use in tests.
-pub async fn create_test_oauth_client(pool: &Pool, user_id: &str) -> TestOAuthClient {
+pub async fn create_test_oauth_client(store: &DocumentStore, user_id: &str) -> TestOAuthClient {
     use aws_lc_rs::rand as aws_rand;
     use base64::Engine;
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     let (client, client_id) = crate::db::create_oauth_client(
-        pool,
+        store,
         &CreateOAuthClientParams {
             user_id: Some(user_id),
             name: "Test App",
@@ -675,7 +695,7 @@ pub async fn create_test_oauth_client(pool: &Pool, user_id: &str) -> TestOAuthCl
     let secret = URL_SAFE_NO_PAD.encode(secret_bytes);
     let secret_hash = crate::handlers::hash_token(&secret);
 
-    crate::db::create_oauth_client_secret(pool, &client.id, &secret_hash, Some("test"), None)
+    crate::db::create_oauth_client_secret(store, &client.id, &secret_hash, Some("test"), None)
         .await
         .expect("Failed to create test OAuth client secret");
 
@@ -687,7 +707,7 @@ pub async fn create_test_oauth_client(pool: &Pool, user_id: &str) -> TestOAuthCl
 
 /// Create a test OAuth client with custom access scope and resource URIs.
 pub async fn create_test_oauth_client_with_options(
-    pool: &Pool,
+    store: &DocumentStore,
     user_id: &str,
     access_scope: crate::db::AccessScope,
     org_id: Option<&str>,
@@ -698,7 +718,7 @@ pub async fn create_test_oauth_client_with_options(
     use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
     let (client, client_id) = crate::db::create_oauth_client(
-        pool,
+        store,
         &CreateOAuthClientParams {
             user_id: Some(user_id),
             name: "Test App",
@@ -731,7 +751,7 @@ pub async fn create_test_oauth_client_with_options(
     let secret = URL_SAFE_NO_PAD.encode(secret_bytes);
     let secret_hash = crate::handlers::hash_token(&secret);
 
-    crate::db::create_oauth_client_secret(pool, &client.id, &secret_hash, Some("test"), None)
+    crate::db::create_oauth_client_secret(store, &client.id, &secret_hash, Some("test"), None)
         .await
         .expect("Failed to create test OAuth client secret");
 

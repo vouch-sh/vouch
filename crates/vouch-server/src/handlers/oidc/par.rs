@@ -295,7 +295,7 @@ pub async fn par(
             dpop_jkt,
         };
 
-        return match db::create_pushed_authorization_request(&state.db, create_params).await {
+        return match db::create_pushed_authorization_request(&state.store, create_params).await {
             Ok((_id, request_uri)) => (
                 StatusCode::CREATED,
                 Json(ParResponse {
@@ -399,7 +399,7 @@ pub async fn par(
         dpop_jkt,
     };
 
-    match db::create_pushed_authorization_request(&state.db, create_params).await {
+    match db::create_pushed_authorization_request(&state.store, create_params).await {
         Ok((_id, request_uri)) => {
             // RFC 9126 Section 2.2: Return 201 Created
             (

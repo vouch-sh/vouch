@@ -116,7 +116,7 @@ pub async fn introspect_token(
     // Verify session exists in database
     let token_hash = hash_token(token);
     let session_exists = matches!(
-        db::get_session_by_token_hash(&state.db, &token_hash).await,
+        db::get_session_by_token_hash(&state.store, &token_hash).await,
         Ok(Some(_))
     );
 
@@ -178,17 +178,38 @@ pub async fn revoke_token(
         &config.base_url,
     );
 
+    let sub = decoded.as_ref().map(|d| d.sub().to_string());
     let email = decoded.as_ref().and_then(|d| d.email().map(String::from));
 
     // RFC 7009: Always attempt to delete the session by token hash,
     // even if JWT decode fails — revocation should be best-effort.
     let token_hash = hash_token(token);
-    match db::delete_session_by_token_hash(&state.db, &token_hash).await {
+    match db::delete_session_by_token_hash(&state.store, &token_hash).await {
         Ok(deleted) => {
             if deleted {
                 if let Some(ref email) = email {
                     tracing::info!("Token revoked for user: {}", redact_email(email));
                 }
+
+                // Fire-and-forget logout audit event
+                if let Some(ref user_id) = sub {
+                    let audit = state.audit.clone();
+                    let params = db::AuthEventParams {
+                        user_id: user_id.clone(),
+                        event_type: db::AuthEventType::Logout,
+                        success: true,
+                        ..Default::default()
+                    };
+                    let email_for_audit = email.clone();
+                    tokio::spawn(async move {
+                        if let Err(e) =
+                            db::insert_auth_event(&audit, &params, email_for_audit.as_deref()).await
+                        {
+                            tracing::warn!("Failed to log revocation logout event: {}", e,);
+                        }
+                    });
+                }
+
                 return RevocationResult {
                     revoked: true,
                     user_email: email,

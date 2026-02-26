@@ -81,7 +81,7 @@ impl GitHubService<'_> {
 
         // Store installation in database
         db::create_github_installation(
-            self.db,
+            self.store,
             params.org_id,
             params.installation_id as i64,
             &details.account.login,
@@ -151,7 +151,7 @@ impl GitHubService<'_> {
             .ok_or(GitHubError::InstallationAccessDenied)?;
 
         // Verify installation is not already linked
-        if db::get_github_installation_by_installation_id(self.db, params.installation_id as i64)
+        if db::get_github_installation_by_installation_id(self.store, params.installation_id as i64)
             .await
             .map_err(GitHubError::Database)?
             .is_some()
@@ -170,7 +170,7 @@ impl GitHubService<'_> {
 
         // Store installation in database
         db::create_github_installation(
-            self.db,
+            self.store,
             params.org_id,
             params.installation_id as i64,
             &user_installation.account.login,
@@ -233,7 +233,7 @@ impl GitHubService<'_> {
         let app = self.require_app()?;
 
         // Get all linked installation IDs
-        let linked_ids: HashSet<i64> = db::get_all_linked_installation_ids(self.db)
+        let linked_ids: HashSet<i64> = db::get_all_linked_installation_ids(self.store)
             .await
             .unwrap_or_default()
             .into_iter()
@@ -265,7 +265,7 @@ impl GitHubService<'_> {
 
     /// Get connected installations for an organization.
     pub async fn get_org_installations(&self, org_id: &str) -> GitHubResult<Vec<String>> {
-        let installations = db::get_github_installations_by_org(self.db, org_id)
+        let installations = db::get_github_installations_by_org(self.store, org_id)
             .await
             .map_err(GitHubError::Database)?;
 
@@ -299,7 +299,7 @@ impl GitHubService<'_> {
         permissions_json: &str,
     ) {
         if let Err(e) = db::log_github_credential_event(
-            self.db,
+            self.audit,
             GitHubCredentialEventParams {
                 event_type,
                 user_id: &user.id,

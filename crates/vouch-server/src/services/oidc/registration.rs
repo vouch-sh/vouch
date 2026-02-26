@@ -419,7 +419,7 @@ pub async fn register_client(
 
     // 15. Create the client
     let (client, client_id) = db::create_oauth_client(
-        &state.db,
+        &state.store,
         &CreateOAuthClientParams {
             user_id: authenticated_user_id,
             name: client_name,
@@ -460,7 +460,7 @@ pub async fn register_client(
         let secret_hash = hash_token(&secret);
 
         db::create_oauth_client_secret(
-            &state.db,
+            &state.store,
             &client.id,
             &secret_hash,
             Some("Dynamic registration"),
@@ -480,7 +480,7 @@ pub async fn register_client(
     // 17. Record audit event
     let base_url = &state.config().base_url;
     if let Err(e) = db::record_oauth_event(
-        &state.db,
+        &state.audit,
         &client.id,
         OAuthEventType::ClientRegistered,
         authenticated_user_id,
@@ -494,7 +494,7 @@ pub async fn register_client(
     }
 
     // Derive client_id_issued_at from created_at
-    let client_id_issued_at = client.created_at.to_jiff().as_second();
+    let client_id_issued_at = client.created_at.as_second();
 
     tracing::info!(
         "Dynamic client registration: client_id={}, user={}, app_type={:?}",
@@ -570,7 +570,7 @@ async fn lookup_and_verify_registration_token(
     client_id: &str,
     token: &str,
 ) -> Result<OAuthClient, ServiceError> {
-    let client = db::get_oauth_client_by_client_id(&state.db, client_id)
+    let client = db::get_oauth_client_by_client_id(&state.store, client_id)
         .await
         .map_err(|e| {
             tracing::error!("DB error looking up client {client_id}: {e}");
@@ -615,7 +615,7 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
     let response_types = parse_json_string_array(client.response_types.as_deref());
     let metadata = parse_registration_metadata(client.registration_metadata.as_deref());
 
-    let client_id_issued_at = client.created_at.to_jiff().as_second();
+    let client_id_issued_at = client.created_at.as_second();
 
     RegistrationResponse {
         client_id: client.client_id.clone(),
@@ -839,7 +839,7 @@ async fn apply_software_statement(
     })?;
 
     // Look up the trusted issuer
-    let issuer = db::get_trusted_jwt_issuer_by_issuer(&state.db, &unverified_claims.iss)
+    let issuer = db::get_trusted_jwt_issuer_by_issuer(&state.store, &unverified_claims.iss)
         .await
         .map_err(|e| {
             tracing::error!("Failed to look up trusted JWT issuer: {e}");

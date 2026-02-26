@@ -349,6 +349,41 @@ impl From<sqlx::postgres::PgQueryResult> for QueryResult {
     }
 }
 
+/// Retry an async block on transient DSQL errors.
+///
+/// Re-evaluates the body on each attempt (creating a fresh future),
+/// so the operation is fully retried from scratch. Non-retryable
+/// errors and successes pass through immediately.
+///
+/// Usage: `with_dsql_retry!(async { ... }).await`
+#[macro_export]
+macro_rules! with_dsql_retry {
+    ($body:expr) => {{
+        let mut __attempt = 0u32;
+        loop {
+            match $body.await {
+                Ok(val) => break Ok(val),
+                Err(e)
+                    if $crate::db::pool::is_retryable_db_error(&e)
+                        && __attempt < $crate::db::pool::MAX_DSQL_RETRIES =>
+                {
+                    tracing::warn!(
+                        attempt = __attempt,
+                        error = %e,
+                        "transient DSQL error, retrying"
+                    );
+                    tokio::time::sleep(
+                        $crate::db::pool::retry_backoff(__attempt),
+                    )
+                    .await;
+                    __attempt += 1;
+                }
+                Err(e) => break Err(e),
+            }
+        }
+    }};
+}
+
 /// Execute a query that returns no rows against the pool.
 ///
 /// This macro handles dispatching to the correct pool type.
@@ -547,6 +582,48 @@ fn spawn_token_refresh(pool: sqlx::PgPool, dsql: DsqlEndpoint, user: String, is_
     });
 }
 
+// ============================================================================
+// DSQL Retry Helpers
+// ============================================================================
+
+/// Maximum number of retries for transient DSQL errors.
+pub const MAX_DSQL_RETRIES: u32 = 3;
+
+/// SQLSTATE codes that indicate a transient, retryable error.
+///
+/// - `40001`: Serialization failure (standard SQL)
+/// - `OC000`: Aurora DSQL optimistic concurrency conflict
+const RETRYABLE_SQL_STATES: &[&str] = &["40001", "OC000"];
+
+/// Check whether an error is a transient database error worth retrying.
+///
+/// Downcasts through `anyhow::Error` → `sqlx::Error::Database` and
+/// inspects the SQLSTATE code.
+pub fn is_retryable_db_error(err: &anyhow::Error) -> bool {
+    if let Some(sqlx_err) = err.downcast_ref::<sqlx::Error>()
+        && let sqlx::Error::Database(db_err) = sqlx_err
+        && let Some(code) = db_err.code()
+    {
+        return RETRYABLE_SQL_STATES.iter().any(|s| code == *s);
+    }
+    false
+}
+
+/// Compute a jittered exponential backoff duration for the given attempt.
+///
+/// Base delay doubles each attempt (~10ms, ~20ms, ~40ms) with ±25% jitter.
+pub fn retry_backoff(attempt: u32) -> Duration {
+    let base_ms = 10u64.saturating_mul(1u64 << attempt);
+    // ±25% jitter using simple xorshift on timestamp
+    let jitter_range = base_ms / 4;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos();
+    let jitter = (u64::from(nanos) % (jitter_range * 2 + 1)).saturating_sub(jitter_range);
+    Duration::from_millis(base_ms.saturating_add(jitter))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -621,5 +698,22 @@ mod tests {
     fn test_redact_database_url_invalid() {
         // Invalid URLs are returned as-is
         assert_eq!(redact_database_url("not-a-url"), "not-a-url");
+    }
+
+    #[test]
+    fn test_is_retryable_db_error_non_db() {
+        let err = anyhow::anyhow!("some random error");
+        assert!(!is_retryable_db_error(&err));
+    }
+
+    #[test]
+    fn test_retry_backoff_increases() {
+        let d0 = retry_backoff(0);
+        let d1 = retry_backoff(1);
+        let d2 = retry_backoff(2);
+        // Base roughly doubles; allow wide range due to jitter
+        assert!(d0.as_millis() <= 20);
+        assert!(d1.as_millis() <= 40);
+        assert!(d2.as_millis() <= 80);
     }
 }

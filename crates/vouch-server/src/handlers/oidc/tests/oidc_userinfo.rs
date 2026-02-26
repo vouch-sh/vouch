@@ -34,8 +34,8 @@ async fn test_userinfo_returns_sub_claim() {
     let (app, state) = test_app().await;
 
     // Create a test user and OAuth access token session (includes email scope)
-    let user = create_test_user(&state.db, "userinfo@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "userinfo@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     let (status, body) = http_get(
