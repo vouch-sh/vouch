@@ -188,11 +188,8 @@ pub(crate) async fn auto_provision(
             if err_str.contains("404") || err_str.contains("501") {
                 tracing::debug!("Server does not support SSH certificates: {e}");
             } else {
-                tracing::warn!("Auto SSH provisioning failed: {e:#}");
-                println!(
-                    "SSH certificate not provisioned ({e:#}). \
-                     Run: vouch credential ssh"
-                );
+                tracing::warn!("Auto SSH provisioning failed: {e}");
+                println!("SSH certificate not provisioned. Run: vouch credential ssh");
             }
             false
         }
