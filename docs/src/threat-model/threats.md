@@ -111,7 +111,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 |----|------------|--------|
 | M-17 | 8-hour maximum session lifetime | Implemented |
 | M-18 | SecretString with automatic zeroization | Implemented |
-| M-19 | File permissions 0600 on cookie/config files | Implemented |
+| M-19 | File permissions 0600 on config files | Implemented |
 | M-20 | Socket permissions 0700 on agent directory | Implemented |
 | M-21 | Explicit logout clears all session storage | Implemented |
 
@@ -204,7 +204,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 | M-37 | SCIM tokens hashed with SHA-256 (not stored plaintext) | Implemented |
 | M-38 | Separate SCIM token per IdP integration | Implemented |
 | M-39 | SCIM operations logged with source IdP info | Implemented |
-| M-40 | Optional IP allowlist for SCIM endpoints | Implemented |
+| M-40 | Optional IP allowlist for SCIM endpoints | Planned |
 | M-41 | Token rotation capability | Implemented |
 
 ---
@@ -334,7 +334,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 ### T-15b: Compromised CLI ES256 Key
 
-**Threat Statement**: A **sophisticated attacker** with **access to the user's workstation** can **steal the CLI ES256 key pair from `~/.vouch/client_key.json`** which leads to **ability to authenticate as the FAPI client but not obtain tokens without FIDO2 assertion**, negatively impacting **limited confidentiality (client identity only)**.
+**Threat Statement**: A **sophisticated attacker** with **access to the user's workstation** can **steal the CLI ES256 key pair from the OS keychain or fallback file** which leads to **ability to authenticate as the FAPI client but not obtain tokens without FIDO2 assertion**, negatively impacting **limited confidentiality (client identity only)**.
 
 **Likelihood**: Low
 **Impact**: Low (key alone cannot authenticate)
@@ -343,7 +343,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-60f | File permissions 0600 on `client_key.json` | Implemented |
+| M-60f | OS keychain storage (macOS Keychain, Linux Secret Service, Windows Credential Manager) with file fallback (0600 permissions) | Implemented |
 | M-60g | Key is useless without FIDO2 assertion (cannot forge the FIDO2 grant) | Implemented |
 | M-60h | DPoP binding prevents token use from different key | Implemented |
 | M-60i | Re-registration with new key pair on compromise | Implemented |
@@ -423,7 +423,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 
 ## Enrollment Threats
 
-### T-18: Enrollment Code Brute Force
+### T-18: User Code Brute Force
 
 **Threat Statement**: A **script kiddie** with **automated tools** can **brute force the 8-character user code** which leads to **no success due to rate limiting and short expiration**, negatively impacting **nothing (attack fails)**.
 
@@ -436,15 +436,15 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 |----|------------|--------|
 | M-68 | User code ~40 bits entropy | Implemented |
 | M-69 | 10-minute code expiration | Implemented |
-| M-70 | 5 attempts per code before invalidation | Planned |
-| M-71 | Rate limiting: 10 requests/minute per IP | Planned |
+| M-70 | 5 attempts per user code before invalidation | Planned |
+| M-71 | Rate limiting: 10 requests/minute per IP on device authorization endpoint | Planned |
 | M-72 | `slow_down` response for rapid polling | Implemented |
 
 ---
 
-### T-19: Device Code Interception
+### T-19: User Code Interception
 
-**Threat Statement**: A **sophisticated attacker** with **access to user's terminal output** can **see the device code and complete enrollment first** which leads to **no impact due to device code being useless without OIDC authentication**, negatively impacting **nothing (attack fails)**.
+**Threat Statement**: A **sophisticated attacker** with **access to user's terminal output** can **see the user code and complete enrollment first** which leads to **no impact due to user code being useless without OIDC authentication**, negatively impacting **nothing (attack fails)**.
 
 **Likelihood**: Low
 **Impact**: None
@@ -453,7 +453,7 @@ Threat statements follow the [AWS Threat Grammar](https://aws.amazon.com/blogs/s
 **Mitigations**:
 | ID | Mitigation | Status |
 |----|------------|--------|
-| M-73 | Device code alone cannot complete enrollment | Implemented |
+| M-73 | User code alone cannot complete enrollment | Implemented |
 | M-74 | OIDC authentication required in browser | Implemented |
 | M-75 | WebAuthn registration required with physical hardware authenticator | Implemented |
 

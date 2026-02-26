@@ -1176,3 +1176,180 @@ async fn test_rfc9449_dpop_nonce_required_retry_with_nonce_succeeds() {
         "Successful retry must return access_token"
     );
 }
+
+// ========================================================================
+// DPoP at Resource Endpoints WITHOUT Nonce (CLI Pattern)
+// ========================================================================
+
+#[tokio::test]
+async fn test_dpop_resource_endpoint_without_nonce() {
+    // This test replicates the exact pattern the CLI uses after login:
+    // 1. Obtain a DPoP-bound access token (via token exchange with nonce)
+    // 2. Use the token at a resource endpoint with DPoP proof but NO nonce
+    //
+    // The CLI never acquires nonces for resource endpoint requests.
+    // RFC 9449 allows this: nonces are required at the token endpoint
+    // (precomputation defense) but optional at resource endpoints
+    // (ath provides token binding).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "dpop-no-nonce@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Step 1: Get a DPoP-bound access token
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let token_uri = format!("{}/oauth/token", state.config().base_url);
+
+    let (subject_token, _id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    // Acquire nonce for token endpoint (required there)
+    let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
+
+    let dpop_proof =
+        create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
+
+    let auth_header = client.basic_auth_header();
+
+    let exchange_response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header), ("DPoP", &dpop_proof)],
+    )
+    .await;
+
+    assert_eq!(
+        exchange_response.status,
+        StatusCode::OK,
+        "Token exchange should succeed: {}",
+        exchange_response.body
+    );
+    let exchange_body: serde_json::Value =
+        serde_json::from_str(&exchange_response.body).expect("Valid JSON");
+    let dpop_bound_token = exchange_body["access_token"]
+        .as_str()
+        .expect("access_token present");
+    assert_eq!(
+        exchange_body["token_type"].as_str().unwrap_or(""),
+        "DPoP",
+        "Token type should be DPoP"
+    );
+
+    // Step 2: Use DPoP-bound token at userinfo WITHOUT a nonce
+    // This is exactly what the CLI does for resource endpoint requests
+    let userinfo_uri = format!("{}/oauth/userinfo", state.config().base_url);
+    let resource_proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "GET",
+        &userinfo_uri,
+        None, // NO nonce — this is the CLI pattern
+        Some(dpop_bound_token),
+    );
+
+    let response = http_get_full(
+        &app,
+        "/oauth/userinfo",
+        &[
+            ("Authorization", &format!("DPoP {dpop_bound_token}")),
+            ("DPoP", &resource_proof),
+        ],
+    )
+    .await;
+
+    assert_eq!(
+        response.status,
+        StatusCode::OK,
+        "DPoP at resource endpoint without nonce should succeed: {}",
+        response.body
+    );
+    let userinfo: serde_json::Value = serde_json::from_str(&response.body).expect("Valid JSON");
+    assert!(userinfo.get("sub").is_some(), "sub claim must be present");
+}
+
+#[tokio::test]
+async fn test_dpop_resource_endpoint_post_json_without_nonce() {
+    // Same as above but with POST + JSON body (matches SSH cert endpoint pattern).
+    // The SSH cert endpoint uses extract_resource_token, not userinfo's custom handler.
+    // Since SSH CA is not configured in test_app, we expect 503 NOT 401.
+    // Getting 503 means DPoP validation passed (401 would mean it failed).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.db, "dpop-post-nonce@example.com").await;
+    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.db, &user.id).await;
+
+    // Step 1: Get a DPoP-bound access token
+    let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
+    let token_uri = format!("{}/oauth/token", state.config().base_url);
+
+    let (subject_token, _id_token) =
+        issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
+
+    let dpop_proof =
+        create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
+
+    let auth_header = client.basic_auth_header();
+
+    let exchange_response = http_post_form_full(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={subject_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header), ("DPoP", &dpop_proof)],
+    )
+    .await;
+
+    assert_eq!(exchange_response.status, StatusCode::OK);
+    let exchange_body: serde_json::Value =
+        serde_json::from_str(&exchange_response.body).expect("Valid JSON");
+    let dpop_bound_token = exchange_body["access_token"]
+        .as_str()
+        .expect("access_token present");
+
+    // Step 2: Use DPoP-bound token at POST /v1/credentials/ssh (no nonce)
+    let ssh_uri = format!("{}/v1/credentials/ssh", state.config().base_url);
+    let resource_proof = create_dpop_proof(
+        &dpop_key,
+        &dpop_jwk,
+        "POST",
+        &ssh_uri,
+        None, // NO nonce
+        Some(dpop_bound_token),
+    );
+
+    let (status, body) = http_post_json(
+        &app,
+        "/v1/credentials/ssh",
+        r#"{"public_key":"ssh-ed25519 AAAA test@example.com"}"#,
+        &[
+            ("Authorization", &format!("DPoP {dpop_bound_token}")),
+            ("DPoP", &resource_proof),
+        ],
+    )
+    .await;
+
+    // SSH CA is not configured in tests, so we expect 503 (SERVICE_UNAVAILABLE).
+    // The critical assertion: NOT 401 (which would mean DPoP validation failed).
+    assert_ne!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "DPoP validation should pass (expect 503 for missing SSH CA, not 401): {body}"
+    );
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Should fail with SSH CA not configured, not auth error: {body}"
+    );
+}

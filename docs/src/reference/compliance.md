@@ -20,7 +20,7 @@ This page maps Vouch features to common compliance frameworks. Vouch's hardware-
 | AU-3 | Content of Audit Records | Audit records include user identity, timestamp, credential type, authenticator AAGUID, and IP address |
 | AU-8 | Time Stamps | Certificate validity tied to server time; supports GPS/NTP in air-gapped environments |
 | AU-9 | Protection of Audit Information | Audit logs stored in database with configurable retention periods |
-| AC-2 | Account Management | User enrollment via verified identity (OIDC); key registration and revocation via admin UI |
+| AC-2 | Account Management | User enrollment via verified identity (OIDC); key registration via CLI (`vouch register`); revocation via CLI (`vouch keys remove`) or admin API |
 | AC-7 | Unsuccessful Logon Attempts | FIDO2 PIN retry limits enforced by YubiKey hardware (locks after 8 attempts) |
 | AC-11 | Device Lock | Sessions expire after configurable duration (default 8 hours); re-authentication required |
 | AC-12 | Session Termination | Explicit logout (`vouch logout`) and automatic session expiration |

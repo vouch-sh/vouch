@@ -6,6 +6,8 @@ use crate::db::{self};
 use crate::redact_email;
 use crate::services::error::ServiceError;
 use crate::services::keys as key_svc;
+use axum::extract::OriginalUri;
+use axum::http::Method;
 use axum::{
     Json,
     extract::{Path, State},
@@ -76,12 +78,14 @@ impl RegistrationState {
 /// (`vouch enroll`) to register their first key. After that, they can add
 /// additional keys via this endpoint after logging in with an existing key.
 pub async fn register_start(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterStartRequest>,
 ) -> Result<Json<RegisterStartResponse>, (StatusCode, Json<vouch_common::ApiError>)> {
-    let token = extract_resource_token(&state, &headers, &jar).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
     let user_id = Uuid::parse_str(&token.sub).map_err(|e| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -284,11 +288,13 @@ pub async fn register_complete(
 
 /// List all registered keys for the authenticated user.
 pub async fn list_keys(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListKeysResponse>, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let keys =
         key_svc::list_keys_for_user(&state.db, &token.sub, token.authenticator_id.as_deref())
@@ -299,13 +305,15 @@ pub async fn list_keys(
 
 /// Rename a registered key.
 pub async fn rename_key(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
     Path(key_id): Path<String>,
     Json(req): Json<RenameKeyRequest>,
 ) -> Result<Json<RenameKeyResponse>, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let message = key_svc::rename_key(&state.db, &token.sub, &key_id, &req.name).await?;
 
@@ -314,12 +322,14 @@ pub async fn rename_key(
 
 /// Delete a registered key.
 pub async fn delete_key(
-    State(state): State<Arc<AppState>>,
+    method: Method,
+    uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
+    State(state): State<Arc<AppState>>,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
     // Use auth_time as the freshness anchor; default to epoch (always stale) if absent
     key_svc::require_fresh_timestamp(
         token.auth_time.unwrap_or(0),

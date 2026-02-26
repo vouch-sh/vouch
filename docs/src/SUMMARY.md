@@ -88,10 +88,7 @@
   - [Key Ceremony](advanced/airgap-key-ceremony.md)
   - [YubiKey Provisioning](advanced/airgap-yubikey.md)
   - [Operations](advanced/airgap-operations.md)
-- [Agent Delegation (Planned)](advanced/delegation.md)
-  - [CIBA Protocol](advanced/delegation-ciba.md)
-  - [Scopes and Lifecycle](advanced/delegation-lifecycle.md)
-  - [Security and Audit](advanced/delegation-security.md)
+
 
 ---
 

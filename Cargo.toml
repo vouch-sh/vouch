@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.2.43"
+version = "2026.2.44"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.93.1"
@@ -15,6 +15,7 @@ unsafe_code = "deny"
 [workspace.lints.clippy]
 # Panic-prevention lints
 # See: https://blog.reverberate.org/2025/02/03/no-panic-rust.html
+# See: https://github.com/trailofbits/claude-code-config/blob/main/claude-md-template.md#rust
 #
 # Production code must never panic. These lints enforce panic-free patterns.
 unwrap_used = "deny"
@@ -35,6 +36,21 @@ indexing_slicing = "deny"
 
 # String slicing can panic on non-UTF8 boundaries
 string_slice = "warn"
+
+# Code hygiene
+dbg_macro = "deny"
+
+# Safety
+await_holding_lock = "deny"
+large_futures = "deny"
+mem_forget = "deny"
+
+module_name_repetitions = "allow"
+similar_names = "allow"
+
+# Deferred — requires migrating ~330 #[allow] to #[expect] with per-attr verification
+# allow_attributes = "deny"
+# pedantic = { level = "warn", priority = -1 }
 
 [workspace.dependencies]
 anyhow = { version = "=1.0.102", default-features = false }

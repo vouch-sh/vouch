@@ -57,7 +57,9 @@ pub use discovery::{OidcDiscoveryDocument, build_discovery_document, build_jwks}
 pub use exchange::{TokenExchangeParams, TokenExchangeResult};
 pub use introspection::{IntrospectionResult, RevocationResult};
 pub use keys::{EcJwk, OidcSigningKey};
-pub use registration::{RegistrationRequest, RegistrationResponse, register_client};
+pub use registration::{
+    RegistrationRequest, RegistrationResponse, read_client_configuration, register_client,
+};
 pub use resource::ResourceUri;
 pub use scope::{OAuthScope, ScopeSet};
 pub use token::{

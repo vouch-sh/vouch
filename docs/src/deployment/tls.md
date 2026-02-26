@@ -49,21 +49,6 @@ kill -SIGHUP $(pgrep vouch-server)
 
 > **Note**: SIGHUP only reloads TLS certificates. It does not reload any other configuration.
 
-## Load Balancer TLS Termination
-
-If terminating TLS at a load balancer (ALB, nginx, etc.), run Vouch without TLS configuration:
-
-```bash
-# No VOUCH_TLS_CERT or VOUCH_TLS_KEY set
-VOUCH_LISTEN_ADDR=0.0.0.0:3000
-VOUCH_BASE_URL=https://auth.example.com  # External URL (behind LB)
-```
-
-Ensure the load balancer:
-- Forwards the `Host` header
-- Uses HTTPS for the external listener
-- Health checks against `GET /health` on the backend port
-
 ## Self-Signed Certificates (Development)
 
 For development or testing:

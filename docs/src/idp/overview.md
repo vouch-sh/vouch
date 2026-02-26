@@ -8,21 +8,18 @@ Vouch uses external identity providers (IdPs) to verify user identity during enr
 - Pull user attributes (email, name, groups) from your existing identity system
 - No separate user database to maintain in Vouch
 
-## Self-Service Admin Portal
+## Configuration
 
-Administrators configure external IdPs through the Vouch web interface — no config files or server restarts required.
+IdP configuration is via environment variables:
 
+```bash
+VOUCH_OIDC_ISSUER=https://accounts.google.com
+VOUCH_OIDC_CLIENT_ID=<your-client-id>
+VOUCH_OIDC_CLIENT_SECRET=<your-client-secret>
+VOUCH_ALLOWED_DOMAINS=company.com
 ```
-Admin Portal → Settings → Identity Providers → Add Provider
-```
 
-## Configuration Steps
-
-1. Select provider type (Google Workspace)
-2. Enter client credentials from the external IdP
-3. Configure allowed domains (e.g., `@company.com`)
-4. Test the connection
-5. Enable for user enrollment
+See the [Google Workspace](google-workspace.md) guide for setup instructions.
 
 ## Supported Providers
 

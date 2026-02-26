@@ -424,6 +424,7 @@ async fn validate_dpop_common(
     pool: &Pool,
     config_max_age: i64,
     expected_ath: Option<&str>,
+    require_nonce: bool,
 ) -> Result<ValidatedDpopProof, DpopError> {
     // Parse header, verify signature, and extract claims in a single pass
     let (header, claims) = parse_and_verify_dpop_proof(proof)?;
@@ -436,8 +437,10 @@ async fn validate_dpop_common(
         return Err(DpopError::ReplayDetected);
     }
 
-    // Nonce requirement: always require nonces per RFC 9449 Section 8
-    if claims.nonce.is_none() {
+    // Nonce requirement: enforced at token endpoint (RFC 9449 Section 8)
+    // where precomputation attacks are a concern. Resource endpoints use
+    // `ath` (access token hash) for binding, so nonces are optional there.
+    if require_nonce && claims.nonce.is_none() {
         let new_nonce = db::generate_dpop_nonce(pool, NONCE_VALIDITY_SECONDS)
             .await
             .map_err(|e| DpopError::InvalidFormat(format!("nonce generation failed: {e}")))?;
@@ -497,6 +500,7 @@ pub async fn validate_dpop_proof(
         pool,
         config_max_age,
         None, // No access token hash for token endpoint
+        true, // Require nonce at token endpoint
     )
     .await
 }
@@ -515,8 +519,8 @@ pub async fn validate_dpop_proof(
 /// * `pool` - Database pool for nonce and JTI persistence
 /// * `config_max_age` - Maximum allowed proof age in seconds
 pub async fn validate_dpop_at_resource(
-    proof: &str,
     access_token: &str,
+    proof: &str,
     method: &str,
     uri: &str,
     pool: &Pool,
@@ -530,6 +534,7 @@ pub async fn validate_dpop_at_resource(
         pool,
         config_max_age,
         Some(&expected_ath),
+        false, // Nonces optional at resource endpoints (ath provides binding)
     )
     .await
 }

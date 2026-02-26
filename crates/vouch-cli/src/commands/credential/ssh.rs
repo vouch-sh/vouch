@@ -95,9 +95,14 @@ pub(crate) struct SshProvisionResult {
 
 /// Core provisioning: ensure keypair, request cert from server, write cert to disk.
 /// No stdout output — callers decide what to print.
+///
+/// When `fapi_key` is provided, the client uses it directly for DPoP proof
+/// generation instead of reloading from the keychain. This avoids a storage
+/// round-trip that can fail on some platforms.
 pub(crate) async fn provision_ssh_certificate(
     server: &str,
     key_path: Option<&str>,
+    fapi_key: Option<vouch_cli::fapi::ClientKey>,
 ) -> Result<SshProvisionResult> {
     // Determine key path
     let key_path = match key_path {
@@ -114,7 +119,10 @@ pub(crate) async fn provision_ssh_certificate(
         .map_err(|e| anyhow::anyhow!("failed to format public key: {e}"))?;
 
     // Request certificate from server
-    let client = VouchClient::new(server).await?;
+    let mut client = VouchClient::new(server).await?;
+    if let Some(key) = fapi_key {
+        client.set_fapi_key(key);
+    }
     let request = SshCertificateRequest {
         public_key: pub_key_str,
     };
@@ -138,9 +146,16 @@ pub(crate) async fn provision_ssh_certificate(
 }
 
 /// Auto-provision SSH certificate after authentication (best-effort).
+///
+/// When `fapi_key` is provided, passes it to the client so DPoP proofs
+/// are generated without reloading from the keychain.
 /// Returns `true` if provisioning succeeded.
-pub(crate) async fn auto_provision(server: &str, expires_at: &str) -> bool {
-    match provision_ssh_certificate(server, None).await {
+pub(crate) async fn auto_provision(
+    server: &str,
+    expires_at: &str,
+    fapi_key: Option<vouch_cli::fapi::ClientKey>,
+) -> bool {
+    match provision_ssh_certificate(server, None, fapi_key).await {
         Ok(result) => {
             // Store in agent with session linkage (Unix only)
             #[cfg(unix)]
@@ -173,7 +188,7 @@ pub(crate) async fn auto_provision(server: &str, expires_at: &str) -> bool {
             if err_str.contains("404") || err_str.contains("501") {
                 tracing::debug!("Server does not support SSH certificates: {e}");
             } else {
-                tracing::debug!("Auto SSH provisioning failed: {e}");
+                tracing::warn!("Auto SSH provisioning failed: {e}");
                 println!("SSH certificate not provisioned. Run: vouch credential ssh");
             }
             false
@@ -188,7 +203,7 @@ pub(crate) async fn auto_provision(server: &str, expires_at: &str) -> bool {
 /// 2. Requests a certificate from the Vouch server
 /// 3. Stores the certificate alongside the key
 pub async fn run(server: &str, key_path: Option<&str>) -> Result<()> {
-    let result = provision_ssh_certificate(server, key_path).await?;
+    let result = provision_ssh_certificate(server, key_path, None).await?;
 
     if result.keypair_generated {
         println!("Generating new SSH keypair...");

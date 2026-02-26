@@ -21,7 +21,7 @@ Out of scope:
 - Physical security of hardware authenticator devices (covered by vendor security models)
 - Network infrastructure (firewalls, load balancers)
 - Operating system security on user workstations
-- External identity providers (Google Workspace, Microsoft Entra ID)
+- External identity providers (Google Workspace)
 
 ### Security Objectives
 
@@ -87,7 +87,7 @@ Out of scope:
 
 ### A-07: External IdP Trustworthiness
 
-**Statement**: External identity providers (Google Workspace, Entra ID) correctly verify user identities.
+**Statement**: External identity providers (Google Workspace) correctly verify user identities.
 
 **Rationale**: These are enterprise-grade identity providers with their own security models.
 

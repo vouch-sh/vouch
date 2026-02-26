@@ -30,7 +30,7 @@
 
 **SCIM token rejected**
 - Tokens are shown once at creation and cannot be retrieved after
-- Generate a new token in the admin portal and update the IdP configuration
+- Generate a new token via the admin API (`POST /api/v1/org/scim-tokens`) and update the IdP configuration
 
 ## Debug Logging
 

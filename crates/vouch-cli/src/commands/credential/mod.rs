@@ -14,6 +14,7 @@ pub mod github;
 pub mod pip;
 
 pub mod ssh;
+pub mod token;
 
 /// Credential subcommands.
 #[derive(Subcommand)]
@@ -88,6 +89,8 @@ pub enum CredentialCommands {
         /// Username passed by pip (typically "aws").
         username: Option<String>,
     },
+    /// Print the current session token for use with curl or other tools.
+    Token {},
     /// Obtain a CodeArtifact authorization token.
     Codeartifact {
         /// CodeArtifact domain name (or use --profile / saved default).

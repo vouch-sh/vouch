@@ -8,9 +8,9 @@ Vouch uses several cryptographic keys. This page covers their lifecycle and rota
 |-----|-----------|---------|---------|
 | SSH CA Key | Ed25519 | Signs SSH user certificates | File, env var, or S3 config |
 | OIDC Signing Key | P-256 EC (ES256) | Signs ID tokens and access tokens | Env var or S3 config |
-| JWT Secret | HMAC-SHA256 | Signs internal session JWTs | Env var or S3 config |
+| JWT Secret | HMAC-SHA256 | Signs internal state tokens (authorization codes, WebAuthn state, CSRF) | Env var or S3 config |
 | TLS Certificate | EC/RSA | HTTPS transport | Env var or S3 config |
-| Client Key (per-CLI) | P-256 EC (ES256) | FAPI 2.0 client auth, DPoP proofs | `~/.vouch/client_key.json` |
+| Client Key (per-CLI) | P-256 EC (ES256) | FAPI 2.0 client auth, DPoP proofs | OS keychain (macOS Keychain, Linux Secret Service, Windows Credential Manager), file fallback |
 
 ## SSH CA Key
 
@@ -58,7 +58,7 @@ curl https://auth.example.com/.well-known/ssh-ca.pub
 
 ## OIDC Signing Key
 
-Used to sign ID tokens and access tokens with ES256 algorithm.
+Used to sign ID tokens ([OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html)) and access tokens ([RFC 9068](https://www.rfc-editor.org/rfc/rfc9068)) with ES256 algorithm.
 
 ### Configuration
 
@@ -87,7 +87,7 @@ When rotating the OIDC signing key:
 
 ## JWT Secret
 
-Used for signing internal session JWTs. Must be at least 32 characters.
+Used for signing internal state tokens (authorization codes, WebAuthn challenge state, CSRF tokens) with HS256. Access tokens are signed with the OIDC signing key (ES256) per [RFC 9068](https://www.rfc-editor.org/rfc/rfc9068). Must be at least 32 characters.
 
 ### Generation
 

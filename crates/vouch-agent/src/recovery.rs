@@ -2,8 +2,8 @@
 //! Session recovery from persisted credentials on disk.
 //!
 //! On startup, the agent attempts to restore a valid session by reading
-//! `~/.vouch/config.json`, validating the token against the server, and
-//! populating in-memory state.
+//! `~/.vouch/config.json` (primary) or `~/.vouch/cookie.txt` (fallback),
+//! validating the token against the server, and populating in-memory state.
 //!
 //! This is best-effort: all errors are logged and never block startup.
 
@@ -37,13 +37,16 @@ async fn try_recover_inner(
     state: &Arc<AgentState>,
     ssh_state: &Arc<SshAgentState>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    // Try to read token and server URL from config.json
+    // Try config.json first, then fall back to cookie.txt
     let (token, server_url) = match read_credentials_from_config()? {
         Some((t, url)) => (SecretString::from(t), url),
-        None => {
-            debug!("No persisted credentials found for recovery");
-            return Ok(false);
-        }
+        None => match read_credentials_from_cookie() {
+            Some((t, url)) => (SecretString::from(t), url),
+            None => {
+                debug!("No persisted credentials found for recovery");
+                return Ok(false);
+            }
+        },
     };
 
     // Reject insecure server URLs (unless explicitly allowed)
@@ -133,4 +136,27 @@ fn read_credentials_from_config() -> Result<Option<(String, String)>, Box<dyn st
         (Some(token), Some(url)) if !token.is_empty() && !url.is_empty() => Ok(Some((token, url))),
         _ => Ok(None),
     }
+}
+
+/// Read token and server URL from `~/.vouch/cookie.txt`.
+///
+/// Derives `https://{domain}` from the cookie's domain field.
+/// Returns `None` if the file is missing, invalid, or expired.
+fn read_credentials_from_cookie() -> Option<(String, String)> {
+    let cookie = match vouch_common::read_cookie() {
+        Ok(Some(c)) => c,
+        Ok(None) => return None,
+        Err(e) => {
+            debug!("Failed to read cookie.txt: {e}");
+            return None;
+        }
+    };
+
+    if vouch_common::is_cookie_expired(&cookie) {
+        debug!("Cookie is expired, skipping");
+        return None;
+    }
+
+    let server_url = format!("https://{}", cookie.domain);
+    Some((cookie.value, server_url))
 }

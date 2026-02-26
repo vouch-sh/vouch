@@ -18,7 +18,7 @@ The user-facing command-line tool. Written in Rust using:
 **FAPI 2.0 Client:**
 
 The CLI operates as a FAPI 2.0 client with its own cryptographic identity:
-- Generates an ES256 key pair stored at `~/.vouch/client_key.json` (file permissions 0600)
+- Generates an ES256 key pair stored in the OS keychain (macOS Keychain, Linux Secret Service, Windows Credential Manager) with file fallback
 - Auto-registers with the server via RFC 7591 Dynamic Client Registration on first use (`vouch enroll` or `vouch login`)
 - Uses `private_key_jwt` (RFC 7523) for client authentication — no shared secrets between CLI and server
 - Sends DPoP proofs (RFC 9449) with every token request
@@ -122,6 +122,4 @@ For the full IdP configuration details, see [Identity Provider Overview](../idp/
 
 ### Application Registration
 
-Developers register their applications through a self-service portal to obtain OAuth client credentials for integrating with Vouch.
-
-Application registration is managed through the Vouch web interface.
+Developers register their applications via RFC 7591 Dynamic Client Registration (`POST /oauth/register`) to obtain OAuth client credentials for integrating with Vouch. The CLI handles this automatically during first use.

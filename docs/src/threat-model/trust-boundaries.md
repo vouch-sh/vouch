@@ -10,7 +10,7 @@ This chapter documents the data flow diagram showing how components interact acr
 │                                                                                 │
 │                              External Services                                  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                         │
-│  │ Google/Entra │  │   AWS STS    │  │   GitHub     │                         │
+│  │ Google OIDC  │  │   AWS STS    │  │   GitHub     │                         │
 │  │    OIDC      │  │   / EKS     │  │   API        │                         │
 │  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘                         │
 │         │                 │                 │                                 │
@@ -117,5 +117,5 @@ This chapter documents the data flow diagram showing how components interact acr
 | **User Database** | Email, credential mappings | I > C > A |
 | **OIDC Configuration** | External IdP settings | I > A > C |
 | **SSH Certificates** | Signed user certificates | I > C > A |
-| **Cookie Files** | Local session storage | C > I > A |
+| **Config File** | Local session storage (`~/.vouch/config.json`) | C > I > A |
 | **FAPI Client Registration** | RFC 7591 client_id and server-stored public key | I > C > A |

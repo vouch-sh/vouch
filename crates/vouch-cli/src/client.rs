@@ -38,8 +38,8 @@ impl VouchClient<ReqwestClient> {
     /// Create an authenticated client.
     ///
     /// Resolves the token once from the agent (if running) or config file.
-    /// Also loads the FAPI client key from `~/.vouch/client_key.json` for
-    /// DPoP proof generation on resource requests.
+    /// Also loads the FAPI client key from the OS keychain (or disk fallback)
+    /// for DPoP proof generation on resource requests.
     ///
     /// This is the standard constructor for most commands.
     pub async fn new(base_url: &str) -> Result<Self> {
@@ -105,6 +105,14 @@ impl<H: HttpClient> VouchClient<H> {
         self.token = Some(token);
     }
 
+    /// Set the FAPI client key for DPoP proof generation.
+    ///
+    /// Used when the caller already has the key in memory (e.g., from
+    /// the login flow) and wants to avoid reloading from the keychain.
+    pub fn set_fapi_key(&mut self, key: ClientKey) {
+        self.fapi_key = Some(key);
+    }
+
     /// Get the base URL.
     pub fn base_url(&self) -> &str {
         &self.base_url
@@ -134,13 +142,21 @@ impl<H: HttpClient> VouchClient<H> {
                 .build(key)
             {
                 Ok(proof) => {
+                    tracing::debug!("Using DPoP auth for {method} {url} (kid={})", key.kid());
                     return Ok((format!("DPoP {token_str}"), Some(proof)));
                 }
                 Err(e) => {
                     // Non-fatal: fall through to Bearer auth.
-                    tracing::debug!("DPoP proof generation failed, falling back to Bearer: {e}");
+                    // Warn rather than debug — Bearer fallback for a DPoP-bound
+                    // token causes 401, so this is worth surfacing.
+                    tracing::warn!(
+                        "DPoP proof failed for {method} {url}, \
+                         falling back to Bearer: {e}"
+                    );
                 }
             }
+        } else {
+            tracing::debug!("Using Bearer auth for {method} {url} (no FAPI key)");
         }
 
         Ok((format!("Bearer {token_str}"), None))
@@ -324,6 +340,11 @@ impl<H: HttpClient> VouchClient<H> {
                     }
                     .into());
                 }
+                // Log the server's reason — the error body often explains
+                // why the token was rejected (e.g., DPoP binding mismatch).
+                if !error_text.is_empty() {
+                    tracing::warn!("Server rejected token (401): {error_text}");
+                }
                 Err(crate::exit_code::CliError::NotAuthenticated.into())
             }
             403 => Err(crate::exit_code::CliError::PermissionDenied.into()),
@@ -332,28 +353,51 @@ impl<H: HttpClient> VouchClient<H> {
     }
 }
 
-/// Load the FAPI client key from `~/.vouch/client_key.json`.
+/// Load the FAPI client key for DPoP proof generation.
 ///
-/// Returns `None` if the key file does not exist or cannot be loaded.
-/// This is intentionally non-fatal: resource requests fall back to
-/// `Bearer` auth when no key is available.
+/// Checks sources in order:
+/// 1. OS keychain (preferred — encrypted at rest)
+/// 2. `~/.vouch/client_key.json` (legacy/fallback)
+///
+/// Returns `None` if no key is found. Never generates a new key — that
+/// happens only in the enroll/login flows. This is intentionally non-fatal:
+/// resource requests fall back to `Bearer` auth when no key is available.
 fn load_fapi_key() -> Option<ClientKey> {
+    // 1. Try the OS keychain first.
+    match vouch_cli::fapi::key_store::load_from_keychain() {
+        Ok(Some(key_file)) => match ClientKey::from_key_file(&key_file) {
+            Ok(key) => {
+                tracing::debug!("Loaded FAPI key from keychain: kid={}", key.kid());
+                return Some(key);
+            }
+            Err(e) => {
+                tracing::warn!("Keychain has FAPI key but it failed to parse: {e}");
+            }
+        },
+        Ok(None) => {
+            tracing::debug!("No FAPI key in keychain");
+        }
+        Err(e) => {
+            tracing::warn!("Cannot access keychain for FAPI key: {e}");
+        }
+    }
+
+    // 2. Fall back to disk.
     let home = dirs::home_dir()?;
     let key_path = home.join(".vouch").join("client_key.json");
 
-    // Only load an existing key — do NOT generate a new one here.
-    // Key generation happens in the enroll/login flows.
     if !key_path.exists() {
+        tracing::debug!("No FAPI key on disk at {}", key_path.display());
         return None;
     }
 
     match ClientKey::load(&key_path) {
         Ok(key) => {
-            tracing::debug!("Loaded FAPI key for DPoP: kid={}", key.kid());
+            tracing::debug!("Loaded FAPI key from disk: kid={}", key.kid());
             Some(key)
         }
         Err(e) => {
-            tracing::debug!("Could not load FAPI key for DPoP: {e}");
+            tracing::warn!("FAPI key exists on disk but failed to load: {e}");
             None
         }
     }
