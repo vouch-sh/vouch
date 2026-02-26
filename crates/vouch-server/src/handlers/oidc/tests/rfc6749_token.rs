@@ -44,8 +44,8 @@ async fn test_token_invalid_code() {
     let (app, state) = test_app().await;
 
     // Create a test user and OAuth client for authentication
-    let user = create_test_user(&state.db, "invalid-code@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "invalid-code@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     let (status, body) = http_post_form(

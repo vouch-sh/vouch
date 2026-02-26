@@ -217,7 +217,7 @@ pub async fn exchange_fido2_assertion(
 
     // 7. Update counter in database
     db::update_authenticator_counter(
-        &state.db,
+        &state.store,
         &authenticator.id,
         assertion_result.new_counter as i32,
     )
@@ -238,9 +238,10 @@ pub async fn exchange_fido2_assertion(
         success: true,
         failure_reason: None,
     };
-    let db = state.db.clone();
+    let audit = state.audit.clone();
+    let user_email = user.email.clone();
     tokio::spawn(async move {
-        if let Err(e) = db::insert_auth_event(&db, &auth_event_params).await {
+        if let Err(e) = db::insert_auth_event(&audit, &auth_event_params, Some(&user_email)).await {
             tracing::warn!("Failed to log auth event: {}", e);
         }
     });

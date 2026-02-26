@@ -52,7 +52,7 @@ pub async fn exchange_jwt_bearer_grant(
     let unverified_claims = decode_claims_unverified(assertion)?;
 
     // 3. Look up trusted issuer by iss
-    let issuer = db::get_trusted_jwt_issuer_by_issuer(&state.db, &unverified_claims.iss)
+    let issuer = db::get_trusted_jwt_issuer_by_issuer(&state.store, &unverified_claims.iss)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| {
@@ -75,11 +75,11 @@ pub async fn exchange_jwt_bearer_grant(
 
     // 4. Resolve issuer's JWKS
     let jwks = resolve_issuer_jwks(
-        &state.db,
+        &state.store,
         &issuer.id,
         &issuer.jwks_uri,
         issuer.jwks_cache.as_deref(),
-        issuer.jwks_cached_at.as_ref(),
+        issuer.jwks_cached_at.as_deref(),
         &state.http_client,
     )
     .await?;
@@ -119,11 +119,11 @@ pub async fn exchange_jwt_bearer_grant(
     let user = match issuer.subject_claim_mapping.as_str() {
         "email" => {
             // sub claim is the user's email
-            db::get_user_by_email(&state.db, &validated.claims.sub)
+            db::get_user_by_email(&state.store, &validated.claims.sub)
                 .await
                 .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         }
-        "user_id" => db::get_user_by_id(&state.db, &validated.claims.sub)
+        "user_id" => db::get_user_by_id(&state.store, &validated.claims.sub)
             .await
             .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?,
         other => {
@@ -150,10 +150,9 @@ pub async fn exchange_jwt_bearer_grant(
         let max_lifetime = i64::from(issuer.max_token_lifetime_seconds);
         let expires_at = Timestamp::now()
             .checked_add(max_lifetime.seconds())
-            .map(|t| t.to_string())
-            .unwrap_or_else(|_| Timestamp::now().to_string());
+            .unwrap_or_else(|_| Timestamp::now());
 
-        let is_new = db::store_jwt_assertion_jti(&state.db, jti, &issuer.issuer, &expires_at)
+        let is_new = db::store_jwt_assertion_jti(&state.store, jti, &issuer.issuer, expires_at)
             .await
             .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?;
 

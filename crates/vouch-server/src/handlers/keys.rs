@@ -95,7 +95,7 @@ pub async fn register_start(
     })?;
 
     // Verify user exists (should always exist if they have a valid session)
-    let user = db::get_user_by_id(&state.db, &token.sub)
+    let user = db::get_user_by_id(&state.store, &token.sub)
         .await
         .map_err(|e| {
             json_error(
@@ -113,7 +113,7 @@ pub async fn register_start(
     );
 
     // Get existing credentials to exclude
-    let existing_auths = db::get_authenticators_for_user(&state.db, &user.id)
+    let existing_auths = db::get_authenticators_for_user(&state.store, &user.id)
         .await
         .map_err(|e| {
             json_error(
@@ -216,7 +216,7 @@ pub async fn register_complete(
         verified.credential_id.into();
 
     // Check for duplicate credential registration
-    if let Some(_existing) = db::get_authenticator_by_credential_id(&state.db, &verified_cred_id)
+    if let Some(_existing) = db::get_authenticator_by_credential_id(&state.store, &verified_cred_id)
         .await
         .map_err(|e| {
             json_error(
@@ -251,8 +251,9 @@ pub async fn register_complete(
     // user_handle is the user_id as bytes (for discoverable credentials)
     let user_handle = reg_state.user_id.as_bytes().to_vec();
     let device_id = db::create_authenticator(
-        &state.db,
+        &state.store,
         &reg_state.user_id.to_string(),
+        &reg_state.user_name,
         &reg_state.device_name,
         &verified_cred_id,
         &verified_public_key,
@@ -297,7 +298,7 @@ pub async fn list_keys(
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let keys =
-        key_svc::list_keys_for_user(&state.db, &token.sub, token.authenticator_id.as_deref())
+        key_svc::list_keys_for_user(&state.store, &token.sub, token.authenticator_id.as_deref())
             .await?;
 
     Ok(Json(ListKeysResponse { keys }))
@@ -315,7 +316,7 @@ pub async fn rename_key(
 ) -> Result<Json<RenameKeyResponse>, ServiceError> {
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    let message = key_svc::rename_key(&state.db, &token.sub, &key_id, &req.name).await?;
+    let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &req.name).await?;
 
     Ok(Json(RenameKeyResponse { message }))
 }
@@ -336,7 +337,8 @@ pub async fn delete_key(
         key_svc::KEY_DELETE_MAX_AGE_SECS,
     )?;
 
-    let (key_name, sessions_revoked) = key_svc::delete_key(&state.db, &token.sub, &key_id).await?;
+    let (key_name, sessions_revoked) =
+        key_svc::delete_key(&state.store, &token.sub, &key_id).await?;
 
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),

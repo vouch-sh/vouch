@@ -5,7 +5,7 @@
 //! with database-backed caching for multi-instance deployments.
 
 use super::validate::JwtAssertionHeader;
-use crate::db::{self, Pool};
+use crate::db::{self, store::DocumentStore};
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::Timestamp;
 use serde::Deserialize;
@@ -61,12 +61,12 @@ pub struct JwkEntry {
 ///
 /// For `jwks_uri` clients, uses database-backed caching with stale-while-revalidate.
 pub async fn resolve_client_jwks(
-    pool: &Pool,
+    store: &DocumentStore,
     client_id: &str,
     jwks: Option<&str>,
     jwks_uri: Option<&str>,
     jwks_uri_cache: Option<&str>,
-    jwks_uri_cached_at: Option<&jiff_sqlx::Timestamp>,
+    jwks_uri_cached_at: Option<&str>,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
     // Inline JWKS takes priority
@@ -77,7 +77,7 @@ pub async fn resolve_client_jwks(
     // JWKS URI with caching
     if let Some(uri) = jwks_uri {
         return resolve_jwks_uri(
-            pool,
+            store,
             client_id,
             uri,
             jwks_uri_cache,
@@ -95,15 +95,15 @@ pub async fn resolve_client_jwks(
 
 /// Resolve the JWKS for a trusted issuer.
 pub async fn resolve_issuer_jwks(
-    pool: &Pool,
+    store: &DocumentStore,
     issuer_id: &str,
     jwks_uri: &str,
     jwks_cache: Option<&str>,
-    jwks_cached_at: Option<&jiff_sqlx::Timestamp>,
+    jwks_cached_at: Option<&str>,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
     resolve_jwks_uri_for_issuer(
-        pool,
+        store,
         issuer_id,
         jwks_uri,
         jwks_cache,
@@ -115,16 +115,18 @@ pub async fn resolve_issuer_jwks(
 
 /// Fetch JWKS from a URI with caching (for clients).
 async fn resolve_jwks_uri(
-    pool: &Pool,
+    store: &DocumentStore,
     client_id: &str,
     uri: &str,
     cached_jwks: Option<&str>,
-    cached_at: Option<&jiff_sqlx::Timestamp>,
+    cached_at: Option<&str>,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
     // Check cache freshness
-    if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at) {
-        let cache_age = Timestamp::now().as_second() - cached_at.to_jiff().as_second();
+    if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at)
+        && let Ok(ts) = cached_at.parse::<Timestamp>()
+    {
+        let cache_age = Timestamp::now().as_second() - ts.as_second();
         if cache_age < JWKS_CACHE_TTL_SECONDS {
             return parse_jwks(cache);
         }
@@ -134,15 +136,17 @@ async fn resolve_jwks_uri(
     match fetch_jwks(uri, http_client).await {
         Ok(jwks_json) => {
             // Update cache in database
-            if let Err(e) = db::update_client_jwks_cache(pool, client_id, &jwks_json).await {
+            if let Err(e) = db::update_client_jwks_cache(store, client_id, &jwks_json).await {
                 tracing::warn!("Failed to update JWKS cache for client {client_id}: {e}");
             }
             parse_jwks(&jwks_json)
         }
         Err(e) => {
             // Stale-while-revalidate: use stale cache on fetch failure (with max age cap)
-            if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at) {
-                let stale_age = Timestamp::now().as_second() - cached_at.to_jiff().as_second();
+            if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at)
+                && let Ok(ts) = cached_at.parse::<Timestamp>()
+            {
+                let stale_age = Timestamp::now().as_second() - ts.as_second();
                 if stale_age < JWKS_STALE_MAX_AGE_SECONDS {
                     tracing::warn!("JWKS fetch failed, using stale cache: {e}");
                     return parse_jwks(cache);
@@ -156,16 +160,18 @@ async fn resolve_jwks_uri(
 
 /// Fetch JWKS from a URI with caching (for issuers).
 async fn resolve_jwks_uri_for_issuer(
-    pool: &Pool,
+    store: &DocumentStore,
     issuer_id: &str,
     uri: &str,
     cached_jwks: Option<&str>,
-    cached_at: Option<&jiff_sqlx::Timestamp>,
+    cached_at: Option<&str>,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
     // Check cache freshness
-    if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at) {
-        let cache_age = Timestamp::now().as_second() - cached_at.to_jiff().as_second();
+    if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at)
+        && let Ok(ts) = cached_at.parse::<Timestamp>()
+    {
+        let cache_age = Timestamp::now().as_second() - ts.as_second();
         if cache_age < JWKS_CACHE_TTL_SECONDS {
             return parse_jwks(cache);
         }
@@ -174,15 +180,17 @@ async fn resolve_jwks_uri_for_issuer(
     // Cache is stale or missing — attempt fetch
     match fetch_jwks(uri, http_client).await {
         Ok(jwks_json) => {
-            if let Err(e) = db::update_issuer_jwks_cache(pool, issuer_id, &jwks_json).await {
+            if let Err(e) = db::update_issuer_jwks_cache(store, issuer_id, &jwks_json).await {
                 tracing::warn!("Failed to update JWKS cache for issuer {issuer_id}: {e}");
             }
             parse_jwks(&jwks_json)
         }
         Err(e) => {
             // Stale-while-revalidate: use stale cache on fetch failure (with max age cap)
-            if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at) {
-                let stale_age = Timestamp::now().as_second() - cached_at.to_jiff().as_second();
+            if let (Some(cache), Some(cached_at)) = (cached_jwks, cached_at)
+                && let Ok(ts) = cached_at.parse::<Timestamp>()
+            {
+                let stale_age = Timestamp::now().as_second() - ts.as_second();
                 if stale_age < JWKS_STALE_MAX_AGE_SECONDS {
                     tracing::warn!("JWKS fetch failed, using stale cache: {e}");
                     return parse_jwks(cache);

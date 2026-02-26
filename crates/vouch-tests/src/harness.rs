@@ -61,7 +61,7 @@ impl TestHarness {
     ///
     /// Returns an error if user creation fails.
     pub async fn create_user(&self, email: &str) -> Result<vouch_server::User> {
-        let user = test_utils::create_test_user(&self.state.db, email).await;
+        let user = test_utils::create_test_user(&self.state.store, email).await;
         Ok(user)
     }
 
@@ -71,7 +71,7 @@ impl TestHarness {
     ///
     /// Returns an error if authenticator creation fails.
     pub async fn create_authenticator(&self, user_id: &str) -> Result<String> {
-        let auth_id = test_utils::create_test_authenticator(&self.state.db, user_id).await;
+        let auth_id = test_utils::create_test_authenticator(&self.state.store, user_id).await;
         Ok(auth_id)
     }
 
@@ -136,7 +136,7 @@ impl TestHarness {
     ///
     /// Returns an error if org creation fails.
     pub async fn create_org(&self, domain: &str) -> Result<db::Organization> {
-        let org = test_utils::create_test_org(&self.state.db, domain).await;
+        let org = test_utils::create_test_org(&self.state.store, domain).await;
         Ok(org)
     }
 
@@ -152,7 +152,7 @@ impl TestHarness {
         is_admin: bool,
     ) -> Result<vouch_server::User> {
         let user =
-            test_utils::create_test_user_in_org(&self.state.db, email, org_id, is_admin).await;
+            test_utils::create_test_user_in_org(&self.state.store, email, org_id, is_admin).await;
         Ok(user)
     }
 
@@ -385,7 +385,7 @@ impl TestHarness {
     ///
     /// Returns an error if client creation fails.
     pub async fn create_oauth_client(&self, user_id: &str) -> Result<test_utils::TestOAuthClient> {
-        let client = test_utils::create_test_oauth_client(&self.state.db, user_id).await;
+        let client = test_utils::create_test_oauth_client(&self.state.store, user_id).await;
         Ok(client)
     }
 
@@ -395,7 +395,7 @@ impl TestHarness {
     ///
     /// Returns an error if token creation fails.
     pub async fn create_scim_token(&self, description: &str) -> Result<String> {
-        let token = test_utils::create_test_scim_token(&self.state.db, description).await;
+        let token = test_utils::create_test_scim_token(&self.state.store, description).await;
         Ok(token)
     }
 
@@ -412,13 +412,13 @@ impl TestHarness {
         auth_id: &str,
     ) -> Result<()> {
         // Look up device auth request by user code
-        let request = vouch_server::db::get_device_auth_by_user_code(&self.state.db, user_code)
+        let request = vouch_server::db::get_device_auth_by_user_code(&self.state.store, user_code)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Device auth request not found"))?;
 
         // Authorize it
         vouch_server::db::authorize_device_auth(
-            &self.state.db,
+            &self.state.store,
             &request.id,
             user_id,
             email,
@@ -447,7 +447,7 @@ impl TestHarness {
 
         // Delete the session from the database to make it appear revoked
         let token_hash = hash_token(&token);
-        let _ = db::delete_session_by_token_hash(&self.state.db, &token_hash).await;
+        let _ = db::delete_session_by_token_hash(&self.state.store, &token_hash).await;
 
         token
     }

@@ -116,7 +116,7 @@ pub async fn introspect_token(
     // Verify session exists in database
     let token_hash = hash_token(token);
     let session_exists = matches!(
-        db::get_session_by_token_hash(&state.db, &token_hash).await,
+        db::get_session_by_token_hash(&state.store, &token_hash).await,
         Ok(Some(_))
     );
 
@@ -183,7 +183,7 @@ pub async fn revoke_token(
     // RFC 7009: Always attempt to delete the session by token hash,
     // even if JWT decode fails — revocation should be best-effort.
     let token_hash = hash_token(token);
-    match db::delete_session_by_token_hash(&state.db, &token_hash).await {
+    match db::delete_session_by_token_hash(&state.store, &token_hash).await {
         Ok(deleted) => {
             if deleted {
                 if let Some(ref email) = email {

@@ -8,8 +8,8 @@ async fn test_rfc9207_iss_in_error_redirect() {
     // RFC 9207 Section 2: Error redirects must include `iss` parameter.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "iss-error@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "iss-error@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Trigger an error redirect (missing PKCE)
     let response = http_get_full(
@@ -82,9 +82,9 @@ async fn test_rfc9207_authorize_response_includes_iss_parameter() {
     // so clients can bind the response to the correct authorization server.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "authorize-iss@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "authorize-iss@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
@@ -150,8 +150,8 @@ async fn test_rfc9207_authorize_error_redirect_includes_iss() {
     // error redirect responses, not just successful ones.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "authorize-erriss@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "authorize-erriss@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // response_type=token is unsupported — will produce an error redirect
     let response = http_get_full(

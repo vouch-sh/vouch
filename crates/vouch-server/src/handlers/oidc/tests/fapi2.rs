@@ -225,26 +225,29 @@ fn compute_jwk_thumbprint(jwk: &serde_json::Value) -> String {
 /// 4. Setting `fapi_profile = Fapi2Security`
 ///
 /// Returns `(TestOAuthClient, pkcs8_bytes)`.
-async fn create_fapi_test_client(pool: &db::Pool, user_id: &str) -> (TestOAuthClient, Vec<u8>) {
+async fn create_fapi_test_client(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+) -> (TestOAuthClient, Vec<u8>) {
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
-    let client = create_test_oauth_client(pool, user_id).await;
+    let client = create_test_oauth_client(store, user_id).await;
 
-    let oauth_client = db::get_oauth_client_by_client_id(pool, &client.client_id)
+    let oauth_client = db::get_oauth_client_by_client_id(store, &client.client_id)
         .await
         .expect("DB error looking up client")
         .expect("FAPI test client not found in DB");
 
     let jwks_json = serde_json::to_string(&serde_json::json!({ "keys": [jwk] })).unwrap();
-    db::update_oauth_client_jwks(pool, &oauth_client.id, &jwks_json)
+    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_json)
         .await
         .expect("Failed to set JWKS on FAPI client");
 
-    db::update_oauth_client_auth_method(pool, &oauth_client.id, "private_key_jwt")
+    db::update_oauth_client_auth_method(store, &oauth_client.id, "private_key_jwt")
         .await
         .expect("Failed to set auth method on FAPI client");
 
     db::update_oauth_client_fapi_settings(
-        pool,
+        store,
         &oauth_client.id,
         db::FapiProfile::Fapi2Security,
         true,
@@ -280,9 +283,9 @@ async fn test_fapi2_dpop_code_binding_matching_key() {
     // same DPoP key. The token endpoint must accept the request.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "fapi2-match@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_fapi_test_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "fapi2-match@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
 
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = compute_jwk_thumbprint(&dpop_jwk);
@@ -354,9 +357,9 @@ async fn test_fapi2_dpop_code_binding_mismatching_key() {
     // exchanged using DPoP key B. Expect `invalid_grant`.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "fapi2-mismatch@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_fapi_test_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "fapi2-mismatch@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
 
     // Key A is bound to the auth code
     let (_key_a, jwk_a) = generate_dpop_key_pair();
@@ -437,9 +440,9 @@ async fn test_fapi2_dpop_code_binding_missing_dpop_at_token() {
     // header at the token endpoint.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "fapi2-nodpop@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_fapi_test_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "fapi2-nodpop@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
 
     let (_dpop_key, dpop_jwk) = generate_dpop_key_pair();
     let jkt = compute_jwk_thumbprint(&dpop_jwk);
@@ -501,8 +504,8 @@ async fn test_fapi2_authorize_rejects_without_par() {
     // A direct GET /oauth/authorize without request_uri must return an error page.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "fapi2-nopar@example.com").await;
-    let (client, _pkcs8_bytes) = create_fapi_test_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "fapi2-nopar@example.com").await;
+    let (client, _pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
 
     // Send a direct authorize request without request_uri
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
@@ -540,8 +543,8 @@ async fn test_fapi2_par_accepts_private_key_jwt() {
     // even when the assertion is presented to the PAR endpoint.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "fapi2-par-pkjwt@example.com").await;
-    let (client, pkcs8_bytes) = create_fapi_test_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "fapi2-par-pkjwt@example.com").await;
+    let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -591,9 +594,9 @@ async fn test_fapi2_token_rejects_without_dpop() {
     // DPoP header must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "fapi2-token-nodpop@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_fapi_test_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "fapi2-token-nodpop@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
 
     let scope_set = ScopeSet::parse("openid");
     let code = issue_authorization_code(
@@ -649,9 +652,9 @@ async fn test_fapi2_non_fapi_client_standard_flow() {
     // authorization code flow without DPoP.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "fapi2-std-flow@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "fapi2-std-flow@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Use PAR to obtain a request_uri
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
@@ -740,8 +743,8 @@ async fn test_fapi2_non_fapi_client_secret_basic() {
     // using client_secret_basic.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "fapi2-std-basic@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "fapi2-std-basic@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);

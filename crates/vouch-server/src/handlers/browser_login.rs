@@ -144,9 +144,9 @@ pub async fn login_page(
 
     // Get client name if we have a pending auth
     let client_name = if let Some(ref pending_id) = query.pending_auth {
-        match db::get_pending_oauth_authorization(&state.db, pending_id).await {
+        match db::get_pending_oauth_authorization(&state.store, pending_id).await {
             Ok(Some(pending)) => {
-                match db::get_oauth_client_by_client_id(&state.db, &pending.client_id).await {
+                match db::get_oauth_client_by_client_id(&state.store, &pending.client_id).await {
                     Ok(Some(client)) => Some(client.name),
                     _ => None,
                 }
@@ -328,9 +328,9 @@ pub async fn browser_login_complete(
             success: false,
             failure_reason: Some(reason.to_string()),
         };
-        let db = state.db.clone();
+        let audit = state.audit.clone();
         tokio::spawn(async move {
-            if let Err(e) = db::insert_auth_event(&db, &params).await {
+            if let Err(e) = db::insert_auth_event(&audit, &params, None).await {
                 tracing::warn!("Failed to log auth event: {}", e);
             }
         });
@@ -400,7 +400,7 @@ pub async fn browser_login_complete(
 
     // Update counter in database (WebAuthn counter is u32, stored as i32)
     let new_counter = verification_result.counter as i32;
-    db::update_authenticator_counter(&state.db, &authenticator.id, new_counter)
+    db::update_authenticator_counter(&state.store, &authenticator.id, new_counter)
         .await
         .map_err(|e| {
             json_error(
@@ -454,9 +454,9 @@ pub async fn browser_login_complete(
         success: true,
         failure_reason: None,
     };
-    let db = state.db.clone();
+    let audit = state.audit.clone();
     tokio::spawn(async move {
-        if let Err(e) = db::insert_auth_event(&db, &auth_event_params).await {
+        if let Err(e) = db::insert_auth_event(&audit, &auth_event_params, None).await {
             tracing::warn!("Failed to log auth event: {}", e);
         }
     });

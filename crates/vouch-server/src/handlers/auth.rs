@@ -75,7 +75,7 @@ pub async fn status(
 
     // Check session exists in database
     let token_hash = hash_token(token);
-    let session = db::get_session_by_token_hash(&state.db, &token_hash)
+    let session = db::get_session_by_token_hash(&state.store, &token_hash)
         .await
         .map_err(|e| {
             json_error(
@@ -96,7 +96,7 @@ pub async fn status(
 
     // Get authenticator name from server-side session record
     let device_name = match session.and_then(|s| s.authenticator_id) {
-        Some(auth_id) => db::get_authenticator_by_id(&state.db, &auth_id)
+        Some(auth_id) => db::get_authenticator_by_id(&state.store, &auth_id)
             .await
             .ok()
             .flatten()
@@ -126,7 +126,7 @@ pub async fn logout(State(state): State<Arc<AppState>>, jar: CookieJar) -> Respo
     // Get session from vouch_session cookie and delete it from database
     if let Some(token) = jar.get("vouch_session").map(|c| c.value()) {
         let token_hash = hash_token(token);
-        match db::delete_session_by_token_hash(&state.db, &token_hash).await {
+        match db::delete_session_by_token_hash(&state.store, &token_hash).await {
             Ok(deleted) => {
                 if deleted {
                     tracing::info!("Session deleted during logout");

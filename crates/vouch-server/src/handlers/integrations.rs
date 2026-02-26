@@ -69,9 +69,9 @@ pub async fn integrations_page(State(state): State<Arc<AppState>>, jar: CookieJa
         if let Ok(session) =
             crate::handlers::session::extract_session_from_cookie(&state, &jar).await
         {
-            if let Ok(Some(user)) = db::get_user_by_id(&state.db, &session.sub).await {
+            if let Ok(Some(user)) = db::get_user_by_id(&state.store, &session.sub).await {
                 if let Some(org_id) = &user.org_id {
-                    db::get_github_installations_by_org(&state.db, org_id)
+                    db::get_github_installations_by_org(&state.store, org_id)
                         .await
                         .unwrap_or_default()
                         .into_iter()
@@ -114,7 +114,7 @@ async fn extract_user_with_org(
 ) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
     let token = extract_resource_token(state, headers, jar, method, uri).await?;
 
-    let user = db::get_user_by_id(&state.db, &token.sub)
+    let user = db::get_user_by_id(&state.store, &token.sub)
         .await
         .map_err(|e| {
             json_error(
@@ -174,7 +174,7 @@ pub async fn get_aws_integration(
     let (_user, org_id) =
         extract_user_with_org(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    let integration = db::get_cloud_integration(&state.db, &org_id, "aws")
+    let integration = db::get_cloud_integration(&state.store, &org_id, "aws")
         .await
         .map_err(|e| {
             json_error(
@@ -226,7 +226,7 @@ pub async fn set_aws_integration(
         )
     })?;
 
-    db::upsert_cloud_integration(&state.db, &org_id, "aws", &config_json, &user.id)
+    db::upsert_cloud_integration(&state.store, &org_id, "aws", &config_json, &user.id)
         .await
         .map_err(|e| {
             json_error(
@@ -257,7 +257,7 @@ pub async fn delete_aws_integration(
     let (user, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    let deleted = db::delete_cloud_integration(&state.db, &org_id, "aws")
+    let deleted = db::delete_cloud_integration(&state.store, &org_id, "aws")
         .await
         .map_err(|e| {
             json_error(

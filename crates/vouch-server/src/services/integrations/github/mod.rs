@@ -40,7 +40,8 @@ pub mod webhooks;
 use std::sync::Arc;
 
 use crate::config::ServerConfig;
-use crate::db::Pool;
+use crate::db::audit::AuditStore;
+use crate::db::store::DocumentStore;
 
 // Re-export commonly used types
 pub use app::{
@@ -149,8 +150,10 @@ pub type GitHubResult<T> = Result<T, GitHubError>;
 /// Provides business logic for all GitHub operations. This is the main entry
 /// point for handlers to interact with GitHub functionality.
 pub struct GitHubService<'a> {
-    /// Database pool.
-    pub db: &'a Pool,
+    /// Document store for CRUD operations.
+    pub store: &'a DocumentStore,
+    /// Audit store for audit event operations.
+    pub audit: &'a AuditStore,
     /// Server configuration.
     pub config: &'a ServerConfig,
     /// GitHub App client (if configured).
@@ -161,12 +164,14 @@ impl<'a> GitHubService<'a> {
     /// Create a new GitHub service instance.
     #[must_use]
     pub fn new(
-        db: &'a Pool,
+        store: &'a DocumentStore,
+        audit: &'a AuditStore,
         config: &'a ServerConfig,
         github_app: Option<&'a Arc<GitHubApp>>,
     ) -> Self {
         Self {
-            db,
+            store,
+            audit,
             config,
             github_app,
         }

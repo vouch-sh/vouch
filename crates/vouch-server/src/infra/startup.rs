@@ -124,7 +124,8 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
             config.oauth_events_retention_days,
         );
         Some(cleanup::start_cleanup_task(
-            db.clone(),
+            state.store.clone(),
+            state.audit.clone(),
             config.cleanup_interval_minutes,
             config.auth_events_retention_days,
             config.oauth_events_retention_days,
@@ -349,8 +350,18 @@ async fn build_app_state(config: &config::ServerConfig, db: Pool) -> Result<Arc<
     // Wrap config in ArcSwap for dynamic updates
     let config_swap = Arc::new(ArcSwap::from_pointee(config.clone()));
 
+    // Create document store and audit store with plaintext crypto
+    // (HPKE encryption will be added when KMS key management is
+    // integrated in a follow-up).
+    let crypto: std::sync::Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+        std::sync::Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
+    let store = crate::db::store::DocumentStore::new(db.clone(), crypto.clone());
+    let audit = crate::db::audit::AuditStore::new(db.clone(), crypto);
+
     let state = Arc::new(AppState {
         db,
+        store,
+        audit,
         config: config_swap,
         webauthn,
         ssh_ca,

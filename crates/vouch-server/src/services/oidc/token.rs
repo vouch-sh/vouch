@@ -195,13 +195,13 @@ pub async fn exchange_authorization_code(
     // RFC 6749 Section 10.5: Enforce single-use authorization codes.
     // Try to consume the code; if already consumed this is a replay attack.
     let code_hash = hash_token(params.code);
-    match db::try_consume_authorization_code(&state.db, &code_hash).await {
+    match db::try_consume_authorization_code(&state.store, &code_hash).await {
         Ok(true) => { /* First use — proceed */ }
         Ok(false) => {
             // Code was already consumed or doesn't exist.
             // Single atomic query combines consumed check + owner lookup
             if let Ok(Some((user_id, _client_id))) =
-                db::get_consumed_code_owner(&state.db, &code_hash).await
+                db::get_consumed_code_owner(&state.store, &code_hash).await
             {
                 tracing::warn!(
                     target: "security",
@@ -213,7 +213,7 @@ pub async fn exchange_authorization_code(
                 // multiple attempts to exchange an authorization code, the
                 // authorization server SHOULD attempt to revoke all access tokens
                 // already granted based on the compromised authorization code."
-                match db::delete_oauth_sessions_for_user(&state.db, &user_id).await {
+                match db::delete_oauth_sessions_for_user(&state.store, &user_id).await {
                     Ok(count) if count > 0 => {
                         tracing::warn!(
                             target: "security",
@@ -419,7 +419,7 @@ pub async fn exchange_authorization_code(
     // Record usage event for registered clients
     if let Some(ref auth_client) = authenticated_client
         && let Err(e) = db::record_oauth_event(
-            &state.db,
+            &state.audit,
             &auth_client.client.id,
             db::OAuthEventType::TokenIssued,
             Some(&auth_code.user_id),
@@ -510,7 +510,7 @@ pub async fn authenticate_client(
     credentials: &ClientCredentials,
 ) -> Result<AuthenticatedClient, ClientAuthError> {
     // Look up the client
-    let client = db::get_oauth_client_by_client_id(&state.db, &credentials.client_id)
+    let client = db::get_oauth_client_by_client_id(&state.store, &credentials.client_id)
         .await
         .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?
         .ok_or(ClientAuthError::InvalidClient)?;
@@ -534,10 +534,13 @@ pub async fn authenticate_client(
         let secret_hash = hash_token(secret.expose_secret());
 
         // Validate credentials
-        let validated =
-            db::validate_oauth_client_credentials(&state.db, &credentials.client_id, &secret_hash)
-                .await
-                .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
+        let validated = db::validate_oauth_client_credentials(
+            &state.store,
+            &credentials.client_id,
+            &secret_hash,
+        )
+        .await
+        .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
 
         if validated.is_none() {
             return Err(ClientAuthError::InvalidCredentials);
@@ -550,7 +553,7 @@ pub async fn authenticate_client(
     } else {
         // Public client - no secret required, but PKCE should be used
         // Update last used timestamp
-        if let Err(e) = db::update_oauth_client_last_used(&state.db, &client.id).await {
+        if let Err(e) = db::update_oauth_client_last_used(&state.store, &client.id).await {
             tracing::warn!("Failed to update OAuth client last_used: {e}");
         }
 
@@ -669,7 +672,7 @@ pub async fn validate_dpop_if_present(
         dpop_proof,
         method,
         &full_uri,
-        &state.db,
+        &state.store,
         state.config().dpop_max_age_seconds,
     )
     .await
@@ -728,7 +731,7 @@ pub async fn validate_session_token(
 
     // Verify session exists in database
     let token_hash = hash_token(token);
-    let session = match db::get_session_by_token_hash(&state.db, &token_hash)
+    let session = match db::get_session_by_token_hash(&state.store, &token_hash)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
     {
@@ -737,7 +740,7 @@ pub async fn validate_session_token(
     };
 
     // Get user from the sub claim
-    let user = match db::get_user_by_id(&state.db, decoded.sub())
+    let user = match db::get_user_by_id(&state.store, decoded.sub())
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
     {
@@ -754,7 +757,7 @@ pub async fn validate_session_token(
     // the session is invalid — this implements key revocation.
     let authenticator = match authenticator_id {
         Some(id) => {
-            match db::get_authenticator_by_id(&state.db, id)
+            match db::get_authenticator_by_id(&state.store, id)
                 .await
                 .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
             {

@@ -1,22 +1,27 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Database queries organized by domain.
 //!
-//! This module provides database operations for the Vouch server, organized
-//! into domain-specific submodules for maintainability.
+//! This module provides database operations for the Vouch server,
+//! organized into domain-specific submodules. Data is stored in a
+//! 3-table encrypted document store (`documents`, `document_indexes`,
+//! `audit_events`) via [`store::DocumentStore`] and
+//! [`audit::AuditStore`].
 //!
 //! # Multi-Database Support
 //!
-//! This module supports both SQLite and PostgreSQL backends via feature flags:
+//! The underlying storage supports both SQLite and PostgreSQL
+//! backends via feature flags:
 //! - `sqlite` (default): Uses SQLite for development and testing
 //! - `postgres`: Uses PostgreSQL/Aurora DSQL for production
-//!
-//! Use the `Pool` type alias for database operations to work with either backend.
 
+pub(crate) mod audit;
 mod authenticators;
 mod authorization_codes;
 mod config;
 mod credentials;
 mod device_auth;
+pub(crate) mod document_type;
+pub(crate) mod documents;
 mod dpop;
 pub mod dsql;
 mod enrollment;
@@ -31,11 +36,13 @@ pub(crate) mod pool;
 pub(crate) mod schema;
 mod scim;
 mod sessions;
+pub(crate) mod store;
 pub(crate) mod types;
 mod users;
 
-// Re-export Pool, DatabaseType, and Transaction for use throughout the application
+// Re-export Pool, DatabaseType, Transaction, and StoreTransaction
 pub use pool::{DatabaseType, Pool, Transaction};
+pub use store::StoreTransaction;
 
 // Re-export user types and functions
 pub use users::{
@@ -90,26 +97,30 @@ pub use config::{
 
 // Re-export SCIM types and functions
 pub use scim::{
-    ScimFilterError, ScimGroupRecord, ScimScope, ScimScopeSet, ScimToken, ScimUserRecord,
-    add_scim_group_member, count_scim_groups, count_scim_users, create_scim_group,
+    ScimFilterError, ScimGroupMemberRecord, ScimGroupRecord, ScimScope, ScimScopeSet, ScimToken,
+    ScimUserRecord, add_scim_group_member, count_scim_groups, count_scim_users, create_scim_group,
     create_scim_token, create_scim_user, delete_old_scim_audit_logs, delete_scim_group,
-    delete_scim_token, get_scim_group, get_scim_group_members, get_scim_token_by_hash,
-    get_scim_user, insert_scim_audit, list_scim_groups, list_scim_tokens, list_scim_users,
-    remove_scim_group_member, replace_scim_group_members, update_scim_group,
-    update_scim_token_last_used, update_scim_user,
+    delete_scim_token, get_scim_group, get_scim_group_by_name, get_scim_group_members,
+    get_scim_token_by_hash, get_scim_user, get_user_scim_groups, insert_scim_audit,
+    list_scim_groups, list_scim_tokens, list_scim_users, remove_scim_group_member,
+    replace_scim_group_members, update_scim_group, update_scim_token_last_used, update_scim_user,
 };
 
-// Re-export OAuth types and functions
+// Re-export OAuth enum types from the document layer (single source of truth)
+pub use documents::oauth::{
+    AccessScope, FapiProfile, OAuthClientType, RegistrationSource, TokenEndpointAuthMethod,
+};
+
+// Re-export OAuth domain types and functions
 pub use oauth::{
-    AccessScope, CreateOAuthClientParams, FapiProfile, OAuthClient, OAuthClientType,
-    OAuthEventType, OAuthUsageStats, RegistrationSource, TokenEndpointAuthMethod,
+    CreateOAuthClientParams, OAuthClient, OAuthClientSecret, OAuthEventType, OAuthUsageStats,
     UpdateOAuthClientParams, create_oauth_client, create_oauth_client_secret,
     delete_expired_jwt_assertion_jtis, delete_oauth_client, delete_old_oauth_usage_events,
     get_client_jwks, get_oauth_client_by_client_id, get_oauth_client_by_id,
-    get_oauth_client_secrets, get_oauth_clients_for_user, get_oauth_usage_stats,
-    record_oauth_event, revoke_all_oauth_client_secrets, store_jwt_assertion_jti,
-    update_client_jwks_cache, update_oauth_client, update_oauth_client_last_used,
-    validate_oauth_client_credentials,
+    get_oauth_client_secrets, get_oauth_clients_for_user, get_oauth_secret_by_hash,
+    get_oauth_usage_stats, record_oauth_event, revoke_all_oauth_client_secrets,
+    store_jwt_assertion_jti, update_client_jwks_cache, update_oauth_client,
+    update_oauth_client_last_used, validate_oauth_client_credentials,
 };
 
 // Re-export test-only OAuth client helpers
@@ -121,9 +132,9 @@ pub use oauth::test_helpers::{
 
 // Re-export JWT issuer types and functions (RFC 7523)
 pub use jwt_issuer::{
-    TrustedJwtIssuer, create_trusted_jwt_issuer, delete_trusted_jwt_issuer,
-    get_trusted_jwt_issuer_by_issuer, list_trusted_jwt_issuers, update_issuer_jwks_cache,
-    update_trusted_jwt_issuer,
+    DEFAULT_MAX_TOKEN_LIFETIME_SECONDS, DEFAULT_SUBJECT_CLAIM_MAPPING, TrustedJwtIssuer,
+    create_trusted_jwt_issuer, delete_trusted_jwt_issuer, get_trusted_jwt_issuer_by_issuer,
+    list_trusted_jwt_issuers, update_issuer_jwks_cache, update_trusted_jwt_issuer,
 };
 
 // Re-export DPoP types and functions (RFC 9449)
@@ -134,11 +145,13 @@ pub use dpop::{
 
 // Re-export credentials types and functions
 pub use credentials::{
-    CloudIntegration, EnrollmentSession, check_delegation_policy, create_enrollment_session,
-    delete_cloud_integration, delete_expired_enrollment_sessions, delete_expired_ssh_revocations,
-    delete_old_token_exchanges, get_cloud_integration, get_delegation_policies,
-    get_enrollment_session_by_token_hash, get_revoked_ssh_certificates, insert_token_exchange,
-    is_ssh_certificate_revoked, revoke_all_ssh_certificates_for_user, revoke_ssh_certificate,
+    CloudIntegration, DelegationPolicy, EnrollmentSession, RevokedSshCertificate,
+    TokenExchangeRecord, check_delegation_policy, create_enrollment_session,
+    delete_cloud_integration, delete_delegation_policy, delete_expired_enrollment_sessions,
+    delete_expired_ssh_revocations, delete_old_token_exchanges, get_cloud_integration,
+    get_delegation_policies, get_enrollment_session_by_token_hash, get_revoked_ssh_certificates,
+    get_token_exchanges_for_user, insert_token_exchange, is_ssh_certificate_revoked,
+    revoke_all_ssh_certificates_for_user, revoke_ssh_certificate, set_delegation_policy_enabled,
     touch_enrollment_session, upsert_cloud_integration,
 };
 
@@ -154,8 +167,9 @@ pub use github::{
 
 // Re-export PAR types and functions (RFC 9126)
 pub use par::{
-    CreateParParams, PushedAuthorizationRequest, consume_pushed_authorization_request,
-    create_pushed_authorization_request, delete_expired_pushed_authorization_requests,
+    CreateParParams, PAR_EXPIRES_IN, PushedAuthorizationRequest,
+    consume_pushed_authorization_request, create_pushed_authorization_request,
+    delete_expired_pushed_authorization_requests,
 };
 
 // Re-export pending OAuth types and functions (RFC 6749, RFC 9700)

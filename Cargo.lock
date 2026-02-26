@@ -2485,18 +2485,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "jiff-sqlx"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cad0aaf716e798876e02217ae420bd730370a175ffd59870018c4aa4daa1513e"
-dependencies = [
- "jiff",
- "sqlx-core",
- "sqlx-postgres",
- "sqlx-sqlite",
-]
-
-[[package]]
 name = "jiff-static"
 version = "0.2.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4972,7 +4960,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.2.44"
+version = "2026.2.45"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4997,7 +4985,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.2.44"
+version = "2026.2.45"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -5044,7 +5032,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.2.44"
+version = "2026.2.45"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5064,7 +5052,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.2.44"
+version = "2026.2.45"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5088,7 +5076,6 @@ dependencies = [
  "hex",
  "http 1.4.0",
  "jiff",
- "jiff-sqlx",
  "jsonwebtoken",
  "mimalloc",
  "mime_guess",
@@ -5124,7 +5111,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.2.44"
+version = "2026.2.45"
 dependencies = [
  "anyhow",
  "aws-lc-rs",

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.2.44"
+version = "2026.2.45"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.93.1"
@@ -80,7 +80,6 @@ hex = { version = "=0.4.3", default-features = false }
 http = { version = "=1.4.0", default-features = false }
 inquire = { version = "=0.9.4", default-features = false }
 jiff = { version = "=0.2.21", default-features = false }
-jiff-sqlx = { version = "0.1", default-features = false }
 jsonwebtoken = { version = "=10.3.0", default-features = false }
 keyring = { version = "=3.6.3", default-features = false }
 libc = { version = "=0.2.182", default-features = false }

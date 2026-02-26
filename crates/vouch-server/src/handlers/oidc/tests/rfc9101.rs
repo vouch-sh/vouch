@@ -57,12 +57,15 @@ fn sign_jwt(pkcs8_bytes: &[u8], header: &serde_json::Value, claims: &serde_json:
 }
 
 /// Create a test OAuth client with JWKS configured for JAR.
-async fn create_test_jar_client(pool: &db::Pool, user_id: &str) -> (TestOAuthClient, Vec<u8>) {
+async fn create_test_jar_client(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+) -> (TestOAuthClient, Vec<u8>) {
     let (pkcs8_bytes, jwk) = generate_es256_signing_key();
 
-    let client = create_test_oauth_client(pool, user_id).await;
+    let client = create_test_oauth_client(store, user_id).await;
 
-    let oauth_client = db::get_oauth_client_by_client_id(pool, &client.client_id)
+    let oauth_client = db::get_oauth_client_by_client_id(store, &client.client_id)
         .await
         .expect("DB error")
         .expect("Client not found");
@@ -72,7 +75,7 @@ async fn create_test_jar_client(pool: &db::Pool, user_id: &str) -> (TestOAuthCli
         "keys": [jwk]
     }))
     .unwrap();
-    db::update_oauth_client_jwks(pool, &oauth_client.id, &jwks_json)
+    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_json)
         .await
         .expect("Failed to set JWKS");
 
@@ -191,9 +194,9 @@ async fn test_rfc9101_discovery_request_parameter_supported_is_true() {
 async fn test_rfc9101_authorize_with_valid_request_parameter_es256() {
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-es256@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-es256@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     let issuer = &state.config().base_url;
@@ -235,9 +238,9 @@ async fn test_rfc9101_authorize_request_object_with_pkce() {
     // Verify PKCE parameters from the Request Object are used.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-pkce@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-pkce@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     let issuer = &state.config().base_url;
@@ -270,9 +273,9 @@ async fn test_rfc9101_authorize_request_parameter_invalid_signature() {
     // A Request Object signed with a different key should be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-badsig@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, _pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-badsig@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, _pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     // Sign with a DIFFERENT key (not registered in JWKS)
     let (wrong_pkcs8, _) = generate_es256_signing_key();
@@ -312,9 +315,9 @@ async fn test_rfc9101_authorize_request_parameter_invalid_signature() {
 async fn test_rfc9101_authorize_request_parameter_expired() {
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-expired@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-expired@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let now = jiff::Timestamp::now().as_second();
     let issuer = &state.config().base_url;
@@ -360,9 +363,9 @@ async fn test_rfc9101_authorize_request_parameter_expired() {
 async fn test_rfc9101_authorize_request_parameter_wrong_iss() {
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-wrongiss@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-wrongiss@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let now = jiff::Timestamp::now().as_second();
     let issuer = &state.config().base_url;
@@ -408,9 +411,9 @@ async fn test_rfc9101_authorize_request_parameter_wrong_iss() {
 async fn test_rfc9101_authorize_request_parameter_wrong_aud() {
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-wrongaud@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-wrongaud@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let now = jiff::Timestamp::now().as_second();
     let challenge = sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk");
@@ -460,9 +463,9 @@ async fn test_rfc9101_authorize_missing_client_id_query_returns_error() {
     // client_id is required in the query string when using the request parameter.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-nocid@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-nocid@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let issuer = &state.config().base_url;
     let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
@@ -524,9 +527,9 @@ async fn test_rfc9101_authorize_both_request_and_request_uri_rejected() {
 async fn test_rfc9101_authorize_request_uri_in_jwt_payload_rejected() {
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-nesteduri@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-nesteduri@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let now = jiff::Timestamp::now().as_second();
     let issuer = &state.config().base_url;
@@ -576,9 +579,9 @@ async fn test_rfc9101_authorize_request_uri_in_jwt_payload_rejected() {
 async fn test_rfc9101_authorize_request_in_jwt_payload_rejected() {
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-nestedreq@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-nestedreq@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let now = jiff::Timestamp::now().as_second();
     let issuer = &state.config().base_url;
@@ -631,17 +634,17 @@ async fn test_rfc9101_authorize_request_in_jwt_payload_rejected() {
 async fn test_rfc9101_require_signed_request_object_rejects_plain_params() {
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-required@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, _pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-required@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, _pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     // Set require_signed_request_object = true
-    let oauth_client = db::get_oauth_client_by_client_id(&state.db, &client.client_id)
+    let oauth_client = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
         .await
         .expect("DB error")
         .expect("Client not found");
-    db::update_oauth_client_jar_settings(&state.db, &oauth_client.id, None, true)
+    db::update_oauth_client_jar_settings(&state.store, &oauth_client.id, None, true)
         .await
         .expect("Failed to update JAR settings");
 
@@ -683,17 +686,17 @@ async fn test_rfc9101_require_signed_request_object_rejects_plain_params() {
 async fn test_rfc9101_require_signed_request_object_accepts_valid_jar() {
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-reqok@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-reqok@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     // Set require_signed_request_object = true
-    let oauth_client = db::get_oauth_client_by_client_id(&state.db, &client.client_id)
+    let oauth_client = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
         .await
         .expect("DB error")
         .expect("Client not found");
-    db::update_oauth_client_jar_settings(&state.db, &oauth_client.id, None, true)
+    db::update_oauth_client_jar_settings(&state.store, &oauth_client.id, None, true)
         .await
         .expect("Failed to update JAR settings");
 
@@ -727,9 +730,9 @@ async fn test_rfc9101_require_signed_request_object_accepts_valid_jar() {
 async fn test_rfc9101_par_accepts_request_object_in_body() {
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-par@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-par@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let issuer = &state.config().base_url;
     let request_jwt = build_request_object(&client.client_id, issuer, &pkcs8_bytes);
@@ -764,9 +767,9 @@ async fn test_rfc9101_par_accepts_request_object_in_body() {
 async fn test_rfc9101_par_request_object_invalid_signature_rejected() {
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-parbad@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, _pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-parbad@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, _pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     // Sign with wrong key
     let (wrong_pkcs8, _) = generate_es256_signing_key();
@@ -793,9 +796,9 @@ async fn test_rfc9101_par_request_object_invalid_signature_rejected() {
 async fn test_rfc9101_par_request_object_client_id_mismatch_rejected() {
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-parcid@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-parcid@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let issuer = &state.config().base_url;
     let now = jiff::Timestamp::now().as_second();
@@ -842,9 +845,9 @@ async fn test_rfc9101_invalid_request_object_error_code_returned() {
     // The invalid_request_object error code should be used for JAR errors.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-errcode@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, _pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-errcode@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, _pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     // Completely invalid JWT string
     let response = http_get_full(
@@ -890,16 +893,16 @@ async fn test_rfc9101_client_signing_alg_es256_rejects_rs256_jwt() {
     // due to algorithm mismatch before key lookup).
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-algenforce@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-algenforce@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     // Configure the client to require ES256 only
-    let oauth_client = db::get_oauth_client_by_client_id(&state.db, &client.client_id)
+    let oauth_client = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
         .await
         .expect("DB error")
         .expect("Client not found");
-    db::update_oauth_client_jar_settings(&state.db, &oauth_client.id, Some("ES256"), false)
+    db::update_oauth_client_jar_settings(&state.store, &oauth_client.id, Some("ES256"), false)
         .await
         .expect("Failed to set request_object_signing_alg");
 
@@ -957,17 +960,17 @@ async fn test_rfc9101_client_signing_alg_es256_accepts_es256_jwt() {
     // with ES256 must be accepted.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-algok@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-algok@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     // Configure the client to require ES256 only
-    let oauth_client = db::get_oauth_client_by_client_id(&state.db, &client.client_id)
+    let oauth_client = db::get_oauth_client_by_client_id(&state.store, &client.client_id)
         .await
         .expect("DB error")
         .expect("Client not found");
-    db::update_oauth_client_jar_settings(&state.db, &oauth_client.id, Some("ES256"), false)
+    db::update_oauth_client_jar_settings(&state.store, &oauth_client.id, Some("ES256"), false)
         .await
         .expect("Failed to set request_object_signing_alg");
 
@@ -1003,9 +1006,9 @@ async fn test_rfc9101_authorize_missing_response_type_in_request_object_rejected
     // When it's missing, the server must return an error.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-nort@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-nort@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let now = jiff::Timestamp::now().as_second();
     let issuer = &state.config().base_url;
@@ -1063,9 +1066,9 @@ async fn test_rfc9101_authorize_missing_redirect_uri_in_request_object_rejected(
     // When it's missing, the server must return an error.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-noredir@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-noredir@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let now = jiff::Timestamp::now().as_second();
     let issuer = &state.config().base_url;
@@ -1125,9 +1128,9 @@ async fn test_rfc9101_state_from_request_object_preserved_in_response() {
     // in the authorization response redirect (RFC 6749 Section 4.1.2).
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-state@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-state@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     let now = jiff::Timestamp::now().as_second();
@@ -1197,9 +1200,9 @@ async fn test_rfc9101_fapi2_response_type_mismatch_rejected() {
     // and the JWT, they must match. A mismatch must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-fapi-rt@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-fapi-rt@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let now = jiff::Timestamp::now().as_second();
     let issuer = &state.config().base_url;
@@ -1258,9 +1261,9 @@ async fn test_rfc9101_fapi2_scope_mismatch_rejected() {
     // the JWT, they must match. A mismatch must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-fapi-scope@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-fapi-scope@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let now = jiff::Timestamp::now().as_second();
     let issuer = &state.config().base_url;
@@ -1318,9 +1321,9 @@ async fn test_rfc9101_fapi2_matching_query_params_accepted() {
     // FAPI 2.0: When query params match the JWT values, the request is accepted.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-fapi-match@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-fapi-match@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     let now = jiff::Timestamp::now().as_second();
@@ -1386,9 +1389,9 @@ async fn test_rfc9101_authorize_completely_malformed_jwt_handled_gracefully() {
     // gracefully without panicking, returning an appropriate error.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-malformed@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, _pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-malformed@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, _pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     // This is not valid base64 or a valid JWT format
     let malformed_values = &[
@@ -1438,9 +1441,9 @@ async fn test_rfc9101_par_completely_malformed_jwt_returns_400() {
     // A completely malformed JWT at the PAR endpoint should return 400.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-par-mal@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, _pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-par-mal@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, _pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let body = format!(
         "request={}&client_id={}&client_secret={}",
@@ -1482,9 +1485,9 @@ async fn test_rfc9101_par_request_object_with_nested_request_claim_rejected() {
     // This applies at the PAR endpoint as well as the authorize endpoint.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "jar-par-nested@example.com").await;
-    let _auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let (client, pkcs8_bytes) = create_test_jar_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "jar-par-nested@example.com").await;
+    let _auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let (client, pkcs8_bytes) = create_test_jar_client(&state.store, &user.id).await;
 
     let now = jiff::Timestamp::now().as_second();
     let issuer = &state.config().base_url;

@@ -18,6 +18,7 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use jiff::Timestamp;
 use serde::Deserialize;
 use std::sync::Arc;
 use vouch_common::{ApiError, AuthEventInfo, ListAuthEventsResponse};
@@ -42,7 +43,7 @@ async fn extract_org_admin(
 ) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
     let token = extract_resource_token(state, headers, jar, method, uri).await?;
 
-    let user = db::get_user_by_id(&state.db, &token.sub)
+    let user = db::get_user_by_id(&state.store, &token.sub)
         .await
         .map_err(|e| {
             json_error(
@@ -114,7 +115,7 @@ pub async fn list_auth_events(
     };
 
     // Fetch events
-    let events = db::get_auth_events(&state.db, &db_query)
+    let events = db::get_auth_events(&state.audit, &db_query)
         .await
         .map_err(|e| {
             json_error(
@@ -129,7 +130,7 @@ pub async fn list_auth_events(
         std::collections::HashMap::new();
     for event in &events {
         if !user_emails.contains_key(&event.user_id)
-            && let Ok(Some(user)) = db::get_user_by_id(&state.db, &event.user_id).await
+            && let Ok(Some(user)) = db::get_user_by_id(&state.store, &event.user_id).await
         {
             user_emails.insert(event.user_id.clone(), user.email);
         }
@@ -152,7 +153,7 @@ pub async fn list_auth_events(
             client_version: e.client_version,
             success: e.success,
             failure_reason: e.failure_reason,
-            created_at: e.created_at.to_jiff().to_string(),
+            created_at: e.created_at,
         })
         .collect();
 
@@ -177,7 +178,7 @@ pub struct CreateScimTokenResponse {
     pub id: String,
     pub token: String,
     pub description: Option<String>,
-    pub expires_at: String,
+    pub expires_at: Option<Timestamp>,
 }
 
 /// SCIM token info for listing.
@@ -185,9 +186,9 @@ pub struct CreateScimTokenResponse {
 pub struct ScimTokenInfo {
     pub id: String,
     pub description: Option<String>,
-    pub created_at: String,
-    pub last_used_at: Option<String>,
-    pub expires_at: Option<String>,
+    pub created_at: Timestamp,
+    pub last_used_at: Option<Timestamp>,
+    pub expires_at: Option<Timestamp>,
 }
 
 /// Response for listing SCIM tokens.
@@ -234,17 +235,14 @@ pub async fn create_scim_token(
 
     // Calculate expiration
     let duration = jiff::Span::new().days(req.expires_in_days);
-    let expires_at = jiff::Timestamp::now()
-        .checked_add(duration)
-        .map(|t| t.to_string())
-        .unwrap_or_default();
+    let expires_at = jiff::Timestamp::now().checked_add(duration).ok();
 
     // Store the token
     let token_id = db::create_scim_token(
-        &state.db,
+        &state.store,
         &token_hash,
         req.description.as_deref(),
-        Some(&expires_at),
+        expires_at,
         Some(&org_id),
         None, // Default scope: full access
     )
@@ -279,7 +277,7 @@ pub async fn list_scim_tokens(
     let (_user, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    let tokens = db::list_scim_tokens(&state.db, Some(&org_id))
+    let tokens = db::list_scim_tokens(&state.store, Some(&org_id))
         .await
         .map_err(|e| {
             json_error(
@@ -294,9 +292,9 @@ pub async fn list_scim_tokens(
         .map(|t| ScimTokenInfo {
             id: t.id,
             description: t.description,
-            created_at: t.created_at.to_jiff().to_string(),
-            last_used_at: t.last_used_at.map(|ts| ts.to_jiff().to_string()),
-            expires_at: t.expires_at.map(|ts| ts.to_jiff().to_string()),
+            created_at: t.created_at,
+            last_used_at: t.last_used_at,
+            expires_at: t.expires_at,
         })
         .collect();
 
@@ -316,7 +314,7 @@ pub async fn delete_scim_token(
     let (_user, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    let deleted = db::delete_scim_token(&state.db, &token_id, &org_id)
+    let deleted = db::delete_scim_token(&state.store, &token_id, &org_id)
         .await
         .map_err(|e| {
             json_error(

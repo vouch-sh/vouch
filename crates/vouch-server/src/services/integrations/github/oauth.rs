@@ -67,7 +67,7 @@ impl GitHubService<'_> {
 
         // Update user's GitHub identity
         db::update_user_github_identity(
-            self.db,
+            self.store,
             params.user_id,
             github_user.id as i64,
             &github_user.login,
@@ -91,7 +91,7 @@ impl GitHubService<'_> {
     /// Returns an error if the refresh fails.
     pub async fn get_user_access_token(&self, user_id: &str) -> GitHubResult<Option<String>> {
         // Get the user's refresh token
-        let refresh_token = match db::get_user_github_refresh_token(self.db, user_id)
+        let refresh_token = match db::get_user_github_refresh_token(self.store, user_id)
             .await
             .map_err(GitHubError::Database)?
         {
@@ -111,11 +111,11 @@ impl GitHubService<'_> {
 
         // Update the refresh token if a new one was issued
         if let Some(new_refresh_token) = &token_response.refresh_token
-            && let Ok(Some(user)) = db::get_user_by_id(self.db, user_id).await
+            && let Ok(Some(user)) = db::get_user_by_id(self.store, user_id).await
             && let (Some(github_id), Some(github_login)) = (user.github_id, &user.github_login)
         {
             let _ = db::update_user_github_identity(
-                self.db,
+                self.store,
                 user_id,
                 github_id,
                 github_login,

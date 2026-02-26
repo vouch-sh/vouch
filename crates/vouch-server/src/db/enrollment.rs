@@ -1,18 +1,13 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! Enrollment database operations with transactional guarantees.
+//! Enrollment database operations.
 //!
-//! This module provides atomic enrollment operations that ensure consistency
+//! This module provides enrollment operations that ensure consistency
 //! when creating organizations and users during the OIDC enrollment flow.
 
-use super::Pool;
-use super::schema::{Organizations, Users};
-use super::types::BuildSql;
-use super::types::DbTimestamp;
-use crate::{tx_execute, tx_fetch_one, tx_fetch_optional};
+use super::documents::organization::OrganizationDoc;
+use super::documents::user::UserDoc;
+use super::store::DocumentStore;
 use anyhow::Result;
-use jiff::Timestamp;
-use sea_query::{Expr, OnConflict, Query};
-use uuid::Uuid;
 
 /// Result of enrolling a user with their organization.
 #[derive(Debug)]
@@ -26,7 +21,7 @@ pub struct EnrollmentResult {
 }
 
 /// User record from enrollment.
-#[derive(Debug, sqlx::FromRow)]
+#[derive(Debug)]
 pub struct EnrolledUser {
     pub id: String,
     pub email: String,
@@ -35,114 +30,50 @@ pub struct EnrolledUser {
     pub is_org_admin: bool,
 }
 
-/// Organization record for enrollment.
-#[derive(Debug, sqlx::FromRow)]
-struct EnrollmentOrg {
-    id: String,
-    #[allow(dead_code)]
-    domain: String,
-    #[allow(dead_code)]
-    created_at: DbTimestamp,
-    created_by_user_id: Option<String>,
-}
-
-/// Enroll a user with their organization in a single transaction.
+/// Enroll a user with their organization atomically.
 ///
-/// This function atomically:
+/// This function:
 /// 1. Gets or creates the organization for the user's domain
-/// 2. Determines if the user should be an org admin (first user in org)
+/// 2. Determines if the user should be an org admin (first user)
 /// 3. Creates or gets the user with the org association
-/// 4. Updates the org's `created_by_user_id` if this is the first user
+/// 4. Updates the org's `created_by_user_id` if first user
 ///
-/// # Arguments
-///
-/// * `pool` - Database connection pool
-/// * `email` - User's email address
-/// * `name` - Optional display name
-/// * `domain` - The hosted domain from OIDC (e.g., "acme.com"), or None for personal accounts
-///
-/// # Returns
-///
-/// Returns an `EnrollmentResult` with the user, org_id, and admin status.
-///
-/// # Errors
-///
-/// Returns an error if any database operation fails. The transaction is
-/// automatically rolled back on error.
+/// All steps execute within a single database transaction.
 pub async fn enroll_user_with_org(
-    pool: &Pool,
+    store: &DocumentStore,
     email: &str,
     name: Option<&str>,
     domain: Option<&str>,
 ) -> Result<EnrollmentResult> {
-    let mut tx = pool.begin().await?;
-    let db_type = tx.db_type();
+    let mut tx = store.begin().await?;
 
     // Step 1: Get or create organization (if domain provided)
     let (org_id, org_needs_admin) = if let Some(domain) = domain {
-        // Check if org exists
-        let select_org_sql = {
-            let query = Query::select()
-                .columns([
-                    Organizations::Id,
-                    Organizations::Domain,
-                    Organizations::CreatedAt,
-                    Organizations::CreatedByUserId,
-                ])
-                .from(Organizations::Table)
-                .and_where(Expr::col(Organizations::Domain).eq(domain))
-                .to_owned();
-            query.build_sql(db_type)
-        };
+        let existing = tx.find_one::<OrganizationDoc>("domain", domain).await?;
 
-        let existing_org: Option<EnrollmentOrg> =
-            tx_fetch_optional!(tx, sqlx::query_as(&select_org_sql))?;
-
-        match existing_org {
+        match existing {
             Some(org) => {
-                // Org exists - check if it needs an admin (created_by_user_id is null)
-                let needs_admin = org.created_by_user_id.is_none();
+                let needs_admin = org.data.created_by_user_id.is_none();
                 (Some(org.id), needs_admin)
             }
             None => {
-                // Create new org
-                let org_id = Uuid::now_v7().to_string();
-                let now = Timestamp::now().to_string();
-                let insert_org_sql = {
-                    let query = Query::insert()
-                        .into_table(Organizations::Table)
-                        .columns([
-                            Organizations::Id,
-                            Organizations::Domain,
-                            Organizations::CreatedAt,
-                        ])
-                        .values_panic([org_id.clone().into(), domain.into(), now.as_str().into()])
-                        .to_owned();
-                    query.build_sql(db_type)
+                let doc = OrganizationDoc {
+                    domain: domain.to_string(),
+                    name: None,
+                    created_by_user_id: None,
                 };
-                tx_execute!(tx, sqlx::query(&insert_org_sql))?;
-                (Some(org_id), true) // New org, first user becomes admin
+                let result = tx.insert(&doc).await?;
+                (Some(result.id), true)
             }
         }
     } else {
-        // No domain = personal account, no org
         (None, false)
     };
 
     // Step 2: Determine admin status
-    // User is admin if: org needs an admin AND there are no existing users in the org
     let is_org_admin = if org_needs_admin {
         if let Some(ref oid) = org_id {
-            // Count existing users in this org
-            let count_sql = {
-                let query = Query::select()
-                    .expr(Expr::col(Users::Id).count())
-                    .from(Users::Table)
-                    .and_where(Expr::col(Users::OrgId).eq(oid.as_str()))
-                    .to_owned();
-                query.build_sql(db_type)
-            };
-            let (count,): (i64,) = tx_fetch_one!(tx, sqlx::query_as(&count_sql))?;
+            let count = tx.count::<UserDoc>("org_id", oid).await?;
             count == 0
         } else {
             false
@@ -151,66 +82,54 @@ pub async fn enroll_user_with_org(
         false
     };
 
-    // Step 3: Upsert user with org info
-    let user_id = Uuid::now_v7().to_string();
-    let now = Timestamp::now().to_string();
-    let insert_user_sql = {
-        let query = Query::insert()
-            .into_table(Users::Table)
-            .columns([
-                Users::Id,
-                Users::Email,
-                Users::Name,
-                Users::OrgId,
-                Users::IsOrgAdmin,
-                Users::CreatedAt,
-            ])
-            .values_panic([
-                user_id.clone().into(),
-                email.into(),
-                name.into(),
-                org_id.clone().into(),
-                is_org_admin.into(),
-                now.as_str().into(),
-            ])
-            .on_conflict(OnConflict::new().do_nothing().to_owned())
-            .to_owned();
-        query.build_sql(db_type)
-    };
-    tx_execute!(tx, sqlx::query(&insert_user_sql))?;
+    // Step 3: Get or create user
+    let existing_user = tx.find_one::<UserDoc>("email", email).await?;
 
-    // Fetch the user (might be existing user if insert was ignored)
-    let fetch_user_sql = {
-        let query = Query::select()
-            .columns([
-                Users::Id,
-                Users::Email,
-                Users::Name,
-                Users::OrgId,
-                Users::IsOrgAdmin,
-            ])
-            .from(Users::Table)
-            .and_where(Expr::col(Users::Email).eq(email))
-            .to_owned();
-        query.build_sql(db_type)
+    let user = match existing_user {
+        Some(doc) => EnrolledUser {
+            id: doc.id,
+            email: doc.data.email,
+            name: doc.data.name,
+            org_id: doc.data.org_id,
+            is_org_admin: doc.data.is_org_admin,
+        },
+        None => {
+            let doc = UserDoc {
+                email: email.to_string(),
+                name: name.map(String::from),
+                org_id: org_id.clone(),
+                is_org_admin,
+                active: true,
+                external_id: None,
+                github_id: None,
+                github_login: None,
+                github_refresh_token: None,
+            };
+            let result = tx.insert(&doc).await?;
+            EnrolledUser {
+                id: result.id,
+                email: result.data.email,
+                name: result.data.name,
+                org_id: result.data.org_id,
+                is_org_admin: result.data.is_org_admin,
+            }
+        }
     };
-    let user: EnrolledUser = tx_fetch_one!(tx, sqlx::query_as(&fetch_user_sql))?;
 
-    // Step 4: If this user became the admin, update org's created_by_user_id
-    if is_org_admin && let Some(ref oid) = org_id {
-        let update_org_sql = {
-            let query = Query::update()
-                .table(Organizations::Table)
-                .value(Organizations::CreatedByUserId, user.id.clone())
-                .and_where(Expr::col(Organizations::Id).eq(oid.as_str()))
-                .and_where(Expr::col(Organizations::CreatedByUserId).is_null())
-                .to_owned();
-            query.build_sql(db_type)
-        };
-        tx_execute!(tx, sqlx::query(&update_org_sql))?;
+    // Step 4: Ensure org has an admin. Uses compare_and_update so that
+    // only one concurrent enrollee wins the admin slot. On re-run after a
+    // crash, this also repairs a missing created_by_user_id.
+    if let Some(ref oid) = org_id
+        && let Some(org_doc) = tx.get::<OrganizationDoc>(oid).await?
+        && org_doc.data.created_by_user_id.is_none()
+    {
+        let mut data = org_doc.data;
+        data.created_by_user_id = Some(user.id.clone());
+        // Optimistic lock: if another enrollment already set
+        // the admin, this returns false and we skip.
+        let _won = tx.compare_and_update(oid, org_doc.version, &data).await?;
     }
 
-    // Commit the transaction
     tx.commit().await?;
 
     Ok(EnrollmentResult {

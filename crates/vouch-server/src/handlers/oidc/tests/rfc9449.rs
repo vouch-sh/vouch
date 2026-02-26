@@ -127,9 +127,9 @@ async fn test_dpop_token_exchange_with_proof() {
     // RFC 9449: Token endpoint should accept DPoP proof and return DPoP-bound token
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-exchange@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-exchange@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -184,9 +184,9 @@ async fn test_dpop_userinfo_with_dpop_scheme() {
     // RFC 9449 Section 7.1: UserInfo with DPoP-bound token and DPoP authorization scheme
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-userinfo@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-userinfo@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Generate DPoP key pair
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
@@ -270,9 +270,9 @@ async fn test_dpop_userinfo_key_mismatch_rejected() {
     // should be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-mismatch@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-mismatch@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Generate two different DPoP key pairs
     let (dpop_key1, dpop_jwk1) = generate_dpop_key_pair();
@@ -355,8 +355,8 @@ async fn test_dpop_scheme_without_proof_rejected() {
     // RFC 9449: Using DPoP authorization scheme without a DPoP proof header should fail
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-noproof@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-noproof@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     let response = http_get_full(
@@ -379,9 +379,9 @@ async fn test_dpop_non_bound_token_with_dpop_scheme_rejected() {
     // RFC 9449 Section 7.1: Using DPoP scheme with a non-DPoP-bound token should fail
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-nonbound@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-nonbound@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Get a regular (non-DPoP-bound) access token
     let (access_token, _id_token) =
@@ -425,9 +425,9 @@ async fn test_rfc9449_jti_replay_prevention() {
     // RFC 9449 Section 10: Replaying a DPoP proof with same jti must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-replay@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-replay@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -483,9 +483,9 @@ async fn test_rfc9449_wrong_typ_header() {
     // RFC 9449 Section 4.1: DPoP proof with wrong typ (JWT instead of dpop+jwt) must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-typ@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-typ@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -541,9 +541,9 @@ async fn test_rfc9449_htm_method_mismatch() {
     // RFC 9449 Section 4.2: DPoP proof with wrong HTTP method must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-htm@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-htm@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -583,9 +583,9 @@ async fn test_rfc9449_htu_uri_mismatch() {
     // RFC 9449 Section 4.2: DPoP proof for a different URI must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-htu@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-htu@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -625,9 +625,9 @@ async fn test_rfc9449_expired_dpop_proof() {
     // RFC 9449 Section 4.2: DPoP proof with old iat must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-expired@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-expired@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -682,9 +682,9 @@ async fn test_rfc9449_ath_mismatch() {
     // RFC 9449 Section 7.1: DPoP proof with wrong access token hash must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-ath@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-ath@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Get a DPoP-bound token
     let (subject_token, _id_token) =
@@ -760,9 +760,9 @@ async fn test_rfc9449_dpop_symmetric_algorithm_rejected() {
     // must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-symm@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-symm@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -811,9 +811,9 @@ async fn test_rfc9449_dpop_wrong_typ_header() {
     // must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-badtyp@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-badtyp@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -861,9 +861,9 @@ async fn test_rfc9449_dpop_htm_mismatch() {
     // RFC 9449 Section 4.2: DPoP proof with wrong HTTP method must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-htm@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-htm@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -900,9 +900,9 @@ async fn test_rfc9449_dpop_htu_mismatch() {
     // RFC 9449 Section 4.2: DPoP proof for wrong URI must be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-htu@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-htu@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -939,9 +939,9 @@ async fn test_rfc9449_dpop_expired_proof() {
     // RFC 9449 Section 4.2: DPoP proof with old iat should be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-expired@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-expired@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -999,9 +999,9 @@ async fn test_rfc9449_dpop_nonce_required_token_endpoint_returns_nonce_header() 
     // Nonces are always required per RFC 9449 Section 8.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-nonce-req@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-nonce-req@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue authorization code (no PKCE, no DPoP needed here)
     let scope_set = ScopeSet::parse("openid");
@@ -1079,9 +1079,9 @@ async fn test_rfc9449_dpop_nonce_required_retry_with_nonce_succeeds() {
     // Nonces are always required per RFC 9449 Section 8.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-nonce-retry@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-nonce-retry@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue authorization code
     let scope_set = ScopeSet::parse("openid");
@@ -1193,9 +1193,9 @@ async fn test_dpop_resource_endpoint_without_nonce() {
     // (ath provides token binding).
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-no-nonce@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-no-nonce@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Step 1: Get a DPoP-bound access token
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();
@@ -1281,9 +1281,9 @@ async fn test_dpop_resource_endpoint_post_json_without_nonce() {
     // Getting 503 means DPoP validation passed (401 would mean it failed).
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "dpop-post-nonce@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "dpop-post-nonce@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Step 1: Get a DPoP-bound access token
     let (dpop_key, dpop_jwk) = generate_dpop_key_pair();

@@ -121,7 +121,7 @@ async fn test_rfc7643_create_user_requires_username() {
     // RFC 7643 Section 4.1: userName is REQUIRED for User resource
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-create-user").await;
+    let token = create_test_scim_token(&state.store, "test-create-user").await;
 
     // Create user with valid userName
     let (status, body) = http_post_json(
@@ -143,7 +143,7 @@ async fn test_rfc7644_create_user_conflict() {
     // RFC 7644 Section 3.3: Duplicate user returns 409 Conflict
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-conflict").await;
+    let token = create_test_scim_token(&state.store, "test-conflict").await;
     let auth_header = format!("Bearer {}", token);
 
     // Create first user
@@ -180,7 +180,7 @@ async fn test_rfc7644_get_user_by_id() {
     // RFC 7644 Section 3.4.1: GET user by ID
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-get-user").await;
+    let token = create_test_scim_token(&state.store, "test-get-user").await;
     let auth_header = format!("Bearer {}", token);
 
     // Create a user first
@@ -214,7 +214,7 @@ async fn test_rfc7644_get_user_not_found() {
     // RFC 7644 Section 3.4.1: Non-existent user returns 404
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-not-found").await;
+    let token = create_test_scim_token(&state.store, "test-not-found").await;
 
     let (status, body) = http_get(
         &app,
@@ -237,7 +237,7 @@ async fn test_rfc7644_list_users_pagination() {
     // RFC 7644 Section 3.4.2: Pagination with startIndex and count
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-pagination").await;
+    let token = create_test_scim_token(&state.store, "test-pagination").await;
     let auth_header = format!("Bearer {}", token);
 
     // Create several users
@@ -276,7 +276,7 @@ async fn test_rfc7644_list_users_filter() {
     // RFC 7644 Section 3.4.2: Filter users by userName
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-filter").await;
+    let token = create_test_scim_token(&state.store, "test-filter").await;
     let auth_header = format!("Bearer {}", token);
 
     // Create users
@@ -311,7 +311,7 @@ async fn test_rfc7644_patch_user_deactivate() {
     // RFC 7644 Section 3.5.2: PATCH to deactivate user
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-patch-deactivate").await;
+    let token = create_test_scim_token(&state.store, "test-patch-deactivate").await;
     let auth_header = format!("Bearer {}", token);
 
     // Create an active user
@@ -353,7 +353,7 @@ async fn test_rfc7644_delete_user() {
     // RFC 7644 Section 3.6: DELETE removes user
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-delete").await;
+    let token = create_test_scim_token(&state.store, "test-delete").await;
     let auth_header = format!("Bearer {}", token);
 
     // Create a user
@@ -399,7 +399,7 @@ async fn test_rfc7644_error_format() {
     // RFC 7644 Section 3.12: Error response format
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-error-format").await;
+    let token = create_test_scim_token(&state.store, "test-error-format").await;
 
     // Request non-existent user to get an error
     let (status, body) = http_get(
@@ -434,7 +434,7 @@ async fn test_rfc7644_filter_eq_operator() {
     // RFC 7644 Section 3.4.1: "eq" filter operator.
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-eq-filter").await;
+    let token = create_test_scim_token(&state.store, "test-eq-filter").await;
     let auth_header = format!("Bearer {}", token);
 
     // Create a user to search for
@@ -470,7 +470,7 @@ async fn test_rfc7644_error_includes_scim_schema() {
     // RFC 7644 Section 3.12: SCIM errors must include correct schemas URN.
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-error-schema").await;
+    let token = create_test_scim_token(&state.store, "test-error-schema").await;
 
     let (status, body) = http_get(
         &app,
@@ -505,7 +505,7 @@ async fn test_rfc7644_list_response_format() {
     // totalResults, startIndex, and itemsPerPage.
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-list-format").await;
+    let token = create_test_scim_token(&state.store, "test-list-format").await;
     let auth_header = format!("Bearer {}", token);
 
     let (status, body) = http_get(&app, "/scim/v2/Users", &[("Authorization", &auth_header)]).await;
@@ -539,7 +539,7 @@ async fn test_rfc7644_filter_co_operator_contains() {
     // userName co "partial" returns all users whose userName contains "partial".
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-co-filter").await;
+    let token = create_test_scim_token(&state.store, "test-co-filter").await;
     let auth_header = format!("Bearer {}", token);
 
     // Create users with known usernames
@@ -603,7 +603,7 @@ async fn test_rfc7644_filter_sw_operator_starts_with() {
     // userName sw "prefix" returns all users whose userName starts with "prefix".
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-sw-filter").await;
+    let token = create_test_scim_token(&state.store, "test-sw-filter").await;
     let auth_header = format!("Bearer {}", token);
 
     // Create users with known usernames
@@ -667,7 +667,7 @@ async fn test_rfc7644_filter_eq_still_works_alongside_new_operators() {
     // RFC 7644 Section 3.4.2: "eq" returns only exact matches.
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-eq-regression").await;
+    let token = create_test_scim_token(&state.store, "test-eq-regression").await;
     let auth_header = format!("Bearer {}", token);
 
     // Create two users where one is a superstring of the other
@@ -723,7 +723,7 @@ async fn test_rfc7644_filter_unsupported_operator_returns_error() {
     // "ne" (not equal) is not supported and should produce an error response.
     let (app, state) = test_app().await;
 
-    let token = create_test_scim_token(&state.db, "test-ne-unsupported").await;
+    let token = create_test_scim_token(&state.store, "test-ne-unsupported").await;
     let auth_header = format!("Bearer {}", token);
 
     // Create a user (so there's something to filter)

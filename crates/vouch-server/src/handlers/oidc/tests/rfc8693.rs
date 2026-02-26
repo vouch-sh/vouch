@@ -26,10 +26,10 @@ async fn test_token_exchange_valid_token_types() {
     // RFC 8693 Section 2.1: All valid subject_token_type URNs should be accepted
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "exchange-types@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange-types@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     let valid_types = [
@@ -71,8 +71,8 @@ async fn test_token_exchange_invalid_subject_token() {
     // RFC 8693: Invalid subject token returns invalid_grant
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "exchange-invalid@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange-invalid@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     let (status, body) = http_post_form(
@@ -94,10 +94,10 @@ async fn test_token_exchange_successful() {
     let (app, state) = test_app().await;
 
     // Create a valid subject token and client for authentication
-    let user = create_test_user(&state.db, "exchange@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     let (status, body) = http_post_form(
@@ -136,10 +136,10 @@ async fn test_token_exchange_scope_downgrade() {
     // RFC 8693 Section 2.2: Can reduce scope, not expand
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "exchange-scope@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange-scope@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     // Request a subset of scopes
@@ -166,9 +166,9 @@ async fn test_token_exchange_uses_subject_scope() {
     // RFC 8693: Token exchange should respect subject token's scope
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "exchange-scope2@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange-scope2@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue token with only "openid" scope
     let (access_token, _id_token) =
@@ -202,8 +202,8 @@ async fn test_rfc8693_missing_subject_token() {
     // RFC 8693 Section 2.1: Missing subject_token returns invalid_request.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "exchange-missing-subject@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange-missing-subject@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     let (status, body) = http_post_form(
@@ -228,10 +228,10 @@ async fn test_rfc8693_missing_subject_token_type() {
     // RFC 8693 Section 2.1: Missing subject_token_type returns invalid_request.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "exchange-missing-type@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange-missing-type@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     let (status, body) = http_post_form(
@@ -258,10 +258,10 @@ async fn test_rfc8693_issued_token_type_in_response() {
     // RFC 8693 Section 2.2: Response must include issued_token_type.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "exchange-issued-type@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange-issued-type@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     let (status, body) = http_post_form(
@@ -293,10 +293,10 @@ async fn test_rfc8693_unsupported_requested_token_type() {
     // RFC 8693 Section 2.1: Unsupported requested_token_type returns error.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "exchange-bad-type@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange-bad-type@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     let (status, body) = http_post_form(
@@ -324,9 +324,9 @@ async fn test_rfc8693_delegation_depth_limit() {
     // We test this by performing a chain of token exchanges with actor tokens.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "delegation-depth@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "delegation-depth@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     // Get initial OAuth access token
@@ -334,7 +334,7 @@ async fn test_rfc8693_delegation_depth_limit() {
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
     // Create a series of actor tokens (another user)
-    let _actor_user = create_test_user(&state.db, "actor@example.com").await;
+    let _actor_user = create_test_user(&state.store, "actor@example.com").await;
 
     // Chain exchanges with actor tokens to build delegation depth.
     // MAX_DELEGATION_DEPTH is 5, so after 5 successful exchanges with actor tokens,
@@ -345,8 +345,8 @@ async fn test_rfc8693_delegation_depth_limit() {
     for i in 0..7 {
         // Create a unique actor user for each iteration to avoid session hash collisions
         let actor_email = format!("actor-{}@example.com", i);
-        let iter_actor = create_test_user(&state.db, &actor_email).await;
-        let iter_actor_auth = create_test_authenticator(&state.db, &iter_actor.id).await;
+        let iter_actor = create_test_user(&state.store, &actor_email).await;
+        let iter_actor_auth = create_test_authenticator(&state.store, &iter_actor.id).await;
         let actor_token =
             create_test_session(&state, &iter_actor.id, &iter_actor.email, &iter_actor_auth).await;
 
@@ -391,8 +391,8 @@ async fn test_rfc8693_client_auth_required_for_exchange() {
     // RFC 8693: Token exchange requires client authentication.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "exchange-noauth@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange-noauth@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
     // Try token exchange without any client authentication
@@ -424,9 +424,9 @@ async fn test_rfc8693_issued_token_type_in_exchange_response() {
     // RFC 8693 Section 2.2: Response MUST include issued_token_type.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "exchange-type@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange-type@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -461,9 +461,9 @@ async fn test_rfc8693_unsupported_requested_token_type_rejected() {
     // RFC 8693 Section 2.1: Unsupported requested_token_type returns error.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "exchange-unsupported@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange-unsupported@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -496,13 +496,13 @@ async fn test_rfc8693_actor_token_delegation_chain() {
     let (app, state) = test_app().await;
 
     // Create grantor (subject) user
-    let grantor = create_test_user(&state.db, "grantor@example.com").await;
-    let grantor_auth = create_test_authenticator(&state.db, &grantor.id).await;
-    let client = create_test_oauth_client(&state.db, &grantor.id).await;
+    let grantor = create_test_user(&state.store, "grantor@example.com").await;
+    let grantor_auth = create_test_authenticator(&state.store, &grantor.id).await;
+    let client = create_test_oauth_client(&state.store, &grantor.id).await;
 
     // Create grantee (actor) user
-    let grantee = create_test_user(&state.db, "grantee@example.com").await;
-    let grantee_auth = create_test_authenticator(&state.db, &grantee.id).await;
+    let grantee = create_test_user(&state.store, "grantee@example.com").await;
+    let grantee_auth = create_test_authenticator(&state.store, &grantee.id).await;
 
     // Get tokens for both users
     let (grantor_token, _) =
@@ -560,9 +560,9 @@ async fn test_rfc8693_token_lifetime_capped_by_subject() {
     // the remaining lifetime of the subject token.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "exchange-lifetime@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange-lifetime@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -602,9 +602,9 @@ async fn test_rfc8693_invalid_actor_token_type() {
     // RFC 8693: Invalid actor_token_type should be rejected.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "exchange-bad-actor-type@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "exchange-bad-actor-type@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 

@@ -99,7 +99,7 @@ pub async fn userinfo(
             dpop_header,
             method.as_str(),
             &full_uri,
-            &state.db,
+            &state.store,
             state.config().dpop_max_age_seconds,
         )
         .await

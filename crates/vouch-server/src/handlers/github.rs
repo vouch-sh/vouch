@@ -232,7 +232,12 @@ fn github_service<'a>(
     state: &'a AppState,
     config: &'a crate::config::ServerConfig,
 ) -> GitHubService<'a> {
-    GitHubService::new(&state.db, config, state.github_app.as_ref())
+    GitHubService::new(
+        &state.store,
+        &state.audit,
+        config,
+        state.github_app.as_ref(),
+    )
 }
 
 // ============================================================================
@@ -328,7 +333,7 @@ pub async fn github_connect_page(
     };
 
     // Get user
-    let user = match db::get_user_by_id(&state.db, &session.sub).await {
+    let user = match db::get_user_by_id(&state.store, &session.sub).await {
         Ok(Some(u)) => u,
         _ => return error_response(GitHubError::UserNotFound),
     };
@@ -496,7 +501,7 @@ async fn handle_installation_callback(
     };
 
     // Get user for audit log
-    let user = match db::get_user_by_id(&state.db, &token.user_id).await {
+    let user = match db::get_user_by_id(&state.store, &token.user_id).await {
         Ok(Some(u)) => u,
         _ => return error_response(GitHubError::UserNotFound),
     };
@@ -548,7 +553,7 @@ pub async fn github_link_start(State(state): State<Arc<AppState>>, jar: CookieJa
     };
 
     // Get user
-    let user = match db::get_user_by_id(&state.db, &session.sub).await {
+    let user = match db::get_user_by_id(&state.store, &session.sub).await {
         Ok(Some(u)) => u,
         _ => return error_response(GitHubError::UserNotFound),
     };
@@ -611,7 +616,7 @@ pub async fn github_reconnect(
     };
 
     // Get user
-    let user = match db::get_user_by_id(&state.db, &session.sub).await {
+    let user = match db::get_user_by_id(&state.store, &session.sub).await {
         Ok(Some(u)) => u,
         _ => return error_response(GitHubError::UserNotFound),
     };

@@ -114,7 +114,7 @@ pub async fn extract_resource_token(
 
     // 3. Verify session exists in DB via token_hash
     let token_hash = hash_token(&token);
-    let session = db::get_session_by_token_hash(&state.db, &token_hash)
+    let session = db::get_session_by_token_hash(&state.store, &token_hash)
         .await
         .map_err(|e| {
             json_error(
@@ -145,7 +145,7 @@ pub async fn extract_resource_token(
                         proof,
                         method,
                         &full_uri,
-                        &state.db,
+                        &state.store,
                         config.dpop_max_age_seconds,
                     )
                     .await
@@ -230,7 +230,7 @@ pub async fn extract_resource_token_with_email(
     let email = if let Some(ref email) = token.email {
         email.clone()
     } else {
-        let user = db::get_user_by_id(&state.db, &token.sub)
+        let user = db::get_user_by_id(&state.store, &token.sub)
             .await
             .map_err(|e| {
                 json_error(
@@ -360,7 +360,7 @@ pub async fn get_resource_auth_context(state: &AppState, jar: &CookieJar) -> Aut
     // Verify session exists in DB
     let token_hash = hash_token(token);
     let session_exists = matches!(
-        db::get_session_by_token_hash(&state.db, &token_hash).await,
+        db::get_session_by_token_hash(&state.store, &token_hash).await,
         Ok(Some(_))
     );
 
@@ -372,7 +372,7 @@ pub async fn get_resource_auth_context(state: &AppState, jar: &CookieJar) -> Aut
     let user_email = decoded.email().map(String::from);
 
     // Look up user to check org membership and admin status
-    let (has_org, is_org_admin) = match db::get_user_by_id(&state.db, &user_id).await {
+    let (has_org, is_org_admin) = match db::get_user_by_id(&state.store, &user_id).await {
         Ok(Some(user)) => (user.org_id.is_some(), user.is_org_admin),
         _ => (false, false),
     };

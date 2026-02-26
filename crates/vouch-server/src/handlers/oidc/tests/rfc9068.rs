@@ -9,9 +9,9 @@ async fn test_rfc9068_required_claims_in_access_token() {
     // iss, exp, aud, sub, client_id, iat, jti
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "rfc9068-claims@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "rfc9068-claims@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -76,9 +76,9 @@ async fn test_rfc9068_typ_header_is_at_jwt() {
     // RFC 9068 Section 2.1: Access token header must have typ: "at+jwt"
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "rfc9068-typ@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "rfc9068-typ@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -105,9 +105,9 @@ async fn test_rfc9068_jti_uniqueness() {
     // RFC 9068 Section 2.2: Two consecutively issued tokens must have different jti values.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "rfc9068-jti@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "rfc9068-jti@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Use token exchange to get two different access tokens (avoids auth code single-use)
     let (subject_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -167,9 +167,9 @@ async fn test_rfc9068_recommended_claims() {
     // should be present for FIDO2-issued tokens.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "rfc9068-recommended@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "rfc9068-recommended@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -195,9 +195,9 @@ async fn test_rfc9068_introspection_matches_token() {
     // RFC 9068 Section 4: Introspection of JWT access token returns matching claims.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "rfc9068-introspect@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "rfc9068-introspect@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -231,9 +231,9 @@ async fn test_rfc9068_access_token_all_required_claims() {
     // all required claims are present.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "at-claims@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "at-claims@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -254,9 +254,9 @@ async fn test_rfc9068_access_token_typ_header() {
     // RFC 9068 Section 2.1: Access token JWT must have typ header "at+jwt".
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "at-typ@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "at-typ@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -277,9 +277,9 @@ async fn test_rfc9068_jti_unique_across_tokens() {
     // RFC 9068 Section 2.2: JTI must be unique across consecutively issued tokens.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "at-jti-uniq@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "at-jti-uniq@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue first token
     let (token1, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -314,9 +314,9 @@ async fn test_rfc9068_access_token_recommended_claims() {
     // RFC 9068 Section 2.2: RECOMMENDED claims in FIDO2-issued access tokens.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "at-recommended@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "at-recommended@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 

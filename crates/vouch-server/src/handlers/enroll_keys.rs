@@ -39,7 +39,7 @@ pub async fn list_keys(
         })?;
 
     let keys =
-        key_svc::list_keys_for_user(&state.db, &token.sub, token.authenticator_id.as_deref())
+        key_svc::list_keys_for_user(&state.store, &token.sub, token.authenticator_id.as_deref())
             .await
             .map_err(into_handler_error)?;
 
@@ -65,7 +65,7 @@ pub async fn rename_key(
             )
         })?;
 
-    let message = key_svc::rename_key(&state.db, &token.sub, &key_id, &req.name)
+    let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &req.name)
         .await
         .map_err(into_handler_error)?;
 
@@ -93,7 +93,8 @@ pub async fn delete_key(
     let auth_timestamp = token.auth_time.unwrap_or(0);
     key_svc::require_fresh_timestamp(auth_timestamp, key_svc::KEY_DELETE_MAX_AGE_SECS)?;
 
-    let (key_name, sessions_revoked) = key_svc::delete_key(&state.db, &token.sub, &key_id).await?;
+    let (key_name, sessions_revoked) =
+        key_svc::delete_key(&state.store, &token.sub, &key_id).await?;
 
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! API request and response types for CLI-Server communication.
 
+use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -387,8 +388,8 @@ pub struct KeyInfo {
     pub id: String,
     /// Human-readable name for the key.
     pub name: String,
-    /// ISO 8601 timestamp when the key was registered.
-    pub created_at: String,
+    /// Timestamp when the key was registered.
+    pub created_at: Timestamp,
     /// Whether this key was used to create the current session.
     pub is_current_session: bool,
     /// Device model name (e.g., "YubiKey 5 NFC") if known from AAGUID.
@@ -471,8 +472,8 @@ pub struct AuthEventInfo {
     /// Reason for failure (if applicable).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub failure_reason: Option<String>,
-    /// ISO 8601 timestamp when the event occurred.
-    pub created_at: String,
+    /// Timestamp when the event occurred.
+    pub created_at: Timestamp,
 }
 
 /// Response containing a list of authentication events.
@@ -576,8 +577,8 @@ pub struct GitHubTokenResponse {
     /// Installation access token (use as password with username "x-access-token").
     #[serde(serialize_with = "serialize_secret_string")]
     pub token: secrecy::SecretString,
-    /// ISO 8601 expiration timestamp.
-    pub expires_at: String,
+    /// Expiration timestamp.
+    pub expires_at: Timestamp,
     /// Seconds until expiration.
     pub expires_in: u64,
     /// Granted permissions (scope -> level).

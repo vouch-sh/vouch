@@ -94,7 +94,7 @@ pub async fn authenticate_scim(
     let token_hash = hex::encode(digest::digest(&SHA256, token.as_bytes()));
 
     // Verify token exists and is valid
-    let token_record = db::get_scim_token_by_hash(&state.db, &token_hash)
+    let token_record = db::get_scim_token_by_hash(&state.store, &token_hash)
         .await
         .map_err(|_| {
             (
@@ -110,7 +110,7 @@ pub async fn authenticate_scim(
         })?;
 
     // Update last_used_at
-    if let Err(e) = db::update_scim_token_last_used(&state.db, &token_record.id).await {
+    if let Err(e) = db::update_scim_token_last_used(&state.store, &token_record.id).await {
         tracing::warn!("Failed to update SCIM token last_used_at: {e}");
     }
 

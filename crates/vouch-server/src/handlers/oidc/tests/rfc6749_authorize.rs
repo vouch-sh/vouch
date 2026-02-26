@@ -13,9 +13,9 @@ async fn test_rfc6749_authorize_authenticated_user_redirects_with_code() {
     // to the redirect_uri with code and state parameters.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "authorize-authed@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "authorize-authed@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Create a valid session stored in the DB (cookie-based auth)
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
@@ -110,8 +110,8 @@ async fn test_rfc6749_authorize_unregistered_redirect_uri_shows_error_page() {
     // redirect — it must display an error to the user.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "authorize-badredir@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "authorize-badredir@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     // Note: client is registered with https://example.com/callback
 
     let response = http_get_full(
@@ -149,8 +149,8 @@ async fn test_rfc6749_authorize_missing_response_type_redirects_with_error() {
     // redirected back to the registered redirect_uri.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "authorize-nort@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "authorize-nort@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let response = http_get_full(
         &app,
@@ -197,8 +197,8 @@ async fn test_rfc6749_authorize_empty_redirect_uri_shows_error_page() {
     // the server MUST NOT redirect and MUST display an error to the user.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "authorize-noredir@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "authorize-noredir@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let response = http_get_full(
         &app,
@@ -232,8 +232,8 @@ async fn test_rfc6749_authorize_unsupported_response_type_redirects_with_error()
     // MUST redirect to the redirect_uri with error=unsupported_response_type.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "authorize-badrt@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "authorize-badrt@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let state_param = "teststate-badrt";
 
     let response = http_get_full(
@@ -289,8 +289,8 @@ async fn test_rfc6749_authorize_unauthenticated_user_redirects_to_login() {
     // to /login with pending_auth.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "authorize-noauth@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "authorize-noauth@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
@@ -341,10 +341,10 @@ async fn test_rfc6749_authorize_access_denied_personal_scope() {
     let (app, state) = test_app().await;
 
     // Create user who owns the app
-    let owner = create_test_user(&state.db, "authorize-owner@example.com").await;
+    let owner = create_test_user(&state.store, "authorize-owner@example.com").await;
     // Create a Personal scope app
     let client = create_test_oauth_client_with_options(
-        &state.db,
+        &state.store,
         &owner.id,
         crate::db::AccessScope::Personal,
         None,
@@ -353,8 +353,8 @@ async fn test_rfc6749_authorize_access_denied_personal_scope() {
     .await;
 
     // Create a different user who will try to authorize
-    let other_user = create_test_user(&state.db, "authorize-other@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &other_user.id).await;
+    let other_user = create_test_user(&state.store, "authorize-other@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &other_user.id).await;
     let session_token =
         create_test_session(&state, &other_user.id, &other_user.email, &auth_id).await;
 
@@ -405,12 +405,12 @@ async fn test_rfc8707_authorize_invalid_resource_redirects_with_error() {
     // the server MUST return error=invalid_target.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "authorize-badres@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "authorize-badres@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
     // Create a client with a specific resource URI
     let client = create_test_oauth_client_with_options(
-        &state.db,
+        &state.store,
         &user.id,
         crate::db::AccessScope::Public,
         None,
@@ -539,9 +539,9 @@ async fn test_rfc6749_authorize_state_preserved_across_redirect() {
     // special characters that must survive URL encoding round-trip.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "authorize-state@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "authorize-state@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
@@ -602,8 +602,8 @@ async fn test_rfc6749_authorize_param_length_validation() {
     // maximum allowed lengths to prevent abuse.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "authorize-longparam@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "authorize-longparam@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // state has max length of 512 — send 600 chars
     let long_state = "x".repeat(600);
@@ -649,9 +649,9 @@ async fn test_rfc6749_authorize_code_redirect_to_registered_uri_only() {
     // that the successful redirect goes to the correct URI.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "authorize-reguri@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "authorize-reguri@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
@@ -738,8 +738,8 @@ async fn test_rfc6749_redirect_uri_validation_against_registered() {
     // RFC 6749 Section 10.6: Authorize endpoint rejects unregistered redirect URIs.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "redirect-unregistered@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "redirect-unregistered@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let response = http_get_full(
         &app,
@@ -775,8 +775,8 @@ async fn test_rfc6749_state_parameter_passthrough() {
     // unchanged in the error redirect response.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "state-passthrough@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "state-passthrough@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let unique_state = "unique-state-value-12345";
 

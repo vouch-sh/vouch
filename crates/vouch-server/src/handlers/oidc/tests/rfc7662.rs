@@ -13,9 +13,9 @@ async fn test_introspect_active_token() {
     let (app, state) = test_app().await;
 
     // Create a test user and OAuth client
-    let user = create_test_user(&state.db, "introspect@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "introspect@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue an access token via the OAuth flow so the token's client_id
     // matches the introspecting client (RFC 7662 Section 4 cross-client check)
@@ -53,8 +53,8 @@ async fn test_introspect_invalid_token() {
     let (app, state) = test_app().await;
 
     // Create an OAuth client for authentication (RFC 7662 Section 2.1)
-    let user = create_test_user(&state.db, "introspect-invalid@example.com").await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "introspect-invalid@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     let (status, body) = http_post_form(
@@ -79,10 +79,10 @@ async fn test_introspect_revoked_token() {
     let (app, state) = test_app().await;
 
     // Create user, OAuth client, and session
-    let user = create_test_user(&state.db, "introspect-revoked@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "introspect-revoked@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     // Revoke the token (requires client authentication per RFC 7009)
@@ -113,9 +113,9 @@ async fn test_auth_code_flow_token_works_with_introspection() {
     // Issue auth code → exchange → /oauth/introspect → assert active=true
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "oauth-introspect@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "oauth-introspect@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _id_token) =
         issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
@@ -144,9 +144,9 @@ async fn test_introspection_returns_actual_scope() {
     // RFC 7662 Section 2.2: Introspection must return actual granted scope
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "introspect-scope@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "introspect-scope@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue token with only "openid" scope
     let (access_token, _id_token) =
@@ -203,10 +203,10 @@ async fn test_rfc7662_response_content_type() {
     // RFC 7662 Section 2.2: Response Content-Type must be application/json.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "introspect-ct@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "introspect-ct@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
     let auth_header = client.basic_auth_header();
 
     let response = http_post_form_full(
@@ -237,9 +237,9 @@ async fn test_rfc7662_active_token_required_fields() {
     // required fields: active, scope, client_id, token_type, exp, iat, sub, iss
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "introspect-fields@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "introspect-fields@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -285,9 +285,9 @@ async fn test_rfc7662_introspection_active_token_has_required_fields() {
     // all required fields.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "introspect-fields@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "introspect-fields@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -325,9 +325,9 @@ async fn test_rfc7662_introspection_response_content_type() {
     // RFC 7662 Section 2.2: Response Content-Type must be application/json.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "introspect-ct@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "introspect-ct@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
@@ -359,10 +359,10 @@ async fn test_rfc7662_cross_client_introspection() {
     // Client B introspects a token issued to Client A.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "introspect-cross@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client_a = create_test_oauth_client(&state.db, &user.id).await;
-    let client_b = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "introspect-cross@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client_a = create_test_oauth_client(&state.store, &user.id).await;
+    let client_b = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue token for client A
     let (token_a, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client_a).await;
@@ -399,10 +399,10 @@ async fn test_rfc7662_cross_client_introspection_returns_inactive() {
     // Client B, MUST return active=false to prevent information disclosure.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "introspect-cross-inactive@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client_a = create_test_oauth_client(&state.db, &user.id).await;
-    let client_b = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "introspect-cross-inactive@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client_a = create_test_oauth_client(&state.store, &user.id).await;
+    let client_b = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue token for client A
     let (token_a, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client_a).await;
@@ -446,9 +446,9 @@ async fn test_rfc7662_same_client_introspection_returns_active() {
     // active=true with full metadata.
     let (app, state) = test_app().await;
 
-    let user = create_test_user(&state.db, "introspect-own-active@example.com").await;
-    let auth_id = create_test_authenticator(&state.db, &user.id).await;
-    let client = create_test_oauth_client(&state.db, &user.id).await;
+    let user = create_test_user(&state.store, "introspect-own-active@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
 
     // Issue token for the client
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
