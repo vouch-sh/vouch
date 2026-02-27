@@ -131,10 +131,28 @@ pub fn is_nitro_tpm_available() -> bool {
 ///
 /// Searches PATH entries directly instead of shelling out to `which`
 /// (which is not POSIX and may not be present on minimal AMIs).
-fn is_attest_binary_available() -> bool {
+#[must_use]
+pub fn is_attest_binary_available() -> bool {
     std::env::var_os("PATH")
         .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(ATTEST_BINARY).is_file()))
         .is_some_and(|found| found)
+}
+
+/// Exercise the full NitroTPM attestation path.
+///
+/// Generates an ephemeral RSA key pair, requests an attestation document,
+/// and returns the document size in bytes. Used as a startup health check
+/// to surface NitroTPM issues (burstable instance limits, broken device,
+/// etc.) without blocking server startup.
+///
+/// # Errors
+///
+/// Returns an error if key generation fails, the attestation binary is
+/// missing, or the TPM device rejects the request.
+pub fn probe_attestation() -> Result<usize> {
+    let keypair = generate_ephemeral_rsa_keypair()?;
+    let doc = get_attestation_document(&keypair.public_key_der)?;
+    Ok(doc.len())
 }
 
 // ============================================================================
