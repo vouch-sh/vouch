@@ -15,7 +15,7 @@ use crate::{
     AppState, config,
     crypto::{ssh_ca, tpm_decrypt},
     db::{Pool, dsql::DsqlEndpoint, migrations::run_dsql_migrations, pool::redact_database_url},
-    infra::{cleanup, s3_config},
+    infra::{cleanup, s3_config, s3_config::DocumentKeyMaterial},
     services::{integrations::github::GitHubApp, oidc::OidcSigningKey},
 };
 
@@ -59,8 +59,9 @@ impl ServerComponents {
 pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     let mut config = config::ServerConfig::from_args(args)?;
 
-    // Load S3 config if configured (BEFORE database connection)
-    let (s3_client, s3_source, initial_etag) = load_s3_config(&mut config).await?;
+    // Load S3 config if configured (BEFORE database connection).
+    // If the config has a document_key, also recovers the HPKE key pair.
+    let (s3_client, s3_source, initial_etag, doc_keys) = load_s3_config(&mut config).await?;
 
     tracing::info!("Starting vouch-server on {}", config.listen_addr);
 
@@ -112,7 +113,7 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     }
 
     // Build AppState and start background tasks
-    let state = build_app_state(&config, db.clone()).await?;
+    let state = build_app_state(&config, db.clone(), doc_keys).await?;
 
     // Start background cleanup task if enabled
     let cleanup_handle = if config.cleanup_interval_minutes > 0 {
@@ -149,17 +150,19 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 /// Load configuration from S3 if configured.
 ///
 /// Fetches the initial config from S3, handles encrypted envelopes via
-/// NitroTPM + KMS, and merges into the server config.
+/// NitroTPM + KMS, and merges into the server config. If the config has
+/// a `document_key`, also returns the key material for document encryption.
 async fn load_s3_config(
     config: &mut config::ServerConfig,
 ) -> Result<(
     Option<aws_sdk_s3::Client>,
     Option<s3_config::S3ConfigSource>,
     Option<String>,
+    Option<DocumentKeyMaterial>,
 )> {
     let Some(bucket) = &config.s3_config_bucket else {
         tracing::info!("Configuration source: environment variables");
-        return Ok((None, None, None));
+        return Ok((None, None, None, None));
     };
 
     tracing::info!(
@@ -193,16 +196,18 @@ async fn load_s3_config(
 
     // Fetch initial config - fail fast if unreachable.
     // If the S3 object is an encrypted envelope, this will use NitroTPM
-    // attestation + KMS to decrypt the config secrets.
-    let (s3_cfg, etag) = s3_config::fetch_s3_config(&s3_client, &source, Some(&kms_client))
-        .await
-        .context("Failed to fetch S3 configuration")?;
+    // attestation + KMS to decrypt the config secrets. If the config has
+    // a document_key, the P-384 private key is decrypted via plain KMS.
+    let (s3_cfg, etag, doc_keys) =
+        s3_config::fetch_s3_config(&s3_client, &source, Some(&kms_client))
+            .await
+            .context("Failed to fetch S3 configuration")?;
 
     // Merge S3 config (S3 wins over env vars)
     config.merge_s3_config(&s3_cfg, false); // Initial merge - all fields allowed
     tracing::info!("S3 configuration merged (etag: {etag})");
 
-    Ok((Some(s3_client), Some(source), Some(etag)))
+    Ok((Some(s3_client), Some(source), Some(etag), doc_keys))
 }
 
 /// Connect to the database and run migrations.
@@ -269,7 +274,11 @@ async fn connect_and_migrate(config: &config::ServerConfig) -> Result<Pool> {
 }
 
 /// Build shared application state with all service components.
-async fn build_app_state(config: &config::ServerConfig, db: Pool) -> Result<Arc<AppState>> {
+async fn build_app_state(
+    config: &config::ServerConfig,
+    db: Pool,
+    doc_keys: Option<DocumentKeyMaterial>,
+) -> Result<Arc<AppState>> {
     // Build WebAuthn instance
     // Use base_url as origin (handles localhost with http and port correctly)
     let rp_origin = url::Url::parse(&config.base_url)?;
@@ -350,11 +359,24 @@ async fn build_app_state(config: &config::ServerConfig, db: Pool) -> Result<Arc<
     // Wrap config in ArcSwap for dynamic updates
     let config_swap = Arc::new(ArcSwap::from_pointee(config.clone()));
 
-    // Create document store and audit store with plaintext crypto
-    // (HPKE encryption will be added when KMS key management is
-    // integrated in a follow-up).
+    // Create document store and audit store with appropriate crypto.
+    // When document keys are available (from config.document_key), use
+    // HpkeDocumentCrypto for database-level encryption. Otherwise fall
+    // back to PlaintextDocumentCrypto for development.
     let crypto: std::sync::Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
-        std::sync::Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
+        if let Some(keys) = doc_keys {
+            tracing::info!("Document encryption: HPKE (P-384 key pair from KMS)");
+            std::sync::Arc::new(
+                crate::crypto::document_crypto::HpkeDocumentCrypto::new(
+                    keys.public_key,
+                    keys.private_key,
+                )
+                .context("Failed to initialize HpkeDocumentCrypto from document key")?,
+            )
+        } else {
+            tracing::info!("Document encryption: plaintext (no document key configured)");
+            std::sync::Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto)
+        };
     let store = crate::db::store::DocumentStore::new(db.clone(), crypto.clone());
     let audit = crate::db::audit::AuditStore::new(db.clone(), crypto);
 

@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Encrypt a plain S3Config JSON into a KMS-encrypted envelope.
 //!
-//! This subcommand takes a plain `S3Config` JSON file, generates a data key via
-//! `kms:GenerateDataKey`, AES-256-GCM encrypts the inner config, and writes an
-//! `EncryptedEnvelope` JSON to stdout.
+//! This subcommand takes a plain `S3Config` JSON file, generates an AES-256
+//! data key via `kms:GenerateDataKey`, AES-256-GCM encrypts the inner config,
+//! and writes an `EncryptedEnvelope` JSON to stdout.
 //!
 //! ## Usage
 //!
@@ -95,12 +95,14 @@ pub async fn run(args: EncryptConfigArgs) -> Result<()> {
 
     tracing::info!("Config parsed successfully");
 
-    // 2. Extract wrapper fields (tls, _acme, version) that live outside the encrypted payload
+    // 2. Extract wrapper fields (tls, _acme, version) that live outside
+    //    the encrypted payload
     let wrapper_tls: Option<S3TlsConfig> = config.tls.clone();
     let wrapper_acme: Option<S3AcmeConfig> = config.acme.clone();
     let wrapper_version: u32 = config.version.unwrap_or(1);
 
-    // 3. Remove tls and version from the inner JSON so they only appear in the wrapper
+    // 3. Remove tls, _acme, and version from the inner JSON so they
+    //    only appear in the wrapper
     let mut inner_value: serde_json::Value =
         serde_json::from_slice(&config_bytes).context("Failed to parse config as JSON value")?;
     if let Some(obj) = inner_value.as_object_mut() {
@@ -124,8 +126,11 @@ pub async fn run(args: EncryptConfigArgs) -> Result<()> {
     let sdk_config = config_loader.load().await;
     let kms_client = aws_sdk_kms::Client::new(&sdk_config);
 
-    // 5. Generate a data key via KMS
-    tracing::info!("Generating data key via KMS (key: {})", args.kms_key_id);
+    // 5. Generate an AES-256 data key via KMS
+    tracing::info!(
+        "Generating AES-256 data key via KMS (key: {})",
+        args.kms_key_id
+    );
 
     let generate_response = kms_client
         .generate_data_key()
@@ -140,29 +145,25 @@ pub async fn run(args: EncryptConfigArgs) -> Result<()> {
         .context("KMS GenerateDataKey response missing plaintext")?;
     let plaintext_key = Zeroizing::new(plaintext_key_blob.as_ref().to_vec());
 
-    let encrypted_key_blob = generate_response
+    let ciphertext_blob = generate_response
         .ciphertext_blob()
         .context("KMS GenerateDataKey response missing ciphertext_blob")?;
-    let encrypted_data_key = BASE64.encode(encrypted_key_blob.as_ref());
+    let encrypted_data_key = BASE64.encode(ciphertext_blob.as_ref());
 
     tracing::info!(
-        "Data key generated ({} bytes plaintext, {} bytes ciphertext)",
-        plaintext_key.len(),
-        encrypted_key_blob.as_ref().len()
+        "AES-256 data key generated (encrypted key: {} bytes)",
+        ciphertext_blob.as_ref().len()
     );
 
     // 6. AES-256-GCM encrypt the inner config JSON
-    let encrypted_data_raw = aes_256_gcm_encrypt(&plaintext_key, &inner_json)
+    let ciphertext = aes_256_gcm_encrypt(&plaintext_key, &inner_json)
         .context("AES-256-GCM encryption failed")?;
-    let encrypted_data = BASE64.encode(&encrypted_data_raw);
-
-    // plaintext_key is Zeroizing — auto-zeroed when dropped here
 
     // 7. Build the envelope
     let envelope = EncryptedEnvelope {
         kms_key_id: args.kms_key_id.clone(),
         encrypted_data_key,
-        encrypted_data,
+        encrypted_data: BASE64.encode(&ciphertext),
         version: wrapper_version,
         tls: wrapper_tls,
         acme: wrapper_acme,

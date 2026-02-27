@@ -6,7 +6,9 @@
 //! They are not part of the business logic or HTTP handler layers.
 
 pub mod cleanup;
+pub mod decrypt_config;
 pub mod encrypt_config;
+pub mod generate_document_key;
 pub mod rate_limit;
 pub mod request_id;
 pub mod router;

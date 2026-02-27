@@ -30,6 +30,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::task::JoinHandle;
 
+use rustls::crypto::hpke::{HpkePrivateKey, HpkePublicKey};
+
 use crate::config::ServerConfig;
 use crate::crypto::tpm_decrypt;
 
@@ -84,6 +86,50 @@ impl std::fmt::Debug for S3AcmeConfig {
         f.debug_struct("S3AcmeConfig")
             .field("account_key", &"[REDACTED]")
             .field("email", &self.email)
+            .finish()
+    }
+}
+
+/// Document encryption key configuration from S3.
+///
+/// When present in the S3 config, the server uses the P-384 private key
+/// (decrypted from KMS at startup) for HPKE document encryption.
+/// Provisioned by the `generate-document-key` subcommand.
+#[derive(Clone, Deserialize, Serialize)]
+pub struct S3DocumentKeyConfig {
+    /// KMS key ID that protects the encrypted private key.
+    pub kms_key_id: String,
+    /// Base64-encoded KMS ciphertext blob (encrypted P-384 private key DER).
+    pub encrypted_private_key: String,
+}
+
+impl std::fmt::Debug for S3DocumentKeyConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3DocumentKeyConfig")
+            .field("kms_key_id", &self.kms_key_id)
+            .field("encrypted_private_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Decrypted P-384 HPKE key pair for document encryption.
+///
+/// Recovered from `S3DocumentKeyConfig` by decrypting the private key via KMS.
+pub struct DocumentKeyMaterial {
+    /// P-384 public key (uncompressed point, 97 bytes).
+    pub public_key: HpkePublicKey,
+    /// P-384 private key (scalar, 48 bytes). Zeroizes on drop.
+    pub private_key: HpkePrivateKey,
+}
+
+impl std::fmt::Debug for DocumentKeyMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DocumentKeyMaterial")
+            .field(
+                "public_key",
+                &format_args!("[{} bytes]", self.public_key.0.len()),
+            )
+            .field("private_key", &"[REDACTED]")
             .finish()
     }
 }
@@ -238,6 +284,10 @@ pub struct S3Config {
     pub device_code_expires_seconds: Option<u64>,
     /// Device code polling interval in seconds.
     pub device_poll_interval_seconds: Option<u64>,
+
+    // Document encryption key
+    /// P-384 document encryption key (provisioned by `generate-document-key`).
+    pub document_key: Option<S3DocumentKeyConfig>,
 }
 
 // Custom Debug that redacts secrets to prevent accidental log exposure.
@@ -283,6 +333,7 @@ impl std::fmt::Debug for S3Config {
                 "device_poll_interval_seconds",
                 &self.device_poll_interval_seconds,
             )
+            .field("document_key", &self.document_key)
             .finish()
     }
 }
@@ -313,6 +364,47 @@ async fn fetch_s3_raw(client: &S3Client, source: &S3ConfigSource) -> Result<(Vec
     Ok((body.into_bytes().to_vec(), etag))
 }
 
+/// Decrypt a `document_key` config entry to recover the P-384 HPKE key pair.
+///
+/// Calls `kms:Decrypt` (plain, no NitroTPM attestation) to decrypt the private
+/// key ciphertext, then derives the HPKE key pair from the DER.
+async fn decrypt_document_key(
+    kms_client: &KmsClient,
+    doc_key: &S3DocumentKeyConfig,
+) -> Result<DocumentKeyMaterial> {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    let encrypted_bytes = BASE64
+        .decode(&doc_key.encrypted_private_key)
+        .context("Failed to base64-decode document_key.encrypted_private_key")?;
+
+    let response = kms_client
+        .decrypt()
+        .key_id(&doc_key.kms_key_id)
+        .ciphertext_blob(aws_smithy_types::Blob::new(encrypted_bytes))
+        .send()
+        .await
+        .context("KMS Decrypt for document_key failed")?;
+
+    let plaintext_blob = response
+        .plaintext()
+        .context("KMS Decrypt response missing plaintext for document_key")?;
+
+    let (public_key, private_key) =
+        crate::crypto::document_crypto::p384_hpke_keys_from_private_key_der(
+            plaintext_blob.as_ref(),
+        )
+        .context("Failed to extract P-384 HPKE keys from document_key DER")?;
+
+    tracing::info!("Document encryption key decrypted via KMS");
+
+    Ok(DocumentKeyMaterial {
+        public_key,
+        private_key,
+    })
+}
+
 /// Fetch configuration from S3.
 ///
 /// If the S3 object is an encrypted envelope (contains `kms_key_id`), decrypts it
@@ -322,20 +414,24 @@ async fn fetch_s3_raw(client: &S3Client, source: &S3ConfigSource) -> Result<(Vec
 /// If the S3 object is plain JSON (no `kms_key_id`), parses it directly (backwards
 /// compatible with existing configs).
 ///
+/// If the config contains a `document_key` section, the P-384 private key is
+/// decrypted via KMS (plain, no NitroTPM) and returned as `DocumentKeyMaterial`.
+///
 /// # Arguments
 /// * `s3_client` - S3 client for fetching the config object
 /// * `source` - S3 bucket/key/region configuration
-/// * `kms_client` - Optional KMS client; required only when the config is an encrypted envelope
+/// * `kms_client` - Optional KMS client; required for encrypted envelopes and document keys
 ///
-/// Returns the parsed config and the ETag for change detection.
+/// Returns the parsed config, the ETag for change detection, and optionally the
+/// document key material for `HpkeDocumentCrypto`.
 pub async fn fetch_s3_config(
     s3_client: &S3Client,
     source: &S3ConfigSource,
     kms_client: Option<&KmsClient>,
-) -> Result<(S3Config, String)> {
+) -> Result<(S3Config, String, Option<DocumentKeyMaterial>)> {
     let (raw_bytes, etag) = fetch_s3_raw(s3_client, source).await?;
 
-    if tpm_decrypt::is_encrypted_envelope(&raw_bytes) {
+    let config = if tpm_decrypt::is_encrypted_envelope(&raw_bytes) {
         tracing::info!("S3 config format: encrypted envelope (KMS + NitroTPM attestation)");
 
         let kms = kms_client.ok_or_else(|| {
@@ -383,13 +479,23 @@ pub async fn fetch_s3_config(
         }
 
         tracing::info!("S3 config decrypted and parsed successfully");
-        Ok((config, etag))
+        config
     } else {
         tracing::info!("S3 config format: plain JSON");
-        let config: S3Config =
-            serde_json::from_slice(&raw_bytes).context("Failed to parse S3 config JSON")?;
-        Ok((config, etag))
-    }
+        serde_json::from_slice(&raw_bytes).context("Failed to parse S3 config JSON")?
+    };
+
+    // If the config has a document_key, decrypt it independently
+    let doc_keys = if let Some(doc_key_config) = &config.document_key {
+        let kms = kms_client.ok_or_else(|| {
+            anyhow::anyhow!("S3 config has document_key but no KMS client is available")
+        })?;
+        Some(decrypt_document_key(kms, doc_key_config).await?)
+    } else {
+        None
+    };
+
+    Ok((config, etag, doc_keys))
 }
 
 /// Check if configuration has changed using HEAD request.
@@ -954,6 +1060,36 @@ mod tests {
         let acme = config.acme.unwrap();
         assert_eq!(acme.account_key, "secret-acme-key");
         assert_eq!(acme.email, "admin@example.com");
+    }
+
+    #[test]
+    fn test_s3_config_deserialization_with_document_key() {
+        let json = r#"{
+            "version": 1,
+            "rp_id": "vouch.example.com",
+            "document_key": {
+                "kms_key_id": "mrk-doc-key-123",
+                "encrypted_private_key": "YmFzZTY0Y2lwaGVydGV4dA=="
+            }
+        }"#;
+
+        let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
+
+        assert!(config.document_key.is_some());
+        let dk = config.document_key.unwrap();
+        assert_eq!(dk.kms_key_id, "mrk-doc-key-123");
+        assert_eq!(dk.encrypted_private_key, "YmFzZTY0Y2lwaGVydGV4dA==");
+    }
+
+    #[test]
+    fn test_s3_config_deserialization_without_document_key() {
+        let json = r#"{
+            "version": 1,
+            "rp_id": "vouch.example.com"
+        }"#;
+
+        let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
+        assert!(config.document_key.is_none());
     }
 
     #[test]

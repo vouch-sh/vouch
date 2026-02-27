@@ -1,0 +1,86 @@
+// SPDX-License-Identifier: BUSL-1.1
+//! Generate a P-384 document encryption key pair via KMS.
+//!
+//! Uses `kms:GenerateDataKeyPairWithoutPlaintext` with `ECC_NIST_P384` to
+//! produce a key pair where the private key is returned only in encrypted form.
+//! The plaintext private key never leaves KMS — the server decrypts it at
+//! startup via `kms:Decrypt`. The output is a JSON object suitable for
+//! embedding as the `document_key` field in an S3 config.
+//!
+//! ## Usage
+//!
+//! ```bash
+//! vouch-server generate-document-key --kms-key-id mrk-abc > document_key.json
+//! ```
+//!
+//! Then merge the output into your S3 config JSON under `"document_key"`.
+
+use anyhow::{Context, Result};
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
+use clap::Args;
+
+/// Generate a P-384 document encryption key pair via KMS
+/// (without plaintext private key).
+#[derive(Args)]
+pub struct GenerateDocumentKeyArgs {
+    /// KMS key ID, ARN, or alias for
+    /// `GenerateDataKeyPairWithoutPlaintext`.
+    #[arg(long)]
+    pub kms_key_id: String,
+
+    /// AWS region override.
+    #[arg(long, env = "AWS_REGION")]
+    pub region: Option<String>,
+}
+
+/// Run the generate-document-key subcommand.
+pub async fn run(args: GenerateDocumentKeyArgs) -> Result<()> {
+    // 1. Build AWS SDK config and create KMS client
+    let mut config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+    if let Some(region) = &args.region {
+        config_loader = config_loader.region(aws_config::Region::new(region.clone()));
+    }
+    let sdk_config = config_loader.load().await;
+    let kms_client = aws_sdk_kms::Client::new(&sdk_config);
+
+    // 2. Generate a P-384 data key pair via KMS
+    tracing::info!(
+        "Generating P-384 data key pair via KMS (key: {})",
+        args.kms_key_id
+    );
+
+    let response = kms_client
+        .generate_data_key_pair_without_plaintext()
+        .key_id(&args.kms_key_id)
+        .key_pair_spec(aws_sdk_kms::types::DataKeyPairSpec::EccNistP384)
+        .send()
+        .await
+        .context("KMS GenerateDataKeyPairWithoutPlaintext failed")?;
+
+    // 3. Extract the public key (informational for operators)
+    let public_key_der_blob = response
+        .public_key()
+        .context("KMS response missing public_key")?;
+
+    // 4. Extract the encrypted private key (KMS ciphertext blob)
+    let encrypted_private_key_blob = response
+        .private_key_ciphertext_blob()
+        .context("KMS response missing private_key_ciphertext_blob")?;
+
+    // 5. Output JSON
+    // `kms_key_id` + `encrypted_private_key` map to S3DocumentKeyConfig fields.
+    // `public_key` is informational for operators (not consumed by the server).
+    let output = serde_json::json!({
+        "kms_key_id": args.kms_key_id,
+        "encrypted_private_key": BASE64.encode(encrypted_private_key_blob.as_ref()),
+        "public_key": BASE64.encode(public_key_der_blob.as_ref()),
+    });
+
+    let json = serde_json::to_string_pretty(&output).context("Failed to serialize output JSON")?;
+    println!("{json}");
+
+    tracing::info!("Document key JSON written to stdout");
+
+    Ok(())
+}

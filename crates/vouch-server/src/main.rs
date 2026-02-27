@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 use vouch_server::{
     config,
-    infra::{encrypt_config, serve, startup},
+    infra::{decrypt_config, encrypt_config, generate_document_key, serve, startup},
 };
 
 // ============================================================================
@@ -35,6 +35,10 @@ enum Commands {
     Serve(config::Args),
     /// Encrypt a plain S3Config JSON into a KMS-encrypted envelope.
     EncryptConfig(encrypt_config::EncryptConfigArgs),
+    /// Decrypt a KMS-encrypted S3 config envelope to plain JSON.
+    DecryptConfig(decrypt_config::DecryptConfigArgs),
+    /// Generate a P-384 document encryption key pair via KMS.
+    GenerateDocumentKey(generate_document_key::GenerateDocumentKeyArgs),
 }
 
 #[tokio::main]
@@ -54,20 +58,27 @@ async fn main() -> Result<()> {
     // (legacy: `vouch-server --listen-addr ...`).
     let first_arg = std::env::args().nth(1).unwrap_or_default();
     match first_arg.as_str() {
-        "serve" | "encrypt-config" | "help" | "--help" | "-h" => {
+        "serve"
+        | "encrypt-config"
+        | "decrypt-config"
+        | "generate-document-key"
+        | "help"
+        | "--help"
+        | "-h" => {
             let cli = Cli::parse();
             match cli.command {
                 Commands::Serve(args) => run_server(args).await,
                 Commands::EncryptConfig(args) => {
-                    // encrypt-config logs to stderr so stdout is pure JSON
-                    tracing_subscriber::fmt()
-                        .with_writer(std::io::stderr)
-                        .with_env_filter(
-                            EnvFilter::try_from_default_env()
-                                .unwrap_or_else(|_| EnvFilter::new("info")),
-                        )
-                        .init();
+                    init_stderr_logging();
                     encrypt_config::run(args).await
+                }
+                Commands::DecryptConfig(args) => {
+                    init_stderr_logging();
+                    decrypt_config::run(args).await
+                }
+                Commands::GenerateDocumentKey(args) => {
+                    init_stderr_logging();
+                    generate_document_key::run(args).await
                 }
             }
         }
@@ -79,8 +90,17 @@ async fn main() -> Result<()> {
     }
 }
 
+/// Initialize logging to stderr so stdout remains pure JSON for subcommands.
+fn init_stderr_logging() {
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+        )
+        .init();
+}
+
 async fn run_server(args: config::Args) -> Result<()> {
-    // Initialize logging (only for serve mode; encrypt-config inits its own)
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

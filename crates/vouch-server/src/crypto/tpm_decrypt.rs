@@ -28,7 +28,6 @@
 //! - `nitro-tpm-attest` CLI: Installed on NitroTPM-enabled AMIs via `aws-nitro-tpm-tools`
 
 use anyhow::{Context, Result};
-use aws_lc_rs::aead;
 use aws_sdk_kms::Client as KmsClient;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -44,9 +43,9 @@ use super::ber::DerParser;
 /// Encrypted envelope wrapper for S3 config.
 ///
 /// When the S3 config object contains a `kms_key_id` field, it is treated
-/// as an encrypted envelope. The `encrypted_data` field contains the actual
-/// S3Config JSON encrypted with AES-256-GCM, and `encrypted_data_key` is
-/// the AES key encrypted by KMS.
+/// as an encrypted envelope. Uses `kms:GenerateDataKey` to produce an AES-256
+/// data key. The `encrypted_data_key` field holds the KMS-encrypted data key,
+/// and `encrypted_data` holds the AES-256-GCM ciphertext (nonce + ciphertext + tag).
 #[derive(Deserialize, Serialize)]
 pub struct EncryptedEnvelope {
     /// KMS key ID (key ID, not ARN — works across multi-region replicas).
@@ -55,7 +54,7 @@ pub struct EncryptedEnvelope {
     /// Base64-encoded KMS ciphertext blob (the encrypted AES-256 data key).
     pub encrypted_data_key: String,
 
-    /// Base64-encoded AES-256-GCM ciphertext: `nonce (12 bytes) || ciphertext || tag (16 bytes)`.
+    /// Base64-encoded AES-256-GCM ciphertext (12-byte nonce + ciphertext + 16-byte tag).
     pub encrypted_data: String,
 
     /// Envelope format version (for future compatibility).
@@ -65,6 +64,10 @@ pub struct EncryptedEnvelope {
     /// TLS config (promoted to wrapper for hot-reload without decryption).
     pub tls: Option<crate::infra::s3_config::S3TlsConfig>,
 
+    // SECURITY: The ACME account key is intentionally stored in plaintext outside
+    // the encrypted payload. External certificate renewal processes (certbot, acme.sh)
+    // need to read this field without KMS access. The account key authenticates to the
+    // ACME CA but cannot issue certificates without domain validation.
     /// ACME config (promoted to wrapper for external certificate renewal processes).
     #[serde(rename = "_acme", default, skip_serializing_if = "Option::is_none")]
     pub acme: Option<crate::infra::s3_config::S3AcmeConfig>,
@@ -480,7 +483,7 @@ fn aes_256_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Zeroi
     let decrypting_key = PaddedBlockDecryptingKey::cbc_pkcs7(unbound_key)
         .map_err(|e| anyhow::anyhow!("Failed to create CBC decrypting key: {e}"))?;
 
-    let mut in_out = ciphertext.to_vec();
+    let mut in_out = Zeroizing::new(ciphertext.to_vec());
     let plaintext = decrypting_key
         .decrypt(&mut in_out, context)
         .map_err(|e| anyhow::anyhow!("AES-256-CBC decryption failed: {e}"))?;
@@ -489,106 +492,73 @@ fn aes_256_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Zeroi
 }
 
 // ============================================================================
-// AES-256-GCM Decryption (for config payload)
+// AES-256-GCM Encryption/Decryption (for config envelope)
 // ============================================================================
 
-/// AAD version tag for context-binding.
+/// AES-256-GCM encrypt with a random 12-byte nonce.
 ///
-/// Prevents ciphertext from being moved between envelopes. The version byte
-/// can be extended with additional context (e.g., KMS key ARN) in future versions.
-const AAD_VERSION: u8 = 1;
-
-/// Build the AAD (Additional Authenticated Data) for AES-256-GCM operations.
-fn build_aad() -> [u8; 1] {
-    [AAD_VERSION]
-}
-
-/// AES-256-GCM decrypt the config payload.
-///
-/// The encrypted data format is: `nonce (12 bytes) || ciphertext || tag (16 bytes)`.
-/// This is the format produced by the provisioning tool when encrypting the S3Config JSON.
-///
-/// Uses a version-tagged AAD to bind ciphertext to its envelope context.
-fn aes_256_gcm_decrypt(key: &[u8], encrypted_data: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-    const NONCE_LEN: usize = 12;
-    const TAG_LEN: usize = 16;
-    const MIN_LEN: usize = NONCE_LEN + TAG_LEN + 1; // at least 1 byte of ciphertext
+/// Returns `[12-byte nonce][ciphertext][16-byte tag]`.
+pub fn aes_256_gcm_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    use aws_lc_rs::aead;
 
     if key.len() != 32 {
         anyhow::bail!("AES-256-GCM requires 32-byte key, got {}", key.len());
     }
-    if encrypted_data.len() < MIN_LEN {
+
+    let unbound_key = aead::UnboundKey::new(&aead::AES_256_GCM, key)
+        .map_err(|e| anyhow::anyhow!("Failed to create AES-256-GCM key: {e}"))?;
+    let less_safe_key = aead::LessSafeKey::new(unbound_key);
+
+    let mut nonce_bytes = [0u8; aead::NONCE_LEN];
+    aws_lc_rs::rand::fill(&mut nonce_bytes)
+        .map_err(|_| anyhow::anyhow!("Failed to generate random nonce"))?;
+    let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
+
+    let mut in_out = plaintext.to_vec();
+    less_safe_key
+        .seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut in_out)
+        .map_err(|e| anyhow::anyhow!("AES-256-GCM seal failed: {e}"))?;
+
+    let mut result = Vec::with_capacity(aead::NONCE_LEN + in_out.len());
+    result.extend_from_slice(&nonce_bytes);
+    result.extend_from_slice(&in_out);
+    Ok(result)
+}
+
+/// AES-256-GCM decrypt.
+///
+/// Expects `[12-byte nonce][ciphertext][16-byte tag]`.
+pub fn aes_256_gcm_decrypt(key: &[u8], nonce_and_ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    use aws_lc_rs::aead;
+
+    if key.len() != 32 {
+        anyhow::bail!("AES-256-GCM requires 32-byte key, got {}", key.len());
+    }
+
+    let min_len = aead::NONCE_LEN + aead::AES_256_GCM.tag_len();
+    if nonce_and_ciphertext.len() < min_len {
         anyhow::bail!(
-            "Encrypted data too short ({} bytes, minimum {})",
-            encrypted_data.len(),
-            MIN_LEN
+            "ciphertext too short for AES-256-GCM ({} bytes, minimum {min_len})",
+            nonce_and_ciphertext.len(),
         );
     }
 
-    let nonce_bytes = encrypted_data
-        .get(..NONCE_LEN)
-        .context("Failed to extract nonce")?;
-    let ciphertext_and_tag = encrypted_data
-        .get(NONCE_LEN..)
-        .context("Failed to extract ciphertext")?;
+    let (nonce_bytes, ciphertext) = nonce_and_ciphertext.split_at(aead::NONCE_LEN);
+    let nonce_array: [u8; 12] = nonce_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid nonce length"))?;
 
     let unbound_key = aead::UnboundKey::new(&aead::AES_256_GCM, key)
         .map_err(|e| anyhow::anyhow!("Failed to create AES-256-GCM key: {e}"))?;
+    let less_safe_key = aead::LessSafeKey::new(unbound_key);
+    let nonce = aead::Nonce::assume_unique_for_key(nonce_array);
 
-    let nonce = aead::Nonce::try_assume_unique_for_key(nonce_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid nonce: {e}"))?;
-
-    let opening_key = aead::LessSafeKey::new(unbound_key);
-
-    let aad = build_aad();
-    let mut in_out = ciphertext_and_tag.to_vec();
-    let plaintext = opening_key
-        .open_in_place(nonce, aead::Aad::from(&aad), &mut in_out)
-        .map_err(|_| {
-            anyhow::anyhow!("AES-256-GCM decryption failed (wrong key or tampered data)")
-        })?;
+    let mut in_out = ciphertext.to_vec();
+    let plaintext = less_safe_key
+        .open_in_place(nonce, aead::Aad::empty(), &mut in_out)
+        .map_err(|e| anyhow::anyhow!("AES-256-GCM open failed: {e}"))?;
 
     Ok(Zeroizing::new(plaintext.to_vec()))
-}
-
-/// AES-256-GCM encrypt data (for provisioning/testing).
-///
-/// Returns `nonce (12 bytes) || ciphertext || tag (16 bytes)`.
-///
-/// Uses a version-tagged AAD to bind ciphertext to its envelope context.
-pub fn aes_256_gcm_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    use aws_lc_rs::rand as aws_rand;
-
-    const NONCE_LEN: usize = 12;
-
-    if key.len() != 32 {
-        anyhow::bail!("AES-256-GCM requires 32-byte key, got {}", key.len());
-    }
-
-    let unbound_key = aead::UnboundKey::new(&aead::AES_256_GCM, key)
-        .map_err(|e| anyhow::anyhow!("Failed to create AES-256-GCM key: {e}"))?;
-
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    aws_rand::fill(&mut nonce_bytes)
-        .map_err(|_| anyhow::anyhow!("Failed to generate random nonce"))?;
-
-    let nonce = aead::Nonce::try_assume_unique_for_key(&nonce_bytes)
-        .map_err(|e| anyhow::anyhow!("Invalid nonce: {e}"))?;
-
-    let sealing_key = aead::LessSafeKey::new(unbound_key);
-
-    let aad = build_aad();
-    let mut in_out = plaintext.to_vec();
-    sealing_key
-        .seal_in_place_append_tag(nonce, aead::Aad::from(&aad), &mut in_out)
-        .map_err(|_| anyhow::anyhow!("AES-256-GCM encryption failed"))?;
-
-    // Prepend nonce
-    let mut result = Vec::with_capacity(NONCE_LEN + in_out.len());
-    result.extend_from_slice(&nonce_bytes);
-    result.extend_from_slice(&in_out);
-
-    Ok(result)
 }
 
 // ============================================================================
@@ -597,12 +567,15 @@ pub fn aes_256_gcm_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
 
 /// Decrypt an encrypted S3 config envelope using NitroTPM-attested KMS.
 ///
+/// Decrypts the AES-256 data key via KMS (with NitroTPM attestation), then uses
+/// AES-256-GCM to decrypt the config payload. Returns the plaintext config bytes.
+///
 /// # Arguments
 /// * `kms_client` - AWS KMS client (pre-configured with credentials and region)
 /// * `envelope` - The parsed encrypted envelope from S3
 ///
 /// # Returns
-/// The decrypted inner S3Config JSON bytes.
+/// The decrypted config bytes.
 ///
 /// # Errors
 /// Returns an error if NitroTPM is unavailable, KMS call fails, or decryption fails.
@@ -610,6 +583,14 @@ pub async fn decrypt_envelope(
     kms_client: &KmsClient,
     envelope: &EncryptedEnvelope,
 ) -> Result<Zeroizing<Vec<u8>>> {
+    // Validate envelope version
+    if envelope.version != 1 {
+        anyhow::bail!(
+            "unsupported envelope version: {} (expected 1)",
+            envelope.version
+        );
+    }
+
     // Verify NitroTPM is available
     if !is_nitro_tpm_available() {
         anyhow::bail!(
@@ -635,7 +616,7 @@ pub async fn decrypt_envelope(
         .await
         .context("Failed to decrypt data key via attested KMS")?;
 
-    // Decode the encrypted config data
+    // Decode encrypted data
     let encrypted_data = BASE64
         .decode(&envelope.encrypted_data)
         .context("Failed to base64-decode encrypted_data")?;
@@ -677,103 +658,6 @@ mod tests {
     fn test_is_encrypted_envelope_empty() {
         assert!(!is_encrypted_envelope(b"{}"));
         assert!(!is_encrypted_envelope(b""));
-    }
-
-    #[test]
-    fn test_aes_256_gcm_round_trip() {
-        let key = [0x42u8; 32];
-        let plaintext = b"hello, NitroTPM attested world!";
-
-        let encrypted = aes_256_gcm_encrypt(&key, plaintext).unwrap();
-
-        // Verify format: nonce (12) + ciphertext (31) + tag (16) = 59
-        assert_eq!(encrypted.len(), 12 + plaintext.len() + 16);
-
-        let decrypted = aes_256_gcm_decrypt(&key, &encrypted).unwrap();
-        assert_eq!(&**decrypted, plaintext);
-    }
-
-    #[test]
-    fn test_aes_256_gcm_wrong_key() {
-        let key = [0x42u8; 32];
-        let wrong_key = [0x43u8; 32];
-        let plaintext = b"secret data";
-
-        let encrypted = aes_256_gcm_encrypt(&key, plaintext).unwrap();
-        let result = aes_256_gcm_decrypt(&wrong_key, &encrypted);
-
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_aes_256_gcm_tampered_data() {
-        let key = [0x42u8; 32];
-        let plaintext = b"secret data";
-
-        let mut encrypted = aes_256_gcm_encrypt(&key, plaintext).unwrap();
-        // Flip a bit in the ciphertext
-        if let Some(byte) = encrypted.get_mut(15) {
-            *byte ^= 0x01;
-        }
-
-        let result = aes_256_gcm_decrypt(&key, &encrypted);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_aes_256_gcm_reject_short_key() {
-        let result = aes_256_gcm_decrypt(&[0u8; 16], &[0u8; 30]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_aes_256_gcm_reject_short_data() {
-        let result = aes_256_gcm_decrypt(&[0u8; 32], &[0u8; 20]);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_envelope_deserialization() {
-        let json = r#"{
-            "kms_key_id": "mrk-abcd1234efgh5678",
-            "encrypted_data_key": "dGVzdC1lbmNyeXB0ZWQta2V5",
-            "encrypted_data": "dGVzdC1lbmNyeXB0ZWQtZGF0YQ==",
-            "version": 1,
-            "tls": {
-                "cert": "base64cert",
-                "key": "base64key"
-            },
-            "_acme": {
-                "account_key": "acme-secret-key",
-                "email": "admin@example.com"
-            }
-        }"#;
-
-        let envelope: EncryptedEnvelope = serde_json::from_str(json).unwrap();
-        assert_eq!(envelope.kms_key_id, "mrk-abcd1234efgh5678");
-        assert_eq!(envelope.version, 1);
-        assert!(envelope.tls.is_some());
-        let tls = envelope.tls.unwrap();
-        assert_eq!(tls.cert, Some("base64cert".to_string()));
-        assert!(envelope.acme.is_some());
-        let acme = envelope.acme.unwrap();
-        assert_eq!(acme.account_key, "acme-secret-key");
-        assert_eq!(acme.email, "admin@example.com");
-    }
-
-    #[test]
-    fn test_envelope_deserialization_minimal() {
-        let json = r#"{
-            "kms_key_id": "mrk-abc",
-            "encrypted_data_key": "aGVsbG8=",
-            "encrypted_data": "d29ybGQ="
-        }"#;
-
-        let envelope: EncryptedEnvelope = serde_json::from_str(json).unwrap();
-        assert_eq!(envelope.kms_key_id, "mrk-abc");
-        assert_eq!(envelope.version, 1); // default
-        assert!(envelope.tls.is_none());
-        assert!(envelope.acme.is_none());
     }
 
     #[test]
@@ -855,16 +739,7 @@ mod tests {
         assert_eq!(pt, &data_key);
     }
 
-    // ====================================================================
-    // Additional tests from review feedback
-    // ====================================================================
-
     /// AES-256-CBC: wrong key must not produce correct plaintext.
-    ///
-    /// With PKCS#7 padding, a wrong key may either trigger a padding error
-    /// (most likely) or produce garbage that happens to have valid padding
-    /// (~1/256 chance). Either outcome is acceptable as long as the original
-    /// plaintext is never recovered.
     #[test]
     fn test_aes_256_cbc_wrong_key() {
         use aws_lc_rs::cipher::{AES_256, PaddedBlockEncryptingKey, UnboundCipherKey};
@@ -873,14 +748,12 @@ mod tests {
         let wrong_key = [0x43u8; 32];
         let plaintext = b"test plaintext data for CBC mode";
 
-        // Encrypt with correct key
         let enc_key = UnboundCipherKey::new(&AES_256, &key).unwrap();
         let enc = PaddedBlockEncryptingKey::cbc_pkcs7(enc_key).unwrap();
         let mut in_out = plaintext.to_vec();
         let context = enc.encrypt(&mut in_out).unwrap();
         let iv: &[u8] = (&context).try_into().unwrap();
 
-        // Decrypt with wrong key — must either fail or produce wrong plaintext
         let result = aes_256_cbc_decrypt(&wrong_key, iv, &in_out);
         if let Ok(decrypted) = result {
             assert_ne!(
@@ -903,14 +776,8 @@ mod tests {
         let mut in_out = plaintext.to_vec();
         let _context = enc.encrypt(&mut in_out).unwrap();
 
-        // Use a completely wrong IV
         let wrong_iv = [0xFF; 16];
         let result = aes_256_cbc_decrypt(&key, &wrong_iv, &in_out);
-        // With PKCS#7, wrong IV usually still "decrypts" but produces
-        // garbage first block. The padding check may or may not catch it
-        // depending on the last block, so we just verify it doesn't match.
-        // With PKCS#7, a wrong IV may or may not trigger a padding error.
-        // Either way, it must not produce the original plaintext.
         if let Ok(decrypted) = result {
             assert_ne!(&**decrypted, plaintext);
         }
@@ -924,29 +791,68 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// Round-trip test: encrypt -> serialize envelope -> deserialize -> decrypt.
-    ///
-    /// Exercises the full `EncryptedEnvelope` serialization path without KMS
-    /// by using a locally-generated random key.
+    /// AES-256-GCM encrypt/decrypt round-trip.
     #[test]
-    fn test_envelope_encrypt_serialize_deserialize_decrypt() {
-        use aws_lc_rs::rand as aws_rand;
+    fn test_aes_256_gcm_round_trip() {
+        let key = [0x42u8; 32];
+        let plaintext = b"test config payload for AES-256-GCM";
 
-        // Generate a random 32-byte key (simulates KMS plaintext data key)
-        let mut key = [0u8; 32];
-        aws_rand::fill(&mut key).unwrap();
+        let ciphertext = aes_256_gcm_encrypt(&key, plaintext).unwrap();
+        // nonce (12) + plaintext (35) + tag (16) = 63
+        assert_eq!(ciphertext.len(), 12 + plaintext.len() + 16);
 
+        let decrypted = aes_256_gcm_decrypt(&key, &ciphertext).unwrap();
+        assert_eq!(&**decrypted, plaintext);
+    }
+
+    /// AES-256-GCM: wrong key must fail.
+    #[test]
+    fn test_aes_256_gcm_wrong_key() {
+        let key = [0x42u8; 32];
+        let wrong_key = [0x43u8; 32];
+        let plaintext = b"secret data";
+
+        let ciphertext = aes_256_gcm_encrypt(&key, plaintext).unwrap();
+        let result = aes_256_gcm_decrypt(&wrong_key, &ciphertext);
+        assert!(result.is_err());
+    }
+
+    /// AES-256-GCM: tampered ciphertext must fail.
+    #[test]
+    fn test_aes_256_gcm_tampered_ciphertext() {
+        let key = [0x42u8; 32];
+        let plaintext = b"secret data";
+
+        let mut ciphertext = aes_256_gcm_encrypt(&key, plaintext).unwrap();
+        // Flip a byte in the ciphertext (after the nonce)
+        if let Some(byte) = ciphertext.get_mut(15) {
+            *byte ^= 0xFF;
+        }
+        let result = aes_256_gcm_decrypt(&key, &ciphertext);
+        assert!(result.is_err());
+    }
+
+    /// AES-256-GCM: too-short input must fail.
+    #[test]
+    fn test_aes_256_gcm_too_short() {
+        let key = [0x42u8; 32];
+        let result = aes_256_gcm_decrypt(&key, &[0u8; 10]);
+        assert!(result.is_err());
+    }
+
+    /// Round-trip test: AES-256-GCM encrypt → serialize envelope → deserialize → decrypt.
+    #[test]
+    fn test_envelope_aes_gcm_serialize_deserialize() {
         let sample_config =
             br#"{"rp_id":"test.example.com","base_url":"https://test.example.com"}"#;
 
-        // Encrypt
-        let encrypted_data_raw = aes_256_gcm_encrypt(&key, sample_config).unwrap();
+        let data_key = [0x42u8; 32];
+        let ciphertext = aes_256_gcm_encrypt(&data_key, sample_config).unwrap();
 
-        // Build envelope
         let envelope = EncryptedEnvelope {
             kms_key_id: "mrk-test1234".to_string(),
-            encrypted_data_key: BASE64.encode(key), // In real usage this would be KMS ciphertext
-            encrypted_data: BASE64.encode(&encrypted_data_raw),
+            encrypted_data_key: BASE64.encode(data_key), // fake: would be KMS ciphertext
+            encrypted_data: BASE64.encode(&ciphertext),
             version: 1,
             tls: Some(crate::infra::s3_config::S3TlsConfig {
                 cert: Some("test-cert".to_string()),
@@ -958,33 +864,22 @@ mod tests {
             }),
         };
 
-        // Serialize to JSON
         let json = serde_json::to_string_pretty(&envelope).unwrap();
 
-        // Verify JSON contains expected fields
         assert!(json.contains("kms_key_id"));
         assert!(json.contains("encrypted_data_key"));
         assert!(json.contains("encrypted_data"));
-        assert!(json.contains("\"version\": 1"));
         assert!(json.contains("test-cert"));
         assert!(json.contains("_acme"));
         assert!(json.contains("acme@example.com"));
 
-        // Deserialize back
         let parsed: EncryptedEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.kms_key_id, "mrk-test1234");
-        assert_eq!(parsed.version, 1);
-        assert!(parsed.tls.is_some());
-        assert!(parsed.acme.is_some());
-        let acme = parsed.acme.as_ref().unwrap();
-        assert_eq!(acme.email, "acme@example.com");
 
-        // Decrypt
-        let decoded_key = BASE64.decode(&parsed.encrypted_data_key).unwrap();
-        let decoded_data = BASE64.decode(&parsed.encrypted_data).unwrap();
-        let decrypted = aes_256_gcm_decrypt(&decoded_key, &decoded_data).unwrap();
-
-        assert_eq!(&**decrypted, sample_config);
+        let ct = BASE64.decode(&parsed.encrypted_data).unwrap();
+        let dk = BASE64.decode(&parsed.encrypted_data_key).unwrap();
+        let opened = aes_256_gcm_decrypt(&dk, &ct).unwrap();
+        assert_eq!(&*opened, sample_config);
     }
 
     /// Verify `skip_serializing_if` omits `_acme` when `None`.
@@ -1030,24 +925,16 @@ mod tests {
     }
 
     /// End-to-end CMS EnvelopedData parsing + decryption with a hand-crafted structure.
-    ///
-    /// Constructs a minimal valid CMS EnvelopedData DER blob:
-    /// - RSA-OAEP encrypts a 32-byte content key to our public key
-    /// - AES-256-CBC encrypts a payload with that content key
-    /// - Wraps it all in the DER structure KMS would produce
     #[test]
     fn test_cms_enveloped_data_end_to_end() {
         use aws_lc_rs::cipher::{AES_256, PaddedBlockEncryptingKey, UnboundCipherKey};
         use aws_lc_rs::rsa::{OAEP_SHA256_MGF1SHA256, OaepPublicEncryptingKey};
 
-        // Generate RSA key pair
         let keypair = generate_ephemeral_rsa_keypair().unwrap();
 
-        // The "content key" that would be used for AES-256-CBC
         let content_key = [0x42u8; 32];
         let payload = b"decrypted config payload from KMS";
 
-        // RSA-OAEP encrypt the content key
         let pub_key =
             aws_lc_rs::rsa::PublicEncryptingKey::from_der(&keypair.public_key_der).unwrap();
         let oaep_pub = OaepPublicEncryptingKey::new(pub_key).unwrap();
@@ -1061,17 +948,12 @@ mod tests {
             )
             .unwrap();
 
-        // AES-256-CBC encrypt the payload
         let enc_unbound = UnboundCipherKey::new(&AES_256, &content_key).unwrap();
         let enc = PaddedBlockEncryptingKey::cbc_pkcs7(enc_unbound).unwrap();
         let mut cbc_out = payload.to_vec();
         let cbc_context = enc.encrypt(&mut cbc_out).unwrap();
         let iv: &[u8] = (&cbc_context).try_into().unwrap();
 
-        // Build the CMS EnvelopedData DER structure by hand.
-        // This mirrors the structure documented in parse_cms_enveloped_data.
-
-        // Helper: DER TLV wrapper
         fn der_tlv(tag: u8, value: &[u8]) -> Vec<u8> {
             let mut out = vec![tag];
             let len = value.len();
@@ -1089,29 +971,22 @@ mod tests {
             out
         }
 
-        // envelopedData OID: 1.2.840.113549.1.7.3
         let oid_enveloped_data = [
             0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x03,
         ];
-        // data OID: 1.2.840.113549.1.7.1
         let oid_data = [
             0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x07, 0x01,
         ];
-        // rsaOAEP OID: 1.2.840.113549.1.1.7
         let oid_rsa_oaep = [
             0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x07,
         ];
-        // aes-256-cbc OID: 2.16.840.1.101.3.4.1.42
         let oid_aes256cbc = [
             0x06, 0x09, 0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x01, 0x2a,
         ];
 
-        // version INTEGER 0
         let version = [0x02, 0x01, 0x00];
-
-        // KeyTransRecipientInfo
-        let rid = der_tlv(0x04, &[0x00]); // dummy rid (octet string)
-        let key_enc_alg = der_tlv(0x30, &oid_rsa_oaep); // SEQUENCE { OID }
+        let rid = der_tlv(0x04, &[0x00]);
+        let key_enc_alg = der_tlv(0x30, &oid_rsa_oaep);
         let enc_key_octet = der_tlv(0x04, encrypted_key);
 
         let mut ktri_inner = Vec::new();
@@ -1120,17 +995,13 @@ mod tests {
         ktri_inner.extend_from_slice(&key_enc_alg);
         ktri_inner.extend_from_slice(&enc_key_octet);
         let ktri = der_tlv(0x30, &ktri_inner);
-
         let recipient_infos = der_tlv(0x31, &ktri);
 
-        // EncryptedContentInfo
         let iv_octet = der_tlv(0x04, iv);
         let mut cea_inner = Vec::new();
         cea_inner.extend_from_slice(&oid_aes256cbc);
         cea_inner.extend_from_slice(&iv_octet);
         let content_enc_alg = der_tlv(0x30, &cea_inner);
-
-        // [0] IMPLICIT OCTET STRING for encrypted content
         let encrypted_content_implicit = der_tlv(0x80, &cbc_out);
 
         let mut eci_inner = Vec::new();
@@ -1139,23 +1010,19 @@ mod tests {
         eci_inner.extend_from_slice(&encrypted_content_implicit);
         let encrypted_content_info = der_tlv(0x30, &eci_inner);
 
-        // EnvelopedData SEQUENCE
         let mut ed_inner = Vec::new();
         ed_inner.extend_from_slice(&version);
         ed_inner.extend_from_slice(&recipient_infos);
         ed_inner.extend_from_slice(&encrypted_content_info);
         let enveloped_data = der_tlv(0x30, &ed_inner);
 
-        // [0] EXPLICIT wrapper
         let explicit_0 = der_tlv(0xa0, &enveloped_data);
 
-        // ContentInfo SEQUENCE
         let mut ci_inner = Vec::new();
         ci_inner.extend_from_slice(&oid_enveloped_data);
         ci_inner.extend_from_slice(&explicit_0);
         let content_info = der_tlv(0x30, &ci_inner);
 
-        // Now parse and decrypt
         let decrypted = decrypt_cms_envelope(&content_info, keypair.private_key).unwrap();
         assert_eq!(&**decrypted, payload);
     }

@@ -13,6 +13,7 @@
 use anyhow::{Context, Result, bail};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
+use rustls::crypto::hpke::{HpkePrivateKey, HpkePublicKey};
 use zeroize::Zeroizing;
 
 /// Encrypted document payload for storage.
@@ -91,30 +92,36 @@ impl DocumentCrypto for PlaintextDocumentCrypto {
 /// is used for `open()` (decrypted from KMS on startup). The HMAC key is
 /// derived from the public key via HKDF so that writers can compute index
 /// values without access to the private key.
-#[derive(Debug)]
-#[allow(dead_code)] // Wired in via infra/startup.rs when HPKE keys are configured
 pub struct HpkeDocumentCrypto {
-    public_key: rustls::crypto::hpke::HpkePublicKey,
-    #[allow(dead_code)]
-    private_key: Zeroizing<Vec<u8>>,
+    public_key: HpkePublicKey,
+    private_key: HpkePrivateKey,
     hmac_key: Zeroizing<Vec<u8>>,
 }
 
-#[allow(dead_code)] // Wired in via infra/startup.rs when HPKE keys are configured
+impl std::fmt::Debug for HpkeDocumentCrypto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HpkeDocumentCrypto")
+            .field(
+                "public_key",
+                &format_args!("[{} bytes]", self.public_key.0.len()),
+            )
+            .field("private_key", &"[REDACTED]")
+            .field("hmac_key", &"[REDACTED]")
+            .finish()
+    }
+}
+
 impl HpkeDocumentCrypto {
     /// Create a new HPKE document crypto instance.
-    ///
-    /// `public_key_bytes`: raw big-endian uncompressed P-384 public key.
-    /// `private_key_bytes`: raw big-endian P-384 private key (scalar).
     ///
     /// # Errors
     ///
     /// Returns an error if the HMAC key derivation fails.
-    pub fn new(public_key_bytes: Vec<u8>, private_key_bytes: Vec<u8>) -> Result<Self> {
-        let hmac_key = derive_hmac_key(&public_key_bytes)?;
+    pub fn new(public_key: HpkePublicKey, private_key: HpkePrivateKey) -> Result<Self> {
+        let hmac_key = derive_hmac_key(&public_key.0)?;
         Ok(Self {
-            public_key: rustls::crypto::hpke::HpkePublicKey(public_key_bytes),
-            private_key: Zeroizing::new(private_key_bytes),
+            public_key,
+            private_key,
             hmac_key: Zeroizing::new(hmac_key),
         })
     }
@@ -154,10 +161,8 @@ impl DocumentCrypto for HpkeDocumentCrypto {
             .decode(&doc.data)
             .context("invalid base64 in ciphertext")?;
 
-        let private_key: rustls::crypto::hpke::HpkePrivateKey = self.private_key.to_vec().into();
-
         Self::hpke_suite()
-            .open(&enc, info, aad, &ciphertext, &private_key)
+            .open(&enc, info, aad, &ciphertext, &self.private_key)
             .map_err(|e| anyhow::anyhow!("HPKE open failed: {e}"))
     }
 
@@ -175,7 +180,12 @@ impl DocumentCrypto for HpkeDocumentCrypto {
 /// Derive a 32-byte HMAC key from the public key using HKDF-SHA384.
 ///
 /// `HKDF-SHA384(salt=SHA384(public_key), ikm=public_key, info="vouch-index-hmac")` → 32 bytes.
-#[allow(dead_code)] // Used by HpkeDocumentCrypto
+///
+/// The public key is used as IKM intentionally: the HMAC key enables
+/// deterministic blind indexing (equality lookups without decryption),
+/// not confidentiality. Anyone with the public key can compute index
+/// values — this is by design, so that writers can index documents
+/// without access to the private key.
 fn derive_hmac_key(public_key: &[u8]) -> Result<Vec<u8>> {
     use aws_lc_rs::digest;
     use aws_lc_rs::hkdf;
@@ -184,17 +194,16 @@ fn derive_hmac_key(public_key: &[u8]) -> Result<Vec<u8>> {
     let salt = hkdf::Salt::new(hkdf::HKDF_SHA384, pk_hash.as_ref());
     let prk = salt.extract(public_key);
 
-    let mut hmac_key = [0u8; 32];
+    let mut hmac_key = Zeroizing::new([0u8; 32]);
     prk.expand(&[b"vouch-index-hmac"], HkdfLen(32))
         .map_err(|_| anyhow::anyhow!("HKDF expand failed"))?
-        .fill(&mut hmac_key)
+        .fill(&mut *hmac_key)
         .map_err(|_| anyhow::anyhow!("HKDF fill failed"))?;
 
     Ok(hmac_key.to_vec())
 }
 
 /// Helper type that implements `KeyType` for a fixed-length output.
-#[allow(dead_code)] // Used by derive_hmac_key
 struct HkdfLen(usize);
 
 impl aws_lc_rs::hkdf::KeyType for HkdfLen {
@@ -204,175 +213,53 @@ impl aws_lc_rs::hkdf::KeyType for HkdfLen {
 }
 
 // ============================================================================
-// DER-to-Raw P-384 Key Conversion
+// DER-to-HPKE Key Conversion
 // ============================================================================
 
-/// Extract the raw public key bytes from a DER-encoded
-/// `SubjectPublicKeyInfo` structure (P-384).
+/// Extract an HPKE key pair from a DER-encoded ECPrivateKey (SEC1/RFC 5915).
 ///
-/// KMS returns DER-encoded public keys. The rustls HPKE API requires raw
-/// uncompressed point format (0x04 || x || y, 97 bytes for P-384).
-///
-/// # Errors
-///
-/// Returns an error if the DER is malformed or not a P-384 key.
-#[allow(dead_code)] // Used by infra/startup.rs when HPKE keys are configured
-pub fn p384_public_key_from_der(der: &[u8]) -> Result<Vec<u8>> {
-    // SubjectPublicKeyInfo ::= SEQUENCE {
-    //   algorithm  AlgorithmIdentifier,
-    //   subjectPublicKey  BIT STRING
-    // }
-    // The BIT STRING's content (after the unused-bits byte) is the
-    // uncompressed EC point.
-    let mut parser = SimpleDerParser::new(der);
-    parser.enter_sequence()?;
-    parser.skip_element()?; // AlgorithmIdentifier
-    let bit_string = parser.read_bit_string()?;
-
-    // P-384 uncompressed point: 0x04 + 48 bytes x + 48 bytes y = 97 bytes
-    if bit_string.len() != 97 {
-        bail!(
-            "unexpected P-384 public key length: {} (expected 97)",
-            bit_string.len()
-        );
-    }
-    if bit_string.first().copied() != Some(0x04) {
-        bail!("P-384 public key is not in uncompressed point format");
-    }
-    Ok(bit_string)
-}
-
-/// Extract the raw private key scalar from a DER-encoded `ECPrivateKey`
-/// structure (P-384, SEC 1 / RFC 5915).
+/// Uses `aws_lc_rs::agreement::PrivateKey` to parse the DER and extract
+/// the raw P-384 scalar and uncompressed public point, then wraps them
+/// in rustls HPKE types.
 ///
 /// # Errors
 ///
-/// Returns an error if the DER is malformed or the key is not 48 bytes.
-#[allow(dead_code)] // Used by infra/startup.rs when HPKE keys are configured
-pub fn p384_private_key_from_der(der: &[u8]) -> Result<Vec<u8>> {
-    // ECPrivateKey ::= SEQUENCE {
-    //   version        INTEGER { ecPrivkeyVer1(1) },
-    //   privateKey     OCTET STRING,
-    //   parameters [0] ECParameters OPTIONAL,
-    //   publicKey  [1] BIT STRING OPTIONAL
-    // }
-    let mut parser = SimpleDerParser::new(der);
-    parser.enter_sequence()?;
-    parser.skip_element()?; // version
-    let private_key = parser.read_octet_string()?;
+/// Returns an error if the DER is malformed, the key is not P-384,
+/// or the extracted key sizes are unexpected.
+pub fn p384_hpke_keys_from_private_key_der(der: &[u8]) -> Result<(HpkePublicKey, HpkePrivateKey)> {
+    use aws_lc_rs::agreement;
+    use aws_lc_rs::encoding::AsBigEndian;
 
-    if private_key.len() != 48 {
+    let private_key = agreement::PrivateKey::from_private_key_der(&agreement::ECDH_P384, der)
+        .map_err(|e| anyhow::anyhow!("failed to parse DER as P-384 ECPrivateKey: {e}"))?;
+
+    let scalar: aws_lc_rs::encoding::EcPrivateKeyBin = private_key
+        .as_be_bytes()
+        .map_err(|e| anyhow::anyhow!("failed to extract P-384 private key scalar: {e}"))?;
+    if scalar.as_ref().len() != 48 {
         bail!(
             "unexpected P-384 private key length: {} (expected 48)",
-            private_key.len()
+            scalar.as_ref().len()
         );
     }
-    Ok(private_key)
-}
 
-// ============================================================================
-// Minimal DER Parser
-// ============================================================================
-
-/// Minimal DER parser for extracting keys from SPKI and ECPrivateKey
-/// structures. Not a full ASN.1 parser — handles only the subset needed
-/// for P-384 key extraction.
-#[allow(dead_code)] // Used by p384_*_from_der functions
-struct SimpleDerParser<'a> {
-    data: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> SimpleDerParser<'a> {
-    fn new(data: &'a [u8]) -> Self {
-        Self { data, pos: 0 }
+    let public_point = private_key
+        .compute_public_key()
+        .map_err(|e| anyhow::anyhow!("failed to compute P-384 public key: {e}"))?;
+    if public_point.as_ref().len() != 97 {
+        bail!(
+            "unexpected P-384 public key length: {} (expected 97)",
+            public_point.as_ref().len()
+        );
+    }
+    if public_point.as_ref().first().copied() != Some(0x04) {
+        bail!("P-384 public key is not in uncompressed point format");
     }
 
-    fn remaining(&self) -> &'a [u8] {
-        self.data.get(self.pos..).unwrap_or(&[])
-    }
+    let hpke_private = HpkePrivateKey::from(scalar.as_ref().to_vec());
+    let hpke_public = HpkePublicKey(public_point.as_ref().to_vec());
 
-    fn read_byte(&mut self) -> Result<u8> {
-        let b = *self
-            .remaining()
-            .first()
-            .context("unexpected end of DER data")?;
-        self.pos += 1;
-        Ok(b)
-    }
-
-    fn read_length(&mut self) -> Result<usize> {
-        let first = self.read_byte()?;
-        if first < 0x80 {
-            return Ok(first as usize);
-        }
-        let num_bytes = (first & 0x7F) as usize;
-        if num_bytes > 4 {
-            bail!("DER length too large: {num_bytes} length bytes");
-        }
-        let mut len: usize = 0;
-        for _ in 0..num_bytes {
-            let b = self.read_byte()?;
-            len = len.checked_shl(8).context("DER length overflow")? | (b as usize);
-        }
-        Ok(len)
-    }
-
-    fn read_bytes(&mut self, count: usize) -> Result<&'a [u8]> {
-        let end = self.pos.checked_add(count).context("DER offset overflow")?;
-        let slice = self
-            .data
-            .get(self.pos..end)
-            .context("unexpected end of DER data")?;
-        self.pos = end;
-        Ok(slice)
-    }
-
-    fn enter_sequence(&mut self) -> Result<()> {
-        let tag = self.read_byte()?;
-        if tag != 0x30 {
-            bail!("expected SEQUENCE (0x30), got 0x{tag:02x}");
-        }
-        let _len = self.read_length()?;
-        Ok(())
-    }
-
-    fn skip_element(&mut self) -> Result<()> {
-        let _tag = self.read_byte()?;
-        let len = self.read_length()?;
-        if self.pos.checked_add(len).is_none() || self.pos + len > self.data.len() {
-            bail!("element extends past end of DER data");
-        }
-        self.pos += len;
-        Ok(())
-    }
-
-    fn read_bit_string(&mut self) -> Result<Vec<u8>> {
-        let tag = self.read_byte()?;
-        if tag != 0x03 {
-            bail!("expected BIT STRING (0x03), got 0x{tag:02x}");
-        }
-        let len = self.read_length()?;
-        if len < 1 {
-            bail!("BIT STRING too short");
-        }
-        let unused_bits = self.read_byte()?;
-        if unused_bits != 0 {
-            bail!("non-zero unused bits in BIT STRING: {unused_bits}");
-        }
-        let content = self.read_bytes(len - 1)?;
-        Ok(content.to_vec())
-    }
-
-    fn read_octet_string(&mut self) -> Result<Vec<u8>> {
-        let tag = self.read_byte()?;
-        if tag != 0x04 {
-            bail!("expected OCTET STRING (0x04), got 0x{tag:02x}");
-        }
-        let len = self.read_length()?;
-        let content = self.read_bytes(len)?;
-        Ok(content.to_vec())
-    }
+    Ok((hpke_public, hpke_private))
 }
 
 // ============================================================================
@@ -493,11 +380,32 @@ mod tests {
         assert_eq!(priv_key.secret_bytes().len(), 48); // P-384 scalar
     }
 
+    #[test]
+    fn p384_der_roundtrip() {
+        // Generate a P-384 key pair via agreement API, export as DER,
+        // then parse it back with our function
+        use aws_lc_rs::agreement;
+        use aws_lc_rs::encoding::AsDer;
+
+        let private_key = agreement::PrivateKey::generate(&agreement::ECDH_P384).unwrap();
+        let der: aws_lc_rs::encoding::EcPrivateKeyRfc5915Der = private_key.as_der().unwrap();
+        let (pub_key, priv_key) = p384_hpke_keys_from_private_key_der(der.as_ref()).unwrap();
+
+        assert_eq!(pub_key.0.len(), 97);
+        assert_eq!(priv_key.secret_bytes().len(), 48);
+
+        // Verify the extracted keys work for HPKE
+        let crypto = HpkeDocumentCrypto::new(pub_key, priv_key).unwrap();
+        let sealed = crypto.seal(b"test", b"aad", b"hello").unwrap();
+        let opened = crypto.open(b"test", b"aad", &sealed).unwrap();
+        assert_eq!(opened, b"hello");
+    }
+
     fn make_test_crypto() -> HpkeDocumentCrypto {
         use rustls::crypto::hpke::Hpke;
 
         let suite = &rustls::crypto::aws_lc_rs::hpke::DH_KEM_P384_HKDF_SHA384_AES_256;
         let (pub_key, priv_key) = suite.generate_key_pair().unwrap();
-        HpkeDocumentCrypto::new(pub_key.0, priv_key.secret_bytes().to_vec()).unwrap()
+        HpkeDocumentCrypto::new(pub_key, priv_key.secret_bytes().to_vec().into()).unwrap()
     }
 }
