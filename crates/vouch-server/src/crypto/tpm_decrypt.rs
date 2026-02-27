@@ -72,6 +72,10 @@ pub struct EncryptedEnvelope {
     /// TLS config (promoted to wrapper for hot-reload without decryption).
     pub tls: Option<crate::infra::s3_config::S3TlsConfig>,
 
+    // SECURITY: The ACME account key is intentionally stored in plaintext outside
+    // the encrypted payload. External certificate renewal processes (certbot, acme.sh)
+    // need to read this field without KMS access. The account key authenticates to the
+    // ACME CA but cannot issue certificates without domain validation.
     /// ACME config (promoted to wrapper for external certificate renewal processes).
     #[serde(rename = "_acme", default, skip_serializing_if = "Option::is_none")]
     pub acme: Option<crate::infra::s3_config::S3AcmeConfig>,
@@ -95,12 +99,25 @@ impl std::fmt::Debug for EncryptedEnvelope {
 
 /// Key material recovered from envelope decryption.
 ///
-/// Contains the raw P-384 key pair for use with `HpkeDocumentCrypto`.
+/// Contains the P-384 HPKE key pair for use with `HpkeDocumentCrypto`.
+/// `HpkePrivateKey` zeroizes on drop.
 pub struct HpkeKeyMaterial {
-    /// Raw uncompressed P-384 public key (97 bytes: 0x04 || x || y).
-    pub public_key: Vec<u8>,
-    /// Raw P-384 private key scalar (48 bytes).
-    pub private_key: Zeroizing<Vec<u8>>,
+    /// P-384 public key (uncompressed point, 97 bytes).
+    pub public_key: rustls::crypto::hpke::HpkePublicKey,
+    /// P-384 private key (scalar, 48 bytes). Zeroizes on drop.
+    pub private_key: rustls::crypto::hpke::HpkePrivateKey,
+}
+
+impl std::fmt::Debug for HpkeKeyMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HpkeKeyMaterial")
+            .field(
+                "public_key",
+                &format_args!("[{} bytes]", self.public_key.0.len()),
+            )
+            .field("private_key", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Result of decrypting an encrypted envelope.
@@ -109,6 +126,18 @@ pub struct DecryptedEnvelope {
     pub config_bytes: Zeroizing<Vec<u8>>,
     /// HPKE key material for `HpkeDocumentCrypto`.
     pub hpke_keys: HpkeKeyMaterial,
+}
+
+impl std::fmt::Debug for DecryptedEnvelope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DecryptedEnvelope")
+            .field(
+                "config_bytes",
+                &format_args!("[{} bytes, REDACTED]", self.config_bytes.len()),
+            )
+            .field("hpke_keys", &self.hpke_keys)
+            .finish()
+    }
 }
 
 fn default_version() -> u32 {
@@ -510,7 +539,7 @@ fn aes_256_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Zeroi
     let decrypting_key = PaddedBlockDecryptingKey::cbc_pkcs7(unbound_key)
         .map_err(|e| anyhow::anyhow!("Failed to create CBC decrypting key: {e}"))?;
 
-    let mut in_out = ciphertext.to_vec();
+    let mut in_out = Zeroizing::new(ciphertext.to_vec());
     let plaintext = decrypting_key
         .decrypt(&mut in_out, context)
         .map_err(|e| anyhow::anyhow!("AES-256-CBC decryption failed: {e}"))?;
@@ -526,8 +555,8 @@ fn aes_256_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Zeroi
 ///
 /// Encodes the envelope version as a 4-byte big-endian integer to bind the
 /// ciphertext to the specific envelope format version.
-pub fn build_hpke_aad(version: u32) -> Vec<u8> {
-    version.to_be_bytes().to_vec()
+pub fn build_hpke_aad(version: u32) -> [u8; 4] {
+    version.to_be_bytes()
 }
 
 // ============================================================================
@@ -555,6 +584,14 @@ pub async fn decrypt_envelope(
 ) -> Result<DecryptedEnvelope> {
     use super::document_crypto::{DocumentCrypto, EncryptedDocument, HpkeDocumentCrypto};
 
+    // Validate envelope version
+    if envelope.version != 1 {
+        anyhow::bail!(
+            "unsupported envelope version: {} (expected 1)",
+            envelope.version
+        );
+    }
+
     // Verify NitroTPM is available
     if !is_nitro_tpm_available() {
         anyhow::bail!(
@@ -581,20 +618,17 @@ pub async fn decrypt_envelope(
             .await
             .context("Failed to decrypt private key via attested KMS")?;
 
-    // Extract raw P-384 keys from DER
-    let raw_private_key = Zeroizing::new(
-        super::document_crypto::p384_private_key_from_der(&private_key_der)
-            .context("Failed to extract P-384 private key from DER")?,
-    );
+    // Extract HPKE key pair from the DER-encoded private key.
+    // The public key is derived from the private key — no need to parse
+    // the envelope's public_key SPKI separately.
+    let (hpke_public_key, hpke_private_key) =
+        super::document_crypto::p384_hpke_keys_from_private_key_der(&private_key_der)
+            .context("Failed to extract P-384 HPKE key pair from DER")?;
 
-    let public_key_der = BASE64
-        .decode(&envelope.public_key)
-        .context("Failed to base64-decode public_key")?;
-    let raw_public_key = super::document_crypto::p384_public_key_from_der(&public_key_der)
-        .context("Failed to extract P-384 public key from DER")?;
-
-    // Use HpkeDocumentCrypto to decrypt the config payload
-    let crypto = HpkeDocumentCrypto::new(raw_public_key.clone(), raw_private_key.to_vec())
+    // Use HpkeDocumentCrypto to decrypt the config payload, then
+    // recover the keys for runtime use. We create the crypto instance,
+    // decrypt, then take the keys back via `into_keys()`.
+    let crypto = HpkeDocumentCrypto::new(hpke_public_key, hpke_private_key)
         .context("Failed to create HPKE crypto for config decryption")?;
 
     let doc = EncryptedDocument {
@@ -607,6 +641,7 @@ pub async fn decrypt_envelope(
         .open(HPKE_CONFIG_INFO, &aad, &doc)
         .context("Failed to HPKE-open config payload")?;
 
+    let (hpke_public_key, hpke_private_key) = crypto.into_keys();
     let config_bytes = Zeroizing::new(config_bytes);
 
     tracing::info!(
@@ -617,8 +652,8 @@ pub async fn decrypt_envelope(
     Ok(DecryptedEnvelope {
         config_bytes,
         hpke_keys: HpkeKeyMaterial {
-            public_key: raw_public_key,
-            private_key: raw_private_key,
+            public_key: hpke_public_key,
+            private_key: hpke_private_key,
         },
     })
 }
@@ -794,7 +829,8 @@ mod tests {
         let (pub_key, priv_key) = suite.generate_key_pair().unwrap();
 
         let crypto =
-            HpkeDocumentCrypto::new(pub_key.0.clone(), priv_key.secret_bytes().to_vec()).unwrap();
+            HpkeDocumentCrypto::new(pub_key.clone(), priv_key.secret_bytes().to_vec().into())
+                .unwrap();
 
         let aad = build_hpke_aad(1);
         let sealed = crypto.seal(HPKE_CONFIG_INFO, &aad, sample_config).unwrap();
@@ -816,14 +852,16 @@ mod tests {
         let (other_pub, other_priv) = suite.generate_key_pair().unwrap();
 
         let seal_crypto =
-            HpkeDocumentCrypto::new(pub_key.0.clone(), other_priv.secret_bytes().to_vec())
+            HpkeDocumentCrypto::new(pub_key.clone(), other_priv.secret_bytes().to_vec().into())
                 .unwrap();
         let open_crypto =
-            HpkeDocumentCrypto::new(other_pub.0.clone(), other_priv.secret_bytes().to_vec())
+            HpkeDocumentCrypto::new(other_pub.clone(), other_priv.secret_bytes().to_vec().into())
                 .unwrap();
 
         let aad = build_hpke_aad(1);
-        let sealed = seal_crypto.seal(HPKE_CONFIG_INFO, &aad, sample_config).unwrap();
+        let sealed = seal_crypto
+            .seal(HPKE_CONFIG_INFO, &aad, sample_config)
+            .unwrap();
         let result = open_crypto.open(HPKE_CONFIG_INFO, &aad, &sealed);
         assert!(result.is_err());
     }
@@ -840,10 +878,13 @@ mod tests {
         let (pub_key, priv_key) = suite.generate_key_pair().unwrap();
 
         let crypto =
-            HpkeDocumentCrypto::new(pub_key.0.clone(), priv_key.secret_bytes().to_vec()).unwrap();
+            HpkeDocumentCrypto::new(pub_key.clone(), priv_key.secret_bytes().to_vec().into())
+                .unwrap();
 
         let aad_seal = build_hpke_aad(1);
-        let sealed = crypto.seal(HPKE_CONFIG_INFO, &aad_seal, sample_config).unwrap();
+        let sealed = crypto
+            .seal(HPKE_CONFIG_INFO, &aad_seal, sample_config)
+            .unwrap();
 
         let aad_open = build_hpke_aad(2);
         let result = crypto.open(HPKE_CONFIG_INFO, &aad_open, &sealed);
@@ -863,7 +904,8 @@ mod tests {
         let (pub_key, priv_key) = suite.generate_key_pair().unwrap();
 
         let crypto =
-            HpkeDocumentCrypto::new(pub_key.0.clone(), priv_key.secret_bytes().to_vec()).unwrap();
+            HpkeDocumentCrypto::new(pub_key.clone(), priv_key.secret_bytes().to_vec().into())
+                .unwrap();
 
         let version = 1u32;
         let aad = build_hpke_aad(version);
@@ -873,7 +915,7 @@ mod tests {
         let envelope = EncryptedEnvelope {
             kms_key_id: "mrk-test1234".to_string(),
             encrypted_private_key: BASE64.encode(priv_key.secret_bytes()),
-            public_key: BASE64.encode(&pub_key.0),
+            public_key: BASE64.encode(&pub_key.0), // SPKI placeholder for tests
             encapped_key: sealed.encapped_key.unwrap(),
             encrypted_data: sealed.data,
             version,

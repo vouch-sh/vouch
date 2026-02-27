@@ -61,8 +61,7 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 
     // Load S3 config if configured (BEFORE database connection).
     // If the config was an encrypted envelope, also recovers the HPKE key pair.
-    let (s3_client, s3_source, initial_etag, hpke_keys) =
-        load_s3_config(&mut config).await?;
+    let (s3_client, s3_source, initial_etag, hpke_keys) = load_s3_config(&mut config).await?;
 
     tracing::info!("Starting vouch-server on {}", config.listen_addr);
 
@@ -370,7 +369,7 @@ async fn build_app_state(
             std::sync::Arc::new(
                 crate::crypto::document_crypto::HpkeDocumentCrypto::new(
                     keys.public_key,
-                    keys.private_key.to_vec(),
+                    keys.private_key,
                 )
                 .context("Failed to initialize HpkeDocumentCrypto from KMS key pair")?,
             )

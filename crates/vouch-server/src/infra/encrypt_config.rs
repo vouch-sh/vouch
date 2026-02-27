@@ -139,24 +139,21 @@ pub async fn run(args: EncryptConfigArgs) -> Result<()> {
         .await
         .context("KMS GenerateDataKeyPair failed")?;
 
-    // Extract the plaintext public key (DER-encoded SubjectPublicKeyInfo)
+    // Extract the plaintext public key DER (for the envelope's `public_key` field)
     let public_key_der_blob = generate_response
         .public_key()
         .context("KMS GenerateDataKeyPair response missing public_key")?;
     let public_key_der = public_key_der_blob.as_ref().to_vec();
 
-    // Extract the raw P-384 public key for HPKE
-    let raw_public_key =
-        crate::crypto::document_crypto::p384_public_key_from_der(&public_key_der)
-            .context("Failed to extract raw P-384 public key from KMS response")?;
-
-    // Extract the plaintext private key (DER-encoded ECPrivateKey) — used only for seal
+    // Extract the plaintext private key DER and derive the HPKE key pair
     let private_key_der_blob = generate_response
         .private_key_plaintext()
         .context("KMS GenerateDataKeyPair response missing private_key_plaintext")?;
-    let raw_private_key =
-        crate::crypto::document_crypto::p384_private_key_from_der(private_key_der_blob.as_ref())
-            .context("Failed to extract raw P-384 private key from KMS response")?;
+    let (hpke_public_key, hpke_private_key) =
+        crate::crypto::document_crypto::p384_hpke_keys_from_private_key_der(
+            private_key_der_blob.as_ref(),
+        )
+        .context("Failed to extract P-384 HPKE key pair from KMS response")?;
 
     // The encrypted private key (KMS ciphertext blob — decrypted at runtime via KMS)
     let encrypted_private_key_blob = generate_response
@@ -171,7 +168,7 @@ pub async fn run(args: EncryptConfigArgs) -> Result<()> {
     );
 
     // 6. HPKE seal the inner config JSON
-    let crypto = HpkeDocumentCrypto::new(raw_public_key, raw_private_key)
+    let crypto = HpkeDocumentCrypto::new(hpke_public_key, hpke_private_key)
         .context("Failed to create HPKE crypto for config encryption")?;
 
     let aad = build_hpke_aad(wrapper_version);
