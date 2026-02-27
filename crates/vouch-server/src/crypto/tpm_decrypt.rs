@@ -43,26 +43,18 @@ use super::ber::DerParser;
 /// Encrypted envelope wrapper for S3 config.
 ///
 /// When the S3 config object contains a `kms_key_id` field, it is treated
-/// as an encrypted envelope. Uses `kms:GenerateDataKeyPair` to produce a P-384
-/// key pair. The `encrypted_private_key` field holds the KMS-encrypted private
-/// key, `public_key` is the DER-encoded SPKI, and `encrypted_data` +
-/// `encapped_key` form the HPKE ciphertext. The same key pair is reused for
-/// `HpkeDocumentCrypto` (database-level document encryption).
+/// as an encrypted envelope. Uses `kms:GenerateDataKey` to produce an AES-256
+/// data key. The `encrypted_data_key` field holds the KMS-encrypted data key,
+/// and `encrypted_data` holds the AES-256-GCM ciphertext (nonce + ciphertext + tag).
 #[derive(Deserialize, Serialize)]
 pub struct EncryptedEnvelope {
     /// KMS key ID (key ID, not ARN — works across multi-region replicas).
     pub kms_key_id: String,
 
-    /// Base64-encoded KMS ciphertext blob (the encrypted P-384 private key).
-    pub encrypted_private_key: String,
+    /// Base64-encoded KMS ciphertext blob (the encrypted AES-256 data key).
+    pub encrypted_data_key: String,
 
-    /// Base64-encoded DER `SubjectPublicKeyInfo` for the P-384 public key.
-    pub public_key: String,
-
-    /// Base64-encoded HPKE encapsulated key (ephemeral sender key).
-    pub encapped_key: String,
-
-    /// Base64-encoded HPKE ciphertext (RFC 9180).
+    /// Base64-encoded AES-256-GCM ciphertext (12-byte nonce + ciphertext + 16-byte tag).
     pub encrypted_data: String,
 
     /// Envelope format version (for future compatibility).
@@ -86,9 +78,7 @@ impl std::fmt::Debug for EncryptedEnvelope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EncryptedEnvelope")
             .field("kms_key_id", &self.kms_key_id)
-            .field("encrypted_private_key", &"[REDACTED]")
-            .field("public_key", &"[REDACTED]")
-            .field("encapped_key", &"[REDACTED]")
+            .field("encrypted_data_key", &"[REDACTED]")
             .field("encrypted_data", &"[REDACTED]")
             .field("version", &self.version)
             .field("tls", &self.tls)
@@ -97,55 +87,9 @@ impl std::fmt::Debug for EncryptedEnvelope {
     }
 }
 
-/// Key material recovered from envelope decryption.
-///
-/// Contains the P-384 HPKE key pair for use with `HpkeDocumentCrypto`.
-/// `HpkePrivateKey` zeroizes on drop.
-pub struct HpkeKeyMaterial {
-    /// P-384 public key (uncompressed point, 97 bytes).
-    pub public_key: rustls::crypto::hpke::HpkePublicKey,
-    /// P-384 private key (scalar, 48 bytes). Zeroizes on drop.
-    pub private_key: rustls::crypto::hpke::HpkePrivateKey,
-}
-
-impl std::fmt::Debug for HpkeKeyMaterial {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HpkeKeyMaterial")
-            .field(
-                "public_key",
-                &format_args!("[{} bytes]", self.public_key.0.len()),
-            )
-            .field("private_key", &"[REDACTED]")
-            .finish()
-    }
-}
-
-/// Result of decrypting an encrypted envelope.
-pub struct DecryptedEnvelope {
-    /// The decrypted inner S3Config JSON bytes.
-    pub config_bytes: Zeroizing<Vec<u8>>,
-    /// HPKE key material for `HpkeDocumentCrypto`.
-    pub hpke_keys: HpkeKeyMaterial,
-}
-
-impl std::fmt::Debug for DecryptedEnvelope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("DecryptedEnvelope")
-            .field(
-                "config_bytes",
-                &format_args!("[{} bytes, REDACTED]", self.config_bytes.len()),
-            )
-            .field("hpke_keys", &self.hpke_keys)
-            .finish()
-    }
-}
-
 fn default_version() -> u32 {
     1
 }
-
-/// HPKE info string for config encryption (binds ciphertext to purpose).
-pub const HPKE_CONFIG_INFO: &[u8] = b"vouch-s3-config";
 
 /// Probe whether a JSON blob is an encrypted envelope (has `kms_key_id` field).
 ///
@@ -548,15 +492,73 @@ fn aes_256_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Zeroi
 }
 
 // ============================================================================
-// HPKE Config Info/AAD
+// AES-256-GCM Encryption/Decryption (for config envelope)
 // ============================================================================
 
-/// Build the AAD for HPKE config operations.
+/// AES-256-GCM encrypt with a random 12-byte nonce.
 ///
-/// Encodes the envelope version as a 4-byte big-endian integer to bind the
-/// ciphertext to the specific envelope format version.
-pub fn build_hpke_aad(version: u32) -> [u8; 4] {
-    version.to_be_bytes()
+/// Returns `[12-byte nonce][ciphertext][16-byte tag]`.
+pub fn aes_256_gcm_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
+    use aws_lc_rs::aead;
+
+    if key.len() != 32 {
+        anyhow::bail!("AES-256-GCM requires 32-byte key, got {}", key.len());
+    }
+
+    let unbound_key = aead::UnboundKey::new(&aead::AES_256_GCM, key)
+        .map_err(|e| anyhow::anyhow!("Failed to create AES-256-GCM key: {e}"))?;
+    let less_safe_key = aead::LessSafeKey::new(unbound_key);
+
+    let mut nonce_bytes = [0u8; aead::NONCE_LEN];
+    aws_lc_rs::rand::fill(&mut nonce_bytes)
+        .map_err(|_| anyhow::anyhow!("Failed to generate random nonce"))?;
+    let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
+
+    let mut in_out = plaintext.to_vec();
+    less_safe_key
+        .seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut in_out)
+        .map_err(|e| anyhow::anyhow!("AES-256-GCM seal failed: {e}"))?;
+
+    let mut result = Vec::with_capacity(aead::NONCE_LEN + in_out.len());
+    result.extend_from_slice(&nonce_bytes);
+    result.extend_from_slice(&in_out);
+    Ok(result)
+}
+
+/// AES-256-GCM decrypt.
+///
+/// Expects `[12-byte nonce][ciphertext][16-byte tag]`.
+pub fn aes_256_gcm_decrypt(key: &[u8], nonce_and_ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    use aws_lc_rs::aead;
+
+    if key.len() != 32 {
+        anyhow::bail!("AES-256-GCM requires 32-byte key, got {}", key.len());
+    }
+
+    let min_len = aead::NONCE_LEN + aead::AES_256_GCM.tag_len();
+    if nonce_and_ciphertext.len() < min_len {
+        anyhow::bail!(
+            "ciphertext too short for AES-256-GCM ({} bytes, minimum {min_len})",
+            nonce_and_ciphertext.len(),
+        );
+    }
+
+    let (nonce_bytes, ciphertext) = nonce_and_ciphertext.split_at(aead::NONCE_LEN);
+    let nonce_array: [u8; 12] = nonce_bytes
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("invalid nonce length"))?;
+
+    let unbound_key = aead::UnboundKey::new(&aead::AES_256_GCM, key)
+        .map_err(|e| anyhow::anyhow!("Failed to create AES-256-GCM key: {e}"))?;
+    let less_safe_key = aead::LessSafeKey::new(unbound_key);
+    let nonce = aead::Nonce::assume_unique_for_key(nonce_array);
+
+    let mut in_out = ciphertext.to_vec();
+    let plaintext = less_safe_key
+        .open_in_place(nonce, aead::Aad::empty(), &mut in_out)
+        .map_err(|e| anyhow::anyhow!("AES-256-GCM open failed: {e}"))?;
+
+    Ok(Zeroizing::new(plaintext.to_vec()))
 }
 
 // ============================================================================
@@ -565,25 +567,22 @@ pub fn build_hpke_aad(version: u32) -> [u8; 4] {
 
 /// Decrypt an encrypted S3 config envelope using NitroTPM-attested KMS.
 ///
-/// Decrypts the P-384 private key via KMS (with NitroTPM attestation), then uses
-/// HPKE open to decrypt the config payload. Returns the decrypted config and the
-/// P-384 key pair for reuse with `HpkeDocumentCrypto`.
+/// Decrypts the AES-256 data key via KMS (with NitroTPM attestation), then uses
+/// AES-256-GCM to decrypt the config payload. Returns the plaintext config bytes.
 ///
 /// # Arguments
 /// * `kms_client` - AWS KMS client (pre-configured with credentials and region)
 /// * `envelope` - The parsed encrypted envelope from S3
 ///
 /// # Returns
-/// The decrypted config bytes and the P-384 HPKE key pair.
+/// The decrypted config bytes.
 ///
 /// # Errors
 /// Returns an error if NitroTPM is unavailable, KMS call fails, or decryption fails.
 pub async fn decrypt_envelope(
     kms_client: &KmsClient,
     envelope: &EncryptedEnvelope,
-) -> Result<DecryptedEnvelope> {
-    use super::document_crypto::{DocumentCrypto, EncryptedDocument, HpkeDocumentCrypto};
-
+) -> Result<Zeroizing<Vec<u8>>> {
     // Validate envelope version
     if envelope.version != 1 {
         anyhow::bail!(
@@ -607,55 +606,31 @@ pub async fn decrypt_envelope(
         );
     }
 
-    // Decode the encrypted private key (KMS ciphertext blob)
-    let encrypted_private_key = BASE64
-        .decode(&envelope.encrypted_private_key)
-        .context("Failed to base64-decode encrypted_private_key")?;
+    // Decode the encrypted data key (KMS ciphertext blob)
+    let encrypted_data_key = BASE64
+        .decode(&envelope.encrypted_data_key)
+        .context("Failed to base64-decode encrypted_data_key")?;
 
-    // Decrypt private key via attested KMS call
-    let private_key_der =
-        attested_kms_decrypt(kms_client, &envelope.kms_key_id, &encrypted_private_key)
-            .await
-            .context("Failed to decrypt private key via attested KMS")?;
+    // Decrypt data key via attested KMS call
+    let data_key = attested_kms_decrypt(kms_client, &envelope.kms_key_id, &encrypted_data_key)
+        .await
+        .context("Failed to decrypt data key via attested KMS")?;
 
-    // Extract HPKE key pair from the DER-encoded private key.
-    // The public key is derived from the private key — no need to parse
-    // the envelope's public_key SPKI separately.
-    let (hpke_public_key, hpke_private_key) =
-        super::document_crypto::p384_hpke_keys_from_private_key_der(&private_key_der)
-            .context("Failed to extract P-384 HPKE key pair from DER")?;
+    // Decode encrypted data
+    let encrypted_data = BASE64
+        .decode(&envelope.encrypted_data)
+        .context("Failed to base64-decode encrypted_data")?;
 
-    // Use HpkeDocumentCrypto to decrypt the config payload, then
-    // recover the keys for runtime use. We create the crypto instance,
-    // decrypt, then take the keys back via `into_keys()`.
-    let crypto = HpkeDocumentCrypto::new(hpke_public_key, hpke_private_key)
-        .context("Failed to create HPKE crypto for config decryption")?;
-
-    let doc = EncryptedDocument {
-        encapped_key: Some(envelope.encapped_key.clone()),
-        data: envelope.encrypted_data.clone(),
-    };
-
-    let aad = build_hpke_aad(envelope.version);
-    let config_bytes = crypto
-        .open(HPKE_CONFIG_INFO, &aad, &doc)
-        .context("Failed to HPKE-open config payload")?;
-
-    let (hpke_public_key, hpke_private_key) = crypto.into_keys();
-    let config_bytes = Zeroizing::new(config_bytes);
+    // AES-256-GCM decrypt the config payload
+    let plaintext = aes_256_gcm_decrypt(&data_key, &encrypted_data)
+        .context("Failed to AES-256-GCM decrypt config payload")?;
 
     tracing::info!(
-        "Successfully decrypted S3 config envelope ({} bytes plaintext, HPKE key pair recovered)",
-        config_bytes.len()
+        "Successfully decrypted S3 config envelope ({} bytes plaintext)",
+        plaintext.len()
     );
 
-    Ok(DecryptedEnvelope {
-        config_bytes,
-        hpke_keys: HpkeKeyMaterial {
-            public_key: hpke_public_key,
-            private_key: hpke_private_key,
-        },
-    })
+    Ok(plaintext)
 }
 
 // ============================================================================
@@ -669,7 +644,7 @@ mod tests {
 
     #[test]
     fn test_is_encrypted_envelope_positive() {
-        let json = br#"{"kms_key_id": "mrk-abc123", "encrypted_private_key": "...", "public_key": "...", "encapped_key": "...", "encrypted_data": "..."}"#;
+        let json = br#"{"kms_key_id": "mrk-abc123", "encrypted_data_key": "...", "encrypted_data": "..."}"#;
         assert!(is_encrypted_envelope(json));
     }
 
@@ -816,109 +791,69 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// HPKE config seal/open round-trip using HpkeDocumentCrypto.
+    /// AES-256-GCM encrypt/decrypt round-trip.
     #[test]
-    fn test_hpke_config_round_trip() {
-        use super::super::document_crypto::{DocumentCrypto, HpkeDocumentCrypto};
-        use rustls::crypto::hpke::Hpke;
+    fn test_aes_256_gcm_round_trip() {
+        let key = [0x42u8; 32];
+        let plaintext = b"test config payload for AES-256-GCM";
 
-        let sample_config =
-            br#"{"rp_id":"test.example.com","base_url":"https://test.example.com"}"#;
+        let ciphertext = aes_256_gcm_encrypt(&key, plaintext).unwrap();
+        // nonce (12) + plaintext (35) + tag (16) = 63
+        assert_eq!(ciphertext.len(), 12 + plaintext.len() + 16);
 
-        let suite = &rustls::crypto::aws_lc_rs::hpke::DH_KEM_P384_HKDF_SHA384_AES_256;
-        let (pub_key, priv_key) = suite.generate_key_pair().unwrap();
-
-        let crypto =
-            HpkeDocumentCrypto::new(pub_key.clone(), priv_key.secret_bytes().to_vec().into())
-                .unwrap();
-
-        let aad = build_hpke_aad(1);
-        let sealed = crypto.seal(HPKE_CONFIG_INFO, &aad, sample_config).unwrap();
-        let opened = crypto.open(HPKE_CONFIG_INFO, &aad, &sealed).unwrap();
-
-        assert_eq!(&opened, sample_config);
+        let decrypted = aes_256_gcm_decrypt(&key, &ciphertext).unwrap();
+        assert_eq!(&**decrypted, plaintext);
     }
 
-    /// HPKE config: wrong private key must fail.
+    /// AES-256-GCM: wrong key must fail.
     #[test]
-    fn test_hpke_config_wrong_key() {
-        use super::super::document_crypto::{DocumentCrypto, HpkeDocumentCrypto};
-        use rustls::crypto::hpke::Hpke;
+    fn test_aes_256_gcm_wrong_key() {
+        let key = [0x42u8; 32];
+        let wrong_key = [0x43u8; 32];
+        let plaintext = b"secret data";
 
-        let sample_config = br#"{"rp_id":"test.example.com"}"#;
-
-        let suite = &rustls::crypto::aws_lc_rs::hpke::DH_KEM_P384_HKDF_SHA384_AES_256;
-        let (pub_key, _priv_key) = suite.generate_key_pair().unwrap();
-        let (other_pub, other_priv) = suite.generate_key_pair().unwrap();
-
-        let seal_crypto =
-            HpkeDocumentCrypto::new(pub_key.clone(), other_priv.secret_bytes().to_vec().into())
-                .unwrap();
-        let open_crypto =
-            HpkeDocumentCrypto::new(other_pub.clone(), other_priv.secret_bytes().to_vec().into())
-                .unwrap();
-
-        let aad = build_hpke_aad(1);
-        let sealed = seal_crypto
-            .seal(HPKE_CONFIG_INFO, &aad, sample_config)
-            .unwrap();
-        let result = open_crypto.open(HPKE_CONFIG_INFO, &aad, &sealed);
+        let ciphertext = aes_256_gcm_encrypt(&key, plaintext).unwrap();
+        let result = aes_256_gcm_decrypt(&wrong_key, &ciphertext);
         assert!(result.is_err());
     }
 
-    /// HPKE config: wrong AAD (version) must fail.
+    /// AES-256-GCM: tampered ciphertext must fail.
     #[test]
-    fn test_hpke_config_wrong_aad() {
-        use super::super::document_crypto::{DocumentCrypto, HpkeDocumentCrypto};
-        use rustls::crypto::hpke::Hpke;
+    fn test_aes_256_gcm_tampered_ciphertext() {
+        let key = [0x42u8; 32];
+        let plaintext = b"secret data";
 
-        let sample_config = br#"{"rp_id":"test.example.com"}"#;
-
-        let suite = &rustls::crypto::aws_lc_rs::hpke::DH_KEM_P384_HKDF_SHA384_AES_256;
-        let (pub_key, priv_key) = suite.generate_key_pair().unwrap();
-
-        let crypto =
-            HpkeDocumentCrypto::new(pub_key.clone(), priv_key.secret_bytes().to_vec().into())
-                .unwrap();
-
-        let aad_seal = build_hpke_aad(1);
-        let sealed = crypto
-            .seal(HPKE_CONFIG_INFO, &aad_seal, sample_config)
-            .unwrap();
-
-        let aad_open = build_hpke_aad(2);
-        let result = crypto.open(HPKE_CONFIG_INFO, &aad_open, &sealed);
+        let mut ciphertext = aes_256_gcm_encrypt(&key, plaintext).unwrap();
+        // Flip a byte in the ciphertext (after the nonce)
+        if let Some(byte) = ciphertext.get_mut(15) {
+            *byte ^= 0xFF;
+        }
+        let result = aes_256_gcm_decrypt(&key, &ciphertext);
         assert!(result.is_err());
     }
 
-    /// Round-trip test: seal -> serialize envelope -> deserialize -> open.
+    /// AES-256-GCM: too-short input must fail.
     #[test]
-    fn test_envelope_hpke_serialize_deserialize() {
-        use super::super::document_crypto::{DocumentCrypto, HpkeDocumentCrypto};
-        use rustls::crypto::hpke::Hpke;
+    fn test_aes_256_gcm_too_short() {
+        let key = [0x42u8; 32];
+        let result = aes_256_gcm_decrypt(&key, &[0u8; 10]);
+        assert!(result.is_err());
+    }
 
+    /// Round-trip test: AES-256-GCM encrypt → serialize envelope → deserialize → decrypt.
+    #[test]
+    fn test_envelope_aes_gcm_serialize_deserialize() {
         let sample_config =
             br#"{"rp_id":"test.example.com","base_url":"https://test.example.com"}"#;
 
-        let suite = &rustls::crypto::aws_lc_rs::hpke::DH_KEM_P384_HKDF_SHA384_AES_256;
-        let (pub_key, priv_key) = suite.generate_key_pair().unwrap();
+        let data_key = [0x42u8; 32];
+        let ciphertext = aes_256_gcm_encrypt(&data_key, sample_config).unwrap();
 
-        let crypto =
-            HpkeDocumentCrypto::new(pub_key.clone(), priv_key.secret_bytes().to_vec().into())
-                .unwrap();
-
-        let version = 1u32;
-        let aad = build_hpke_aad(version);
-        let sealed = crypto.seal(HPKE_CONFIG_INFO, &aad, sample_config).unwrap();
-
-        // Build envelope
         let envelope = EncryptedEnvelope {
             kms_key_id: "mrk-test1234".to_string(),
-            encrypted_private_key: BASE64.encode(priv_key.secret_bytes()),
-            public_key: BASE64.encode(&pub_key.0), // SPKI placeholder for tests
-            encapped_key: sealed.encapped_key.unwrap(),
-            encrypted_data: sealed.data,
-            version,
+            encrypted_data_key: BASE64.encode(data_key), // fake: would be KMS ciphertext
+            encrypted_data: BASE64.encode(&ciphertext),
+            version: 1,
             tls: Some(crate::infra::s3_config::S3TlsConfig {
                 cert: Some("test-cert".to_string()),
                 key: Some("test-key".to_string()),
@@ -929,30 +864,22 @@ mod tests {
             }),
         };
 
-        // Serialize to JSON
         let json = serde_json::to_string_pretty(&envelope).unwrap();
 
-        // Verify JSON contains expected fields
         assert!(json.contains("kms_key_id"));
-        assert!(json.contains("encrypted_private_key"));
-        assert!(json.contains("public_key"));
-        assert!(json.contains("encapped_key"));
+        assert!(json.contains("encrypted_data_key"));
         assert!(json.contains("encrypted_data"));
         assert!(json.contains("test-cert"));
         assert!(json.contains("_acme"));
         assert!(json.contains("acme@example.com"));
 
-        // Deserialize back and decrypt using HpkeDocumentCrypto
         let parsed: EncryptedEnvelope = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.kms_key_id, "mrk-test1234");
 
-        let doc = super::super::document_crypto::EncryptedDocument {
-            encapped_key: Some(parsed.encapped_key.clone()),
-            data: parsed.encrypted_data.clone(),
-        };
-        let aad = build_hpke_aad(parsed.version);
-        let opened = crypto.open(HPKE_CONFIG_INFO, &aad, &doc).unwrap();
-        assert_eq!(&opened, sample_config);
+        let ct = BASE64.decode(&parsed.encrypted_data).unwrap();
+        let dk = BASE64.decode(&parsed.encrypted_data_key).unwrap();
+        let opened = aes_256_gcm_decrypt(&dk, &ct).unwrap();
+        assert_eq!(&*opened, sample_config);
     }
 
     /// Verify `skip_serializing_if` omits `_acme` when `None`.
@@ -960,9 +887,7 @@ mod tests {
     fn test_envelope_serialization_omits_acme_when_none() {
         let envelope = EncryptedEnvelope {
             kms_key_id: "mrk-test".to_string(),
-            encrypted_private_key: "a2V5".to_string(),
-            public_key: "cHVi".to_string(),
-            encapped_key: "ZW5j".to_string(),
+            encrypted_data_key: "a2V5".to_string(),
             encrypted_data: "ZGF0YQ==".to_string(),
             version: 1,
             tls: None,

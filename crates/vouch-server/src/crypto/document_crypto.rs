@@ -126,14 +126,6 @@ impl HpkeDocumentCrypto {
         })
     }
 
-    /// Consume self, returning the HPKE key pair.
-    ///
-    /// Used when the crypto instance was created temporarily (e.g., for
-    /// envelope decryption) and the keys need to be reused at runtime.
-    pub fn into_keys(self) -> (HpkePublicKey, HpkePrivateKey) {
-        (self.public_key, self.private_key)
-    }
-
     fn hpke_suite() -> &'static rustls::crypto::aws_lc_rs::hpke::HpkeAwsLcRs<32, 48> {
         rustls::crypto::aws_lc_rs::hpke::DH_KEM_P384_HKDF_SHA384_AES_256
     }
@@ -268,6 +260,56 @@ pub fn p384_hpke_keys_from_private_key_der(der: &[u8]) -> Result<(HpkePublicKey,
     let hpke_public = HpkePublicKey(public_point.as_ref().to_vec());
 
     Ok((hpke_public, hpke_private))
+}
+
+/// Fixed DER prefix for a P-384 `SubjectPublicKeyInfo` (23 bytes).
+///
+/// ```text
+/// SEQUENCE (118 bytes) {
+///   SEQUENCE (16 bytes) {
+///     OID 1.2.840.10045.2.1 (ecPublicKey)
+///     OID 1.3.132.0.34 (secp384r1)
+///   }
+///   BIT STRING (98 bytes, 0 unused bits) { ... }
+/// }
+/// ```
+const P384_SPKI_PREFIX: [u8; 23] = [
+    0x30, 0x76, // SEQUENCE, 118 bytes
+    0x30, 0x10, // SEQUENCE, 16 bytes
+    0x06, 0x07, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x02, 0x01, // OID ecPublicKey
+    0x06, 0x05, 0x2b, 0x81, 0x04, 0x00, 0x22, // OID secp384r1
+    0x03, 0x62, 0x00, // BIT STRING, 98 bytes, 0 unused bits
+];
+
+/// Extract a raw P-384 public key (97-byte uncompressed point) from a
+/// DER-encoded `SubjectPublicKeyInfo`.
+///
+/// Validates the fixed SPKI prefix and returns the 97-byte uncompressed
+/// point (starting with `0x04`).
+///
+/// # Errors
+///
+/// Returns an error if the DER length is wrong, the prefix doesn't match,
+/// or the point format is not uncompressed.
+pub fn p384_public_key_from_der(spki_der: &[u8]) -> Result<HpkePublicKey> {
+    let expected_len = P384_SPKI_PREFIX.len() + 97; // 23 + 97 = 120
+    if spki_der.len() != expected_len {
+        bail!(
+            "unexpected P-384 SPKI DER length: {} (expected {expected_len})",
+            spki_der.len()
+        );
+    }
+
+    let (prefix, point) = spki_der.split_at(P384_SPKI_PREFIX.len());
+    if prefix != P384_SPKI_PREFIX {
+        bail!("DER does not have the expected P-384 SPKI prefix");
+    }
+
+    if point.first().copied() != Some(0x04) {
+        bail!("P-384 public key is not in uncompressed point format");
+    }
+
+    Ok(HpkePublicKey(point.to_vec()))
 }
 
 // ============================================================================
@@ -407,6 +449,40 @@ mod tests {
         let sealed = crypto.seal(b"test", b"aad", b"hello").unwrap();
         let opened = crypto.open(b"test", b"aad", &sealed).unwrap();
         assert_eq!(opened, b"hello");
+    }
+
+    #[test]
+    fn p384_public_key_from_der_roundtrip() {
+        use aws_lc_rs::agreement;
+        use aws_lc_rs::encoding::AsDer;
+
+        let private_key = agreement::PrivateKey::generate(&agreement::ECDH_P384).unwrap();
+        let public_key = private_key.compute_public_key().unwrap();
+
+        // Export the public key as SPKI DER
+        let spki_der: aws_lc_rs::encoding::PublicKeyX509Der = public_key.as_der().unwrap();
+        let hpke_pub = p384_public_key_from_der(spki_der.as_ref()).unwrap();
+        assert_eq!(hpke_pub.0.len(), 97);
+        assert_eq!(hpke_pub.0.first().copied(), Some(0x04));
+
+        // Verify it matches the raw public point from the private key
+        assert_eq!(hpke_pub.0, public_key.as_ref());
+    }
+
+    #[test]
+    fn p384_public_key_from_der_wrong_length() {
+        let result = p384_public_key_from_der(&[0u8; 100]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn p384_public_key_from_der_wrong_prefix() {
+        let mut bad = vec![0xFFu8; 120];
+        if let Some(byte) = bad.get_mut(23) {
+            *byte = 0x04; // correct uncompressed marker but wrong prefix
+        }
+        let result = p384_public_key_from_der(&bad);
+        assert!(result.is_err());
     }
 
     fn make_test_crypto() -> HpkeDocumentCrypto {
