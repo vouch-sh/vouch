@@ -68,7 +68,7 @@ struct RawDocumentRow {
     expires_at: Option<String>,
     created_at: String,
     updated_at: String,
-    version: i64,
+    version: i32,
     last_used_at: Option<String>,
 }
 
@@ -546,7 +546,7 @@ impl DocumentStore {
     pub async fn compare_and_update<T: DocumentType>(
         &self,
         id: &str,
-        expected_version: i64,
+        expected_version: i32,
         doc: &T,
     ) -> Result<bool> {
         crate::with_dsql_retry!(async {
@@ -575,7 +575,7 @@ impl DocumentStore {
                     .value(Documents::ExpiresAt, Expr::val(expires_ref))
                     .value(
                         Documents::SchemaVersion,
-                        Expr::val(i64::from(T::CURRENT_VERSION)),
+                        Expr::val(T::CURRENT_VERSION as i32),
                     )
                     .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
                     .value(Documents::Version, Expr::val(expected_version + 1))
@@ -992,13 +992,13 @@ impl<'a> StoreTransaction<'a> {
             .values_panic([
                 id.into(),
                 T::DOC_TYPE.into(),
-                i64::from(T::CURRENT_VERSION).into(),
+                (T::CURRENT_VERSION as i32).into(),
                 encapped.into(),
                 encrypted.data.as_str().into(),
                 expires_ref.into(),
                 now_str.as_str().into(),
                 now_str.as_str().into(),
-                1_i64.into(),
+                1_i32.into(),
                 Option::<&str>::None.into(),
             ])
             .build_sql(db_type);
@@ -1189,7 +1189,7 @@ impl<'a> StoreTransaction<'a> {
                 .value(Documents::ExpiresAt, Expr::val(expires_ref))
                 .value(
                     Documents::SchemaVersion,
-                    Expr::val(i64::from(T::CURRENT_VERSION)),
+                    Expr::val(T::CURRENT_VERSION as i32),
                 )
                 .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
                 .value(Documents::Version, Expr::col(Documents::Version).add(1))
@@ -1394,7 +1394,7 @@ impl<'a> StoreTransaction<'a> {
     pub async fn compare_and_update<T: DocumentType>(
         &mut self,
         id: &str,
-        expected_version: i64,
+        expected_version: i32,
         doc: &T,
     ) -> Result<bool> {
         let json = serde_json::to_vec(doc).context("failed to serialize document")?;
@@ -1419,7 +1419,7 @@ impl<'a> StoreTransaction<'a> {
                 .value(Documents::ExpiresAt, Expr::val(expires_ref))
                 .value(
                     Documents::SchemaVersion,
-                    Expr::val(i64::from(T::CURRENT_VERSION)),
+                    Expr::val(T::CURRENT_VERSION as i32),
                 )
                 .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
                 .value(Documents::Version, Expr::val(expected_version + 1))

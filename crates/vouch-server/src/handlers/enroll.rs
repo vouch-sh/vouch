@@ -387,7 +387,8 @@ pub async fn oidc_callback(
             }
             .into_response();
         }
-        Err(_) => {
+        Err(e) => {
+            tracing::error!("Failed to verify OIDC state: {e:#}");
             return ErrorTemplate {
                 title: "Error".to_string(),
                 message: "Failed to verify state".to_string(),
