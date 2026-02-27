@@ -12,7 +12,7 @@ use axum::extract::OriginalUri;
 use axum::http::Method;
 use axum::{
     Json,
-    extract::{Path, Query, State},
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -21,7 +21,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 use serde::Deserialize;
 use std::sync::Arc;
-use vouch_common::{ApiError, AuthEventInfo, ListAuthEventsResponse};
+use vouch_common::ApiError;
 
 use super::json_error;
 use super::session::extract_resource_token;
@@ -71,90 +71,6 @@ async fn extract_org_admin(
     })?;
 
     Ok((user, org_id))
-}
-
-// ============================================================================
-// Auth Events API
-// ============================================================================
-
-/// Query params for auth events API.
-#[derive(Debug, Deserialize)]
-pub struct AuthEventsQuery {
-    /// Filter by user ID.
-    user_id: Option<String>,
-    /// Filter by event type (login_success, login_failed, enrollment).
-    event_type: Option<String>,
-    /// Filter by events since this ISO 8601 timestamp.
-    since: Option<String>,
-    /// Maximum number of events to return (default 100).
-    limit: Option<i64>,
-}
-
-/// List authentication events for the organization.
-/// GET /api/v1/org/auth-events
-pub async fn list_auth_events(
-    method: Method,
-    uri: OriginalUri,
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    jar: CookieJar,
-    Query(query): Query<AuthEventsQuery>,
-) -> Result<Json<ListAuthEventsResponse>, (StatusCode, Json<ApiError>)> {
-    let (_user, _org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
-
-    // Build query params
-    let db_query = db::AuthEventQuery {
-        user_id: query.user_id.clone(),
-        event_type: query.event_type.clone(),
-        since: query.since.clone(),
-        limit: query.limit,
-    };
-
-    // Fetch events
-    let events = db::get_auth_events(&state.audit, &db_query)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?;
-
-    // Get user emails for the events (for display)
-    let mut user_emails: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
-    for event in &events {
-        if !user_emails.contains_key(&event.user_id)
-            && let Ok(Some(user)) = db::get_user_by_id(&state.store, &event.user_id).await
-        {
-            user_emails.insert(event.user_id.clone(), user.email);
-        }
-    }
-
-    // Convert to API response type
-    let events: Vec<AuthEventInfo> = events
-        .into_iter()
-        .map(|e| AuthEventInfo {
-            id: e.id,
-            user_id: e.user_id.clone(),
-            user_email: user_emails.get(&e.user_id).cloned(),
-            event_type: e.event_type.as_str().to_string(),
-            authenticator_id: e.authenticator_id,
-            client_ip: e.client_ip,
-            user_agent: e.user_agent,
-            client_hostname: e.client_hostname,
-            client_os: e.client_os,
-            client_arch: e.client_arch,
-            client_version: e.client_version,
-            success: e.success,
-            failure_reason: e.failure_reason,
-            created_at: e.created_at,
-        })
-        .collect();
-
-    Ok(Json(ListAuthEventsResponse { events }))
 }
 
 // ============================================================================

@@ -61,24 +61,6 @@ Expired sessions are cleaned up automatically by a background task:
 VOUCH_CLEANUP_INTERVAL=15
 ```
 
-### Admin Operations
-
-Organization administrators (users with `is_org_admin` flag) can view authentication events via the admin API.
-
-Using the cookie file (written automatically on login):
-
-```bash
-curl -b ~/.vouch/cookie.txt \
-  https://auth.example.com/api/v1/org/auth-events
-```
-
-Or using the token command:
-
-```bash
-curl -H "Authorization: Bearer $(vouch credential token)" \
-  https://auth.example.com/api/v1/org/auth-events
-```
-
 ## Security Properties
 
 - **Presence-bound** — Every session traces to a FIDO2 assertion with user verification

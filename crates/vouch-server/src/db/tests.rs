@@ -996,35 +996,6 @@ async fn test_auth_event_logging() {
     )
     .await
     .expect("Failed to insert auth event");
-
-    // Query events for user (get_auth_events now uses AuditStore)
-    let events = get_auth_events(
-        &audit,
-        &AuthEventQuery {
-            user_id: Some(user_id.clone()),
-            limit: Some(10),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("Failed to get events");
-
-    assert_eq!(events.len(), 2);
-
-    // Query by event type
-    let events = get_auth_events(
-        &audit,
-        &AuthEventQuery {
-            event_type: Some("login_success".to_string()),
-            limit: Some(10),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("Failed to get events");
-
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].event_type, AuthEventType::LoginSuccess);
 }
 
 // ========================================================================
@@ -2136,65 +2107,6 @@ async fn test_delete_expired_jwt_assertion_jtis() {
     assert!(
         reused,
         "Expired+deleted JTI should be accepted again after cleanup"
-    );
-}
-
-// ========================================================================
-// AuditStore — since filter
-// ========================================================================
-
-#[tokio::test]
-async fn test_audit_store_since_filter() {
-    let (store, audit) = test_db().await;
-
-    let (user_id, _) = upsert_user(&store, "since-filter@example.com", None)
-        .await
-        .expect("upsert user");
-
-    // Insert an event
-    insert_auth_event(
-        &audit,
-        &AuthEventParams {
-            user_id: user_id.clone(),
-            event_type: AuthEventType::LoginSuccess,
-            success: true,
-            ..Default::default()
-        },
-        None,
-    )
-    .await
-    .expect("insert event");
-
-    // Query with a future `since` timestamp — should return no events
-    let no_events = get_auth_events(
-        &audit,
-        &AuthEventQuery {
-            since: Some("2099-01-01T00:00:00Z".to_string()),
-            limit: Some(100),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("query failed");
-    assert!(
-        no_events.is_empty(),
-        "`since` in the future should exclude all events"
-    );
-
-    // Query with a past `since` timestamp — should return the event
-    let all_events = get_auth_events(
-        &audit,
-        &AuthEventQuery {
-            since: Some("2000-01-01T00:00:00Z".to_string()),
-            limit: Some(100),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("query failed");
-    assert!(
-        !all_events.is_empty(),
-        "`since` in the past should include events"
     );
 }
 

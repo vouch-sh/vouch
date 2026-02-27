@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.2.46"
+version = "2026.2.47"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.93.1"
@@ -95,6 +95,7 @@ rust-ini = { version = "=0.21.3", default-features = false }
 rustls = { version = "=0.23.37", default-features = false }
 rustls-pemfile = { version = "=2.2.0", default-features = false }
 sea-query = { version = "=0.32.7", default-features = false }
+sea-query-binder = { version = "=0.7.0", default-features = false }
 secrecy = { version = "=0.10.3", default-features = false }
 serde = { version = "=1.0.228", default-features = false }
 serde_json = { version = "=1.0.149", default-features = false }

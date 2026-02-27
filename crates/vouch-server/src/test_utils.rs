@@ -202,10 +202,6 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         )
         // Org admin API (JSON, JWT Bearer auth)
         .route(
-            "/api/v1/org/auth-events",
-            get(handlers::admin::list_auth_events),
-        )
-        .route(
             "/api/v1/org/scim-tokens",
             get(handlers::admin::list_scim_tokens).post(handlers::admin::create_scim_token),
         )

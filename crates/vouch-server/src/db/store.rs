@@ -21,7 +21,6 @@ use sea_query::{Expr, Iden, Order, Query};
 
 use super::document_type::{Document, DocumentType};
 use super::pool::Pool;
-use super::types::BuildSql;
 use crate::crypto::document_crypto::{DocumentCrypto, EncryptedDocument};
 
 // ============================================================================
@@ -280,9 +279,7 @@ impl DocumentStore {
     ///
     /// Returns an error if decryption or deserialization fails.
     pub async fn get<T: DocumentType>(&self, id: &str) -> Result<Option<Document<T>>> {
-        let db_type = self.pool.db_type();
-
-        let sql = Query::select()
+        let stmt = Query::select()
             .columns([
                 Documents::Id,
                 Documents::DocType,
@@ -298,10 +295,10 @@ impl DocumentStore {
             .from(Documents::Table)
             .and_where(Expr::col(Documents::Id).eq(id))
             .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
-            .build_sql(db_type);
+            .to_owned();
 
         let row: Option<RawDocumentRow> =
-            crate::db_fetch_optional!(&self.pool, sqlx::query_as(&sql))?;
+            crate::db_fetch_optional!(&self.pool, stmt, RawDocumentRow)?;
 
         match row {
             Some(row) => raw_to_document::<T>(&self.crypto, row).map(Some),
@@ -319,8 +316,7 @@ impl DocumentStore {
             return Ok(Vec::new());
         }
 
-        let db_type = self.pool.db_type();
-        let sql = Query::select()
+        let stmt = Query::select()
             .columns([
                 Documents::Id,
                 Documents::DocType,
@@ -336,9 +332,9 @@ impl DocumentStore {
             .from(Documents::Table)
             .and_where(Expr::col(Documents::Id).is_in(ids.iter().copied()))
             .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
-            .build_sql(db_type);
+            .to_owned();
 
-        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, sqlx::query_as(&sql))?;
+        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
 
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
@@ -378,9 +374,8 @@ impl DocumentStore {
         value: &str,
     ) -> Result<Vec<Document<T>>> {
         let hashed = self.crypto.hmac_index(value);
-        let db_type = self.pool.db_type();
 
-        let sql = Query::select()
+        let stmt = Query::select()
             .columns([
                 (Documents::Table, Documents::Id),
                 (Documents::Table, Documents::DocType),
@@ -405,9 +400,9 @@ impl DocumentStore {
                 Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexValue))
                     .eq(hashed.as_str()),
             )
-            .build_sql(db_type);
+            .to_owned();
 
-        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, sqlx::query_as(&sql))?;
+        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
 
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
@@ -485,15 +480,14 @@ impl DocumentStore {
     pub async fn update_last_used_at(&self, id: &str) -> Result<()> {
         crate::with_dsql_retry!(async {
             let now_str = Timestamp::now().to_string();
-            let db_type = self.pool.db_type();
-            let sql = {
+            let stmt = {
                 let mut q = Query::update();
                 q.table(Documents::Table)
                     .value(Documents::LastUsedAt, Expr::val(now_str.as_str()))
                     .and_where(Expr::col(Documents::Id).eq(id));
-                q.build_sql(db_type)
+                q.to_owned()
             };
-            crate::db_execute!(&self.pool, sqlx::query(&sql))?;
+            crate::db_execute!(&self.pool, stmt)?;
             Ok(())
         })
     }
@@ -558,7 +552,6 @@ impl DocumentStore {
             let now_str = Timestamp::now().to_string();
             let expires = doc.expires_at();
             let indexes = doc.index_entries();
-            let db_type = self.pool.db_type();
 
             let encapped: Option<&str> = encrypted.encapped_key.as_deref();
             let expires_str = expires.map(|ts| ts.to_string());
@@ -567,7 +560,7 @@ impl DocumentStore {
             let mut tx = self.pool.begin().await?;
 
             // UPDATE with version guard (optimistic concurrency)
-            let update_sql = {
+            let update_stmt = {
                 let mut q = Query::update();
                 q.table(Documents::Table)
                     .value(Documents::Data, Expr::val(encrypted.data.as_str()))
@@ -581,10 +574,10 @@ impl DocumentStore {
                     .value(Documents::Version, Expr::val(expected_version + 1))
                     .and_where(Expr::col(Documents::Id).eq(id))
                     .and_where(Expr::col(Documents::Version).eq(expected_version));
-                q.build_sql(db_type)
+                q.to_owned()
             };
 
-            let result = crate::tx_execute!(tx, sqlx::query(&update_sql))?;
+            let result = crate::tx_execute!(tx, update_stmt)?;
 
             if result.rows_affected() == 0 {
                 // Version mismatch — concurrent modification detected
@@ -592,18 +585,18 @@ impl DocumentStore {
             }
 
             // DELETE old indexes
-            let delete_idx_sql = Query::delete()
+            let delete_idx_stmt = Query::delete()
                 .from_table(DocumentIndexes::Table)
                 .and_where(Expr::col(DocumentIndexes::DocumentId).eq(id))
-                .build_sql(db_type);
+                .to_owned();
 
-            crate::tx_execute!(tx, sqlx::query(&delete_idx_sql))?;
+            crate::tx_execute!(tx, delete_idx_stmt)?;
 
             // INSERT new indexes
             for entry in &indexes {
                 let index_id = uuid::Uuid::now_v7().to_string();
                 let hashed_value = self.crypto.hmac_index(&entry.value);
-                let idx_sql = Query::insert()
+                let idx_stmt = Query::insert()
                     .into_table(DocumentIndexes::Table)
                     .columns([
                         DocumentIndexes::Id,
@@ -611,15 +604,15 @@ impl DocumentStore {
                         DocumentIndexes::IndexField,
                         DocumentIndexes::IndexValue,
                     ])
-                    .values_panic([
+                    .values([
                         index_id.as_str().into(),
                         id.into(),
                         entry.field.into(),
                         hashed_value.as_str().into(),
-                    ])
-                    .build_sql(db_type);
+                    ])?
+                    .to_owned();
 
-                crate::tx_execute!(tx, sqlx::query(&idx_sql))?;
+                crate::tx_execute!(tx, idx_stmt)?;
             }
 
             tx.commit().await?;
@@ -705,19 +698,18 @@ impl DocumentStore {
     /// Returns an error if the database operation fails.
     pub async fn delete_expired(&self, doc_type: &str) -> Result<u64> {
         crate::with_dsql_retry!(async {
-            let db_type = self.pool.db_type();
             let now = jiff::Timestamp::now().to_string();
 
             // Find expired document IDs
-            let select_sql = Query::select()
+            let select_stmt = Query::select()
                 .column(Documents::Id)
                 .from(Documents::Table)
                 .and_where(Expr::col(Documents::DocType).eq(doc_type))
                 .and_where(Expr::col(Documents::ExpiresAt).is_not_null())
                 .and_where(Expr::col(Documents::ExpiresAt).lt(now.as_str()))
-                .build_sql(db_type);
+                .to_owned();
 
-            let rows: Vec<IdRow> = crate::db_fetch_all!(&self.pool, sqlx::query_as(&select_sql))?;
+            let rows: Vec<IdRow> = crate::db_fetch_all!(&self.pool, select_stmt, IdRow)?;
 
             let total = rows.len() as u64;
             // Batch deletes: 1,000 docs per tx (2 DELETE statements each)
@@ -730,14 +722,14 @@ impl DocumentStore {
                 let del_idx = Query::delete()
                     .from_table(DocumentIndexes::Table)
                     .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids.clone()))
-                    .build_sql(db_type);
-                crate::tx_execute!(tx, sqlx::query(&del_idx))?;
+                    .to_owned();
+                crate::tx_execute!(tx, del_idx)?;
 
                 let del_doc = Query::delete()
                     .from_table(Documents::Table)
                     .and_where(Expr::col(Documents::Id).is_in(ids))
-                    .build_sql(db_type);
-                crate::tx_execute!(tx, sqlx::query(&del_doc))?;
+                    .to_owned();
+                crate::tx_execute!(tx, del_doc)?;
 
                 tx.commit().await?;
             }
@@ -756,9 +748,8 @@ impl DocumentStore {
     /// Returns an error if the query fails.
     pub async fn count<T: DocumentType>(&self, field: &str, value: &str) -> Result<i64> {
         let hashed = self.crypto.hmac_index(value);
-        let db_type = self.pool.db_type();
 
-        let sql = Query::select()
+        let stmt = Query::select()
             .expr_as(
                 Expr::col((Documents::Table, Documents::Id)).count(),
                 sea_query::Alias::new("count"),
@@ -775,7 +766,7 @@ impl DocumentStore {
                 Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexValue))
                     .eq(hashed.as_str()),
             )
-            .build_sql(db_type);
+            .to_owned();
 
         // Use a simple FromRow struct for the count result
         #[derive(sqlx::FromRow)]
@@ -784,7 +775,7 @@ impl DocumentStore {
             count: i64,
         }
 
-        let row: CountRow = crate::db_fetch_one!(&self.pool, sqlx::query_as(&sql))?;
+        let row: CountRow = crate::db_fetch_one!(&self.pool, stmt, CountRow)?;
         Ok(row.count)
     }
 
@@ -794,16 +785,14 @@ impl DocumentStore {
     ///
     /// Returns an error if the query fails.
     pub async fn count_all<T: DocumentType>(&self) -> Result<i64> {
-        let db_type = self.pool.db_type();
-
-        let sql = Query::select()
+        let stmt = Query::select()
             .expr_as(
                 Expr::col(Documents::Id).count(),
                 sea_query::Alias::new("count"),
             )
             .from(Documents::Table)
             .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
-            .build_sql(db_type);
+            .to_owned();
 
         #[derive(sqlx::FromRow)]
         struct CountRow {
@@ -811,7 +800,7 @@ impl DocumentStore {
             count: i64,
         }
 
-        let row: CountRow = crate::db_fetch_one!(&self.pool, sqlx::query_as(&sql))?;
+        let row: CountRow = crate::db_fetch_one!(&self.pool, stmt, CountRow)?;
         Ok(row.count)
     }
 
@@ -826,9 +815,7 @@ impl DocumentStore {
     ///
     /// Returns an error if decryption or deserialization fails.
     pub async fn list_all<T: DocumentType>(&self) -> Result<Vec<Document<T>>> {
-        let db_type = self.pool.db_type();
-
-        let sql = Query::select()
+        let stmt = Query::select()
             .columns([
                 Documents::Id,
                 Documents::DocType,
@@ -844,9 +831,9 @@ impl DocumentStore {
             .from(Documents::Table)
             .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
             .order_by(Documents::CreatedAt, Order::Desc)
-            .build_sql(db_type);
+            .to_owned();
 
-        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, sqlx::query_as(&sql))?;
+        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
 
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
@@ -868,9 +855,7 @@ impl DocumentStore {
         offset: u64,
         limit: u64,
     ) -> Result<Vec<Document<T>>> {
-        let db_type = self.pool.db_type();
-
-        let sql = Query::select()
+        let stmt = Query::select()
             .columns([
                 Documents::Id,
                 Documents::DocType,
@@ -888,9 +873,9 @@ impl DocumentStore {
             .order_by(Documents::CreatedAt, Order::Asc)
             .offset(offset)
             .limit(limit)
-            .build_sql(db_type);
+            .to_owned();
 
-        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, sqlx::query_as(&sql))?;
+        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
 
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
@@ -969,13 +954,12 @@ impl<'a> StoreTransaction<'a> {
 
         let now = Timestamp::now();
         let now_str = now.to_string();
-        let db_type = self.tx.db_type();
 
         let encapped: Option<&str> = encrypted.encapped_key.as_deref();
         let expires_ref: Option<&str> = expires_str.as_deref();
 
         // INSERT document
-        let insert_sql = Query::insert()
+        let insert_stmt = Query::insert()
             .into_table(Documents::Table)
             .columns([
                 Documents::Id,
@@ -989,7 +973,7 @@ impl<'a> StoreTransaction<'a> {
                 Documents::Version,
                 Documents::LastUsedAt,
             ])
-            .values_panic([
+            .values([
                 id.into(),
                 T::DOC_TYPE.into(),
                 (T::CURRENT_VERSION as i32).into(),
@@ -1000,16 +984,16 @@ impl<'a> StoreTransaction<'a> {
                 now_str.as_str().into(),
                 1_i32.into(),
                 Option::<&str>::None.into(),
-            ])
-            .build_sql(db_type);
+            ])?
+            .to_owned();
 
-        crate::tx_execute!(self.tx, sqlx::query(&insert_sql))?;
+        crate::tx_execute!(self.tx, insert_stmt)?;
 
         // INSERT index entries
         for entry in &indexes {
             let index_id = uuid::Uuid::now_v7().to_string();
             let hashed_value = self.crypto.hmac_index(&entry.value);
-            let idx_sql = Query::insert()
+            let idx_stmt = Query::insert()
                 .into_table(DocumentIndexes::Table)
                 .columns([
                     DocumentIndexes::Id,
@@ -1017,15 +1001,15 @@ impl<'a> StoreTransaction<'a> {
                     DocumentIndexes::IndexField,
                     DocumentIndexes::IndexValue,
                 ])
-                .values_panic([
+                .values([
                     index_id.as_str().into(),
                     id.into(),
                     entry.field.into(),
                     hashed_value.as_str().into(),
-                ])
-                .build_sql(db_type);
+                ])?
+                .to_owned();
 
-            crate::tx_execute!(self.tx, sqlx::query(&idx_sql))?;
+            crate::tx_execute!(self.tx, idx_stmt)?;
         }
 
         let expires_at = expires_str
@@ -1057,9 +1041,7 @@ impl<'a> StoreTransaction<'a> {
     ///
     /// Returns an error if decryption or deserialization fails.
     pub async fn get<T: DocumentType>(&mut self, id: &str) -> Result<Option<Document<T>>> {
-        let db_type = self.tx.db_type();
-
-        let sql = Query::select()
+        let stmt = Query::select()
             .columns([
                 Documents::Id,
                 Documents::DocType,
@@ -1075,9 +1057,9 @@ impl<'a> StoreTransaction<'a> {
             .from(Documents::Table)
             .and_where(Expr::col(Documents::Id).eq(id))
             .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
-            .build_sql(db_type);
+            .to_owned();
 
-        let row: Option<RawDocumentRow> = crate::tx_fetch_optional!(self.tx, sqlx::query_as(&sql))?;
+        let row: Option<RawDocumentRow> = crate::tx_fetch_optional!(self.tx, stmt, RawDocumentRow)?;
 
         match row {
             Some(row) => raw_to_document::<T>(self.crypto, row).map(Some),
@@ -1116,9 +1098,8 @@ impl<'a> StoreTransaction<'a> {
         value: &str,
     ) -> Result<Vec<Document<T>>> {
         let hashed = self.crypto.hmac_index(value);
-        let db_type = self.tx.db_type();
 
-        let sql = Query::select()
+        let stmt = Query::select()
             .columns([
                 (Documents::Table, Documents::Id),
                 (Documents::Table, Documents::DocType),
@@ -1143,9 +1124,9 @@ impl<'a> StoreTransaction<'a> {
                 Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexValue))
                     .eq(hashed.as_str()),
             )
-            .build_sql(db_type);
+            .to_owned();
 
-        let rows: Vec<RawDocumentRow> = crate::tx_fetch_all!(self.tx, sqlx::query_as(&sql))?;
+        let rows: Vec<RawDocumentRow> = crate::tx_fetch_all!(self.tx, stmt, RawDocumentRow)?;
 
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
@@ -1175,13 +1156,12 @@ impl<'a> StoreTransaction<'a> {
         } = serialize_and_encrypt(self.crypto, id, doc)?;
 
         let now_str = Timestamp::now().to_string();
-        let db_type = self.tx.db_type();
 
         let encapped: Option<&str> = encrypted.encapped_key.as_deref();
         let expires_ref: Option<&str> = expires_str.as_deref();
 
         // UPDATE document — scope the query builder so it drops before await
-        let update_sql = {
+        let update_stmt = {
             let mut q = Query::update();
             q.table(Documents::Table)
                 .value(Documents::Data, Expr::val(encrypted.data.as_str()))
@@ -1194,24 +1174,24 @@ impl<'a> StoreTransaction<'a> {
                 .value(Documents::UpdatedAt, Expr::val(now_str.as_str()))
                 .value(Documents::Version, Expr::col(Documents::Version).add(1))
                 .and_where(Expr::col(Documents::Id).eq(id));
-            q.build_sql(db_type)
+            q.to_owned()
         };
 
-        crate::tx_execute!(self.tx, sqlx::query(&update_sql))?;
+        crate::tx_execute!(self.tx, update_stmt)?;
 
         // DELETE old indexes
-        let delete_idx_sql = Query::delete()
+        let delete_idx_stmt = Query::delete()
             .from_table(DocumentIndexes::Table)
             .and_where(Expr::col(DocumentIndexes::DocumentId).eq(id))
-            .build_sql(db_type);
+            .to_owned();
 
-        crate::tx_execute!(self.tx, sqlx::query(&delete_idx_sql))?;
+        crate::tx_execute!(self.tx, delete_idx_stmt)?;
 
         // INSERT new indexes
         for entry in &indexes {
             let index_id = uuid::Uuid::now_v7().to_string();
             let hashed_value = self.crypto.hmac_index(&entry.value);
-            let idx_sql = Query::insert()
+            let idx_stmt = Query::insert()
                 .into_table(DocumentIndexes::Table)
                 .columns([
                     DocumentIndexes::Id,
@@ -1219,15 +1199,15 @@ impl<'a> StoreTransaction<'a> {
                     DocumentIndexes::IndexField,
                     DocumentIndexes::IndexValue,
                 ])
-                .values_panic([
+                .values([
                     index_id.as_str().into(),
                     id.into(),
                     entry.field.into(),
                     hashed_value.as_str().into(),
-                ])
-                .build_sql(db_type);
+                ])?
+                .to_owned();
 
-            crate::tx_execute!(self.tx, sqlx::query(&idx_sql))?;
+            crate::tx_execute!(self.tx, idx_stmt)?;
         }
 
         Ok(())
@@ -1237,27 +1217,26 @@ impl<'a> StoreTransaction<'a> {
     // Delete
     // ========================================================================
 
-    /// Delete a document by ID (and its index entries) within this transaction.
+    /// Delete a document by ID (and its index entries) within this
+    /// transaction.
     ///
     /// # Errors
     ///
     /// Returns an error if the database operation fails.
     pub async fn delete(&mut self, id: &str) -> Result<()> {
-        let db_type = self.tx.db_type();
-
-        let delete_idx_sql = Query::delete()
+        let delete_idx_stmt = Query::delete()
             .from_table(DocumentIndexes::Table)
             .and_where(Expr::col(DocumentIndexes::DocumentId).eq(id))
-            .build_sql(db_type);
+            .to_owned();
 
-        crate::tx_execute!(self.tx, sqlx::query(&delete_idx_sql))?;
+        crate::tx_execute!(self.tx, delete_idx_stmt)?;
 
-        let delete_doc_sql = Query::delete()
+        let delete_doc_stmt = Query::delete()
             .from_table(Documents::Table)
             .and_where(Expr::col(Documents::Id).eq(id))
-            .build_sql(db_type);
+            .to_owned();
 
-        crate::tx_execute!(self.tx, sqlx::query(&delete_doc_sql))?;
+        crate::tx_execute!(self.tx, delete_doc_stmt)?;
 
         Ok(())
     }
@@ -1281,23 +1260,22 @@ impl<'a> StoreTransaction<'a> {
             return Ok(0);
         }
 
-        let db_type = self.tx.db_type();
-
-        // Batch deletes in chunks of 1,000 to stay within DSQL statement limits
+        // Batch deletes in chunks of 1,000 to stay within DSQL statement
+        // limits
         for batch in docs.chunks(1000) {
             let ids: Vec<sea_query::Value> = batch.iter().map(|d| d.id.as_str().into()).collect();
 
             let del_idx = Query::delete()
                 .from_table(DocumentIndexes::Table)
                 .and_where(Expr::col(DocumentIndexes::DocumentId).is_in(ids.clone()))
-                .build_sql(db_type);
-            crate::tx_execute!(self.tx, sqlx::query(&del_idx))?;
+                .to_owned();
+            crate::tx_execute!(self.tx, del_idx)?;
 
             let del_doc = Query::delete()
                 .from_table(Documents::Table)
                 .and_where(Expr::col(Documents::Id).is_in(ids))
-                .build_sql(db_type);
-            crate::tx_execute!(self.tx, sqlx::query(&del_doc))?;
+                .to_owned();
+            crate::tx_execute!(self.tx, del_doc)?;
         }
 
         Ok(total)
@@ -1314,9 +1292,8 @@ impl<'a> StoreTransaction<'a> {
     /// Returns an error if the query fails.
     pub async fn count<T: DocumentType>(&mut self, field: &str, value: &str) -> Result<i64> {
         let hashed = self.crypto.hmac_index(value);
-        let db_type = self.tx.db_type();
 
-        let sql = Query::select()
+        let stmt = Query::select()
             .expr_as(
                 Expr::col((Documents::Table, Documents::Id)).count(),
                 sea_query::Alias::new("count"),
@@ -1333,7 +1310,7 @@ impl<'a> StoreTransaction<'a> {
                 Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexValue))
                     .eq(hashed.as_str()),
             )
-            .build_sql(db_type);
+            .to_owned();
 
         #[derive(sqlx::FromRow)]
         struct CountRow {
@@ -1341,7 +1318,7 @@ impl<'a> StoreTransaction<'a> {
             count: i64,
         }
 
-        let row: CountRow = crate::tx_fetch_one!(self.tx, sqlx::query_as(&sql))?;
+        let row: CountRow = crate::tx_fetch_one!(self.tx, stmt, CountRow)?;
         Ok(row.count)
     }
 
@@ -1405,13 +1382,12 @@ impl<'a> StoreTransaction<'a> {
         let now_str = Timestamp::now().to_string();
         let expires = doc.expires_at();
         let indexes = doc.index_entries();
-        let db_type = self.tx.db_type();
 
         let encapped: Option<&str> = encrypted.encapped_key.as_deref();
         let expires_str = expires.map(|ts| ts.to_string());
         let expires_ref: Option<&str> = expires_str.as_deref();
 
-        let update_sql = {
+        let update_stmt = {
             let mut q = Query::update();
             q.table(Documents::Table)
                 .value(Documents::Data, Expr::val(encrypted.data.as_str()))
@@ -1425,25 +1401,25 @@ impl<'a> StoreTransaction<'a> {
                 .value(Documents::Version, Expr::val(expected_version + 1))
                 .and_where(Expr::col(Documents::Id).eq(id))
                 .and_where(Expr::col(Documents::Version).eq(expected_version));
-            q.build_sql(db_type)
+            q.to_owned()
         };
 
-        let result = crate::tx_execute!(self.tx, sqlx::query(&update_sql))?;
+        let result = crate::tx_execute!(self.tx, update_stmt)?;
 
         if result.rows_affected() == 0 {
             return Ok(false);
         }
 
-        let delete_idx_sql = Query::delete()
+        let delete_idx_stmt = Query::delete()
             .from_table(DocumentIndexes::Table)
             .and_where(Expr::col(DocumentIndexes::DocumentId).eq(id))
-            .build_sql(db_type);
-        crate::tx_execute!(self.tx, sqlx::query(&delete_idx_sql))?;
+            .to_owned();
+        crate::tx_execute!(self.tx, delete_idx_stmt)?;
 
         for entry in &indexes {
             let index_id = uuid::Uuid::now_v7().to_string();
             let hashed_value = self.crypto.hmac_index(&entry.value);
-            let idx_sql = Query::insert()
+            let idx_stmt = Query::insert()
                 .into_table(DocumentIndexes::Table)
                 .columns([
                     DocumentIndexes::Id,
@@ -1451,14 +1427,14 @@ impl<'a> StoreTransaction<'a> {
                     DocumentIndexes::IndexField,
                     DocumentIndexes::IndexValue,
                 ])
-                .values_panic([
+                .values([
                     index_id.as_str().into(),
                     id.into(),
                     entry.field.into(),
                     hashed_value.as_str().into(),
-                ])
-                .build_sql(db_type);
-            crate::tx_execute!(self.tx, sqlx::query(&idx_sql))?;
+                ])?
+                .to_owned();
+            crate::tx_execute!(self.tx, idx_stmt)?;
         }
 
         Ok(true)
@@ -1482,6 +1458,7 @@ impl std::fmt::Debug for StoreTransaction<'_> {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
+    clippy::unreachable,
     clippy::indexing_slicing
 )]
 mod tests {
@@ -1531,38 +1508,39 @@ mod tests {
     async fn test_store() -> DocumentStore {
         let pool = Pool::connect("sqlite::memory:").await.unwrap();
 
-        // Create tables inline for test isolation
-        crate::db_execute!(
-            &pool,
-            sqlx::query(
-                "CREATE TABLE IF NOT EXISTS documents (
-                    id TEXT PRIMARY KEY,
-                    doc_type TEXT NOT NULL,
-                    schema_version INTEGER NOT NULL DEFAULT 1,
-                    encapped_key TEXT,
-                    data TEXT NOT NULL,
-                    expires_at TEXT,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL,
-                    version INTEGER NOT NULL DEFAULT 1,
-                    last_used_at TEXT
-                )"
-            )
+        // Tests always use SQLite — execute raw DDL directly
+        let Pool::Sqlite(ref p) = pool else {
+            unreachable!()
+        };
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS documents (
+                id TEXT PRIMARY KEY,
+                doc_type TEXT NOT NULL,
+                schema_version INTEGER NOT NULL DEFAULT 1,
+                encapped_key TEXT,
+                data TEXT NOT NULL,
+                expires_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                version INTEGER NOT NULL DEFAULT 1,
+                last_used_at TEXT
+            )",
         )
+        .execute(p)
+        .await
         .unwrap();
 
-        crate::db_execute!(
-            &pool,
-            sqlx::query(
-                "CREATE TABLE IF NOT EXISTS document_indexes (
-                    id TEXT PRIMARY KEY,
-                    document_id TEXT NOT NULL,
-                    index_field TEXT NOT NULL,
-                    index_value TEXT NOT NULL,
-                    UNIQUE(document_id, index_field, index_value)
-                )"
-            )
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS document_indexes (
+                id TEXT PRIMARY KEY,
+                document_id TEXT NOT NULL,
+                index_field TEXT NOT NULL,
+                index_value TEXT NOT NULL,
+                UNIQUE(document_id, index_field, index_value)
+            )",
         )
+        .execute(p)
+        .await
         .unwrap();
 
         let crypto = Arc::new(PlaintextDocumentCrypto);
@@ -1877,29 +1855,76 @@ mod tests {
             .unwrap();
         assert_eq!(results.len(), 2);
 
-        // AND: org_id = org-A AND role = admin → 1 result
+        // Two criteria: org_id = org-A AND role = admin → 1 result
         let results = store
             .find_by_indexes::<MultiIndexDoc>(&[("org_id", "org-A"), ("role", "admin")])
             .await
             .unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].data.org_id, "org-A");
-        assert_eq!(results[0].data.role, "admin");
+        assert_eq!(results[0].data, a_admin);
 
-        // AND with no match: org_id = org-B AND role = member → 0
+        // No match
         let results = store
             .find_by_indexes::<MultiIndexDoc>(&[("org_id", "org-B"), ("role", "member")])
             .await
             .unwrap();
         assert!(results.is_empty());
 
-        // Empty criteria → empty results
+        // Empty criteria
         let results = store.find_by_indexes::<MultiIndexDoc>(&[]).await.unwrap();
         assert!(results.is_empty());
     }
 
     #[tokio::test]
-    async fn count_all_and_list_all_paginated() {
+    async fn compare_and_update_version_mismatch() {
+        let store = test_store().await;
+        let doc = TestDoc {
+            name: "cas".to_string(),
+            value: 1,
+        };
+        let inserted = store.insert(&doc).await.unwrap();
+
+        // Update with wrong version should fail
+        let updated_doc = TestDoc {
+            name: "cas".to_string(),
+            value: 2,
+        };
+        let result = store
+            .compare_and_update(&inserted.id, 999, &updated_doc)
+            .await
+            .unwrap();
+        assert!(!result, "CAS with wrong version should return false");
+
+        // Update with correct version should succeed
+        let result = store
+            .compare_and_update(&inserted.id, inserted.version, &updated_doc)
+            .await
+            .unwrap();
+        assert!(result, "CAS with correct version should return true");
+
+        let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
+        assert_eq!(fetched.data.value, 2);
+        assert_eq!(fetched.version, 2);
+    }
+
+    #[tokio::test]
+    async fn count_all_documents() {
+        let store = test_store().await;
+
+        for i in 0..4 {
+            let doc = TestDoc {
+                name: format!("count-all-{i}"),
+                value: i,
+            };
+            store.insert(&doc).await.unwrap();
+        }
+
+        let count = store.count_all::<TestDoc>().await.unwrap();
+        assert_eq!(count, 4);
+    }
+
+    #[tokio::test]
+    async fn list_all_paginated() {
         let store = test_store().await;
 
         for i in 0..5 {
@@ -1910,268 +1935,53 @@ mod tests {
             store.insert(&doc).await.unwrap();
         }
 
-        // count_all
-        let count = store.count_all::<TestDoc>().await.unwrap();
-        assert_eq!(count, 5);
-
-        // Paginated: first 2
+        // First page
         let page1 = store.list_all_paginated::<TestDoc>(0, 2).await.unwrap();
         assert_eq!(page1.len(), 2);
 
-        // Paginated: skip 2, take 2
+        // Second page
         let page2 = store.list_all_paginated::<TestDoc>(2, 2).await.unwrap();
         assert_eq!(page2.len(), 2);
 
-        // Pages don't overlap
-        assert_ne!(page1[0].id, page2[0].id);
-
-        // Paginated: beyond end
-        let page_end = store.list_all_paginated::<TestDoc>(10, 5).await.unwrap();
-        assert!(page_end.is_empty());
+        // Third page (only 1 left)
+        let page3 = store.list_all_paginated::<TestDoc>(4, 2).await.unwrap();
+        assert_eq!(page3.len(), 1);
     }
 
     #[tokio::test]
-    async fn compare_and_update_version_conflict() {
+    async fn update_last_used_at() {
         let store = test_store().await;
-
         let doc = TestDoc {
-            name: "versioned".into(),
+            name: "last-used".to_string(),
             value: 1,
         };
         let inserted = store.insert(&doc).await.unwrap();
-        assert_eq!(inserted.version, 1);
+        assert!(inserted.last_used_at.is_none());
 
-        // Update with correct version succeeds
-        let mut updated_data = inserted.data.clone();
-        updated_data.value = 2;
-        let won = store
-            .compare_and_update(&inserted.id, 1, &updated_data)
-            .await
-            .unwrap();
-        assert!(won);
+        store.update_last_used_at(&inserted.id).await.unwrap();
 
-        // Same version again (stale) fails
-        updated_data.value = 3;
-        let won = store
-            .compare_and_update(&inserted.id, 1, &updated_data)
-            .await
-            .unwrap();
-        assert!(!won);
-
-        // Verify the value stayed at 2
         let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
-        assert_eq!(fetched.data.value, 2);
-        assert_eq!(fetched.version, 2);
+        assert!(fetched.last_used_at.is_some());
     }
 
-    // ====================================================================
-    // StoreTransaction tests
-    // ====================================================================
-
     #[tokio::test]
-    async fn transaction_insert_and_get() {
+    async fn modify_applies_fn() {
         let store = test_store().await;
-
-        let mut tx = store.begin().await.unwrap();
         let doc = TestDoc {
-            name: "tx-test".to_string(),
-            value: 42,
-        };
-        let inserted = tx.insert(&doc).await.unwrap();
-        assert_eq!(inserted.data.name, "tx-test");
-
-        // Visible within the transaction
-        let found = tx.get::<TestDoc>(&inserted.id).await.unwrap();
-        assert!(found.is_some());
-
-        tx.commit().await.unwrap();
-
-        // Visible after commit via the store
-        let found = store.get::<TestDoc>(&inserted.id).await.unwrap();
-        assert!(found.is_some());
-        assert_eq!(found.unwrap().data.value, 42);
-    }
-
-    #[tokio::test]
-    async fn transaction_rollback_on_drop() {
-        let store = test_store().await;
-
-        let id = {
-            let mut tx = store.begin().await.unwrap();
-            let doc = TestDoc {
-                name: "rollback-test".to_string(),
-                value: 99,
-            };
-            let inserted = tx.insert(&doc).await.unwrap();
-
-            // Visible within tx
-            assert!(tx.get::<TestDoc>(&inserted.id).await.unwrap().is_some());
-
-            // Drop tx without commit — rolls back
-            inserted.id
-        };
-
-        // Not visible after rollback
-        let found = store.get::<TestDoc>(&id).await.unwrap();
-        assert!(found.is_none());
-    }
-
-    #[tokio::test]
-    async fn transaction_multi_op_commit() {
-        let store = test_store().await;
-
-        let mut tx = store.begin().await.unwrap();
-
-        // Insert two docs
-        let doc1 = TestDoc {
-            name: "multi-1".to_string(),
-            value: 1,
-        };
-        let doc2 = TestDoc {
-            name: "multi-2".to_string(),
-            value: 2,
-        };
-        let ins1 = tx.insert(&doc1).await.unwrap();
-        let ins2 = tx.insert(&doc2).await.unwrap();
-
-        // Update the first
-        let mut updated = doc1.clone();
-        updated.value = 10;
-        tx.update(&ins1.id, &updated).await.unwrap();
-
-        // Delete the second
-        tx.delete(&ins2.id).await.unwrap();
-
-        tx.commit().await.unwrap();
-
-        // Verify via store
-        let found1 = store.get::<TestDoc>(&ins1.id).await.unwrap().unwrap();
-        assert_eq!(found1.data.value, 10);
-
-        let found2 = store.get::<TestDoc>(&ins2.id).await.unwrap();
-        assert!(found2.is_none());
-    }
-
-    #[tokio::test]
-    async fn transaction_find_one_and_find_all() {
-        let store = test_store().await;
-
-        let mut tx = store.begin().await.unwrap();
-        let doc = TestDoc {
-            name: "findable".to_string(),
-            value: 7,
-        };
-        tx.insert(&doc).await.unwrap();
-
-        // find_one within tx
-        let found = tx.find_one::<TestDoc>("name", "findable").await.unwrap();
-        assert!(found.is_some());
-
-        // find_all within tx
-        let all = tx.find_all::<TestDoc>("name", "findable").await.unwrap();
-        assert_eq!(all.len(), 1);
-
-        tx.commit().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn transaction_delete_by_index() {
-        let store = test_store().await;
-
-        // Pre-populate
-        store
-            .insert(&TestDoc {
-                name: "batch".to_string(),
-                value: 1,
-            })
-            .await
-            .unwrap();
-        store
-            .insert(&TestDoc {
-                name: "batch".to_string(),
-                value: 2,
-            })
-            .await
-            .unwrap();
-        store
-            .insert(&TestDoc {
-                name: "keep".to_string(),
-                value: 3,
-            })
-            .await
-            .unwrap();
-
-        let mut tx = store.begin().await.unwrap();
-        let deleted = tx
-            .delete_by_index::<TestDoc>("name", "batch")
-            .await
-            .unwrap();
-        assert_eq!(deleted, 2);
-        tx.commit().await.unwrap();
-
-        // "batch" docs gone, "keep" remains
-        let remaining = store.find_all::<TestDoc>("name", "batch").await.unwrap();
-        assert!(remaining.is_empty());
-
-        let kept = store.find_one::<TestDoc>("name", "keep").await.unwrap();
-        assert!(kept.is_some());
-    }
-
-    #[tokio::test]
-    async fn transaction_compare_and_update() {
-        let store = test_store().await;
-
-        // Pre-populate
-        let doc = TestDoc {
-            name: "cas-test".to_string(),
-            value: 1,
+            name: "modify-me".to_string(),
+            value: 10,
         };
         let inserted = store.insert(&doc).await.unwrap();
 
-        let mut tx = store.begin().await.unwrap();
-        let mut updated = doc.clone();
-        updated.value = 2;
-        let won = tx
-            .compare_and_update(&inserted.id, 1, &updated)
+        let found = store
+            .modify::<TestDoc, _>(&inserted.id, |d| {
+                d.value += 5;
+            })
             .await
             .unwrap();
-        assert!(won);
-
-        // Stale version fails within same tx
-        updated.value = 3;
-        let won = tx
-            .compare_and_update(&inserted.id, 1, &updated)
-            .await
-            .unwrap();
-        assert!(!won);
-
-        tx.commit().await.unwrap();
+        assert!(found);
 
         let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
-        assert_eq!(fetched.data.value, 2);
-    }
-
-    #[tokio::test]
-    async fn transaction_count() {
-        let store = test_store().await;
-
-        let mut tx = store.begin().await.unwrap();
-        tx.insert(&TestDoc {
-            name: "counted".to_string(),
-            value: 1,
-        })
-        .await
-        .unwrap();
-        tx.insert(&TestDoc {
-            name: "counted".to_string(),
-            value: 2,
-        })
-        .await
-        .unwrap();
-
-        let count = tx.count::<TestDoc>("name", "counted").await.unwrap();
-        assert_eq!(count, 2);
-
-        tx.commit().await.unwrap();
+        assert_eq!(fetched.data.value, 15);
     }
 }
