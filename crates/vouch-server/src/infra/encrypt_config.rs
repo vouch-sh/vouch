@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! Encrypt a plain S3Config JSON into a KMS-encrypted envelope.
 //!
-//! This subcommand takes a plain `S3Config` JSON file, generates a data key via
-//! `kms:GenerateDataKey`, AES-256-GCM encrypts the inner config, and writes an
-//! `EncryptedEnvelope` JSON to stdout.
+//! This subcommand takes a plain `S3Config` JSON file, generates a P-384 data key
+//! pair via `kms:GenerateDataKeyPair`, HPKE-seals the inner config with the public
+//! key, and writes an `EncryptedEnvelope` JSON to stdout. The same key pair is
+//! reused at runtime for `HpkeDocumentCrypto` (database-level document encryption).
 //!
 //! ## Usage
 //!
@@ -20,15 +21,15 @@ use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use clap::Args;
-use zeroize::Zeroizing;
 
 use super::s3_config::{S3AcmeConfig, S3Config, S3TlsConfig};
-use crate::crypto::tpm_decrypt::{EncryptedEnvelope, aes_256_gcm_encrypt};
+use crate::crypto::document_crypto::{DocumentCrypto, HpkeDocumentCrypto};
+use crate::crypto::tpm_decrypt::{EncryptedEnvelope, HPKE_CONFIG_INFO, build_hpke_aad};
 
 /// Encrypt a plain S3Config JSON into a KMS-encrypted envelope.
 #[derive(Args)]
 pub struct EncryptConfigArgs {
-    /// KMS key ID, ARN, or alias for GenerateDataKey.
+    /// KMS key ID, ARN, or alias for GenerateDataKeyPair.
     #[arg(long)]
     pub kms_key_id: String,
 
@@ -124,45 +125,71 @@ pub async fn run(args: EncryptConfigArgs) -> Result<()> {
     let sdk_config = config_loader.load().await;
     let kms_client = aws_sdk_kms::Client::new(&sdk_config);
 
-    // 5. Generate a data key via KMS
-    tracing::info!("Generating data key via KMS (key: {})", args.kms_key_id);
-
-    let generate_response = kms_client
-        .generate_data_key()
-        .key_id(&args.kms_key_id)
-        .key_spec(aws_sdk_kms::types::DataKeySpec::Aes256)
-        .send()
-        .await
-        .context("KMS GenerateDataKey failed")?;
-
-    let plaintext_key_blob = generate_response
-        .plaintext()
-        .context("KMS GenerateDataKey response missing plaintext")?;
-    let plaintext_key = Zeroizing::new(plaintext_key_blob.as_ref().to_vec());
-
-    let encrypted_key_blob = generate_response
-        .ciphertext_blob()
-        .context("KMS GenerateDataKey response missing ciphertext_blob")?;
-    let encrypted_data_key = BASE64.encode(encrypted_key_blob.as_ref());
-
+    // 5. Generate a P-384 data key pair via KMS
     tracing::info!(
-        "Data key generated ({} bytes plaintext, {} bytes ciphertext)",
-        plaintext_key.len(),
-        encrypted_key_blob.as_ref().len()
+        "Generating P-384 data key pair via KMS (key: {})",
+        args.kms_key_id
     );
 
-    // 6. AES-256-GCM encrypt the inner config JSON
-    let encrypted_data_raw = aes_256_gcm_encrypt(&plaintext_key, &inner_json)
-        .context("AES-256-GCM encryption failed")?;
-    let encrypted_data = BASE64.encode(&encrypted_data_raw);
+    let generate_response = kms_client
+        .generate_data_key_pair()
+        .key_id(&args.kms_key_id)
+        .key_pair_spec(aws_sdk_kms::types::DataKeyPairSpec::EccNistP384)
+        .send()
+        .await
+        .context("KMS GenerateDataKeyPair failed")?;
 
-    // plaintext_key is Zeroizing — auto-zeroed when dropped here
+    // Extract the plaintext public key (DER-encoded SubjectPublicKeyInfo)
+    let public_key_der_blob = generate_response
+        .public_key()
+        .context("KMS GenerateDataKeyPair response missing public_key")?;
+    let public_key_der = public_key_der_blob.as_ref().to_vec();
+
+    // Extract the raw P-384 public key for HPKE
+    let raw_public_key =
+        crate::crypto::document_crypto::p384_public_key_from_der(&public_key_der)
+            .context("Failed to extract raw P-384 public key from KMS response")?;
+
+    // Extract the plaintext private key (DER-encoded ECPrivateKey) — used only for seal
+    let private_key_der_blob = generate_response
+        .private_key_plaintext()
+        .context("KMS GenerateDataKeyPair response missing private_key_plaintext")?;
+    let raw_private_key =
+        crate::crypto::document_crypto::p384_private_key_from_der(private_key_der_blob.as_ref())
+            .context("Failed to extract raw P-384 private key from KMS response")?;
+
+    // The encrypted private key (KMS ciphertext blob — decrypted at runtime via KMS)
+    let encrypted_private_key_blob = generate_response
+        .private_key_ciphertext_blob()
+        .context("KMS GenerateDataKeyPair response missing private_key_ciphertext_blob")?;
+    let encrypted_private_key = BASE64.encode(encrypted_private_key_blob.as_ref());
+
+    tracing::info!(
+        "P-384 data key pair generated (public key: {} bytes DER, encrypted private key: {} bytes)",
+        public_key_der.len(),
+        encrypted_private_key_blob.as_ref().len()
+    );
+
+    // 6. HPKE seal the inner config JSON
+    let crypto = HpkeDocumentCrypto::new(raw_public_key, raw_private_key)
+        .context("Failed to create HPKE crypto for config encryption")?;
+
+    let aad = build_hpke_aad(wrapper_version);
+    let sealed = crypto
+        .seal(HPKE_CONFIG_INFO, &aad, &inner_json)
+        .context("HPKE seal failed")?;
+
+    let encapped_key = sealed
+        .encapped_key
+        .context("HPKE seal did not produce encapped_key")?;
 
     // 7. Build the envelope
     let envelope = EncryptedEnvelope {
         kms_key_id: args.kms_key_id.clone(),
-        encrypted_data_key,
-        encrypted_data,
+        encrypted_private_key,
+        public_key: BASE64.encode(&public_key_der),
+        encapped_key,
+        encrypted_data: sealed.data,
         version: wrapper_version,
         tls: wrapper_tls,
         acme: wrapper_acme,

@@ -327,12 +327,13 @@ async fn fetch_s3_raw(client: &S3Client, source: &S3ConfigSource) -> Result<(Vec
 /// * `source` - S3 bucket/key/region configuration
 /// * `kms_client` - Optional KMS client; required only when the config is an encrypted envelope
 ///
-/// Returns the parsed config and the ETag for change detection.
+/// Returns the parsed config, the ETag for change detection, and optionally the HPKE
+/// key material recovered from the encrypted envelope (for use with `HpkeDocumentCrypto`).
 pub async fn fetch_s3_config(
     s3_client: &S3Client,
     source: &S3ConfigSource,
     kms_client: Option<&KmsClient>,
-) -> Result<(S3Config, String)> {
+) -> Result<(S3Config, String, Option<tpm_decrypt::HpkeKeyMaterial>)> {
     let (raw_bytes, etag) = fetch_s3_raw(s3_client, source).await?;
 
     if tpm_decrypt::is_encrypted_envelope(&raw_bytes) {
@@ -361,12 +362,13 @@ pub async fn fetch_s3_config(
         let wrapper_acme = envelope.acme.clone();
         let wrapper_version = envelope.version;
 
-        // Decrypt the inner config via attested KMS call
-        let plaintext = tpm_decrypt::decrypt_envelope(kms, &envelope).await?;
+        // Decrypt the inner config via attested KMS call.
+        // This also recovers the P-384 HPKE key pair for document encryption.
+        let decrypted = tpm_decrypt::decrypt_envelope(kms, &envelope).await?;
 
         // Parse the decrypted JSON as S3Config
-        let mut config: S3Config =
-            serde_json::from_slice(&plaintext).context("Failed to parse decrypted S3 config")?;
+        let mut config: S3Config = serde_json::from_slice(&decrypted.config_bytes)
+            .context("Failed to parse decrypted S3 config")?;
 
         // Merge wrapper fields into the config
         // TLS from wrapper takes precedence (allows hot-reload without decryption)
@@ -383,12 +385,12 @@ pub async fn fetch_s3_config(
         }
 
         tracing::info!("S3 config decrypted and parsed successfully");
-        Ok((config, etag))
+        Ok((config, etag, Some(decrypted.hpke_keys)))
     } else {
         tracing::info!("S3 config format: plain JSON");
         let config: S3Config =
             serde_json::from_slice(&raw_bytes).context("Failed to parse S3 config JSON")?;
-        Ok((config, etag))
+        Ok((config, etag, None))
     }
 }
 

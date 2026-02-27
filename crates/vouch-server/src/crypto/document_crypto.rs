@@ -92,15 +92,12 @@ impl DocumentCrypto for PlaintextDocumentCrypto {
 /// derived from the public key via HKDF so that writers can compute index
 /// values without access to the private key.
 #[derive(Debug)]
-#[allow(dead_code)] // Wired in via infra/startup.rs when HPKE keys are configured
 pub struct HpkeDocumentCrypto {
     public_key: rustls::crypto::hpke::HpkePublicKey,
-    #[allow(dead_code)]
     private_key: Zeroizing<Vec<u8>>,
     hmac_key: Zeroizing<Vec<u8>>,
 }
 
-#[allow(dead_code)] // Wired in via infra/startup.rs when HPKE keys are configured
 impl HpkeDocumentCrypto {
     /// Create a new HPKE document crypto instance.
     ///
@@ -175,7 +172,6 @@ impl DocumentCrypto for HpkeDocumentCrypto {
 /// Derive a 32-byte HMAC key from the public key using HKDF-SHA384.
 ///
 /// `HKDF-SHA384(salt=SHA384(public_key), ikm=public_key, info="vouch-index-hmac")` → 32 bytes.
-#[allow(dead_code)] // Used by HpkeDocumentCrypto
 fn derive_hmac_key(public_key: &[u8]) -> Result<Vec<u8>> {
     use aws_lc_rs::digest;
     use aws_lc_rs::hkdf;
@@ -194,7 +190,6 @@ fn derive_hmac_key(public_key: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Helper type that implements `KeyType` for a fixed-length output.
-#[allow(dead_code)] // Used by derive_hmac_key
 struct HkdfLen(usize);
 
 impl aws_lc_rs::hkdf::KeyType for HkdfLen {
@@ -216,7 +211,6 @@ impl aws_lc_rs::hkdf::KeyType for HkdfLen {
 /// # Errors
 ///
 /// Returns an error if the DER is malformed or not a P-384 key.
-#[allow(dead_code)] // Used by infra/startup.rs when HPKE keys are configured
 pub fn p384_public_key_from_der(der: &[u8]) -> Result<Vec<u8>> {
     // SubjectPublicKeyInfo ::= SEQUENCE {
     //   algorithm  AlgorithmIdentifier,
@@ -248,7 +242,6 @@ pub fn p384_public_key_from_der(der: &[u8]) -> Result<Vec<u8>> {
 /// # Errors
 ///
 /// Returns an error if the DER is malformed or the key is not 48 bytes.
-#[allow(dead_code)] // Used by infra/startup.rs when HPKE keys are configured
 pub fn p384_private_key_from_der(der: &[u8]) -> Result<Vec<u8>> {
     // ECPrivateKey ::= SEQUENCE {
     //   version        INTEGER { ecPrivkeyVer1(1) },
@@ -277,7 +270,6 @@ pub fn p384_private_key_from_der(der: &[u8]) -> Result<Vec<u8>> {
 /// Minimal DER parser for extracting keys from SPKI and ECPrivateKey
 /// structures. Not a full ASN.1 parser — handles only the subset needed
 /// for P-384 key extraction.
-#[allow(dead_code)] // Used by p384_*_from_der functions
 struct SimpleDerParser<'a> {
     data: &'a [u8],
     pos: usize,
