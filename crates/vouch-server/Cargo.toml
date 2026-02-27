@@ -29,7 +29,7 @@ aws-sdk-dsql = { workspace = true, features = ["rt-tokio", "default-https-client
 aws-sdk-kms = { workspace = true, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "rustls"] }
 aws-sdk-s3 = { workspace = true, features = ["rt-tokio", "default-https-client", "behavior-version-latest", "rustls"] }
 aws-smithy-types = { workspace = true }
-axum = { workspace = true, features = ["json", "tokio", "http1", "form", "query"] }
+axum = { workspace = true, features = ["json", "tokio", "http1", "http2", "form", "original-uri", "query"] }
 axum-extra = { workspace = true, features = ["cookie", "typed-header"] }
 axum-server = { workspace = true, features = ["tls-rustls"] }
 base64 = { workspace = true, features = ["std"] }
