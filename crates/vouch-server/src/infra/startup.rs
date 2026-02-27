@@ -70,13 +70,44 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 
     // Validate config after all sources merged (env, S3)
     config.validate()?;
+    let nitro_tpm = tpm_decrypt::is_nitro_tpm_available();
+    let attest_binary = nitro_tpm && tpm_decrypt::is_attest_binary_available();
+    let nitro_tpm_status = if nitro_tpm {
+        if attest_binary {
+            "true (binary=ready)"
+        } else {
+            "true (binary=missing)"
+        }
+    } else {
+        "false"
+    };
     tracing::info!(
         "Configuration validated: rp_id={}, base_url={}, tls={}, NitroTPM={}",
         config.rp_id,
         config.base_url,
         config.tls_configured(),
-        tpm_decrypt::is_nitro_tpm_available(),
+        nitro_tpm_status,
     );
+
+    // Fire-and-forget background probe that exercises the full attestation
+    // path (ephemeral RSA key + nitro-tpm-attest subprocess + /dev/tpm0).
+    // Surfaces burstable-instance NV_DefineSpace limits and broken TPM
+    // devices without blocking startup.
+    if attest_binary {
+        tokio::task::spawn(async {
+            match tokio::task::spawn_blocking(tpm_decrypt::probe_attestation).await {
+                Ok(Ok(n)) => {
+                    tracing::info!("NitroTPM attestation probe succeeded ({n} bytes)");
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("NitroTPM attestation probe failed: {e:#}");
+                }
+                Err(e) => {
+                    tracing::warn!("NitroTPM attestation probe task panicked: {e}");
+                }
+            }
+        });
+    }
 
     // Feature status summary — one log per feature for searchable CloudWatch events
     tracing::info!(
