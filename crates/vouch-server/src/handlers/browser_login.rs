@@ -104,7 +104,6 @@ const MIN_CREDENTIAL_ID_BYTES: usize = 16;
 /// Maximum decoded byte length for a valid credential ID (WebAuthn spec).
 const MAX_CREDENTIAL_ID_BYTES: usize = 1023;
 
-
 // ============================================================================
 // Authentication State
 // ============================================================================
@@ -713,12 +712,8 @@ mod tests {
         // Non-UUID pending_auth should redirect to /login (stripping the bad param)
         let (app, _state) = crate::test_utils::test_app().await;
 
-        let resp = crate::test_utils::http_get_full(
-            &app,
-            "/login?pending_auth=not-a-uuid",
-            &[],
-        )
-        .await;
+        let resp =
+            crate::test_utils::http_get_full(&app, "/login?pending_auth=not-a-uuid", &[]).await;
 
         assert_eq!(resp.status, axum::http::StatusCode::SEE_OTHER);
         let location = resp
