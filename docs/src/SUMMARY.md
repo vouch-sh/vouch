@@ -34,6 +34,8 @@
 - [Backup and Recovery](operations/backup-recovery.md)
 - [Software Updates](operations/updates.md)
 - [Troubleshooting](operations/troubleshooting.md)
+- [Incident Response](operations/incident-response.md)
+- [Vulnerability Disclosure](operations/vulnerability-disclosure.md)
 
 ---
 
@@ -43,41 +45,7 @@
 - [Endpoints and Discovery](oidc/endpoints.md)
 - [Grant Types](oidc/grant-types.md)
 - [Token Format and Claims](oidc/tokens.md)
-- [DPoP and FAPI 2.0](oidc/dpop-fapi.md)
-- [Resource Indicators (RFC 8707)](oidc/resource-indicators.md)
 - [JWT Bearer (RFC 7523)](oidc/jwt-bearer.md)
-
----
-
-# Architecture
-
-- [System Overview](architecture/overview.md)
-- [Components](architecture/components.md)
-- [Authentication Flows](architecture/auth-flows.md)
-- [Data Model](architecture/data-model.md)
-- [Agent IPC Protocol](architecture/agent-ipc.md)
-- [Technology Stack](architecture/tech-stack.md)
-
----
-
-# Security
-
-- [Security Model](security/model.md)
-- [Security Controls](security/controls.md)
-- [Session and Credential Security](security/session-credential.md)
-- [Hardening Guide](security/hardening.md)
-- [Incident Response](security/incident-response.md)
-- [Vulnerability Disclosure](security/vulnerability-disclosure.md)
-
----
-
-# Threat Model
-
-- [Overview and Scope](threat-model/overview.md)
-- [Trust Boundaries and Assets](threat-model/trust-boundaries.md)
-- [Threat Actors](threat-model/actors.md)
-- [Threat Statements](threat-model/threats.md)
-- [Mitigations Summary](threat-model/mitigations.md)
 
 ---
 
@@ -88,7 +56,6 @@
   - [Key Ceremony](advanced/airgap-key-ceremony.md)
   - [YubiKey Provisioning](advanced/airgap-yubikey.md)
   - [Operations](advanced/airgap-operations.md)
-
 
 ---
 

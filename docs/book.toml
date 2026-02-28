@@ -1,5 +1,5 @@
 [book]
-title = "Vouch Documentation"
+title = "Vouch Server Operator Guide"
 authors = ["Vouch Team"]
 description = "Operator and administrator documentation for Vouch — hardware-backed authentication."
 language = "en"
