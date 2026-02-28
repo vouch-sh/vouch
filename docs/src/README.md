@@ -33,8 +33,6 @@ Vouch is designed for high-security environments:
 - **Short-lived credentials** — Minimize blast radius of compromise
 - **Audit trail** — Every credential issuance logged with attestation
 
-See [Security Model](security/model.md) for the full security model and [Threat Model](threat-model/overview.md) for the threat analysis.
-
 ---
 
 Get started with the [Deployment Overview](deployment/overview.md).
