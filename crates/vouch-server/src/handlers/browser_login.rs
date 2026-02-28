@@ -704,6 +704,62 @@ mod tests {
         assert_eq!(decoded.pending_auth, Some("pending-123".to_string()));
     }
 
+    // ========================================================================
+    // Login Page — pending_auth Validation Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_login_page_rejects_non_uuid_pending_auth() {
+        // Non-UUID pending_auth should redirect to /login (stripping the bad param)
+        let (app, _state) = crate::test_utils::test_app().await;
+
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            "/login?pending_auth=not-a-uuid",
+            &[],
+        )
+        .await;
+
+        assert_eq!(resp.status, axum::http::StatusCode::SEE_OTHER);
+        let location = resp
+            .headers
+            .get("location")
+            .expect("redirect should have location header")
+            .to_str()
+            .expect("location should be valid string");
+        assert_eq!(location, "/login");
+    }
+
+    #[tokio::test]
+    async fn test_login_page_accepts_valid_uuid_pending_auth() {
+        // Valid UUID pending_auth should not redirect to /login
+        let (app, _state) = crate::test_utils::test_app().await;
+
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            "/login?pending_auth=aaaaaaaa-bbbb-7ccc-dddd-eeeeeeeeeeee",
+            &[],
+        )
+        .await;
+
+        // Should render the login page (200), not redirect to /login
+        assert_eq!(resp.status, axum::http::StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_login_page_no_pending_auth_renders_ok() {
+        // No pending_auth at all should render the login page
+        let (app, _state) = crate::test_utils::test_app().await;
+
+        let resp = crate::test_utils::http_get_full(&app, "/login", &[]).await;
+
+        assert_eq!(resp.status, axum::http::StatusCode::OK);
+    }
+
+    // ========================================================================
+    // Browser Auth State Tests
+    // ========================================================================
+
     #[test]
     fn test_browser_auth_state_decode_wrong_secret() {
         let now = jiff::Timestamp::now().as_second();

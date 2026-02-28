@@ -637,3 +637,122 @@ pub async fn get_github_token(
         repositories,
     }))
 }
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use crate::test_utils::*;
+    use axum::http::StatusCode;
+
+    // ========================================================================
+    // SSH Serial Validation Tests — Positive
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_ssh_serial_valid_numeric() {
+        // A valid numeric serial should pass validation (returning 200, not 400)
+        let (app, _state) = test_app().await;
+
+        let (status, _body) = http_get(&app, "/v1/credentials/ssh/krl/12345", &[]).await;
+
+        // Should not be 400 — the serial format is valid
+        assert_ne!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "Valid numeric serial should pass validation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ssh_serial_valid_max_u64() {
+        // Maximum u64 value (20 digits) should be accepted
+        let (app, _state) = test_app().await;
+
+        let (status, _body) =
+            http_get(&app, "/v1/credentials/ssh/krl/18446744073709551615", &[]).await;
+
+        assert_ne!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "Max u64 serial should pass validation"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_ssh_serial_valid_zero() {
+        let (app, _state) = test_app().await;
+
+        let (status, _body) = http_get(&app, "/v1/credentials/ssh/krl/0", &[]).await;
+
+        assert_ne!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "Zero serial should pass validation"
+        );
+    }
+
+    // ========================================================================
+    // SSH Serial Validation Tests — Negative
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_ssh_serial_rejects_non_numeric() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/abc123", &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "invalid_serial");
+    }
+
+    #[tokio::test]
+    async fn test_ssh_serial_rejects_too_long() {
+        // 21 digits exceeds the 20-digit maximum for u64
+        let (app, _state) = test_app().await;
+
+        let (status, body) =
+            http_get(&app, "/v1/credentials/ssh/krl/123456789012345678901", &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "invalid_serial");
+    }
+
+    #[tokio::test]
+    async fn test_ssh_serial_rejects_negative() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/-1", &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "invalid_serial");
+    }
+
+    #[tokio::test]
+    async fn test_ssh_serial_rejects_hex() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/0xDEADBEEF", &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "invalid_serial");
+    }
+
+    #[tokio::test]
+    async fn test_ssh_serial_rejects_special_chars() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_get(&app, "/v1/credentials/ssh/krl/123%3B456", &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["code"], "invalid_serial");
+    }
+}
