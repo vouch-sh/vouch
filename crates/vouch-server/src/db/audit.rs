@@ -11,7 +11,6 @@ use anyhow::Result;
 use sea_query::{Expr, Iden, Order, Query};
 
 use super::pool::Pool;
-use super::types::BuildSql;
 use crate::crypto::document_crypto::DocumentCrypto;
 
 // ============================================================================
@@ -122,7 +121,6 @@ impl AuditStore {
     ) -> Result<String> {
         let id = uuid::Uuid::now_v7().to_string();
         let now = jiff::Timestamp::now().to_string();
-        let db_type = self.pool.db_type();
 
         let email_domain = email.and_then(extract_domain);
         let email_hmac = email.map(|e| self.crypto.hmac_index(e));
@@ -130,7 +128,7 @@ impl AuditStore {
         let domain_ref: Option<&str> = email_domain.as_deref();
         let hmac_ref: Option<&str> = email_hmac.as_deref();
 
-        let sql = Query::insert()
+        let stmt = Query::insert()
             .into_table(AuditEvents::Table)
             .columns([
                 AuditEvents::Id,
@@ -141,7 +139,7 @@ impl AuditStore {
                 AuditEvents::Data,
                 AuditEvents::CreatedAt,
             ])
-            .values_panic([
+            .values([
                 id.as_str().into(),
                 event_type.into(),
                 user_id.into(),
@@ -149,10 +147,10 @@ impl AuditStore {
                 hmac_ref.into(),
                 data_json.into(),
                 now.as_str().into(),
-            ])
-            .build_sql(db_type);
+            ])?
+            .to_owned();
 
-        crate::db_execute!(&self.pool, sqlx::query(&sql))?;
+        crate::db_execute!(&self.pool, stmt)?;
 
         Ok(id)
     }
@@ -163,10 +161,8 @@ impl AuditStore {
     ///
     /// Returns an error if the query fails.
     pub async fn query_events(&self, filter: &AuditEventFilter) -> Result<Vec<AuditEvent>> {
-        let db_type = self.pool.db_type();
-
         // Scope the query builder so it drops before await
-        let sql = {
+        let stmt = {
             let mut q = Query::select();
             q.columns([
                 AuditEvents::Id,
@@ -199,9 +195,9 @@ impl AuditStore {
                 q.limit(limit);
             }
 
-            q.build_sql(db_type)
+            q.to_owned()
         };
-        let rows: Vec<RawAuditRow> = crate::db_fetch_all!(&self.pool, sqlx::query_as(&sql))?;
+        let rows: Vec<RawAuditRow> = crate::db_fetch_all!(&self.pool, stmt, RawAuditRow)?;
 
         let mut events = Vec::with_capacity(rows.len());
         for row in rows {
@@ -218,15 +214,13 @@ impl AuditStore {
     ///
     /// Returns an error if the delete fails.
     pub async fn delete_old_events(&self, event_type: &str, before: &str) -> Result<u64> {
-        let db_type = self.pool.db_type();
-
-        let sql = Query::delete()
+        let stmt = Query::delete()
             .from_table(AuditEvents::Table)
             .and_where(Expr::col(AuditEvents::EventType).eq(event_type))
             .and_where(Expr::col(AuditEvents::CreatedAt).lt(before))
-            .build_sql(db_type);
+            .to_owned();
 
-        let result = crate::db_execute!(&self.pool, sqlx::query(&sql))?;
+        let result = crate::db_execute!(&self.pool, stmt)?;
         Ok(result.rows_affected())
     }
 }
@@ -272,6 +266,7 @@ fn raw_to_audit_event(row: RawAuditRow) -> AuditEvent {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::panic,
+    clippy::unreachable,
     clippy::indexing_slicing
 )]
 mod tests {
@@ -281,20 +276,23 @@ mod tests {
     async fn test_audit() -> AuditStore {
         let pool = Pool::connect("sqlite::memory:").await.unwrap();
 
-        crate::db_execute!(
-            &pool,
-            sqlx::query(
-                "CREATE TABLE IF NOT EXISTS audit_events (
-                    id TEXT PRIMARY KEY,
-                    event_type TEXT NOT NULL,
-                    user_id TEXT,
-                    email_domain TEXT,
-                    email_hmac TEXT,
-                    data TEXT NOT NULL,
-                    created_at TEXT NOT NULL
-                )"
-            )
+        // Tests always use SQLite — execute raw DDL directly
+        let Pool::Sqlite(ref p) = pool else {
+            unreachable!()
+        };
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS audit_events (
+                id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                user_id TEXT,
+                email_domain TEXT,
+                email_hmac TEXT,
+                data TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )",
         )
+        .execute(p)
+        .await
         .unwrap();
 
         let crypto = Arc::new(PlaintextDocumentCrypto);

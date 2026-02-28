@@ -460,7 +460,7 @@ async fn test_oauth_client_crud() {
         .expect("Failed to get client")
         .expect("Client should exist");
     assert_eq!(updated.name, "My Updated App");
-    assert_eq!(updated.get_redirect_uris().len(), 2);
+    assert_eq!(updated.redirect_uris.len(), 2);
 
     // Delete client
     let deleted = delete_oauth_client(&store, &client.id)
@@ -996,35 +996,6 @@ async fn test_auth_event_logging() {
     )
     .await
     .expect("Failed to insert auth event");
-
-    // Query events for user (get_auth_events now uses AuditStore)
-    let events = get_auth_events(
-        &audit,
-        &AuthEventQuery {
-            user_id: Some(user_id.clone()),
-            limit: Some(10),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("Failed to get events");
-
-    assert_eq!(events.len(), 2);
-
-    // Query by event type
-    let events = get_auth_events(
-        &audit,
-        &AuthEventQuery {
-            event_type: Some("login_success".to_string()),
-            limit: Some(10),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("Failed to get events");
-
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].event_type, AuthEventType::LoginSuccess);
 }
 
 // ========================================================================
@@ -1398,9 +1369,12 @@ async fn test_cloud_integration_crud() {
     assert!(config.is_none());
 
     // Create GCP config
-    let gcp_config =
-        r#"{"project_number":"123456789","pool_id":"vouch-pool","provider_id":"vouch-provider"}"#;
-    let integration = upsert_cloud_integration(&store, &org.id, "gcp", gcp_config, &user_id)
+    let gcp_config: serde_json::Value = serde_json::json!({
+        "project_number": "123456789",
+        "pool_id": "vouch-pool",
+        "provider_id": "vouch-provider"
+    });
+    let integration = upsert_cloud_integration(&store, &org.id, "gcp", &gcp_config, &user_id)
         .await
         .expect("Failed to create config");
 
@@ -1420,9 +1394,12 @@ async fn test_cloud_integration_crud() {
     assert_eq!(config.config, gcp_config);
 
     // Update the config
-    let updated_config =
-        r#"{"project_number":"987654321","pool_id":"new-pool","provider_id":"new-provider"}"#;
-    let updated = upsert_cloud_integration(&store, &org.id, "gcp", updated_config, &user_id)
+    let updated_config: serde_json::Value = serde_json::json!({
+        "project_number": "987654321",
+        "pool_id": "new-pool",
+        "provider_id": "new-provider"
+    });
+    let updated = upsert_cloud_integration(&store, &org.id, "gcp", &updated_config, &user_id)
         .await
         .expect("Failed to update config");
 
@@ -1461,14 +1438,15 @@ async fn test_cloud_integration_multiple_providers() {
         .expect("Failed to create user");
 
     // Create both GCP and AWS configs
-    let gcp_config = r#"{"project_number":"111","pool_id":"pool","provider_id":"provider"}"#;
-    let aws_config = r#"{"default_role_arn":"arn:aws:iam::123:role/Test"}"#;
+    let gcp_config =
+        serde_json::json!({"project_number":"111","pool_id":"pool","provider_id":"provider"});
+    let aws_config = serde_json::json!({"default_role_arn":"arn:aws:iam::123:role/Test"});
 
-    upsert_cloud_integration(&store, &org.id, "gcp", gcp_config, &user_id)
+    upsert_cloud_integration(&store, &org.id, "gcp", &gcp_config, &user_id)
         .await
         .expect("Failed to create GCP config");
 
-    upsert_cloud_integration(&store, &org.id, "aws", aws_config, &user_id)
+    upsert_cloud_integration(&store, &org.id, "aws", &aws_config, &user_id)
         .await
         .expect("Failed to create AWS config");
 
@@ -1522,14 +1500,16 @@ async fn test_cloud_integration_org_isolation() {
         .expect("Failed to create user2");
 
     // Create GCP config for org1
-    let config1 = r#"{"project_number":"111","pool_id":"pool1","provider_id":"provider1"}"#;
-    upsert_cloud_integration(&store, &org1.id, "gcp", config1, &user_id1)
+    let config1 =
+        serde_json::json!({"project_number":"111","pool_id":"pool1","provider_id":"provider1"});
+    upsert_cloud_integration(&store, &org1.id, "gcp", &config1, &user_id1)
         .await
         .expect("Failed to create config for org1");
 
     // Create GCP config for org2
-    let config2 = r#"{"project_number":"222","pool_id":"pool2","provider_id":"provider2"}"#;
-    upsert_cloud_integration(&store, &org2.id, "gcp", config2, &user_id2)
+    let config2 =
+        serde_json::json!({"project_number":"222","pool_id":"pool2","provider_id":"provider2"});
+    upsert_cloud_integration(&store, &org2.id, "gcp", &config2, &user_id2)
         .await
         .expect("Failed to create config for org2");
 
@@ -2136,65 +2116,6 @@ async fn test_delete_expired_jwt_assertion_jtis() {
     assert!(
         reused,
         "Expired+deleted JTI should be accepted again after cleanup"
-    );
-}
-
-// ========================================================================
-// AuditStore — since filter
-// ========================================================================
-
-#[tokio::test]
-async fn test_audit_store_since_filter() {
-    let (store, audit) = test_db().await;
-
-    let (user_id, _) = upsert_user(&store, "since-filter@example.com", None)
-        .await
-        .expect("upsert user");
-
-    // Insert an event
-    insert_auth_event(
-        &audit,
-        &AuthEventParams {
-            user_id: user_id.clone(),
-            event_type: AuthEventType::LoginSuccess,
-            success: true,
-            ..Default::default()
-        },
-        None,
-    )
-    .await
-    .expect("insert event");
-
-    // Query with a future `since` timestamp — should return no events
-    let no_events = get_auth_events(
-        &audit,
-        &AuthEventQuery {
-            since: Some("2099-01-01T00:00:00Z".to_string()),
-            limit: Some(100),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("query failed");
-    assert!(
-        no_events.is_empty(),
-        "`since` in the future should exclude all events"
-    );
-
-    // Query with a past `since` timestamp — should return the event
-    let all_events = get_auth_events(
-        &audit,
-        &AuthEventQuery {
-            since: Some("2000-01-01T00:00:00Z".to_string()),
-            limit: Some(100),
-            ..Default::default()
-        },
-    )
-    .await
-    .expect("query failed");
-    assert!(
-        !all_events.is_empty(),
-        "`since` in the past should include events"
     );
 }
 

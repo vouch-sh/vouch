@@ -442,7 +442,7 @@ pub async fn update_application_api(
     let redirect_uris = req
         .redirect_uris
         .clone()
-        .unwrap_or_else(|| client.get_redirect_uris());
+        .unwrap_or_else(|| client.redirect_uris.clone());
 
     // Validate redirect URIs are valid URLs
     if let Err(invalid) = validate_redirect_uris(&redirect_uris) {
@@ -461,7 +461,7 @@ pub async fn update_application_api(
         .resource_uris
         .as_deref()
         .map(|u| u.to_vec())
-        .unwrap_or_else(|| client.get_resource_uris());
+        .unwrap_or_else(|| client.resource_uris.clone());
 
     // Validate resource URIs per RFC 8707 (absolute URI, no fragment).
     for uri_str in &resource_uris {

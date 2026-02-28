@@ -76,9 +76,6 @@ impl GitHubService<'_> {
             .await
             .map_err(|e| GitHubError::GitHubApi(e.to_string()))?;
 
-        // Serialize permissions to JSON
-        let permissions_json = serde_json::to_string(&details.permissions).unwrap_or_default();
-
         // Store installation in database
         db::create_github_installation(
             self.store,
@@ -86,7 +83,7 @@ impl GitHubService<'_> {
             params.installation_id as i64,
             &details.account.login,
             &details.account.account_type,
-            &permissions_json,
+            &details.permissions,
             &details.repository_selection,
             Some(&params.user.id),
         )
@@ -99,7 +96,8 @@ impl GitHubService<'_> {
             params.org_id
         );
 
-        // Log audit event
+        // Log audit event (serialize permissions for the audit log string)
+        let permissions_json = serde_json::to_string(&details.permissions).unwrap_or_default();
         self.log_installation_event(
             "installation_connected",
             params.user,
@@ -165,9 +163,6 @@ impl GitHubService<'_> {
             .await
             .map_err(|e| GitHubError::GitHubApi(e.to_string()))?;
 
-        // Serialize permissions to JSON
-        let permissions_json = serde_json::to_string(&details.permissions).unwrap_or_default();
-
         // Store installation in database
         db::create_github_installation(
             self.store,
@@ -175,7 +170,7 @@ impl GitHubService<'_> {
             params.installation_id as i64,
             &user_installation.account.login,
             &user_installation.account.account_type,
-            &permissions_json,
+            &details.permissions,
             &details.repository_selection,
             Some(&params.user.id),
         )
@@ -189,7 +184,8 @@ impl GitHubService<'_> {
             params.user.id
         );
 
-        // Log audit event
+        // Log audit event (serialize permissions for the audit log string)
+        let permissions_json = serde_json::to_string(&details.permissions).unwrap_or_default();
         self.log_installation_event(
             "installation_reconnected",
             params.user,

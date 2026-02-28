@@ -103,10 +103,6 @@ fn build_general_limited_routes() -> Router<Arc<AppState>> {
         .route("/oauth/authorize", get(handlers::oidc::authorize))
         // Org admin API (JSON, JWT Bearer auth)
         .route(
-            "/api/v1/org/auth-events",
-            get(handlers::admin::list_auth_events),
-        )
-        .route(
             "/api/v1/org/scim-tokens",
             get(handlers::admin::list_scim_tokens).post(handlers::admin::create_scim_token),
         )

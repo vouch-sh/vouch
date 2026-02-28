@@ -291,7 +291,7 @@ pub async fn authorize(
             "Invalid redirect_uri '{}' for client '{}'. Registered URIs: {:?}",
             validated.redirect_uri(),
             validated.client_id(),
-            oauth_client.get_redirect_uris()
+            oauth_client.redirect_uris
         );
         // Show error page instead of redirecting to unregistered URI
         return AuthorizeDeniedTemplate {

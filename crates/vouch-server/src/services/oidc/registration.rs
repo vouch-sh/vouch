@@ -409,10 +409,6 @@ pub async fn register_client(
     let registration_metadata = build_registration_metadata(&request);
     let registration_metadata_str = serde_json::to_string(&registration_metadata).ok();
 
-    // Serialize grant/response types as JSON arrays for storage
-    let grant_types_json = serde_json::to_string(&grant_types).ok();
-    let response_types_json = serde_json::to_string(&response_types).ok();
-
     // 14. Generate registration access token
     let reg_token = generate_registration_token()?;
     let reg_token_hash = hash_token(&reg_token);
@@ -434,8 +430,8 @@ pub async fn register_client(
             jwks_uri: jwks_uri.as_deref(),
             fapi_profile: Some(fapi_profile),
             dpop_bound_access_tokens: Some(dpop_bound),
-            grant_types: grant_types_json.as_deref(),
-            response_types: response_types_json.as_deref(),
+            grant_types: Some(&grant_types),
+            response_types: Some(&response_types),
             software_id: request.software_id.as_deref(),
             software_version: request.software_version.as_deref(),
             registration_source: RegistrationSource::Dynamic,
@@ -610,9 +606,8 @@ async fn lookup_and_verify_registration_token(
 /// Per RFC 7592 Section 3, the response omits the `registration_access_token`
 /// but includes the `registration_client_uri`.
 fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationResponse {
-    let redirect_uris = client.get_redirect_uris();
-    let grant_types = parse_json_string_array(client.grant_types.as_deref());
-    let response_types = parse_json_string_array(client.response_types.as_deref());
+    let grant_types = client.grant_types.clone().unwrap_or_default();
+    let response_types = client.response_types.clone().unwrap_or_default();
     let metadata = parse_registration_metadata(client.registration_metadata.as_deref());
 
     let client_id_issued_at = client.created_at.as_second();
@@ -624,10 +619,10 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
         client_id_issued_at: Some(client_id_issued_at),
         registration_access_token: None,
         registration_client_uri: Some(format!("{base_url}/oauth/register/{}", client.client_id)),
-        redirect_uris: if redirect_uris.is_empty() {
+        redirect_uris: if client.redirect_uris.is_empty() {
             None
         } else {
-            Some(redirect_uris)
+            Some(client.redirect_uris.clone())
         },
         token_endpoint_auth_method: client.token_endpoint_auth_method.as_str().to_string(),
         grant_types,
@@ -652,12 +647,6 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
             None
         },
     }
-}
-
-/// Parse a JSON string array from a database column.
-fn parse_json_string_array(json: Option<&str>) -> Vec<String> {
-    json.and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default()
 }
 
 /// Parse the `registration_metadata` JSON blob.

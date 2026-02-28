@@ -431,59 +431,6 @@ pub struct RenameKeyResponse {
 }
 
 // ============================================================================
-// Authentication Events (Admin API)
-// ============================================================================
-
-/// Authentication event for audit/security review.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct AuthEventInfo {
-    /// Unique identifier.
-    pub id: String,
-    /// User ID.
-    pub user_id: String,
-    /// User email (if available).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_email: Option<String>,
-    /// Event type (login_success, login_failed, enrollment, logout).
-    pub event_type: String,
-    /// Authenticator ID used (if applicable).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub authenticator_id: Option<String>,
-    /// Client IP address.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_ip: Option<String>,
-    /// HTTP User-Agent header.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub user_agent: Option<String>,
-    /// Client hostname (from CLI).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_hostname: Option<String>,
-    /// Client OS.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_os: Option<String>,
-    /// Client architecture.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_arch: Option<String>,
-    /// CLI version.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_version: Option<String>,
-    /// Whether the event was successful.
-    pub success: bool,
-    /// Reason for failure (if applicable).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub failure_reason: Option<String>,
-    /// Timestamp when the event occurred.
-    pub created_at: Timestamp,
-}
-
-/// Response containing a list of authentication events.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ListAuthEventsResponse {
-    /// List of authentication events.
-    pub events: Vec<AuthEventInfo>,
-}
-
-// ============================================================================
 // SSH Credentials
 // ============================================================================
 

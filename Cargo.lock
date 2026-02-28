@@ -3836,6 +3836,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sea-query-binder"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0019f47430f7995af63deda77e238c17323359af241233ec768aba1faea7608"
+dependencies = [
+ "sea-query",
+ "sqlx",
+]
+
+[[package]]
 name = "sea-query-derive"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4960,7 +4970,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.2.46"
+version = "2026.2.47"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4985,7 +4995,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.2.46"
+version = "2026.2.47"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -5032,7 +5042,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.2.46"
+version = "2026.2.47"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5052,7 +5062,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.2.46"
+version = "2026.2.47"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5084,6 +5094,7 @@ dependencies = [
  "rustls 0.23.37",
  "rustls-pemfile",
  "sea-query",
+ "sea-query-binder",
  "secrecy",
  "serde",
  "serde_json",
@@ -5111,7 +5122,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.2.46"
+version = "2026.2.47"
 dependencies = [
  "anyhow",
  "aws-lc-rs",

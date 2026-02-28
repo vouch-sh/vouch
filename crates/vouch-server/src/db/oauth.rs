@@ -26,14 +26,14 @@ pub struct OAuthClient {
     pub name: String,
     pub description: Option<String>,
     pub application_type: OAuthClientType,
-    pub redirect_uris: String,
+    pub redirect_uris: Vec<String>,
     pub active: bool,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub last_used_at: Option<Timestamp>,
     pub access_scope: AccessScope,
     pub org_id: Option<String>,
-    pub resource_uris: String,
+    pub resource_uris: Vec<String>,
     pub jwks: Option<String>,
     pub jwks_uri: Option<String>,
     pub jwks_uri_cached_at: Option<Timestamp>,
@@ -43,8 +43,8 @@ pub struct OAuthClient {
     pub require_signed_request_object: Option<bool>,
     pub fapi_profile: FapiProfile,
     pub dpop_bound_access_tokens: bool,
-    pub grant_types: Option<String>,
-    pub response_types: Option<String>,
+    pub grant_types: Option<Vec<String>>,
+    pub response_types: Option<Vec<String>>,
     pub software_id: Option<String>,
     pub software_version: Option<String>,
     pub registration_source: Option<RegistrationSource>,
@@ -91,27 +91,16 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
 
 impl OAuthClient {
     #[must_use]
-    pub fn get_redirect_uris(&self) -> Vec<String> {
-        serde_json::from_str(&self.redirect_uris).unwrap_or_default()
-    }
-
-    #[must_use]
     pub fn is_valid_redirect_uri(&self, uri: &str) -> bool {
-        self.get_redirect_uris().iter().any(|u| u == uri)
-    }
-
-    #[must_use]
-    pub fn get_resource_uris(&self) -> Vec<String> {
-        serde_json::from_str(&self.resource_uris).unwrap_or_default()
+        self.redirect_uris.iter().any(|u| u == uri)
     }
 
     #[must_use]
     pub fn is_valid_resource_uri(&self, uri: &str) -> bool {
-        let uris = self.get_resource_uris();
-        if uris.is_empty() {
+        if self.resource_uris.is_empty() {
             return true;
         }
-        uris.iter().any(|u| u == uri)
+        self.resource_uris.iter().any(|u| u == uri)
     }
 
     #[must_use]
@@ -135,8 +124,8 @@ pub struct CreateOAuthClientParams<'a> {
     pub jwks_uri: Option<&'a str>,
     pub fapi_profile: Option<FapiProfile>,
     pub dpop_bound_access_tokens: Option<bool>,
-    pub grant_types: Option<&'a str>,
-    pub response_types: Option<&'a str>,
+    pub grant_types: Option<&'a [String]>,
+    pub response_types: Option<&'a [String]>,
     pub software_id: Option<&'a str>,
     pub software_version: Option<&'a str>,
     pub registration_source: RegistrationSource,
@@ -150,8 +139,6 @@ pub async fn create_oauth_client(
     params: &CreateOAuthClientParams<'_>,
 ) -> Result<(OAuthClient, String)> {
     let client_id = uuid::Uuid::now_v7().to_string();
-    let redirect_uris_json = serde_json::to_string(params.redirect_uris)?;
-    let resource_uris_json = serde_json::to_string(params.resource_uris)?;
 
     let doc = OAuthClientDoc {
         user_id: params.user_id.map(String::from),
@@ -159,11 +146,11 @@ pub async fn create_oauth_client(
         name: params.name.to_string(),
         description: params.description.map(String::from),
         application_type: params.application_type,
-        redirect_uris: redirect_uris_json,
+        redirect_uris: params.redirect_uris.to_vec(),
         active: true,
         access_scope: params.access_scope,
         org_id: params.org_id.map(String::from),
-        resource_uris: resource_uris_json,
+        resource_uris: params.resource_uris.to_vec(),
         jwks: params.jwks.map(String::from),
         jwks_uri: params.jwks_uri.map(String::from),
         jwks_uri_cached_at: None,
@@ -173,8 +160,8 @@ pub async fn create_oauth_client(
         require_signed_request_object: None,
         fapi_profile: params.fapi_profile.unwrap_or_default(),
         dpop_bound_access_tokens: params.dpop_bound_access_tokens.unwrap_or(false),
-        grant_types: params.grant_types.map(String::from),
-        response_types: params.response_types.map(String::from),
+        grant_types: params.grant_types.map(<[String]>::to_vec),
+        response_types: params.response_types.map(<[String]>::to_vec),
         software_id: params.software_id.map(String::from),
         software_version: params.software_version.map(String::from),
         registration_source: Some(params.registration_source),
@@ -241,15 +228,12 @@ pub async fn update_oauth_client(
     store: &DocumentStore,
     params: &UpdateOAuthClientParams<'_>,
 ) -> Result<()> {
-    let redirect_uris_json = serde_json::to_string(params.redirect_uris)?;
-    let resource_uris_json = serde_json::to_string(params.resource_uris)?;
-
     store
         .modify::<OAuthClientDoc, _>(params.id, |data| {
             data.name = params.name.to_string();
             data.description = params.description.map(String::from);
-            data.redirect_uris = redirect_uris_json.clone();
-            data.resource_uris = resource_uris_json.clone();
+            data.redirect_uris = params.redirect_uris.to_vec();
+            data.resource_uris = params.resource_uris.to_vec();
             data.token_endpoint_auth_method = params.token_endpoint_auth_method;
             data.jwks = params.jwks.map(String::from);
             data.jwks_uri = params.jwks_uri.map(String::from);

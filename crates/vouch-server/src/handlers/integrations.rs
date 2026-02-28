@@ -186,7 +186,7 @@ pub async fn get_aws_integration(
 
     match integration {
         Some(i) => {
-            let config: AwsIntegrationConfig = serde_json::from_str(&i.config).map_err(|e| {
+            let config: AwsIntegrationConfig = serde_json::from_value(i.config).map_err(|e| {
                 json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "config_parse_error",
@@ -218,7 +218,7 @@ pub async fn set_aws_integration(
     let (user, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    let config_json = serde_json::to_string(&config).map_err(|e| {
+    let config_value = serde_json::to_value(&config).map_err(|e| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "serialize_error",
@@ -226,7 +226,7 @@ pub async fn set_aws_integration(
         )
     })?;
 
-    db::upsert_cloud_integration(&state.store, &org_id, "aws", &config_json, &user.id)
+    db::upsert_cloud_integration(&state.store, &org_id, "aws", &config_value, &user.id)
         .await
         .map_err(|e| {
             json_error(

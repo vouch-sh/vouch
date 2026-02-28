@@ -385,7 +385,7 @@ pub struct CloudIntegration {
     pub id: String,
     pub org_id: String,
     pub provider: String,
-    pub config: String,
+    pub config: serde_json::Value,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
     pub created_by_user_id: Option<String>,
@@ -422,7 +422,7 @@ pub async fn upsert_cloud_integration(
     store: &DocumentStore,
     org_id: &str,
     provider: &str,
-    config: &str,
+    config: &serde_json::Value,
     user_id: &str,
 ) -> Result<CloudIntegration> {
     // Check if one already exists
@@ -433,7 +433,7 @@ pub async fn upsert_cloud_integration(
     if let Some(doc) = existing.into_iter().next() {
         // Update existing
         let mut data = doc.data;
-        data.config = config.to_string();
+        data.config = config.clone();
         store.update(&doc.id, &data).await?;
         let updated = store.get::<CloudIntegrationDoc>(&doc.id).await?;
         return updated
@@ -445,7 +445,7 @@ pub async fn upsert_cloud_integration(
     let doc = CloudIntegrationDoc {
         org_id: org_id.to_string(),
         provider: provider.to_string(),
-        config: config.to_string(),
+        config: config.clone(),
         created_by_user_id: Some(user_id.to_string()),
     };
     let result = store.insert(&doc).await?;
