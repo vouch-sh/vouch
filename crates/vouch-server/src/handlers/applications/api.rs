@@ -332,12 +332,12 @@ pub async fn get_application_api(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    // Validate app_id length before any processing
-    if app_id.is_empty() || app_id.len() > super::MAX_APP_ID_LEN {
+    // Validate app_id is a UUID before any processing
+    if uuid::Uuid::try_parse(&app_id).is_err() {
         return Err(json_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            "Invalid application ID",
+            "Invalid application ID format",
         ));
     }
 
@@ -378,12 +378,12 @@ pub async fn update_application_api(
     Path(app_id): Path<String>,
     Json(req): Json<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
-    // Validate app_id length before any processing
-    if app_id.is_empty() || app_id.len() > super::MAX_APP_ID_LEN {
+    // Validate app_id is a UUID before any processing
+    if uuid::Uuid::try_parse(&app_id).is_err() {
         return Err(json_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            "Invalid application ID",
+            "Invalid application ID format",
         ));
     }
 
@@ -670,12 +670,12 @@ pub async fn delete_application_api(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    // Validate app_id length before any processing
-    if app_id.is_empty() || app_id.len() > super::MAX_APP_ID_LEN {
+    // Validate app_id is a UUID before any processing
+    if uuid::Uuid::try_parse(&app_id).is_err() {
         return Err(json_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            "Invalid application ID",
+            "Invalid application ID format",
         ));
     }
 
@@ -728,12 +728,12 @@ pub async fn rotate_secret_api(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
 ) -> Result<Json<RotateSecretResponse>, (StatusCode, Json<ApiError>)> {
-    // Validate app_id length before any processing
-    if app_id.is_empty() || app_id.len() > super::MAX_APP_ID_LEN {
+    // Validate app_id is a UUID before any processing
+    if uuid::Uuid::try_parse(&app_id).is_err() {
         return Err(json_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            "Invalid application ID",
+            "Invalid application ID format",
         ));
     }
 
@@ -822,12 +822,12 @@ pub async fn revoke_tokens_api(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    // Validate app_id length before any processing
-    if app_id.is_empty() || app_id.len() > super::MAX_APP_ID_LEN {
+    // Validate app_id is a UUID before any processing
+    if uuid::Uuid::try_parse(&app_id).is_err() {
         return Err(json_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            "Invalid application ID",
+            "Invalid application ID format",
         ));
     }
 

@@ -43,9 +43,6 @@ pub use web::{
 /// Length of generated client secrets in bytes.
 const SECRET_LENGTH: usize = 32;
 
-/// Maximum length for application ID path parameters.
-const MAX_APP_ID_LEN: usize = 64;
-
 // ============================================================================
 // Helper Functions
 // ============================================================================

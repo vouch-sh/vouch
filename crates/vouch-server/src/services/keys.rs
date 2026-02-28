@@ -90,9 +90,11 @@ pub async fn rename_key(
     key_id: &str,
     new_name: &str,
 ) -> Result<String, ServiceError> {
-    // Validate key_id format before DB lookup
-    if key_id.is_empty() || key_id.len() > 64 {
-        return Err(ServiceError::Validation("Invalid key ID".to_string()));
+    // Validate key_id is a UUID before DB lookup
+    if uuid::Uuid::try_parse(key_id).is_err() {
+        return Err(ServiceError::Validation(
+            "Invalid key ID format".to_string(),
+        ));
     }
 
     // Validate name
@@ -155,9 +157,11 @@ pub async fn delete_key(
     user_id: &str,
     key_id: &str,
 ) -> Result<(String, u64), ServiceError> {
-    // Validate key_id format before DB lookup
-    if key_id.is_empty() || key_id.len() > 64 {
-        return Err(ServiceError::Validation("Invalid key ID".to_string()));
+    // Validate key_id is a UUID before DB lookup
+    if uuid::Uuid::try_parse(key_id).is_err() {
+        return Err(ServiceError::Validation(
+            "Invalid key ID format".to_string(),
+        ));
     }
 
     // Get the authenticator to verify ownership

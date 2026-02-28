@@ -104,9 +104,6 @@ const MIN_CREDENTIAL_ID_BYTES: usize = 16;
 /// Maximum decoded byte length for a valid credential ID (WebAuthn spec).
 const MAX_CREDENTIAL_ID_BYTES: usize = 1023;
 
-/// Maximum length for `pending_auth` parameter.
-/// Pending auth IDs are UUIDs (36 chars), but allow some headroom.
-const MAX_PENDING_AUTH_LEN: usize = 64;
 
 // ============================================================================
 // Authentication State
@@ -166,9 +163,9 @@ pub async fn login_page(
 ) -> Response {
     let auth = get_auth_context(&state, &jar).await;
 
-    // Validate pending_auth format if present (should be a short identifier).
+    // Validate pending_auth is a UUID before DB lookup.
     if let Some(ref pending_id) = query.pending_auth
-        && (pending_id.len() > MAX_PENDING_AUTH_LEN || pending_id.is_empty())
+        && uuid::Uuid::try_parse(pending_id).is_err()
     {
         return axum::response::Redirect::to("/login").into_response();
     }

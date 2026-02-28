@@ -235,12 +235,12 @@ pub async fn delete_scim_token(
     jar: CookieJar,
     Path(token_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
-    // Validate token_id length before any processing
-    if token_id.is_empty() || token_id.len() > 64 {
+    // Validate token_id is a UUID before any processing
+    if uuid::Uuid::try_parse(&token_id).is_err() {
         return Err(json_error(
             StatusCode::BAD_REQUEST,
             "invalid_request",
-            "Invalid token ID",
+            "Invalid token ID format",
         ));
     }
 

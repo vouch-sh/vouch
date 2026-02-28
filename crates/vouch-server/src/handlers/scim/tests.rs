@@ -216,9 +216,10 @@ async fn test_rfc7644_get_user_not_found() {
 
     let token = create_test_scim_token(&state.store, "test-not-found").await;
 
+    // Use a valid UUID format that doesn't exist in the database
     let (status, body) = http_get(
         &app,
-        "/scim/v2/Users/nonexistent-user-id",
+        "/scim/v2/Users/00000000-0000-7000-0000-000000000000",
         &[("Authorization", &format!("Bearer {}", token))],
     )
     .await;
@@ -401,10 +402,10 @@ async fn test_rfc7644_error_format() {
 
     let token = create_test_scim_token(&state.store, "test-error-format").await;
 
-    // Request non-existent user to get an error
+    // Request non-existent user (valid UUID format) to get an error
     let (status, body) = http_get(
         &app,
-        "/scim/v2/Users/nonexistent",
+        "/scim/v2/Users/00000000-0000-7000-0000-000000000001",
         &[("Authorization", &format!("Bearer {}", token))],
     )
     .await;
@@ -472,9 +473,10 @@ async fn test_rfc7644_error_includes_scim_schema() {
 
     let token = create_test_scim_token(&state.store, "test-error-schema").await;
 
+    // Use a valid UUID format that doesn't exist in the database
     let (status, body) = http_get(
         &app,
-        "/scim/v2/Users/does-not-exist",
+        "/scim/v2/Users/00000000-0000-7000-0000-000000000002",
         &[("Authorization", &format!("Bearer {}", token))],
     )
     .await;

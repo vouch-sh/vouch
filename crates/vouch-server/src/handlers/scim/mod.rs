@@ -37,10 +37,6 @@ pub use users::{create_user, delete_user, get_user, list_users, patch_user};
 // Input Validation
 // ============================================================================
 
-/// Maximum length for a SCIM resource ID path parameter.
-/// IDs are UUIDs (36 chars), but allow some headroom for alternate formats.
-const MAX_RESOURCE_ID_LEN: usize = 64;
-
 /// Maximum length for SCIM filter query parameter.
 const MAX_FILTER_LEN: usize = 1024;
 
@@ -48,12 +44,12 @@ const MAX_FILTER_LEN: usize = 1024;
 const MAX_START_INDEX: usize = 1_000_000;
 
 /// Validate a SCIM resource ID path parameter.
-/// Returns a SCIM error if the ID is empty or too long.
+/// All resource IDs are UUID v7; reject anything that doesn't parse.
 fn validate_resource_id(id: &str) -> Result<(), (StatusCode, Json<ScimError>)> {
-    if id.is_empty() || id.len() > MAX_RESOURCE_ID_LEN {
+    if uuid::Uuid::try_parse(id).is_err() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(ScimError::new(400, "Invalid resource ID")),
+            Json(ScimError::new(400, "Invalid resource ID format")),
         ));
     }
     Ok(())
