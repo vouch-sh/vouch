@@ -234,13 +234,11 @@ pub struct OAuthClientDoc {
     pub name: String,
     pub description: Option<String>,
     pub application_type: OAuthClientType,
-    /// JSON array of redirect URIs.
-    pub redirect_uris: String,
+    pub redirect_uris: Vec<String>,
     pub active: bool,
     pub access_scope: AccessScope,
     pub org_id: Option<String>,
-    /// JSON array of resource URIs (RFC 8707).
-    pub resource_uris: String,
+    pub resource_uris: Vec<String>,
     /// Inline JWKS JSON (RFC 7523).
     pub jwks: Option<String>,
     pub jwks_uri: Option<String>,
@@ -254,10 +252,8 @@ pub struct OAuthClientDoc {
     pub fapi_profile: FapiProfile,
     /// RFC 9449 DPoP-bound access tokens.
     pub dpop_bound_access_tokens: bool,
-    /// RFC 7591 grant types (JSON array).
-    pub grant_types: Option<String>,
-    /// RFC 7591 response types (JSON array).
-    pub response_types: Option<String>,
+    pub grant_types: Option<Vec<String>>,
+    pub response_types: Option<Vec<String>>,
     /// RFC 7591 software identifier.
     pub software_id: Option<String>,
     pub software_version: Option<String>,

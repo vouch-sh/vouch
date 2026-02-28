@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! GitHub App installation database operations.
 
+use std::collections::HashMap;
+
 use super::audit::AuditStore;
 use super::document_type::Document;
 use super::documents::audit::GitHubCredentialAuditData;
@@ -21,14 +23,12 @@ pub struct GitHubInstallation {
     pub installation_id: i64,
     pub github_account_login: String,
     pub github_account_type: String,
-    pub permissions: String,
+    pub permissions: HashMap<String, String>,
     pub repository_selection: String,
     pub installed_at: Timestamp,
     pub installed_by_user_id: Option<String>,
     pub suspended_at: Option<Timestamp>,
-    /// JSON array of repository names when
-    /// repository_selection is "selected".
-    pub repositories: Option<String>,
+    pub repositories: Option<Vec<String>>,
 }
 
 impl From<Document<GitHubInstallationDoc>> for GitHubInstallation {
@@ -57,7 +57,7 @@ pub async fn create_github_installation(
     installation_id: i64,
     github_account_login: &str,
     github_account_type: &str,
-    permissions: &str,
+    permissions: &HashMap<String, String>,
     repository_selection: &str,
     installed_by_user_id: Option<&str>,
 ) -> Result<String> {
@@ -66,7 +66,7 @@ pub async fn create_github_installation(
         installation_id,
         github_account_login: github_account_login.to_string(),
         github_account_type: github_account_type.to_string(),
-        permissions: permissions.to_string(),
+        permissions: permissions.clone(),
         repository_selection: repository_selection.to_string(),
         installed_at: Timestamp::now(),
         installed_by_user_id: installed_by_user_id.map(String::from),
@@ -184,15 +184,13 @@ pub async fn update_github_installation_repos(
     installation_id: i64,
     repos: &[String],
 ) -> Result<bool> {
-    let repos_json = serde_json::to_string(repos)?;
-
     let doc = store
         .find_one::<GitHubInstallationDoc>("installation_id", &installation_id.to_string())
         .await?;
 
     if let Some(doc) = doc {
         let mut data = doc.data;
-        data.repositories = Some(repos_json);
+        data.repositories = Some(repos.to_vec());
         store.update(&doc.id, &data).await?;
         return Ok(true);
     }
@@ -213,12 +211,7 @@ pub async fn update_github_installation_repos_delta(
         return Ok(false);
     };
 
-    // Parse existing repos
-    let mut repos: Vec<String> = installation
-        .repositories
-        .as_deref()
-        .and_then(|r| serde_json::from_str(r).ok())
-        .unwrap_or_default();
+    let mut repos: Vec<String> = installation.repositories.unwrap_or_default();
 
     // Apply delta
     for repo in added {

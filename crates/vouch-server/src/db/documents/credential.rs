@@ -12,8 +12,7 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 pub struct CloudIntegrationDoc {
     pub org_id: String,
     pub provider: String,
-    /// JSON configuration blob.
-    pub config: String,
+    pub config: serde_json::Value,
     pub created_by_user_id: Option<String>,
 }
 

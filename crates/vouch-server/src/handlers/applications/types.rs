@@ -56,8 +56,6 @@ pub struct ApplicationInfo {
 
 impl From<OAuthClient> for ApplicationInfo {
     fn from(client: OAuthClient) -> Self {
-        let redirect_uris = client.get_redirect_uris();
-        let resource_uris = client.get_resource_uris();
         let token_endpoint_auth_method = client.token_endpoint_auth_method.as_str().to_string();
         let fapi_profile = client.fapi_profile.as_str().to_string();
         let jwks = client.jwks.clone();
@@ -68,13 +66,13 @@ impl From<OAuthClient> for ApplicationInfo {
             name: client.name,
             description: client.description,
             application_type: client.application_type.as_str().to_string(),
-            redirect_uris,
+            redirect_uris: client.redirect_uris,
             active: client.active,
             created_at: client.created_at,
             last_used_at: client.last_used_at,
             access_scope: client.access_scope,
             org_id: client.org_id,
-            resource_uris,
+            resource_uris: client.resource_uris,
             token_endpoint_auth_method,
             fapi_profile,
             jwks,
@@ -315,8 +313,6 @@ pub struct ApplicationResponse {
 
 impl From<OAuthClient> for ApplicationResponse {
     fn from(client: OAuthClient) -> Self {
-        let redirect_uris = client.get_redirect_uris();
-        let resource_uris = client.get_resource_uris();
         let jwks_configured = client.jwks.is_some() || client.jwks_uri.is_some();
         let jwks_uri = client.jwks_uri.clone();
         Self {
@@ -325,14 +321,14 @@ impl From<OAuthClient> for ApplicationResponse {
             name: client.name,
             description: client.description,
             application_type: client.application_type.as_str().to_string(),
-            redirect_uris,
+            redirect_uris: client.redirect_uris,
             active: client.active,
             created_at: client.created_at,
             updated_at: client.updated_at,
             last_used_at: client.last_used_at,
             access_scope: client.access_scope.as_str().to_string(),
             org_id: client.org_id,
-            resource_uris,
+            resource_uris: client.resource_uris,
             token_endpoint_auth_method: client.token_endpoint_auth_method.as_str().to_string(),
             fapi_profile: client.fapi_profile.as_str().to_string(),
             jwks_configured,

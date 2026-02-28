@@ -460,7 +460,7 @@ async fn test_oauth_client_crud() {
         .expect("Failed to get client")
         .expect("Client should exist");
     assert_eq!(updated.name, "My Updated App");
-    assert_eq!(updated.get_redirect_uris().len(), 2);
+    assert_eq!(updated.redirect_uris.len(), 2);
 
     // Delete client
     let deleted = delete_oauth_client(&store, &client.id)
@@ -1369,9 +1369,12 @@ async fn test_cloud_integration_crud() {
     assert!(config.is_none());
 
     // Create GCP config
-    let gcp_config =
-        r#"{"project_number":"123456789","pool_id":"vouch-pool","provider_id":"vouch-provider"}"#;
-    let integration = upsert_cloud_integration(&store, &org.id, "gcp", gcp_config, &user_id)
+    let gcp_config: serde_json::Value = serde_json::json!({
+        "project_number": "123456789",
+        "pool_id": "vouch-pool",
+        "provider_id": "vouch-provider"
+    });
+    let integration = upsert_cloud_integration(&store, &org.id, "gcp", &gcp_config, &user_id)
         .await
         .expect("Failed to create config");
 
@@ -1391,9 +1394,12 @@ async fn test_cloud_integration_crud() {
     assert_eq!(config.config, gcp_config);
 
     // Update the config
-    let updated_config =
-        r#"{"project_number":"987654321","pool_id":"new-pool","provider_id":"new-provider"}"#;
-    let updated = upsert_cloud_integration(&store, &org.id, "gcp", updated_config, &user_id)
+    let updated_config: serde_json::Value = serde_json::json!({
+        "project_number": "987654321",
+        "pool_id": "new-pool",
+        "provider_id": "new-provider"
+    });
+    let updated = upsert_cloud_integration(&store, &org.id, "gcp", &updated_config, &user_id)
         .await
         .expect("Failed to update config");
 
@@ -1432,14 +1438,15 @@ async fn test_cloud_integration_multiple_providers() {
         .expect("Failed to create user");
 
     // Create both GCP and AWS configs
-    let gcp_config = r#"{"project_number":"111","pool_id":"pool","provider_id":"provider"}"#;
-    let aws_config = r#"{"default_role_arn":"arn:aws:iam::123:role/Test"}"#;
+    let gcp_config =
+        serde_json::json!({"project_number":"111","pool_id":"pool","provider_id":"provider"});
+    let aws_config = serde_json::json!({"default_role_arn":"arn:aws:iam::123:role/Test"});
 
-    upsert_cloud_integration(&store, &org.id, "gcp", gcp_config, &user_id)
+    upsert_cloud_integration(&store, &org.id, "gcp", &gcp_config, &user_id)
         .await
         .expect("Failed to create GCP config");
 
-    upsert_cloud_integration(&store, &org.id, "aws", aws_config, &user_id)
+    upsert_cloud_integration(&store, &org.id, "aws", &aws_config, &user_id)
         .await
         .expect("Failed to create AWS config");
 
@@ -1493,14 +1500,16 @@ async fn test_cloud_integration_org_isolation() {
         .expect("Failed to create user2");
 
     // Create GCP config for org1
-    let config1 = r#"{"project_number":"111","pool_id":"pool1","provider_id":"provider1"}"#;
-    upsert_cloud_integration(&store, &org1.id, "gcp", config1, &user_id1)
+    let config1 =
+        serde_json::json!({"project_number":"111","pool_id":"pool1","provider_id":"provider1"});
+    upsert_cloud_integration(&store, &org1.id, "gcp", &config1, &user_id1)
         .await
         .expect("Failed to create config for org1");
 
     // Create GCP config for org2
-    let config2 = r#"{"project_number":"222","pool_id":"pool2","provider_id":"provider2"}"#;
-    upsert_cloud_integration(&store, &org2.id, "gcp", config2, &user_id2)
+    let config2 =
+        serde_json::json!({"project_number":"222","pool_id":"pool2","provider_id":"provider2"});
+    upsert_cloud_integration(&store, &org2.id, "gcp", &config2, &user_id2)
         .await
         .expect("Failed to create config for org2");
 

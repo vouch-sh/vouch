@@ -365,18 +365,12 @@ pub async fn get_github_status(
             })
             .unwrap_or_default()
             .into_iter()
-            .map(|i| {
-                let repositories: Option<Vec<String>> = i
-                    .repositories
-                    .as_deref()
-                    .and_then(|r| serde_json::from_str(r).ok());
-                vouch_common::GitHubAccountStatus {
-                    login: i.github_account_login,
-                    account_type: i.github_account_type,
-                    suspended: i.suspended_at.is_some(),
-                    repository_selection: i.repository_selection,
-                    repositories,
-                }
+            .map(|i| vouch_common::GitHubAccountStatus {
+                login: i.github_account_login,
+                account_type: i.github_account_type,
+                suspended: i.suspended_at.is_some(),
+                repository_selection: i.repository_selection,
+                repositories: i.repositories,
             })
             .collect()
     } else {
