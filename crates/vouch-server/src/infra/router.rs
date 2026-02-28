@@ -29,6 +29,9 @@ const SCIM_BODY_LIMIT: usize = 64 * 1024;
 /// Body limit for GitHub webhook payloads.
 const WEBHOOK_BODY_LIMIT: usize = 1024 * 1024;
 
+/// Body limit for WebAuthn enrollment payloads (attestation objects are typically < 4 KB).
+const ENROLL_BODY_LIMIT: usize = 32 * 1024;
+
 /// Global body size limit (per-route overrides above are more restrictive).
 const GLOBAL_BODY_LIMIT: usize = 256 * 1024;
 
@@ -279,7 +282,8 @@ fn build_ui_routes(config: &config::ServerConfig) -> Router<Arc<AppState>> {
         )
         .route(
             "/enroll/webauthn/complete",
-            post(handlers::enroll::browser_register_complete),
+            post(handlers::enroll::browser_register_complete)
+                .layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT)),
         )
         // Key management during enrollment (uses cookie for auth)
         .route("/enroll/keys", get(handlers::enroll::enroll_keys_page))
