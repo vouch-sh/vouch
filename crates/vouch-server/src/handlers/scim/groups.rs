@@ -161,10 +161,7 @@ pub async fn create_group(
         "Group",
         &db_group.id,
         Some(&auth.token_id),
-        Some(&format!(
-            "{{\"displayName\": \"{}\"}}",
-            db_group.display_name
-        )),
+        Some(&serde_json::json!({"displayName": &db_group.display_name}).to_string()),
     )
     .await
     {
@@ -464,7 +461,7 @@ pub async fn delete_group(
         "Group",
         &id,
         Some(&auth.token_id),
-        Some(&format!("{{\"displayName\": \"{}\"}}", group.display_name)),
+        Some(&serde_json::json!({"displayName": &group.display_name}).to_string()),
     )
     .await
     {

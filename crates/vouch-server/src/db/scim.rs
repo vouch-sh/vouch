@@ -559,21 +559,35 @@ pub(crate) fn parse_scim_filter(
         other => return Err(ScimFilterError::UnsupportedOperator(other.to_string())),
     };
 
-    // Extract quoted value from the original filter
-    // (preserving case).
-    let pattern = format!("{attr} {op_word} ");
-    let pattern_lower = pattern.to_lowercase();
+    // Extract quoted value from the original filter (preserving case).
+    //
+    // We search in `filter_lower` for consistent byte offsets, then map
+    // back to the original `filter` using `char_indices` so that any
+    // multibyte characters that change byte length under `to_lowercase()`
+    // don't cause offset misalignment.
+    let pattern_lower = format!("{attr_lower} {op_word} ");
 
-    if let Some(pos) = filter_lower.find(&pattern_lower)
-        && let Some(rest_str) = filter.get(pos + pattern.len()..)
-        && let Some(unquoted) = rest_str.strip_prefix('"')
-        && let Some(end) = unquoted.find('"')
-        && let Some(val) = unquoted.get(..end)
-    {
-        return Ok(Some(ScimFilter {
-            op,
-            value: val.to_string(),
-        }));
+    if let Some(lower_pos) = filter_lower.find(&pattern_lower) {
+        let lower_end = lower_pos + pattern_lower.len();
+
+        // Map byte offset in filter_lower back to the original filter
+        // by counting characters up to that offset, then converting
+        // back to a byte offset in the original string.
+        let char_offset = filter_lower.get(..lower_end).map(|s| s.chars().count());
+
+        if let Some(orig_byte_pos) = char_offset.and_then(|n| {
+            filter.char_indices().nth(n).map(|(i, _)| i)
+        })
+            && let Some(rest_str) = filter.get(orig_byte_pos..)
+            && let Some(unquoted) = rest_str.strip_prefix('"')
+            && let Some(end) = unquoted.find('"')
+            && let Some(val) = unquoted.get(..end)
+        {
+            return Ok(Some(ScimFilter {
+                op,
+                value: val.to_string(),
+            }));
+        }
     }
 
     Ok(None)
