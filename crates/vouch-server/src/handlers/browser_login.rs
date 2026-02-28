@@ -72,6 +72,43 @@ pub struct LoginTemplate {
 impl_template_response!(LoginTemplate);
 
 // ============================================================================
+// Validation Constants
+// ============================================================================
+
+/// Maximum encoded length for `credential_id` (base64url).
+/// WebAuthn spec allows up to 1023 bytes raw ≈ 1364 chars encoded.
+const MAX_CREDENTIAL_ID_LEN: usize = 1400;
+
+/// Maximum encoded length for `authenticator_data` (base64url).
+/// Authenticator data is typically 37+ bytes; with extensions it can be larger.
+const MAX_AUTHENTICATOR_DATA_LEN: usize = 4 * 1024;
+
+/// Maximum encoded length for `client_data_json` (base64url).
+/// Client data JSON is a small JSON object (origin, type, challenge).
+const MAX_CLIENT_DATA_JSON_LEN: usize = 4 * 1024;
+
+/// Maximum encoded length for `signature` (base64url).
+/// ECDSA/EdDSA signatures are typically under 100 bytes.
+const MAX_SIGNATURE_LEN: usize = 1024;
+
+/// Maximum encoded length for `user_handle` (base64url).
+/// User handles are 16-byte UUIDs ≈ 22 chars encoded.
+const MAX_USER_HANDLE_LEN: usize = 256;
+
+/// Maximum encoded length for the authentication `state` JWT.
+const MAX_STATE_TOKEN_LEN: usize = 8 * 1024;
+
+/// Minimum decoded byte length for a valid credential ID.
+const MIN_CREDENTIAL_ID_BYTES: usize = 16;
+
+/// Maximum decoded byte length for a valid credential ID (WebAuthn spec).
+const MAX_CREDENTIAL_ID_BYTES: usize = 1023;
+
+/// Maximum length for `pending_auth` parameter.
+/// Pending auth IDs are UUIDs (36 chars), but allow some headroom.
+const MAX_PENDING_AUTH_LEN: usize = 64;
+
+// ============================================================================
 // Authentication State
 // ============================================================================
 
@@ -128,6 +165,13 @@ pub async fn login_page(
     jar: CookieJar,
 ) -> Response {
     let auth = get_auth_context(&state, &jar).await;
+
+    // Validate pending_auth format if present (should be a short identifier).
+    if let Some(ref pending_id) = query.pending_auth
+        && (pending_id.len() > MAX_PENDING_AUTH_LEN || pending_id.is_empty())
+    {
+        return axum::response::Redirect::to("/login").into_response();
+    }
 
     // If already authenticated and have pending_auth, redirect back to authorize
     if auth.authenticated {
@@ -231,6 +275,15 @@ pub async fn browser_login_start(
 /// POST /login/webauthn/complete
 ///
 /// Verify WebAuthn assertion and create session.
+///
+/// Validation is ordered to fail fast before any database access:
+/// 1. Origin header validation (CSRF protection)
+/// 2. Field length bounds (reject obviously oversized/empty fields)
+/// 3. State JWT decode + expiration check
+/// 4. Base64url decode all fields
+/// 5. Credential ID byte length validation
+/// 6. Client data JSON structure validation (type, origin)
+/// 7. Database operations (authenticator lookup, signature verification)
 #[allow(clippy::too_many_lines)]
 pub async fn browser_login_complete(
     State(state): State<Arc<AppState>>,
@@ -238,7 +291,7 @@ pub async fn browser_login_complete(
     _jar: CookieJar,
     Json(req): Json<BrowserLoginCompleteRequest>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
-    // Validate Origin header for CSRF protection (RFC 9700)
+    // ── Phase 1: Origin header validation ────────────────────────────────
     validate_origin(&headers, &state.config().base_url)?;
 
     tracing::info!("Browser login complete (discoverable credential flow)");
@@ -246,12 +299,58 @@ pub async fn browser_login_complete(
     // Extract client info for audit logging
     let client_info = ClientInfo::from_headers(&headers);
 
-    // Decode state
+    // ── Phase 2: Field length bounds ─────────────────────────────────────
+    // Reject obviously oversized or empty fields before any processing.
+    if req.state.len() > MAX_STATE_TOKEN_LEN {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_state",
+            "State token exceeds maximum length",
+        ));
+    }
+    if req.credential_id.is_empty() || req.credential_id.len() > MAX_CREDENTIAL_ID_LEN {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Credential ID is empty or exceeds maximum length",
+        ));
+    }
+    if req.authenticator_data.is_empty()
+        || req.authenticator_data.len() > MAX_AUTHENTICATOR_DATA_LEN
+    {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Authenticator data is empty or exceeds maximum length",
+        ));
+    }
+    if req.client_data_json.is_empty() || req.client_data_json.len() > MAX_CLIENT_DATA_JSON_LEN {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Client data JSON is empty or exceeds maximum length",
+        ));
+    }
+    if req.signature.is_empty() || req.signature.len() > MAX_SIGNATURE_LEN {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Signature is empty or exceeds maximum length",
+        ));
+    }
+    if req.user_handle.is_empty() || req.user_handle.len() > MAX_USER_HANDLE_LEN {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "User handle is empty or exceeds maximum length",
+        ));
+    }
+
+    // ── Phase 3: State JWT decode + expiration ───────────────────────────
     let auth_state =
         BrowserAuthenticationState::decode(&req.state, state.config().jwt_secret.expose_secret())
             .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
 
-    // Check expiration
     let now = Timestamp::now().as_second();
     if now > auth_state.exp {
         return Err(json_error(
@@ -261,7 +360,7 @@ pub async fn browser_login_complete(
         ));
     }
 
-    // Decode base64url inputs
+    // ── Phase 4: Base64url decode all fields ─────────────────────────────
     let credential_id = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|_| {
         json_error(
             StatusCode::BAD_REQUEST,
@@ -303,6 +402,58 @@ pub async fn browser_login_complete(
             "Invalid user_handle",
         )
     })?;
+
+    // ── Phase 5: Credential ID byte length validation ────────────────────
+    if credential_id.len() < MIN_CREDENTIAL_ID_BYTES
+        || credential_id.len() > MAX_CREDENTIAL_ID_BYTES
+    {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Credential ID length is outside the valid range (16-1023 bytes)",
+        ));
+    }
+
+    // ── Phase 6: Client data JSON structure validation ───────────────────
+    // Parse and validate client data before any DB or crypto operations.
+    let client_data_str = std::str::from_utf8(&client_data_json).map_err(|_| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Client data JSON is not valid UTF-8",
+        )
+    })?;
+
+    #[derive(serde::Deserialize)]
+    struct ClientData {
+        origin: String,
+        #[serde(rename = "type")]
+        typ: String,
+    }
+
+    let client_data: ClientData = serde_json::from_str(client_data_str).map_err(|e| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            &format!("Client data JSON is malformed: {e}"),
+        )
+    })?;
+
+    if client_data.typ != "webauthn.get" {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Client data type must be 'webauthn.get'",
+        ));
+    }
+
+    if client_data.origin != state.config().base_url {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_input",
+            "Client data origin mismatch",
+        ));
+    }
 
     // Parse user_handle as UUID to identify the user
     let user_id = Uuid::from_slice(&user_handle).map_err(|_| {

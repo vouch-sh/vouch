@@ -123,6 +123,17 @@ pub async fn create_scim_token(
     let (_user, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
+    // Validate description length
+    if let Some(ref desc) = req.description
+        && desc.len() > 256
+    {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Description must be 256 characters or less",
+        ));
+    }
+
     // Validate expiration (required, 1-365 days)
     if req.expires_in_days < 1 || req.expires_in_days > 365 {
         return Err(json_error(
@@ -224,6 +235,15 @@ pub async fn delete_scim_token(
     jar: CookieJar,
     Path(token_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    // Validate token_id length before any processing
+    if token_id.is_empty() || token_id.len() > 64 {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid token ID",
+        ));
+    }
+
     let (_user, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 

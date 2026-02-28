@@ -167,6 +167,16 @@ pub async fn device_token(
         ));
     }
 
+    // Validate device_code format before hashing and DB lookup.
+    // Generated codes are 32 random bytes base64url-encoded (43 chars).
+    // Reject obviously invalid inputs to avoid unnecessary work.
+    if req.device_code.is_empty() || req.device_code.len() > 128 {
+        return Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            OAuthError::invalid_grant(),
+        ));
+    }
+
     // Hash the device code and look it up
     let device_code_hash = hash_device_code(&req.device_code);
     let request = db::get_device_auth_by_code_hash(&state.store, &device_code_hash)

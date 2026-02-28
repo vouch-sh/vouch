@@ -38,6 +38,11 @@ pub async fn list_groups(
     let start_index = query.start_index.unwrap_or(1);
     let count = query.count.unwrap_or(100).min(100);
 
+    // Validate query parameters before DB access
+    if let Err((status, json)) = super::validate_list_params(query.filter.as_deref(), start_index) {
+        return (status, json).into_response();
+    }
+
     // Get groups from database
     let groups =
         match db::list_scim_groups(&state.store, query.filter.as_deref(), start_index, count).await
@@ -181,6 +186,11 @@ pub async fn get_group(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
+    // Validate resource ID before any processing
+    if let Err((status, json)) = super::validate_resource_id(&id) {
+        return (status, json).into_response();
+    }
+
     // Authenticate
     let auth = match authenticate_scim(&state, &headers).await {
         Ok(auth) => auth,
@@ -225,6 +235,11 @@ pub async fn patch_group(
     Path(id): Path<String>,
     Json(patch): Json<ScimPatchRequest>,
 ) -> Response {
+    // Validate resource ID before any processing
+    if let Err((status, json)) = super::validate_resource_id(&id) {
+        return (status, json).into_response();
+    }
+
     // Authenticate and check scope
     let auth = match authenticate_scim(&state, &headers).await {
         Ok(auth) => auth,
@@ -398,6 +413,11 @@ pub async fn delete_group(
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Response {
+    // Validate resource ID before any processing
+    if let Err((status, json)) = super::validate_resource_id(&id) {
+        return (status, json).into_response();
+    }
+
     // Authenticate and check scope
     let auth = match authenticate_scim(&state, &headers).await {
         Ok(auth) => auth,

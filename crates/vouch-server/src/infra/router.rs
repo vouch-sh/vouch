@@ -32,6 +32,9 @@ const WEBHOOK_BODY_LIMIT: usize = 1024 * 1024;
 /// Body limit for WebAuthn enrollment payloads (attestation objects are typically < 4 KB).
 const ENROLL_BODY_LIMIT: usize = 32 * 1024;
 
+/// Body limit for WebAuthn login payloads (assertions are smaller than attestations).
+const LOGIN_BODY_LIMIT: usize = 32 * 1024;
+
 /// Global body size limit (per-route overrides above are more restrictive).
 const GLOBAL_BODY_LIMIT: usize = 256 * 1024;
 
@@ -269,7 +272,8 @@ fn build_ui_routes(config: &config::ServerConfig) -> Router<Arc<AppState>> {
         )
         .route(
             "/login/webauthn/complete",
-            post(handlers::browser_login::browser_login_complete),
+            post(handlers::browser_login::browser_login_complete)
+                .layer(DefaultBodyLimit::max(LOGIN_BODY_LIMIT)),
         )
         // Browser-based enrollment
         .route("/device", get(handlers::enroll::device_verify_page))

@@ -387,6 +387,17 @@ pub async fn oidc_callback(
         .into_response();
     };
 
+    // Validate state length before DB lookup.
+    // OIDC state is base64url-encoded 32 random bytes (43 chars).
+    if oidc_state.len() > 128 {
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Invalid state parameter".to_string(),
+            back_url: None,
+        }
+        .into_response();
+    }
+
     // Verify state
     let stored_state = match db::get_oidc_state(&state.store, &oidc_state).await {
         Ok(Some(s)) => s,
@@ -933,7 +944,8 @@ pub async fn browser_register_complete(
             "Credential ID is empty or exceeds maximum length",
         ));
     }
-    if req.attestation_object.is_empty() || req.attestation_object.len() > MAX_ATTESTATION_OBJECT_LEN
+    if req.attestation_object.is_empty()
+        || req.attestation_object.len() > MAX_ATTESTATION_OBJECT_LEN
     {
         return Err(json_error(
             StatusCode::BAD_REQUEST,

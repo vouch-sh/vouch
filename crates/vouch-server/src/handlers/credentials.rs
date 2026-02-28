@@ -173,6 +173,16 @@ pub async fn check_ssh_revocation(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(serial): axum::extract::Path<String>,
 ) -> Result<Json<SshRevocationCheckResponse>, ServiceError> {
+    // Validate serial format before DB query.
+    // SSH certificate serials are unsigned 64-bit integers (RFC 4253).
+    if serial.is_empty() || serial.len() > 20 || !serial.chars().all(|c| c.is_ascii_digit()) {
+        return Err(ServiceError::http(
+            StatusCode::BAD_REQUEST,
+            "invalid_serial",
+            "Serial must be a numeric string (u64)",
+        ));
+    }
+
     let revoked = db::is_ssh_certificate_revoked(&state.store, &serial)
         .await
         .map_err(|e| {

@@ -90,6 +90,11 @@ pub async fn rename_key(
     key_id: &str,
     new_name: &str,
 ) -> Result<String, ServiceError> {
+    // Validate key_id format before DB lookup
+    if key_id.is_empty() || key_id.len() > 64 {
+        return Err(ServiceError::Validation("Invalid key ID".to_string()));
+    }
+
     // Validate name
     let name = new_name.trim();
     if name.is_empty() {
@@ -150,6 +155,11 @@ pub async fn delete_key(
     user_id: &str,
     key_id: &str,
 ) -> Result<(String, u64), ServiceError> {
+    // Validate key_id format before DB lookup
+    if key_id.is_empty() || key_id.len() > 64 {
+        return Err(ServiceError::Validation("Invalid key ID".to_string()));
+    }
+
     // Get the authenticator to verify ownership
     let authenticator = db::get_authenticator_by_id(store, key_id)
         .await

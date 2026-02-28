@@ -332,6 +332,15 @@ pub async fn get_application_api(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
+    // Validate app_id length before any processing
+    if app_id.is_empty() || app_id.len() > super::MAX_APP_ID_LEN {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid application ID",
+        ));
+    }
+
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -369,6 +378,15 @@ pub async fn update_application_api(
     Path(app_id): Path<String>,
     Json(req): Json<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
+    // Validate app_id length before any processing
+    if app_id.is_empty() || app_id.len() > super::MAX_APP_ID_LEN {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid application ID",
+        ));
+    }
+
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Get existing application
@@ -652,6 +670,15 @@ pub async fn delete_application_api(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    // Validate app_id length before any processing
+    if app_id.is_empty() || app_id.len() > super::MAX_APP_ID_LEN {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid application ID",
+        ));
+    }
+
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Verify ownership
@@ -701,6 +728,15 @@ pub async fn rotate_secret_api(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
 ) -> Result<Json<RotateSecretResponse>, (StatusCode, Json<ApiError>)> {
+    // Validate app_id length before any processing
+    if app_id.is_empty() || app_id.len() > super::MAX_APP_ID_LEN {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid application ID",
+        ));
+    }
+
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Verify ownership
@@ -786,6 +822,15 @@ pub async fn revoke_tokens_api(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    // Validate app_id length before any processing
+    if app_id.is_empty() || app_id.len() > super::MAX_APP_ID_LEN {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid application ID",
+        ));
+    }
+
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Verify ownership

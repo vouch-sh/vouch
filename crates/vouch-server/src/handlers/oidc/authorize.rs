@@ -136,6 +136,17 @@ pub async fn authorize(
 
     // RFC 9126: If request_uri is present, resolve the PAR and replace parameters.
     if let Some(ref request_uri) = params.request_uri {
+        // Validate request_uri format before DB lookup (RFC 9126 Section 2.2).
+        // Must start with the standard URN prefix and be reasonably sized.
+        if !request_uri.starts_with("urn:ietf:params:oauth:request_uri:") || request_uri.len() > 256
+        {
+            return AuthorizeDeniedTemplate {
+                client_name: "Unknown Application".to_string(),
+                error_message: "Invalid request_uri format".to_string(),
+            }
+            .into_response();
+        }
+
         let client_id = params.client_id.clone().unwrap_or_default();
         if client_id.is_empty() {
             return AuthorizeDeniedTemplate {
