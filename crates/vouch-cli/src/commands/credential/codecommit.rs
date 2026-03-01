@@ -145,8 +145,7 @@ async fn get_sts_credentials(_region: &str) -> Result<StsCredentials> {
     let cache_key = format!("aws:{role_arn}");
 
     let data = super::cache::get_or_fetch(&cache_key, "AWS credentials", || async {
-        let output =
-            super::aws::fetch_and_assume(&server, &role_arn, Some("vouch-codecommit")).await?;
+        let output = super::aws::fetch_and_assume(&server, &role_arn).await?;
         let expires_at = output.expiration.clone();
         Ok((output.to_json(), expires_at))
     })
@@ -186,14 +185,20 @@ async fn get_sts_credentials(_region: &str) -> Result<StsCredentials> {
 
 /// Resolve the AWS region for a CodeCommit operation.
 ///
-/// Priority: explicit URL region > specified profile's region > vouch profile region > us-east-1.
+/// Priority:
+/// 1. Explicit URL region (`codecommit::us-east-1://repo`)
+/// 2. Specified profile's region (`codecommit://profile@repo`)
+/// 3. Vouch AWS profile's region
+/// 4. `AWS_DEFAULT_REGION` env var
+/// 5. `AWS_REGION` env var
+/// 6. Default: `us-east-1`
 fn resolve_region(url_region: Option<&str>, profile: Option<&str>) -> Result<String> {
     if let Some(region) = url_region {
         return Ok(region.to_string());
     }
 
     if let Ok(aws_config) = crate::integrations::aws::AwsConfig::load() {
-        // If a profile was specified in the URL, try to look up its region
+        // If a profile was specified in the URL, try its region
         if let Some(profile_name) = profile
             && let Some(profile_data) = aws_config.get_profile(profile_name)
             && let Some(region) = profile_data.region
@@ -207,6 +212,14 @@ fn resolve_region(url_region: Option<&str>, profile: Option<&str>) -> Result<Str
         {
             return Ok(region);
         }
+    }
+
+    // Check environment variables
+    if let Ok(r) = std::env::var("AWS_DEFAULT_REGION") {
+        return Ok(r);
+    }
+    if let Ok(r) = std::env::var("AWS_REGION") {
+        return Ok(r);
     }
 
     // Default to us-east-1

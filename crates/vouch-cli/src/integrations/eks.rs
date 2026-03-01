@@ -60,14 +60,6 @@ struct EksExecConfig {
     command: Option<String>,
     #[serde(default)]
     args: Vec<String>,
-    #[serde(default)]
-    env: Option<Vec<ExecEnvVar>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ExecEnvVar {
-    name: String,
-    value: String,
 }
 
 impl IntegrationCheck for EksIntegration {
@@ -109,7 +101,7 @@ fn default_kubeconfig_path() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".kube").join("config"))
 }
 
-/// Find all kubeconfig contexts using `aws eks get-token` with a vouch profile.
+/// Find all kubeconfig contexts using `vouch credential eks`.
 fn find_vouch_eks_contexts() -> Vec<String> {
     let kubeconfig_path = match default_kubeconfig_path() {
         Some(p) if p.exists() => p,
@@ -126,7 +118,6 @@ fn find_vouch_eks_contexts() -> Vec<String> {
         Err(_) => return Vec::new(),
     };
 
-    // Find users with aws eks get-token exec and a vouch AWS_PROFILE
     let vouch_users: std::collections::HashSet<&str> = config
         .users
         .iter()
@@ -134,7 +125,6 @@ fn find_vouch_eks_contexts() -> Vec<String> {
         .map(|u| u.name.as_str())
         .collect();
 
-    // Find contexts using those users
     config
         .contexts
         .iter()
@@ -143,22 +133,13 @@ fn find_vouch_eks_contexts() -> Vec<String> {
         .collect()
 }
 
-/// Check if an exec config is an EKS credential backed by a vouch AWS profile.
+/// Check if an exec config is `vouch credential eks`.
 fn is_vouch_eks_exec(exec: &EksExecConfig) -> bool {
-    // Command must be "aws"
-    let is_aws_command = exec.command.as_ref().is_some_and(|cmd| cmd == "aws");
-
-    // Args must contain "eks" and "get-token"
+    let is_vouch_command = exec.command.as_ref().is_some_and(|cmd| cmd == "vouch");
+    let has_credential = exec.args.iter().any(|a| a == "credential");
     let has_eks = exec.args.iter().any(|a| a == "eks");
-    let has_get_token = exec.args.iter().any(|a| a == "get-token");
 
-    // Env must have AWS_PROFILE pointing to a vouch-like profile
-    let has_vouch_profile = exec.env.as_ref().is_some_and(|envs| {
-        envs.iter()
-            .any(|e| e.name == "AWS_PROFILE" && e.value.contains("vouch"))
-    });
-
-    is_aws_command && has_eks && has_get_token && has_vouch_profile
+    is_vouch_command && has_credential && has_eks
 }
 
 #[cfg(test)]
@@ -171,88 +152,44 @@ mod tests {
     // ==========================================================================
 
     #[test]
-    fn test_is_vouch_eks_exec_valid() {
+    fn test_is_vouch_eks_exec_full_args() {
         let exec = EksExecConfig {
-            command: Some("aws".to_string()),
+            command: Some("vouch".to_string()),
             args: vec![
+                "credential".to_string(),
                 "eks".to_string(),
-                "get-token".to_string(),
                 "--cluster-name".to_string(),
                 "my-cluster".to_string(),
                 "--region".to_string(),
                 "us-east-1".to_string(),
+                "--role".to_string(),
+                "arn:aws:iam::123456789012:role/MyRole".to_string(),
             ],
-            env: Some(vec![ExecEnvVar {
-                name: "AWS_PROFILE".to_string(),
-                value: "vouch".to_string(),
-            }]),
         };
 
         assert!(is_vouch_eks_exec(&exec));
     }
 
     #[test]
-    fn test_is_vouch_eks_exec_vouch_numbered_profile() {
+    fn test_is_vouch_eks_exec_minimal_args() {
         let exec = EksExecConfig {
-            command: Some("aws".to_string()),
-            args: vec!["eks".to_string(), "get-token".to_string()],
-            env: Some(vec![ExecEnvVar {
-                name: "AWS_PROFILE".to_string(),
-                value: "vouch-2".to_string(),
-            }]),
+            command: Some("vouch".to_string()),
+            args: vec![
+                "credential".to_string(),
+                "eks".to_string(),
+                "--cluster-name".to_string(),
+                "test".to_string(),
+            ],
         };
 
         assert!(is_vouch_eks_exec(&exec));
     }
 
     #[test]
-    fn test_is_vouch_eks_exec_not_aws_command() {
+    fn test_is_vouch_eks_exec_not_vouch_command() {
         let exec = EksExecConfig {
-            command: Some("kubectl".to_string()),
-            args: vec!["eks".to_string(), "get-token".to_string()],
-            env: Some(vec![ExecEnvVar {
-                name: "AWS_PROFILE".to_string(),
-                value: "vouch".to_string(),
-            }]),
-        };
-
-        assert!(!is_vouch_eks_exec(&exec));
-    }
-
-    #[test]
-    fn test_is_vouch_eks_exec_no_eks_arg() {
-        let exec = EksExecConfig {
-            command: Some("aws".to_string()),
-            args: vec!["sts".to_string(), "get-caller-identity".to_string()],
-            env: Some(vec![ExecEnvVar {
-                name: "AWS_PROFILE".to_string(),
-                value: "vouch".to_string(),
-            }]),
-        };
-
-        assert!(!is_vouch_eks_exec(&exec));
-    }
-
-    #[test]
-    fn test_is_vouch_eks_exec_non_vouch_profile() {
-        let exec = EksExecConfig {
-            command: Some("aws".to_string()),
-            args: vec!["eks".to_string(), "get-token".to_string()],
-            env: Some(vec![ExecEnvVar {
-                name: "AWS_PROFILE".to_string(),
-                value: "production".to_string(),
-            }]),
-        };
-
-        assert!(!is_vouch_eks_exec(&exec));
-    }
-
-    #[test]
-    fn test_is_vouch_eks_exec_no_env() {
-        let exec = EksExecConfig {
-            command: Some("aws".to_string()),
-            args: vec!["eks".to_string(), "get-token".to_string()],
-            env: None,
+            command: Some("other-tool".to_string()),
+            args: vec!["credential".to_string(), "eks".to_string()],
         };
 
         assert!(!is_vouch_eks_exec(&exec));
@@ -262,11 +199,27 @@ mod tests {
     fn test_is_vouch_eks_exec_no_command() {
         let exec = EksExecConfig {
             command: None,
-            args: vec!["eks".to_string(), "get-token".to_string()],
-            env: Some(vec![ExecEnvVar {
-                name: "AWS_PROFILE".to_string(),
-                value: "vouch".to_string(),
-            }]),
+            args: vec!["credential".to_string(), "eks".to_string()],
+        };
+
+        assert!(!is_vouch_eks_exec(&exec));
+    }
+
+    #[test]
+    fn test_is_vouch_eks_exec_missing_credential_arg() {
+        let exec = EksExecConfig {
+            command: Some("vouch".to_string()),
+            args: vec!["eks".to_string()],
+        };
+
+        assert!(!is_vouch_eks_exec(&exec));
+    }
+
+    #[test]
+    fn test_is_vouch_eks_exec_missing_eks_arg() {
+        let exec = EksExecConfig {
+            command: Some("vouch".to_string()),
+            args: vec!["credential".to_string(), "rds".to_string()],
         };
 
         assert!(!is_vouch_eks_exec(&exec));
@@ -294,17 +247,16 @@ users:
 - name: vouch-eks-prod
   user:
     exec:
-      command: aws
+      command: vouch
       args:
+        - credential
         - eks
-        - get-token
         - --cluster-name
         - prod
         - --region
         - us-east-1
-      env:
-        - name: AWS_PROFILE
-          value: vouch
+        - --role
+        - arn:aws:iam::123456789012:role/MyRole
 - name: regular-user
   user:
     token: some-token
@@ -315,13 +267,11 @@ users:
         assert_eq!(config.contexts.len(), 2);
         assert_eq!(config.users.len(), 2);
 
-        // First user should have vouch EKS exec
         let vouch_user = &config.users[0];
         assert_eq!(vouch_user.name, "vouch-eks-prod");
         assert!(vouch_user.user.exec.is_some());
         assert!(is_vouch_eks_exec(vouch_user.user.exec.as_ref().unwrap()));
 
-        // Second user should not have exec
         let regular_user = &config.users[1];
         assert_eq!(regular_user.name, "regular-user");
         assert!(regular_user.user.exec.is_none());

@@ -8,7 +8,7 @@
 use anyhow::{Context, Result};
 use secrecy::SecretString;
 
-use super::sigv4::sign_and_send_rest_post;
+use super::sigv4::sign_and_send_rest;
 use super::sts::StsCredentials;
 
 /// CodeArtifact authorization token and expiration.
@@ -138,8 +138,9 @@ pub async fn get_authorization_token(
         ("domain-owner", &registry.domain_owner),
     ];
 
-    let response_body = sign_and_send_rest_post(
+    let response_body = sign_and_send_rest(
         http_client,
+        reqwest::Method::POST,
         &endpoint,
         "/v1/authorization-token",
         &query_params,

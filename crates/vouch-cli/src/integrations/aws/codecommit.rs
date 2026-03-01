@@ -248,7 +248,12 @@ fn codecommit_domain_for_region(region: &str) -> &'static str {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::string_slice
+)]
 mod tests {
     use super::*;
 
@@ -586,5 +591,55 @@ mod tests {
         let username = result.username.expose_secret();
         assert_eq!(username, "AKIAIOSFODNN7EXAMPLE");
         assert!(!username.contains('%'));
+    }
+
+    /// End-to-end signature verification for `sign_request`.
+    ///
+    /// Calls the function, extracts the dynamic timestamp from the
+    /// password, then independently reconstructs the SigV4 signing
+    /// calculation and verifies the signature matches.
+    #[test]
+    fn test_codecommit_signature_verification() {
+        let creds = StsCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: SecretString::from(
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            ),
+            session_token: SecretString::from("AQtoken123".to_string()),
+            expiration: "2024-01-15T18:30:45Z".parse().unwrap(),
+        };
+
+        let result = sign_request(
+            &creds,
+            "git-codecommit.us-east-1.amazonaws.com",
+            "/v1/repos/my-repo",
+            "us-east-1",
+        );
+
+        let password = result.password.expose_secret();
+        // Password: {YYYYMMDDTHHMMSS}Z{hex_signature}
+        let timestamp = &password[..15];
+        let actual_sig = &password[16..];
+        let date_stamp = &timestamp[..8];
+
+        // Reconstruct the signing independently
+        let hostname = "git-codecommit.us-east-1.amazonaws.com";
+        let path = "/v1/repos/my-repo";
+        let canonical_headers = format!("host:{hostname}\n");
+        let canonical_request = format!("GIT\n{path}\n\n{canonical_headers}\nhost\n");
+        let cr_hash = sigv4::sha256_hex(canonical_request.as_bytes());
+
+        let scope = format!("{date_stamp}/us-east-1/codecommit/aws4_request");
+        let string_to_sign = format!("AWS4-HMAC-SHA256\n{timestamp}\n{scope}\n{cr_hash}");
+
+        let key = sigv4::derive_signing_key(
+            &creds.secret_access_key,
+            date_stamp,
+            "us-east-1",
+            "codecommit",
+        );
+        let expected_sig = hex::encode(sigv4::hmac_sha256(&key, string_to_sign.as_bytes()));
+
+        assert_eq!(actual_sig, expected_sig, "CodeCommit signature mismatch");
     }
 }

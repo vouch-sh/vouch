@@ -42,16 +42,11 @@ impl std::fmt::Debug for AwsEnvCredentials {
 }
 
 /// Fetch AWS credentials (cache-first) and extract environment variable values.
-pub async fn fetch_aws_credentials(
-    server: &str,
-    role_arn: &str,
-    session_name: Option<&str>,
-) -> Result<AwsEnvCredentials> {
+pub async fn fetch_aws_credentials(server: &str, role_arn: &str) -> Result<AwsEnvCredentials> {
     let cache_key = format!("aws:{role_arn}");
 
     let data = cache::get_or_fetch(&cache_key, "AWS credentials", || async {
-        let output =
-            super::credential::aws::fetch_and_assume(server, role_arn, session_name).await?;
+        let output = super::credential::aws::fetch_and_assume(server, role_arn).await?;
         let expires_at = output.expiration.clone();
         Ok((output.to_json(), expires_at))
     })
@@ -134,7 +129,6 @@ pub async fn run(
     server: &str,
     credential_type: &CredentialType,
     role: Option<&str>,
-    session_name: Option<&str>,
     command: &[String],
     ca_opts: CodeArtifactOptions<'_>,
 ) -> Result<()> {
@@ -153,7 +147,7 @@ pub async fn run(
             let role_arn = role.context(
                 "AWS credentials require --role. Usage: vouch exec --type aws --role <ARN> -- <command>",
             )?;
-            inject_aws_credentials(&mut cmd, server, role_arn, session_name).await?;
+            inject_aws_credentials(&mut cmd, server, role_arn).await?;
         }
         CredentialType::Github => {
             inject_github_credentials(&mut cmd, server).await?;
@@ -192,13 +186,8 @@ pub async fn run(
 /// the CloudTrail user-agent string.
 ///
 /// See: <https://hackingthe.cloud/aws/general-knowledge/aws_cli_tips_and_tricks/#modifying-the-cloudtrail-log-user-agent-with-aws_execution_env>
-async fn inject_aws_credentials(
-    cmd: &mut Command,
-    server: &str,
-    role_arn: &str,
-    session_name: Option<&str>,
-) -> Result<()> {
-    let creds = fetch_aws_credentials(server, role_arn, session_name).await?;
+async fn inject_aws_credentials(cmd: &mut Command, server: &str, role_arn: &str) -> Result<()> {
+    let creds = fetch_aws_credentials(server, role_arn).await?;
 
     cmd.env("AWS_ACCESS_KEY_ID", &creds.access_key_id);
     cmd.env(

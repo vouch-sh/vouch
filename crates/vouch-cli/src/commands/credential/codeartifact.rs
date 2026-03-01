@@ -13,18 +13,13 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 
-use crate::client::VouchClient;
-use crate::commands::credential::aws::{OidcTokenResponse, build_session_tags, decode_jwt_payload};
+use crate::commands::credential::aws::exchange_for_sts_credentials;
 use crate::commands::credential::cache;
 use crate::config::Config;
 use crate::integrations::aws::codeartifact::{
     CodeArtifactRegistry, CodeArtifactToken, get_authorization_token,
 };
 use crate::integrations::aws::get_local_aws_role;
-use crate::integrations::aws::sts::{
-    assume_role_with_web_identity, extract_partition_from_role_arn, get_domain_suffix_for_partition,
-};
-use crate::session::get_user_email;
 
 /// Resolve CodeArtifact domain/owner/region from CLI flags, profile, or default profile.
 ///
@@ -177,85 +172,26 @@ async fn fetch_token(
     domain_owner: &str,
     region: &str,
 ) -> Result<CodeArtifactToken> {
-    let client = VouchClient::new(server).await?;
-
-    // Get OIDC token from Vouch server
-    let token_response: OidcTokenResponse = client
-        .get_authenticated("/v1/credentials/aws/token")
-        .await
-        .context("failed to get OIDC token from Vouch server")?;
-
-    // Get the AWS role ARN from local ~/.aws/config
     let role_arn = get_local_aws_role().ok_or_else(|| {
         anyhow::anyhow!(
-            "AWS not configured. Run 'vouch setup aws --role <role-arn>' with a role \
-             that has CodeArtifact permissions"
+            "AWS not configured. Run 'vouch setup aws --role <role-arn>' \
+             with a role that has CodeArtifact permissions"
         )
     })?;
 
-    // Decode JWT to extract claims for session tags (ABAC)
-    let id_token = token_response.id_token.expose_secret();
-    let tags = match decode_jwt_payload(id_token) {
-        Ok(claims) => build_session_tags(&claims),
-        Err(err) => {
-            tracing::debug!(
-                error = %err,
-                "failed to decode JWT payload for session tags, proceeding without ABAC tags"
-            );
-            Vec::new()
-        }
-    };
+    let result =
+        exchange_for_sts_credentials(server, &role_arn, region, "vouch-codeartifact").await?;
 
-    // Determine domain suffix from role ARN partition
-    let partition = match extract_partition_from_role_arn(&role_arn) {
-        Some(p) => p,
-        None => {
-            tracing::debug!(
-                role_arn = %role_arn,
-                "could not extract partition from role ARN, defaulting to 'aws'"
-            );
-            "aws"
-        }
-    };
-    let domain_suffix = get_domain_suffix_for_partition(partition);
-
-    // Create HTTP client once for all AWS API calls
-    let http_client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
-
-    // Call STS AssumeRoleWithWebIdentity
-    let email = get_user_email(server).await;
-    let session = email.as_deref().unwrap_or("vouch-codeartifact");
-    let sts_response = assume_role_with_web_identity(
-        &http_client,
-        &role_arn,
-        session,
-        id_token,
-        region,
-        domain_suffix,
-        &tags,
-    )
-    .await
-    .context("failed to assume AWS role")?;
-
-    // Call CodeArtifact GetAuthorizationToken
     let registry = CodeArtifactRegistry {
         domain: domain.to_string(),
         domain_owner: domain_owner.to_string(),
         region: region.to_string(),
-        domain_suffix: domain_suffix.to_string(),
+        domain_suffix: result.domain_suffix.to_string(),
     };
 
-    let ca_token = get_authorization_token(
-        &http_client,
-        &registry,
-        &sts_response
-            .assume_role_with_web_identity_result
-            .credentials,
-    )
-    .await
-    .context("failed to get CodeArtifact authorization token")?;
+    let ca_token = get_authorization_token(&result.http_client, &registry, &result.credentials)
+        .await
+        .context("failed to get CodeArtifact authorization token")?;
 
     Ok(ca_token)
 }

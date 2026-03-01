@@ -10,10 +10,6 @@ use secrecy::{ExposeSecret, SecretString};
 use serde::Deserialize;
 
 use crate::client::VouchClient;
-use crate::integrations::aws::sts::{
-    assume_role_with_web_identity, extract_partition_from_role_arn,
-    get_default_region_for_partition, get_domain_suffix_for_partition, validate_role_arn,
-};
 use crate::session::get_user_email;
 
 /// AWS credential process output format.
@@ -112,17 +108,83 @@ pub(crate) fn build_session_tags(claims: &serde_json::Value) -> Vec<(String, Str
     tags
 }
 
+/// Result of the OIDC → STS credential exchange.
+///
+/// Provides everything downstream AWS API calls need: an HTTP client,
+/// the temporary STS credentials, and the domain suffix for endpoint
+/// construction.
+pub(crate) struct StsExchangeResult {
+    pub(crate) http_client: reqwest::Client,
+    pub(crate) credentials: crate::integrations::aws::sts::StsCredentials,
+    pub(crate) domain_suffix: &'static str,
+}
+
+/// Exchange a Vouch session for AWS STS credentials.
+///
+/// Handles the full flow: OIDC token fetch → JWT decode for session tags →
+/// role ARN validation → `AssumeRoleWithWebIdentity`.
+///
+/// The STS session name is always the user's email address (for CloudTrail
+/// visibility). Falls back to `fallback_label` if email is unavailable.
+pub(crate) async fn exchange_for_sts_credentials(
+    server: &str,
+    role_arn: &str,
+    region: &str,
+    fallback_label: &str,
+) -> Result<StsExchangeResult> {
+    use crate::integrations::aws::sts::{Arn, assume_role_with_web_identity};
+
+    let arn = Arn::parse_role_arn(role_arn)?;
+    let domain_suffix = arn.partition.dns_suffix();
+
+    let client = VouchClient::new(server).await?;
+
+    let token_response: OidcTokenResponse = client
+        .get_authenticated("/v1/credentials/aws/token")
+        .await
+        .context("failed to get OIDC token from Vouch server")?;
+
+    let id_token = token_response.id_token.expose_secret();
+    let tags = decode_jwt_payload(id_token)
+        .map(|claims| build_session_tags(&claims))
+        .unwrap_or_default();
+
+    let http_client =
+        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
+            .context("failed to create HTTP client")?;
+
+    let email = get_user_email(server).await;
+    let session = email.as_deref().unwrap_or(fallback_label);
+    let credentials = assume_role_with_web_identity(
+        &http_client,
+        role_arn,
+        session,
+        id_token,
+        region,
+        domain_suffix,
+        &tags,
+    )
+    .await
+    .context("failed to assume AWS role")?;
+
+    Ok(StsExchangeResult {
+        http_client,
+        credentials,
+        domain_suffix,
+    })
+}
+
 /// Run the AWS credential command.
 ///
 /// Uses a cache-first strategy via [`super::cache::get_or_fetch`]:
 /// 1. Check agent cache — return immediately if valid cached credentials exist
 /// 2. Fetch fresh OIDC token from Vouch server, call STS, cache the result
 /// 3. On network error, fall back to cached credentials (if any)
-pub async fn run(server: &str, role_arn: &str, session_name: Option<&str>) -> Result<()> {
+pub async fn run(server: &str, role_arn: &str) -> Result<()> {
     let cache_key = format!("aws:{role_arn}");
 
     let data = super::cache::get_or_fetch(&cache_key, "AWS credentials", || async {
-        let output = fetch_and_assume(server, role_arn, session_name).await?;
+        let output = fetch_and_assume(server, role_arn).await?;
         let expires_at = output.expiration.clone();
         Ok((output.to_json(), expires_at))
     })
@@ -137,50 +199,14 @@ pub async fn run(server: &str, role_arn: &str, session_name: Option<&str>) -> Re
 pub(crate) async fn fetch_and_assume(
     server: &str,
     role_arn: &str,
-    session_name: Option<&str>,
 ) -> Result<CredentialProcessOutput> {
-    let client = VouchClient::new(server).await?;
+    use crate::integrations::aws;
 
-    // Get OIDC token from Vouch server
-    let token_response: OidcTokenResponse = client
-        .get_authenticated("/v1/credentials/aws/token")
-        .await
-        .context("failed to get OIDC token from Vouch server")?;
+    let profile_name = aws::resolve_profile(None).unwrap_or_default();
+    let region = aws::resolve_region(None, &profile_name)?;
 
-    // Decode JWT to extract claims for session tags (ABAC)
-    let id_token = token_response.id_token.expose_secret();
-    let tags = decode_jwt_payload(id_token)
-        .map(|claims| build_session_tags(&claims))
-        .unwrap_or_default();
-
-    // Validate and determine region and domain suffix from role ARN partition
-    validate_role_arn(role_arn)?;
-    let partition = extract_partition_from_role_arn(role_arn).unwrap_or("aws");
-    let region = get_default_region_for_partition(partition);
-    let domain_suffix = get_domain_suffix_for_partition(partition);
-
-    // Call AWS STS AssumeRoleWithWebIdentity
-    // Use email as default session name for CloudTrail visibility
-    let http_client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
-    let email = get_user_email(server).await;
-    let session = session_name.or(email.as_deref()).unwrap_or("vouch-session");
-    let sts_response = assume_role_with_web_identity(
-        &http_client,
-        role_arn,
-        session,
-        id_token,
-        region,
-        domain_suffix,
-        &tags,
-    )
-    .await
-    .context("failed to assume AWS role")?;
-
-    let creds = &sts_response
-        .assume_role_with_web_identity_result
-        .credentials;
+    let result = exchange_for_sts_credentials(server, role_arn, &region, "vouch-session").await?;
+    let creds = &result.credentials;
     Ok(CredentialProcessOutput {
         version: 1,
         access_key_id: creds.access_key_id.clone(),

@@ -9,9 +9,12 @@ pub mod cargo;
 pub mod codeartifact;
 pub mod codecommit;
 pub mod docker;
+pub mod eks;
 pub mod git_protocol;
 pub mod github;
 pub mod pip;
+pub mod rds;
+pub mod redshift;
 
 pub mod ssh;
 pub mod token;
@@ -24,9 +27,6 @@ pub enum CredentialCommands {
         /// AWS IAM role ARN to assume.
         #[arg(long)]
         role: String,
-        /// Session name for the assumed role.
-        #[arg(long)]
-        session_name: Option<String>,
     },
     /// Obtain an SSH certificate.
     Ssh {
@@ -88,6 +88,63 @@ pub enum CredentialCommands {
         service_url: Option<String>,
         /// Username passed by pip (typically "aws").
         username: Option<String>,
+    },
+    /// Generate a Kubernetes bearer token for Amazon EKS authentication.
+    ///
+    /// Outputs a Kubernetes ExecCredential JSON to stdout. Use as a
+    /// kubeconfig exec-based credential plugin.
+    Eks {
+        /// EKS cluster name.
+        #[arg(long)]
+        cluster_name: String,
+        /// AWS region (auto-detected from AWS profile or env if not specified).
+        #[arg(long)]
+        region: Option<String>,
+        /// AWS IAM role ARN to assume (auto-detected from vouch AWS profile if not specified).
+        #[arg(long)]
+        role: Option<String>,
+    },
+    /// Generate an RDS IAM authentication token.
+    ///
+    /// Prints a token to stdout that can be used as the database password
+    /// for RDS instances with IAM authentication enabled.
+    Rds {
+        /// RDS instance hostname.
+        #[arg(long)]
+        hostname: String,
+        /// Database port (default: 5432).
+        #[arg(long, default_value = "5432")]
+        port: u16,
+        /// Database username.
+        #[arg(long)]
+        username: String,
+        /// AWS region (auto-detected from AWS profile or env if not specified).
+        #[arg(long)]
+        region: Option<String>,
+        /// AWS IAM role ARN to assume (auto-detected from vouch AWS profile if not specified).
+        #[arg(long)]
+        role: Option<String>,
+    },
+    /// Generate temporary Amazon Redshift database credentials.
+    ///
+    /// Uses `GetClusterCredentialsWithIAM` to auto-map IAM identity to a
+    /// database user. Outputs JSON with DbUser, DbPassword, and Expiration.
+    Redshift {
+        /// Redshift cluster identifier.
+        #[arg(long)]
+        cluster_id: String,
+        /// Database name (optional).
+        #[arg(long)]
+        db_name: Option<String>,
+        /// AWS region (auto-detected from AWS profile or env if not specified).
+        #[arg(long)]
+        region: Option<String>,
+        /// AWS IAM role ARN to assume (auto-detected from vouch AWS profile if not specified).
+        #[arg(long)]
+        role: Option<String>,
+        /// Credential duration in seconds (900-3600, default: 900).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(900..=3600))]
+        duration: Option<u32>,
     },
     /// Print the current session token for use with curl or other tools.
     Token {},

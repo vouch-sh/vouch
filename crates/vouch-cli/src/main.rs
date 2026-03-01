@@ -184,9 +184,6 @@ enum Commands {
         /// AWS IAM role ARN (required for --type aws).
         #[arg(long)]
         role: Option<String>,
-        /// Session name for AWS assumed role.
-        #[arg(long)]
-        session_name: Option<String>,
         #[command(flatten)]
         ca: CodeArtifactArgs,
     },
@@ -212,9 +209,6 @@ enum Commands {
         /// AWS IAM role ARN (required for --type aws).
         #[arg(long)]
         role: Option<String>,
-        /// Session name for the assumed role.
-        #[arg(long)]
-        session_name: Option<String>,
         #[command(flatten)]
         ca: CodeArtifactArgs,
         /// Command and arguments to execute.
@@ -326,7 +320,6 @@ async fn run() -> Result<()> {
             credential_type,
             shell,
             role,
-            session_name,
             ca,
         } => {
             commands::env::run(
@@ -334,7 +327,6 @@ async fn run() -> Result<()> {
                 &credential_type,
                 &shell,
                 role.as_deref(),
-                session_name.as_deref(),
                 ca.to_options(),
             )
             .await
@@ -353,7 +345,6 @@ async fn run() -> Result<()> {
         Commands::Exec {
             credential_type,
             role,
-            session_name,
             ca,
             command,
         } => {
@@ -361,16 +352,13 @@ async fn run() -> Result<()> {
                 server,
                 &credential_type,
                 role.as_deref(),
-                session_name.as_deref(),
                 &command,
                 ca.to_options(),
             )
             .await
         }
         Commands::Credential { command } => match command {
-            CredentialCommands::Aws { role, session_name } => {
-                commands::credential::aws::run(server, &role, session_name.as_deref()).await
-            }
+            CredentialCommands::Aws { role } => commands::credential::aws::run(server, &role).await,
             CredentialCommands::Ssh { key } => {
                 commands::credential::ssh::run(server, key.as_deref()).await
             }
@@ -393,6 +381,53 @@ async fn run() -> Result<()> {
                     &operation,
                     service_url.as_deref(),
                     username.as_deref(),
+                )
+                .await
+            }
+            CredentialCommands::Eks {
+                cluster_name,
+                region,
+                role,
+            } => {
+                commands::credential::eks::run(
+                    server,
+                    &cluster_name,
+                    region.as_deref(),
+                    role.as_deref(),
+                )
+                .await
+            }
+            CredentialCommands::Rds {
+                hostname,
+                port,
+                username,
+                region,
+                role,
+            } => {
+                commands::credential::rds::run(
+                    server,
+                    &hostname,
+                    port,
+                    &username,
+                    region.as_deref(),
+                    role.as_deref(),
+                )
+                .await
+            }
+            CredentialCommands::Redshift {
+                cluster_id,
+                db_name,
+                region,
+                role,
+                duration,
+            } => {
+                commands::credential::redshift::run(
+                    server,
+                    &cluster_id,
+                    db_name.as_deref(),
+                    region.as_deref(),
+                    role.as_deref(),
+                    duration,
                 )
                 .await
             }
@@ -430,6 +465,7 @@ async fn run() -> Result<()> {
                 kubeconfig,
             } => {
                 commands::setup::eks::run(
+                    server,
                     &cluster,
                     region.as_deref(),
                     profile.as_deref(),

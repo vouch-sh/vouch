@@ -10,9 +10,7 @@ use secrecy::ExposeSecret;
 use crate::commands::credential::codeartifact::resolve_codeartifact_params;
 use crate::config::{CodeArtifactProfile, Config};
 use crate::integrations::aws::get_local_aws_role;
-use crate::integrations::aws::sts::{
-    extract_partition_from_role_arn, get_domain_suffix_for_partition,
-};
+use crate::integrations::aws::sts::Arn;
 use crate::integrations::cargo::CargoConfig;
 
 /// Supported package manager tools for CodeArtifact.
@@ -72,9 +70,13 @@ pub async fn run(
 
     // Derive domain suffix from the AWS config's role ARN partition
     // to support China, GovCloud, and other partitions.
-    let partition = get_local_aws_role()
-        .and_then(|role| extract_partition_from_role_arn(&role).map(String::from));
-    let domain_suffix = get_domain_suffix_for_partition(partition.as_deref().unwrap_or("aws"));
+    let domain_suffix = get_local_aws_role()
+        .and_then(|role| {
+            Arn::parse_role_arn(&role)
+                .ok()
+                .map(|arn| arn.partition.dns_suffix())
+        })
+        .unwrap_or("amazonaws.com");
 
     let ca_host = format!("{domain}-{domain_owner}.d.codeartifact.{region}.{domain_suffix}");
 
