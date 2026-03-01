@@ -81,6 +81,14 @@ ENV OPENSSL_LIB_DIR=/usr/lib
 ENV OPENSSL_INCLUDE_DIR=/usr/include
 RUN cargo chef cook --release --package vouch-server --recipe-path recipe.json
 
+# Restore real manifests (cook leaves stubs with placeholder versions)
+COPY Cargo.toml Cargo.lock ./
+COPY crates/vouch-common/Cargo.toml crates/vouch-common/
+COPY crates/vouch-server/Cargo.toml crates/vouch-server/
+COPY crates/vouch-cli/Cargo.toml crates/vouch-cli/
+COPY crates/vouch-agent/Cargo.toml crates/vouch-agent/
+COPY crates/vouch-tests/Cargo.toml crates/vouch-tests/
+
 # Copy actual source code
 COPY crates/vouch-common/src crates/vouch-common/src
 COPY crates/vouch-server/src crates/vouch-server/src
