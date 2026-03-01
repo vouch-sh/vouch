@@ -76,7 +76,7 @@ pub struct ValidatedResourceToken {
 /// Supports three token sources (in order of precedence):
 /// 1. `Authorization: DPoP <token>` — DPoP-bound token (FAPI 2.0)
 /// 2. `Authorization: Bearer <token>` — standard Bearer token
-/// 3. `vouch_session` cookie — browser sessions
+/// 3. `__Host-vouch_session` cookie — browser sessions
 ///
 /// Validates the token as ES256 `at+jwt` (RFC 9068), verifies session
 /// existence in DB, and validates DPoP proof if the token is sender-constrained.
@@ -246,7 +246,7 @@ pub async fn extract_resource_token_with_email(
     Ok((token, email))
 }
 
-/// Extract and validate an OAuth access token from the `vouch_session` cookie only.
+/// Extract and validate an OAuth access token from the session cookie only.
 ///
 /// Used by browser UI handlers (enrollment, GitHub, applications) where the
 /// Authorization header is not available. The cookie contains an OAuth access token
@@ -273,7 +273,7 @@ enum AuthScheme {
     DPoP,
     /// `Authorization: Bearer <token>`
     Bearer,
-    /// Token read from `vouch_session` cookie
+    /// Token read from session cookie
     Cookie,
 }
 
@@ -298,7 +298,7 @@ fn extract_token_from_request(
     }
 
     // Fall back to cookie
-    if let Some(cookie) = jar.get("vouch_session") {
+    if let Some(cookie) = jar.get(vouch_common::SESSION_COOKIE_NAME) {
         return Ok((cookie.value().to_string(), AuthScheme::Cookie));
     }
 
@@ -314,7 +314,7 @@ fn extract_token_from_request(
 /// Returns a Cookie configured with proper security attributes.
 #[must_use]
 pub fn create_session_cookie(token: &str, max_age_seconds: i64) -> Cookie<'static> {
-    Cookie::build(("vouch_session", token.to_owned()))
+    Cookie::build((vouch_common::SESSION_COOKIE_NAME, token.to_owned()))
         .path("/")
         .http_only(true)
         .secure(true)
@@ -328,7 +328,7 @@ pub fn create_session_cookie(token: &str, max_age_seconds: i64) -> Cookie<'stati
 /// Returns a Cookie that expires the session cookie.
 #[must_use]
 pub fn clear_session_cookie() -> Cookie<'static> {
-    Cookie::build(("vouch_session", ""))
+    Cookie::build((vouch_common::SESSION_COOKIE_NAME, ""))
         .path("/")
         .http_only(true)
         .secure(true)
@@ -340,7 +340,7 @@ pub fn clear_session_cookie() -> Cookie<'static> {
 /// Helper to extract auth context from cookie jar using OAuth tokens.
 pub async fn get_resource_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
     // Try to extract token from cookie
-    let token = match jar.get("vouch_session") {
+    let token = match jar.get(vouch_common::SESSION_COOKIE_NAME) {
         Some(c) => c.value(),
         None => return AuthContext::unauthenticated(),
     };

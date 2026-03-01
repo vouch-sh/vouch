@@ -32,7 +32,7 @@ use super::session::extract_resource_token;
 
 /// Extract and validate an org admin from Bearer token, DPoP token, or cookie.
 ///
-/// Tries Authorization header first, then falls back to vouch_session cookie.
+/// Tries Authorization header first, then falls back to session cookie.
 /// Returns the user and their org_id if they are an org admin.
 async fn extract_org_admin(
     state: &AppState,

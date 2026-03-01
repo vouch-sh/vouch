@@ -43,7 +43,7 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
 
     // Start server with graceful shutdown
     if config.tls_configured() {
-        let tls_config = crate::infra::tls::build_tls_config(&config).await?;
+        let tls_config = crate::infra::tls::build_tls_config(&config)?;
 
         // TLS mode: always listen on 443 (HTTPS) and 80 (HTTP redirect)
         let https_addr: std::net::SocketAddr =
@@ -110,9 +110,7 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
                             &tls_config_for_reload,
                             cert,
                             key,
-                        )
-                        .await
-                        {
+                        ) {
                             Ok(()) => tracing::info!("TLS certificates reloaded successfully"),
                             Err(e) => tracing::error!("Failed to reload TLS certificates: {e:#}"),
                         }

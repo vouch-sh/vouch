@@ -624,7 +624,7 @@ async fn test_rfc9126_authorize_resolves_request_uri() {
             client.client_id,
             urlencoding::encode(&request_uri),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -727,7 +727,7 @@ async fn test_rfc9126_request_uri_is_single_use() {
             client.client_id,
             urlencoding::encode(&request_uri),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -745,7 +745,7 @@ async fn test_rfc9126_request_uri_is_single_use() {
             client.client_id,
             urlencoding::encode(&request_uri),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -789,7 +789,7 @@ async fn test_rfc9126_request_uri_is_client_bound() {
             client_b.client_id,
             urlencoding::encode(&request_uri),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -828,7 +828,7 @@ async fn test_rfc9126_client_binding_failure_does_not_consume() {
             client_b.client_id,
             urlencoding::encode(&request_uri),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -840,7 +840,7 @@ async fn test_rfc9126_client_binding_failure_does_not_consume() {
             client_a.client_id,
             urlencoding::encode(&request_uri),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 

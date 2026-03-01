@@ -31,3 +31,12 @@ pub use cookie::{
 };
 pub use error::*;
 pub use url::{UrlSecurity, check_url_security, is_loopback_host};
+
+/// Session cookie name with `__Host-` prefix (RFC 6265bis).
+///
+/// The `__Host-` prefix provides browser-enforced guarantees:
+/// - Cookie must be set with `Secure` flag
+/// - Cookie must be set from a secure origin
+/// - Cookie must not include a `Domain` attribute
+/// - Cookie must have `Path=/`
+pub const SESSION_COOKIE_NAME: &str = "__Host-vouch_session";

@@ -47,7 +47,7 @@ mime_guess = { workspace = true }
 mimalloc = { workspace = true, features = ["secure"] }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 rust-embed = { workspace = true, features = ["axum-ex", "deterministic-timestamps", "mime-guess"] }
-rustls = { workspace = true, features = ["aws-lc-rs", "std", "tls12", "prefer-post-quantum"] }
+rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum"] }
 rustls-pemfile = { workspace = true, features = ["std"] }
 sea-query = { workspace = true, features = ["backend-sqlite", "backend-postgres", "derive"] }
 sea-query-binder = { workspace = true, features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio-rustls"] }

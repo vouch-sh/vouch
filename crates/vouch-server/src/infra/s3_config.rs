@@ -664,7 +664,7 @@ async fn apply_config_update(
         && let (Some(cert), Some(key)) = (&new_config.tls_cert, &new_config.tls_key)
     {
         tracing::info!("TLS config changed, reloading certificates");
-        super::tls::reload_tls_from_config(tls, cert, key).await?;
+        super::tls::reload_tls_from_config(tls, cert, key)?;
         tracing::info!("TLS certificates reloaded successfully");
     }
 
