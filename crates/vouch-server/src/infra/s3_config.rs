@@ -259,9 +259,15 @@ pub struct S3Config {
     /// SSH CA private key.
     pub ssh_ca_key: Option<String>,
 
+    /// AWS KMS key ID for SSH CA signing (multi-region `mrk-` prefix).
+    pub ssh_ca_kms_key_id: Option<String>,
+
     // OIDC signing key (base64-encoded PEM EC P-256 private key)
     /// OIDC signing key.
     pub oidc_signing_key: Option<String>,
+
+    /// AWS KMS key ID for OIDC signing (multi-region `mrk-` prefix).
+    pub oidc_signing_kms_key_id: Option<String>,
 
     // Cleanup settings
     /// Cleanup interval in minutes.
@@ -312,7 +318,9 @@ impl std::fmt::Debug for S3Config {
             .field("cors_origins", &self.cors_origins)
             .field("github", &self.github)
             .field("ssh_ca_key", &"[REDACTED]")
+            .field("ssh_ca_kms_key_id", &self.ssh_ca_kms_key_id)
             .field("oidc_signing_key", &"[REDACTED]")
+            .field("oidc_signing_kms_key_id", &self.oidc_signing_kms_key_id)
             .field("cleanup_interval_minutes", &self.cleanup_interval_minutes)
             .field(
                 "auth_events_retention_days",
@@ -816,10 +824,16 @@ impl ServerConfig {
         if let Some(v) = &s3.ssh_ca_key {
             self.ssh_ca_key = Some(SecretString::from(v.clone()));
         }
+        if let Some(v) = &s3.ssh_ca_kms_key_id {
+            self.ssh_ca_kms_key_id = Some(v.clone());
+        }
 
         // OIDC signing key
         if let Some(v) = &s3.oidc_signing_key {
             self.oidc_signing_key = Some(SecretString::from(v.clone()));
+        }
+        if let Some(v) = &s3.oidc_signing_kms_key_id {
+            self.oidc_signing_kms_key_id = Some(v.clone());
         }
 
         // Cleanup settings
@@ -1090,6 +1104,68 @@ mod tests {
 
         let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
         assert!(config.document_key.is_none());
+    }
+
+    #[test]
+    fn test_s3_config_deserialization_with_kms_key_ids() {
+        let json = r#"{
+            "version": 1,
+            "rp_id": "vouch.example.com",
+            "ssh_ca_kms_key_id": "mrk-abc123def456",
+            "oidc_signing_kms_key_id": "mrk-789ghi012jkl"
+        }"#;
+
+        let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
+
+        assert_eq!(
+            config.ssh_ca_kms_key_id,
+            Some("mrk-abc123def456".to_string())
+        );
+        assert_eq!(
+            config.oidc_signing_kms_key_id,
+            Some("mrk-789ghi012jkl".to_string())
+        );
+    }
+
+    #[test]
+    fn test_merge_s3_config_kms_key_ids() {
+        let mut config = crate::test_utils::test_config();
+        assert!(config.ssh_ca_kms_key_id.is_none());
+        assert!(config.oidc_signing_kms_key_id.is_none());
+
+        let s3 = S3Config {
+            ssh_ca_kms_key_id: Some("mrk-ssh-key".to_string()),
+            oidc_signing_kms_key_id: Some("mrk-oidc-key".to_string()),
+            ..Default::default()
+        };
+
+        config.merge_s3_config(&s3, false);
+
+        assert_eq!(
+            config.ssh_ca_kms_key_id,
+            Some("mrk-ssh-key".to_string())
+        );
+        assert_eq!(
+            config.oidc_signing_kms_key_id,
+            Some("mrk-oidc-key".to_string())
+        );
+    }
+
+    #[test]
+    fn test_merge_s3_config_runtime_blocks_kms_key_ids() {
+        let mut config = crate::test_utils::test_config();
+
+        let s3 = S3Config {
+            ssh_ca_kms_key_id: Some("mrk-ssh-key".to_string()),
+            oidc_signing_kms_key_id: Some("mrk-oidc-key".to_string()),
+            ..Default::default()
+        };
+
+        // Runtime update should NOT apply KMS key IDs
+        config.merge_s3_config(&s3, true);
+
+        assert!(config.ssh_ca_kms_key_id.is_none());
+        assert!(config.oidc_signing_kms_key_id.is_none());
     }
 
     #[test]
