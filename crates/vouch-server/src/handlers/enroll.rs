@@ -765,7 +765,10 @@ pub async fn browser_register_start(
     // Get device_auth_id from enrollment session if available (for CLI polling).
     // Look up by session token hash, since oidc_callback stores the
     // enrollment session keyed to the same token.
-    let device_auth_id = match jar.get(vouch_common::SESSION_COOKIE_NAME).map(|c| c.value()) {
+    let device_auth_id = match jar
+        .get(vouch_common::SESSION_COOKIE_NAME)
+        .map(|c| c.value())
+    {
         Some(cookie_val) => {
             let token_hash = hash_token(cookie_val);
             let enrollment_session =

@@ -88,17 +88,13 @@ pub fn reload_tls_from_config(
 /// - TLS 1.3 only (no TLS 1.2 or earlier)
 /// - ALPN: h2, http/1.1
 /// - No client authentication (public-facing server)
-fn build_server_config(
-    cert_pem: &[u8],
-    key_pem: &[u8],
-) -> Result<Arc<rustls::ServerConfig>> {
+fn build_server_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<Arc<rustls::ServerConfig>> {
     validate_pem(cert_pem, "CERTIFICATE").context("Invalid TLS certificate format")?;
     validate_pem(key_pem, "PRIVATE KEY").context("Invalid TLS private key format")?;
 
-    let certs: Vec<rustls::pki_types::CertificateDer<'_>> =
-        rustls_pemfile::certs(&mut &*cert_pem)
-            .collect::<Result<Vec<_>, _>>()
-            .context("Failed to parse PEM certificate chain")?;
+    let certs: Vec<rustls::pki_types::CertificateDer<'_>> = rustls_pemfile::certs(&mut &*cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .context("Failed to parse PEM certificate chain")?;
 
     let key = rustls_pemfile::private_key(&mut &*key_pem)
         .context("Failed to parse PEM private key")?
