@@ -930,3 +930,81 @@ pub async fn delete_secret_form(
 
     Redirect::to(&format!("/applications/{app_id}")).into_response()
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::test_utils::*;
+
+    // Web handlers use Path<String> (not ValidPath<ValidUuid>) so that invalid
+    // UUIDs flow through to the db lookup and produce HTML error pages, not
+    // JSON 400s. These tests guard against accidentally switching to ValidPath.
+
+    #[tokio::test]
+    async fn test_detail_page_invalid_uuid_returns_html_not_json() {
+        let (app, _state) = test_app().await;
+
+        let resp = http_get_full(&app, "/applications/not-a-uuid", &[]).await;
+
+        // Should NOT be 400 (which ValidPath would produce).
+        // Without a session cookie the handler returns the unauthorized template (200).
+        assert_ne!(resp.status, StatusCode::BAD_REQUEST);
+        let ct = resp
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            ct.contains("text/html"),
+            "expected HTML content-type, got: {ct}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_page_invalid_uuid_returns_html_not_json() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_post_form(&app, "/applications/not-a-uuid/delete", "", &[]).await;
+
+        assert_ne!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body.contains("</html>") || body.contains("<!DOCTYPE"),
+            "expected HTML response, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_secret_page_invalid_uuid_returns_html_not_json() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) =
+            http_post_form(&app, "/applications/not-a-uuid/secrets", "", &[]).await;
+
+        assert_ne!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body.contains("</html>") || body.contains("<!DOCTYPE"),
+            "expected HTML response, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_secret_page_invalid_uuids_returns_html_not_json() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_post_form(
+            &app,
+            "/applications/not-a-uuid/secrets/also-bad/delete",
+            "",
+            &[],
+        )
+        .await;
+
+        assert_ne!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body.contains("</html>") || body.contains("<!DOCTYPE"),
+            "expected HTML response, got: {body}"
+        );
+    }
+}

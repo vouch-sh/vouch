@@ -10,6 +10,7 @@ pub mod device;
 pub mod enroll;
 pub mod enroll_keys;
 pub(crate) mod extractors;
+pub(crate) use extractors::{ValidPath, ValidUuid};
 pub mod github;
 pub mod home;
 pub mod install;

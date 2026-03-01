@@ -13,7 +13,7 @@ use axum::extract::OriginalUri;
 use axum::http::Method;
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -24,6 +24,7 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use super::session::extract_org_admin;
+use super::{ValidPath, ValidUuid};
 
 // ============================================================================
 // SCIM Token Management API
@@ -175,17 +176,8 @@ pub async fn delete_scim_token(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     jar: CookieJar,
-    Path(token_id): Path<String>,
+    ValidPath(token_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
-    // Validate token_id is a UUID before any processing
-    if uuid::Uuid::try_parse(&token_id).is_err() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "Invalid token ID format",
-        ));
-    }
-
     let (_user, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
@@ -206,4 +198,53 @@ pub async fn delete_scim_token(
     tracing::info!("Deleted SCIM token: {}", token_id);
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::test_utils::*;
+
+    // ValidPath<ValidUuid> is extracted before the handler body runs auth checks,
+    // so a malformed UUID must produce 400 regardless of authentication state.
+
+    #[tokio::test]
+    async fn test_delete_scim_token_invalid_uuid_returns_400() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_delete(&app, "/api/v1/org/scim-tokens/not-a-uuid", &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_delete_scim_token_invalid_uuid_error_is_json() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_delete(&app, "/api/v1/org/scim-tokens/not-a-uuid", &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // ServiceError::api produces {"code": "...", "message": "..."}
+        let json: serde_json::Value =
+            serde_json::from_str(&body).expect("error response must be valid JSON");
+        assert!(
+            json.get("code").is_some(),
+            "JSON error must contain 'code' field; got: {json}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_delete_scim_token_valid_uuid_proceeds_to_auth_check() {
+        // A valid UUID with no auth should fail with 401, not 400,
+        // confirming UUID validation passed and auth ran.
+        let (app, _state) = test_app().await;
+        let valid_uuid = uuid::Uuid::now_v7();
+
+        let (status, _body) =
+            http_delete(&app, &format!("/api/v1/org/scim-tokens/{valid_uuid}"), &[]).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
 }
