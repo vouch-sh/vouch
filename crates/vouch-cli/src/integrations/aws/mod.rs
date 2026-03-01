@@ -71,6 +71,32 @@ pub(crate) fn get_local_aws_role() -> Option<String> {
     extract_role_from_credential_process(&profile.credential_process?)
 }
 
+/// Resolve AWS role ARN and region from CLI flags or local config.
+///
+/// This is the standard resolution pattern used by credential commands
+/// that need both a role and region (EKS, RDS, Redshift). It:
+/// 1. Uses the `--role` flag if provided, otherwise reads from `~/.aws/config`
+/// 2. Resolves region from `--region` flag, AWS profile, or env vars
+pub fn resolve_role_and_region(
+    role: Option<&str>,
+    region: Option<&str>,
+) -> anyhow::Result<(String, String)> {
+    let role_arn = match role {
+        Some(r) => r.to_string(),
+        None => get_local_aws_role().ok_or_else(|| {
+            anyhow::anyhow!(
+                "AWS not configured. Run 'vouch setup aws --role <role-arn>' \
+                 first, or specify --role."
+            )
+        })?,
+    };
+
+    let profile_name = resolve_profile(None).unwrap_or_default();
+    let region_name = resolve_region(region, &profile_name)?;
+
+    Ok((role_arn, region_name))
+}
+
 use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
 
 /// AWS integration checker.

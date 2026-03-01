@@ -5,7 +5,7 @@ use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
 
 use super::CredentialType;
-use super::exec::CodeArtifactOptions;
+use super::exec::{CodeArtifactOptions, RdsOptions, RedshiftOptions};
 
 /// Shell format for environment variable output.
 #[derive(Clone, Debug, clap::ValueEnum)]
@@ -23,6 +23,8 @@ pub async fn run(
     shell: &Shell,
     role: Option<&str>,
     ca_opts: CodeArtifactOptions<'_>,
+    rds_opts: RdsOptions<'_>,
+    rs_opts: RedshiftOptions<'_>,
 ) -> Result<()> {
     match credential_type {
         CredentialType::Aws => {
@@ -33,6 +35,8 @@ pub async fn run(
         }
         CredentialType::Github => print_github_env(server, shell).await,
         CredentialType::Codeartifact => print_codeartifact_env(server, &ca_opts, shell).await,
+        CredentialType::Rds => print_rds_env(server, role, &rds_opts, shell).await,
+        CredentialType::Redshift => print_redshift_env(server, role, &rs_opts, shell).await,
     }
 }
 
@@ -103,6 +107,66 @@ async fn print_codeartifact_env(
         "CODEARTIFACT_AUTH_TOKEN",
         token.authorization_token.expose_secret(),
     );
+
+    Ok(())
+}
+
+/// Fetch RDS IAM auth token and print PostgreSQL export statements.
+async fn print_rds_env(
+    server: &str,
+    role: Option<&str>,
+    opts: &RdsOptions<'_>,
+    shell: &Shell,
+) -> Result<()> {
+    let hostname = opts.hostname.context(
+        "RDS credentials require --rds-hostname. \
+         Usage: vouch env --type rds --rds-hostname <host> --rds-username <user>",
+    )?;
+    let username = opts.username.context(
+        "RDS credentials require --rds-username. \
+         Usage: vouch env --type rds --rds-hostname <host> --rds-username <user>",
+    )?;
+
+    let token =
+        super::credential::rds::fetch_rds_token(server, hostname, opts.port, username, None, role)
+            .await?;
+
+    print_export(shell, "PGPASSWORD", token.expose_secret());
+    print_export(shell, "PGHOST", hostname);
+    print_export(shell, "PGPORT", &opts.port.to_string());
+    print_export(shell, "PGUSER", username);
+    print_export(shell, "PGSSLMODE", "require");
+
+    Ok(())
+}
+
+/// Fetch Redshift credentials and print PostgreSQL export statements.
+async fn print_redshift_env(
+    server: &str,
+    role: Option<&str>,
+    opts: &RedshiftOptions<'_>,
+    shell: &Shell,
+) -> Result<()> {
+    let target = super::credential::redshift::resolve_target(
+        opts.cluster_id,
+        opts.workgroup,
+        opts.duration,
+    )?;
+
+    let (role_arn, region_name) = crate::integrations::aws::resolve_role_and_region(role, None)?;
+
+    let creds = super::credential::redshift::fetch_redshift_credentials(
+        server,
+        &target,
+        opts.db_name,
+        &region_name,
+        &role_arn,
+    )
+    .await?;
+
+    print_export(shell, "PGPASSWORD", creds.db_password.expose_secret());
+    print_export(shell, "PGUSER", &creds.db_user);
+    print_export(shell, "PGSSLMODE", "require");
 
     Ok(())
 }
@@ -216,5 +280,42 @@ mod tests {
         let export = format_export(&Shell::Bash, "AWS_EXECUTION_ENV", &value);
         assert!(export.starts_with("export AWS_EXECUTION_ENV='vouch-cli/"));
         assert!(export.ends_with("';"));
+    }
+
+    /// Verify exact RDS PostgreSQL environment variable names.
+    #[test]
+    fn test_rds_env_variable_names_bash() {
+        let pw = format_export(&Shell::Bash, "PGPASSWORD", "rds-token");
+        let host = format_export(&Shell::Bash, "PGHOST", "mydb.rds.amazonaws.com");
+        let port = format_export(&Shell::Bash, "PGPORT", "5432");
+        let user = format_export(&Shell::Bash, "PGUSER", "admin");
+        let ssl = format_export(&Shell::Bash, "PGSSLMODE", "require");
+
+        assert_eq!(pw, "export PGPASSWORD='rds-token';");
+        assert_eq!(host, "export PGHOST='mydb.rds.amazonaws.com';");
+        assert_eq!(port, "export PGPORT='5432';");
+        assert_eq!(user, "export PGUSER='admin';");
+        assert_eq!(ssl, "export PGSSLMODE='require';");
+    }
+
+    /// Verify exact Redshift PostgreSQL environment variable names.
+    #[test]
+    fn test_redshift_env_variable_names_bash() {
+        let pw = format_export(&Shell::Bash, "PGPASSWORD", "redshift-pw");
+        let user = format_export(&Shell::Bash, "PGUSER", "IAMR:my-role");
+        let ssl = format_export(&Shell::Bash, "PGSSLMODE", "require");
+
+        assert_eq!(pw, "export PGPASSWORD='redshift-pw';");
+        assert_eq!(user, "export PGUSER='IAMR:my-role';");
+        assert_eq!(ssl, "export PGSSLMODE='require';");
+    }
+
+    /// Verify RDS env variables in Fish shell format.
+    #[test]
+    fn test_rds_env_variable_names_fish() {
+        let pw = format_export(&Shell::Fish, "PGPASSWORD", "rds-token");
+        let host = format_export(&Shell::Fish, "PGHOST", "mydb.rds.amazonaws.com");
+        assert_eq!(pw, "set -gx PGPASSWORD 'rds-token';");
+        assert_eq!(host, "set -gx PGHOST 'mydb.rds.amazonaws.com';");
     }
 }

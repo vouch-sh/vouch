@@ -17,6 +17,23 @@ pub struct CodeArtifactOptions<'a> {
     pub profile: Option<&'a str>,
 }
 
+/// RDS-specific options for exec/env commands.
+#[derive(Default)]
+pub struct RdsOptions<'a> {
+    pub hostname: Option<&'a str>,
+    pub port: u16,
+    pub username: Option<&'a str>,
+}
+
+/// Redshift-specific options for exec/env commands.
+#[derive(Default)]
+pub struct RedshiftOptions<'a> {
+    pub cluster_id: Option<&'a str>,
+    pub workgroup: Option<&'a str>,
+    pub db_name: Option<&'a str>,
+    pub duration: Option<u32>,
+}
+
 /// Cached AWS credentials extracted from `serde_json::Value`.
 ///
 /// `access_key_id` is a plain `String` because AWS access key IDs are semi-public
@@ -131,6 +148,8 @@ pub async fn run(
     role: Option<&str>,
     command: &[String],
     ca_opts: CodeArtifactOptions<'_>,
+    rds_opts: RdsOptions<'_>,
+    rs_opts: RedshiftOptions<'_>,
 ) -> Result<()> {
     if command.is_empty() {
         bail!("No command specified. Usage: vouch exec -- <command> [args...]");
@@ -154,6 +173,12 @@ pub async fn run(
         }
         CredentialType::Codeartifact => {
             inject_codeartifact_credentials(&mut cmd, server, &ca_opts).await?;
+        }
+        CredentialType::Rds => {
+            inject_rds_credentials(&mut cmd, server, role, &rds_opts).await?;
+        }
+        CredentialType::Redshift => {
+            inject_redshift_credentials(&mut cmd, server, role, &rs_opts).await?;
         }
     }
 
@@ -249,6 +274,66 @@ async fn inject_codeartifact_credentials(
         "CODEARTIFACT_AUTH_TOKEN",
         token.authorization_token.expose_secret(),
     );
+
+    Ok(())
+}
+
+/// Fetch an RDS IAM auth token and inject PostgreSQL env vars.
+async fn inject_rds_credentials(
+    cmd: &mut Command,
+    server: &str,
+    role: Option<&str>,
+    opts: &RdsOptions<'_>,
+) -> Result<()> {
+    let hostname = opts.hostname.context(
+        "RDS credentials require --rds-hostname. \
+         Usage: vouch exec --type rds --rds-hostname <host> --rds-username <user> -- <command>",
+    )?;
+    let username = opts.username.context(
+        "RDS credentials require --rds-username. \
+         Usage: vouch exec --type rds --rds-hostname <host> --rds-username <user> -- <command>",
+    )?;
+
+    let token =
+        super::credential::rds::fetch_rds_token(server, hostname, opts.port, username, None, role)
+            .await?;
+
+    cmd.env("PGPASSWORD", token.expose_secret());
+    cmd.env("PGHOST", hostname);
+    cmd.env("PGPORT", opts.port.to_string());
+    cmd.env("PGUSER", username);
+    cmd.env("PGSSLMODE", "require");
+
+    Ok(())
+}
+
+/// Fetch Redshift credentials and inject PostgreSQL env vars.
+async fn inject_redshift_credentials(
+    cmd: &mut Command,
+    server: &str,
+    role: Option<&str>,
+    opts: &RedshiftOptions<'_>,
+) -> Result<()> {
+    let target = super::credential::redshift::resolve_target(
+        opts.cluster_id,
+        opts.workgroup,
+        opts.duration,
+    )?;
+
+    let (role_arn, region_name) = crate::integrations::aws::resolve_role_and_region(role, None)?;
+
+    let creds = super::credential::redshift::fetch_redshift_credentials(
+        server,
+        &target,
+        opts.db_name,
+        &region_name,
+        &role_arn,
+    )
+    .await?;
+
+    cmd.env("PGPASSWORD", creds.db_password.expose_secret());
+    cmd.env("PGUSER", &creds.db_user);
+    cmd.env("PGSSLMODE", "require");
 
     Ok(())
 }
