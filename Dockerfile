@@ -79,7 +79,7 @@ COPY --from=planner /app/recipe.json recipe.json
 ENV OPENSSL_STATIC=1
 ENV OPENSSL_LIB_DIR=/usr/lib
 ENV OPENSSL_INCLUDE_DIR=/usr/include
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --release --package vouch-server --recipe-path recipe.json
 
 # Copy actual source code
 COPY crates/vouch-common/src crates/vouch-common/src
