@@ -43,26 +43,43 @@ COPY crates/vouch-server/src crates/vouch-server/src
 RUN cd crates/vouch-server \
     && /app/tailwindcss -i styles/input.css -o static/css/output.css --minify
 
-# Rust build stage - using musl for static binary
-FROM rust:1.93.1-alpine AS builder
-
-# Build argument for reproducible builds
-ARG SOURCE_DATE_EPOCH=0
-
+# cargo-chef base stage - shared between planner and builder
+FROM rust:1.93.1-alpine AS chef
+RUN cargo install cargo-chef --locked
 WORKDIR /app
 
-# Install build dependencies for static compilation
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
-
-# Copy manifests
+# Planner stage - generate dependency recipe from workspace manifests
+FROM chef AS planner
 COPY Cargo.toml Cargo.lock ./
 COPY crates/vouch-common/Cargo.toml crates/vouch-common/
 COPY crates/vouch-server/Cargo.toml crates/vouch-server/
 COPY crates/vouch-cli/Cargo.toml crates/vouch-cli/
 COPY crates/vouch-agent/Cargo.toml crates/vouch-agent/
+COPY crates/vouch-tests/Cargo.toml crates/vouch-tests/
 
-# Build dependencies only (cached layer)
-RUN cargo build --release --package vouch-server 2>/dev/null || true
+# Create dummy source files so cargo metadata can resolve the workspace
+RUN mkdir -p crates/vouch-common/src && touch crates/vouch-common/src/lib.rs \
+    && mkdir -p crates/vouch-server/src && touch crates/vouch-server/src/lib.rs crates/vouch-server/src/main.rs \
+    && mkdir -p crates/vouch-cli/src && touch crates/vouch-cli/src/lib.rs crates/vouch-cli/src/main.rs \
+    && mkdir -p crates/vouch-agent/src && touch crates/vouch-agent/src/lib.rs crates/vouch-agent/src/main.rs \
+    && mkdir -p crates/vouch-tests/src && touch crates/vouch-tests/src/lib.rs
+RUN cargo chef prepare --recipe-path recipe.json
+
+# Rust build stage - using musl for static binary
+FROM chef AS builder
+
+# Build argument for reproducible builds
+ARG SOURCE_DATE_EPOCH=0
+
+# Install build dependencies for static compilation
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+
+# Cook dependencies (cached until Cargo.toml/Cargo.lock change)
+COPY --from=planner /app/recipe.json recipe.json
+ENV OPENSSL_STATIC=1
+ENV OPENSSL_LIB_DIR=/usr/lib
+ENV OPENSSL_INCLUDE_DIR=/usr/include
+RUN cargo chef cook --release --package vouch-server --recipe-path recipe.json
 
 # Copy actual source code
 COPY crates/vouch-common/src crates/vouch-common/src
@@ -77,9 +94,6 @@ COPY --from=css-builder /app/crates/vouch-server/static crates/vouch-server/stat
 RUN touch -d "@${SOURCE_DATE_EPOCH}" crates/vouch-common/src/lib.rs crates/vouch-server/src/main.rs
 
 # Build the release binary with static linking
-ENV OPENSSL_STATIC=1
-ENV OPENSSL_LIB_DIR=/usr/lib
-ENV OPENSSL_INCLUDE_DIR=/usr/include
 RUN cargo build --release --package vouch-server
 
 # Create empty data directory marker
