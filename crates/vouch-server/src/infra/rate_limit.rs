@@ -14,8 +14,8 @@
 //! connection address).
 //!
 //! Three tiers are provided:
-//! - **Auth**: Strict limits for login/token endpoints (burst=2, 1 req/4s per IP)
-//! - **Credential**: Moderate limits for credential issuance (burst=5, 1 req/2s per IP)
+//! - **Auth**: Strict limits for login/token endpoints (burst=8, 1 req/2s per IP)
+//! - **Credential**: Moderate limits for credential issuance (burst=15, 1 req/2s per IP)
 //! - **General**: Relaxed limits for SCIM, admin, and authorize endpoints (burst=20, 1 req/s per IP)
 //!
 //! `tower-governor` handles its own internal state cleanup via the governor
@@ -64,14 +64,14 @@ pub fn build_auth_rate_limiter() -> RateLimitLayer {
 
 /// Build a rate limiting layer for credential issuance endpoints.
 ///
-/// Burst of 5 requests, replenish 1 every 2 seconds per IP.
-/// More permissive than auth endpoints since these require a valid session,
-/// but still limited to prevent abuse.
+/// Burst of 15 requests, replenish 1 every 2 seconds per IP.
+/// kubectl spawns multiple parallel `vouch credential eks` processes
+/// on startup, so the burst must accommodate concurrent requests.
 #[must_use]
 pub fn build_credential_rate_limiter() -> RateLimitLayer {
     let config = GovernorConfigBuilder::default()
         .per_second(2)
-        .burst_size(5)
+        .burst_size(15)
         .use_headers()
         .finish()
         .unwrap_or_else(|| {

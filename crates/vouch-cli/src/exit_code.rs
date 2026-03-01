@@ -27,6 +27,9 @@ pub const CONFIG_ERROR: u8 = 6;
 /// Step-up authentication required but failed (e.g., no YubiKey attached).
 pub const STEP_UP_REQUIRED: u8 = 7;
 
+/// Server rate-limited the request (429 Too Many Requests).
+pub const RATE_LIMITED: u8 = 8;
+
 /// Typed CLI errors that map directly to exit codes.
 ///
 /// Use these at error sites instead of ad-hoc `anyhow::bail!()` calls
@@ -77,6 +80,13 @@ pub enum CliError {
         /// Maximum authentication age in seconds.
         max_age: Option<u64>,
     },
+
+    /// Server returned 429 Too Many Requests.
+    #[error("rate limited by server — wait a moment and retry")]
+    RateLimited {
+        /// Seconds to wait before retrying (from `Retry-After` header).
+        retry_after: Option<u64>,
+    },
 }
 
 /// Classify an `anyhow::Error` into an appropriate exit code.
@@ -95,6 +105,7 @@ pub fn classify(err: &anyhow::Error) -> ExitCode {
                 CliError::PermissionDenied(_) => ExitCode::from(PERMISSION_DENIED),
                 CliError::ConfigError(_) => ExitCode::from(CONFIG_ERROR),
                 CliError::StepUpRequired { .. } => ExitCode::from(STEP_UP_REQUIRED),
+                CliError::RateLimited { .. } => ExitCode::from(RATE_LIMITED),
             };
         }
     }
@@ -165,6 +176,11 @@ fn classify_message(msg: &str) -> ExitCode {
         || lower.contains("timed out")
     {
         return ExitCode::from(NETWORK_ERROR);
+    }
+
+    // Rate limiting
+    if lower.contains("rate limited") {
+        return ExitCode::from(RATE_LIMITED);
     }
 
     // Permission errors
@@ -317,5 +333,22 @@ mod tests {
         }
         .into();
         assert_eq!(code_value(classify(&err)), STEP_UP_REQUIRED);
+    }
+
+    #[test]
+    fn test_classify_cli_error_rate_limited() {
+        let err: anyhow::Error = CliError::RateLimited {
+            retry_after: Some(5),
+        }
+        .into();
+        assert_eq!(code_value(classify(&err)), RATE_LIMITED);
+    }
+
+    #[test]
+    fn test_classify_rate_limited_message() {
+        assert_eq!(
+            code_value(classify_message("rate limited by server — wait and retry")),
+            RATE_LIMITED
+        );
     }
 }

@@ -172,6 +172,58 @@ impl<H: HttpClient> VouchClient<H> {
         format!("{}{}", self.base_url, path)
     }
 
+    /// Send an HTTP request with automatic retry on transient errors.
+    ///
+    /// Retries up to [`MAX_RETRIES`] times on 429 (using `Retry-After`)
+    /// and 5xx (using exponential backoff with jitter). DPoP proofs are
+    /// regenerated on each attempt when `auth` is `Auth::Authenticated`.
+    async fn request_with_retry<Resp: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        content_type: Option<&str>,
+        auth: Auth,
+    ) -> Result<Resp> {
+        let url = self.url(path);
+        tracing::debug!("{method} {url} ({auth})");
+
+        let mut attempt = 0;
+        loop {
+            let response = match auth {
+                Auth::Authenticated => {
+                    let (hdr, dpop_proof) = self.build_auth(method, &url)?;
+                    let extra: Option<Vec<(&str, &str)>> =
+                        dpop_proof.as_deref().map(|p| vec![("DPoP", p)]);
+                    self.http
+                        .request(
+                            method,
+                            &url,
+                            body,
+                            content_type,
+                            Some(&hdr),
+                            extra.as_deref(),
+                        )
+                        .await
+                }
+                Auth::None => {
+                    self.http
+                        .request(method, &url, body, content_type, None, None)
+                        .await
+                }
+            }
+            .with_context(|| format!("failed to connect to {url}"))?;
+
+            match retry_delay(&response, attempt) {
+                Some(wait) => {
+                    tokio::time::sleep(wait).await;
+                    attempt += 1;
+                }
+                None => return Self::handle_response(response),
+            }
+        }
+    }
+
     /// POST a form-encoded request and get a JSON response.
     /// Used for OAuth endpoints which require application/x-www-form-urlencoded.
     pub async fn post_form<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
@@ -179,144 +231,75 @@ impl<H: HttpClient> VouchClient<H> {
         Req: Serialize,
         Resp: DeserializeOwned,
     {
-        let url = self.url(path);
-        tracing::debug!("POST {} (form)", url);
-
         let form = serde_urlencoded::to_string(body).context("failed to serialize form data")?;
-        let response = self
-            .http
-            .request(
-                "POST",
-                &url,
-                Some(form.as_bytes()),
-                Some("application/x-www-form-urlencoded"),
-                None,
-                None,
-            )
-            .await
-            .with_context(|| format!("failed to connect to {url}"))?;
-
-        Self::handle_response(response)
+        self.request_with_retry(
+            "POST",
+            path,
+            Some(form.as_bytes()),
+            Some("application/x-www-form-urlencoded"),
+            Auth::None,
+        )
+        .await
     }
 
     /// GET a JSON response with authentication.
     ///
-    /// Uses `Authorization: DPoP <token>` with a bound `DPoP:` proof header
-    /// when a FAPI client key is available; falls back to `Bearer` otherwise.
+    /// Uses DPoP when a FAPI client key is available; falls back to Bearer.
     pub async fn get_authenticated<Resp>(&self, path: &str) -> Result<Resp>
     where
         Resp: DeserializeOwned,
     {
-        let url = self.url(path);
-        tracing::debug!("GET {} (authenticated)", url);
-
-        let (auth, dpop_proof) = self.build_auth("GET", &url)?;
-
-        let extra: Option<Vec<(&str, &str)>> = dpop_proof.as_deref().map(|p| vec![("DPoP", p)]);
-        let extra_ref: Option<&[(&str, &str)]> = extra.as_deref();
-
-        let response = self
-            .http
-            .request("GET", &url, None, None, Some(&auth), extra_ref)
+        self.request_with_retry("GET", path, None, None, Auth::Authenticated)
             .await
-            .with_context(|| format!("failed to connect to {url}"))?;
-
-        Self::handle_response(response)
     }
 
     /// DELETE with authentication.
     ///
-    /// Uses `Authorization: DPoP <token>` with a bound `DPoP:` proof header
-    /// when a FAPI client key is available; falls back to `Bearer` otherwise.
+    /// Uses DPoP when a FAPI client key is available; falls back to Bearer.
     pub async fn delete_authenticated<Resp>(&self, path: &str) -> Result<Resp>
     where
         Resp: DeserializeOwned,
     {
-        let url = self.url(path);
-        tracing::debug!("DELETE {} (authenticated)", url);
-
-        let (auth, dpop_proof) = self.build_auth("DELETE", &url)?;
-
-        let extra: Option<Vec<(&str, &str)>> = dpop_proof.as_deref().map(|p| vec![("DPoP", p)]);
-        let extra_ref: Option<&[(&str, &str)]> = extra.as_deref();
-
-        let response = self
-            .http
-            .request("DELETE", &url, None, None, Some(&auth), extra_ref)
+        self.request_with_retry("DELETE", path, None, None, Auth::Authenticated)
             .await
-            .with_context(|| format!("failed to connect to {url}"))?;
-
-        Self::handle_response(response)
     }
 
     /// POST a JSON request with authentication and get a JSON response.
     ///
-    /// Uses `Authorization: DPoP <token>` with a bound `DPoP:` proof header
-    /// when a FAPI client key is available; falls back to `Bearer` otherwise.
+    /// Uses DPoP when a FAPI client key is available; falls back to Bearer.
     pub async fn post_authenticated<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
     where
         Req: Serialize,
         Resp: DeserializeOwned,
     {
-        let url = self.url(path);
-        tracing::debug!("POST {} (authenticated)", url);
-
-        let (auth, dpop_proof) = self.build_auth("POST", &url)?;
-
         let json = serde_json::to_vec(body).context("failed to serialize request")?;
-
-        let extra: Option<Vec<(&str, &str)>> = dpop_proof.as_deref().map(|p| vec![("DPoP", p)]);
-        let extra_ref: Option<&[(&str, &str)]> = extra.as_deref();
-
-        let response = self
-            .http
-            .request(
-                "POST",
-                &url,
-                Some(&json),
-                Some("application/json"),
-                Some(&auth),
-                extra_ref,
-            )
-            .await
-            .with_context(|| format!("failed to connect to {url}"))?;
-
-        Self::handle_response(response)
+        self.request_with_retry(
+            "POST",
+            path,
+            Some(&json),
+            Some("application/json"),
+            Auth::Authenticated,
+        )
+        .await
     }
 
     /// PATCH a JSON request with authentication and get a JSON response.
     ///
-    /// Uses `Authorization: DPoP <token>` with a bound `DPoP:` proof header
-    /// when a FAPI client key is available; falls back to `Bearer` otherwise.
+    /// Uses DPoP when a FAPI client key is available; falls back to Bearer.
     pub async fn patch_authenticated<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
     where
         Req: Serialize,
         Resp: DeserializeOwned,
     {
-        let url = self.url(path);
-        tracing::debug!("PATCH {} (authenticated)", url);
-
-        let (auth, dpop_proof) = self.build_auth("PATCH", &url)?;
-
         let json = serde_json::to_vec(body).context("failed to serialize request")?;
-
-        let extra: Option<Vec<(&str, &str)>> = dpop_proof.as_deref().map(|p| vec![("DPoP", p)]);
-        let extra_ref: Option<&[(&str, &str)]> = extra.as_deref();
-
-        let response = self
-            .http
-            .request(
-                "PATCH",
-                &url,
-                Some(&json),
-                Some("application/json"),
-                Some(&auth),
-                extra_ref,
-            )
-            .await
-            .with_context(|| format!("failed to connect to {url}"))?;
-
-        Self::handle_response(response)
+        self.request_with_retry(
+            "PATCH",
+            path,
+            Some(&json),
+            Some("application/json"),
+            Auth::Authenticated,
+        )
+        .await
     }
 
     /// Handle HTTP response, parsing JSON or error.
@@ -335,6 +318,92 @@ impl<H: HttpClient> VouchClient<H> {
     }
 }
 
+/// Whether a request carries authentication headers.
+#[derive(Debug, Clone, Copy)]
+enum Auth {
+    Authenticated,
+    None,
+}
+
+impl std::fmt::Display for Auth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Authenticated => f.write_str("authenticated"),
+            Self::None => f.write_str("unauthenticated"),
+        }
+    }
+}
+
+/// Maximum number of retries for transient errors.
+const MAX_RETRIES: u32 = 3;
+
+/// Return the delay before the next retry attempt, or `None` if the
+/// response is not retryable or retries are exhausted.
+///
+/// - **429**: waits for the `Retry-After` header (default 2s, cap 30s).
+/// - **5xx**: exponential backoff with jitter (equal-jitter strategy).
+/// - **Everything else**: not retryable.
+fn retry_delay(response: &HttpResponse, attempt: u32) -> Option<std::time::Duration> {
+    if attempt >= MAX_RETRIES {
+        return None;
+    }
+
+    match response.status {
+        429 => {
+            let secs = response.retry_after.unwrap_or(2).min(30);
+            eprintln!(
+                "Rate limited by server, retrying in {secs}s \
+                 (attempt {}/{MAX_RETRIES})...",
+                attempt + 1,
+            );
+            Some(std::time::Duration::from_secs(secs))
+        }
+        500..=599 => {
+            let delay = backoff_with_jitter(attempt);
+            eprintln!(
+                "Server error ({}), retrying in {:.1}s \
+                 (attempt {}/{MAX_RETRIES})...",
+                response.status,
+                delay.as_secs_f64(),
+                attempt + 1,
+            );
+            Some(delay)
+        }
+        _ => None,
+    }
+}
+
+/// Compute an exponential backoff delay with equal jitter.
+///
+/// Uses the "equal jitter" strategy: `half + random(0, half)` where
+/// `half = min(cap, base * 2^attempt) / 2`. This guarantees a minimum
+/// wait of half the computed backoff while adding randomness to prevent
+/// thundering-herd effects.
+fn backoff_with_jitter(attempt: u32) -> std::time::Duration {
+    const BASE_MS: u64 = 1_000;
+    const CAP_MS: u64 = 30_000;
+
+    let exp_ms = BASE_MS.saturating_mul(1_u64.checked_shl(attempt).unwrap_or(u64::MAX));
+    let capped_ms = exp_ms.min(CAP_MS);
+    let half_ms = capped_ms / 2;
+
+    let jitter_ms = random_u64_in_range(half_ms);
+
+    std::time::Duration::from_millis(half_ms + jitter_ms)
+}
+
+/// Return a random `u64` in `0..=max` using `aws-lc-rs` CSPRNG.
+fn random_u64_in_range(max: u64) -> u64 {
+    if max == 0 {
+        return 0;
+    }
+    let mut buf = [0u8; 8];
+    if aws_lc_rs::rand::fill(&mut buf).is_err() {
+        return max / 2; // deterministic fallback
+    }
+    u64::from_le_bytes(buf) % (max + 1)
+}
+
 /// Classification of HTTP error responses from the server.
 ///
 /// Maps HTTP status codes (and headers) into semantic categories
@@ -349,6 +418,8 @@ enum ServerErrorKind {
     Unauthorized,
     /// 403 — server denied the request.
     Forbidden,
+    /// 429 — rate limited by server.
+    RateLimited { retry_after: Option<u64> },
     /// Any other non-success status code.
     Other(u16),
 }
@@ -370,6 +441,9 @@ impl ServerErrorKind {
                 Self::Unauthorized
             }
             403 => Self::Forbidden,
+            429 => Self::RateLimited {
+                retry_after: response.retry_after,
+            },
             status => Self::Other(status),
         }
     }
@@ -419,6 +493,7 @@ impl ServerErrorKind {
                 };
                 CliError::PermissionDenied(reason).into()
             }
+            Self::RateLimited { retry_after } => CliError::RateLimited { retry_after }.into(),
             Self::Other(status) => format_http_error(status, error_text),
         }
     }
@@ -584,6 +659,116 @@ mod tests {
             cli_err,
             crate::exit_code::CliError::NotAuthenticated { .. }
         ));
+    }
+
+    #[test]
+    fn test_handle_response_429_returns_rate_limited() {
+        let mut response = HttpResponse::new(429, b"{}".to_vec());
+        response.retry_after = Some(5);
+        let result: Result<serde_json::Value> =
+            VouchClient::<ReqwestClient>::handle_response(response);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        let cli_err = err.downcast_ref::<crate::exit_code::CliError>().unwrap();
+        assert!(matches!(
+            cli_err,
+            crate::exit_code::CliError::RateLimited {
+                retry_after: Some(5)
+            }
+        ));
+    }
+
+    #[test]
+    fn test_retry_delay_returns_none_for_200() {
+        let response = HttpResponse::new(200, b"{}".to_vec());
+        assert!(retry_delay(&response, 0).is_none());
+    }
+
+    #[test]
+    fn test_retry_delay_returns_none_for_401() {
+        let response = HttpResponse::new(401, b"{}".to_vec());
+        assert!(retry_delay(&response, 0).is_none());
+    }
+
+    #[test]
+    fn test_retry_delay_429_uses_retry_after() {
+        let mut response = HttpResponse::new(429, b"{}".to_vec());
+        response.retry_after = Some(10);
+        let duration = retry_delay(&response, 0).unwrap();
+        assert_eq!(duration, std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_retry_delay_429_caps_at_30_seconds() {
+        let mut response = HttpResponse::new(429, b"{}".to_vec());
+        response.retry_after = Some(120);
+        let duration = retry_delay(&response, 0).unwrap();
+        assert_eq!(duration, std::time::Duration::from_secs(30));
+    }
+
+    #[test]
+    fn test_retry_delay_429_defaults_to_2_seconds() {
+        let response = HttpResponse::new(429, b"{}".to_vec());
+        let duration = retry_delay(&response, 0).unwrap();
+        assert_eq!(duration, std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn test_retry_delay_5xx_uses_backoff() {
+        let response = HttpResponse::new(502, b"{}".to_vec());
+        let d0 = retry_delay(&response, 0).unwrap();
+        // Attempt 0: base=1s, half=500ms, jitter 0..500ms → 500..1000ms
+        assert!(d0 >= std::time::Duration::from_millis(500));
+        assert!(d0 <= std::time::Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn test_retry_delay_5xx_increases_with_attempt() {
+        let response = HttpResponse::new(500, b"{}".to_vec());
+        // Run multiple times to account for jitter; minimum always increases
+        // Attempt 0: min 500ms, Attempt 1: min 1000ms
+        let d0_min = std::time::Duration::from_millis(500);
+        let d1_min = std::time::Duration::from_millis(1000);
+        assert!(retry_delay(&response, 0).unwrap() >= d0_min);
+        assert!(retry_delay(&response, 1).unwrap() >= d1_min);
+    }
+
+    #[test]
+    fn test_retry_delay_returns_none_when_retries_exhausted() {
+        let response_429 = HttpResponse::new(429, b"{}".to_vec());
+        assert!(retry_delay(&response_429, MAX_RETRIES).is_none());
+
+        let response_500 = HttpResponse::new(500, b"{}".to_vec());
+        assert!(retry_delay(&response_500, MAX_RETRIES).is_none());
+    }
+
+    #[test]
+    fn test_retry_delay_allows_up_to_max_retries() {
+        let response = HttpResponse::new(429, b"{}".to_vec());
+        assert!(retry_delay(&response, 0).is_some());
+        assert!(retry_delay(&response, 1).is_some());
+        assert!(retry_delay(&response, 2).is_some());
+        assert!(retry_delay(&response, 3).is_none());
+    }
+
+    #[test]
+    fn test_backoff_with_jitter_bounded() {
+        for attempt in 0..5 {
+            let delay = backoff_with_jitter(attempt);
+            assert!(delay <= std::time::Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    fn test_random_u64_in_range_zero() {
+        assert_eq!(random_u64_in_range(0), 0);
+    }
+
+    #[test]
+    fn test_random_u64_in_range_bounded() {
+        for _ in 0..100 {
+            assert!(random_u64_in_range(10) <= 10);
+        }
     }
 
     #[test]

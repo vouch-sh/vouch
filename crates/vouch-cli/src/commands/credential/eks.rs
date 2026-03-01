@@ -25,8 +25,12 @@ use crate::integrations::aws::sigv4::{
 /// EKS presigned URL validity: 60 seconds (matches `aws eks get-token`).
 const EKS_TOKEN_EXPIRES_SECONDS: u64 = 60;
 
-/// EKS tokens are valid for 14 minutes (per Kubernetes API server).
-const EKS_TOKEN_VALIDITY_MINUTES: i64 = 14;
+/// Safety margin subtracted from the presigned URL lifetime.
+///
+/// The presigned STS URL embedded in the token expires after
+/// `EKS_TOKEN_EXPIRES_SECONDS`. We cache for slightly less to ensure
+/// the URL is still valid when EKS calls STS to verify it.
+const EKS_EXPIRY_MARGIN_SECONDS: i64 = 15;
 
 /// Run the EKS credential command.
 ///
@@ -98,10 +102,15 @@ fn build_exec_credential(token: &str) -> Result<serde_json::Value> {
     }))
 }
 
-/// Compute the expiration timestamp (14 minutes from now) as RFC 3339.
+/// Compute the expiration timestamp as RFC 3339.
+///
+/// The lifetime matches the presigned STS URL validity minus a safety
+/// margin, so cached tokens are never served after the URL expires.
 fn expiration_rfc3339() -> Result<String> {
+    #[allow(clippy::cast_possible_wrap)]
+    let ttl_seconds = EKS_TOKEN_EXPIRES_SECONDS as i64 - EKS_EXPIRY_MARGIN_SECONDS;
     let expires = jiff::Timestamp::now()
-        .checked_add(jiff::SignedDuration::from_mins(EKS_TOKEN_VALIDITY_MINUTES))
+        .checked_add(jiff::SignedDuration::from_secs(ttl_seconds))
         .context("failed to compute EKS token expiration")?;
     Ok(expires.to_string())
 }

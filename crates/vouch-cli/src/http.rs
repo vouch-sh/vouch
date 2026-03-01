@@ -24,6 +24,8 @@ pub struct HttpResponse {
     /// Returned by the server to bind the next DPoP proof to a server-issued nonce
     /// (RFC 9449 Section 8).
     pub dpop_nonce: Option<String>,
+    /// Retry-After header value in seconds (if present on 429 responses).
+    pub retry_after: Option<u64>,
 }
 
 impl HttpResponse {
@@ -35,6 +37,7 @@ impl HttpResponse {
             body,
             www_authenticate: None,
             dpop_nonce: None,
+            retry_after: None,
         }
     }
 
@@ -50,6 +53,7 @@ impl HttpResponse {
             body,
             www_authenticate,
             dpop_nonce: None,
+            retry_after: None,
         }
     }
 
@@ -194,6 +198,17 @@ impl HttpClient for ReqwestClient {
             .and_then(|v| v.to_str().ok())
             .map(String::from);
 
+        // Extract Retry-After header for 429 responses
+        let retry_after = if status == 429 {
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse().ok())
+        } else {
+            None
+        };
+
         let body = response
             .bytes()
             .await
@@ -204,6 +219,7 @@ impl HttpClient for ReqwestClient {
             body: body.to_vec(),
             www_authenticate,
             dpop_nonce,
+            retry_after,
         })
     }
 }
@@ -327,6 +343,7 @@ pub fn format_http_error(status: u16, error_text: &str) -> anyhow::Error {
         401 => anyhow::anyhow!("not authenticated - run 'vouch login' first"),
         403 => anyhow::anyhow!("permission denied by server"),
         404 => anyhow::anyhow!("server endpoint not found (status 404). Check your server URL."),
+        429 => anyhow::anyhow!("rate limited by server — wait a moment and retry"),
         500..=599 => {
             anyhow::anyhow!("server error ({status}). Run 'vouch doctor' to check connectivity.")
         }
@@ -509,6 +526,17 @@ mod test_utils {
                 .and_then(|v| v.to_str().ok())
                 .map(String::from);
 
+            // Extract Retry-After header for 429 responses
+            let retry_after = if status == 429 {
+                response
+                    .headers()
+                    .get("retry-after")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.parse().ok())
+            } else {
+                None
+            };
+
             let body_bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
                 .await
                 .context("failed to read response body")?;
@@ -518,6 +546,7 @@ mod test_utils {
                 body: body_bytes.to_vec(),
                 www_authenticate,
                 dpop_nonce,
+                retry_after,
             })
         }
     }
