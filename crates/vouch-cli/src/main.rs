@@ -155,6 +155,9 @@ struct RdsArgs {
     /// Database username (required for --type rds).
     #[arg(long)]
     rds_username: Option<String>,
+    /// AWS region (auto-detected from AWS profile or env if not specified, for --type rds).
+    #[arg(long)]
+    rds_region: Option<String>,
 }
 
 impl RdsArgs {
@@ -163,6 +166,7 @@ impl RdsArgs {
             hostname: self.rds_hostname.as_deref(),
             port: self.rds_port,
             username: self.rds_username.as_deref(),
+            region: self.rds_region.as_deref(),
         }
     }
 }
@@ -182,6 +186,9 @@ struct RedshiftArgs {
     /// Credential duration in seconds, 900-3600 (for --type redshift provisioned).
     #[arg(long, value_parser = clap::value_parser!(u32).range(900..=3600))]
     redshift_duration: Option<u32>,
+    /// AWS region (auto-detected from AWS profile or env if not specified, for --type redshift).
+    #[arg(long)]
+    redshift_region: Option<String>,
 }
 
 impl RedshiftArgs {
@@ -191,6 +198,7 @@ impl RedshiftArgs {
             workgroup: self.redshift_workgroup.as_deref(),
             db_name: self.redshift_db_name.as_deref(),
             duration: self.redshift_duration,
+            region: self.redshift_region.as_deref(),
         }
     }
 }

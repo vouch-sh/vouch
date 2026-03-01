@@ -47,8 +47,16 @@ async fn try_agent_token() -> Option<SecretString> {
 pub async fn resolve_session() -> Result<ResolvedSession> {
     // 1. Try agent first (Unix only)
     #[cfg(unix)]
-    if let Some(session) = try_agent_session().await {
-        return Ok(session);
+    {
+        if let Some(session) = try_agent_session().await {
+            return Ok(session);
+        }
+        if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+            eprintln!(
+                "Hint: Agent not running. Start it for faster \
+                 auth: vouch-agent --foreground"
+            );
+        }
     }
 
     // 2. Fall back to config file
@@ -61,7 +69,9 @@ pub async fn resolve_session() -> Result<ResolvedSession> {
         .to_string();
     let token = config
         .token()
-        .ok_or(crate::exit_code::CliError::NotAuthenticated)?;
+        .ok_or(crate::exit_code::CliError::NotAuthenticated {
+            reason: "no session token — run 'vouch login' to authenticate".to_string(),
+        })?;
     // Clone the secret string before config is dropped
     let token = token.clone();
 
@@ -89,7 +99,9 @@ pub async fn resolve_token() -> Result<SecretString> {
     let config = Config::load().context("failed to load config")?;
     let token = config
         .token()
-        .ok_or(crate::exit_code::CliError::NotAuthenticated)?;
+        .ok_or(crate::exit_code::CliError::NotAuthenticated {
+            reason: "no session token — run 'vouch login' to authenticate".to_string(),
+        })?;
     Ok(token.clone())
 }
 

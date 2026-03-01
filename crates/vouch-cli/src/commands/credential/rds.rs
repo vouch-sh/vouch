@@ -50,6 +50,8 @@ pub async fn run(
 /// Fetch an RDS IAM auth token (cached).
 ///
 /// Returns the token as a `SecretString` for use in environment injection.
+/// If `region` is `None`, attempts to extract it from the RDS hostname
+/// before falling back to AWS profile/env detection.
 pub async fn fetch_rds_token(
     server: &str,
     hostname: &str,
@@ -61,7 +63,9 @@ pub async fn fetch_rds_token(
     validate_sigv4_input(hostname, "hostname")?;
     validate_sigv4_input(username, "username")?;
 
-    let (role_arn, region_name) = aws::resolve_role_and_region(role, region)?;
+    let hostname_region = extract_region_from_rds_hostname(hostname);
+    let effective_region = region.or(hostname_region);
+    let (role_arn, region_name) = aws::resolve_role_and_region(role, effective_region)?;
 
     let cache_key = format!("rds:{hostname}:{port}:{username}:{role_arn}");
 
@@ -113,6 +117,17 @@ async fn generate_rds_token(
     Ok(token)
 }
 
+/// Extract the AWS region from an RDS hostname.
+///
+/// RDS hostnames follow the pattern `{id}.{random}.{region}.rds.amazonaws.com`.
+/// Returns `None` if the hostname doesn't match.
+fn extract_region_from_rds_hostname(hostname: &str) -> Option<&str> {
+    let parts: Vec<&str> = hostname.split('.').collect();
+    let rds_idx = parts.iter().position(|&p| p == "rds")?;
+    let region_idx = rds_idx.checked_sub(1)?;
+    parts.get(region_idx).copied()
+}
+
 /// Compute cache expiry: 14 minutes from now (1 minute safety margin).
 fn rds_cache_expiry() -> Result<String> {
     let expires = jiff::Timestamp::now()
@@ -159,5 +174,32 @@ mod tests {
     fn test_rds_cache_expiry_valid() {
         let expiry = rds_cache_expiry().expect("should compute");
         assert!(expiry.parse::<jiff::Timestamp>().is_ok());
+    }
+
+    #[test]
+    fn test_extract_region_from_standard_hostname() {
+        let hostname = "vouch-demo-rds.cjcxqsog7mxa.us-east-1.rds.amazonaws.com";
+        assert_eq!(
+            extract_region_from_rds_hostname(hostname),
+            Some("us-east-1")
+        );
+    }
+
+    #[test]
+    fn test_extract_region_from_govcloud_hostname() {
+        let hostname = "mydb.abc123.us-gov-west-1.rds.us-gov.amazonaws.com";
+        assert_eq!(
+            extract_region_from_rds_hostname(hostname),
+            Some("us-gov-west-1")
+        );
+    }
+
+    #[test]
+    fn test_extract_region_from_non_rds_hostname() {
+        assert_eq!(extract_region_from_rds_hostname("localhost"), None);
+        assert_eq!(
+            extract_region_from_rds_hostname("my-custom-proxy.example.com"),
+            None
+        );
     }
 }

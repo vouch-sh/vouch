@@ -23,6 +23,7 @@ pub struct RdsOptions<'a> {
     pub hostname: Option<&'a str>,
     pub port: u16,
     pub username: Option<&'a str>,
+    pub region: Option<&'a str>,
 }
 
 /// Redshift-specific options for exec/env commands.
@@ -32,6 +33,7 @@ pub struct RedshiftOptions<'a> {
     pub workgroup: Option<&'a str>,
     pub db_name: Option<&'a str>,
     pub duration: Option<u32>,
+    pub region: Option<&'a str>,
 }
 
 /// Cached AWS credentials extracted from `serde_json::Value`.
@@ -294,9 +296,15 @@ async fn inject_rds_credentials(
          Usage: vouch exec --type rds --rds-hostname <host> --rds-username <user> -- <command>",
     )?;
 
-    let token =
-        super::credential::rds::fetch_rds_token(server, hostname, opts.port, username, None, role)
-            .await?;
+    let token = super::credential::rds::fetch_rds_token(
+        server,
+        hostname,
+        opts.port,
+        username,
+        opts.region,
+        role,
+    )
+    .await?;
 
     cmd.env("PGPASSWORD", token.expose_secret());
     cmd.env("PGHOST", hostname);
@@ -320,7 +328,8 @@ async fn inject_redshift_credentials(
         opts.duration,
     )?;
 
-    let (role_arn, region_name) = crate::integrations::aws::resolve_role_and_region(role, None)?;
+    let (role_arn, region_name) =
+        crate::integrations::aws::resolve_role_and_region(role, opts.region)?;
 
     let creds = super::credential::redshift::fetch_redshift_credentials(
         server,

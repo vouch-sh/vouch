@@ -127,9 +127,15 @@ async fn print_rds_env(
          Usage: vouch env --type rds --rds-hostname <host> --rds-username <user>",
     )?;
 
-    let token =
-        super::credential::rds::fetch_rds_token(server, hostname, opts.port, username, None, role)
-            .await?;
+    let token = super::credential::rds::fetch_rds_token(
+        server,
+        hostname,
+        opts.port,
+        username,
+        opts.region,
+        role,
+    )
+    .await?;
 
     print_export(shell, "PGPASSWORD", token.expose_secret());
     print_export(shell, "PGHOST", hostname);
@@ -153,7 +159,8 @@ async fn print_redshift_env(
         opts.duration,
     )?;
 
-    let (role_arn, region_name) = crate::integrations::aws::resolve_role_and_region(role, None)?;
+    let (role_arn, region_name) =
+        crate::integrations::aws::resolve_role_and_region(role, opts.region)?;
 
     let creds = super::credential::redshift::fetch_redshift_credentials(
         server,

@@ -489,7 +489,12 @@ impl YubiKey {
 
         // Discoverable credentials must return a user handle
         if assertion.user.id.is_empty() {
-            bail!("Credential is not discoverable. Please re-register with `vouch register`");
+            bail!(
+                "Your YubiKey has a credential for this service, \
+                 but it was not stored as a passkey.\n\
+                 Re-enroll with `vouch enroll` to create a \
+                 compatible credential."
+            );
         }
 
         Ok(AuthenticationResult {
@@ -529,11 +534,20 @@ fn translate_fido2_error(err: anyhow::Error, operation: &str) -> anyhow::Error {
 
     if err_str.contains("0x32") || err_str.contains("PIN_BLOCKED") {
         return anyhow::anyhow!(
-            "Your YubiKey PIN is blocked due to too many incorrect attempts.\n\
+            "Your YubiKey PIN is blocked due to too many \
+             incorrect attempts.\n\
              You must reset the FIDO2 application to continue:\n\
              \n\
-             WARNING: This will delete all FIDO2 credentials on this YubiKey!\n\
-             Run: ykman fido reset"
+             WARNING: This will delete all FIDO2 credentials \
+             on this YubiKey!\n\
+             \n\
+             Option 1: ykman fido reset  \
+             (install: brew install ykman)\n\
+             Option 2: Use the YubiKey Manager GUI app to \
+             reset FIDO2\n\
+             \n\
+             After reset, run `vouch enroll` to re-register \
+             your YubiKey."
         );
     }
 
@@ -550,8 +564,8 @@ fn translate_fido2_error(err: anyhow::Error, operation: &str) -> anyhow::Error {
 
     if err_str.contains("0x35") || err_str.contains("PIN_NOT_SET") {
         return anyhow::anyhow!(
-            "Your YubiKey does not have a PIN set.\n\
-             Run `vouch login` to set up a PIN."
+            "Your YubiKey PIN is not set. \
+             This is unexpected — try running this command again."
         );
     }
 

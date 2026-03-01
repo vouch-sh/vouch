@@ -1030,8 +1030,7 @@ mod tests {
     /// so the registration is still valid.
     #[test]
     fn test_hostname_from_url_valid_registration_match() {
-        let reg_host =
-            hostname_from_url("https://us.vouch.sh/register/my-client-123").unwrap();
+        let reg_host = hostname_from_url("https://us.vouch.sh/register/my-client-123").unwrap();
         let current_host = hostname_from_url("https://us.vouch.sh").unwrap();
         assert_eq!(reg_host, current_host);
     }
@@ -1405,9 +1404,7 @@ mod tests {
         config.set_client_id("cid-us");
         config.set_dpop_key_id("kid-us");
         config.set_registration_access_token("rat-us");
-        config.set_registration_client_uri(
-            "https://us.vouch.sh/reg/1",
-        );
+        config.set_registration_client_uri("https://us.vouch.sh/reg/1");
 
         // Populate server B.
         config.set_server_url("https://eu.vouch.sh");
@@ -1417,10 +1414,7 @@ mod tests {
 
         // Switch back to A and verify every field.
         config.set_server_url("https://us.vouch.sh");
-        assert_eq!(
-            config.token().expect("us token").expose_secret(),
-            "tok-us"
-        );
+        assert_eq!(config.token().expect("us token").expose_secret(), "tok-us");
         assert_eq!(config.client_id(), Some("cid-us"));
         assert_eq!(config.dpop_key_id(), Some("kid-us"));
         assert_eq!(
@@ -1437,10 +1431,7 @@ mod tests {
 
         // Switch to B and verify.
         config.set_server_url("https://eu.vouch.sh");
-        assert_eq!(
-            config.token().expect("eu token").expose_secret(),
-            "tok-eu"
-        );
+        assert_eq!(config.token().expect("eu token").expose_secret(), "tok-eu");
         assert_eq!(config.client_id(), Some("cid-eu"));
         assert_eq!(config.dpop_key_id(), Some("kid-eu"));
         assert!(config.registration_access_token().is_none());
@@ -1479,9 +1470,7 @@ mod tests {
         let file: ConfigFile = serde_json::from_str(json).unwrap();
         let config = Config::from(file);
 
-        let rat = config
-            .registration_access_token()
-            .expect("migrated RAT");
+        let rat = config.registration_access_token().expect("migrated RAT");
         assert_eq!(rat.expose_secret(), "legacy-rat-secret");
     }
 

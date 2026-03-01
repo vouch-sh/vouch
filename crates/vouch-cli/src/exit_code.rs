@@ -35,15 +35,18 @@ pub const STEP_UP_REQUIRED: u8 = 7;
 /// These can be wrapped in `anyhow::Error` transparently:
 /// ```ignore
 /// use crate::exit_code::CliError;
-/// Err(CliError::NotAuthenticated)?
+/// Err(CliError::NotAuthenticated { reason: "...".into() })?
 /// ```
 // Variants are adopted incrementally — some are only exercised via tests for now.
 #[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
     /// User is not authenticated — session missing or expired.
-    #[error("not authenticated — run 'vouch login' first")]
-    NotAuthenticated,
+    #[error("{reason}")]
+    NotAuthenticated {
+        /// Context-specific message explaining why authentication failed.
+        reason: String,
+    },
 
     /// Hardware security key not found or timed out.
     #[error("{0}")]
@@ -53,9 +56,9 @@ pub enum CliError {
     #[error("{0}")]
     NetworkError(String),
 
-    /// Server denied the request (401/403).
-    #[error("permission denied")]
-    PermissionDenied,
+    /// Server denied the request (403).
+    #[error("permission denied — {0}")]
+    PermissionDenied(String),
 
     /// Configuration is missing or invalid.
     #[error("{0}")]
@@ -65,7 +68,9 @@ pub enum CliError {
     ///
     /// Server returned `insufficient_user_authentication` in `WWW-Authenticate`.
     /// The CLI should re-authenticate and retry the request.
-    #[error("step-up authentication required (max_age={max_age:?})")]
+    #[error(
+        "step-up authentication required — run 'vouch login' to re-authenticate with your YubiKey"
+    )]
     StepUpRequired {
         /// Requested ACR values from the challenge.
         acr_values: Option<String>,
@@ -84,10 +89,10 @@ pub fn classify(err: &anyhow::Error) -> ExitCode {
     for cause in err.chain() {
         if let Some(cli_err) = cause.downcast_ref::<CliError>() {
             return match cli_err {
-                CliError::NotAuthenticated => ExitCode::from(NOT_AUTHENTICATED),
+                CliError::NotAuthenticated { .. } => ExitCode::from(NOT_AUTHENTICATED),
                 CliError::HardwareNotFound(_) => ExitCode::from(HARDWARE_NOT_FOUND),
                 CliError::NetworkError(_) => ExitCode::from(NETWORK_ERROR),
-                CliError::PermissionDenied => ExitCode::from(PERMISSION_DENIED),
+                CliError::PermissionDenied(_) => ExitCode::from(PERMISSION_DENIED),
                 CliError::ConfigError(_) => ExitCode::from(CONFIG_ERROR),
                 CliError::StepUpRequired { .. } => ExitCode::from(STEP_UP_REQUIRED),
             };
@@ -261,7 +266,10 @@ mod tests {
 
     #[test]
     fn test_classify_cli_error_not_authenticated() {
-        let err: anyhow::Error = CliError::NotAuthenticated.into();
+        let err: anyhow::Error = CliError::NotAuthenticated {
+            reason: "not authenticated — run 'vouch login' first".to_string(),
+        }
+        .into();
         assert_eq!(code_value(classify(&err)), NOT_AUTHENTICATED);
     }
 
@@ -280,7 +288,8 @@ mod tests {
 
     #[test]
     fn test_classify_cli_error_permission() {
-        let err: anyhow::Error = CliError::PermissionDenied.into();
+        let err: anyhow::Error =
+            CliError::PermissionDenied("access denied by server".to_string()).into();
         assert_eq!(code_value(classify(&err)), PERMISSION_DENIED);
     }
 
@@ -293,8 +302,10 @@ mod tests {
     #[test]
     fn test_classify_cli_error_wrapped_in_anyhow_context() {
         // CliError wrapped with anyhow context should still be found via chain()
-        let err =
-            anyhow::Error::new(CliError::NotAuthenticated).context("failed to get credentials");
+        let err = anyhow::Error::new(CliError::NotAuthenticated {
+            reason: "not authenticated — run 'vouch login' first".to_string(),
+        })
+        .context("failed to get credentials");
         assert_eq!(code_value(classify(&err)), NOT_AUTHENTICATED);
     }
 

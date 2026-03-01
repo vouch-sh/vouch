@@ -260,7 +260,11 @@ async fn poll_for_token(
     loop {
         // Check timeout
         if start.elapsed() > timeout {
-            anyhow::bail!("Enrollment timed out. Please try again.");
+            anyhow::bail!(
+                "Enrollment timed out. Please try again.\n\
+                 Make sure to complete the sign-in in your \
+                 browser window and enter the code shown above."
+            );
         }
 
         // Wait before polling

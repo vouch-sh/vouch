@@ -189,7 +189,7 @@ pub(crate) async fn auto_provision(
                 tracing::debug!("Server does not support SSH certificates: {e}");
             } else {
                 tracing::warn!("Auto SSH provisioning failed: {e}");
-                println!("SSH certificate not provisioned. Run: vouch credential ssh");
+                println!("SSH certificate not provisioned ({e}). Run: vouch credential ssh");
             }
             false
         }

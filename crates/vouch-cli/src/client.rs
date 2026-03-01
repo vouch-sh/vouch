@@ -153,6 +153,11 @@ impl<H: HttpClient> VouchClient<H> {
                         "DPoP proof failed for {method} {url}, \
                          falling back to Bearer: {e}"
                     );
+                    eprintln!(
+                        "Warning: DPoP proof generation failed ({e}). \
+                         Authentication may fail if the server \
+                         requires DPoP."
+                    );
                 }
             }
         } else {
@@ -316,39 +321,105 @@ impl<H: HttpClient> VouchClient<H> {
 
     /// Handle HTTP response, parsing JSON or error.
     ///
-    /// Returns typed [`crate::exit_code::CliError`] for well-known HTTP status codes:
-    /// - 401 → `CliError::NotAuthenticated`
-    /// - 403 → `CliError::PermissionDenied`
-    /// - Other errors → generic message from [`format_http_error`]
+    /// Classifies the HTTP status into a [`ServerErrorKind`] and
+    /// converts to the appropriate [`CliError`](crate::exit_code::CliError).
     fn handle_response<Resp: DeserializeOwned>(response: HttpResponse) -> Result<Resp> {
         if response.is_success() {
             return response.json();
         }
 
-        let status_code = response.status;
+        let kind = ServerErrorKind::from_response(&response);
         let error_text = response.text().unwrap_or_default();
 
-        match status_code {
+        Err(kind.into_cli_error(&error_text))
+    }
+}
+
+/// Classification of HTTP error responses from the server.
+///
+/// Maps HTTP status codes (and headers) into semantic categories
+/// that convert to [`CliError`](crate::exit_code::CliError).
+enum ServerErrorKind {
+    /// 401 with RFC 9470 step-up challenge in `WWW-Authenticate`.
+    StepUp {
+        acr_values: Option<String>,
+        max_age: Option<u64>,
+    },
+    /// 401 without step-up — token rejected or missing.
+    Unauthorized,
+    /// 403 — server denied the request.
+    Forbidden,
+    /// Any other non-success status code.
+    Other(u16),
+}
+
+impl ServerErrorKind {
+    /// Classify an HTTP response into a `ServerErrorKind`.
+    fn from_response(response: &HttpResponse) -> Self {
+        match response.status {
             401 => {
-                // RFC 9470: Check for step-up authentication challenge
+                // RFC 9470: Check for step-up auth challenge.
                 if let Some(ref www_auth) = response.www_authenticate
                     && let Some(challenge) = parse_www_authenticate(www_auth)
                 {
-                    return Err(crate::exit_code::CliError::StepUpRequired {
+                    return Self::StepUp {
                         acr_values: challenge.acr_values,
                         max_age: challenge.max_age,
-                    }
-                    .into());
+                    };
                 }
-                // Log the server's reason — the error body often explains
-                // why the token was rejected (e.g., DPoP binding mismatch).
+                Self::Unauthorized
+            }
+            403 => Self::Forbidden,
+            status => Self::Other(status),
+        }
+    }
+
+    /// Convert into a `CliError` wrapped in `anyhow::Error`.
+    ///
+    /// Parses the response body as [`ApiError`](vouch_common::ApiError)
+    /// to extract the server's reason when available.
+    fn into_cli_error(self, error_text: &str) -> anyhow::Error {
+        use crate::exit_code::CliError;
+
+        match self {
+            Self::StepUp {
+                acr_values,
+                max_age,
+            } => CliError::StepUpRequired {
+                acr_values,
+                max_age,
+            }
+            .into(),
+            Self::Unauthorized => {
                 if !error_text.is_empty() {
                     tracing::warn!("Server rejected token (401): {error_text}");
                 }
-                Err(crate::exit_code::CliError::NotAuthenticated.into())
+                let reason = if let Ok(api_err) =
+                    serde_json::from_str::<vouch_common::ApiError>(error_text)
+                {
+                    format!("{} — run 'vouch login' to re-authenticate", api_err.message)
+                } else if error_text.to_lowercase().contains("expired") {
+                    "session expired — run 'vouch login' to \
+                     re-authenticate"
+                        .to_string()
+                } else {
+                    "not authenticated — run 'vouch login' first".to_string()
+                };
+                CliError::NotAuthenticated { reason }.into()
             }
-            403 => Err(crate::exit_code::CliError::PermissionDenied.into()),
-            _ => Err(format_http_error(status_code, &error_text)),
+            Self::Forbidden => {
+                let reason = if let Ok(api_err) =
+                    serde_json::from_str::<vouch_common::ApiError>(error_text)
+                {
+                    api_err.message
+                } else if error_text.is_empty() {
+                    "access denied by server".to_string()
+                } else {
+                    error_text.to_string()
+                };
+                CliError::PermissionDenied(reason).into()
+            }
+            Self::Other(status) => format_http_error(status, error_text),
         }
     }
 }
@@ -511,7 +582,7 @@ mod tests {
         let cli_err = err.downcast_ref::<crate::exit_code::CliError>().unwrap();
         assert!(matches!(
             cli_err,
-            crate::exit_code::CliError::NotAuthenticated
+            crate::exit_code::CliError::NotAuthenticated { .. }
         ));
     }
 

@@ -587,8 +587,10 @@ fn token_error(body: &str, status: reqwest::StatusCode) -> anyhow::Error {
                  first."
             }
             "invalid_client" => {
-                "\n\nClient registration is invalid.\nRun 'vouch login' \
-                 again — the client will be re-registered automatically."
+                "\n\nClient registration is invalid or expired.\n\
+                 The client will be re-registered on the next \
+                 attempt.\nPlease run this command again. If it \
+                 persists, run 'vouch enroll' to start fresh."
             }
             _ => "",
         };
