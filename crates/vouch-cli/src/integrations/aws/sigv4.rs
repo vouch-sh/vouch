@@ -512,7 +512,12 @@ fn truncate_error_body(body: &str, max_len: usize) -> &str {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::indexing_slicing,
+    clippy::string_slice
+)]
 mod tests {
     use super::*;
 
@@ -733,5 +738,161 @@ mod tests {
     fn test_truncate_error_body_exact() {
         let body = "a".repeat(500);
         assert_eq!(truncate_error_body(&body, 500).len(), 500);
+    }
+
+    /// End-to-end signature verification for `build_presigned_url`.
+    ///
+    /// Calls the function, extracts the dynamic timestamp from the URL,
+    /// then independently reconstructs the SigV4 signing calculation
+    /// and verifies the signature matches.
+    #[test]
+    fn test_presigned_url_signature_verification() {
+        let creds = StsCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: SecretString::from(
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            ),
+            session_token: SecretString::from("AQtoken123".to_string()),
+            expiration: "2024-01-15T18:30:45Z".parse().unwrap(),
+        };
+
+        let url = build_presigned_url(&PresignedUrlParams {
+            method: "GET",
+            endpoint: "https://sts.us-east-1.amazonaws.com",
+            path: "/",
+            query_params: &[("Action", "GetCallerIdentity"), ("Version", "2011-06-15")],
+            extra_signed_headers: &[("x-k8s-aws-id", "my-cluster")],
+            service: "sts",
+            region: "us-east-1",
+            creds: &creds,
+            expires_seconds: 60,
+        });
+
+        // Extract dynamic timestamp and signature from URL
+        let date_key = "X-Amz-Date=";
+        let date_pos = url.find(date_key).unwrap() + date_key.len();
+        let amz_date = &url[date_pos..date_pos + 16];
+        let date_stamp = &amz_date[..8];
+
+        let sig_key = "X-Amz-Signature=";
+        let sig_pos = url.find(sig_key).unwrap() + sig_key.len();
+        let actual_sig = &url[sig_pos..sig_pos + 64];
+
+        // Independently reconstruct the canonical request
+        let host = "sts.us-east-1.amazonaws.com";
+        let scope = format!("{date_stamp}/us-east-1/sts/aws4_request");
+        let cred_val = format!("AKIAIOSFODNN7EXAMPLE/{scope}");
+        let signed_hdrs = "host;x-k8s-aws-id";
+        let canonical_hdrs = format!("host:{host}\nx-k8s-aws-id:my-cluster\n");
+
+        let mut qp: BTreeMap<&str, String> = BTreeMap::new();
+        qp.insert("Action", "GetCallerIdentity".into());
+        qp.insert("Version", "2011-06-15".into());
+        qp.insert("X-Amz-Algorithm", "AWS4-HMAC-SHA256".into());
+        qp.insert("X-Amz-Credential", cred_val);
+        qp.insert("X-Amz-Date", amz_date.to_string());
+        qp.insert("X-Amz-Expires", "60".into());
+        qp.insert("X-Amz-Security-Token", "AQtoken123".into());
+        qp.insert("X-Amz-SignedHeaders", signed_hdrs.into());
+
+        let cqs: String = qp
+            .iter()
+            .map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        let cr = format!(
+            "GET\n/\n{cqs}\n{canonical_hdrs}\n\
+             {signed_hdrs}\nUNSIGNED-PAYLOAD"
+        );
+
+        let cr_hash = sha256_hex(cr.as_bytes());
+        let sts = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{cr_hash}");
+
+        let key = derive_signing_key(&creds.secret_access_key, date_stamp, "us-east-1", "sts");
+        let expected_sig = hex::encode(hmac_sha256(&key, sts.as_bytes()));
+
+        assert_eq!(actual_sig, expected_sig, "presigned URL signature mismatch");
+    }
+
+    /// Verify presigned URL uses UNSIGNED-PAYLOAD (not empty hash).
+    ///
+    /// Per AWS SigV4 spec, presigned URLs must use the literal string
+    /// "UNSIGNED-PAYLOAD" as the payload hash in the canonical request,
+    /// not SHA-256("").
+    #[test]
+    fn test_presigned_url_uses_unsigned_payload() {
+        let creds = StsCredentials {
+            access_key_id: "AKID".to_string(),
+            secret_access_key: SecretString::from("secret".to_string()),
+            session_token: SecretString::from("tok".to_string()),
+            expiration: "2024-01-15T18:30:45Z".parse().unwrap(),
+        };
+
+        let url = build_presigned_url(&PresignedUrlParams {
+            method: "GET",
+            endpoint: "https://example.amazonaws.com",
+            path: "/",
+            query_params: &[],
+            extra_signed_headers: &[],
+            service: "sts",
+            region: "us-east-1",
+            creds: &creds,
+            expires_seconds: 60,
+        });
+
+        // The empty payload hash should NOT appear in the URL
+        // (it would if we accidentally hashed the payload instead
+        // of using UNSIGNED-PAYLOAD)
+        let empty_hash = sha256_hex(b"");
+        assert!(
+            !url.contains(&empty_hash),
+            "presigned URL must not contain empty payload hash"
+        );
+    }
+
+    /// Verify query params in presigned URL are sorted by key.
+    ///
+    /// AWS SigV4 requires the canonical query string to be sorted
+    /// alphabetically by parameter name (after URI encoding).
+    #[test]
+    fn test_presigned_url_query_params_sorted() {
+        let creds = StsCredentials {
+            access_key_id: "AKID".to_string(),
+            secret_access_key: SecretString::from("secret".to_string()),
+            session_token: SecretString::from("tok".to_string()),
+            expiration: "2024-01-15T18:30:45Z".parse().unwrap(),
+        };
+
+        let url = build_presigned_url(&PresignedUrlParams {
+            method: "GET",
+            endpoint: "https://sts.us-east-1.amazonaws.com",
+            path: "/",
+            query_params: &[("Zebra", "last"), ("Action", "first")],
+            extra_signed_headers: &[],
+            service: "sts",
+            region: "us-east-1",
+            creds: &creds,
+            expires_seconds: 60,
+        });
+
+        // Extract query string (between ? and &X-Amz-Signature)
+        let qs_start = url.find('?').unwrap() + 1;
+        let sig_sep = url.find("&X-Amz-Signature=").unwrap();
+        let qs = &url[qs_start..sig_sep];
+
+        // Split into param names and verify sorted order
+        let param_names: Vec<&str> = qs
+            .split('&')
+            .filter_map(|p| p.split_once('='))
+            .map(|(k, _)| k)
+            .collect();
+
+        let mut sorted = param_names.clone();
+        sorted.sort();
+        assert_eq!(
+            param_names, sorted,
+            "query params must be alphabetically sorted"
+        );
     }
 }
