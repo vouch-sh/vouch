@@ -364,47 +364,66 @@ async fn run_fapi_login_with_nonce(
 ///
 /// Returns the `client_id` on success.
 async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) -> Result<String> {
-    if let Ok(config) = Config::load()
-        && let Some(id) = config.client_id()
-    {
-        // Check 1: does the current key match what was registered?
-        let key_matches = config
-            .dpop_key_id()
-            .is_some_and(|stored_kid| stored_kid == fapi_key.kid());
+    let base_url = client.base_url().to_string();
 
-        if !key_matches {
-            tracing::debug!(
-                "Key mismatch (stored={:?}, current={}), re-registering",
-                config.dpop_key_id(),
-                fapi_key.kid()
-            );
-        } else if let Some(uri) = config.registration_client_uri()
-            && let Some(token) = config.registration_access_token()
-        {
-            // Check 2: is the registration still active on the server?
-            match vouch_cli::fapi::registration::is_client_registered(
-                client.raw_client(),
-                uri,
-                token.expose_secret(),
-            )
-            .await
+    if let Ok(mut config) = Config::load() {
+        config.set_server_url(&base_url);
+        if let Some(id) = config.client_id() {
+            // Check 1: does the current key match what was registered?
+            let key_matches = config
+                .dpop_key_id()
+                .is_some_and(|stored_kid| stored_kid == fapi_key.kid());
+
+            if !key_matches {
+                tracing::debug!(
+                    "Key mismatch (stored={:?}, current={}), re-registering",
+                    config.dpop_key_id(),
+                    fapi_key.kid()
+                );
+            } else if let Some(uri) = config.registration_client_uri()
+                && let Some(token) = config.registration_access_token()
             {
-                Ok(true) => return Ok(id.to_string()),
-                Ok(false) => {
-                    tracing::debug!("Client {id} no longer registered, re-registering");
+                // Check 2: does the registration URI match the
+                // current server? A mismatch means stale config
+                // from a different server (e.g. localhost vs prod).
+                let uri_matches_server = crate::config::hostname_from_url(uri).ok()
+                    == crate::config::hostname_from_url(&base_url).ok();
+
+                if !uri_matches_server {
+                    tracing::debug!(
+                        "Registration URI {uri} does not match \
+                         server {base_url}, re-registering"
+                    );
+                } else {
+                    // Check 3: is the registration still active?
+                    match vouch_cli::fapi::registration::is_client_registered(
+                        client.raw_client(),
+                        uri,
+                        token.expose_secret(),
+                    )
+                    .await
+                    {
+                        Ok(true) => return Ok(id.to_string()),
+                        Ok(false) => {
+                            tracing::debug!(
+                                "Client {id} no longer registered, \
+                                 re-registering"
+                            );
+                        }
+                        Err(e) => {
+                            // Network error — trust the stored
+                            // client_id; login will fail with a
+                            // clearer error at the challenge step.
+                            tracing::debug!("Could not validate registration: {e}");
+                            return Ok(id.to_string());
+                        }
+                    }
                 }
-                Err(e) => {
-                    // Network error — try the stored client_id; if
-                    // the server is unreachable, login will fail with
-                    // a clearer error at the challenge step anyway.
-                    tracing::debug!("Could not validate registration: {e}");
-                    return Ok(id.to_string());
-                }
+            } else {
+                // No RFC 7592 credentials (pre-7592 config) but key
+                // matches — trust the stored client_id.
+                return Ok(id.to_string());
             }
-        } else {
-            // No RFC 7592 credentials (pre-7592 config) but key
-            // matches — trust the stored client_id.
-            return Ok(id.to_string());
         }
     }
 
@@ -413,7 +432,7 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
 
     let result = vouch_cli::fapi::registration::register_fapi_client(
         client.raw_client(),
-        client.base_url(),
+        &base_url,
         None,
         fapi_key,
     )
@@ -422,6 +441,7 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
 
     // Persist the registration to config.
     Config::modify(|config| {
+        config.set_server_url(&base_url);
         config.clear_fapi();
         config.set_client_id(&result.client_id);
         if let Some(ref rat) = result.registration_access_token {

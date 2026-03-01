@@ -375,7 +375,7 @@ async fn run() -> Result<()> {
         Commands::Status { format } => {
             commands::status::run(server, format.unwrap_or_default()).await
         }
-        Commands::Logout => commands::logout::run().await,
+        Commands::Logout => commands::logout::run(server).await,
         Commands::Env {
             credential_type,
             shell,

@@ -9,8 +9,9 @@ use crate::config::Config;
 use vouch_common::clear_cookie;
 
 /// Run the logout command.
-pub async fn run() -> Result<()> {
+pub async fn run(server: &str) -> Result<()> {
     let mut config = Config::load()?;
+    config.set_server_url(server);
 
     // Check if we have a token in config
     let had_token = config.token().is_some();

@@ -194,12 +194,13 @@ async fn register_fapi_client_open(
     base_url: &str,
     key: &vouch_cli::fapi::ClientKey,
 ) -> Option<String> {
-    // If we already have a client_id in config, skip registration.
-    if let Ok(config) = Config::load()
-        && let Some(id) = config.client_id()
-    {
-        tracing::debug!("FAPI client already registered: client_id={id}");
-        return Some(id.to_string());
+    // If we already have a client_id in config for this server, skip.
+    if let Ok(mut config) = Config::load() {
+        config.set_server_url(base_url);
+        if let Some(id) = config.client_id() {
+            tracing::debug!("FAPI client already registered: client_id={id}");
+            return Some(id.to_string());
+        }
     }
 
     // Open registration — no auth token.
@@ -210,7 +211,9 @@ async fn register_fapi_client_open(
             let client_id = result.client_id.clone();
 
             // Save registration results to config.
+            let url = base_url.to_string();
             if let Err(e) = Config::modify(|config| {
+                config.set_server_url(&url);
                 config.set_client_id(&result.client_id);
                 if let Some(ref rat) = result.registration_access_token {
                     config.set_registration_access_token(rat);

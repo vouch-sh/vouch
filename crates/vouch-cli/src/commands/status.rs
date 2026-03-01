@@ -158,7 +158,8 @@ pub async fn run(server: &str, mode: OutputFormat) -> Result<()> {
     }
 
     // Fall back to config/server check
-    let config = Config::load()?;
+    let mut config = Config::load()?;
+    config.set_server_url(server);
 
     if config.token().is_none() {
         match mode {
