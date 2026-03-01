@@ -3,6 +3,7 @@
 
 use crate::AppState;
 use crate::db;
+use crate::services::error::ServiceError;
 use axum::{
     Json,
     body::Body,
@@ -13,9 +14,9 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
 use std::sync::Arc;
-use vouch_common::{ApiError, SessionStatus};
+use vouch_common::SessionStatus;
 
-use super::{clear_session_cookie, hash_token, json_error};
+use super::{clear_session_cookie, hash_token};
 
 /// Get current session status.
 ///
@@ -24,7 +25,7 @@ use super::{clear_session_cookie, hash_token, json_error};
 pub async fn status(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Json<SessionStatus>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<SessionStatus>, ServiceError> {
     // Get Authorization header (Bearer or DPoP)
     let auth_header = headers
         .get(header::AUTHORIZATION)
@@ -78,11 +79,7 @@ pub async fn status(
     let session = db::get_session_by_token_hash(&state.store, &token_hash)
         .await
         .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
         })?;
 
     if session.is_none() {

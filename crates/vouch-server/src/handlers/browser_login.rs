@@ -24,11 +24,11 @@ use crate::AppState;
 use crate::crypto::generate_challenge;
 use crate::crypto::webauthn_verify;
 use crate::db::{self, AuthEventParams, AuthEventType};
-use crate::handlers::errors::json_error;
 use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
 use crate::redact_email;
 use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::services::error::ServiceError;
 use crate::services::oidc::amr::{ACR_AAL3, AuthMethod};
 use crate::services::oidc::scope::ScopeSet;
 use askama::Template;
@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
 use vouch_common::{
-    ApiError, BrowserLoginCompleteRequest, BrowserLoginCompleteResponse, BrowserLoginStartRequest,
+    BrowserLoginCompleteRequest, BrowserLoginCompleteResponse, BrowserLoginStartRequest,
     BrowserLoginStartResponse,
 };
 
@@ -214,7 +214,7 @@ pub async fn browser_login_start(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<BrowserLoginStartRequest>,
-) -> Result<Json<BrowserLoginStartResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<BrowserLoginStartResponse>, ServiceError> {
     // Validate Origin header for CSRF protection (RFC 9700)
     validate_origin(&headers, &state.config().base_url)?;
 
@@ -222,7 +222,7 @@ pub async fn browser_login_start(
 
     // Generate challenge
     let challenge = generate_challenge().map_err(|_| {
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "rng_error",
             "Failed to generate challenge",
@@ -232,7 +232,7 @@ pub async fn browser_login_start(
     let exp = now
         .checked_add(Span::new().minutes(5))
         .map_err(|_| {
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "time_error",
                 "Time calculation overflow",
@@ -252,10 +252,10 @@ pub async fn browser_login_start(
     let state_token = auth_state
         .encode(state.config().jwt_secret.expose_secret())
         .map_err(|e| {
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "state_error",
-                &e.to_string(),
+                e.to_string(),
             )
         })?;
 
@@ -286,7 +286,7 @@ pub async fn browser_login_complete(
     headers: HeaderMap,
     _jar: CookieJar,
     Json(req): Json<BrowserLoginCompleteRequest>,
-) -> Result<Response, (StatusCode, Json<ApiError>)> {
+) -> Result<Response, ServiceError> {
     // ── Phase 1: Origin header validation ────────────────────────────────
     validate_origin(&headers, &state.config().base_url)?;
 
@@ -298,14 +298,14 @@ pub async fn browser_login_complete(
     // ── Phase 2: Field length bounds ─────────────────────────────────────
     // Reject obviously oversized or empty fields before any processing.
     if req.state.len() > MAX_STATE_TOKEN_LEN {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_state",
             "State token exceeds maximum length",
         ));
     }
     if req.credential_id.is_empty() || req.credential_id.len() > MAX_CREDENTIAL_ID_LEN {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Credential ID is empty or exceeds maximum length",
@@ -314,28 +314,28 @@ pub async fn browser_login_complete(
     if req.authenticator_data.is_empty()
         || req.authenticator_data.len() > MAX_AUTHENTICATOR_DATA_LEN
     {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Authenticator data is empty or exceeds maximum length",
         ));
     }
     if req.client_data_json.is_empty() || req.client_data_json.len() > MAX_CLIENT_DATA_JSON_LEN {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Client data JSON is empty or exceeds maximum length",
         ));
     }
     if req.signature.is_empty() || req.signature.len() > MAX_SIGNATURE_LEN {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Signature is empty or exceeds maximum length",
         ));
     }
     if req.user_handle.is_empty() || req.user_handle.len() > MAX_USER_HANDLE_LEN {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "User handle is empty or exceeds maximum length",
@@ -343,13 +343,15 @@ pub async fn browser_login_complete(
     }
 
     // ── Phase 3: State JWT decode + expiration ───────────────────────────
-    let auth_state =
-        BrowserAuthenticationState::decode(&req.state, state.config().jwt_secret.expose_secret())
-            .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
+    let auth_state = BrowserAuthenticationState::decode(
+        &req.state,
+        state.config().jwt_secret.expose_secret(),
+    )
+    .map_err(|e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()))?;
 
     let now = Timestamp::now().as_second();
     if now > auth_state.exp {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "expired",
             "Authentication session expired",
@@ -358,7 +360,7 @@ pub async fn browser_login_complete(
 
     // ── Phase 4: Base64url decode all fields ─────────────────────────────
     let credential_id = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|_| {
-        json_error(
+        ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Invalid credential_id",
@@ -368,7 +370,7 @@ pub async fn browser_login_complete(
     let authenticator_data = URL_SAFE_NO_PAD
         .decode(&req.authenticator_data)
         .map_err(|_| {
-            json_error(
+            ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "invalid_input",
                 "Invalid authenticator_data",
@@ -376,7 +378,7 @@ pub async fn browser_login_complete(
         })?;
 
     let client_data_json = URL_SAFE_NO_PAD.decode(&req.client_data_json).map_err(|_| {
-        json_error(
+        ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Invalid client_data_json",
@@ -384,7 +386,7 @@ pub async fn browser_login_complete(
     })?;
 
     let signature = URL_SAFE_NO_PAD.decode(&req.signature).map_err(|_| {
-        json_error(
+        ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Invalid signature",
@@ -392,7 +394,7 @@ pub async fn browser_login_complete(
     })?;
 
     let user_handle = URL_SAFE_NO_PAD.decode(&req.user_handle).map_err(|_| {
-        json_error(
+        ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Invalid user_handle",
@@ -403,7 +405,7 @@ pub async fn browser_login_complete(
     if credential_id.len() < MIN_CREDENTIAL_ID_BYTES
         || credential_id.len() > MAX_CREDENTIAL_ID_BYTES
     {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Credential ID length is outside the valid range (16-1023 bytes)",
@@ -413,7 +415,7 @@ pub async fn browser_login_complete(
     // ── Phase 6: Client data JSON structure validation ───────────────────
     // Parse and validate client data before any DB or crypto operations.
     let client_data_str = std::str::from_utf8(&client_data_json).map_err(|_| {
-        json_error(
+        ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Client data JSON is not valid UTF-8",
@@ -428,15 +430,15 @@ pub async fn browser_login_complete(
     }
 
     let client_data: ClientData = serde_json::from_str(client_data_str).map_err(|e| {
-        json_error(
+        ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
-            &format!("Client data JSON is malformed: {e}"),
+            format!("Client data JSON is malformed: {e}"),
         )
     })?;
 
     if client_data.typ != "webauthn.get" {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Client data type must be 'webauthn.get'",
@@ -444,7 +446,7 @@ pub async fn browser_login_complete(
     }
 
     if client_data.origin != state.config().base_url {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
             "Client data origin mismatch",
@@ -453,7 +455,7 @@ pub async fn browser_login_complete(
 
     // Parse user_handle as UUID to identify the user
     let user_id = Uuid::from_slice(&user_handle).map_err(|_| {
-        json_error(
+        ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_user_handle",
             "Invalid user handle format",
@@ -503,7 +505,7 @@ pub async fn browser_login_complete(
         };
         log_failure(&user_id.to_string(), None, &reason);
         // Return generic error to prevent credential enumeration
-        json_error(
+        ServiceError::api(
             StatusCode::UNAUTHORIZED,
             "auth_failed",
             "Authentication failed",
@@ -531,7 +533,7 @@ pub async fn browser_login_complete(
     )
     .map_err(|e| {
         log_failure(&user.id, Some(&authenticator.id), &e.to_string());
-        json_error(
+        ServiceError::api(
             StatusCode::UNAUTHORIZED,
             "auth_failed",
             "Authentication failed",
@@ -550,11 +552,7 @@ pub async fn browser_login_complete(
     db::update_authenticator_counter(&state.store, &authenticator.id, new_counter)
         .await
         .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
         })?;
 
     // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
@@ -578,10 +576,10 @@ pub async fn browser_login_complete(
     )
     .await
     .map_err(|e| {
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "session_error",
-            &e.to_string(),
+            e.to_string(),
         )
     })?;
     let token = session_result.token;
@@ -642,15 +640,12 @@ pub async fn browser_login_complete(
 // ============================================================================
 
 /// Validate Origin header for CSRF protection (RFC 9700).
-fn validate_origin(
-    headers: &HeaderMap,
-    expected_origin: &str,
-) -> Result<(), (StatusCode, Json<ApiError>)> {
+fn validate_origin(headers: &HeaderMap, expected_origin: &str) -> Result<(), ServiceError> {
     let origin = headers
         .get("Origin")
         .and_then(|h| h.to_str().ok())
         .ok_or_else(|| {
-            json_error(
+            ServiceError::api(
                 StatusCode::FORBIDDEN,
                 "missing_origin",
                 "Origin header required",
@@ -663,7 +658,7 @@ fn validate_origin(
             origin,
             expected_origin
         );
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::FORBIDDEN,
             "invalid_origin",
             "Request origin mismatch",

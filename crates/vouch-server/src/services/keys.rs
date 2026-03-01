@@ -119,7 +119,7 @@ pub async fn rename_key(
 
     // Verify the key belongs to the user
     if authenticator.user_id != user_id {
-        return Err(ServiceError::http(
+        return Err(ServiceError::api(
             axum::http::StatusCode::FORBIDDEN,
             "forbidden",
             "Key does not belong to this user",
@@ -175,7 +175,7 @@ pub async fn delete_key(
 
     // Verify the key belongs to the user
     if authenticator.user_id != user_id {
-        return Err(ServiceError::http(
+        return Err(ServiceError::api(
             axum::http::StatusCode::FORBIDDEN,
             "forbidden",
             "Key does not belong to this user",
@@ -191,7 +191,7 @@ pub async fn delete_key(
         })?;
 
     if key_count <= 1 {
-        return Err(ServiceError::http(
+        return Err(ServiceError::api(
             axum::http::StatusCode::BAD_REQUEST,
             "last_key",
             "Cannot delete your last key. Register another key first.",

@@ -10,8 +10,8 @@
 //! - GET /github/success - Success page after connection
 
 use crate::db;
-use crate::handlers::errors::json_error;
 use crate::handlers::session::AuthContext;
+use crate::services::error::ServiceError;
 use crate::services::integrations::github::{
     ConnectInstallationParams, GitHubError, GitHubService, LinkAccountParams,
     ReconnectInstallationParams, installations::validate_org_admin, webhooks::WebhookEvent,
@@ -19,7 +19,6 @@ use crate::services::integrations::github::{
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::Form;
-use axum::Json;
 use axum::body::Bytes;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, StatusCode};
@@ -30,7 +29,6 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use vouch_common::ApiError;
 
 // ============================================================================
 // Templates
@@ -249,7 +247,7 @@ pub async fn github_webhook(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     body: Bytes,
-) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+) -> Result<StatusCode, ServiceError> {
     let config = state.config();
     let service = github_service(&state, &config);
 
@@ -259,7 +257,7 @@ pub async fn github_webhook(
         .and_then(|h| h.to_str().ok())
         .and_then(|s| s.strip_prefix("sha256="))
         .ok_or_else(|| {
-            json_error(
+            ServiceError::api(
                 StatusCode::UNAUTHORIZED,
                 "invalid_signature",
                 "Missing or invalid X-Hub-Signature-256 header",
@@ -269,11 +267,7 @@ pub async fn github_webhook(
     service
         .verify_webhook_signature(signature, &body)
         .map_err(|e| {
-            json_error(
-                StatusCode::UNAUTHORIZED,
-                "invalid_signature",
-                &e.to_string(),
-            )
+            ServiceError::api(StatusCode::UNAUTHORIZED, "invalid_signature", e.to_string())
         })?;
 
     // Get event type and handle
@@ -287,10 +281,10 @@ pub async fn github_webhook(
         .handle_webhook_event(event_type, &body)
         .await
         .map_err(|e| {
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "webhook_error",
-                &e.to_string(),
+                e.to_string(),
             )
         })?;
 

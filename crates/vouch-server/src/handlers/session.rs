@@ -4,13 +4,11 @@
 use crate::AppState;
 use crate::crypto::hash_token;
 use crate::db;
-use axum::Json;
+use crate::services::error::ServiceError;
 use axum::http::StatusCode;
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use subtle::ConstantTimeEq;
 use time::Duration;
-
-use super::errors::json_error;
 
 // ============================================================================
 // Authentication Context for Templates
@@ -90,7 +88,7 @@ pub async fn extract_resource_token(
     jar: &CookieJar,
     method: &str,
     uri: &str,
-) -> Result<ValidatedResourceToken, (StatusCode, Json<vouch_common::ApiError>)> {
+) -> Result<ValidatedResourceToken, ServiceError> {
     // 1. Extract token from Authorization header or cookie
     let (token, auth_scheme) = extract_token_from_request(headers, jar)?;
 
@@ -103,7 +101,7 @@ pub async fn extract_resource_token(
         &config.base_url,
     )
     .ok_or_else(|| {
-        json_error(
+        ServiceError::api(
             StatusCode::UNAUTHORIZED,
             "invalid_token",
             "Invalid or expired access token",
@@ -117,14 +115,10 @@ pub async fn extract_resource_token(
     let session = db::get_session_by_token_hash(&state.store, &token_hash)
         .await
         .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
         })?
         .ok_or_else(|| {
-            json_error(
+            ServiceError::api(
                 StatusCode::UNAUTHORIZED,
                 "invalid_token",
                 "Session not found or revoked",
@@ -155,7 +149,7 @@ pub async fn extract_resource_token(
                             let is_match: bool =
                                 validated.jkt.as_bytes().ct_eq(cnf.jkt.as_bytes()).into();
                             if !is_match {
-                                return Err(json_error(
+                                return Err(ServiceError::api(
                                     StatusCode::UNAUTHORIZED,
                                     "invalid_token",
                                     "DPoP proof key does not match token binding",
@@ -164,7 +158,7 @@ pub async fn extract_resource_token(
                         }
                         Err(e) => {
                             tracing::debug!("DPoP validation failed: {e}");
-                            return Err(json_error(
+                            return Err(ServiceError::api(
                                 StatusCode::UNAUTHORIZED,
                                 "invalid_token",
                                 "Invalid DPoP proof",
@@ -172,7 +166,7 @@ pub async fn extract_resource_token(
                         }
                     }
                 } else {
-                    return Err(json_error(
+                    return Err(ServiceError::api(
                         StatusCode::UNAUTHORIZED,
                         "invalid_token",
                         "Missing DPoP proof header for sender-constrained token",
@@ -187,7 +181,7 @@ pub async fn extract_resource_token(
                     "Rejected Bearer auth for sender-constrained token \
                      (client must use DPoP scheme)"
                 );
-                return Err(json_error(
+                return Err(ServiceError::api(
                     StatusCode::UNAUTHORIZED,
                     "invalid_token",
                     "Sender-constrained tokens must use DPoP authorization scheme",
@@ -223,7 +217,7 @@ pub async fn extract_resource_token_with_email(
     jar: &CookieJar,
     method: &str,
     uri: &str,
-) -> Result<(ValidatedResourceToken, String), (StatusCode, Json<vouch_common::ApiError>)> {
+) -> Result<(ValidatedResourceToken, String), ServiceError> {
     let token = extract_resource_token(state, headers, jar, method, uri).await?;
 
     // If token already has email, use it; otherwise look up from DB
@@ -233,13 +227,11 @@ pub async fn extract_resource_token_with_email(
         let user = db::get_user_by_id(&state.store, &token.sub)
             .await
             .map_err(|e| {
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    &e.to_string(),
-                )
+                ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
             })?
-            .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
+            .ok_or_else(|| {
+                ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
+            })?;
         user.email
     };
 
@@ -258,7 +250,7 @@ pub async fn extract_resource_token_with_email(
 pub async fn extract_session_from_cookie(
     state: &AppState,
     jar: &CookieJar,
-) -> Result<ValidatedResourceToken, (StatusCode, Json<vouch_common::ApiError>)> {
+) -> Result<ValidatedResourceToken, ServiceError> {
     // Use an empty header map — cookie path only.
     // DPoP validation is skipped for the Cookie auth scheme, so method and uri
     // are not used and can be empty strings.
@@ -284,7 +276,7 @@ enum AuthScheme {
 fn extract_token_from_request(
     headers: &axum::http::HeaderMap,
     jar: &CookieJar,
-) -> Result<(String, AuthScheme), (StatusCode, Json<vouch_common::ApiError>)> {
+) -> Result<(String, AuthScheme), ServiceError> {
     use axum::http::header::AUTHORIZATION;
 
     // Check Authorization header
@@ -302,11 +294,87 @@ fn extract_token_from_request(
         return Ok((cookie.value().to_string(), AuthScheme::Cookie));
     }
 
-    Err(json_error(
+    Err(ServiceError::api(
         StatusCode::UNAUTHORIZED,
         "unauthorized",
         "Missing access token",
     ))
+}
+
+// ============================================================================
+// Shared Auth Extraction Helpers
+// ============================================================================
+
+/// Extract authenticated user and their org_id.
+///
+/// Returns `(user, org_id)` or an error if not authenticated or no org.
+pub async fn extract_user_with_org(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    jar: &CookieJar,
+    method: &str,
+    uri: &str,
+) -> Result<(db::User, String), ServiceError> {
+    let token = extract_resource_token(state, headers, jar, method, uri).await?;
+
+    let user = db::get_user_by_id(&state.store, &token.sub)
+        .await
+        .map_err(|e| {
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
+        })?
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::UNAUTHORIZED, "unauthorized", "User not found")
+        })?;
+
+    let org_id = user.org_id.clone().ok_or_else(|| {
+        ServiceError::api(
+            StatusCode::FORBIDDEN,
+            "no_organization",
+            "Cloud integrations require organization membership",
+        )
+    })?;
+
+    Ok((user, org_id))
+}
+
+/// Extract and validate an org admin from the access token.
+///
+/// Returns the user and their org_id if they are an org admin.
+pub async fn extract_org_admin(
+    state: &AppState,
+    headers: &axum::http::HeaderMap,
+    jar: &CookieJar,
+    method: &str,
+    uri: &str,
+) -> Result<(db::User, String), ServiceError> {
+    let token = extract_resource_token(state, headers, jar, method, uri).await?;
+
+    let user = db::get_user_by_id(&state.store, &token.sub)
+        .await
+        .map_err(|e| {
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
+        })?
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::UNAUTHORIZED, "unauthorized", "User not found")
+        })?;
+
+    if !user.is_org_admin {
+        return Err(ServiceError::api(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "Organization admin access required",
+        ));
+    }
+
+    let org_id = user.org_id.clone().ok_or_else(|| {
+        ServiceError::api(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "User is not associated with an organization",
+        )
+    })?;
+
+    Ok((user, org_id))
 }
 
 /// Create a session cookie.

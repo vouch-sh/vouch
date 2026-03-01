@@ -2,11 +2,8 @@
 //! WebAuthn registration attestation validation.
 
 use crate::attestation::{extract_aaguid_from_attestation, validate_hardware_attestation};
-use axum::Json;
+use crate::services::error::ServiceError;
 use axum::http::StatusCode;
-use vouch_common::ApiError;
-
-use super::errors::json_error;
 
 /// Result of validating a registration attestation.
 pub struct ValidatedAttestation {
@@ -31,12 +28,12 @@ pub struct ValidatedAttestation {
 /// Returns an error if the attestation is from a software passkey or platform authenticator.
 pub fn validate_registration_attestation(
     attestation_object: &[u8],
-) -> Result<ValidatedAttestation, (StatusCode, Json<ApiError>)> {
+) -> Result<ValidatedAttestation, ServiceError> {
     // Validate attestation format - reject software passkeys and platform authenticators
     let validation = validate_hardware_attestation(attestation_object);
     if let (Some(code), Some(message)) = (validation.error_code(), validation.error_message()) {
         tracing::warn!("Rejected registration: {}", code);
-        return Err(json_error(StatusCode::BAD_REQUEST, code, message));
+        return Err(ServiceError::api(StatusCode::BAD_REQUEST, code, message));
     }
 
     // Extract AAGUID from the attestation object
