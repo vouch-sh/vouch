@@ -2233,11 +2233,8 @@ async fn test_scim_user_list_filter_sw_operator() {
 fn test_scim_filter_parse_cjk_value() {
     use crate::db::scim::{ScimFilterOp, parse_scim_filter};
 
-    let result = parse_scim_filter(
-        r#"displayName eq "山田太郎""#,
-        "displayName",
-    )
-    .expect("parse should succeed");
+    let result = parse_scim_filter(r#"displayName eq "山田太郎""#, "displayName")
+        .expect("parse should succeed");
     let filter = result.expect("filter should be present");
     assert_eq!(filter.op, ScimFilterOp::Eq);
     assert_eq!(filter.value, "山田太郎");
@@ -2247,11 +2244,8 @@ fn test_scim_filter_parse_cjk_value() {
 fn test_scim_filter_parse_cjk_co_operator() {
     use crate::db::scim::{ScimFilterOp, parse_scim_filter};
 
-    let result = parse_scim_filter(
-        r#"displayName co "田中""#,
-        "displayName",
-    )
-    .expect("parse should succeed");
+    let result =
+        parse_scim_filter(r#"displayName co "田中""#, "displayName").expect("parse should succeed");
     let filter = result.expect("filter should be present");
     assert_eq!(filter.op, ScimFilterOp::Co);
     assert_eq!(filter.value, "田中");
@@ -2261,11 +2255,8 @@ fn test_scim_filter_parse_cjk_co_operator() {
 fn test_scim_filter_parse_emoji_value() {
     use crate::db::scim::{ScimFilterOp, parse_scim_filter};
 
-    let result = parse_scim_filter(
-        r#"displayName eq "Test 🔑 Key""#,
-        "displayName",
-    )
-    .expect("parse should succeed");
+    let result = parse_scim_filter(r#"displayName eq "Test 🔑 Key""#, "displayName")
+        .expect("parse should succeed");
     let filter = result.expect("filter should be present");
     assert_eq!(filter.op, ScimFilterOp::Eq);
     assert_eq!(filter.value, "Test 🔑 Key");
@@ -2275,11 +2266,8 @@ fn test_scim_filter_parse_emoji_value() {
 fn test_scim_filter_parse_korean_value() {
     use crate::db::scim::{ScimFilterOp, parse_scim_filter};
 
-    let result = parse_scim_filter(
-        r#"userName eq "사용자@example.com""#,
-        "userName",
-    )
-    .expect("parse should succeed");
+    let result = parse_scim_filter(r#"userName eq "사용자@example.com""#, "userName")
+        .expect("parse should succeed");
     let filter = result.expect("filter should be present");
     assert_eq!(filter.op, ScimFilterOp::Eq);
     assert_eq!(filter.value, "사용자@example.com");

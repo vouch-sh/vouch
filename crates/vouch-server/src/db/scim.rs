@@ -575,9 +575,8 @@ pub(crate) fn parse_scim_filter(
         // back to a byte offset in the original string.
         let char_offset = filter_lower.get(..lower_end).map(|s| s.chars().count());
 
-        if let Some(orig_byte_pos) = char_offset.and_then(|n| {
-            filter.char_indices().nth(n).map(|(i, _)| i)
-        })
+        if let Some(orig_byte_pos) =
+            char_offset.and_then(|n| filter.char_indices().nth(n).map(|(i, _)| i))
             && let Some(rest_str) = filter.get(orig_byte_pos..)
             && let Some(unquoted) = rest_str.strip_prefix('"')
             && let Some(end) = unquoted.find('"')
