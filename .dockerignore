@@ -10,6 +10,7 @@
 !crates/vouch-server/Cargo.toml
 !crates/vouch-cli/Cargo.toml
 !crates/vouch-agent/Cargo.toml
+!crates/vouch-tests/Cargo.toml
 
 # Source code: only server and its shared dependency
 !crates/vouch-common/src/
