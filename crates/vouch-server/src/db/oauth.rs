@@ -378,6 +378,26 @@ pub async fn revoke_all_oauth_client_secrets(
     Ok(count)
 }
 
+/// Get a secret by its internal ID.
+pub async fn get_oauth_client_secret_by_id(
+    store: &DocumentStore,
+    id: &str,
+) -> Result<Option<OAuthClientSecret>> {
+    let doc = store.get::<OAuthClientSecretDoc>(id).await?;
+    Ok(doc.map(OAuthClientSecret::from))
+}
+
+/// Revoke a single secret (soft-delete).
+///
+/// Returns `true` if the secret was found and updated, `false` if not found.
+pub async fn revoke_oauth_client_secret(store: &DocumentStore, id: &str) -> Result<bool> {
+    store
+        .modify::<OAuthClientSecretDoc, _>(id, |data| {
+            data.revoked_at = Some(Timestamp::now());
+        })
+        .await
+}
+
 // ============================================================================
 // OAuth Usage Events (now via AuditStore)
 // ============================================================================
@@ -391,6 +411,8 @@ pub enum OAuthEventType {
     AuthSuccess,
     AuthFailure,
     ClientRegistered,
+    SecretAdded,
+    SecretRevoked,
 }
 
 impl OAuthEventType {
@@ -403,6 +425,8 @@ impl OAuthEventType {
             Self::AuthSuccess => "auth_success",
             Self::AuthFailure => "auth_failure",
             Self::ClientRegistered => "client_registered",
+            Self::SecretAdded => "secret_added",
+            Self::SecretRevoked => "secret_revoked",
         }
     }
 }
@@ -842,5 +866,251 @@ mod tests {
         let none_json =
             serde_json::to_string(&FapiProfile::None).expect("FapiProfile::None serialization");
         assert_eq!(none_json, r#""none""#);
+    }
+
+    // ========================================================================
+    // Test Helpers
+    // ========================================================================
+
+    use std::sync::Arc;
+
+    use crate::crypto::document_crypto::PlaintextDocumentCrypto;
+    use crate::db::Pool;
+
+    async fn test_store() -> DocumentStore {
+        let pool = Pool::connect("sqlite::memory:")
+            .await
+            .expect("Failed to create test database");
+
+        match &pool {
+            Pool::Sqlite(p) => sqlx::migrate!("./migrations/sqlite")
+                .run(p)
+                .await
+                .expect("Failed to run migrations"),
+            Pool::Postgres(p) => sqlx::migrate!("./migrations/postgres")
+                .run(p)
+                .await
+                .expect("Failed to run migrations"),
+        }
+
+        let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+            Arc::new(PlaintextDocumentCrypto);
+        DocumentStore::new(pool, crypto)
+    }
+
+    async fn create_client_and_secret(
+        store: &DocumentStore,
+    ) -> (OAuthClient, OAuthClientSecret, String) {
+        let (client, _client_id) = create_oauth_client(
+            store,
+            &CreateOAuthClientParams {
+                user_id: Some("test-user"),
+                name: "Test App",
+                description: None,
+                application_type: OAuthClientType::Web,
+                redirect_uris: &["https://example.com/callback".to_string()],
+                access_scope: AccessScope::Public,
+                org_id: None,
+                resource_uris: &[],
+                token_endpoint_auth_method: None,
+                jwks: None,
+                jwks_uri: None,
+                fapi_profile: None,
+                dpop_bound_access_tokens: None,
+                grant_types: None,
+                response_types: None,
+                software_id: None,
+                software_version: None,
+                registration_source: RegistrationSource::Manual,
+                registration_access_token_hash: None,
+                registration_metadata: None,
+            },
+        )
+        .await
+        .expect("create client");
+
+        let secret_hash = "hash_abc123";
+        let secret =
+            create_oauth_client_secret(store, &client.id, secret_hash, Some("test secret"), None)
+                .await
+                .expect("create secret");
+
+        (client, secret, secret_hash.to_string())
+    }
+
+    // ========================================================================
+    // Secret Retrieval Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_get_secret_by_id() {
+        let store = test_store().await;
+        let (_client, secret, _hash) = create_client_and_secret(&store).await;
+
+        let fetched = get_oauth_client_secret_by_id(&store, &secret.id)
+            .await
+            .expect("db query");
+
+        assert!(fetched.is_some());
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.id, secret.id);
+        assert_eq!(fetched.oauth_client_id, secret.oauth_client_id);
+        assert_eq!(fetched.description.as_deref(), Some("test secret"));
+    }
+
+    #[tokio::test]
+    async fn test_get_secret_by_id_not_found() {
+        let store = test_store().await;
+
+        let fetched = get_oauth_client_secret_by_id(&store, "nonexistent-id")
+            .await
+            .expect("db query");
+
+        assert!(fetched.is_none());
+    }
+
+    // ========================================================================
+    // Secret Revocation Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_revoke_secret_sets_revoked_at() {
+        let store = test_store().await;
+        let (_client, secret, _hash) = create_client_and_secret(&store).await;
+
+        assert!(secret.revoked_at.is_none());
+
+        let updated = revoke_oauth_client_secret(&store, &secret.id)
+            .await
+            .expect("revoke");
+        assert!(updated);
+
+        let fetched = get_oauth_client_secret_by_id(&store, &secret.id)
+            .await
+            .expect("db query")
+            .expect("secret exists");
+
+        assert!(fetched.revoked_at.is_some());
+    }
+
+    // ========================================================================
+    // is_valid Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_secret_is_valid_active() {
+        let store = test_store().await;
+        let (_client, secret, _hash) = create_client_and_secret(&store).await;
+
+        let now = Timestamp::now();
+        assert!(secret.is_valid(&now));
+    }
+
+    #[tokio::test]
+    async fn test_secret_is_valid_revoked() {
+        let store = test_store().await;
+        let (_client, secret, _hash) = create_client_and_secret(&store).await;
+
+        revoke_oauth_client_secret(&store, &secret.id)
+            .await
+            .expect("revoke");
+
+        let fetched = get_oauth_client_secret_by_id(&store, &secret.id)
+            .await
+            .expect("db query")
+            .expect("secret exists");
+
+        let now = Timestamp::now();
+        assert!(!fetched.is_valid(&now));
+    }
+
+    #[tokio::test]
+    async fn test_secret_is_valid_expired() {
+        let store = test_store().await;
+        let (client, _secret, _hash) = create_client_and_secret(&store).await;
+
+        let past = Timestamp::now()
+            .checked_sub(jiff::SignedDuration::from_hours(1))
+            .expect("valid timestamp");
+
+        let expired_secret = create_oauth_client_secret(
+            &store,
+            &client.id,
+            "hash_expired",
+            Some("expired"),
+            Some(past),
+        )
+        .await
+        .expect("create expired secret");
+
+        let now = Timestamp::now();
+        assert!(!expired_secret.is_valid(&now));
+    }
+
+    // ========================================================================
+    // Multiple Secrets Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_multiple_secrets_for_client() {
+        let store = test_store().await;
+        let (client, _secret1, _hash1) = create_client_and_secret(&store).await;
+
+        let _secret2 = create_oauth_client_secret(
+            &store,
+            &client.id,
+            "hash_second",
+            Some("second secret"),
+            None,
+        )
+        .await
+        .expect("create second secret");
+
+        let secrets = get_oauth_client_secrets(&store, &client.id)
+            .await
+            .expect("list secrets");
+
+        assert_eq!(secrets.len(), 2);
+    }
+
+    // ========================================================================
+    // Credential Validation Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_validate_credentials_with_either_secret() {
+        let store = test_store().await;
+        let (client, _secret1, hash1) = create_client_and_secret(&store).await;
+
+        let hash2 = "hash_second_secret";
+        let _secret2 = create_oauth_client_secret(&store, &client.id, hash2, Some("second"), None)
+            .await
+            .expect("create second secret");
+
+        let result1 = validate_oauth_client_credentials(&store, &client.client_id, &hash1)
+            .await
+            .expect("validate with first");
+        assert!(result1.is_some());
+
+        let result2 = validate_oauth_client_credentials(&store, &client.client_id, hash2)
+            .await
+            .expect("validate with second");
+        assert!(result2.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_validate_credentials_revoked_fails() {
+        let store = test_store().await;
+        let (client, secret, hash) = create_client_and_secret(&store).await;
+
+        revoke_oauth_client_secret(&store, &secret.id)
+            .await
+            .expect("revoke");
+
+        let result = validate_oauth_client_credentials(&store, &client.client_id, &hash)
+            .await
+            .expect("validate");
+
+        assert!(result.is_none());
     }
 }

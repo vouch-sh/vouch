@@ -15,6 +15,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use super::super::session::AuthContext;
+use crate::filters;
 
 // ============================================================================
 // Templates
@@ -113,6 +114,7 @@ pub struct ApplicationCreatedTemplate {
 pub struct ApplicationDetailTemplate {
     pub app: ApplicationInfo,
     pub secrets_count: usize,
+    pub secrets: Vec<SecretInfo>,
     pub usage_stats: Vec<UsageStat>,
     /// Authentication context for header display.
     pub auth: AuthContext,
@@ -124,14 +126,16 @@ pub struct UsageStat {
     pub count: i64,
 }
 
-/// Secret rotated success page (shows new secret once).
+/// Secret added success page (shows new secret once).
 #[derive(Template)]
-#[template(path = "applications/rotated.html")]
+#[template(path = "applications/secret_added.html")]
 #[allow(dead_code)]
-pub struct SecretRotatedTemplate {
+pub struct SecretAddedTemplate {
+    pub app_id: String,
     pub name: String,
     pub client_id: String,
     pub client_secret: String,
+    pub secret_id: String,
     /// Authentication context for header display.
     pub auth: AuthContext,
 }
@@ -155,7 +159,7 @@ impl_template_response!(
     ApplicationCreateTemplate,
     ApplicationCreatedTemplate,
     ApplicationDetailTemplate,
-    SecretRotatedTemplate,
+    SecretAddedTemplate,
     ApplicationErrorTemplate,
 );
 
@@ -343,10 +347,33 @@ pub struct ListApplicationsResponse {
     pub applications: Vec<ApplicationResponse>,
 }
 
-/// API response for secret rotation.
+/// API request for adding a secret.
+#[derive(Debug, Deserialize)]
+pub struct AddSecretRequest {
+    pub description: Option<String>,
+}
+
+/// API response for adding a secret (plaintext shown once).
 #[derive(Debug, Serialize)]
-pub struct RotateSecretResponse {
+pub struct AddSecretResponse {
+    pub secret_id: String,
     pub client_secret: String,
     pub created_at: Timestamp,
     pub expires_at: Option<Timestamp>,
+}
+
+/// Secret metadata for listing (never exposes hash).
+#[derive(Debug, Serialize)]
+pub struct SecretInfo {
+    pub id: String,
+    pub description: Option<String>,
+    pub created_at: Timestamp,
+    pub expires_at: Option<Timestamp>,
+    pub active: bool,
+}
+
+/// API response for listing secrets.
+#[derive(Debug, Serialize)]
+pub struct ListSecretsResponse {
+    pub secrets: Vec<SecretInfo>,
 }

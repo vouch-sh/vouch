@@ -227,8 +227,13 @@ fn build_api_routes() -> Router<Arc<AppState>> {
                 .delete(handlers::applications::delete_application_api),
         )
         .route(
-            "/api/v1/applications/{id}/rotate",
-            post(handlers::applications::rotate_secret_api),
+            "/api/v1/applications/{id}/secrets",
+            get(handlers::applications::list_secrets_api)
+                .post(handlers::applications::add_secret_api),
+        )
+        .route(
+            "/api/v1/applications/{id}/secrets/{secret_id}",
+            delete(handlers::applications::delete_secret_api),
         )
         .route(
             "/api/v1/applications/{id}/revoke",
@@ -332,8 +337,12 @@ fn build_ui_routes(config: &config::ServerConfig) -> Router<Arc<AppState>> {
             post(handlers::applications::delete_application_form),
         )
         .route(
-            "/applications/{id}/rotate",
-            post(handlers::applications::rotate_secret_form),
+            "/applications/{id}/secrets",
+            post(handlers::applications::add_secret_form),
+        )
+        .route(
+            "/applications/{id}/secrets/{secret_id}/delete",
+            post(handlers::applications::delete_secret_form),
         )
         // Static file serving for CSS, JS, and assets (embedded in binary via rust-embed)
         .route("/static/{*path}", get(static_assets::static_handler))

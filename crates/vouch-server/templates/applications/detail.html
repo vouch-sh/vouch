@@ -66,10 +66,23 @@
                 </dd>
 
                 <dt class="text-gray-400">Auth Method</dt>
-                <dd>
+                <dd class="flex items-center gap-1.5">
                     <span class="px-2 inline-flex text-xs leading-5 font-semibold rounded bg-vouch-raised text-gray-300">
                         {{ app.token_endpoint_auth_method }}
                     </span>
+                    {% if app.token_endpoint_auth_method == "client_secret_basic" || app.token_endpoint_auth_method == "client_secret_post" %}
+                    <a href="https://www.rfc-editor.org/rfc/rfc6749#section-2.3.1" target="_blank" rel="noopener noreferrer" title="RFC 6749 Section 2.3.1 — Client Password" class="text-gray-500 hover:text-gray-300 transition-colors">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M12 18.75h.008v.008H12v-.008z"/><circle cx="12" cy="12" r="10" stroke-width="1.5"/></svg>
+                    </a>
+                    {% elif app.token_endpoint_auth_method == "private_key_jwt" %}
+                    <a href="https://www.rfc-editor.org/rfc/rfc7523" target="_blank" rel="noopener noreferrer" title="RFC 7523 — JWT Profile for Client Authentication" class="text-gray-500 hover:text-gray-300 transition-colors">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M12 18.75h.008v.008H12v-.008z"/><circle cx="12" cy="12" r="10" stroke-width="1.5"/></svg>
+                    </a>
+                    {% elif app.token_endpoint_auth_method == "none" %}
+                    <a href="https://www.rfc-editor.org/rfc/rfc7591#section-2" target="_blank" rel="noopener noreferrer" title="RFC 7591 Section 2 — Public Client (no authentication)" class="text-gray-500 hover:text-gray-300 transition-colors">
+                        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M9.879 7.519c1.171-1.025 3.071-1.025 4.242 0 1.172 1.025 1.172 2.687 0 3.712-.203.179-.43.326-.67.442-.745.361-1.45.999-1.45 1.827v.75M12 18.75h.008v.008H12v-.008z"/><circle cx="12" cy="12" r="10" stroke-width="1.5"/></svg>
+                    </a>
+                    {% endif %}
                 </dd>
 
                 {% if app.fapi_profile == "fapi2_security" %}
@@ -90,10 +103,10 @@
                 {% endmatch %}
 
                 <dt class="text-gray-400">Created</dt>
-                <dd class="text-gray-200">{{ app.created_at }}</dd>
+                <dd class="text-gray-200">{{ app.created_at|humandate }}</dd>
 
                 <dt class="text-gray-400">Last Used</dt>
-                <dd class="text-gray-200">{% match app.last_used_at %}{% when Some with (date) %}{{ date }}{% when None %}Never{% endmatch %}</dd>
+                <dd class="text-gray-200">{% match app.last_used_at %}{% when Some with (date) %}{{ date|humandate }}{% when None %}Never{% endmatch %}</dd>
             </dl>
 
             <!-- JWKS / JWKS URI (for FAPI clients) -->
@@ -145,22 +158,50 @@
             </div>
             {% endif %}
 
-            <!-- Client Secret Section (for confidential clients, hidden for FAPI) -->
+            <!-- Client Secrets Section (for confidential clients, hidden for FAPI) -->
             {% if (app.application_type == "web" || app.application_type == "service") && app.fapi_profile != "fapi2_security" %}
             <div class="border-t border-vouch-border pt-4">
-                <div class="flex items-center justify-between">
+                <div class="flex items-center justify-between mb-3">
                     <div>
-                        <label class="text-sm text-gray-400">Client Secret</label>
-                        <span class="text-xs text-gray-500 ml-2">({{ secrets_count }} active)</span>
+                        <label class="text-sm text-gray-400">Client Secrets</label>
+                        <span class="text-xs text-gray-500 ml-2">({{ secrets_count }} of 2 active)</span>
                     </div>
-                    <form action="/applications/{{ app.id }}/rotate" method="POST">
-                        <button type="submit" data-confirm="Rotate secret? Old secret will be revoked immediately."
-                            class="px-3 py-1.5 bg-vouch-warning text-white rounded text-xs font-medium hover:opacity-90 transition-colors">
-                            Rotate Secret
+                    {% if secrets_count < 2 %}
+                    <form action="/applications/{{ app.id }}/secrets" method="POST">
+                        <button type="submit"
+                            class="px-3 py-1.5 bg-vouch-accent hover:bg-vouch-accent-hover text-[#0a0a0a] rounded text-xs font-medium transition-colors">
+                            Add Secret
                         </button>
                     </form>
+                    {% endif %}
                 </div>
-                <p class="mt-1 text-xs text-gray-500">Rotating will revoke all existing secrets.</p>
+                {% if secrets.is_empty() %}
+                <p class="text-sm text-gray-500">No secrets configured.</p>
+                {% else %}
+                <div class="space-y-2">
+                    {% for secret in secrets %}
+                    <div class="flex items-center justify-between bg-vouch-raised border border-vouch-border rounded-md px-3 py-2">
+                        <div class="text-sm">
+                            <span class="text-gray-300">{% match secret.description %}{% when Some with (desc) %}{{ desc }}{% when None %}Secret{% endmatch %}</span>
+                            {% if secret.active %}
+                            <span class="ml-2 px-1.5 inline-flex text-xs leading-5 font-semibold rounded bg-vouch-success-bg text-vouch-success">active</span>
+                            {% else %}
+                            <span class="ml-2 px-1.5 inline-flex text-xs leading-5 font-semibold rounded bg-vouch-error-bg text-vouch-error">revoked</span>
+                            {% endif %}
+                            <span class="ml-2 text-xs text-gray-500">Created {{ secret.created_at|humandate }}</span>
+                        </div>
+                        {% if secret.active && secrets_count > 1 %}
+                        <form action="/applications/{{ app.id }}/secrets/{{ secret.id }}/delete" method="POST">
+                            <button type="submit" data-confirm="Revoke this secret? It will no longer be accepted for authentication."
+                                class="px-2 py-1 text-vouch-error hover:opacity-80 text-xs font-medium">
+                                Revoke
+                            </button>
+                        </form>
+                        {% endif %}
+                    </div>
+                    {% endfor %}
+                </div>
+                {% endif %}
             </div>
             {% endif %}
 

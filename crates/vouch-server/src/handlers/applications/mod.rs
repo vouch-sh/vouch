@@ -18,22 +18,26 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use super::extract_session_from_cookie;
 use super::session::AuthContext;
 
+/// Maximum number of active secrets per application.
+pub(crate) const MAX_ACTIVE_SECRETS: usize = 2;
+
 // Re-export all public handler functions so callers don't need to change.
 pub use api::{
-    create_application_api, delete_application_api, get_application_api, list_applications_api,
-    revoke_tokens_api, rotate_secret_api, update_application_api,
+    add_secret_api, create_application_api, delete_application_api, delete_secret_api,
+    get_application_api, list_applications_api, list_secrets_api, revoke_tokens_api,
+    update_application_api,
 };
 pub use types::{
-    ApplicationCreateTemplate, ApplicationCreatedTemplate, ApplicationDetailTemplate,
-    ApplicationErrorTemplate, ApplicationInfo, ApplicationResponse,
+    AddSecretRequest, AddSecretResponse, ApplicationCreateTemplate, ApplicationCreatedTemplate,
+    ApplicationDetailTemplate, ApplicationErrorTemplate, ApplicationInfo, ApplicationResponse,
     ApplicationUnauthorizedTemplate, ApplicationsListTemplate, CreateApplicationForm,
     CreateApplicationRequest, CreateApplicationResponse, ListApplicationsResponse,
-    RotateSecretResponse, SecretRotatedTemplate, UpdateApplicationForm, UpdateApplicationRequest,
-    UsageStat,
+    ListSecretsResponse, SecretAddedTemplate, SecretInfo, UpdateApplicationForm,
+    UpdateApplicationRequest, UsageStat,
 };
 pub use web::{
-    create_application_form, create_application_page, delete_application_form,
-    detail_application_page, list_applications_page, rotate_secret_form, update_application_form,
+    add_secret_form, create_application_form, create_application_page, delete_application_form,
+    delete_secret_form, detail_application_page, list_applications_page, update_application_form,
 };
 
 // ============================================================================
