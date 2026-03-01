@@ -40,20 +40,7 @@ pub async fn run(
 ) -> Result<()> {
     validate_sigv4_input(cluster_name, "cluster name")?;
 
-    // Resolve role ARN from flag or local AWS config
-    let role_arn = match role {
-        Some(r) => r.to_string(),
-        None => aws::get_local_aws_role().ok_or_else(|| {
-            anyhow::anyhow!(
-                "AWS not configured. Run 'vouch setup aws --role <role-arn>' \
-                 first, or specify --role."
-            )
-        })?,
-    };
-
-    // Resolve region from flag, profile, or env
-    let profile_name = aws::resolve_profile(None).unwrap_or_default();
-    let region_name = aws::resolve_region(region, &profile_name)?;
+    let (role_arn, region_name) = aws::resolve_role_and_region(role, region)?;
 
     let cache_key = format!("eks:{cluster_name}:{role_arn}");
 

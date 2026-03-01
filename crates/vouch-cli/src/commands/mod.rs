@@ -25,4 +25,8 @@ pub enum CredentialType {
     Github,
     /// CodeArtifact authorization token (CODEARTIFACT_AUTH_TOKEN).
     Codeartifact,
+    /// RDS IAM auth token (PGPASSWORD, PGHOST, PGPORT, PGUSER, PGSSLMODE).
+    Rds,
+    /// Redshift database credentials (PGPASSWORD, PGUSER, PGSSLMODE).
+    Redshift,
 }

@@ -120,25 +120,77 @@ struct Cli {
 struct CodeArtifactArgs {
     /// CodeArtifact domain name (required for --type codeartifact unless profile is set).
     #[arg(long)]
-    ca_domain: Option<String>,
+    codeartifact_domain: Option<String>,
     /// AWS account ID that owns the CodeArtifact domain (required for --type codeartifact unless profile is set).
     #[arg(long)]
-    ca_domain_owner: Option<String>,
+    codeartifact_domain_owner: Option<String>,
     /// AWS region for CodeArtifact (required for --type codeartifact unless profile is set).
     #[arg(long)]
-    ca_region: Option<String>,
+    codeartifact_region: Option<String>,
     /// Named CodeArtifact profile from config (for --type codeartifact).
     #[arg(long)]
-    ca_profile: Option<String>,
+    codeartifact_profile: Option<String>,
 }
 
 impl CodeArtifactArgs {
     fn to_options(&self) -> commands::exec::CodeArtifactOptions<'_> {
         commands::exec::CodeArtifactOptions {
-            domain: self.ca_domain.as_deref(),
-            domain_owner: self.ca_domain_owner.as_deref(),
-            region: self.ca_region.as_deref(),
-            profile: self.ca_profile.as_deref(),
+            domain: self.codeartifact_domain.as_deref(),
+            domain_owner: self.codeartifact_domain_owner.as_deref(),
+            region: self.codeartifact_region.as_deref(),
+            profile: self.codeartifact_profile.as_deref(),
+        }
+    }
+}
+
+/// Shared RDS CLI arguments for exec/env commands.
+#[derive(clap::Args)]
+struct RdsArgs {
+    /// RDS instance hostname (required for --type rds).
+    #[arg(long)]
+    rds_hostname: Option<String>,
+    /// Database port (default: 5432, for --type rds).
+    #[arg(long, default_value = "5432")]
+    rds_port: u16,
+    /// Database username (required for --type rds).
+    #[arg(long)]
+    rds_username: Option<String>,
+}
+
+impl RdsArgs {
+    fn to_options(&self) -> commands::exec::RdsOptions<'_> {
+        commands::exec::RdsOptions {
+            hostname: self.rds_hostname.as_deref(),
+            port: self.rds_port,
+            username: self.rds_username.as_deref(),
+        }
+    }
+}
+
+/// Shared Redshift CLI arguments for exec/env commands.
+#[derive(clap::Args)]
+struct RedshiftArgs {
+    /// Redshift provisioned cluster ID (for --type redshift).
+    #[arg(long, conflicts_with = "redshift_workgroup")]
+    redshift_cluster_id: Option<String>,
+    /// Redshift Serverless workgroup name (for --type redshift).
+    #[arg(long, conflicts_with = "redshift_cluster_id")]
+    redshift_workgroup: Option<String>,
+    /// Redshift database name (for --type redshift).
+    #[arg(long)]
+    redshift_db_name: Option<String>,
+    /// Credential duration in seconds, 900-3600 (for --type redshift provisioned).
+    #[arg(long, value_parser = clap::value_parser!(u32).range(900..=3600))]
+    redshift_duration: Option<u32>,
+}
+
+impl RedshiftArgs {
+    fn to_options(&self) -> commands::exec::RedshiftOptions<'_> {
+        commands::exec::RedshiftOptions {
+            cluster_id: self.redshift_cluster_id.as_deref(),
+            workgroup: self.redshift_workgroup.as_deref(),
+            db_name: self.redshift_db_name.as_deref(),
+            duration: self.redshift_duration,
         }
     }
 }
@@ -185,7 +237,11 @@ enum Commands {
         #[arg(long)]
         role: Option<String>,
         #[command(flatten)]
-        ca: CodeArtifactArgs,
+        codeartifact: CodeArtifactArgs,
+        #[command(flatten)]
+        rds: RdsArgs,
+        #[command(flatten)]
+        redshift: RedshiftArgs,
     },
     /// Output a shell hook for ambient auth status.
     ///
@@ -210,7 +266,11 @@ enum Commands {
         #[arg(long)]
         role: Option<String>,
         #[command(flatten)]
-        ca: CodeArtifactArgs,
+        codeartifact: CodeArtifactArgs,
+        #[command(flatten)]
+        rds: RdsArgs,
+        #[command(flatten)]
+        redshift: RedshiftArgs,
         /// Command and arguments to execute.
         #[arg(trailing_var_arg = true, required = true)]
         command: Vec<String>,
@@ -320,14 +380,18 @@ async fn run() -> Result<()> {
             credential_type,
             shell,
             role,
-            ca,
+            codeartifact,
+            rds,
+            redshift,
         } => {
             commands::env::run(
                 server,
                 &credential_type,
                 &shell,
                 role.as_deref(),
-                ca.to_options(),
+                codeartifact.to_options(),
+                rds.to_options(),
+                redshift.to_options(),
             )
             .await
         }
@@ -345,7 +409,9 @@ async fn run() -> Result<()> {
         Commands::Exec {
             credential_type,
             role,
-            ca,
+            codeartifact,
+            rds,
+            redshift,
             command,
         } => {
             commands::exec::run(
@@ -353,7 +419,9 @@ async fn run() -> Result<()> {
                 &credential_type,
                 role.as_deref(),
                 &command,
-                ca.to_options(),
+                codeartifact.to_options(),
+                rds.to_options(),
+                redshift.to_options(),
             )
             .await
         }
@@ -416,18 +484,23 @@ async fn run() -> Result<()> {
             }
             CredentialCommands::Redshift {
                 cluster_id,
+                workgroup,
                 db_name,
                 region,
                 role,
                 duration,
             } => {
+                let target = commands::credential::redshift::resolve_target(
+                    cluster_id.as_deref(),
+                    workgroup.as_deref(),
+                    duration,
+                )?;
                 commands::credential::redshift::run(
                     server,
-                    &cluster_id,
+                    target,
                     db_name.as_deref(),
                     region.as_deref(),
                     role.as_deref(),
-                    duration,
                 )
                 .await
             }

@@ -15,6 +15,7 @@
 //! 3. Strip `https://` prefix and print to stdout
 
 use anyhow::{Context, Result};
+use secrecy::{ExposeSecret, SecretString};
 
 use crate::commands::credential::aws::exchange_for_sts_credentials;
 use crate::commands::credential::cache;
@@ -41,23 +42,26 @@ pub async fn run(
     region: Option<&str>,
     role: Option<&str>,
 ) -> Result<()> {
+    let token = fetch_rds_token(server, hostname, port, username, region, role).await?;
+    println!("{}", token.expose_secret());
+    Ok(())
+}
+
+/// Fetch an RDS IAM auth token (cached).
+///
+/// Returns the token as a `SecretString` for use in environment injection.
+pub async fn fetch_rds_token(
+    server: &str,
+    hostname: &str,
+    port: u16,
+    username: &str,
+    region: Option<&str>,
+    role: Option<&str>,
+) -> Result<SecretString> {
     validate_sigv4_input(hostname, "hostname")?;
     validate_sigv4_input(username, "username")?;
 
-    // Resolve role ARN from flag or local AWS config
-    let role_arn = match role {
-        Some(r) => r.to_string(),
-        None => aws::get_local_aws_role().ok_or_else(|| {
-            anyhow::anyhow!(
-                "AWS not configured. Run 'vouch setup aws --role <role-arn>' \
-                 first, or specify --role."
-            )
-        })?,
-    };
-
-    // Resolve region
-    let profile_name = aws::resolve_profile(None).unwrap_or_default();
-    let region_name = aws::resolve_region(region, &profile_name)?;
+    let (role_arn, region_name) = aws::resolve_role_and_region(role, region)?;
 
     let cache_key = format!("rds:{hostname}:{port}:{username}:{role_arn}");
 
@@ -72,8 +76,7 @@ pub async fn run(
 
     // Extract token string from cached JSON value
     let token = data.as_str().context("cached RDS token is not a string")?;
-    println!("{token}");
-    Ok(())
+    Ok(SecretString::from(token.to_string()))
 }
 
 /// Generate an RDS IAM auth token.

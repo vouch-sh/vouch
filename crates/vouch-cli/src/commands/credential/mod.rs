@@ -127,12 +127,24 @@ pub enum CredentialCommands {
     },
     /// Generate temporary Amazon Redshift database credentials.
     ///
-    /// Uses `GetClusterCredentialsWithIAM` to auto-map IAM identity to a
-    /// database user. Outputs JSON with DbUser, DbPassword, and Expiration.
+    /// Supports both provisioned clusters (`--cluster-id`) and Redshift
+    /// Serverless workgroups (`--workgroup`). Exactly one must be specified.
+    /// Outputs JSON with DbUser, DbPassword, and Expiration.
     Redshift {
-        /// Redshift cluster identifier.
-        #[arg(long)]
-        cluster_id: String,
+        /// Redshift provisioned cluster identifier.
+        #[arg(
+            long,
+            conflicts_with = "workgroup",
+            required_unless_present = "workgroup"
+        )]
+        cluster_id: Option<String>,
+        /// Redshift Serverless workgroup name.
+        #[arg(
+            long,
+            conflicts_with = "cluster_id",
+            required_unless_present = "cluster_id"
+        )]
+        workgroup: Option<String>,
         /// Database name (optional).
         #[arg(long)]
         db_name: Option<String>,
@@ -142,8 +154,8 @@ pub enum CredentialCommands {
         /// AWS IAM role ARN to assume (auto-detected from vouch AWS profile if not specified).
         #[arg(long)]
         role: Option<String>,
-        /// Credential duration in seconds (900-3600, default: 900).
-        #[arg(long, value_parser = clap::value_parser!(u32).range(900..=3600))]
+        /// Credential duration in seconds (900-3600, default: 900). Only for provisioned clusters.
+        #[arg(long, value_parser = clap::value_parser!(u32).range(900..=3600), conflicts_with = "workgroup")]
         duration: Option<u32>,
     },
     /// Print the current session token for use with curl or other tools.
