@@ -34,6 +34,51 @@ pub use groups::{create_group, delete_group, get_group, list_groups, patch_group
 pub use users::{create_user, delete_user, get_user, list_users, patch_user};
 
 // ============================================================================
+// Input Validation
+// ============================================================================
+
+/// Maximum length for SCIM filter query parameter.
+const MAX_FILTER_LEN: usize = 1024;
+
+/// Maximum value for `startIndex` pagination parameter.
+const MAX_START_INDEX: usize = 1_000_000;
+
+/// Validate a SCIM resource ID path parameter.
+/// All resource IDs are UUID v7; reject anything that doesn't parse.
+fn validate_resource_id(id: &str) -> Result<(), (StatusCode, Json<ScimError>)> {
+    if uuid::Uuid::try_parse(id).is_err() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ScimError::new(400, "Invalid resource ID format")),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate SCIM list query parameters.
+/// Enforces length bounds on `filter` and range bounds on `startIndex`.
+fn validate_list_params(
+    filter: Option<&str>,
+    start_index: usize,
+) -> Result<(), (StatusCode, Json<ScimError>)> {
+    if let Some(f) = filter
+        && f.len() > MAX_FILTER_LEN
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ScimError::new(400, "Filter exceeds maximum length").with_type("invalidFilter")),
+        ));
+    }
+    if start_index > MAX_START_INDEX {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(ScimError::new(400, "startIndex exceeds maximum value")),
+        ));
+    }
+    Ok(())
+}
+
+// ============================================================================
 // Authentication
 // ============================================================================
 

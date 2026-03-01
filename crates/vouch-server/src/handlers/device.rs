@@ -167,6 +167,16 @@ pub async fn device_token(
         ));
     }
 
+    // Validate device_code format before hashing and DB lookup.
+    // Generated codes are 32 random bytes base64url-encoded (43 chars).
+    // Reject obviously invalid inputs to avoid unnecessary work.
+    if req.device_code.is_empty() || req.device_code.len() > 128 {
+        return Err(oauth_error(
+            StatusCode::BAD_REQUEST,
+            OAuthError::invalid_grant(),
+        ));
+    }
+
     // Hash the device code and look it up
     let device_code_hash = hash_device_code(&req.device_code);
     let request = db::get_device_auth_by_code_hash(&state.store, &device_code_hash)
@@ -674,6 +684,77 @@ mod tests {
             status,
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "Device code endpoint should reject JSON content-type per RFC 8628"
+        );
+    }
+
+    // ========================================================================
+    // Device Code Input Validation Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_device_code_rejects_empty() {
+        // Empty device_code should be rejected before DB lookup
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/token",
+            "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code=",
+            &[],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn test_device_code_rejects_too_long() {
+        // Device code > 128 characters should be rejected
+        let (app, _state) = test_app().await;
+
+        let long_code = "a".repeat(200);
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/token",
+            &format!(
+                "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
+                long_code
+            ),
+            &[],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["error"], "invalid_grant");
+    }
+
+    #[tokio::test]
+    async fn test_device_code_accepts_valid_length() {
+        // A device code within the length limit should pass validation
+        // (it won't be found in DB, but it shouldn't be rejected by validation)
+        let (app, _state) = test_app().await;
+
+        let valid_code = "a".repeat(128);
+        let (status, body) = http_post_form(
+            &app,
+            "/oauth/token",
+            &format!(
+                "grant_type=urn:ietf:params:oauth:grant-type:device_code&device_code={}",
+                valid_code
+            ),
+            &[],
+        )
+        .await;
+
+        // Should get invalid_grant (not found) rather than failing validation
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(
+            error["error"], "invalid_grant",
+            "Valid-length code should pass validation and reach DB lookup"
         );
     }
 

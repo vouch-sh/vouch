@@ -216,9 +216,10 @@ async fn test_rfc7644_get_user_not_found() {
 
     let token = create_test_scim_token(&state.store, "test-not-found").await;
 
+    // Use a valid UUID format that doesn't exist in the database
     let (status, body) = http_get(
         &app,
-        "/scim/v2/Users/nonexistent-user-id",
+        "/scim/v2/Users/00000000-0000-7000-0000-000000000000",
         &[("Authorization", &format!("Bearer {}", token))],
     )
     .await;
@@ -401,10 +402,10 @@ async fn test_rfc7644_error_format() {
 
     let token = create_test_scim_token(&state.store, "test-error-format").await;
 
-    // Request non-existent user to get an error
+    // Request non-existent user (valid UUID format) to get an error
     let (status, body) = http_get(
         &app,
-        "/scim/v2/Users/nonexistent",
+        "/scim/v2/Users/00000000-0000-7000-0000-000000000001",
         &[("Authorization", &format!("Bearer {}", token))],
     )
     .await;
@@ -472,9 +473,10 @@ async fn test_rfc7644_error_includes_scim_schema() {
 
     let token = create_test_scim_token(&state.store, "test-error-schema").await;
 
+    // Use a valid UUID format that doesn't exist in the database
     let (status, body) = http_get(
         &app,
-        "/scim/v2/Users/does-not-exist",
+        "/scim/v2/Users/00000000-0000-7000-0000-000000000002",
         &[("Authorization", &format!("Bearer {}", token))],
     )
     .await;
@@ -762,4 +764,208 @@ async fn test_rfc7644_filter_unsupported_operator_returns_error() {
         scim_type == "invalidFilter" || !body.is_empty(),
         "Error must indicate invalid filter, got scimType: {scim_type}"
     );
+}
+
+// ========================================================================
+// Input Validation Tests — Resource ID Format
+// ========================================================================
+
+#[tokio::test]
+async fn test_validation_get_user_invalid_uuid_returns_400() {
+    // Non-UUID resource IDs must be rejected with 400 before hitting the DB
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.store, "test-invalid-uuid").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_get(
+        &app,
+        "/scim/v2/Users/not-a-uuid",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "400");
+    assert!(
+        error["detail"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Invalid resource ID"),
+        "Error detail should mention invalid resource ID"
+    );
+}
+
+#[tokio::test]
+async fn test_validation_get_group_invalid_uuid_returns_400() {
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.store, "test-invalid-group-uuid").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_get(
+        &app,
+        "/scim/v2/Groups/not-a-valid-id",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "400");
+}
+
+#[tokio::test]
+async fn test_validation_patch_user_invalid_uuid_returns_400() {
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.store, "test-patch-invalid-uuid").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        "/scim/v2/Users/xyz-not-uuid",
+        Some(r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "active", "value": false}]}"#.to_string()),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "400");
+}
+
+#[tokio::test]
+async fn test_validation_delete_user_invalid_uuid_returns_400() {
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.store, "test-delete-invalid-uuid").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_request(
+        &app,
+        "DELETE",
+        "/scim/v2/Users/drop-table-users",
+        None,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "400");
+}
+
+#[tokio::test]
+async fn test_validation_valid_uuid_passes_to_not_found() {
+    // A valid UUID that doesn't exist should return 404, not 400
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.store, "test-valid-uuid-404").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, _body) = http_get(
+        &app,
+        "/scim/v2/Users/aaaaaaaa-bbbb-7ccc-dddd-eeeeeeeeeeee",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "Valid UUID format should pass validation and reach the DB (404)"
+    );
+}
+
+// ========================================================================
+// Input Validation Tests — Filter Length
+// ========================================================================
+
+#[tokio::test]
+async fn test_validation_filter_too_long_returns_400() {
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.store, "test-long-filter").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Build a filter that exceeds the 1024 character limit
+    let long_filter = format!("userName eq \"{}\"", "a".repeat(1100));
+    let encoded_filter = urlencoding::encode(&long_filter);
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Users?filter={}", encoded_filter),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "400");
+    assert_eq!(error["scimType"], "invalidFilter");
+}
+
+#[tokio::test]
+async fn test_validation_filter_within_limit_succeeds() {
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.store, "test-normal-filter").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // A normal-length filter should succeed
+    let (status, _body) = http_get(
+        &app,
+        "/scim/v2/Users?filter=userName%20eq%20%22test@example.com%22",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+}
+
+// ========================================================================
+// Input Validation Tests — startIndex Bounds
+// ========================================================================
+
+#[tokio::test]
+async fn test_validation_start_index_too_large_returns_400() {
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.store, "test-large-start-index").await;
+    let auth_header = format!("Bearer {}", token);
+
+    let (status, body) = http_get(
+        &app,
+        "/scim/v2/Users?startIndex=9999999",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["status"], "400");
+}
+
+#[tokio::test]
+async fn test_validation_start_index_at_boundary_succeeds() {
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.store, "test-boundary-start-index").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // startIndex = 1000000 is exactly at the boundary (should pass)
+    let (status, _body) = http_get(
+        &app,
+        "/scim/v2/Users?startIndex=1000000",
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
 }

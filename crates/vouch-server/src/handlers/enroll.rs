@@ -19,6 +19,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::{Span, Timestamp};
 use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
+use serde_json;
 use std::sync::Arc;
 use uuid::Uuid;
 use vouch_common::{ApiError, BrowserRegisterCompleteRequest, BrowserRegisterStartResponse};
@@ -185,7 +186,7 @@ pub async fn device_verify_submit(
     State(state): State<Arc<AppState>>,
     Form(form): Form<UserCodeForm>,
 ) -> Response {
-    // Normalize user code (uppercase, ensure dash)
+    // Normalize user code (uppercase, strip whitespace, ensure dash)
     let user_code = form.user_code.to_uppercase().trim().to_string();
     let user_code = if user_code.chars().count() == 8 && !user_code.contains('-') {
         format!(
@@ -196,6 +197,16 @@ pub async fn device_verify_submit(
     } else {
         user_code
     };
+
+    // Validate user code format before DB lookup.
+    // Valid codes are "XXXX-XXXX" where X is from the device code alphabet
+    // (consonants: BCDFGHJKLMNPQRSTVWXZ). Reject anything else immediately.
+    if !is_valid_user_code_format(&user_code) {
+        return DeviceVerifyTemplate {
+            error: Some("Invalid code. Please check and try again.".to_string()),
+        }
+        .into_response();
+    }
 
     // Look up device auth request
     let request = match db::get_device_auth_by_user_code(&state.store, &user_code).await {
@@ -375,6 +386,17 @@ pub async fn oidc_callback(
         }
         .into_response();
     };
+
+    // Validate state length before DB lookup.
+    // OIDC state is base64url-encoded 32 random bytes (43 chars).
+    if oidc_state.len() > 128 {
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Invalid state parameter".to_string(),
+            back_url: None,
+        }
+        .into_response();
+    }
 
     // Verify state
     let stored_state = match db::get_oidc_state(&state.store, &oidc_state).await {
@@ -864,8 +886,39 @@ pub async fn browser_register_start(
     }))
 }
 
+/// Maximum encoded length for `credential_id` (base64url).
+/// WebAuthn spec allows up to 1023 bytes raw ≈ 1364 chars encoded.
+const MAX_CREDENTIAL_ID_LEN: usize = 1400;
+
+/// Maximum encoded length for `attestation_object` (base64url).
+/// Hardware key attestations with certificate chains are typically under 4 KB.
+const MAX_ATTESTATION_OBJECT_LEN: usize = 16 * 1024;
+
+/// Maximum encoded length for `client_data_json` (base64url).
+/// Client data JSON is a small JSON object (origin, type, challenge).
+const MAX_CLIENT_DATA_JSON_LEN: usize = 4 * 1024;
+
+/// Maximum encoded length for the registration `state` JWT.
+const MAX_STATE_TOKEN_LEN: usize = 8 * 1024;
+
+/// Minimum decoded byte length for a valid credential ID.
+const MIN_CREDENTIAL_ID_BYTES: usize = 16;
+
+/// Maximum decoded byte length for a valid credential ID (WebAuthn spec).
+const MAX_CREDENTIAL_ID_BYTES: usize = 1023;
+
 /// Complete browser-based `WebAuthn` registration.
 /// POST /enroll/webauthn/complete
+///
+/// Validation is ordered to fail fast before any database access:
+/// 1. Field length bounds (reject obviously oversized/empty fields)
+/// 2. State JWT decode + expiration check
+/// 3. Base64url decode all fields
+/// 4. Credential ID byte length validation
+/// 5. Client data JSON structure validation (type, origin)
+/// 6. Hardware attestation validation (reject software passkeys)
+/// 7. WebAuthn cryptographic verification
+/// 8. Database operations (duplicate check, store, authorize)
 #[allow(clippy::unused_async, clippy::too_many_lines)]
 pub async fn browser_register_complete(
     State(state): State<Arc<AppState>>,
@@ -875,12 +928,45 @@ pub async fn browser_register_complete(
     // Extract client info from headers (for auth event logging)
     let client_info = ClientInfo::from_headers(&headers);
 
-    // Decode state containing webauthn verification state
+    // ── Phase 1: Field length bounds ────────────────────────────────────
+    // Reject obviously oversized or empty fields before any processing.
+    if req.state.len() > MAX_STATE_TOKEN_LEN {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_state",
+            "State token exceeds maximum length",
+        ));
+    }
+    if req.credential_id.is_empty() || req.credential_id.len() > MAX_CREDENTIAL_ID_LEN {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_credential",
+            "Credential ID is empty or exceeds maximum length",
+        ));
+    }
+    if req.attestation_object.is_empty()
+        || req.attestation_object.len() > MAX_ATTESTATION_OBJECT_LEN
+    {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_attestation",
+            "Attestation object is empty or exceeds maximum length",
+        ));
+    }
+    if req.client_data_json.is_empty() || req.client_data_json.len() > MAX_CLIENT_DATA_JSON_LEN {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_data",
+            "Client data JSON is empty or exceeds maximum length",
+        ));
+    }
+
+    // ── Phase 2: State JWT decode + expiration ──────────────────────────
     let reg_state =
         BrowserRegistrationState::decode(&req.state, state.config().jwt_secret.expose_secret())
             .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
 
-    // Decode credential data from base64url
+    // ── Phase 3: Base64url decode all fields ────────────────────────────
     let credential_id_bytes = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|e| {
         json_error(
             StatusCode::BAD_REQUEST,
@@ -889,7 +975,108 @@ pub async fn browser_register_complete(
         )
     })?;
 
-    // Check for duplicate credential registration before proceeding
+    let attestation_object = URL_SAFE_NO_PAD
+        .decode(&req.attestation_object)
+        .map_err(|e| {
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_attestation",
+                &e.to_string(),
+            )
+        })?;
+
+    let client_data_json = URL_SAFE_NO_PAD.decode(&req.client_data_json).map_err(|e| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_data",
+            &e.to_string(),
+        )
+    })?;
+
+    // ── Phase 4: Credential ID byte length validation ───────────────────
+    if credential_id_bytes.len() < MIN_CREDENTIAL_ID_BYTES
+        || credential_id_bytes.len() > MAX_CREDENTIAL_ID_BYTES
+    {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_credential",
+            "Credential ID length is outside the valid range (16-1023 bytes)",
+        ));
+    }
+
+    // ── Phase 5: Client data JSON structure validation ──────────────────
+    // Parse and validate the client data before any DB or crypto operations.
+    let client_data_str = std::str::from_utf8(&client_data_json).map_err(|_| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_data",
+            "Client data JSON is not valid UTF-8",
+        )
+    })?;
+
+    let client_data: ClientData = serde_json::from_str(client_data_str).map_err(|e| {
+        json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_data",
+            &format!("Client data JSON is malformed: {e}"),
+        )
+    })?;
+
+    if client_data.typ != "webauthn.create" {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_data",
+            "Client data type must be 'webauthn.create'",
+        ));
+    }
+
+    // Verify the origin matches the server's base URL.
+    let expected_origin = &state.config().base_url;
+    if client_data.origin != *expected_origin {
+        tracing::warn!(
+            "Origin mismatch: got '{}', expected '{}'",
+            client_data.origin,
+            expected_origin
+        );
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_data",
+            "Client data origin does not match the server",
+        ));
+    }
+
+    // ── Phase 6: Hardware attestation validation ────────────────────────
+    // Reject software passkeys and platform authenticators before DB access.
+    let validated = validate_registration_attestation(&attestation_object)?;
+
+    // ── Phase 7: WebAuthn cryptographic verification ────────────────────
+    use webauthn_rs::prelude::Base64UrlSafeData;
+    let reg_credential = webauthn_rs_proto::RegisterPublicKeyCredential {
+        id: req.credential_id.clone(),
+        raw_id: Base64UrlSafeData::from(credential_id_bytes.clone()),
+        response: webauthn_rs_proto::AuthenticatorAttestationResponseRaw {
+            attestation_object: Base64UrlSafeData::from(attestation_object),
+            client_data_json: Base64UrlSafeData::from(client_data_json),
+            transports: None,
+        },
+        extensions: webauthn_rs_proto::RegistrationExtensionsClientOutputs::default(),
+        type_: "public-key".to_string(),
+    };
+
+    let passkey = state
+        .webauthn
+        .finish_passkey_registration(&reg_credential, &reg_state.webauthn_state)
+        .map_err(|e| {
+            tracing::warn!("WebAuthn verification failed: {}", e);
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "attestation_failed",
+                &format!("Attestation verification failed: {e}"),
+            )
+        })?;
+
+    // ── Phase 8: Database operations ────────────────────────────────────
+    // All cheap validation passed — now check for duplicate credentials.
     if let Some(_existing) =
         db::get_authenticator_by_credential_id(&state.store, &credential_id_bytes)
             .await
@@ -911,61 +1098,6 @@ pub async fn browser_register_complete(
             "This security key is already registered",
         ));
     }
-
-    let attestation_object = URL_SAFE_NO_PAD
-        .decode(&req.attestation_object)
-        .map_err(|e| {
-            json_error(
-                StatusCode::BAD_REQUEST,
-                "invalid_attestation",
-                &e.to_string(),
-            )
-        })?;
-
-    let client_data_json = URL_SAFE_NO_PAD.decode(&req.client_data_json).map_err(|e| {
-        json_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_client_data",
-            &e.to_string(),
-        )
-    })?;
-
-    // Build the RegisterPublicKeyCredential for webauthn-rs verification
-    use webauthn_rs::prelude::Base64UrlSafeData;
-    let reg_credential = webauthn_rs_proto::RegisterPublicKeyCredential {
-        id: req.credential_id.clone(),
-        raw_id: Base64UrlSafeData::from(credential_id_bytes.clone()),
-        response: webauthn_rs_proto::AuthenticatorAttestationResponseRaw {
-            attestation_object: Base64UrlSafeData::from(attestation_object.clone()),
-            client_data_json: Base64UrlSafeData::from(client_data_json),
-            transports: None,
-        },
-        extensions: webauthn_rs_proto::RegistrationExtensionsClientOutputs::default(),
-        type_: "public-key".to_string(),
-    };
-
-    // Log raw attestation object for debugging
-    // Use webauthn-rs to verify the attestation
-    // This performs cryptographic verification of:
-    // - Challenge matches
-    // - Origin/RP ID matches
-    // - Attestation signature is valid
-    // - User presence (UP) and user verification (UV) flags
-    // Use webauthn-rs to verify the attestation
-    let passkey = state
-        .webauthn
-        .finish_passkey_registration(&reg_credential, &reg_state.webauthn_state)
-        .map_err(|e| {
-            tracing::warn!("WebAuthn verification failed: {}", e);
-            json_error(
-                StatusCode::BAD_REQUEST,
-                "attestation_failed",
-                &format!("Attestation verification failed: {e}"),
-            )
-        })?;
-
-    // Validate attestation (hardware-only, extract device info)
-    let validated = validate_registration_attestation(&attestation_object)?;
 
     // Extract COSE public key and convert to raw CBOR bytes for storage
     // This ensures compatibility with our server-side WebAuthn verification
@@ -1262,4 +1394,28 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
 #[allow(dead_code)]
 pub fn is_direct_enrollment(device_auth: &db::DeviceAuthRequest) -> bool {
     device_auth.user_code.starts_with(DIRECT_ENROLL_PREFIX)
+}
+
+/// Characters used for user code generation (consonants only, no ambiguous chars).
+/// Must match the alphabet in `device.rs`.
+const USER_CODE_CHARS: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
+
+/// Validate that a user code matches the expected `XXXX-XXXX` format
+/// where each character is from the device code alphabet.
+///
+/// This rejects obviously invalid codes before hitting the database.
+fn is_valid_user_code_format(code: &str) -> bool {
+    let bytes = code.as_bytes();
+    // Must be exactly 9 characters: 4 letters, dash, 4 letters
+    if bytes.len() != 9 {
+        return false;
+    }
+    if bytes.get(4).copied() != Some(b'-') {
+        return false;
+    }
+    bytes
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != 4)
+        .all(|(_, &b)| USER_CODE_CHARS.contains(&b))
 }

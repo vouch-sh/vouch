@@ -171,6 +171,8 @@ pub fn test_router(state: Arc<AppState>) -> Router {
             post(handlers::keys::register_complete),
         )
         .route("/v1/auth/status", get(handlers::auth::status))
+        // Browser-based WebAuthn login
+        .route("/login", get(handlers::browser_login::login_page))
         // Browser-based enrollment
         .route("/device", get(handlers::enroll::device_verify_page))
         .route("/device", post(handlers::enroll::device_verify_submit))
@@ -195,6 +197,10 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/credentials/ssh/ca",
             get(handlers::credentials::get_ssh_ca_public_key),
+        )
+        .route(
+            "/v1/credentials/ssh/krl/{serial}",
+            get(handlers::credentials::check_ssh_revocation),
         )
         .route(
             "/v1/credentials/aws/token",
@@ -228,6 +234,16 @@ pub fn test_router(state: Arc<AppState>) -> Router {
             get(handlers::scim::get_user)
                 .patch(handlers::scim::patch_user)
                 .delete(handlers::scim::delete_user),
+        )
+        .route(
+            "/scim/v2/Groups",
+            get(handlers::scim::list_groups).post(handlers::scim::create_group),
+        )
+        .route(
+            "/scim/v2/Groups/{id}",
+            get(handlers::scim::get_group)
+                .patch(handlers::scim::patch_group)
+                .delete(handlers::scim::delete_group),
         )
         // OAuth Application Registration Portal
         .route(
