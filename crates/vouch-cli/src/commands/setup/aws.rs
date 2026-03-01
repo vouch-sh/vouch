@@ -21,7 +21,7 @@ fn aws_config_dir() -> Result<PathBuf> {
 /// - If `--profile` is given, uses that name (exits early if it already exists).
 /// - Otherwise, checks existing vouch profiles for a role match (exits early if found),
 ///   then picks the next available name: "vouch", "vouch-2", "vouch-3", etc.
-pub async fn run(profile: Option<&str>, role_arn: &str) -> Result<()> {
+pub async fn run(profile: Option<&str>, role_arn: &str, region: Option<&str>) -> Result<()> {
     let vouch_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("vouch"));
 
     let config_path = AwsConfig::default_path()?;
@@ -67,7 +67,7 @@ pub async fn run(profile: Option<&str>, role_arn: &str) -> Result<()> {
             "{} credential aws --role {role_arn}",
             vouch_path.display()
         )),
-        region: None,
+        region: region.map(str::to_string),
     });
     config.save()?;
 

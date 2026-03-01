@@ -24,6 +24,9 @@ pub enum SetupCommands {
         /// AWS IAM role ARN to assume.
         #[arg(long)]
         role: String,
+        /// AWS region to set in the profile.
+        #[arg(long)]
+        region: Option<String>,
     },
     /// Configure SSH to use Vouch certificates.
     Ssh {

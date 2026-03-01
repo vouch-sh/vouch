@@ -1141,10 +1141,7 @@ mod tests {
 
         config.merge_s3_config(&s3, false);
 
-        assert_eq!(
-            config.ssh_ca_kms_key_id,
-            Some("mrk-ssh-key".to_string())
-        );
+        assert_eq!(config.ssh_ca_kms_key_id, Some("mrk-ssh-key".to_string()));
         assert_eq!(
             config.oidc_signing_kms_key_id,
             Some("mrk-oidc-key".to_string())
