@@ -13,7 +13,7 @@ use axum::extract::OriginalUri;
 use axum::http::Method;
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::State,
     http::{HeaderMap, StatusCode},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -27,6 +27,7 @@ use super::types::{
 use super::{MAX_ACTIVE_SECRETS, generate_client_secret, validate_redirect_uris};
 use crate::handlers::hash_token;
 use crate::handlers::session::extract_resource_token;
+use crate::handlers::{ValidPath, ValidUuid};
 use crate::services::error::ServiceError;
 use crate::services::oidc::ResourceUri;
 
@@ -331,17 +332,8 @@ pub async fn get_application_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    Path(app_id): Path<String>,
+    ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<Json<ApplicationResponse>, ServiceError> {
-    // Validate app_id is a UUID before any processing
-    if uuid::Uuid::try_parse(&app_id).is_err() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "Invalid application ID format",
-        ));
-    }
-
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -378,18 +370,9 @@ pub async fn update_application_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    Path(app_id): Path<String>,
+    ValidPath(app_id): ValidPath<ValidUuid>,
     Json(req): Json<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, ServiceError> {
-    // Validate app_id is a UUID before any processing
-    if uuid::Uuid::try_parse(&app_id).is_err() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "Invalid application ID format",
-        ));
-    }
-
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Get existing application
@@ -677,17 +660,8 @@ pub async fn delete_application_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    Path(app_id): Path<String>,
+    ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
-    // Validate app_id is a UUID before any processing
-    if uuid::Uuid::try_parse(&app_id).is_err() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "Invalid application ID format",
-        ));
-    }
-
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Verify ownership
@@ -737,17 +711,9 @@ pub async fn add_secret_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    Path(app_id): Path<String>,
+    ValidPath(app_id): ValidPath<ValidUuid>,
     Json(req): Json<AddSecretRequest>,
 ) -> Result<(StatusCode, Json<AddSecretResponse>), ServiceError> {
-    if uuid::Uuid::try_parse(&app_id).is_err() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "Invalid application ID format",
-        ));
-    }
-
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -866,16 +832,8 @@ pub async fn list_secrets_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    Path(app_id): Path<String>,
+    ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<Json<ListSecretsResponse>, ServiceError> {
-    if uuid::Uuid::try_parse(&app_id).is_err() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "Invalid application ID format",
-        ));
-    }
-
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -936,16 +894,8 @@ pub async fn delete_secret_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    Path((app_id, secret_id)): Path<(String, String)>,
+    ValidPath((app_id, secret_id)): ValidPath<(ValidUuid, ValidUuid)>,
 ) -> Result<StatusCode, ServiceError> {
-    if uuid::Uuid::try_parse(&app_id).is_err() || uuid::Uuid::try_parse(&secret_id).is_err() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "Invalid ID format",
-        ));
-    }
-
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -982,7 +932,7 @@ pub async fn delete_secret_api(
         })?
         .ok_or_else(|| ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Secret not found"))?;
 
-    if secret.oauth_client_id != app_id {
+    if secret.oauth_client_id != *app_id {
         return Err(ServiceError::api(
             StatusCode::NOT_FOUND,
             "not_found",
@@ -1012,7 +962,7 @@ pub async fn delete_secret_api(
 
     let other_active = all_secrets
         .iter()
-        .filter(|s| s.id != secret_id && s.is_valid(&now))
+        .filter(|s| s.id != *secret_id && s.is_valid(&now))
         .count();
 
     if other_active == 0 {
@@ -1065,17 +1015,8 @@ pub async fn revoke_tokens_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
-    Path(app_id): Path<String>,
+    ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
-    // Validate app_id is a UUID before any processing
-    if uuid::Uuid::try_parse(&app_id).is_err() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "Invalid application ID format",
-        ));
-    }
-
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Verify ownership
@@ -1360,6 +1301,137 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // ========================================================================
+    // ValidPath<ValidUuid> rejection — other endpoints
+    // Each handler that uses ValidPath<ValidUuid> must return 400 for
+    // a malformed UUID path segment, before any auth or DB check.
+    // ========================================================================
+
+    async fn authed_user(state: &crate::AppState, email: &str) -> String {
+        let user = create_test_user(&state.store, email).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(state, &user.id, &user.email, &auth_id).await;
+        bearer(&token)
+    }
+
+    #[tokio::test]
+    async fn test_get_application_invalid_uuid_returns_400() {
+        let (app, state) = test_app().await;
+        let auth = authed_user(&state, "get-badid@example.com").await;
+
+        let (status, body) = http_get(
+            &app,
+            "/api/v1/applications/not-a-uuid",
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_delete_application_invalid_uuid_returns_400() {
+        let (app, state) = test_app().await;
+        let auth = authed_user(&state, "del-badid@example.com").await;
+
+        let (status, body) = http_delete(
+            &app,
+            "/api/v1/applications/not-a-uuid",
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_list_secrets_invalid_uuid_returns_400() {
+        let (app, state) = test_app().await;
+        let auth = authed_user(&state, "list-badid@example.com").await;
+
+        let (status, body) = http_get(
+            &app,
+            "/api/v1/applications/not-a-uuid/secrets",
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_revoke_tokens_invalid_uuid_returns_400() {
+        let (app, state) = test_app().await;
+        let auth = authed_user(&state, "revoke-badid@example.com").await;
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/applications/not-a-uuid/revoke",
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_delete_secret_invalid_app_id_returns_400() {
+        let (app, state) = test_app().await;
+        let auth = authed_user(&state, "del-sec-badappid@example.com").await;
+        let valid_uuid = uuid::Uuid::now_v7();
+
+        let (status, body) = http_delete(
+            &app,
+            &format!("/api/v1/applications/not-a-uuid/secrets/{valid_uuid}"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_delete_secret_invalid_secret_id_returns_400() {
+        let (app, state) = test_app().await;
+        let auth = authed_user(&state, "del-sec-badsecid@example.com").await;
+        let valid_uuid = uuid::Uuid::now_v7();
+
+        let (status, body) = http_delete(
+            &app,
+            &format!("/api/v1/applications/{valid_uuid}/secrets/not-a-uuid"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn test_invalid_uuid_error_response_is_json() {
+        // ValidPath must return a JSON error body (not a plain string or HTML)
+        // when the path param fails UUID validation.
+        let (app, state) = test_app().await;
+        let auth = authed_user(&state, "json-err@example.com").await;
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/applications/not-a-uuid/secrets",
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        // ServiceError::api produces {"code": "...", "message": "..."}
+        let json: serde_json::Value =
+            serde_json::from_str(&body).expect("error response must be valid JSON");
+        assert!(
+            json.get("code").is_some(),
+            "JSON error response must contain 'code' field; got: {json}"
+        );
     }
 
     // ========================================================================
