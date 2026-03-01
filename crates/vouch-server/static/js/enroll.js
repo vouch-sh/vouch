@@ -55,6 +55,7 @@
                         userVerification: 'required',
                         residentKey: 'required'
                     },
+                    hints: ['security-key'],
                     excludeCredentials: excludeCredentials,
                     timeout: 60000,
                     attestation: 'direct'

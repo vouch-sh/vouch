@@ -254,6 +254,7 @@
                 rpId: options.rp_id,
                 timeout: options.timeout,
                 userVerification: options.user_verification,
+                hints: ['security-key'],
                 allowCredentials: []
             }
         });
@@ -330,6 +331,7 @@
                         userVerification: 'required',
                         residentKey: 'required'
                     },
+                    hints: ['security-key'],
                     timeout: 60000,
                     attestation: 'direct'
                 }
