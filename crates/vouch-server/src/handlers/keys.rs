@@ -26,7 +26,6 @@ use vouch_common::{
     fido2_types::Challenge,
 };
 
-use super::errors::json_error;
 use super::session::extract_resource_token;
 use super::{generate_challenge, validate_registration_attestation};
 use crate::crypto::webauthn_verify;
@@ -84,13 +83,13 @@ pub async fn register_start(
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterStartRequest>,
-) -> Result<Json<RegisterStartResponse>, (StatusCode, Json<vouch_common::ApiError>)> {
+) -> Result<Json<RegisterStartResponse>, ServiceError> {
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
     let user_id = Uuid::parse_str(&token.sub).map_err(|e| {
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "uuid_error",
-            &e.to_string(),
+            e.to_string(),
         )
     })?;
 
@@ -98,13 +97,11 @@ pub async fn register_start(
     let user = db::get_user_by_id(&state.store, &token.sub)
         .await
         .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
         })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "user_not_found", "User not found"))?;
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
+        })?;
 
     tracing::info!(
         "Registration start for authenticated user: {} (adding key: {})",
@@ -116,11 +113,7 @@ pub async fn register_start(
     let existing_auths = db::get_authenticators_for_user(&state.store, &user.id)
         .await
         .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
         })?;
 
     let exclude_credential_ids: Vec<vouch_common::CredentialId<vouch_common::Raw>> = existing_auths
@@ -130,7 +123,7 @@ pub async fn register_start(
 
     // Generate challenge
     let challenge = generate_challenge().map_err(|_| {
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "rng_error",
             "Failed to generate challenge",
@@ -157,10 +150,10 @@ pub async fn register_start(
     let state_token = reg_state
         .encode(state.config().jwt_secret.expose_secret())
         .map_err(|e| {
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "state_error",
-                &e.to_string(),
+                e.to_string(),
             )
         })?;
 
@@ -181,13 +174,14 @@ pub async fn register_start(
 pub async fn register_complete(
     State(state): State<Arc<AppState>>,
     Json(req): Json<RegisterCompleteRequest>,
-) -> Result<Json<RegisterCompleteResponse>, (StatusCode, Json<vouch_common::ApiError>)> {
+) -> Result<Json<RegisterCompleteResponse>, ServiceError> {
     tracing::info!("Registration complete");
 
     // Decode state
     let reg_state =
-        RegistrationState::decode(&req.state, state.config().jwt_secret.expose_secret())
-            .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
+        RegistrationState::decode(&req.state, state.config().jwt_secret.expose_secret()).map_err(
+            |e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()),
+        )?;
 
     // Server-side WebAuthn attestation verification
     // Verify the attestation object, client data, RP ID, challenge, and origin
@@ -204,10 +198,10 @@ pub async fn register_complete(
     )
     .map_err(|e| {
         tracing::warn!("Registration attestation verification failed: {e}");
-        json_error(
+        ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_attestation",
-            &e.to_string(),
+            e.to_string(),
         )
     })?;
 
@@ -219,18 +213,14 @@ pub async fn register_complete(
     if let Some(_existing) = db::get_authenticator_by_credential_id(&state.store, &verified_cred_id)
         .await
         .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
         })?
     {
         tracing::warn!(
             "Rejected duplicate credential registration for user: {}",
             reg_state.user_id
         );
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::CONFLICT,
             "credential_already_registered",
             "This security key is already registered",
@@ -261,22 +251,16 @@ pub async fn register_complete(
         Some(&user_handle),
     )
     .await
-    .map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db_error",
-            &e.to_string(),
-        )
-    })?;
+    .map_err(|e| ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string()))?;
 
     tracing::info!("Registered new authenticator: {}", device_id);
 
     Ok(Json(RegisterCompleteResponse {
         device_id: Uuid::parse_str(&device_id).map_err(|e| {
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "uuid_error",
-                &e.to_string(),
+                e.to_string(),
             )
         })?,
         message: "Registration successful".to_string(),

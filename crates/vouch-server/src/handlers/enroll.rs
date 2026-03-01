@@ -22,15 +22,16 @@ use serde::{Deserialize, Serialize};
 use serde_json;
 use std::sync::Arc;
 use uuid::Uuid;
-use vouch_common::{ApiError, BrowserRegisterCompleteRequest, BrowserRegisterStartResponse};
+use vouch_common::{BrowserRegisterCompleteRequest, BrowserRegisterStartResponse};
 
 use super::session::AuthContext;
 use super::{
     create_session_cookie, extract_session_from_cookie, generate_random_bytes, hash_token,
-    json_error, validate_registration_attestation,
+    validate_registration_attestation,
 };
 use crate::redact_email;
 use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::services::error::ServiceError;
 use crate::services::oidc::amr::{ACR_AAL3, AuthMethod};
 use crate::services::oidc::scope::ScopeSet;
 
@@ -740,12 +741,12 @@ pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar
 pub async fn browser_register_start(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
-) -> Result<Json<BrowserRegisterStartResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<BrowserRegisterStartResponse>, ServiceError> {
     // Get session from cookie
     let token = extract_session_from_cookie(&state, &jar)
         .await
         .map_err(|_| {
-            json_error(
+            ServiceError::api(
                 StatusCode::UNAUTHORIZED,
                 "invalid_session",
                 "Invalid or expired session",
@@ -753,10 +754,10 @@ pub async fn browser_register_start(
         })?;
 
     let user_id = Uuid::parse_str(&token.sub).map_err(|e| {
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "uuid_error",
-            &e.to_string(),
+            e.to_string(),
         )
     })?;
 
@@ -776,7 +777,7 @@ pub async fn browser_register_start(
                     .await
                     .map_err(|e| {
                         tracing::error!("Failed to look up enrollment session: {}", e);
-                        json_error(
+                        ServiceError::api(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             "db_error",
                             "Failed to look up enrollment session",
@@ -802,11 +803,7 @@ pub async fn browser_register_start(
     let existing_auths = db::get_authenticators_for_user(&state.store, &token.sub)
         .await
         .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
         })?;
 
     tracing::info!(
@@ -839,10 +836,10 @@ pub async fn browser_register_start(
         .webauthn
         .start_passkey_registration(user_id, &user_email, &user_email, Some(exclude_credentials))
         .map_err(|e| {
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "webauthn_error",
-                &e.to_string(),
+                e.to_string(),
             )
         })?;
 
@@ -864,10 +861,10 @@ pub async fn browser_register_start(
     let state_token = reg_state
         .encode(state.config().jwt_secret.expose_secret())
         .map_err(|e| {
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "state_error",
-                &e.to_string(),
+                e.to_string(),
             )
         })?;
 
@@ -927,21 +924,21 @@ pub async fn browser_register_complete(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(req): Json<BrowserRegisterCompleteRequest>,
-) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+) -> Result<impl IntoResponse, ServiceError> {
     // Extract client info from headers (for auth event logging)
     let client_info = ClientInfo::from_headers(&headers);
 
     // ── Phase 1: Field length bounds ────────────────────────────────────
     // Reject obviously oversized or empty fields before any processing.
     if req.state.len() > MAX_STATE_TOKEN_LEN {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_state",
             "State token exceeds maximum length",
         ));
     }
     if req.credential_id.is_empty() || req.credential_id.len() > MAX_CREDENTIAL_ID_LEN {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_credential",
             "Credential ID is empty or exceeds maximum length",
@@ -950,14 +947,14 @@ pub async fn browser_register_complete(
     if req.attestation_object.is_empty()
         || req.attestation_object.len() > MAX_ATTESTATION_OBJECT_LEN
     {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_attestation",
             "Attestation object is empty or exceeds maximum length",
         ));
     }
     if req.client_data_json.is_empty() || req.client_data_json.len() > MAX_CLIENT_DATA_JSON_LEN {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_client_data",
             "Client data JSON is empty or exceeds maximum length",
@@ -967,32 +964,30 @@ pub async fn browser_register_complete(
     // ── Phase 2: State JWT decode + expiration ──────────────────────────
     let reg_state =
         BrowserRegistrationState::decode(&req.state, state.config().jwt_secret.expose_secret())
-            .map_err(|e| json_error(StatusCode::BAD_REQUEST, "invalid_state", &e.to_string()))?;
+            .map_err(|e| {
+                ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
+            })?;
 
     // ── Phase 3: Base64url decode all fields ────────────────────────────
     let credential_id_bytes = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|e| {
-        json_error(
-            StatusCode::BAD_REQUEST,
-            "invalid_credential",
-            &e.to_string(),
-        )
+        ServiceError::api(StatusCode::BAD_REQUEST, "invalid_credential", e.to_string())
     })?;
 
     let attestation_object = URL_SAFE_NO_PAD
         .decode(&req.attestation_object)
         .map_err(|e| {
-            json_error(
+            ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "invalid_attestation",
-                &e.to_string(),
+                e.to_string(),
             )
         })?;
 
     let client_data_json = URL_SAFE_NO_PAD.decode(&req.client_data_json).map_err(|e| {
-        json_error(
+        ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_client_data",
-            &e.to_string(),
+            e.to_string(),
         )
     })?;
 
@@ -1000,7 +995,7 @@ pub async fn browser_register_complete(
     if credential_id_bytes.len() < MIN_CREDENTIAL_ID_BYTES
         || credential_id_bytes.len() > MAX_CREDENTIAL_ID_BYTES
     {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_credential",
             "Credential ID length is outside the valid range (16-1023 bytes)",
@@ -1010,7 +1005,7 @@ pub async fn browser_register_complete(
     // ── Phase 5: Client data JSON structure validation ──────────────────
     // Parse and validate the client data before any DB or crypto operations.
     let client_data_str = std::str::from_utf8(&client_data_json).map_err(|_| {
-        json_error(
+        ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_client_data",
             "Client data JSON is not valid UTF-8",
@@ -1018,15 +1013,15 @@ pub async fn browser_register_complete(
     })?;
 
     let client_data: ClientData = serde_json::from_str(client_data_str).map_err(|e| {
-        json_error(
+        ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_client_data",
-            &format!("Client data JSON is malformed: {e}"),
+            format!("Client data JSON is malformed: {e}"),
         )
     })?;
 
     if client_data.typ != "webauthn.create" {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_client_data",
             "Client data type must be 'webauthn.create'",
@@ -1041,7 +1036,7 @@ pub async fn browser_register_complete(
             client_data.origin,
             expected_origin
         );
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_client_data",
             "Client data origin does not match the server",
@@ -1071,10 +1066,10 @@ pub async fn browser_register_complete(
         .finish_passkey_registration(&reg_credential, &reg_state.webauthn_state)
         .map_err(|e| {
             tracing::warn!("WebAuthn verification failed: {}", e);
-            json_error(
+            ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "attestation_failed",
-                &format!("Attestation verification failed: {e}"),
+                format!("Attestation verification failed: {e}"),
             )
         })?;
 
@@ -1084,18 +1079,14 @@ pub async fn browser_register_complete(
         db::get_authenticator_by_credential_id(&state.store, &credential_id_bytes)
             .await
             .map_err(|e| {
-                json_error(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    &e.to_string(),
-                )
+                ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
             })?
     {
         tracing::warn!(
             "Rejected duplicate credential registration for user: {}",
             reg_state.user_id
         );
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::CONFLICT,
             "credential_already_registered",
             "This security key is already registered",
@@ -1108,7 +1099,7 @@ pub async fn browser_register_complete(
 
     let public_key_cbor = crate::crypto::cose::cose_key_to_cbor(cose_key).map_err(|e| {
         tracing::error!("Failed to serialize COSE key to CBOR: {e}");
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "cbor_error",
             "Failed to serialize key",
@@ -1133,13 +1124,7 @@ pub async fn browser_register_complete(
         Some(&user_handle),
     )
     .await
-    .map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db_error",
-            &e.to_string(),
-        )
-    })?;
+    .map_err(|e| ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string()))?;
 
     // Mark device authorization as complete (only for CLI-initiated flows)
     if reg_state.device_auth_id.is_empty() {
@@ -1162,11 +1147,7 @@ pub async fn browser_register_complete(
                 reg_state.device_auth_id,
                 e
             );
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
         })?;
     }
 
@@ -1203,7 +1184,7 @@ pub async fn browser_register_complete(
 
     // Create a session for the browser so the user stays logged in
     let session_hours = i64::try_from(state.config().session_hours).map_err(|_| {
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "time_error",
             "Invalid session hours",
@@ -1231,10 +1212,10 @@ pub async fn browser_register_complete(
     )
     .await
     .map_err(|e| {
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "session_error",
-            &e.to_string(),
+            e.to_string(),
         )
     })?;
     let token = session_result.token;
@@ -1243,7 +1224,7 @@ pub async fn browser_register_complete(
     let cookie = create_session_cookie(token.expose_secret(), session_hours * 3600);
     let html = SuccessTemplate.render().map_err(|e| {
         tracing::error!("Template render error: {}", e);
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "render_error",
             "Failed to render template",

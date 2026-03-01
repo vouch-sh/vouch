@@ -11,7 +11,10 @@
 //! - GET/PUT/DELETE /v1/integrations/aws
 
 use crate::db;
-use crate::handlers::session::{AuthContext, extract_resource_token, get_resource_auth_context};
+use crate::handlers::session::{
+    AuthContext, extract_org_admin, extract_user_with_org, get_resource_auth_context,
+};
+use crate::services::error::ServiceError;
 use crate::{AppState, impl_template_response};
 use askama::Template;
 use axum::Json;
@@ -20,9 +23,7 @@ use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
-use vouch_common::{ApiError, AwsIntegrationConfig, IntegrationConfigResponse};
-
-use super::json_error;
+use vouch_common::{AwsIntegrationConfig, IntegrationConfigResponse};
 
 // ============================================================================
 // Templates
@@ -100,65 +101,6 @@ pub async fn integrations_page(State(state): State<Arc<AppState>>, jar: CookieJa
 }
 
 // ============================================================================
-// Cloud Integration API Helpers
-// ============================================================================
-
-/// Extract authenticated user and their org_id.
-/// Returns (user, org_id) or an error if not authenticated or no org.
-async fn extract_user_with_org(
-    state: &AppState,
-    headers: &HeaderMap,
-    jar: &CookieJar,
-    method: &str,
-    uri: &str,
-) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
-    let token = extract_resource_token(state, headers, jar, method, uri).await?;
-
-    let user = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
-        })?
-        .ok_or_else(|| json_error(StatusCode::UNAUTHORIZED, "unauthorized", "User not found"))?;
-
-    let org_id = user.org_id.clone().ok_or_else(|| {
-        json_error(
-            StatusCode::FORBIDDEN,
-            "no_organization",
-            "Cloud integrations require organization membership",
-        )
-    })?;
-
-    Ok((user, org_id))
-}
-
-/// Extract and validate an org admin from the access token.
-/// Returns the user and their org_id if they are an org admin.
-async fn extract_org_admin(
-    state: &AppState,
-    headers: &HeaderMap,
-    jar: &CookieJar,
-    method: &str,
-    uri: &str,
-) -> Result<(db::User, String), (StatusCode, Json<ApiError>)> {
-    let (user, org_id) = extract_user_with_org(state, headers, jar, method, uri).await?;
-
-    if !user.is_org_admin {
-        return Err(json_error(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "Organization admin access required",
-        ));
-    }
-
-    Ok((user, org_id))
-}
-
-// ============================================================================
 // AWS Integration API
 // ============================================================================
 
@@ -170,27 +112,23 @@ pub async fn get_aws_integration(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<IntegrationConfigResponse<AwsIntegrationConfig>>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<IntegrationConfigResponse<AwsIntegrationConfig>>, ServiceError> {
     let (_user, org_id) =
         extract_user_with_org(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let integration = db::get_cloud_integration(&state.store, &org_id, "aws")
         .await
         .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
         })?;
 
     match integration {
         Some(i) => {
             let config: AwsIntegrationConfig = serde_json::from_value(i.config).map_err(|e| {
-                json_error(
+                ServiceError::api(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "config_parse_error",
-                    &format!("Failed to parse AWS config: {e}"),
+                    format!("Failed to parse AWS config: {e}"),
                 )
             })?;
             Ok(Json(IntegrationConfigResponse {
@@ -214,26 +152,22 @@ pub async fn set_aws_integration(
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
     Json(config): Json<AwsIntegrationConfig>,
-) -> Result<Json<AwsIntegrationConfig>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<AwsIntegrationConfig>, ServiceError> {
     let (user, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let config_value = serde_json::to_value(&config).map_err(|e| {
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "serialize_error",
-            &e.to_string(),
+            e.to_string(),
         )
     })?;
 
     db::upsert_cloud_integration(&state.store, &org_id, "aws", &config_value, &user.id)
         .await
         .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
         })?;
 
     tracing::info!(
@@ -253,18 +187,14 @@ pub async fn delete_aws_integration(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
-) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+) -> Result<StatusCode, ServiceError> {
     let (user, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let deleted = db::delete_cloud_integration(&state.store, &org_id, "aws")
         .await
         .map_err(|e| {
-            json_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                &e.to_string(),
-            )
+            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
         })?;
 
     if deleted {
@@ -275,7 +205,7 @@ pub async fn delete_aws_integration(
         );
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(json_error(
+        Err(ServiceError::api(
             StatusCode::NOT_FOUND,
             "not_found",
             "AWS integration not configured",

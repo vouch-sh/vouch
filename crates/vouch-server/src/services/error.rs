@@ -58,14 +58,13 @@ pub enum ServiceError {
         scim_type: Option<String>,
     },
 
-    /// Pre-formatted HTTP error from legacy handler code.
+    /// Structured API error with explicit status code, error code, and message.
     ///
-    /// This variant bridges the old `(StatusCode, Json<ApiError>)` handler pattern
-    /// with the `ServiceError` type, preserving the original status code, error code,
-    /// and message. It enables incremental migration of handlers from the tuple
-    /// pattern to `Result<T, ServiceError>` without losing error information.
+    /// Use this when you need a specific error code in the response body (e.g.,
+    /// `"ssh_ca_not_configured"`) that doesn't map cleanly to one of the typed
+    /// `ServiceError` variants. Produces `{"code": "...", "message": "..."}`.
     #[error("{message}")]
-    HttpError {
+    Api {
         /// HTTP status code.
         status: StatusCode,
         /// Machine-readable error code (e.g., "ssh_ca_not_configured").
@@ -250,15 +249,15 @@ impl ServiceError {
         }
     }
 
-    /// Create an HTTP error with a specific status code, error code, and message.
+    /// Create a structured API error with a specific status code, error code,
+    /// and message.
     ///
-    /// This is the `ServiceError` equivalent of the legacy `json_error()` helper.
     /// Use this when you need a specific error code in the response body (e.g.,
     /// `"ssh_ca_not_configured"`) that doesn't map cleanly to one of the typed
     /// `ServiceError` variants.
     #[must_use]
-    pub fn http(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::HttpError {
+    pub fn api(status: StatusCode, code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self::Api {
             status,
             code: code.into(),
             message: message.into(),
@@ -435,14 +434,22 @@ impl ServiceError {
     }
 
     /// Convert to a standard API error response.
+    ///
+    /// All non-protocol variants produce `{"code": "...", "message": "..."}`.
     pub fn into_api_response(self) -> Response {
-        let (status, message) = match &self {
-            Self::NotFound(entity) => (StatusCode::NOT_FOUND, format!("{entity} not found")),
-            Self::Validation(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
-            Self::Unauthorized(msg) => (StatusCode::UNAUTHORIZED, (*msg).to_string()),
-            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, (*msg).to_string()),
-            Self::Conflict(msg) => (StatusCode::CONFLICT, msg.clone()),
-            Self::HttpError {
+        let (status, code, message) = match &self {
+            Self::NotFound(entity) => (
+                StatusCode::NOT_FOUND,
+                "not_found",
+                format!("{entity} not found"),
+            ),
+            Self::Validation(msg) => (StatusCode::BAD_REQUEST, "invalid_request", msg.clone()),
+            Self::Unauthorized(msg) => {
+                (StatusCode::UNAUTHORIZED, "unauthorized", (*msg).to_string())
+            }
+            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", (*msg).to_string()),
+            Self::Conflict(msg) => (StatusCode::CONFLICT, "conflict", msg.clone()),
+            Self::Api {
                 status,
                 code,
                 message,
@@ -474,23 +481,14 @@ impl ServiceError {
             }
             Self::Database(_) | Self::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
                 "Internal error".to_string(),
             ),
             Self::OAuth { .. } => return self.into_oauth_response().into_response(),
             Self::Scim { .. } => return self.into_scim_response(),
         };
 
-        (status, Json(serde_json::json!({ "error": message }))).into_response()
-    }
-}
-
-impl From<(StatusCode, Json<ApiError>)> for ServiceError {
-    fn from((status, Json(api_error)): (StatusCode, Json<ApiError>)) -> Self {
-        Self::HttpError {
-            status,
-            code: api_error.code,
-            message: api_error.message,
-        }
+        (status, Json(ApiError::new(code, &message))).into_response()
     }
 }
 
@@ -544,14 +542,14 @@ mod tests {
     }
 
     #[test]
-    fn test_service_error_http_factory() {
-        let err = ServiceError::http(
+    fn test_service_error_api_factory() {
+        let err = ServiceError::api(
             StatusCode::SERVICE_UNAVAILABLE,
             "ssh_ca_not_configured",
             "SSH CA is not configured",
         );
         match err {
-            ServiceError::HttpError {
+            ServiceError::Api {
                 status,
                 code,
                 message,
@@ -560,38 +558,16 @@ mod tests {
                 assert_eq!(code, "ssh_ca_not_configured");
                 assert_eq!(message, "SSH CA is not configured");
             }
-            _ => panic!("Expected HttpError"),
+            _ => panic!("Expected Api"),
         }
     }
 
-    #[test]
-    fn test_service_error_from_tuple() {
-        let tuple = (
-            StatusCode::NOT_FOUND,
-            Json(ApiError::new("user_not_found", "User not found")),
-        );
-        let err = ServiceError::from(tuple);
-        match err {
-            ServiceError::HttpError {
-                status,
-                code,
-                message,
-            } => {
-                assert_eq!(status, StatusCode::NOT_FOUND);
-                assert_eq!(code, "user_not_found");
-                assert_eq!(message, "User not found");
-            }
-            _ => panic!("Expected HttpError"),
-        }
-    }
-
-    /// Verify that `ServiceError::HttpError` produces the exact same JSON wire format
-    /// as the legacy `json_error()` helper: `{"code": "...", "message": "..."}`.
+    /// Verify that `ServiceError::Api` produces `{"code": "...", "message": "..."}`.
     #[tokio::test]
-    async fn test_http_error_response_format() {
+    async fn test_api_error_response_format() {
         use axum::body::to_bytes;
 
-        let err = ServiceError::http(StatusCode::NOT_FOUND, "user_not_found", "User not found");
+        let err = ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found");
         let response = err.into_response();
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -604,40 +580,59 @@ mod tests {
         assert_eq!(json["message"], "User not found");
     }
 
-    /// Verify that `From<(StatusCode, Json<ApiError>)>` round-trips correctly
-    /// through `IntoResponse`, producing the same format.
+    /// Verify that all standard ServiceError variants produce `{"code":..., "message":...}`.
     #[tokio::test]
-    async fn test_from_tuple_response_format() {
+    async fn test_standard_variants_produce_code_message_format() {
         use axum::body::to_bytes;
 
-        let tuple = (
-            StatusCode::FORBIDDEN,
-            Json(ApiError::new("insufficient_scope", "Requires admin")),
-        );
-        let err = ServiceError::from(tuple);
-        let response = err.into_response();
+        let cases: Vec<(ServiceError, StatusCode, &str, &str)> = vec![
+            (
+                ServiceError::NotFound("Session"),
+                StatusCode::NOT_FOUND,
+                "not_found",
+                "Session not found",
+            ),
+            (
+                ServiceError::Validation("bad input".to_string()),
+                StatusCode::BAD_REQUEST,
+                "invalid_request",
+                "bad input",
+            ),
+            (
+                ServiceError::Unauthorized("no token"),
+                StatusCode::UNAUTHORIZED,
+                "unauthorized",
+                "no token",
+            ),
+            (
+                ServiceError::Forbidden("not allowed"),
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "not allowed",
+            ),
+            (
+                ServiceError::Conflict("duplicate".to_string()),
+                StatusCode::CONFLICT,
+                "conflict",
+                "duplicate",
+            ),
+            (
+                ServiceError::Internal("boom".to_string()),
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Internal error",
+            ),
+        ];
 
-        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        for (err, expected_status, expected_code, expected_msg) in cases {
+            let response = err.into_response();
+            assert_eq!(response.status(), expected_status);
 
-        let body = to_bytes(response.into_body(), 4096).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-
-        assert_eq!(json["code"], "insufficient_scope");
-        assert_eq!(json["message"], "Requires admin");
-    }
-
-    /// Verify that standard ServiceError variants produce a JSON body with "error" field.
-    #[tokio::test]
-    async fn test_standard_error_response_format() {
-        use axum::body::to_bytes;
-
-        let err = ServiceError::NotFound("Session");
-        let response = err.into_response();
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-
-        let body = to_bytes(response.into_body(), 4096).await.unwrap();
-        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(json["error"], "Session not found");
+            let body = to_bytes(response.into_body(), 4096).await.unwrap();
+            let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(json["code"], expected_code);
+            assert_eq!(json["message"], expected_msg);
+        }
     }
 
     /// Verify OAuth error response format matches RFC 6749 Section 5.2.

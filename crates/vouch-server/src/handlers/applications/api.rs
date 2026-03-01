@@ -18,15 +18,15 @@ use axum::{
 };
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
-use vouch_common::ApiError;
 
 use super::types::{
     ApplicationResponse, CreateApplicationRequest, CreateApplicationResponse,
     ListApplicationsResponse, RotateSecretResponse, UpdateApplicationRequest,
 };
 use super::{generate_client_secret, validate_redirect_uris};
+use crate::handlers::hash_token;
 use crate::handlers::session::extract_resource_token;
-use crate::handlers::{hash_token, json_error};
+use crate::services::error::ServiceError;
 use crate::services::oidc::ResourceUri;
 
 /// List user's applications (API).
@@ -37,14 +37,14 @@ pub async fn list_applications_api(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<ListApplicationsResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<ListApplicationsResponse>, ServiceError> {
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let applications = db::get_oauth_clients_for_user(&state.store, &token.sub)
         .await
         .map_err(|e| {
             tracing::error!("Failed to list applications: {e}");
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
                 "Internal database error",
@@ -66,13 +66,13 @@ pub async fn create_application_api(
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateApplicationRequest>,
-) -> Result<Json<CreateApplicationResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<CreateApplicationResponse>, ServiceError> {
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Validate inputs
     let name = req.name.trim();
     if name.is_empty() {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_name",
             "Application name is required",
@@ -83,7 +83,7 @@ pub async fn create_application_api(
         .application_type
         .parse::<OAuthClientType>()
         .map_err(|_| {
-            json_error(
+            ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "invalid_type",
                 "Invalid application type. Must be: web, native, spa, or service",
@@ -102,17 +102,17 @@ pub async fn create_application_api(
         .await
         .map_err(|e| {
             tracing::error!("Failed to get user: {e}");
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
                 "Internal database error",
             )
         })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
+        .ok_or_else(|| ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
 
     // Validate: Organization scope requires user to have an org
     if access_scope == AccessScope::Organization && user.org_id.is_none() {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_access_scope",
             "Organization scope requires organization membership",
@@ -128,7 +128,7 @@ pub async fn create_application_api(
 
     // For non-service apps, at least one redirect URI is required
     if !matches!(app_type, OAuthClientType::Service) && req.redirect_uris.is_empty() {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_redirect_uris",
             "At least one redirect URI is required",
@@ -137,10 +137,10 @@ pub async fn create_application_api(
 
     // Validate redirect URIs are valid URLs
     if let Err(invalid) = validate_redirect_uris(&req.redirect_uris) {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_redirect_uris",
-            &format!(
+            format!(
                 "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
                 invalid.join(", ")
             ),
@@ -153,10 +153,10 @@ pub async fn create_application_api(
     // Validate resource URIs per RFC 8707 (absolute URI, no fragment).
     for uri_str in resource_uris {
         if let Err(e) = ResourceUri::parse(uri_str) {
-            return Err(json_error(
+            return Err(ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "invalid_resource_uri",
-                &format!("Invalid resource URI '{uri_str}': {e}"),
+                format!("Invalid resource URI '{uri_str}': {e}"),
             ));
         }
     }
@@ -169,7 +169,7 @@ pub async fn create_application_api(
 
     // FAPI validation: must be a confidential client type
     if is_fapi && !matches!(app_type, OAuthClientType::Web | OAuthClientType::Service) {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_fapi_profile",
             "FAPI 2.0 Security Profile requires a confidential client type (web or service)",
@@ -185,7 +185,7 @@ pub async fn create_application_api(
         .filter(|s| !s.is_empty());
 
     if is_fapi && jwks_trimmed.is_none() && jwks_uri_trimmed.is_none() {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "missing_jwks",
             "FAPI 2.0 requires jwks or jwks_uri for private_key_jwt authentication",
@@ -200,7 +200,7 @@ pub async fn create_application_api(
                     .get("keys")
                     .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
                 {
-                    return Err(json_error(
+                    return Err(ServiceError::api(
                         StatusCode::BAD_REQUEST,
                         "invalid_jwks",
                         "JWKS must be a JSON object with a non-empty \"keys\" array",
@@ -208,7 +208,7 @@ pub async fn create_application_api(
                 }
             }
             Err(_) => {
-                return Err(json_error(
+                return Err(ServiceError::api(
                     StatusCode::BAD_REQUEST,
                     "invalid_jwks",
                     "JWKS must be valid JSON",
@@ -222,7 +222,7 @@ pub async fn create_application_api(
         match url::Url::parse(jwks_uri_val) {
             Ok(parsed) if parsed.scheme() == "https" => {}
             _ => {
-                return Err(json_error(
+                return Err(ServiceError::api(
                     StatusCode::BAD_REQUEST,
                     "invalid_jwks_uri",
                     "JWKS URI must be a valid https:// URL",
@@ -268,7 +268,7 @@ pub async fn create_application_api(
     .await
     .map_err(|e| {
         tracing::error!("Failed to create OAuth client: {e}");
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_error",
             "Internal database error",
@@ -290,7 +290,7 @@ pub async fn create_application_api(
         .await
         .map_err(|e| {
             tracing::error!("Failed to create client secret: {e}");
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
                 "Internal database error",
@@ -331,10 +331,10 @@ pub async fn get_application_api(
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
-) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<ApplicationResponse>, ServiceError> {
     // Validate app_id is a UUID before any processing
     if uuid::Uuid::try_parse(&app_id).is_err() {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "Invalid application ID format",
@@ -347,17 +347,19 @@ pub async fn get_application_api(
         .await
         .map_err(|e| {
             tracing::error!("Failed to get application: {e}");
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
                 "Internal database error",
             )
         })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
+        })?;
 
     // Verify ownership
     if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::NOT_FOUND,
             "not_found",
             "Application not found",
@@ -377,10 +379,10 @@ pub async fn update_application_api(
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
     Json(req): Json<UpdateApplicationRequest>,
-) -> Result<Json<ApplicationResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<ApplicationResponse>, ServiceError> {
     // Validate app_id is a UUID before any processing
     if uuid::Uuid::try_parse(&app_id).is_err() {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "Invalid application ID format",
@@ -394,17 +396,19 @@ pub async fn update_application_api(
         .await
         .map_err(|e| {
             tracing::error!("Failed to get application for update: {e}");
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
                 "Internal database error",
             )
         })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
+        })?;
 
     // Verify ownership
     if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::NOT_FOUND,
             "not_found",
             "Application not found",
@@ -424,13 +428,15 @@ pub async fn update_application_api(
                 .await
                 .map_err(|e| {
                     tracing::error!("Failed to get user for scope validation: {e}");
-                    json_error(
+                    ServiceError::api(
                         StatusCode::INTERNAL_SERVER_ERROR,
                         "db_error",
                         "Internal database error",
                     )
                 })?
-                .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "User not found"))?,
+                .ok_or_else(|| {
+                    ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found")
+                })?,
         )
     } else {
         None
@@ -440,7 +446,7 @@ pub async fn update_application_api(
     if access_scope == Some(AccessScope::Organization)
         && user.as_ref().is_some_and(|u| u.org_id.is_none())
     {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_access_scope",
             "Organization scope requires organization membership",
@@ -464,10 +470,10 @@ pub async fn update_application_api(
 
     // Validate redirect URIs are valid URLs
     if let Err(invalid) = validate_redirect_uris(&redirect_uris) {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_redirect_uris",
-            &format!(
+            format!(
                 "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
                 invalid.join(", ")
             ),
@@ -484,10 +490,10 @@ pub async fn update_application_api(
     // Validate resource URIs per RFC 8707 (absolute URI, no fragment).
     for uri_str in &resource_uris {
         if let Err(e) = ResourceUri::parse(uri_str) {
-            return Err(json_error(
+            return Err(ServiceError::api(
                 StatusCode::BAD_REQUEST,
                 "invalid_resource_uri",
-                &format!("Invalid resource URI '{uri_str}': {e}"),
+                format!("Invalid resource URI '{uri_str}': {e}"),
             ));
         }
     }
@@ -505,7 +511,7 @@ pub async fn update_application_api(
             OAuthClientType::Web | OAuthClientType::Service
         )
     {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_fapi_profile",
             "FAPI 2.0 Security Profile requires a confidential client type (web or service)",
@@ -526,7 +532,7 @@ pub async fn update_application_api(
         && client.jwks.is_none()
         && client.jwks_uri.is_none()
     {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "missing_jwks",
             "FAPI 2.0 requires jwks or jwks_uri for private_key_jwt authentication",
@@ -541,7 +547,7 @@ pub async fn update_application_api(
                     .get("keys")
                     .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
                 {
-                    return Err(json_error(
+                    return Err(ServiceError::api(
                         StatusCode::BAD_REQUEST,
                         "invalid_jwks",
                         "JWKS must be a JSON object with a non-empty \"keys\" array",
@@ -549,7 +555,7 @@ pub async fn update_application_api(
                 }
             }
             Err(_) => {
-                return Err(json_error(
+                return Err(ServiceError::api(
                     StatusCode::BAD_REQUEST,
                     "invalid_jwks",
                     "JWKS must be valid JSON",
@@ -563,7 +569,7 @@ pub async fn update_application_api(
         match url::Url::parse(jwks_uri_val) {
             Ok(parsed) if parsed.scheme() == "https" => {}
             _ => {
-                return Err(json_error(
+                return Err(ServiceError::api(
                     StatusCode::BAD_REQUEST,
                     "invalid_jwks_uri",
                     "JWKS URI must be a valid https:// URL",
@@ -635,7 +641,7 @@ pub async fn update_application_api(
     .await
     .map_err(|e| {
         tracing::error!("Failed to update OAuth client: {e}");
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_error",
             "Internal database error",
@@ -647,13 +653,15 @@ pub async fn update_application_api(
         .await
         .map_err(|e| {
             tracing::error!("Failed to fetch updated application: {e}");
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
                 "Internal database error",
             )
         })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
+        })?;
 
     tracing::info!("Updated OAuth application: {} ({})", name, client.client_id);
 
@@ -669,10 +677,10 @@ pub async fn delete_application_api(
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
-) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+) -> Result<StatusCode, ServiceError> {
     // Validate app_id is a UUID before any processing
     if uuid::Uuid::try_parse(&app_id).is_err() {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "Invalid application ID format",
@@ -686,16 +694,18 @@ pub async fn delete_application_api(
         .await
         .map_err(|e| {
             tracing::error!("Failed to get application for deletion: {e}");
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
                 "Internal database error",
             )
         })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
+        })?;
 
     if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::NOT_FOUND,
             "not_found",
             "Application not found",
@@ -706,7 +716,7 @@ pub async fn delete_application_api(
         .await
         .map_err(|e| {
             tracing::error!("Failed to delete OAuth client: {e}");
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
                 "Internal database error",
@@ -727,10 +737,10 @@ pub async fn rotate_secret_api(
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
-) -> Result<Json<RotateSecretResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<RotateSecretResponse>, ServiceError> {
     // Validate app_id is a UUID before any processing
     if uuid::Uuid::try_parse(&app_id).is_err() {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "Invalid application ID format",
@@ -744,16 +754,18 @@ pub async fn rotate_secret_api(
         .await
         .map_err(|e| {
             tracing::error!("Failed to get application for secret rotation: {e}");
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
                 "Internal database error",
             )
         })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
+        })?;
 
     if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::NOT_FOUND,
             "not_found",
             "Application not found",
@@ -762,7 +774,7 @@ pub async fn rotate_secret_api(
 
     // Check if this client type supports secrets
     if !client.application_type.requires_secret() {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "no_secret",
             "This application type does not use client secrets",
@@ -778,7 +790,7 @@ pub async fn rotate_secret_api(
         .await
         .map_err(|e| {
             tracing::error!("Failed to revoke old secrets: {e}");
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
                 "Internal database error",
@@ -796,7 +808,7 @@ pub async fn rotate_secret_api(
     .await
     .map_err(|e| {
         tracing::error!("Failed to create rotated secret: {e}");
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_error",
             "Internal database error",
@@ -821,10 +833,10 @@ pub async fn revoke_tokens_api(
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
-) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+) -> Result<StatusCode, ServiceError> {
     // Validate app_id is a UUID before any processing
     if uuid::Uuid::try_parse(&app_id).is_err() {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_request",
             "Invalid application ID format",
@@ -838,16 +850,18 @@ pub async fn revoke_tokens_api(
         .await
         .map_err(|e| {
             tracing::error!("Failed to get application for token revocation: {e}");
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
                 "Internal database error",
             )
         })?
-        .ok_or_else(|| json_error(StatusCode::NOT_FOUND, "not_found", "Application not found"))?;
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
+        })?;
 
     if client.user_id.as_deref() != Some(token.sub.as_str()) {
-        return Err(json_error(
+        return Err(ServiceError::api(
             StatusCode::NOT_FOUND,
             "not_found",
             "Application not found",
@@ -859,7 +873,7 @@ pub async fn revoke_tokens_api(
         .await
         .map_err(|e| {
             tracing::error!("Failed to revoke all secrets: {e}");
-            json_error(
+            ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
                 "Internal database error",

@@ -10,15 +10,11 @@ use crate::services::keys as key_svc;
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
 };
 use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
-use vouch_common::{
-    ApiError, DeleteKeyResponse, ListKeysResponse, RenameKeyRequest, RenameKeyResponse,
-};
+use vouch_common::{DeleteKeyResponse, ListKeysResponse, RenameKeyRequest, RenameKeyResponse};
 
-use super::json_error;
 use super::session::extract_session_from_cookie;
 
 /// List all registered keys for the user (during enrollment).
@@ -27,21 +23,12 @@ use super::session::extract_session_from_cookie;
 pub async fn list_keys(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
-) -> Result<Json<ListKeysResponse>, (StatusCode, Json<ApiError>)> {
-    let token = extract_session_from_cookie(&state, &jar)
-        .await
-        .map_err(|_| {
-            json_error(
-                StatusCode::UNAUTHORIZED,
-                "invalid_session",
-                "Invalid or expired session",
-            )
-        })?;
+) -> Result<Json<ListKeysResponse>, ServiceError> {
+    let token = extract_session_from_cookie(&state, &jar).await?;
 
     let keys =
         key_svc::list_keys_for_user(&state.store, &token.sub, token.authenticator_id.as_deref())
-            .await
-            .map_err(into_handler_error)?;
+            .await?;
 
     Ok(Json(ListKeysResponse { keys }))
 }
@@ -54,20 +41,10 @@ pub async fn rename_key(
     jar: CookieJar,
     Path(key_id): Path<String>,
     Json(req): Json<RenameKeyRequest>,
-) -> Result<Json<RenameKeyResponse>, (StatusCode, Json<ApiError>)> {
-    let token = extract_session_from_cookie(&state, &jar)
-        .await
-        .map_err(|_| {
-            json_error(
-                StatusCode::UNAUTHORIZED,
-                "invalid_session",
-                "Invalid or expired session",
-            )
-        })?;
+) -> Result<Json<RenameKeyResponse>, ServiceError> {
+    let token = extract_session_from_cookie(&state, &jar).await?;
 
-    let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &req.name)
-        .await
-        .map_err(into_handler_error)?;
+    let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &req.name).await?;
 
     Ok(Json(RenameKeyResponse { message }))
 }
@@ -75,18 +52,12 @@ pub async fn rename_key(
 /// Delete a security key (during enrollment).
 /// DELETE /enroll/keys/{id}
 /// Authentication is via session cookie.
-///
-/// Returns `ServiceError` directly (rather than the tuple format used by other
-/// enroll_keys handlers) so that `StepUpRequired` can emit a `WWW-Authenticate`
-/// header via `ServiceError::into_api_response()`.
 pub async fn delete_key(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
-    let token = extract_session_from_cookie(&state, &jar)
-        .await
-        .map_err(|_| ServiceError::Unauthorized("Invalid or expired session"))?;
+    let token = extract_session_from_cookie(&state, &jar).await?;
 
     // Require a recent authentication for destructive key operations.
     // Use auth_time (when FIDO2 occurred) if available, otherwise fall back to iat.
@@ -100,29 +71,4 @@ pub async fn delete_key(
         message: format!("Key '{}' has been deleted", key_name),
         sessions_revoked,
     }))
-}
-
-/// Convert a `ServiceError` into the handler error tuple format.
-fn into_handler_error(err: crate::services::error::ServiceError) -> (StatusCode, Json<ApiError>) {
-    use crate::services::error::ServiceError;
-
-    let (status, code, message) = match &err {
-        ServiceError::NotFound(entity) => (
-            StatusCode::NOT_FOUND,
-            "not_found",
-            format!("{entity} not found"),
-        ),
-        ServiceError::Validation(msg) => (StatusCode::BAD_REQUEST, "invalid_request", msg.clone()),
-        ServiceError::Forbidden(msg) => (StatusCode::FORBIDDEN, "forbidden", (*msg).to_string()),
-        ServiceError::Unauthorized(msg) => {
-            (StatusCode::UNAUTHORIZED, "unauthorized", (*msg).to_string())
-        }
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal_error",
-            "Internal error".to_string(),
-        ),
-    };
-
-    (status, Json(ApiError::new(code, &message)))
 }

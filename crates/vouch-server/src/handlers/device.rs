@@ -14,12 +14,11 @@ use jiff::{Span, Timestamp};
 use secrecy::ExposeSecret;
 use std::sync::Arc;
 use vouch_common::{
-    ApiError, DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse,
-    OAuthError,
+    DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, DeviceTokenResponse, OAuthError,
 };
 
-use super::json_error;
 use crate::redact_email;
+use crate::services::error::ServiceError;
 
 /// Characters used for user code generation (no ambiguous characters).
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
@@ -77,19 +76,19 @@ fn hash_device_code(code: &str) -> String {
 pub async fn device_code(
     State(state): State<Arc<AppState>>,
     axum::Form(_req): axum::Form<DeviceCodeRequest>,
-) -> Result<Json<DeviceCodeResponse>, (StatusCode, Json<ApiError>)> {
+) -> Result<Json<DeviceCodeResponse>, ServiceError> {
     tracing::info!("Device authorization request");
 
     // Generate codes
     let device_code = generate_device_code().map_err(|_| {
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "rng_error",
             "Failed to generate device code",
         )
     })?;
     let user_code = generate_user_code().map_err(|_| {
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "rng_error",
             "Failed to generate user code",
@@ -102,7 +101,7 @@ pub async fn device_code(
     let expires_seconds = i64::try_from(state.config().device_code_expires_seconds).unwrap_or(600);
     let duration = Span::new().seconds(expires_seconds);
     let expires_at = now.checked_add(duration).map_err(|_| {
-        json_error(
+        ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "time_error",
             "Time overflow",
@@ -120,13 +119,7 @@ pub async fn device_code(
         interval_seconds,
     )
     .await
-    .map_err(|e| {
-        json_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "db_error",
-            &e.to_string(),
-        )
-    })?;
+    .map_err(|e| ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string()))?;
 
     // Build verification URL
     let verification_uri = format!("{}/device", state.config().base_url);
