@@ -20,12 +20,12 @@ use std::sync::Arc;
 use super::types::{
     ApplicationCreateTemplate, ApplicationCreatedTemplate, ApplicationDetailTemplate,
     ApplicationErrorTemplate, ApplicationInfo, ApplicationUnauthorizedTemplate,
-    ApplicationsListTemplate, CreateApplicationForm, SecretRotatedTemplate, UpdateApplicationForm,
-    UsageStat,
+    ApplicationsListTemplate, CreateApplicationForm, SecretAddedTemplate, SecretInfo,
+    UpdateApplicationForm, UsageStat,
 };
 use super::{
-    extract_auth_from_cookie, generate_client_secret, parse_redirect_uris, parse_resource_uris,
-    validate_redirect_uris,
+    MAX_ACTIVE_SECRETS, extract_auth_from_cookie, generate_client_secret, parse_redirect_uris,
+    parse_resource_uris, validate_redirect_uris,
 };
 use crate::handlers::hash_token;
 use crate::services::oidc::ResourceUri;
@@ -399,11 +399,22 @@ pub async fn detail_application_page(
         }
     };
 
-    // Get secrets count
-    let secrets_count = match db::get_oauth_client_secrets(&state.store, &app_id).await {
-        Ok(s) => s.iter().filter(|s| s.revoked_at.is_none()).count(),
-        Err(_) => 0,
-    };
+    // Get secrets metadata
+    let now = jiff::Timestamp::now();
+    let all_secrets = db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .unwrap_or_default();
+    let secrets: Vec<SecretInfo> = all_secrets
+        .iter()
+        .map(|s| SecretInfo {
+            id: s.id.clone(),
+            description: s.description.clone(),
+            created_at: s.created_at,
+            expires_at: s.expires_at,
+            active: s.is_valid(&now),
+        })
+        .collect();
+    let secrets_count = secrets.iter().filter(|s| s.active).count();
 
     // Get usage stats
     let usage_stats = match db::get_oauth_usage_stats(&state.audit, &app_id, None).await {
@@ -420,6 +431,7 @@ pub async fn detail_application_page(
     ApplicationDetailTemplate {
         app: ApplicationInfo::from(client),
         secrets_count,
+        secrets,
         usage_stats,
         auth,
     }
@@ -736,9 +748,9 @@ pub async fn delete_application_form(
     Redirect::to("/applications").into_response()
 }
 
-/// Rotate client secret.
-/// POST /applications/:id/rotate
-pub async fn rotate_secret_form(
+/// Add a new client secret.
+/// POST /applications/:id/secrets
+pub async fn add_secret_form(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Path(app_id): Path<String>,
@@ -749,7 +761,6 @@ pub async fn rotate_secret_form(
 
     let user_id = auth.user_id.as_deref().unwrap_or_default();
 
-    // Verify ownership
     let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
         Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
         _ => {
@@ -762,51 +773,160 @@ pub async fn rotate_secret_form(
         }
     };
 
-    // Check if this client type supports secrets
     if !client.application_type.requires_secret() {
         return ApplicationErrorTemplate {
             title: "Error".to_string(),
             message: "This application type does not use client secrets.".to_string(),
-            back_url: format!("/applications/{}", app_id),
+            back_url: format!("/applications/{app_id}"),
         }
         .into_response();
     }
 
-    // Generate new secret
+    if client.is_fapi()
+        && client.token_endpoint_auth_method == db::TokenEndpointAuthMethod::PrivateKeyJwt
+    {
+        return ApplicationErrorTemplate {
+            title: "Error".to_string(),
+            message: "FAPI clients using private_key_jwt do not use client secrets.".to_string(),
+            back_url: format!("/applications/{app_id}"),
+        }
+        .into_response();
+    }
+
+    let now = jiff::Timestamp::now();
+    let secrets = match db::get_oauth_client_secrets(&state.store, &app_id).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("Failed to get secrets: {e}");
+            return ApplicationErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to add secret.".to_string(),
+                back_url: format!("/applications/{app_id}"),
+            }
+            .into_response();
+        }
+    };
+
+    let active_count = secrets.iter().filter(|s| s.is_valid(&now)).count();
+    if active_count >= MAX_ACTIVE_SECRETS {
+        return ApplicationErrorTemplate {
+            title: "Error".to_string(),
+            message: "Maximum of 2 active secrets allowed.".to_string(),
+            back_url: format!("/applications/{app_id}"),
+        }
+        .into_response();
+    }
+
     let secret = generate_client_secret();
     let secret_hash = hash_token(&secret);
 
-    // Revoke old secrets
-    if let Err(e) = db::revoke_all_oauth_client_secrets(&state.store, &app_id).await {
-        tracing::error!("Failed to revoke old secrets: {}", e);
-    }
+    let record =
+        match db::create_oauth_client_secret(&state.store, &app_id, &secret_hash, None, None).await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::error!("Failed to create secret: {e}");
+                return ApplicationErrorTemplate {
+                    title: "Error".to_string(),
+                    message: "Failed to add secret.".to_string(),
+                    back_url: format!("/applications/{app_id}"),
+                }
+                .into_response();
+            }
+        };
 
-    // Create new secret
-    if let Err(e) = db::create_oauth_client_secret(
-        &state.store,
-        &app_id,
-        &secret_hash,
-        Some("Rotated secret"),
-        None,
-    )
-    .await
-    {
-        tracing::error!("Failed to create new secret: {}", e);
+    tracing::info!("Added secret for OAuth application: {}", client.client_id);
+
+    SecretAddedTemplate {
+        app_id: app_id.to_string(),
+        name: client.name,
+        client_id: client.client_id,
+        client_secret: secret,
+        secret_id: record.id,
+        auth,
+    }
+    .into_response()
+}
+
+/// Delete (revoke) a secret.
+/// POST /applications/:id/secrets/:secret_id/delete
+pub async fn delete_secret_form(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Path((app_id, secret_id)): Path<(String, String)>,
+) -> Response {
+    let Some(auth) = extract_auth_from_cookie(&state, &jar).await else {
+        return ApplicationUnauthorizedTemplate.into_response();
+    };
+
+    let user_id = auth.user_id.as_deref().unwrap_or_default();
+
+    let client = match db::get_oauth_client_by_id(&state.store, &app_id).await {
+        Ok(Some(c)) if c.user_id.as_deref() == Some(user_id) => c,
+        _ => {
+            return ApplicationErrorTemplate {
+                title: "Not Found".to_string(),
+                message: "Application not found.".to_string(),
+                back_url: "/applications".to_string(),
+            }
+            .into_response();
+        }
+    };
+
+    let secret = match db::get_oauth_client_secret_by_id(&state.store, &secret_id).await {
+        Ok(Some(s)) if s.oauth_client_id == app_id => s,
+        _ => {
+            return ApplicationErrorTemplate {
+                title: "Not Found".to_string(),
+                message: "Secret not found.".to_string(),
+                back_url: format!("/applications/{app_id}"),
+            }
+            .into_response();
+        }
+    };
+
+    if secret.revoked_at.is_some() {
         return ApplicationErrorTemplate {
-            title: "Error".to_string(),
-            message: "Failed to rotate secret.".to_string(),
-            back_url: format!("/applications/{}", app_id),
+            title: "Not Found".to_string(),
+            message: "Secret not found.".to_string(),
+            back_url: format!("/applications/{app_id}"),
         }
         .into_response();
     }
 
-    tracing::info!("Rotated secret for OAuth application: {}", client.client_id);
+    let now = jiff::Timestamp::now();
+    let all_secrets = db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .unwrap_or_default();
+    let other_active = all_secrets
+        .iter()
+        .filter(|s| s.id != secret_id && s.is_valid(&now))
+        .count();
 
-    SecretRotatedTemplate {
-        name: client.name,
-        client_id: client.client_id,
-        client_secret: secret,
-        auth,
+    if other_active == 0 {
+        return ApplicationErrorTemplate {
+            title: "Error".to_string(),
+            message: "Cannot delete the last active secret.".to_string(),
+            back_url: format!("/applications/{app_id}"),
+        }
+        .into_response();
     }
-    .into_response()
+
+    if let Err(e) = db::revoke_oauth_client_secret(&state.store, &secret_id).await {
+        tracing::error!("Failed to revoke secret: {e}");
+        return ApplicationErrorTemplate {
+            title: "Error".to_string(),
+            message: "Failed to delete secret.".to_string(),
+            back_url: format!("/applications/{app_id}"),
+        }
+        .into_response();
+    }
+
+    tracing::info!(
+        "Revoked secret {} for OAuth application: {}",
+        secret_id,
+        client.client_id
+    );
+
+    Redirect::to(&format!("/applications/{app_id}")).into_response()
 }

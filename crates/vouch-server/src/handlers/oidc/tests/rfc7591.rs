@@ -1111,6 +1111,7 @@ async fn test_rfc7591_e2e_registered_client_auth_code_flow() {
 
     // Build a TestOAuthClient from the registration response
     let dynamic_client = TestOAuthClient {
+        app_id: String::new(),
         client_id: client_id.to_string(),
         client_secret: client_secret.to_string(),
     };

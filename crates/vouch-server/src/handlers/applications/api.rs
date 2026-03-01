@@ -20,10 +20,11 @@ use axum_extra::extract::cookie::CookieJar;
 use std::sync::Arc;
 
 use super::types::{
-    ApplicationResponse, CreateApplicationRequest, CreateApplicationResponse,
-    ListApplicationsResponse, RotateSecretResponse, UpdateApplicationRequest,
+    AddSecretRequest, AddSecretResponse, ApplicationResponse, CreateApplicationRequest,
+    CreateApplicationResponse, ListApplicationsResponse, ListSecretsResponse, SecretInfo,
+    UpdateApplicationRequest,
 };
-use super::{generate_client_secret, validate_redirect_uris};
+use super::{MAX_ACTIVE_SECRETS, generate_client_secret, validate_redirect_uris};
 use crate::handlers::hash_token;
 use crate::handlers::session::extract_resource_token;
 use crate::services::error::ServiceError;
@@ -728,17 +729,17 @@ pub async fn delete_application_api(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Rotate client secret (API).
-/// POST /api/v1/applications/:id/rotate
-pub async fn rotate_secret_api(
+/// Add a new client secret (API).
+/// POST /api/v1/applications/:id/secrets
+pub async fn add_secret_api(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
     Path(app_id): Path<String>,
-) -> Result<Json<RotateSecretResponse>, ServiceError> {
-    // Validate app_id is a UUID before any processing
+    Json(req): Json<AddSecretRequest>,
+) -> Result<(StatusCode, Json<AddSecretResponse>), ServiceError> {
     if uuid::Uuid::try_parse(&app_id).is_err() {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
@@ -749,11 +750,10 @@ pub async fn rotate_secret_api(
 
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    // Verify ownership
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to get application for secret rotation: {e}");
+            tracing::error!("Failed to get application: {e}");
             ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
@@ -772,7 +772,6 @@ pub async fn rotate_secret_api(
         ));
     }
 
-    // Check if this client type supports secrets
     if !client.application_type.requires_secret() {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
@@ -781,15 +780,21 @@ pub async fn rotate_secret_api(
         ));
     }
 
-    // Generate new secret
-    let secret = generate_client_secret();
-    let secret_hash = hash_token(&secret);
+    if client.is_fapi()
+        && client.token_endpoint_auth_method == db::TokenEndpointAuthMethod::PrivateKeyJwt
+    {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "no_secret",
+            "FAPI clients using private_key_jwt do not use client secrets",
+        ));
+    }
 
-    // Revoke old secrets
-    db::revoke_all_oauth_client_secrets(&state.store, &app_id)
+    let now = jiff::Timestamp::now();
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
         .await
         .map_err(|e| {
-            tracing::error!("Failed to revoke old secrets: {e}");
+            tracing::error!("Failed to get secrets: {e}");
             ServiceError::api(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "db_error",
@@ -797,17 +802,28 @@ pub async fn rotate_secret_api(
             )
         })?;
 
-    // Create new secret
-    let secret_record = db::create_oauth_client_secret(
+    let active_count = secrets.iter().filter(|s| s.is_valid(&now)).count();
+    if active_count >= MAX_ACTIVE_SECRETS {
+        return Err(ServiceError::api(
+            StatusCode::CONFLICT,
+            "max_secrets_reached",
+            "Maximum of 2 active secrets allowed",
+        ));
+    }
+
+    let secret = generate_client_secret();
+    let secret_hash = hash_token(&secret);
+
+    let record = db::create_oauth_client_secret(
         &state.store,
         &app_id,
         &secret_hash,
-        Some("Rotated secret"),
+        req.description.as_deref(),
         None,
     )
     .await
     .map_err(|e| {
-        tracing::error!("Failed to create rotated secret: {e}");
+        tracing::error!("Failed to create secret: {e}");
         ServiceError::api(
             StatusCode::INTERNAL_SERVER_ERROR,
             "db_error",
@@ -815,17 +831,234 @@ pub async fn rotate_secret_api(
         )
     })?;
 
-    tracing::info!("Rotated secret for OAuth application: {}", client.client_id);
+    if let Err(e) = db::record_oauth_event(
+        &state.audit,
+        &app_id,
+        OAuthEventType::SecretAdded,
+        Some(&token.sub),
+        None,
+        None,
+        Some("Secret added"),
+    )
+    .await
+    {
+        tracing::warn!("Failed to record OAuth event: {e}");
+    }
 
-    Ok(Json(RotateSecretResponse {
-        client_secret: secret,
-        created_at: secret_record.created_at,
-        expires_at: secret_record.expires_at,
+    tracing::info!("Added secret for OAuth application: {}", client.client_id);
+
+    Ok((
+        StatusCode::CREATED,
+        Json(AddSecretResponse {
+            secret_id: record.id,
+            client_secret: secret,
+            created_at: record.created_at,
+            expires_at: record.expires_at,
+        }),
+    ))
+}
+
+/// List secrets for an application (API).
+/// GET /api/v1/applications/:id/secrets
+pub async fn list_secrets_api(
+    method: Method,
+    uri: OriginalUri,
+    headers: HeaderMap,
+    jar: CookieJar,
+    State(state): State<Arc<AppState>>,
+    Path(app_id): Path<String>,
+) -> Result<Json<ListSecretsResponse>, ServiceError> {
+    if uuid::Uuid::try_parse(&app_id).is_err() {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid application ID format",
+        ));
+    }
+
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+
+    let client = db::get_oauth_client_by_id(&state.store, &app_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get application: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
+        })?;
+
+    if client.user_id.as_deref() != Some(token.sub.as_str()) {
+        return Err(ServiceError::api(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Application not found",
+        ));
+    }
+
+    let now = jiff::Timestamp::now();
+    let secrets = db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get secrets: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?;
+
+    let secret_infos = secrets
+        .into_iter()
+        .map(|s| SecretInfo {
+            active: s.is_valid(&now),
+            id: s.id,
+            description: s.description,
+            created_at: s.created_at,
+            expires_at: s.expires_at,
+        })
+        .collect();
+
+    Ok(Json(ListSecretsResponse {
+        secrets: secret_infos,
     }))
 }
 
+/// Delete (revoke) a secret (API).
+/// DELETE /api/v1/applications/:id/secrets/:secret_id
+pub async fn delete_secret_api(
+    method: Method,
+    uri: OriginalUri,
+    headers: HeaderMap,
+    jar: CookieJar,
+    State(state): State<Arc<AppState>>,
+    Path((app_id, secret_id)): Path<(String, String)>,
+) -> Result<StatusCode, ServiceError> {
+    if uuid::Uuid::try_parse(&app_id).is_err() || uuid::Uuid::try_parse(&secret_id).is_err() {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_request",
+            "Invalid ID format",
+        ));
+    }
+
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+
+    let client = db::get_oauth_client_by_id(&state.store, &app_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get application: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Application not found")
+        })?;
+
+    if client.user_id.as_deref() != Some(token.sub.as_str()) {
+        return Err(ServiceError::api(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Application not found",
+        ));
+    }
+
+    let secret = db::get_oauth_client_secret_by_id(&state.store, &secret_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get secret: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?
+        .ok_or_else(|| ServiceError::api(StatusCode::NOT_FOUND, "not_found", "Secret not found"))?;
+
+    if secret.oauth_client_id != app_id {
+        return Err(ServiceError::api(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Secret not found",
+        ));
+    }
+
+    if secret.revoked_at.is_some() {
+        return Err(ServiceError::api(
+            StatusCode::NOT_FOUND,
+            "not_found",
+            "Secret not found",
+        ));
+    }
+
+    let now = jiff::Timestamp::now();
+    let all_secrets = db::get_oauth_client_secrets(&state.store, &app_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get secrets: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?;
+
+    let other_active = all_secrets
+        .iter()
+        .filter(|s| s.id != secret_id && s.is_valid(&now))
+        .count();
+
+    if other_active == 0 {
+        return Err(ServiceError::api(
+            StatusCode::CONFLICT,
+            "last_secret",
+            "Cannot delete the last active secret",
+        ));
+    }
+
+    db::revoke_oauth_client_secret(&state.store, &secret_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to revoke secret: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?;
+
+    if let Err(e) = db::record_oauth_event(
+        &state.audit,
+        &app_id,
+        OAuthEventType::SecretRevoked,
+        Some(&token.sub),
+        None,
+        None,
+        Some("Secret revoked"),
+    )
+    .await
+    {
+        tracing::warn!("Failed to record OAuth event: {e}");
+    }
+
+    tracing::info!(
+        "Revoked secret {} for OAuth application: {}",
+        secret_id,
+        client.client_id
+    );
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
 /// Revoke all tokens for an application (API).
-/// POST /api/v1/applications/:id/revoke
+/// `POST /api/v1/applications/:id/revoke`
 pub async fn revoke_tokens_api(
     method: Method,
     uri: OriginalUri,
@@ -901,4 +1134,553 @@ pub async fn revoke_tokens_api(
     );
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::test_utils::*;
+
+    // ========================================================================
+    // Helper: create a test app owned by a user, returning (app_id, token)
+    // ========================================================================
+
+    async fn setup_user_with_app(state: &crate::AppState, email: &str) -> (String, String) {
+        let user = create_test_user(&state.store, email).await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(state, &user.id, &user.email, &auth_id).await;
+        let client = create_test_oauth_client(&state.store, &user.id).await;
+        (client.app_id, token)
+    }
+
+    fn bearer(token: &str) -> String {
+        format!("Bearer {token}")
+    }
+
+    // ========================================================================
+    // POST /api/v1/applications/:id/secrets — Add Secret
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_add_secret_success() {
+        let (app, state) = test_app().await;
+        let (app_id, token) = setup_user_with_app(&state, "add-secret@example.com").await;
+        let auth = bearer(&token);
+
+        let (status, body) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED, "body: {body}");
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert!(json.get("secret_id").is_some());
+        assert!(json.get("client_secret").is_some());
+        assert!(json.get("created_at").is_some());
+
+        let secret_value = json["client_secret"].as_str().unwrap();
+        assert!(secret_value.starts_with("vouch_"));
+    }
+
+    #[tokio::test]
+    async fn test_add_secret_with_description() {
+        let (app, state) = test_app().await;
+        let (app_id, token) = setup_user_with_app(&state, "add-desc@example.com").await;
+        let auth = bearer(&token);
+
+        let (status, _body) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            r#"{"description": "CI/CD pipeline"}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Verify description appears in list
+        let (status, body) = http_get(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        let secrets = json["secrets"].as_array().unwrap();
+        let has_desc = secrets
+            .iter()
+            .any(|s| s["description"].as_str() == Some("CI/CD pipeline"));
+        assert!(has_desc, "Description should be visible in list");
+    }
+
+    #[tokio::test]
+    async fn test_add_secret_max_reached() {
+        let (app, state) = test_app().await;
+        let (app_id, token) = setup_user_with_app(&state, "max-secrets@example.com").await;
+        let auth = bearer(&token);
+
+        // App already has 1 secret from creation. Add a second.
+        let (status, _) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+
+        // Third should fail (max is 2 active)
+        let (status, body) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["code"], "max_secrets_reached");
+    }
+
+    #[tokio::test]
+    async fn test_add_secret_after_revoking_one() {
+        let (app, state) = test_app().await;
+        let (app_id, token) = setup_user_with_app(&state, "revoke-add@example.com").await;
+        let auth = bearer(&token);
+
+        // Add second secret (now at max)
+        let (status, body) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+        let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let second_id = second["secret_id"].as_str().unwrap();
+
+        // Revoke the second secret
+        let (status, _) = http_delete(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets/{second_id}"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Now we should be able to add another
+        let (status, _) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn test_add_secret_unauthenticated() {
+        let (app, state) = test_app().await;
+        let (app_id, _token) = setup_user_with_app(&state, "unauth@example.com").await;
+
+        let (status, _body) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            r#"{}"#,
+            &[],
+        )
+        .await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn test_add_secret_wrong_owner() {
+        let (app, state) = test_app().await;
+
+        // Create app owned by user1
+        let user1 = create_test_user(&state.store, "owner@example.com").await;
+        let client = create_test_oauth_client(&state.store, &user1.id).await;
+
+        // Authenticate as user2
+        let user2 = create_test_user(&state.store, "other@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user2.id).await;
+        let token2 = create_test_session(&state, &user2.id, &user2.email, &auth_id).await;
+        let auth = bearer(&token2);
+
+        let (status, _) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{}/secrets", client.app_id),
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_add_secret_nonexistent_app() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "noapp@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+
+        let bogus_id = uuid::Uuid::now_v7();
+        let (status, _) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{bogus_id}/secrets"),
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_add_secret_invalid_app_id() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "badid@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+
+        let (status, _) = http_post_json(
+            &app,
+            "/api/v1/applications/not-a-uuid/secrets",
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // ========================================================================
+    // GET /api/v1/applications/:id/secrets — List Secrets
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_list_secrets_single() {
+        let (app, state) = test_app().await;
+        let (app_id, token) = setup_user_with_app(&state, "list-one@example.com").await;
+        let auth = bearer(&token);
+
+        let (status, body) = http_get(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        let secrets = json["secrets"].as_array().unwrap();
+        assert_eq!(secrets.len(), 1);
+
+        let s = &secrets[0];
+        assert!(s.get("id").is_some());
+        assert!(s.get("created_at").is_some());
+        assert_eq!(s["active"], true);
+        // secret_hash must NOT be exposed
+        assert!(s.get("secret_hash").is_none());
+    }
+
+    #[tokio::test]
+    async fn test_list_secrets_shows_revoked() {
+        let (app, state) = test_app().await;
+        let (app_id, token) = setup_user_with_app(&state, "list-revoked@example.com").await;
+        let auth = bearer(&token);
+
+        // Add second secret
+        let (_, body) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let second_id = second["secret_id"].as_str().unwrap();
+
+        // Revoke it
+        let (status, _) = http_delete(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets/{second_id}"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // List should show both (1 active, 1 revoked)
+        let (status, body) = http_get(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        let secrets = json["secrets"].as_array().unwrap();
+        assert_eq!(secrets.len(), 2);
+
+        let active_count = secrets.iter().filter(|s| s["active"] == true).count();
+        let revoked_count = secrets.iter().filter(|s| s["active"] == false).count();
+        assert_eq!(active_count, 1);
+        assert_eq!(revoked_count, 1);
+    }
+
+    #[tokio::test]
+    async fn test_list_secrets_wrong_owner() {
+        let (app, state) = test_app().await;
+
+        let user1 = create_test_user(&state.store, "owner2@example.com").await;
+        let client = create_test_oauth_client(&state.store, &user1.id).await;
+
+        let user2 = create_test_user(&state.store, "other2@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user2.id).await;
+        let token2 = create_test_session(&state, &user2.id, &user2.email, &auth_id).await;
+        let auth = bearer(&token2);
+
+        let (status, _) = http_get(
+            &app,
+            &format!("/api/v1/applications/{}/secrets", client.app_id),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ========================================================================
+    // DELETE /api/v1/applications/:id/secrets/:secret_id — Delete Secret
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_delete_secret_success() {
+        let (app, state) = test_app().await;
+        let (app_id, token) = setup_user_with_app(&state, "del-ok@example.com").await;
+        let auth = bearer(&token);
+
+        // Add second secret
+        let (_, body) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let second_id = second["secret_id"].as_str().unwrap();
+
+        // Delete the second secret
+        let (status, _) = http_delete(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets/{second_id}"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Verify it shows as inactive in list
+        let (_, body) = http_get(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let secrets = json["secrets"].as_array().unwrap();
+        let deleted = secrets.iter().find(|s| s["id"] == second_id).unwrap();
+        assert_eq!(deleted["active"], false);
+    }
+
+    #[tokio::test]
+    async fn test_delete_last_secret_rejected() {
+        let (app, state) = test_app().await;
+        let (app_id, token) = setup_user_with_app(&state, "del-last@example.com").await;
+        let auth = bearer(&token);
+
+        // Get the only secret's ID
+        let (_, body) = http_get(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let secret_id = json["secrets"][0]["id"].as_str().unwrap();
+
+        // Try to delete it
+        let (status, body) = http_delete(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets/{secret_id}"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["code"], "last_secret");
+    }
+
+    #[tokio::test]
+    async fn test_delete_already_revoked() {
+        let (app, state) = test_app().await;
+        let (app_id, token) = setup_user_with_app(&state, "del-revoked@example.com").await;
+        let auth = bearer(&token);
+
+        // Add and then revoke a secret
+        let (_, body) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let second_id = second["secret_id"].as_str().unwrap();
+
+        let (status, _) = http_delete(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets/{second_id}"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Try to delete again
+        let (status, _) = http_delete(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets/{second_id}"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_delete_secret_wrong_app() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "wrong-app@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+        let auth = bearer(&token);
+
+        // Create two apps
+        let client1 = create_test_oauth_client(&state.store, &user.id).await;
+        let client2 = create_test_oauth_client(&state.store, &user.id).await;
+
+        // Get secret from app2
+        let (_, body) = http_get(
+            &app,
+            &format!("/api/v1/applications/{}/secrets", client2.app_id),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let secret2_id = json["secrets"][0]["id"].as_str().unwrap();
+
+        // Try to delete app2's secret via app1's route
+        let (status, _) = http_delete(
+            &app,
+            &format!(
+                "/api/v1/applications/{}/secrets/{secret2_id}",
+                client1.app_id
+            ),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_delete_secret_wrong_owner() {
+        let (app, state) = test_app().await;
+
+        let user1 = create_test_user(&state.store, "del-owner1@example.com").await;
+        let client = create_test_oauth_client(&state.store, &user1.id).await;
+
+        let user2 = create_test_user(&state.store, "del-owner2@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user2.id).await;
+        let token2 = create_test_session(&state, &user2.id, &user2.email, &auth_id).await;
+        let auth = bearer(&token2);
+
+        // Get secret ID from app (via db directly, since API would 404)
+        let secrets = crate::db::get_oauth_client_secrets(&state.store, &client.app_id)
+            .await
+            .unwrap();
+        let secret_id = &secrets[0].id;
+
+        let (status, _) = http_delete(
+            &app,
+            &format!("/api/v1/applications/{}/secrets/{secret_id}", client.app_id),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    // ========================================================================
+    // Edge Case: last-secret protection with revoked secrets
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_cannot_delete_sole_active_when_other_revoked() {
+        let (app, state) = test_app().await;
+        let (app_id, token) = setup_user_with_app(&state, "sole-active@example.com").await;
+        let auth = bearer(&token);
+
+        // Add second secret (now 2 active)
+        let (_, body) = http_post_json(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            r#"{}"#,
+            &[("Authorization", &auth)],
+        )
+        .await;
+        let second: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let second_id = second["secret_id"].as_str().unwrap();
+
+        // Revoke the second (now 1 active + 1 revoked)
+        let (status, _) = http_delete(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets/{second_id}"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        // Get the remaining active secret's ID
+        let (_, body) = http_get(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        let secrets = json["secrets"].as_array().unwrap();
+        let active_secret = secrets
+            .iter()
+            .find(|s| s["active"] == true)
+            .expect("should have 1 active secret");
+        let active_id = active_secret["id"].as_str().unwrap();
+
+        // Trying to delete the sole active secret should fail,
+        // even though there's a revoked secret present
+        let (status, body) = http_delete(
+            &app,
+            &format!("/api/v1/applications/{app_id}/secrets/{active_id}"),
+            &[("Authorization", &auth)],
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
+        assert_eq!(json["code"], "last_secret");
+    }
 }

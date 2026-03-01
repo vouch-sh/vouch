@@ -8,6 +8,7 @@ pub mod attestation;
 pub mod config;
 pub mod crypto;
 pub mod db;
+pub mod filters;
 pub mod handlers;
 pub mod infra;
 pub mod services;

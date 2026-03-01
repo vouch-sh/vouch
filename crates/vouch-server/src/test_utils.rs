@@ -265,8 +265,12 @@ pub fn test_router(state: Arc<AppState>) -> Router {
             post(handlers::applications::delete_application_form),
         )
         .route(
-            "/applications/{id}/rotate",
-            post(handlers::applications::rotate_secret_form),
+            "/applications/{id}/secrets",
+            post(handlers::applications::add_secret_form),
+        )
+        .route(
+            "/applications/{id}/secrets/{secret_id}/delete",
+            post(handlers::applications::delete_secret_form),
         )
         // Applications API (JSON)
         .route(
@@ -281,8 +285,13 @@ pub fn test_router(state: Arc<AppState>) -> Router {
                 .delete(handlers::applications::delete_application_api),
         )
         .route(
-            "/api/v1/applications/{id}/rotate",
-            post(handlers::applications::rotate_secret_api),
+            "/api/v1/applications/{id}/secrets",
+            get(handlers::applications::list_secrets_api)
+                .post(handlers::applications::add_secret_api),
+        )
+        .route(
+            "/api/v1/applications/{id}/secrets/{secret_id}",
+            delete(handlers::applications::delete_secret_api),
         )
         .route(
             "/api/v1/applications/{id}/revoke",
@@ -651,6 +660,8 @@ pub async fn create_test_scim_token(store: &DocumentStore, description: &str) ->
 
 /// Result of creating a test OAuth client with credentials.
 pub struct TestOAuthClient {
+    /// The internal application ID (database primary key).
+    pub app_id: String,
     /// The client_id.
     pub client_id: String,
     /// The plaintext client secret.
@@ -712,6 +723,7 @@ pub async fn create_test_oauth_client(store: &DocumentStore, user_id: &str) -> T
         .expect("Failed to create test OAuth client secret");
 
     TestOAuthClient {
+        app_id: client.id,
         client_id,
         client_secret: secret,
     }
@@ -768,6 +780,7 @@ pub async fn create_test_oauth_client_with_options(
         .expect("Failed to create test OAuth client secret");
 
     TestOAuthClient {
+        app_id: client.id,
         client_id,
         client_secret: secret,
     }
