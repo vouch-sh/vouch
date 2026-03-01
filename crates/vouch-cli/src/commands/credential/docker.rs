@@ -24,11 +24,11 @@ use std::io::{BufRead, Write};
 use vouch_common::{GitHubTokenRequest, GitHubTokenResponse};
 
 use crate::client::VouchClient;
-use crate::commands::credential::aws::{OidcTokenResponse, build_session_tags, decode_jwt_payload};
+use crate::commands::credential::aws::exchange_for_sts_credentials;
 use crate::integrations::aws::get_local_aws_role;
 use crate::integrations::aws::sigv4::sign_and_send_json_rpc;
-use crate::integrations::aws::sts::{StsCredentials, assume_role_with_web_identity};
-use crate::session::{get_user_email, resolve_session};
+use crate::integrations::aws::sts::StsCredentials;
+use crate::session::resolve_session;
 
 /// Docker credential helper output format.
 /// See: https://docs.docker.com/engine/reference/commandline/login/#credential-helper-protocol
@@ -199,64 +199,27 @@ async fn get_credential() -> Result<()> {
 /// Get credentials for AWS ECR.
 async fn get_ecr_credential(
     server: &str,
-    token: &SecretString,
+    _token: &SecretString,
     region: &str,
     domain_suffix: &str,
     registry_url: &str,
 ) -> Result<DockerCredential> {
-    let mut client = VouchClient::unauthenticated(server)?;
-    client.set_token(token.clone());
-
-    // Get OIDC token from Vouch server
-    let token_response: OidcTokenResponse = client
-        .get_authenticated("/v1/credentials/aws/token")
-        .await
-        .context("failed to get OIDC token from Vouch server")?;
-
-    // Get the AWS role ARN from local ~/.aws/config
-    // This uses the same role configured via 'vouch setup aws --role ...'
     let role_arn = get_local_aws_role().ok_or_else(|| {
         anyhow::anyhow!(
-            "AWS not configured. Run 'vouch setup aws --role <role-arn>' with a role that has ECR permissions"
+            "AWS not configured. Run 'vouch setup aws --role <role-arn>' \
+             with a role that has ECR permissions"
         )
     })?;
 
-    // Decode JWT to extract claims for session tags (ABAC)
-    let id_token = token_response.id_token.expose_secret();
-    let tags = decode_jwt_payload(id_token)
-        .map(|claims| build_session_tags(&claims))
-        .unwrap_or_default();
-
-    // Create HTTP client once for all AWS API calls
-    let http_client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
-
-    // Call STS AssumeRoleWithWebIdentity using the shared module
-    // Use email as session name for CloudTrail visibility
-    let email = get_user_email(server).await;
-    let session = email.as_deref().unwrap_or("vouch-docker");
-    let sts_response = assume_role_with_web_identity(
-        &http_client,
-        &role_arn,
-        session,
-        id_token,
-        region,
-        domain_suffix,
-        &tags,
-    )
-    .await
-    .context("failed to assume AWS role")?;
+    let result = exchange_for_sts_credentials(server, &role_arn, region, "vouch-docker").await?;
 
     // Call ECR GetAuthorizationToken
     let ecr_token = get_ecr_authorization_token(
-        &http_client,
+        &result.http_client,
         region,
         domain_suffix,
         registry_url,
-        &sts_response
-            .assume_role_with_web_identity_result
-            .credentials,
+        &result.credentials,
     )
     .await
     .context("failed to get ECR authorization token")?;

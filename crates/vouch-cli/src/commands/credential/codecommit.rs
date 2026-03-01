@@ -145,8 +145,7 @@ async fn get_sts_credentials(_region: &str) -> Result<StsCredentials> {
     let cache_key = format!("aws:{role_arn}");
 
     let data = super::cache::get_or_fetch(&cache_key, "AWS credentials", || async {
-        let output =
-            super::aws::fetch_and_assume(&server, &role_arn, Some("vouch-codecommit")).await?;
+        let output = super::aws::fetch_and_assume(&server, &role_arn).await?;
         let expires_at = output.expiration.clone();
         Ok((output.to_json(), expires_at))
     })

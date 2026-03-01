@@ -22,7 +22,6 @@ pub async fn run(
     credential_type: &CredentialType,
     shell: &Shell,
     role: Option<&str>,
-    session_name: Option<&str>,
     ca_opts: CodeArtifactOptions<'_>,
 ) -> Result<()> {
     match credential_type {
@@ -30,7 +29,7 @@ pub async fn run(
             let role_arn = role.context(
                 "AWS credentials require --role. Usage: vouch env --type aws --role <ARN>",
             )?;
-            print_aws_env(server, role_arn, session_name, shell).await
+            print_aws_env(server, role_arn, shell).await
         }
         CredentialType::Github => print_github_env(server, shell).await,
         CredentialType::Codeartifact => print_codeartifact_env(server, &ca_opts, shell).await,
@@ -43,13 +42,8 @@ pub async fn run(
 /// the CloudTrail user-agent string.
 ///
 /// See: <https://hackingthe.cloud/aws/general-knowledge/aws_cli_tips_and_tricks/#modifying-the-cloudtrail-log-user-agent-with-aws_execution_env>
-async fn print_aws_env(
-    server: &str,
-    role_arn: &str,
-    session_name: Option<&str>,
-    shell: &Shell,
-) -> Result<()> {
-    let creds = super::exec::fetch_aws_credentials(server, role_arn, session_name).await?;
+async fn print_aws_env(server: &str, role_arn: &str, shell: &Shell) -> Result<()> {
+    let creds = super::exec::fetch_aws_credentials(server, role_arn).await?;
 
     print_export(shell, "AWS_ACCESS_KEY_ID", &creds.access_key_id);
     print_export(

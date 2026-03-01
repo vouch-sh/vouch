@@ -757,6 +757,11 @@ proptest! {
     ) {
         use vouch_server::services::oidc::registration::validate_redirect_uri_for_test;
 
+        // Skip hosts with malformed Punycode labels — the url crate
+        // validates IDN domains and rejects ACE labels like "xn--"
+        // without valid Punycode content after the prefix.
+        prop_assume!(!host.contains("xn--"));
+
         let uri = format!("https://{host}/{path}");
         // Any well-formed HTTPS URI must be accepted
         let result = validate_redirect_uri_for_test(&uri);

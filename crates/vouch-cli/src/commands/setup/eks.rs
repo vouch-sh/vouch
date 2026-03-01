@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Amazon EKS setup command.
 //!
-//! Configures kubeconfig so kubectl authenticates via the existing Vouch AWS credential
-//! chain: `vouch login` -> `vouch credential aws` (via credential_process) -> `aws eks
-//! get-token` (via kubeconfig exec) -> kubectl.
+//! Configures kubeconfig so kubectl authenticates via `vouch credential eks`,
+//! which natively generates EKS bearer tokens without requiring the AWS CLI.
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+use crate::commands::credential::aws::exchange_for_sts_credentials;
 use crate::integrations::aws;
+use crate::integrations::aws::sigv4::sign_and_send_rest;
 use crate::utils::{ensure_secure_dir, write_secure_file};
 
 // ============================================================================
@@ -172,37 +173,43 @@ fn save_kubeconfig(path: &std::path::Path, config: &Kubeconfig) -> Result<()> {
 // Auto-discovery Helpers
 // ============================================================================
 
-/// Fetch EKS cluster endpoint and CA data via `aws eks describe-cluster`.
-fn describe_cluster(cluster_name: &str, region: &str, profile: &str) -> Result<(String, String)> {
-    let output = std::process::Command::new("aws")
-        .args([
-            "eks",
-            "describe-cluster",
-            "--name",
-            cluster_name,
-            "--region",
-            region,
-            "--profile",
-            profile,
-            "--output",
-            "json",
-        ])
-        .output()
-        .context("failed to run 'aws eks describe-cluster' - is the AWS CLI installed?")?;
+/// Fetch EKS cluster endpoint and CA data via native SigV4-signed REST API.
+async fn describe_cluster(
+    server: &str,
+    cluster_name: &str,
+    region: &str,
+    role_arn: &str,
+) -> Result<(String, String)> {
+    let result = exchange_for_sts_credentials(server, role_arn, region, "vouch-eks-setup").await?;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        bail!(
-            "aws eks describe-cluster failed:\n{}\n\
-             Ensure the cluster '{}' exists in region '{}' and you have access.",
-            stderr.trim(),
-            cluster_name,
-            region,
-        );
-    }
+    // Call EKS DescribeCluster REST API
+    let endpoint = format!("https://eks.{region}.{}", result.domain_suffix);
+    let path = format!(
+        "/clusters/{}",
+        crate::integrations::aws::sigv4::uri_encode(cluster_name)
+    );
 
-    let parsed: DescribeClusterOutput =
-        serde_json::from_slice(&output.stdout).context("failed to parse describe-cluster JSON")?;
+    let response_body = sign_and_send_rest(
+        &result.http_client,
+        reqwest::Method::GET,
+        &endpoint,
+        &path,
+        &[],
+        "eks",
+        region,
+        &result.credentials,
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "failed to describe EKS cluster '{cluster_name}' in \
+             region '{region}'. Ensure the cluster exists and your \
+             IAM role has EKS access."
+        )
+    })?;
+
+    let parsed: DescribeClusterOutput = serde_json::from_str(&response_body)
+        .context("failed to parse EKS DescribeCluster response")?;
 
     let ca_data = parsed
         .cluster
@@ -219,9 +226,10 @@ fn describe_cluster(cluster_name: &str, region: &str, profile: &str) -> Result<(
 
 /// Run the EKS setup command.
 ///
-/// Configures kubeconfig so kubectl uses `aws eks get-token` with a Vouch AWS
-/// profile for authentication.
+/// Configures kubeconfig so kubectl uses `vouch credential eks` for
+/// native EKS token generation (no AWS CLI required).
 pub async fn run(
+    server: &str,
     cluster_name: &str,
     region: Option<&str>,
     profile: Option<&str>,
@@ -231,9 +239,12 @@ pub async fn run(
         default_kubeconfig_path().unwrap_or_else(|_| PathBuf::from("~/.kube/config"))
     });
 
-    // Auto-discover profile and region
+    // Auto-discover profile, region, and role
     let profile_name = aws::resolve_profile(profile)?;
     let region_name = aws::resolve_region(region, &profile_name)?;
+    let role_arn = aws::get_local_aws_role().ok_or_else(|| {
+        anyhow::anyhow!("AWS not configured. Run 'vouch setup aws --role <role-arn>' first.")
+    })?;
 
     println!("Amazon EKS Setup");
     println!("================");
@@ -243,13 +254,26 @@ pub async fn run(
     println!("Profile:  {profile_name}");
     println!();
 
-    // Fetch cluster info from AWS
+    // Fetch cluster info from AWS using native SigV4 API call
     println!("Fetching cluster details...");
-    let (endpoint, ca_data) = describe_cluster(cluster_name, &region_name, &profile_name)?;
+    let (endpoint, ca_data) =
+        describe_cluster(server, cluster_name, &region_name, &role_arn).await?;
 
     // Naming convention
     let user_name = format!("vouch-eks-{cluster_name}");
     let context_name = format!("{cluster_name}-vouch");
+
+    // Build vouch credential eks args
+    let mut exec_args = vec![
+        "credential".to_string(),
+        "eks".to_string(),
+        "--cluster-name".to_string(),
+        cluster_name.to_string(),
+        "--region".to_string(),
+        region_name.clone(),
+    ];
+    exec_args.push("--role".to_string());
+    exec_args.push(role_arn);
 
     // Load existing kubeconfig
     let mut config = load_kubeconfig(&kubeconfig_path)?;
@@ -268,26 +292,16 @@ pub async fn run(
         },
     });
 
-    // Upsert user
+    // Upsert user with vouch credential eks exec config
     config.users.retain(|u| u.name != user_name);
     config.users.push(KubeconfigUser {
         name: user_name.clone(),
         user: KubeconfigUserData {
             exec: Some(ExecConfig {
                 api_version: "client.authentication.k8s.io/v1".to_string(),
-                command: "aws".to_string(),
-                args: vec![
-                    "eks".to_string(),
-                    "get-token".to_string(),
-                    "--cluster-name".to_string(),
-                    cluster_name.to_string(),
-                    "--region".to_string(),
-                    region_name.clone(),
-                ],
-                env: Some(vec![EnvVar {
-                    name: "AWS_PROFILE".to_string(),
-                    value: profile_name.clone(),
-                }]),
+                command: "vouch".to_string(),
+                args: exec_args,
+                env: None,
                 interactive_mode: Some("Never".to_string()),
             }),
             other: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
@@ -312,7 +326,7 @@ pub async fn run(
     println!();
     println!("Updated kubeconfig: {}", kubeconfig_path.display());
     println!("  Cluster: {cluster_name} ({endpoint})");
-    println!("  User:    {user_name} (via AWS profile \"{profile_name}\")");
+    println!("  User:    {user_name} (via vouch credential eks)");
     println!("  Context: {context_name}");
     println!();
     println!("To use:");
@@ -408,31 +422,32 @@ users: []
     }
 
     #[test]
-    fn test_exec_config_serialization() {
+    fn test_exec_config_serialization_vouch() {
         let exec = ExecConfig {
             api_version: "client.authentication.k8s.io/v1".to_string(),
-            command: "aws".to_string(),
+            command: "vouch".to_string(),
             args: vec![
+                "credential".to_string(),
                 "eks".to_string(),
-                "get-token".to_string(),
                 "--cluster-name".to_string(),
                 "test-cluster".to_string(),
                 "--region".to_string(),
                 "us-west-2".to_string(),
+                "--role".to_string(),
+                "arn:aws:iam::123456789012:role/MyRole".to_string(),
             ],
-            env: Some(vec![EnvVar {
-                name: "AWS_PROFILE".to_string(),
-                value: "vouch".to_string(),
-            }]),
+            env: None,
             interactive_mode: Some("Never".to_string()),
         };
 
         let yaml = serde_yaml::to_string(&exec).expect("should serialize");
         assert!(yaml.contains("apiVersion: client.authentication.k8s.io/v1"));
-        assert!(yaml.contains("command: aws"));
+        assert!(yaml.contains("command: vouch"));
         assert!(yaml.contains("interactiveMode: Never"));
-        assert!(yaml.contains("AWS_PROFILE"));
-        assert!(yaml.contains("get-token"));
+        assert!(yaml.contains("credential"));
+        assert!(yaml.contains("eks"));
+        assert!(yaml.contains("--cluster-name"));
+        assert!(!yaml.contains("env:"));
     }
 
     #[test]
