@@ -56,6 +56,13 @@ COPY crates/vouch-server/Cargo.toml crates/vouch-server/
 COPY crates/vouch-cli/Cargo.toml crates/vouch-cli/
 COPY crates/vouch-agent/Cargo.toml crates/vouch-agent/
 COPY crates/vouch-tests/Cargo.toml crates/vouch-tests/
+
+# Create dummy source files so cargo metadata can resolve the workspace
+RUN mkdir -p crates/vouch-common/src && touch crates/vouch-common/src/lib.rs \
+    && mkdir -p crates/vouch-server/src && touch crates/vouch-server/src/lib.rs crates/vouch-server/src/main.rs \
+    && mkdir -p crates/vouch-cli/src && touch crates/vouch-cli/src/lib.rs crates/vouch-cli/src/main.rs \
+    && mkdir -p crates/vouch-agent/src && touch crates/vouch-agent/src/lib.rs crates/vouch-agent/src/main.rs \
+    && mkdir -p crates/vouch-tests/src && touch crates/vouch-tests/src/lib.rs
 RUN cargo chef prepare --recipe-path recipe.json
 
 # Rust build stage - using musl for static binary
