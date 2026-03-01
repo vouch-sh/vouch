@@ -522,9 +522,11 @@ async fn run() -> Result<()> {
             }
         },
         Commands::Setup { command } => match command {
-            SetupCommands::Aws { profile, role } => {
-                commands::setup::aws::run(profile.as_deref(), &role).await
-            }
+            SetupCommands::Aws {
+                profile,
+                role,
+                region,
+            } => commands::setup::aws::run(profile.as_deref(), &role, region.as_deref()).await,
             SetupCommands::Ssh { hosts } => {
                 commands::setup::ssh::run(server, hosts.as_deref()).await
             }

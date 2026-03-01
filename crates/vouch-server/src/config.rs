@@ -247,9 +247,15 @@ pub struct ServerConfig {
     /// SSH CA private key content (PEM format, Ed25519).
     /// If set, takes precedence over `ssh_ca_key_path`.
     pub ssh_ca_key: Option<SecretString>,
+    /// AWS KMS key ID for SSH CA signing (multi-region `mrk-` prefix).
+    /// When set, KMS signing is used and `ssh_ca_key` is ignored.
+    pub ssh_ca_kms_key_id: Option<String>,
     /// OIDC signing key content (PEM format, P-256 EC).
     /// Used for signing OIDC ID tokens with ES256 algorithm.
     pub oidc_signing_key: Option<SecretString>,
+    /// AWS KMS key ID for OIDC signing (multi-region `mrk-` prefix).
+    /// When set, KMS signing is used and `oidc_signing_key` is ignored.
+    pub oidc_signing_kms_key_id: Option<String>,
     /// Maximum age of DPoP proofs in seconds (default: 300).
     pub dpop_max_age_seconds: i64,
     /// Cleanup task interval in minutes (default: 15).
@@ -351,7 +357,9 @@ impl ServerConfig {
             cli_download_windows: args.cli_download_windows,
             ssh_ca_key_path,
             ssh_ca_key: args.ssh_ca_key.map(SecretString::from),
+            ssh_ca_kms_key_id: None,
             oidc_signing_key: args.oidc_signing_key.map(SecretString::from),
+            oidc_signing_kms_key_id: None,
             dpop_max_age_seconds: args.dpop_max_age,
             cleanup_interval_minutes: args.cleanup_interval,
             auth_events_retention_days: args.auth_events_retention_days,

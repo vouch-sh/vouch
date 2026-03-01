@@ -318,30 +318,46 @@ async fn build_app_state(
     let webauthn = webauthn_builder.build()?;
 
     // Initialize SSH CA if configured
-    // Priority: PEM content (VOUCH_SSH_CA_KEY) > file path (VOUCH_SSH_CA_KEY_PATH)
-    let ssh_ca = match ssh_ca::SshCa::load(
-        config.ssh_ca_key.as_ref().map(|s| s.expose_secret()),
-        config.ssh_ca_key_path.as_deref(),
-        &config.rp_id,
-    ) {
-        Ok(Some(ca)) => {
-            let pub_key = ca
-                .public_key()
-                .context("SSH CA loaded but public key is not extractable")?;
-            tracing::info!("SSH CA initialized: {}", pub_key);
-            Some(ca)
-        }
-        Ok(None) => {
-            tracing::info!("SSH CA disabled");
-            None
-        }
-        Err(e) => {
-            tracing::warn!("Failed to initialize SSH CA: {e}");
-            None
+    // Priority: KMS key ID > PEM content (VOUCH_SSH_CA_KEY) > file path (VOUCH_SSH_CA_KEY_PATH)
+    let ssh_ca = if let Some(key_id) = &config.ssh_ca_kms_key_id {
+        tracing::info!(
+            "SSH CA: KMS signing configured (key_id={}), \
+             not yet implemented — skipping local key loading",
+            key_id,
+        );
+        None
+    } else {
+        match ssh_ca::SshCa::load(
+            config.ssh_ca_key.as_ref().map(|s| s.expose_secret()),
+            config.ssh_ca_key_path.as_deref(),
+            &config.rp_id,
+        ) {
+            Ok(Some(ca)) => {
+                let pub_key = ca
+                    .public_key()
+                    .context("SSH CA loaded but public key is not extractable")?;
+                tracing::info!("SSH CA initialized: {}", pub_key);
+                Some(ca)
+            }
+            Ok(None) => {
+                tracing::info!("SSH CA disabled");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("Failed to initialize SSH CA: {e}");
+                None
+            }
         }
     };
 
     // Initialize OIDC signing key (ES256 for AWS and OIDC ID tokens)
+    if let Some(key_id) = &config.oidc_signing_kms_key_id {
+        tracing::info!(
+            "OIDC signing: KMS signing configured (key_id={}), not yet implemented",
+            key_id,
+        );
+    }
+
     let oidc_key = OidcSigningKey::load_or_generate(
         config.oidc_signing_key.as_ref().map(|s| s.expose_secret()),
     )?;

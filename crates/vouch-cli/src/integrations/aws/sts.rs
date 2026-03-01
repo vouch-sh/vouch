@@ -52,6 +52,28 @@ impl Partition {
         }
     }
 
+    /// Default region for STS API calls in this partition.
+    ///
+    /// STS `AssumeRoleWithWebIdentity` is region-agnostic — the call
+    /// succeeds against any regional endpoint regardless of where the
+    /// IAM role lives (IAM is global and has no region in its ARNs).
+    /// We pick a well-known region per partition as a last-resort
+    /// fallback when no region is configured via `--region`, the AWS
+    /// profile, or environment variables.
+    #[must_use]
+    pub fn default_sts_region(self) -> &'static str {
+        match self {
+            Self::Aws => "us-east-1",
+            Self::AwsCn => "cn-north-1",
+            Self::AwsUsGov => "us-gov-west-1",
+            Self::AwsEusc => "eusc-de-east-1",
+            Self::AwsIso => "us-iso-east-1",
+            Self::AwsIsoB => "us-isob-east-1",
+            Self::AwsIsoE => "eu-isoe-west-1",
+            Self::AwsIsoF => "us-isof-south-1",
+        }
+    }
+
     /// DNS suffix for this partition's AWS endpoints.
     #[must_use]
     pub fn dns_suffix(self) -> &'static str {
@@ -274,6 +296,18 @@ mod tests {
     fn test_partition_parse_unknown() {
         assert!(Partition::parse("unknown").is_err());
         assert!(Partition::parse("").is_err());
+    }
+
+    #[test]
+    fn test_partition_default_sts_region() {
+        assert_eq!(Partition::Aws.default_sts_region(), "us-east-1");
+        assert_eq!(Partition::AwsCn.default_sts_region(), "cn-north-1");
+        assert_eq!(Partition::AwsUsGov.default_sts_region(), "us-gov-west-1");
+        assert_eq!(Partition::AwsEusc.default_sts_region(), "eusc-de-east-1");
+        assert_eq!(Partition::AwsIso.default_sts_region(), "us-iso-east-1");
+        assert_eq!(Partition::AwsIsoB.default_sts_region(), "us-isob-east-1");
+        assert_eq!(Partition::AwsIsoE.default_sts_region(), "eu-isoe-west-1");
+        assert_eq!(Partition::AwsIsoF.default_sts_region(), "us-isof-south-1");
     }
 
     #[test]

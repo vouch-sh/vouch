@@ -203,7 +203,15 @@ pub(crate) async fn fetch_and_assume(
     use crate::integrations::aws;
 
     let profile_name = aws::resolve_profile(None).unwrap_or_default();
-    let region = aws::resolve_region(None, &profile_name)?;
+    let region = match aws::resolve_region(None, &profile_name) {
+        Ok(r) => r,
+        Err(_) => {
+            let arn = crate::integrations::aws::sts::Arn::parse_role_arn(role_arn)?;
+            let default = arn.partition.default_sts_region();
+            tracing::debug!("no region configured, defaulting to {default} for STS");
+            default.to_string()
+        }
+    };
 
     let result = exchange_for_sts_credentials(server, role_arn, &region, "vouch-session").await?;
     let creds = &result.credentials;
