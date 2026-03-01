@@ -773,7 +773,7 @@ mod keys {
             .expect("Failed to create authenticated user");
 
         let response = harness
-            .delete_authenticated("/v1/keys/nonexistent-key-id", &token)
+            .delete_authenticated("/v1/keys/00000000-0000-0000-0000-000000000000", &token)
             .await
             .expect("Failed to delete key");
 
@@ -1346,7 +1346,10 @@ mod scim {
             .expect("Failed to create SCIM token");
 
         let response = harness
-            .get_authenticated("/scim/v2/Users/nonexistent-id", &scim_token)
+            .get_authenticated(
+                "/scim/v2/Users/00000000-0000-0000-0000-000000000000",
+                &scim_token,
+            )
             .await
             .expect("Failed to get SCIM user");
 
