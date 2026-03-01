@@ -102,7 +102,7 @@ pub async fn rename_key(
     if name.is_empty() {
         return Err(ServiceError::Validation("Name cannot be empty".to_string()));
     }
-    if name.len() > 100 {
+    if name.chars().count() > 100 {
         return Err(ServiceError::Validation(
             "Name must be 100 characters or less".to_string(),
         ));
