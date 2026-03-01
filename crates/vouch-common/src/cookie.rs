@@ -53,7 +53,7 @@ impl SessionCookie {
             path: "/".to_string(),
             secure: true,
             expires,
-            name: "vouch_session".to_string(),
+            name: crate::SESSION_COOKIE_NAME.to_string(),
             value: value.to_string(),
         }
     }
@@ -209,7 +209,7 @@ mod tests {
         let line = cookie.to_netscape_line();
         assert_eq!(
             line,
-            "vouch.example.com\tFALSE\t/\tTRUE\t1737849600\tvouch_session\ttoken123"
+            "vouch.example.com\tFALSE\t/\tTRUE\t1737849600\t__Host-vouch_session\ttoken123"
         );
 
         let Some(parsed) = SessionCookie::from_netscape_line(&line) else {
@@ -220,7 +220,7 @@ mod tests {
         assert_eq!(parsed.path, "/");
         assert!(parsed.secure);
         assert_eq!(parsed.expires, 1_737_849_600);
-        assert_eq!(parsed.name, "vouch_session");
+        assert_eq!(parsed.name, "__Host-vouch_session");
         assert_eq!(parsed.value, "token123");
     }
 

@@ -209,7 +209,7 @@ async fn test_rfc9101_authorize_with_valid_request_parameter_es256() {
             client.client_id,
             urlencoding::encode(&request_jwt),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -253,7 +253,7 @@ async fn test_rfc9101_authorize_request_object_with_pkce() {
             client.client_id,
             urlencoding::encode(&request_jwt),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -661,7 +661,7 @@ async fn test_rfc9101_require_signed_request_object_rejects_plain_params() {
             urlencoding::encode("https://example.com/callback"),
             challenge,
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -710,7 +710,7 @@ async fn test_rfc9101_require_signed_request_object_accepts_valid_jar() {
             client.client_id,
             urlencoding::encode(&request_jwt),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -984,7 +984,7 @@ async fn test_rfc9101_client_signing_alg_es256_accepts_es256_jwt() {
             client.client_id,
             urlencoding::encode(&request_jwt),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -1162,7 +1162,7 @@ async fn test_rfc9101_state_from_request_object_preserved_in_response() {
             client.client_id,
             urlencoding::encode(&request_jwt),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -1355,7 +1355,7 @@ async fn test_rfc9101_fapi2_matching_query_params_accepted() {
             client.client_id,
             urlencoding::encode(&request_jwt),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 

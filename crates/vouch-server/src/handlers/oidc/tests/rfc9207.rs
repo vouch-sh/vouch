@@ -100,7 +100,7 @@ async fn test_rfc9207_authorize_response_includes_iss_parameter() {
             urlencoding::encode("https://example.com/callback"),
             challenge,
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 

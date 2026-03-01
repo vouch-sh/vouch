@@ -35,7 +35,7 @@ async fn test_rfc6749_authorize_authenticated_user_redirects_with_code() {
             challenge,
             state_param,
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -370,7 +370,7 @@ async fn test_rfc6749_authorize_access_denied_personal_scope() {
             urlencoding::encode("https://example.com/callback"),
             challenge,
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -436,7 +436,7 @@ async fn test_rfc8707_authorize_invalid_resource_redirects_with_error() {
             state_param,
             urlencoding::encode("https://unregistered.example.com"),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -560,7 +560,7 @@ async fn test_rfc6749_authorize_state_preserved_across_redirect() {
             challenge,
             urlencoding::encode(state_param),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -667,7 +667,7 @@ async fn test_rfc6749_authorize_code_redirect_to_registered_uri_only() {
             urlencoding::encode("https://example.com/callback"),
             challenge,
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 

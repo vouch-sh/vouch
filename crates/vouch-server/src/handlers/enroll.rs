@@ -677,7 +677,7 @@ pub async fn oidc_callback(
     }
 
     tracing::info!("Session created for user: {}", redact_email(&claims.email));
-    tracing::debug!("Setting vouch_session cookie and redirecting to /enroll/keys");
+    tracing::debug!("Setting session cookie and redirecting to /enroll/keys");
 
     // Create session cookie and redirect to keys page
     let cookie = create_session_cookie(token.expose_secret(), session_hours * 3600);
@@ -692,11 +692,11 @@ pub async fn oidc_callback(
 
 /// Serve the key management page.
 /// GET /enroll/keys
-/// Authentication is via vouch_session cookie (set by oidc_callback).
+/// Authentication is via session cookie (set by oidc_callback).
 pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
     tracing::debug!("enroll_keys_page: checking for session cookie");
 
-    // Get session from vouch_session cookie
+    // Get session from cookie
     match extract_session_from_cookie(&state, &jar).await {
         Ok(token) => {
             let email = token.email.clone().unwrap_or_default();
@@ -735,13 +735,13 @@ pub async fn enroll_keys_page(State(state): State<Arc<AppState>>, jar: CookieJar
 
 /// Start browser-based `WebAuthn` registration.
 /// POST /enroll/webauthn/start
-/// Authentication is via vouch_session cookie (set by oidc_callback).
+/// Authentication is via session cookie (set by oidc_callback).
 #[allow(clippy::unused_async)]
 pub async fn browser_register_start(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Result<Json<BrowserRegisterStartResponse>, (StatusCode, Json<ApiError>)> {
-    // Get session from vouch_session cookie
+    // Get session from cookie
     let token = extract_session_from_cookie(&state, &jar)
         .await
         .map_err(|_| {
@@ -763,9 +763,9 @@ pub async fn browser_register_start(
     let user_email = token.email.clone().unwrap_or_default();
 
     // Get device_auth_id from enrollment session if available (for CLI polling).
-    // Look up by vouch_session token hash, since oidc_callback stores the
+    // Look up by session token hash, since oidc_callback stores the
     // enrollment session keyed to the same token.
-    let device_auth_id = match jar.get("vouch_session").map(|c| c.value()) {
+    let device_auth_id = match jar.get(vouch_common::SESSION_COOKIE_NAME).map(|c| c.value()) {
         Some(cookie_val) => {
             let token_hash = hash_token(cookie_val);
             let enrollment_session =

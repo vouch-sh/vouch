@@ -313,7 +313,7 @@ pub async fn authorize(
     }
 
     // Try to get existing session from cookie
-    let session_token = jar.get("vouch_session").map(|c| c.value());
+    let session_token = jar.get(vouch_common::SESSION_COOKIE_NAME).map(|c| c.value());
 
     // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
     let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
@@ -551,7 +551,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
         };
 
     // Get session from cookie (should exist after login)
-    let session_token = jar.get("vouch_session").map(|c| c.value());
+    let session_token = jar.get(vouch_common::SESSION_COOKIE_NAME).map(|c| c.value());
 
     // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
     let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
@@ -731,7 +731,7 @@ async fn handle_jar_request(
     }
 
     // Try to get existing session from cookie
-    let session_token = jar.get("vouch_session").map(|c| c.value());
+    let session_token = jar.get(vouch_common::SESSION_COOKIE_NAME).map(|c| c.value());
 
     // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
     let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
@@ -970,7 +970,7 @@ async fn handle_par_request(
     }
 
     // Try to get existing session from cookie
-    let session_token = jar.get("vouch_session").map(|c| c.value());
+    let session_token = jar.get(vouch_common::SESSION_COOKIE_NAME).map(|c| c.value());
 
     // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
     let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);

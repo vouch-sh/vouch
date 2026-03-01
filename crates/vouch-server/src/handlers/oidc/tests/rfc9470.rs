@@ -37,7 +37,7 @@ async fn test_rfc9470_acr_values_aal3_accepted() {
             challenge,
             urlencoding::encode(acr),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -91,7 +91,7 @@ async fn test_rfc9470_acr_values_unsupported_returns_error() {
             urlencoding::encode(acr),
             state_param,
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -155,7 +155,7 @@ async fn test_rfc9470_acr_values_multiple_with_aal3_accepted() {
             challenge,
             urlencoding::encode(acr),
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -252,7 +252,7 @@ async fn test_rfc9470_max_age_zero_forces_reauth() {
             urlencoding::encode("https://example.com/callback"),
             challenge,
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -305,7 +305,7 @@ async fn test_rfc9470_max_age_large_value_allows_fresh_session() {
             urlencoding::encode("https://example.com/callback"),
             challenge,
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -357,7 +357,7 @@ async fn test_rfc9470_prompt_login_forces_reauth() {
             urlencoding::encode("https://example.com/callback"),
             challenge,
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -409,7 +409,7 @@ async fn test_rfc9470_prompt_none_with_valid_session_succeeds() {
             urlencoding::encode("https://example.com/callback"),
             challenge,
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 
@@ -519,7 +519,7 @@ async fn test_rfc9470_prompt_none_with_max_age_zero_returns_login_required() {
             challenge,
             state_param,
         ),
-        &[("Cookie", &format!("vouch_session={session_token}"))],
+        &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
     )
     .await;
 

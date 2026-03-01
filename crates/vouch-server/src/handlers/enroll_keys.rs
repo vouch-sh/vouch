@@ -2,7 +2,7 @@
 //! Key management handlers during enrollment (using cookie-based authentication).
 //!
 //! These endpoints allow users to manage their security keys via browser UI.
-//! Authentication is via the vouch_session cookie containing an OAuth access token.
+//! Authentication is via the session cookie containing an OAuth access token.
 
 use crate::AppState;
 use crate::services::error::ServiceError;
@@ -23,7 +23,7 @@ use super::session::extract_session_from_cookie;
 
 /// List all registered keys for the user (during enrollment).
 /// GET /enroll/keys/api
-/// Authentication is via vouch_session cookie.
+/// Authentication is via session cookie.
 pub async fn list_keys(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
@@ -48,7 +48,7 @@ pub async fn list_keys(
 
 /// Rename a security key (during enrollment).
 /// PATCH /enroll/keys/{id}
-/// Authentication is via vouch_session cookie.
+/// Authentication is via session cookie.
 pub async fn rename_key(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
@@ -74,7 +74,7 @@ pub async fn rename_key(
 
 /// Delete a security key (during enrollment).
 /// DELETE /enroll/keys/{id}
-/// Authentication is via vouch_session cookie.
+/// Authentication is via session cookie.
 ///
 /// Returns `ServiceError` directly (rather than the tuple format used by other
 /// enroll_keys handlers) so that `StepUpRequired` can emit a `WWW-Authenticate`

@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! TLS configuration for optional HTTPS support with hot reloading.
+//!
+//! Enforces TLS 1.3 only — TLS 1.2 is compiled out via rustls feature flags
+//! and explicitly excluded via `builder_with_protocol_versions`. This eliminates
+//! CBC mode attacks, RSA key exchange, and protocol downgrade vectors.
+
+use std::sync::Arc;
 
 use anyhow::{Context, Result, bail};
 use axum_server::tls_rustls::RustlsConfig;
@@ -8,65 +14,7 @@ use secrecy::{ExposeSecret, SecretString};
 use crate::config::ServerConfig;
 
 /// Build TLS configuration from ServerConfig.
-pub async fn build_tls_config(config: &ServerConfig) -> Result<RustlsConfig> {
-    let (cert_bytes, key_bytes) = load_cert_and_key(config)?;
-
-    RustlsConfig::from_pem(cert_bytes, key_bytes)
-        .await
-        .context("Failed to build TLS configuration from certificate and key")
-}
-
-/// Reload TLS configuration by re-reading environment variables.
-///
-/// This reads fresh values from the environment (not from config),
-/// allowing certificate updates without process restart.
-pub async fn reload_tls_config(tls_config: &RustlsConfig) -> Result<()> {
-    let cert_env = std::env::var("VOUCH_TLS_CERT").context("VOUCH_TLS_CERT not set")?;
-    let key_env = std::env::var("VOUCH_TLS_KEY").context("VOUCH_TLS_KEY not set")?;
-
-    let cert_bytes = crate::crypto::pem::decode_base64_pem(&cert_env)
-        .context("Failed to decode TLS certificate")?
-        .into_bytes();
-    let key_bytes = crate::crypto::pem::decode_base64_pem(&key_env)
-        .context("Failed to decode TLS private key")?
-        .into_bytes();
-
-    validate_pem(&cert_bytes, "CERTIFICATE").context("Invalid TLS certificate format")?;
-    validate_pem(&key_bytes, "PRIVATE KEY").context("Invalid TLS private key format")?;
-
-    tls_config
-        .reload_from_pem(cert_bytes, key_bytes)
-        .await
-        .context("Failed to reload TLS configuration")
-}
-
-/// Reload TLS configuration from ServerConfig values.
-///
-/// This is used by the S3 config poller when TLS cert/key changes.
-/// The cert and key are expected to be base64-encoded PEM strings.
-pub async fn reload_tls_from_config(
-    tls_config: &RustlsConfig,
-    cert: &str,
-    key: &SecretString,
-) -> Result<()> {
-    let cert_bytes = crate::crypto::pem::decode_base64_pem(cert)
-        .context("Failed to decode TLS certificate")?
-        .into_bytes();
-    let key_bytes = crate::crypto::pem::decode_base64_pem(key.expose_secret())
-        .context("Failed to decode TLS private key")?
-        .into_bytes();
-
-    validate_pem(&cert_bytes, "CERTIFICATE").context("Invalid TLS certificate format")?;
-    validate_pem(&key_bytes, "PRIVATE KEY").context("Invalid TLS private key format")?;
-
-    tls_config
-        .reload_from_pem(cert_bytes, key_bytes)
-        .await
-        .context("Failed to reload TLS configuration")
-}
-
-/// Load and decode certificate and key from config.
-fn load_cert_and_key(config: &ServerConfig) -> Result<(Vec<u8>, Vec<u8>)> {
+pub fn build_tls_config(config: &ServerConfig) -> Result<RustlsConfig> {
     let cert_pem = config
         .tls_cert
         .as_ref()
@@ -87,9 +35,6 @@ fn load_cert_and_key(config: &ServerConfig) -> Result<(Vec<u8>, Vec<u8>)> {
         .context("Failed to decode TLS private key")?
         .into_bytes();
 
-    validate_pem(&cert_bytes, "CERTIFICATE").context("Invalid TLS certificate format")?;
-    validate_pem(&key_bytes, "PRIVATE KEY").context("Invalid TLS private key format")?;
-
     let cert_source = if cert_was_base64 {
         "base64-encoded PEM"
     } else {
@@ -108,7 +53,68 @@ fn load_cert_and_key(config: &ServerConfig) -> Result<(Vec<u8>, Vec<u8>)> {
         key_bytes.len(),
     );
 
-    Ok((cert_bytes, key_bytes))
+    let server_config = build_server_config(&cert_bytes, &key_bytes)
+        .context("Failed to build TLS configuration from certificate and key")?;
+
+    Ok(RustlsConfig::from_config(server_config))
+}
+
+/// Reload TLS configuration from ServerConfig values.
+///
+/// This is used by the S3 config poller when TLS cert/key changes.
+/// The cert and key are expected to be base64-encoded PEM strings.
+pub fn reload_tls_from_config(
+    tls_config: &RustlsConfig,
+    cert: &str,
+    key: &SecretString,
+) -> Result<()> {
+    let cert_bytes = crate::crypto::pem::decode_base64_pem(cert)
+        .context("Failed to decode TLS certificate")?
+        .into_bytes();
+    let key_bytes = crate::crypto::pem::decode_base64_pem(key.expose_secret())
+        .context("Failed to decode TLS private key")?
+        .into_bytes();
+
+    let server_config = build_server_config(&cert_bytes, &key_bytes)
+        .context("Failed to reload TLS configuration from S3 config")?;
+
+    tls_config.reload_from_config(server_config);
+    Ok(())
+}
+
+/// Build a hardened `rustls::ServerConfig` from PEM-encoded certificate and key.
+///
+/// Enforces:
+/// - TLS 1.3 only (no TLS 1.2 or earlier)
+/// - ALPN: h2, http/1.1
+/// - No client authentication (public-facing server)
+fn build_server_config(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+) -> Result<Arc<rustls::ServerConfig>> {
+    validate_pem(cert_pem, "CERTIFICATE").context("Invalid TLS certificate format")?;
+    validate_pem(key_pem, "PRIVATE KEY").context("Invalid TLS private key format")?;
+
+    let certs: Vec<rustls::pki_types::CertificateDer<'_>> =
+        rustls_pemfile::certs(&mut &*cert_pem)
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to parse PEM certificate chain")?;
+
+    let key = rustls_pemfile::private_key(&mut &*key_pem)
+        .context("Failed to parse PEM private key")?
+        .ok_or_else(|| anyhow::anyhow!("No private key found in PEM data"))?;
+
+    let mut config =
+        rustls::ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+            .with_no_client_auth()
+            .with_single_cert(certs, key)
+            .context("Failed to build rustls ServerConfig")?;
+
+    config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    tracing::info!("TLS configuration: TLS 1.3 only, ALPN=[h2, http/1.1]");
+
+    Ok(Arc::new(config))
 }
 
 /// Validate that PEM content contains expected type.

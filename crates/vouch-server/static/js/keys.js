@@ -277,7 +277,7 @@
             var errResp = await completeResp.json();
             throw new Error(errResp.message || 'Failed to complete re-authentication');
         }
-        // Fresh vouch_session cookie is now set by the Set-Cookie header
+        // Fresh session cookie is now set by the Set-Cookie header
     }
 
     async function addNewKey(event) {

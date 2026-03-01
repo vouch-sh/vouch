@@ -111,6 +111,14 @@ pub fn apply_security_layers(
             HeaderValue::from_static(
                 "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
             ),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("x-dns-prefetch-control"),
+            HeaderValue::from_static("off"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static("cross-origin-resource-policy"),
+            HeaderValue::from_static("same-origin"),
         ));
 
     // HSTS only when TLS is configured.

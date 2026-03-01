@@ -123,8 +123,8 @@ pub async fn status(
 /// Handle sign-out (clears session cookie).
 /// POST /logout
 pub async fn logout(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
-    // Get session from vouch_session cookie and delete it from database
-    if let Some(token) = jar.get("vouch_session").map(|c| c.value()) {
+    // Get session from cookie and delete it from database
+    if let Some(token) = jar.get(vouch_common::SESSION_COOKIE_NAME).map(|c| c.value()) {
         let token_hash = hash_token(token);
 
         // Look up session before deletion to capture user info for audit
