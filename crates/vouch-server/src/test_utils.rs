@@ -78,6 +78,7 @@ pub fn test_config() -> ServerConfig {
         ssh_ca_kms_key_id: None,
         oidc_signing_key: None,
         oidc_signing_kms_key_id: None,
+        jwt_hmac_kms_key_id: None,
         dpop_max_age_seconds: 300,
         cleanup_interval_minutes: 0, // Disabled for tests
         auth_events_retention_days: 90,
@@ -127,6 +128,9 @@ pub async fn test_app_state() -> Arc<AppState> {
         webauthn,
         ssh_ca: None,
         oidc_key,
+        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+            b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
+        ),
         github_app: None,
         http_client: reqwest::Client::new(),
     })

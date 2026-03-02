@@ -144,12 +144,7 @@ async fn test_migration_decode_token_rejects_vouch_session_typ() {
     .expect("encode");
 
     // services::auth::decode_token must return None for any HS256 token
-    let result = decode_token(
-        &legacy_token,
-        config.jwt_secret_bytes(),
-        &state.oidc_key,
-        &config.base_url,
-    );
+    let result = decode_token(&legacy_token, &state.oidc_key, &config.base_url);
 
     assert!(
         result.is_none(),
@@ -222,21 +217,11 @@ async fn test_create_test_session_for_client_client_id_in_jwt() {
 
     let config = state.config();
 
-    let decoded_a = decode_token(
-        &token_a,
-        config.jwt_secret_bytes(),
-        &state.oidc_key,
-        &config.base_url,
-    )
-    .expect("token_a must decode");
+    let decoded_a =
+        decode_token(&token_a, &state.oidc_key, &config.base_url).expect("token_a must decode");
 
-    let decoded_b = decode_token(
-        &token_b,
-        config.jwt_secret_bytes(),
-        &state.oidc_key,
-        &config.base_url,
-    )
-    .expect("token_b must decode");
+    let decoded_b =
+        decode_token(&token_b, &state.oidc_key, &config.base_url).expect("token_b must decode");
 
     let DecodedToken::AccessToken(claims_a) = decoded_a;
     let DecodedToken::AccessToken(claims_b) = decoded_b;

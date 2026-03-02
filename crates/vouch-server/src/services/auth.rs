@@ -421,12 +421,10 @@ impl DecodedToken {
 /// Returns `None` for invalid, expired, or unsupported tokens.
 pub fn decode_token(
     token: &str,
-    jwt_secret: &[u8],
     oidc_key: &OidcSigningKey,
     expected_issuer: &str,
 ) -> Option<DecodedToken> {
-    let ctx =
-        crate::crypto::jwt::TokenValidationContext::new(jwt_secret, oidc_key, expected_issuer);
+    let ctx = crate::crypto::jwt::TokenValidationContext::new(oidc_key, expected_issuer);
     crate::crypto::jwt::decode_token(token, &ctx)
 }
 
@@ -439,16 +437,14 @@ pub fn decode_token(
 )]
 mod tests {
     use super::*;
-    use crate::test_utils::{
-        TEST_ISSUER, TEST_JWT_SECRET, make_test_access_token, make_test_oidc_key,
-    };
+    use crate::test_utils::{TEST_ISSUER, make_test_access_token, make_test_oidc_key};
 
     #[tokio::test]
     async fn test_decode_token_routes_es256_to_access_token() {
         let key = make_test_oidc_key();
         let token = make_test_access_token(&key).await;
 
-        let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER);
+        let decoded = decode_token(&token, &key, TEST_ISSUER);
         assert!(decoded.is_some());
         match decoded.unwrap() {
             DecodedToken::AccessToken(c) => {
@@ -487,16 +483,16 @@ mod tests {
         // Sign as ID token (typ: "JWT", no "at+jwt")
         let token = key.sign_jwt(&claims).await.expect("sign");
 
-        let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER);
+        let decoded = decode_token(&token, &key, TEST_ISSUER);
         assert!(decoded.is_none(), "ID token should be rejected");
     }
 
     #[test]
     fn test_decode_token_rejects_garbage() {
         let key = make_test_oidc_key();
-        assert!(decode_token("not.a.jwt", TEST_JWT_SECRET, &key, TEST_ISSUER).is_none());
-        assert!(decode_token("", TEST_JWT_SECRET, &key, TEST_ISSUER).is_none());
-        assert!(decode_token("abc123", TEST_JWT_SECRET, &key, TEST_ISSUER).is_none());
+        assert!(decode_token("not.a.jwt", &key, TEST_ISSUER).is_none());
+        assert!(decode_token("", &key, TEST_ISSUER).is_none());
+        assert!(decode_token("abc123", &key, TEST_ISSUER).is_none());
     }
 
     #[tokio::test]
@@ -523,7 +519,7 @@ mod tests {
         };
 
         let token = key.sign_access_token_jwt(&claims).await.expect("sign");
-        let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER);
+        let decoded = decode_token(&token, &key, TEST_ISSUER);
         assert!(decoded.is_none(), "Expired token should be rejected");
     }
 
@@ -531,7 +527,7 @@ mod tests {
     async fn test_decoded_token_accessors() {
         let key = make_test_oidc_key();
         let token = make_test_access_token(&key).await;
-        let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER).unwrap();
+        let decoded = decode_token(&token, &key, TEST_ISSUER).unwrap();
 
         assert_eq!(decoded.sub(), "user-123");
         assert_eq!(decoded.email(), Some("test@example.com"));

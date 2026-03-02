@@ -11,12 +11,14 @@ async fn test_rfc8725_cross_type_token_substitution() {
 
     // Create an HS256 state token (e.g. registration state) — should be rejected
     // as a Bearer token at resource endpoints.
-    let fake_state = crate::crypto::jwt::encode_state_token(
-        &serde_json::json!({"sub": "user-1", "exp": 9_999_999_999i64, "iat": 1_000_000_000i64}),
-        crate::crypto::jwt::JwtType::RegistrationState,
-        state.config().jwt_secret_bytes(),
-    )
-    .expect("encode state token");
+    let fake_state = state
+        .state_signer
+        .encode_state_token(
+            &serde_json::json!({"sub": "user-1", "exp": 9_999_999_999i64, "iat": 1_000_000_000i64}),
+            crate::crypto::jwt::JwtType::RegistrationState,
+        )
+        .await
+        .expect("encode state token");
 
     let (status, _body) = http_get(
         &app,
@@ -106,8 +108,6 @@ async fn test_rfc8725_hs256_state_tokens_all_rejected_at_resource_endpoints() {
     // is rejected at /oauth/userinfo (token validation path).
     let (app, state) = test_app().await;
 
-    let secret = state.config().jwt_secret_bytes().to_vec();
-
     let hs256_types = [
         crate::crypto::jwt::JwtType::AuthorizationCode,
         crate::crypto::jwt::JwtType::RegistrationState,
@@ -118,16 +118,18 @@ async fn test_rfc8725_hs256_state_tokens_all_rejected_at_resource_endpoints() {
     ];
 
     for jwt_type in hs256_types {
-        let fake_token = crate::crypto::jwt::encode_state_token(
-            &serde_json::json!({
-                "sub": "attacker",
-                "exp": 9_999_999_999i64,
-                "iat": 1_000_000_000i64
-            }),
-            jwt_type,
-            &secret,
-        )
-        .expect("encode state token");
+        let fake_token = state
+            .state_signer
+            .encode_state_token(
+                &serde_json::json!({
+                    "sub": "attacker",
+                    "exp": 9_999_999_999i64,
+                    "iat": 1_000_000_000i64
+                }),
+                jwt_type,
+            )
+            .await
+            .expect("encode state token");
 
         let (status, _) = http_get(
             &app,

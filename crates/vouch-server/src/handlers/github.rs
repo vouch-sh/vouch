@@ -151,21 +151,23 @@ impl GitHubStateToken {
     }
 
     /// Encode as JWT (RFC 8725 §3.11: explicit typ).
-    fn encode(&self, secret: &[u8]) -> Result<String, jsonwebtoken::errors::Error> {
-        crate::crypto::jwt::encode_state_token(
-            self,
-            crate::crypto::jwt::JwtType::GitHubState,
-            secret,
-        )
+    async fn encode(
+        &self,
+        signer: &crate::crypto::jwt::StateTokenSigner,
+    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
+        signer
+            .encode_state_token(self, crate::crypto::jwt::JwtType::GitHubState)
+            .await
     }
 
     /// Decode from JWT.
-    fn decode(token: &str, secret: &[u8]) -> Result<Self, jsonwebtoken::errors::Error> {
-        crate::crypto::jwt::decode_state_token(
-            token,
-            crate::crypto::jwt::JwtType::GitHubState,
-            secret,
-        )
+    async fn decode(
+        token: &str,
+        signer: &crate::crypto::jwt::StateTokenSigner,
+    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+        signer
+            .decode_state_token(token, crate::crypto::jwt::JwtType::GitHubState)
+            .await
     }
 }
 
@@ -366,7 +368,7 @@ pub async fn github_connect_page(
             ));
         }
     };
-    let encoded_state = match state_token.encode(state.config().jwt_secret_bytes()) {
+    let encoded_state = match state_token.encode(&state.state_signer).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to encode state token: {}", e);
@@ -435,7 +437,7 @@ async fn handle_oauth_callback(
     };
 
     // Decode and validate state token
-    let token = match GitHubStateToken::decode(state_token, state.config().jwt_secret_bytes()) {
+    let token = match GitHubStateToken::decode(state_token, &state.state_signer).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("Invalid state token: {}", e);
@@ -486,7 +488,7 @@ async fn handle_installation_callback(
     };
 
     // Decode and validate state token
-    let token = match GitHubStateToken::decode(state_token, state.config().jwt_secret_bytes()) {
+    let token = match GitHubStateToken::decode(state_token, &state.state_signer).await {
         Ok(t) => t,
         Err(e) => {
             tracing::warn!("Invalid state token: {}", e);
@@ -567,7 +569,7 @@ pub async fn github_link_start(State(state): State<Arc<AppState>>, jar: CookieJa
             ));
         }
     };
-    let encoded_state = match state_token.encode(state.config().jwt_secret_bytes()) {
+    let encoded_state = match state_token.encode(&state.state_signer).await {
         Ok(s) => s,
         Err(e) => {
             tracing::error!("Failed to encode state token: {}", e);
@@ -658,5 +660,69 @@ pub async fn github_success_page(
         org_name: state.config().get_org_display_name().to_string(),
         github_account: params.account.unwrap_or_else(|| "GitHub".to_string()),
         auth,
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::crypto::jwt::{JwtType, StateTokenSigner};
+    use crate::test_utils::TEST_JWT_SECRET;
+
+    #[tokio::test]
+    async fn test_github_state_token_roundtrip() {
+        let signer = StateTokenSigner::local(TEST_JWT_SECRET.to_vec());
+        let token = GitHubStateToken::new_for_install("org-1", "user-1").expect("create token");
+
+        let encoded = token.encode(&signer).await.expect("encode");
+        let decoded = GitHubStateToken::decode(&encoded, &signer)
+            .await
+            .expect("decode");
+
+        assert_eq!(decoded.org_id, "org-1");
+        assert_eq!(decoded.user_id, "user-1");
+        assert_eq!(decoded.flow_type, GitHubStateFlowType::Install);
+    }
+
+    #[tokio::test]
+    async fn test_github_state_token_link_flow() {
+        let signer = StateTokenSigner::local(TEST_JWT_SECRET.to_vec());
+        let token = GitHubStateToken::new_for_link("org-2", "user-2").expect("create token");
+
+        let encoded = token.encode(&signer).await.expect("encode");
+        let decoded = GitHubStateToken::decode(&encoded, &signer)
+            .await
+            .expect("decode");
+
+        assert_eq!(decoded.org_id, "org-2");
+        assert_eq!(decoded.user_id, "user-2");
+        assert_eq!(decoded.flow_type, GitHubStateFlowType::Link);
+    }
+
+    #[tokio::test]
+    async fn test_github_state_token_wrong_secret_rejected() {
+        let signer_a = StateTokenSigner::local(TEST_JWT_SECRET.to_vec());
+        let signer_b =
+            StateTokenSigner::local(b"different_secret_at_least_32chars_long!!".to_vec());
+        let token = GitHubStateToken::new_for_install("org-1", "user-1").expect("create token");
+
+        let encoded = token.encode(&signer_a).await.expect("encode");
+        let result = GitHubStateToken::decode(&encoded, &signer_b).await;
+        assert!(result.is_err(), "Wrong secret should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_github_state_token_wrong_type_rejected() {
+        let signer = StateTokenSigner::local(TEST_JWT_SECRET.to_vec());
+        let token = GitHubStateToken::new_for_install("org-1", "user-1").expect("create token");
+
+        let encoded = token.encode(&signer).await.expect("encode");
+
+        // Try decoding with wrong JwtType via the raw signer
+        let result: Result<GitHubStateToken, _> = signer
+            .decode_state_token(&encoded, JwtType::RegistrationState)
+            .await;
+        assert!(result.is_err(), "Wrong JWT type should be rejected");
     }
 }

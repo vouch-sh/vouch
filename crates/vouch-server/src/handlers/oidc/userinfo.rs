@@ -119,12 +119,7 @@ pub async fn userinfo(
                 // Note: audience is NOT validated here because the userinfo endpoint
                 // receives tokens from any client (aud = client_id per RFC 9068).
                 let config = state.config();
-                if let Some(decoded) = decode_token(
-                    token,
-                    config.jwt_secret_bytes(),
-                    &state.oidc_key,
-                    &config.base_url,
-                ) {
+                if let Some(decoded) = decode_token(token, &state.oidc_key, &config.base_url) {
                     match decoded.cnf() {
                         Some(cnf) => {
                             let is_valid: bool =
