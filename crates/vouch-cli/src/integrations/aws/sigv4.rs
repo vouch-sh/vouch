@@ -913,10 +913,7 @@ mod tests {
         qp.insert("X-Amz-Credential", cred_val);
         qp.insert("X-Amz-Date", amz_date.to_string());
         qp.insert("X-Amz-Expires", "900".into());
-        qp.insert(
-            "X-Amz-Security-Token",
-            "IQoJb3JpZ2luX2VjFakeToken".into(),
-        );
+        qp.insert("X-Amz-Security-Token", "IQoJb3JpZ2luX2VjFakeToken".into());
         qp.insert("X-Amz-SignedHeaders", "host".into());
 
         let cqs: String = qp
@@ -931,11 +928,9 @@ mod tests {
         let cr = format!("GET\n/\n{cqs}\n{canonical_hdrs}\nhost\n{empty_hash}");
 
         let cr_hash = sha256_hex(cr.as_bytes());
-        let string_to_sign =
-            format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{cr_hash}");
+        let string_to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{cr_hash}");
 
-        let key =
-            derive_signing_key(&creds.secret_access_key, date_stamp, "us-east-1", "rds-db");
+        let key = derive_signing_key(&creds.secret_access_key, date_stamp, "us-east-1", "rds-db");
         let expected_sig = hex::encode(hmac_sha256(&key, string_to_sign.as_bytes()));
 
         assert_eq!(
@@ -958,7 +953,10 @@ mod tests {
         // botocore uses EMPTY_SHA256_HASH for presigned URL payloads
         let expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
         let actual = sha256_hex(b"");
-        assert_eq!(actual, expected, "SHA-256 of empty body must match botocore constant");
+        assert_eq!(
+            actual, expected,
+            "SHA-256 of empty body must match botocore constant"
+        );
 
         // Build a presigned URL and independently verify the payload
         // hash in the canonical request by checking the signature.
@@ -1010,12 +1008,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("&");
 
-        let cr_with_empty = format!(
-            "GET\n/\n{cqs}\nhost:example.amazonaws.com\n\nhost\n{expected}"
-        );
-        let cr_with_unsigned = format!(
-            "GET\n/\n{cqs}\nhost:example.amazonaws.com\n\nhost\nUNSIGNED-PAYLOAD"
-        );
+        let cr_with_empty =
+            format!("GET\n/\n{cqs}\nhost:example.amazonaws.com\n\nhost\n{expected}");
+        let cr_with_unsigned =
+            format!("GET\n/\n{cqs}\nhost:example.amazonaws.com\n\nhost\nUNSIGNED-PAYLOAD");
 
         let key = derive_signing_key(&creds.secret_access_key, date_stamp, "us-east-1", "sts");
 

@@ -10,6 +10,7 @@ pub mod cose;
 pub(crate) mod document_crypto;
 pub mod hash;
 pub(crate) mod jwt;
+pub(crate) mod kms_signer;
 pub(crate) mod pem;
 pub mod ssh_ca;
 pub mod tpm_decrypt;

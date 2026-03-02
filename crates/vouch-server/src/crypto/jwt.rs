@@ -237,11 +237,11 @@ mod tests {
         TokenValidationContext::new(TEST_JWT_SECRET, key, TEST_ISSUER)
     }
 
-    #[test]
-    fn test_decode_token_routes_es256_to_access_token() {
+    #[tokio::test]
+    async fn test_decode_token_routes_es256_to_access_token() {
         let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
-        let token = make_test_access_token(&key);
+        let token = make_test_access_token(&key).await;
 
         let decoded = decode_token(&token, &ctx);
         assert!(decoded.is_some());
@@ -254,8 +254,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_decode_token_rejects_id_token_without_at_jwt_typ() {
+    #[tokio::test]
+    async fn test_decode_token_rejects_id_token_without_at_jwt_typ() {
         let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
 
@@ -279,7 +279,7 @@ mod tests {
         };
 
         // Sign as ID token (typ: "JWT", no "at+jwt")
-        let token = key.sign_jwt(&claims).expect("sign");
+        let token = key.sign_jwt(&claims).await.expect("sign");
         let decoded = decode_token(&token, &ctx);
         assert!(decoded.is_none(), "ID token should be rejected");
     }
@@ -293,8 +293,8 @@ mod tests {
         assert!(decode_token("abc123", &ctx).is_none());
     }
 
-    #[test]
-    fn test_decode_token_rejects_expired_access_token() {
+    #[tokio::test]
+    async fn test_decode_token_rejects_expired_access_token() {
         let key = make_test_oidc_key();
         let ctx = make_ctx(&key);
 
@@ -317,15 +317,15 @@ mod tests {
             acr: None,
         };
 
-        let token = key.sign_access_token_jwt(&claims).expect("sign");
+        let token = key.sign_access_token_jwt(&claims).await.expect("sign");
         let decoded = decode_token(&token, &ctx);
         assert!(decoded.is_none(), "Expired token should be rejected");
     }
 
-    #[test]
-    fn test_decode_token_rejects_wrong_issuer() {
+    #[tokio::test]
+    async fn test_decode_token_rejects_wrong_issuer() {
         let key = make_test_oidc_key();
-        let token = make_test_access_token(&key);
+        let token = make_test_access_token(&key).await;
 
         // Use a different expected issuer
         let ctx = TokenValidationContext::new(TEST_JWT_SECRET, &key, "https://wrong-issuer.com");
@@ -363,8 +363,8 @@ mod tests {
         assert_eq!(JwtType::from_header_str("vouch-session+jwt"), None);
     }
 
-    #[test]
-    fn test_access_token_rejects_wrong_issuer() {
+    #[tokio::test]
+    async fn test_access_token_rejects_wrong_issuer() {
         let key = make_test_oidc_key();
 
         let claims = AccessTokenClaims {
@@ -386,7 +386,7 @@ mod tests {
             acr: None,
         };
 
-        let token = key.sign_access_token_jwt(&claims).expect("sign");
+        let token = key.sign_access_token_jwt(&claims).await.expect("sign");
         let ctx = make_ctx(&key);
         let decoded = decode_token(&token, &ctx);
         assert!(

@@ -2,7 +2,8 @@
 //! SSH Certificate Authority for signing user SSH certificates.
 //!
 //! This module provides functionality to:
-//! - Generate and manage an Ed25519 CA keypair
+//! - Generate and manage an Ed25519 CA keypair (Local variant)
+//! - Sign using AWS KMS Ed25519 keys (Kms variant)
 //! - Sign user SSH public keys as certificates
 //! - Extract principals from user email addresses
 
@@ -14,12 +15,28 @@ use ssh_key::{
 };
 use std::path::Path;
 
+use super::kms_signer::KmsSignerEd25519;
+
 /// SSH Certificate Authority.
-pub struct SshCa {
-    /// CA private key for signing certificates.
-    private_key: PrivateKey,
-    /// Relying party ID (used in certificate key ID).
-    rp_id: String,
+///
+/// Supports two modes:
+/// - `Local`: Uses a local Ed25519 private key (file or PEM content)
+/// - `Kms`: Uses an AWS KMS Ed25519 key via `kms:Sign`
+pub enum SshCa {
+    /// Local Ed25519 private key for signing certificates.
+    Local {
+        /// CA private key for signing certificates.
+        private_key: Box<PrivateKey>,
+        /// Relying party ID (used in certificate key ID).
+        rp_id: String,
+    },
+    /// AWS KMS Ed25519 key for signing certificates.
+    Kms {
+        /// KMS signer that calls `kms:Sign` for each operation.
+        signer: KmsSignerEd25519,
+        /// Relying party ID (used in certificate key ID).
+        rp_id: String,
+    },
 }
 
 impl SshCa {
@@ -41,8 +58,23 @@ impl SshCa {
                 .unwrap_or_else(|_| String::from("<unable to display>"))
         );
 
-        Ok(Self {
-            private_key,
+        Ok(Self::Local {
+            private_key: Box::new(private_key),
+            rp_id: rp_id.to_string(),
+        })
+    }
+
+    /// Create a KMS-backed SSH CA.
+    ///
+    /// Calls `kms:GetPublicKey` to fetch and cache the Ed25519 public key.
+    pub async fn from_kms(
+        kms_client: aws_sdk_kms::Client,
+        key_id: String,
+        rp_id: &str,
+    ) -> Result<Self> {
+        let signer = KmsSignerEd25519::new(kms_client, key_id).await?;
+        Ok(Self::Kms {
+            signer,
             rp_id: rp_id.to_string(),
         })
     }
@@ -58,8 +90,8 @@ impl SshCa {
             Self::create_and_save_key(key_path, rp_id)?
         };
 
-        Ok(Self {
-            private_key,
+        Ok(Self::Local {
+            private_key: Box::new(private_key),
             rp_id: rp_id.to_string(),
         })
     }
@@ -159,16 +191,25 @@ impl SshCa {
 
     /// Get the CA public key in OpenSSH format.
     pub fn public_key(&self) -> Result<String> {
-        self.private_key
-            .public_key()
-            .to_openssh()
-            .map_err(|e| anyhow::anyhow!("Failed to format CA public key: {e}"))
+        match self {
+            Self::Local { private_key, .. } => private_key
+                .public_key()
+                .to_openssh()
+                .map_err(|e| anyhow::anyhow!("Failed to format CA public key: {e}")),
+            Self::Kms { signer, .. } => signer
+                .ssh_public_key()?
+                .to_openssh()
+                .map_err(|e| anyhow::anyhow!("Failed to format KMS CA public key: {e}")),
+        }
     }
 
     /// Get the CA public key comment.
     #[must_use]
     pub fn public_key_comment(&self) -> String {
-        format!("vouch-ca@{}", self.rp_id)
+        let rp_id = match self {
+            Self::Local { rp_id, .. } | Self::Kms { rp_id, .. } => rp_id,
+        };
+        format!("vouch-ca@{rp_id}")
     }
 
     /// Sign a user's public key and return an SSH certificate.
@@ -212,7 +253,10 @@ impl SshCa {
         let valid_before = now.saturating_add(valid_seconds);
 
         // Create key ID (identifies the certificate)
-        let key_id = format!("{}@{}", user_email, self.rp_id);
+        let rp_id = match self {
+            Self::Local { rp_id, .. } | Self::Kms { rp_id, .. } => rp_id,
+        };
+        let key_id = format!("{user_email}@{rp_id}");
 
         // Build the certificate
         let mut builder =
@@ -252,10 +296,15 @@ impl SshCa {
             .extension("permit-user-rc", "")
             .map_err(|e| anyhow::anyhow!("Failed to add extension: {e}"))?;
 
-        // Sign the certificate
-        let certificate = builder
-            .sign(&self.private_key)
-            .map_err(|e| anyhow::anyhow!("Failed to sign certificate: {e}"))?;
+        // Sign the certificate — both variants produce ssh-ed25519 certificates
+        let certificate = match self {
+            Self::Local { private_key, .. } => builder
+                .sign(private_key.as_ref())
+                .map_err(|e| anyhow::anyhow!("Failed to sign certificate: {e}"))?,
+            Self::Kms { signer, .. } => builder
+                .sign(signer)
+                .map_err(|e| anyhow::anyhow!("Failed to sign certificate via KMS: {e}"))?,
+        };
 
         // Convert to OpenSSH format
         let cert_string = certificate
@@ -345,8 +394,8 @@ mod tests {
 
         // Generate a CA keypair
         let ca_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-        let ca = SshCa {
-            private_key: ca_key,
+        let ca = SshCa::Local {
+            private_key: Box::new(ca_key),
             rp_id: "test.example.com".to_string(),
         };
 

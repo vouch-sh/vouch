@@ -2,7 +2,8 @@
 //! OIDC signing key management for ES256 (P-256 ECDSA) JWT signing.
 //!
 //! This module provides functionality to:
-//! - Generate P-256 EC keypairs for OIDC ID token signing
+//! - Generate P-256 EC keypairs for OIDC ID token signing (Local variant)
+//! - Sign using AWS KMS P-256 keys via `kms:Sign` (Kms variant)
 //! - Load keys from PEM content or generate new ones
 //! - Export public keys in JWK format for the JWKS endpoint
 //! - Sign JWTs with ES256 algorithm
@@ -18,18 +19,35 @@ use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
+use crate::crypto::kms_signer::KmsSignerP256;
+
 /// OIDC signing key using P-256 ECDSA (ES256).
-pub struct OidcSigningKey {
-    /// The ECDSA key pair for signing.
-    key_pair: EcdsaKeyPair,
-    /// Key ID for the JWK.
-    key_id: String,
-    /// DER-encoded private key (PKCS#8 format for jsonwebtoken).
-    /// Wrapped in `Zeroizing` to clear from memory on drop.
-    der_bytes: Zeroizing<Vec<u8>>,
-    /// Cached decoding key for ES256 JWT verification.
-    /// Built once at construction time to avoid repeated derivation.
-    decoding_key: DecodingKey,
+///
+/// Supports two modes:
+/// - `Local`: Uses a local ECDSA key pair (generated or from PEM)
+/// - `Kms`: Uses an AWS KMS P-256 key via `kms:Sign`
+pub enum OidcSigningKey {
+    /// Local P-256 ECDSA key pair for signing.
+    Local {
+        /// The ECDSA key pair for signing.
+        key_pair: EcdsaKeyPair,
+        /// Key ID for the JWK.
+        key_id: String,
+        /// DER-encoded private key (PKCS#8 format for jsonwebtoken).
+        /// Wrapped in `Zeroizing` to clear from memory on drop.
+        der_bytes: Zeroizing<Vec<u8>>,
+        /// Cached decoding key for ES256 JWT verification.
+        decoding_key: DecodingKey,
+    },
+    /// AWS KMS P-256 ECDSA key for signing.
+    Kms {
+        /// KMS signer that calls `kms:Sign` for each operation.
+        signer: KmsSignerP256,
+        /// Key ID for the JWK.
+        key_id: String,
+        /// Cached decoding key for ES256 JWT verification.
+        decoding_key: DecodingKey,
+    },
 }
 
 impl OidcSigningKey {
@@ -56,11 +74,11 @@ impl OidcSigningKey {
         let der_bytes = Zeroizing::new(pkcs8_bytes.as_ref().to_vec());
 
         // Cache the decoding key at construction time
-        let decoding_key = Self::build_decoding_key(&key_pair)?;
+        let decoding_key = build_decoding_key_from_pair(&key_pair)?;
 
         tracing::info!("Generated new OIDC signing key: {}", key_id);
 
-        Ok(Self {
+        Ok(Self::Local {
             key_pair,
             key_id,
             der_bytes,
@@ -95,14 +113,42 @@ impl OidcSigningKey {
         );
 
         // Cache the decoding key at construction time
-        let decoding_key = Self::build_decoding_key(&key_pair)?;
+        let decoding_key = build_decoding_key_from_pair(&key_pair)?;
 
         tracing::info!("Loaded OIDC signing key from PEM: {}", key_id);
 
-        Ok(Self {
+        Ok(Self::Local {
             key_pair,
             key_id,
             der_bytes,
+            decoding_key,
+        })
+    }
+
+    /// Create a KMS-backed OIDC signing key.
+    ///
+    /// Calls `kms:GetPublicKey` to fetch and cache the P-256 public key.
+    pub async fn from_kms(kms_client: aws_sdk_kms::Client, key_id: String) -> Result<Self> {
+        let signer = KmsSignerP256::new(kms_client, key_id).await?;
+
+        // Build decoding key from x/y coordinates
+        let decoding_key = DecodingKey::from_ec_components(&signer.x_b64(), &signer.y_b64())
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to build decoding key from KMS public key: {e}")
+            })?;
+
+        // Generate key ID from first 8 bytes of public key
+        let pub_bytes = signer.public_key_bytes();
+        let kid = format!(
+            "vouch-oidc-kms-{}",
+            hex::encode(pub_bytes.get(..8).unwrap_or(pub_bytes))
+        );
+
+        tracing::debug!("KMS OIDC signing key initialized: {}", kid);
+
+        Ok(Self::Kms {
+            signer,
+            key_id: kid,
             decoding_key,
         })
     }
@@ -125,101 +171,54 @@ impl OidcSigningKey {
     /// Get the key ID.
     #[must_use]
     pub fn key_id(&self) -> &str {
-        &self.key_id
-    }
-
-    /// Get the `jsonwebtoken` encoding key for signing JWTs.
-    #[must_use]
-    pub fn encoding_key(&self) -> EncodingKey {
-        EncodingKey::from_ec_der(&self.der_bytes)
+        match self {
+            Self::Local { key_id, .. } | Self::Kms { key_id, .. } => key_id,
+        }
     }
 
     /// Get the cached `jsonwebtoken` decoding key for verifying ES256 JWTs.
     ///
     /// Used to verify both ID tokens (OIDC Core Section 2) and
     /// access tokens (RFC 9068) signed by this key.
-    ///
-    /// The key is built once at construction time using
-    /// `DecodingKey::from_ec_components` with the x/y coordinates
-    /// from the public key JWK.
     #[must_use]
     pub fn decoding_key(&self) -> &DecodingKey {
-        &self.decoding_key
-    }
-
-    /// Extract the base64url-encoded x and y coordinates from a P-256 public key.
-    ///
-    /// P-256 uncompressed public keys are 65 bytes: `0x04 || x (32) || y (32)`.
-    fn extract_ec_coordinates(key_pair: &EcdsaKeyPair) -> Result<(String, String)> {
-        let pub_key_bytes = key_pair.public_key().as_ref();
-
-        if pub_key_bytes.len() != 65 {
-            bail!(
-                "Invalid P-256 public key length: expected 65, got {}",
-                pub_key_bytes.len()
-            );
+        match self {
+            Self::Local { decoding_key, .. } | Self::Kms { decoding_key, .. } => decoding_key,
         }
-        if pub_key_bytes.first() != Some(&0x04) {
-            bail!("Invalid P-256 public key format: expected uncompressed point (0x04)");
-        }
-
-        let x = pub_key_bytes
-            .get(1..33)
-            .map(|b| URL_SAFE_NO_PAD.encode(b))
-            .ok_or_else(|| anyhow::anyhow!("Failed to extract x coordinate"))?;
-        let y = pub_key_bytes
-            .get(33..65)
-            .map(|b| URL_SAFE_NO_PAD.encode(b))
-            .ok_or_else(|| anyhow::anyhow!("Failed to extract y coordinate"))?;
-
-        Ok((x, y))
-    }
-
-    /// Build a `DecodingKey` from an ECDSA key pair's public key.
-    ///
-    /// Uses `DecodingKey::from_ec_components` with x/y coordinates,
-    /// which correctly handles the uncompressed P-256 point format
-    /// from `aws-lc-rs`.
-    fn build_decoding_key(key_pair: &EcdsaKeyPair) -> Result<DecodingKey> {
-        let (x, y) = Self::extract_ec_coordinates(key_pair)?;
-        DecodingKey::from_ec_components(&x, &y)
-            .map_err(|e| anyhow::anyhow!("Failed to build decoding key: {e}"))
     }
 
     /// Get the public key as a JWK for the JWKS endpoint.
     pub fn public_key_jwk(&self) -> Result<EcJwk> {
-        let (x, y) = Self::extract_ec_coordinates(&self.key_pair)?;
-        Ok(EcJwk {
-            kty: "EC".to_string(),
-            crv: "P-256".to_string(),
-            alg: "ES256".to_string(),
-            kid: self.key_id.clone(),
-            key_use: "sig".to_string(),
-            x,
-            y,
-        })
-    }
-
-    /// Sign a JWT with the given claims and optional `typ` header override.
-    ///
-    /// When `typ` is `None`, the default `"JWT"` type is used (for ID tokens).
-    /// When `typ` is `Some("at+jwt")`, produces an RFC 9068 access token.
-    fn sign_jwt_with_typ<T: Serialize>(&self, claims: &T, typ: Option<&str>) -> Result<String> {
-        let encoding_key = self.encoding_key();
-
-        let mut header = Header::new(Algorithm::ES256);
-        if let Some(t) = typ {
-            header.typ = Some(t.to_string());
+        match self {
+            Self::Local {
+                key_pair, key_id, ..
+            } => {
+                let (x, y) = extract_ec_coordinates(key_pair)?;
+                Ok(EcJwk {
+                    kty: "EC".to_string(),
+                    crv: "P-256".to_string(),
+                    alg: "ES256".to_string(),
+                    kid: key_id.clone(),
+                    key_use: "sig".to_string(),
+                    x,
+                    y,
+                })
+            }
+            Self::Kms { signer, key_id, .. } => Ok(EcJwk {
+                kty: "EC".to_string(),
+                crv: "P-256".to_string(),
+                alg: "ES256".to_string(),
+                kid: key_id.clone(),
+                key_use: "sig".to_string(),
+                x: signer.x_b64(),
+                y: signer.y_b64(),
+            }),
         }
-        header.kid = Some(self.key_id.clone());
-
-        jsonwebtoken::encode(&header, claims, &encoding_key)
-            .map_err(|e| anyhow::anyhow!("Failed to sign JWT: {e}"))
     }
 
     /// Sign a JWT with the given claims (ID token style, `typ: "JWT"`).
-    pub fn sign_jwt<T: Serialize>(&self, claims: &T) -> Result<String> {
-        self.sign_jwt_with_typ(claims, None)
+    pub async fn sign_jwt<T: Serialize>(&self, claims: &T) -> Result<String> {
+        self.sign_jwt_with_typ(claims, None).await
     }
 
     /// Sign a JWT access token per RFC 9068 Section 2.1.
@@ -228,8 +227,37 @@ impl OidcSigningKey {
     /// "at+jwt" to distinguish access tokens from other JWT types (e.g.,
     /// ID tokens). This prevents token substitution attacks where an ID
     /// token could be used in place of an access token.
-    pub fn sign_access_token_jwt<T: Serialize>(&self, claims: &T) -> Result<String> {
-        self.sign_jwt_with_typ(claims, Some("at+jwt"))
+    pub async fn sign_access_token_jwt<T: Serialize>(&self, claims: &T) -> Result<String> {
+        self.sign_jwt_with_typ(claims, Some("at+jwt")).await
+    }
+
+    /// Sign a JWT with the given claims and optional `typ` header override.
+    ///
+    /// When `typ` is `None`, the default `"JWT"` type is used (for ID tokens).
+    /// When `typ` is `Some("at+jwt")`, produces an RFC 9068 access token.
+    async fn sign_jwt_with_typ<T: Serialize>(
+        &self,
+        claims: &T,
+        typ: Option<&str>,
+    ) -> Result<String> {
+        match self {
+            Self::Local {
+                der_bytes, key_id, ..
+            } => {
+                let encoding_key = EncodingKey::from_ec_der(der_bytes);
+                let mut header = Header::new(Algorithm::ES256);
+                if let Some(t) = typ {
+                    header.typ = Some(t.to_string());
+                }
+                header.kid = Some(key_id.clone());
+
+                jsonwebtoken::encode(&header, claims, &encoding_key)
+                    .map_err(|e| anyhow::anyhow!("Failed to sign JWT: {e}"))
+            }
+            Self::Kms { signer, key_id, .. } => {
+                sign_jwt_with_kms(signer, key_id, claims, typ).await
+            }
+        }
     }
 
     /// Convert PEM to DER bytes.
@@ -257,6 +285,101 @@ impl OidcSigningKey {
             .decode(&base64_content)
             .context("Failed to decode PEM base64 content")
     }
+}
+
+/// JWT header for KMS-signed tokens.
+///
+/// Uses a typed struct to guarantee field presence and deterministic
+/// serialization order (matching what `jsonwebtoken::encode` produces).
+/// Any future header fields must be added here and in the Local
+/// variant's `jsonwebtoken::Header` to keep both paths in sync.
+#[derive(serde::Serialize)]
+struct KmsJwtHeader<'a> {
+    alg: &'a str,
+    typ: &'a str,
+    kid: &'a str,
+}
+
+/// Manually construct and sign a JWT using KMS.
+///
+/// Steps:
+/// 1. Build header JSON with `alg: "ES256"`, `typ`, and `kid`
+/// 2. Serialize claims to JSON
+/// 3. Base64url-encode header and payload, join with "."
+/// 4. Call `signer.sign_raw(signing_input)` → DER signature
+/// 5. Convert DER ECDSA to R||S format for JWT
+/// 6. Base64url-encode signature, return `header.payload.signature`
+async fn sign_jwt_with_kms<T: Serialize>(
+    signer: &KmsSignerP256,
+    key_id: &str,
+    claims: &T,
+    typ: Option<&str>,
+) -> Result<String> {
+    use crate::crypto::kms_signer::der_ecdsa_to_jwt;
+
+    let header = KmsJwtHeader {
+        alg: "ES256",
+        typ: typ.unwrap_or("JWT"),
+        kid: key_id,
+    };
+
+    let header_json = serde_json::to_vec(&header).context("Failed to serialize JWT header")?;
+    let header_b64 = URL_SAFE_NO_PAD.encode(&header_json);
+
+    // Serialize claims
+    let claims_json = serde_json::to_vec(claims).context("Failed to serialize JWT claims")?;
+    let claims_b64 = URL_SAFE_NO_PAD.encode(&claims_json);
+
+    // Build signing input: header.payload
+    let signing_input = format!("{header_b64}.{claims_b64}");
+
+    // Sign with KMS (ECDSA_SHA_256, MessageType: Raw)
+    let der_sig = signer
+        .sign_raw(signing_input.as_bytes())
+        .await
+        .context("KMS JWT signing failed")?;
+
+    // Convert DER ECDSA to JWT R||S format
+    let jwt_sig =
+        der_ecdsa_to_jwt(&der_sig).context("Failed to convert ECDSA DER to JWT format")?;
+    let sig_b64 = URL_SAFE_NO_PAD.encode(jwt_sig);
+
+    Ok(format!("{signing_input}.{sig_b64}"))
+}
+
+/// Extract the base64url-encoded x and y coordinates from a P-256 public key.
+///
+/// P-256 uncompressed public keys are 65 bytes: `0x04 || x (32) || y (32)`.
+fn extract_ec_coordinates(key_pair: &EcdsaKeyPair) -> Result<(String, String)> {
+    let pub_key_bytes = key_pair.public_key().as_ref();
+
+    if pub_key_bytes.len() != 65 {
+        bail!(
+            "Invalid P-256 public key length: expected 65, got {}",
+            pub_key_bytes.len()
+        );
+    }
+    if pub_key_bytes.first() != Some(&0x04) {
+        bail!("Invalid P-256 public key format: expected uncompressed point (0x04)");
+    }
+
+    let x = pub_key_bytes
+        .get(1..33)
+        .map(|b| URL_SAFE_NO_PAD.encode(b))
+        .ok_or_else(|| anyhow::anyhow!("Failed to extract x coordinate"))?;
+    let y = pub_key_bytes
+        .get(33..65)
+        .map(|b| URL_SAFE_NO_PAD.encode(b))
+        .ok_or_else(|| anyhow::anyhow!("Failed to extract y coordinate"))?;
+
+    Ok((x, y))
+}
+
+/// Build a `DecodingKey` from an ECDSA key pair's public key.
+fn build_decoding_key_from_pair(key_pair: &EcdsaKeyPair) -> Result<DecodingKey> {
+    let (x, y) = extract_ec_coordinates(key_pair)?;
+    DecodingKey::from_ec_components(&x, &y)
+        .map_err(|e| anyhow::anyhow!("Failed to build decoding key: {e}"))
 }
 
 /// EC JWK (JSON Web Key) for P-256 keys (RFC 7517 Section 4, RFC 7518 Section 6.2).
@@ -313,8 +436,8 @@ mod tests {
         assert_eq!(jwk.kid, key.key_id());
     }
 
-    #[test]
-    fn test_sign_and_verify_jwt() {
+    #[tokio::test]
+    async fn test_sign_and_verify_jwt() {
         let key = OidcSigningKey::generate().expect("Should generate key");
 
         let claims = TestClaims {
@@ -324,7 +447,7 @@ mod tests {
             iat: 1000000000,
         };
 
-        let token = key.sign_jwt(&claims).expect("Should sign JWT");
+        let token = key.sign_jwt(&claims).await.expect("Should sign JWT");
 
         // Verify the token has the correct structure
         let parts: Vec<&str> = token.split('.').collect();
@@ -342,8 +465,8 @@ mod tests {
         assert!(header.get("kid").is_some(), "Header should have kid");
     }
 
-    #[test]
-    fn test_sign_access_token_jwt_typ_header() {
+    #[tokio::test]
+    async fn test_sign_access_token_jwt_typ_header() {
         // RFC 9068 Section 2.1: typ MUST be "at+jwt"
         let key = OidcSigningKey::generate().expect("Should generate key");
 
@@ -356,6 +479,7 @@ mod tests {
 
         let token = key
             .sign_access_token_jwt(&claims)
+            .await
             .expect("Should sign access token JWT");
 
         // Decode and verify header has typ: "at+jwt"
@@ -373,8 +497,8 @@ mod tests {
         assert!(header.get("kid").is_some(), "Header should have kid");
     }
 
-    #[test]
-    fn test_decoding_key_roundtrip() {
+    #[tokio::test]
+    async fn test_decoding_key_roundtrip() {
         // Verify that sign + decode round-trips correctly
         let key = OidcSigningKey::generate().expect("Should generate key");
         let decoding_key = key.decoding_key();
@@ -389,6 +513,7 @@ mod tests {
         // Sign with access token method
         let token = key
             .sign_access_token_jwt(&claims)
+            .await
             .expect("Should sign access token JWT");
 
         // Verify with decoding key
@@ -402,7 +527,7 @@ mod tests {
         assert_eq!(decoded.header.typ, Some("at+jwt".to_string()));
 
         // Also verify with sign_jwt (ID token style)
-        let id_token = key.sign_jwt(&claims).expect("Should sign JWT");
+        let id_token = key.sign_jwt(&claims).await.expect("Should sign JWT");
         let decoded_id = jsonwebtoken::decode::<TestClaims>(&id_token, decoding_key, &validation)
             .expect("Should decode ID token");
         assert_eq!(decoded_id.claims.sub, "test@example.com");
@@ -426,8 +551,12 @@ mod tests {
         let key1 = OidcSigningKey::generate().expect("Should generate key");
         let jwk1 = key1.public_key_jwk().expect("Should create JWK");
 
-        // Export to PEM and reload
-        let pem_str = pkcs8_to_pem(&key1.der_bytes);
+        // Export to PEM and reload — generate() always returns Local
+        let OidcSigningKey::Local { der_bytes, .. } = &key1 else {
+            // generate() always returns Local variant
+            return;
+        };
+        let pem_str = pkcs8_to_pem(der_bytes);
         let key2 = OidcSigningKey::from_pem(&pem_str).expect("Should load from PEM");
         let jwk2 = key2.public_key_jwk().expect("Should create JWK");
 
