@@ -364,7 +364,6 @@ impl<'a> TokenValidationContext<'a> {
             expected_audience: None,
         }
     }
-
 }
 
 /// Decode a JWT as an RFC 9068 ES256 access token.
