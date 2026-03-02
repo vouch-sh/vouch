@@ -364,17 +364,6 @@ impl<'a> TokenValidationContext<'a> {
             expected_audience: None,
         }
     }
-
-    /// Set the expected audience for access token validation.
-    ///
-    /// Infrastructure for resource servers that know their audience.
-    /// Currently unused — the userinfo endpoint accepts tokens for any client.
-    #[must_use]
-    #[allow(dead_code)]
-    pub fn with_audience(mut self, audience: &'a str) -> Self {
-        self.expected_audience = Some(audience);
-        self
-    }
 }
 
 /// Decode a JWT as an RFC 9068 ES256 access token.

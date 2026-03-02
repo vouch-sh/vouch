@@ -59,10 +59,14 @@ impl ServerComponents {
 pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     let mut config = config::ServerConfig::from_args(args)?;
 
+    // Probe NitroTPM BEFORE S3 config loading so we know whether to
+    // use attested kms:Decrypt for document key decryption.
+    let use_attestation = probe_nitro_tpm().await;
+
     // Load S3 config if configured (BEFORE database connection).
     // If the config has a document_key, also recovers the HPKE key pair.
     let (s3_client, s3_source, initial_etag, doc_keys, kms_client) =
-        load_s3_config(&mut config).await?;
+        load_s3_config(&mut config, use_attestation).await?;
 
     tracing::info!("Starting vouch-server on {}", config.listen_addr);
 
@@ -71,44 +75,13 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 
     // Validate config after all sources merged (env, S3)
     config.validate()?;
-    let nitro_tpm = tpm_decrypt::is_nitro_tpm_available();
-    let attest_binary = nitro_tpm && tpm_decrypt::is_attest_binary_available();
-    let nitro_tpm_status = if nitro_tpm {
-        if attest_binary {
-            "true (binary=ready)"
-        } else {
-            "true (binary=missing)"
-        }
-    } else {
-        "false"
-    };
     tracing::info!(
         "Configuration validated: rp_id={}, base_url={}, tls={}, NitroTPM={}",
         config.rp_id,
         config.base_url,
         config.tls_configured(),
-        nitro_tpm_status,
+        use_attestation,
     );
-
-    // Fire-and-forget background probe that exercises the full attestation
-    // path (ephemeral RSA key + nitro-tpm-attest subprocess + /dev/tpm0).
-    // Surfaces burstable-instance NV_DefineSpace limits and broken TPM
-    // devices without blocking startup.
-    if attest_binary {
-        tokio::task::spawn(async {
-            match tokio::task::spawn_blocking(tpm_decrypt::probe_attestation).await {
-                Ok(Ok(n)) => {
-                    tracing::info!("NitroTPM attestation probe succeeded ({n} bytes)");
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!("NitroTPM attestation probe failed: {e:#}");
-                }
-                Err(e) => {
-                    tracing::warn!("NitroTPM attestation probe task panicked: {e}");
-                }
-            }
-        });
-    }
 
     // Feature status summary — one log per feature for searchable CloudWatch events
     tracing::info!(
@@ -179,13 +152,43 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     })
 }
 
+/// Check if NitroTPM attestation is available and functional.
+///
+/// Returns true only if /dev/tpm0 exists, `nitro-tpm-attest` is in PATH,
+/// and the probe exercise succeeds.
+async fn probe_nitro_tpm() -> bool {
+    if !tpm_decrypt::is_nitro_tpm_available() {
+        tracing::info!("NitroTPM: not available (/dev/tpm0 missing)");
+        return false;
+    }
+    if !tpm_decrypt::is_attest_binary_available() {
+        tracing::warn!("NitroTPM: device present but nitro-tpm-attest binary missing");
+        return false;
+    }
+    match tokio::task::spawn_blocking(tpm_decrypt::probe_attestation).await {
+        Ok(Ok(n)) => {
+            tracing::info!("NitroTPM: attestation probe succeeded ({n} bytes)");
+            true
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("NitroTPM: attestation probe failed: {e:#}");
+            false
+        }
+        Err(e) => {
+            tracing::warn!("NitroTPM: attestation probe task panicked: {e}");
+            false
+        }
+    }
+}
+
 /// Load configuration from S3 if configured.
 ///
-/// Fetches the initial config from S3, handles encrypted envelopes via
-/// NitroTPM + KMS, and merges into the server config. If the config has
-/// a `document_key`, also returns the key material for document encryption.
+/// Fetches the initial config from S3 and merges into the server config.
+/// If the config has a `document_key`, decrypts it via KMS (with NitroTPM
+/// attestation when available) and returns the key material.
 async fn load_s3_config(
     config: &mut config::ServerConfig,
+    use_attestation: bool,
 ) -> Result<(
     Option<aws_sdk_s3::Client>,
     Option<s3_config::S3ConfigSource>,
@@ -216,7 +219,7 @@ async fn load_s3_config(
 
     let s3_client = aws_sdk_s3::Client::new(&sdk_config);
 
-    // Create KMS client for envelope decryption (only used if config is encrypted).
+    // Create KMS client for document key decryption and signing.
     // Uses the same SDK config (region, credentials) as S3.
     let kms_client = aws_sdk_kms::Client::new(&sdk_config);
 
@@ -228,11 +231,10 @@ async fn load_s3_config(
     };
 
     // Fetch initial config - fail fast if unreachable.
-    // If the S3 object is an encrypted envelope, this will use NitroTPM
-    // attestation + KMS to decrypt the config secrets. If the config has
-    // a document_key, the P-384 private key is decrypted via plain KMS.
+    // If the config has a document_key, the P-384 private key is decrypted
+    // via KMS (with NitroTPM attestation when available).
     let (s3_cfg, etag, doc_keys) =
-        s3_config::fetch_s3_config(&s3_client, &source, Some(&kms_client))
+        s3_config::fetch_s3_config(&s3_client, &source, Some(&kms_client), use_attestation)
             .await
             .context("Failed to fetch S3 configuration")?;
 

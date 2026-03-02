@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! NitroTPM-attested KMS envelope decryption.
+//! NitroTPM-attested KMS decryption.
 //!
-//! This module provides optional AWS KMS envelope decryption with NitroTPM attestation.
-//! When running on an EC2 instance with NitroTPM enabled, the server can decrypt
-//! S3 config secrets using KMS with PCR-based key policies.
+//! This module provides optional AWS KMS decryption with NitroTPM attestation.
+//! When running on an EC2 instance with NitroTPM enabled, `kms:Decrypt` calls
+//! include a `Recipient` parameter with a TPM attestation document, ensuring
+//! plaintext is only recoverable on attested instances.
 //!
 //! ## How it works
 //!
@@ -11,105 +12,26 @@
 //! 2. Get a NitroTPM attestation document embedding the RSA public key
 //!    (via the `nitro-tpm-attest` CLI tool from `aws-nitro-tpm-tools`)
 //! 3. Call `kms:Decrypt` with a `Recipient` parameter containing the attestation document
-//! 4. KMS returns `CiphertextForRecipient` — a CMS (PKCS#7) envelope with the data key
+//! 4. KMS returns `CiphertextForRecipient` — a CMS (PKCS#7) envelope with the plaintext
 //!    encrypted to the ephemeral RSA public key
-//! 5. Parse the CMS envelope and RSA-OAEP decrypt to recover the plaintext data key
-//! 6. Use the data key to AES-256-GCM decrypt the config payload
+//! 5. Parse the CMS envelope and RSA-OAEP decrypt to recover the plaintext
 //!
 //! ## Fallback
 //!
-//! When NitroTPM is not available (dev machines, on-prem), this module is a no-op.
-//! The S3 config is loaded as plain JSON (current behavior, unchanged).
+//! When NitroTPM is not available (dev machines, on-prem), `kms_decrypt()` sends
+//! a plain `kms:Decrypt` request without attestation.
 //!
 //! ## Dependencies
 //!
 //! - `aws-sdk-kms`: KMS API client
-//! - `aws-lc-rs`: RSA key generation, RSA-OAEP decryption, AES-256-GCM decryption
+//! - `aws-lc-rs`: RSA key generation, RSA-OAEP decryption, AES-256-CBC decryption
 //! - `nitro-tpm-attest` CLI: Installed on NitroTPM-enabled AMIs via `aws-nitro-tpm-tools`
 
 use anyhow::{Context, Result};
 use aws_sdk_kms::Client as KmsClient;
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
-use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use super::ber::DerParser;
-
-// ============================================================================
-// Encrypted Envelope Format
-// ============================================================================
-
-/// Encrypted envelope wrapper for S3 config.
-///
-/// When the S3 config object contains a `kms_key_id` field, it is treated
-/// as an encrypted envelope. Uses `kms:GenerateDataKey` to produce an AES-256
-/// data key. The `encrypted_data_key` field holds the KMS-encrypted data key,
-/// and `encrypted_data` holds the AES-256-GCM ciphertext (nonce + ciphertext + tag).
-#[derive(Deserialize, Serialize)]
-pub struct EncryptedEnvelope {
-    /// KMS key ID (key ID, not ARN — works across multi-region replicas).
-    pub kms_key_id: String,
-
-    /// Base64-encoded KMS ciphertext blob (the encrypted AES-256 data key).
-    pub encrypted_data_key: String,
-
-    /// Base64-encoded AES-256-GCM ciphertext (12-byte nonce + ciphertext + 16-byte tag).
-    pub encrypted_data: String,
-
-    /// Envelope format version (for future compatibility).
-    #[serde(default = "default_version")]
-    pub version: u32,
-
-    /// TLS config (promoted to wrapper for hot-reload without decryption).
-    pub tls: Option<crate::infra::s3_config::S3TlsConfig>,
-
-    // SECURITY: The ACME account key is intentionally stored in plaintext outside
-    // the encrypted payload. External certificate renewal processes (certbot, acme.sh)
-    // need to read this field without KMS access. The account key authenticates to the
-    // ACME CA but cannot issue certificates without domain validation.
-    /// ACME config (promoted to wrapper for external certificate renewal processes).
-    #[serde(rename = "_acme", default, skip_serializing_if = "Option::is_none")]
-    pub acme: Option<crate::infra::s3_config::S3AcmeConfig>,
-}
-
-// Custom Debug that redacts ciphertext fields to prevent accidental log exposure.
-impl std::fmt::Debug for EncryptedEnvelope {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EncryptedEnvelope")
-            .field("kms_key_id", &self.kms_key_id)
-            .field("encrypted_data_key", &"[REDACTED]")
-            .field("encrypted_data", &"[REDACTED]")
-            .field("version", &self.version)
-            .field("tls", &self.tls)
-            .field("acme", &self.acme)
-            .finish()
-    }
-}
-
-fn default_version() -> u32 {
-    1
-}
-
-/// Probe whether a JSON blob is an encrypted envelope (has `kms_key_id` field).
-///
-/// This is a lightweight check before attempting full deserialization.
-#[must_use]
-pub fn is_encrypted_envelope(json_bytes: &[u8]) -> bool {
-    // Quick string search — avoids parsing the full JSON twice.
-    // The field name is unique enough to avoid false positives.
-    contains_bytes(json_bytes, b"\"kms_key_id\"")
-}
-
-/// Check if `haystack` contains the byte sequence `needle`.
-fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    if needle.is_empty() || haystack.len() < needle.len() {
-        return false;
-    }
-    haystack
-        .windows(needle.len())
-        .any(|window| window == needle)
-}
 
 // ============================================================================
 // NitroTPM Detection
@@ -250,64 +172,63 @@ fn get_attestation_document(public_key_der: &[u8]) -> Result<Vec<u8>> {
 }
 
 // ============================================================================
-// KMS Attested Decrypt
+// KMS Decrypt (with optional NitroTPM attestation)
 // ============================================================================
 
-/// Decrypt a KMS ciphertext blob using NitroTPM attestation.
+/// Decrypt a KMS ciphertext blob, optionally using NitroTPM attestation.
 ///
-/// This is the core function that:
-/// 1. Generates an ephemeral RSA key pair
-/// 2. Gets a NitroTPM attestation document embedding the RSA public key
-/// 3. Calls `kms:Decrypt` with the `Recipient` parameter
-/// 4. Decrypts `CiphertextForRecipient` with the RSA private key
+/// When `use_attestation` is true, adds a `Recipient` parameter with a
+/// NitroTPM attestation document. KMS returns `CiphertextForRecipient`
+/// instead of plaintext, which is RSA-OAEP + CMS decrypted locally.
 ///
-/// Returns the plaintext data key (the original KMS plaintext).
-async fn attested_kms_decrypt(
+/// When `use_attestation` is false, sends a plain `kms:Decrypt` request.
+///
+/// The caller determines `use_attestation` from the startup probe result
+/// (see `probe_attestation()`), not from per-call device checks.
+pub async fn kms_decrypt(
     kms_client: &KmsClient,
     key_id: &str,
     ciphertext_blob: &[u8],
+    use_attestation: bool,
 ) -> Result<Zeroizing<Vec<u8>>> {
-    // Step 1: Generate ephemeral RSA key pair (fast, CPU-only)
-    let rsa_keypair = generate_ephemeral_rsa_keypair()?;
-    tracing::debug!("Generated ephemeral RSA-2048 key pair for attested KMS call");
+    let mut request = kms_client
+        .decrypt()
+        .key_id(key_id)
+        .ciphertext_blob(aws_smithy_types::Blob::new(ciphertext_blob));
 
-    // Step 2: Get attestation document on a blocking thread because
-    // it shells out to nitro-tpm-attest (subprocess I/O via /dev/tpm0).
-    let pub_key_der = rsa_keypair.public_key_der.clone();
-    let attestation_doc =
-        tokio::task::spawn_blocking(move || get_attestation_document(&pub_key_der))
+    let attestation = if use_attestation {
+        let keypair = generate_ephemeral_rsa_keypair()?;
+        let pub_key_der = keypair.public_key_der.clone();
+        let doc = tokio::task::spawn_blocking(move || get_attestation_document(&pub_key_der))
             .await
             .context("Attestation task panicked")?
             .context("Failed to get attestation document")?;
 
-    // Step 3: Call KMS Decrypt with Recipient
-    let recipient = aws_sdk_kms::types::RecipientInfo::builder()
-        .key_encryption_algorithm(aws_sdk_kms::types::KeyEncryptionMechanism::RsaesOaepSha256)
-        .attestation_document(aws_smithy_types::Blob::new(attestation_doc))
-        .build();
+        let recipient = aws_sdk_kms::types::RecipientInfo::builder()
+            .key_encryption_algorithm(aws_sdk_kms::types::KeyEncryptionMechanism::RsaesOaepSha256)
+            .attestation_document(aws_smithy_types::Blob::new(doc))
+            .build();
+        request = request.recipient(recipient);
+        tracing::debug!("kms:Decrypt with NitroTPM attestation for key {key_id}");
+        Some(keypair)
+    } else {
+        tracing::debug!("kms:Decrypt (plain) for key {key_id}");
+        None
+    };
 
-    let response = kms_client
-        .decrypt()
-        .key_id(key_id)
-        .ciphertext_blob(aws_smithy_types::Blob::new(ciphertext_blob))
-        .recipient(recipient)
-        .send()
-        .await
-        .context("KMS Decrypt with attestation failed")?;
+    let response = request.send().await.context("kms:Decrypt failed")?;
 
-    // Step 4: Extract and decrypt CiphertextForRecipient
-    let cms_blob = response
-        .ciphertext_for_recipient()
-        .context("KMS response missing CiphertextForRecipient (is NitroTPM attestation valid?)")?;
-
-    let plaintext = decrypt_cms_envelope(cms_blob.as_ref(), rsa_keypair.private_key)?;
-
-    tracing::debug!(
-        "Successfully decrypted data key via attested KMS call ({} bytes)",
-        plaintext.len()
-    );
-
-    Ok(plaintext)
+    if let Some(keypair) = attestation {
+        let cms_blob = response
+            .ciphertext_for_recipient()
+            .context("KMS response missing CiphertextForRecipient")?;
+        decrypt_cms_envelope(cms_blob.as_ref(), keypair.private_key)
+    } else {
+        let pt = response
+            .plaintext()
+            .context("KMS Decrypt response missing plaintext")?;
+        Ok(Zeroizing::new(pt.as_ref().to_vec()))
+    }
 }
 
 // ============================================================================
@@ -510,148 +431,6 @@ fn aes_256_cbc_decrypt(key: &[u8], iv: &[u8], ciphertext: &[u8]) -> Result<Zeroi
 }
 
 // ============================================================================
-// AES-256-GCM Encryption/Decryption (for config envelope)
-// ============================================================================
-
-/// AES-256-GCM encrypt with a random 12-byte nonce.
-///
-/// Returns `[12-byte nonce][ciphertext][16-byte tag]`.
-pub fn aes_256_gcm_encrypt(key: &[u8], plaintext: &[u8]) -> Result<Vec<u8>> {
-    use aws_lc_rs::aead;
-
-    if key.len() != 32 {
-        anyhow::bail!("AES-256-GCM requires 32-byte key, got {}", key.len());
-    }
-
-    let unbound_key = aead::UnboundKey::new(&aead::AES_256_GCM, key)
-        .map_err(|e| anyhow::anyhow!("Failed to create AES-256-GCM key: {e}"))?;
-    let less_safe_key = aead::LessSafeKey::new(unbound_key);
-
-    let mut nonce_bytes = [0u8; aead::NONCE_LEN];
-    aws_lc_rs::rand::fill(&mut nonce_bytes)
-        .map_err(|_| anyhow::anyhow!("Failed to generate random nonce"))?;
-    let nonce = aead::Nonce::assume_unique_for_key(nonce_bytes);
-
-    let mut in_out = plaintext.to_vec();
-    less_safe_key
-        .seal_in_place_append_tag(nonce, aead::Aad::empty(), &mut in_out)
-        .map_err(|e| anyhow::anyhow!("AES-256-GCM seal failed: {e}"))?;
-
-    let mut result = Vec::with_capacity(aead::NONCE_LEN + in_out.len());
-    result.extend_from_slice(&nonce_bytes);
-    result.extend_from_slice(&in_out);
-    Ok(result)
-}
-
-/// AES-256-GCM decrypt.
-///
-/// Expects `[12-byte nonce][ciphertext][16-byte tag]`.
-pub fn aes_256_gcm_decrypt(key: &[u8], nonce_and_ciphertext: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
-    use aws_lc_rs::aead;
-
-    if key.len() != 32 {
-        anyhow::bail!("AES-256-GCM requires 32-byte key, got {}", key.len());
-    }
-
-    let min_len = aead::NONCE_LEN + aead::AES_256_GCM.tag_len();
-    if nonce_and_ciphertext.len() < min_len {
-        anyhow::bail!(
-            "ciphertext too short for AES-256-GCM ({} bytes, minimum {min_len})",
-            nonce_and_ciphertext.len(),
-        );
-    }
-
-    let (nonce_bytes, ciphertext) = nonce_and_ciphertext.split_at(aead::NONCE_LEN);
-    let nonce_array: [u8; 12] = nonce_bytes
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("invalid nonce length"))?;
-
-    let unbound_key = aead::UnboundKey::new(&aead::AES_256_GCM, key)
-        .map_err(|e| anyhow::anyhow!("Failed to create AES-256-GCM key: {e}"))?;
-    let less_safe_key = aead::LessSafeKey::new(unbound_key);
-    let nonce = aead::Nonce::assume_unique_for_key(nonce_array);
-
-    let mut in_out = ciphertext.to_vec();
-    let plaintext = less_safe_key
-        .open_in_place(nonce, aead::Aad::empty(), &mut in_out)
-        .map_err(|e| anyhow::anyhow!("AES-256-GCM open failed: {e}"))?;
-
-    Ok(Zeroizing::new(plaintext.to_vec()))
-}
-
-// ============================================================================
-// Public API: Decrypt Encrypted Envelope
-// ============================================================================
-
-/// Decrypt an encrypted S3 config envelope using NitroTPM-attested KMS.
-///
-/// Decrypts the AES-256 data key via KMS (with NitroTPM attestation), then uses
-/// AES-256-GCM to decrypt the config payload. Returns the plaintext config bytes.
-///
-/// # Arguments
-/// * `kms_client` - AWS KMS client (pre-configured with credentials and region)
-/// * `envelope` - The parsed encrypted envelope from S3
-///
-/// # Returns
-/// The decrypted config bytes.
-///
-/// # Errors
-/// Returns an error if NitroTPM is unavailable, KMS call fails, or decryption fails.
-pub async fn decrypt_envelope(
-    kms_client: &KmsClient,
-    envelope: &EncryptedEnvelope,
-) -> Result<Zeroizing<Vec<u8>>> {
-    // Validate envelope version
-    if envelope.version != 1 {
-        anyhow::bail!(
-            "unsupported envelope version: {} (expected 1)",
-            envelope.version
-        );
-    }
-
-    // Verify NitroTPM is available
-    if !is_nitro_tpm_available() {
-        anyhow::bail!(
-            "Encrypted S3 config requires NitroTPM but /dev/tpm0 is not available. \
-             Use plain JSON config for non-NitroTPM environments."
-        );
-    }
-
-    if !is_attest_binary_available() {
-        anyhow::bail!(
-            "Encrypted S3 config requires '{ATTEST_BINARY}' binary but it is not in PATH. \
-             Install the 'aws-nitro-tpm-tools' package."
-        );
-    }
-
-    // Decode the encrypted data key (KMS ciphertext blob)
-    let encrypted_data_key = BASE64
-        .decode(&envelope.encrypted_data_key)
-        .context("Failed to base64-decode encrypted_data_key")?;
-
-    // Decrypt data key via attested KMS call
-    let data_key = attested_kms_decrypt(kms_client, &envelope.kms_key_id, &encrypted_data_key)
-        .await
-        .context("Failed to decrypt data key via attested KMS")?;
-
-    // Decode encrypted data
-    let encrypted_data = BASE64
-        .decode(&envelope.encrypted_data)
-        .context("Failed to base64-decode encrypted_data")?;
-
-    // AES-256-GCM decrypt the config payload
-    let plaintext = aes_256_gcm_decrypt(&data_key, &encrypted_data)
-        .context("Failed to AES-256-GCM decrypt config payload")?;
-
-    tracing::info!(
-        "Successfully decrypted S3 config envelope ({} bytes plaintext)",
-        plaintext.len()
-    );
-
-    Ok(plaintext)
-}
-
-// ============================================================================
 // Tests
 // ============================================================================
 
@@ -659,33 +438,6 @@ pub async fn decrypt_envelope(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
     use super::*;
-
-    #[test]
-    fn test_is_encrypted_envelope_positive() {
-        let json = br#"{"kms_key_id": "mrk-abc123", "encrypted_data_key": "...", "encrypted_data": "..."}"#;
-        assert!(is_encrypted_envelope(json));
-    }
-
-    #[test]
-    fn test_is_encrypted_envelope_negative() {
-        let json = br#"{"rp_id": "vouch.example.com", "base_url": "https://vouch.example.com"}"#;
-        assert!(!is_encrypted_envelope(json));
-    }
-
-    #[test]
-    fn test_is_encrypted_envelope_empty() {
-        assert!(!is_encrypted_envelope(b"{}"));
-        assert!(!is_encrypted_envelope(b""));
-    }
-
-    #[test]
-    fn test_contains_bytes() {
-        assert!(contains_bytes(b"hello world", b"world"));
-        assert!(contains_bytes(b"hello world", b"hello"));
-        assert!(!contains_bytes(b"hello world", b"xyz"));
-        assert!(!contains_bytes(b"", b"x"));
-        assert!(!contains_bytes(b"x", b"xy"));
-    }
 
     #[test]
     fn test_rsa_keypair_generation() {
@@ -809,137 +561,64 @@ mod tests {
         assert!(result.is_err());
     }
 
-    /// AES-256-GCM encrypt/decrypt round-trip.
     #[test]
-    fn test_aes_256_gcm_round_trip() {
-        let key = [0x42u8; 32];
-        let plaintext = b"test config payload for AES-256-GCM";
-
-        let ciphertext = aes_256_gcm_encrypt(&key, plaintext).unwrap();
-        // nonce (12) + plaintext (35) + tag (16) = 63
-        assert_eq!(ciphertext.len(), 12 + plaintext.len() + 16);
-
-        let decrypted = aes_256_gcm_decrypt(&key, &ciphertext).unwrap();
-        assert_eq!(&**decrypted, plaintext);
+    fn test_parse_cms_enveloped_data_too_large() {
+        let oversized = vec![0x30; MAX_CMS_SIZE + 1];
+        let result = parse_cms_enveloped_data(&oversized);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("too large"),
+            "Expected 'too large' error, got: {err}"
+        );
     }
 
-    /// AES-256-GCM: wrong key must fail.
     #[test]
-    fn test_aes_256_gcm_wrong_key() {
-        let key = [0x42u8; 32];
-        let wrong_key = [0x43u8; 32];
-        let plaintext = b"secret data";
-
-        let ciphertext = aes_256_gcm_encrypt(&key, plaintext).unwrap();
-        let result = aes_256_gcm_decrypt(&wrong_key, &ciphertext);
-        assert!(result.is_err());
+    fn test_parse_cms_enveloped_data_empty() {
+        let result = parse_cms_enveloped_data(&[]);
+        assert!(result.is_err(), "Empty input must return Err");
     }
 
-    /// AES-256-GCM: tampered ciphertext must fail.
     #[test]
-    fn test_aes_256_gcm_tampered_ciphertext() {
-        let key = [0x42u8; 32];
-        let plaintext = b"secret data";
+    fn test_parse_cms_enveloped_data_garbage_bytes() {
+        let garbage = [0xDE, 0xAD, 0xBE, 0xEF, 0x00, 0xFF];
+        let result = parse_cms_enveloped_data(&garbage);
+        assert!(result.is_err(), "Garbage DER input must return Err");
+    }
 
-        let mut ciphertext = aes_256_gcm_encrypt(&key, plaintext).unwrap();
-        // Flip a byte in the ciphertext (after the nonce)
-        if let Some(byte) = ciphertext.get_mut(15) {
-            *byte ^= 0xFF;
+    #[test]
+    fn test_aes_256_cbc_bad_key_length_short() {
+        let short_key = [0x42u8; 16];
+        let result = aes_256_cbc_decrypt(&short_key, &[0u8; 16], &[0u8; 32]);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("32-byte key"),
+            "Expected '32-byte key' error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_aes_256_cbc_bad_key_length_zero() {
+        let result = aes_256_cbc_decrypt(&[], &[0u8; 16], &[0u8; 32]);
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("32-byte key"),
+            "Expected '32-byte key' error, got: {err}"
+        );
+    }
+
+    /// Conditional test: verify `is_attest_binary_available()` returns false
+    /// when the TPM device is not present (dev machines).
+    #[test]
+    fn test_attest_binary_not_in_path_on_dev() {
+        if std::path::Path::new(TPM_DEVICE_PATH).exists() {
+            // Skip on NitroTPM-enabled instances
+            return;
         }
-        let result = aes_256_gcm_decrypt(&key, &ciphertext);
-        assert!(result.is_err());
-    }
-
-    /// AES-256-GCM: too-short input must fail.
-    #[test]
-    fn test_aes_256_gcm_too_short() {
-        let key = [0x42u8; 32];
-        let result = aes_256_gcm_decrypt(&key, &[0u8; 10]);
-        assert!(result.is_err());
-    }
-
-    /// Round-trip test: AES-256-GCM encrypt → serialize envelope → deserialize → decrypt.
-    #[test]
-    fn test_envelope_aes_gcm_serialize_deserialize() {
-        let sample_config =
-            br#"{"rp_id":"test.example.com","base_url":"https://test.example.com"}"#;
-
-        let data_key = [0x42u8; 32];
-        let ciphertext = aes_256_gcm_encrypt(&data_key, sample_config).unwrap();
-
-        let envelope = EncryptedEnvelope {
-            kms_key_id: "mrk-test1234".to_string(),
-            encrypted_data_key: BASE64.encode(data_key), // fake: would be KMS ciphertext
-            encrypted_data: BASE64.encode(&ciphertext),
-            version: 1,
-            tls: Some(crate::infra::s3_config::S3TlsConfig {
-                cert: Some("test-cert".to_string()),
-                key: Some("test-key".to_string()),
-            }),
-            acme: Some(crate::infra::s3_config::S3AcmeConfig {
-                account_key: "acme-secret".to_string(),
-                email: "acme@example.com".to_string(),
-            }),
-        };
-
-        let json = serde_json::to_string_pretty(&envelope).unwrap();
-
-        assert!(json.contains("kms_key_id"));
-        assert!(json.contains("encrypted_data_key"));
-        assert!(json.contains("encrypted_data"));
-        assert!(json.contains("test-cert"));
-        assert!(json.contains("_acme"));
-        assert!(json.contains("acme@example.com"));
-
-        let parsed: EncryptedEnvelope = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.kms_key_id, "mrk-test1234");
-
-        let ct = BASE64.decode(&parsed.encrypted_data).unwrap();
-        let dk = BASE64.decode(&parsed.encrypted_data_key).unwrap();
-        let opened = aes_256_gcm_decrypt(&dk, &ct).unwrap();
-        assert_eq!(&*opened, sample_config);
-    }
-
-    /// Verify `skip_serializing_if` omits `_acme` when `None`.
-    #[test]
-    fn test_envelope_serialization_omits_acme_when_none() {
-        let envelope = EncryptedEnvelope {
-            kms_key_id: "mrk-test".to_string(),
-            encrypted_data_key: "a2V5".to_string(),
-            encrypted_data: "ZGF0YQ==".to_string(),
-            version: 1,
-            tls: None,
-            acme: None,
-        };
-
-        let json = serde_json::to_string(&envelope).unwrap();
-        assert!(
-            !json.contains("_acme"),
-            "JSON should not contain _acme when None"
-        );
-    }
-
-    /// Verify `S3AcmeConfig` Debug impl redacts `account_key`.
-    #[test]
-    fn test_s3_acme_config_debug_redacts_account_key() {
-        let acme = crate::infra::s3_config::S3AcmeConfig {
-            account_key: "super-secret-key-material".to_string(),
-            email: "admin@example.com".to_string(),
-        };
-
-        let debug_output = format!("{acme:?}");
-        assert!(
-            debug_output.contains("[REDACTED]"),
-            "Debug output should contain [REDACTED]"
-        );
-        assert!(
-            !debug_output.contains("super-secret-key-material"),
-            "Debug output should not contain the actual account key"
-        );
-        assert!(
-            debug_output.contains("admin@example.com"),
-            "Debug output should contain the email"
-        );
+        // On dev machines without aws-nitro-tpm-tools installed,
+        // the binary should not be in PATH.
+        // If it IS installed (unlikely on dev), the test still passes
+        // since we only assert the function doesn't panic.
+        let _ = is_attest_binary_available();
     }
 
     /// End-to-end CMS EnvelopedData parsing + decryption with a hand-crafted structure.

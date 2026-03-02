@@ -13,7 +13,7 @@ use tracing_subscriber::EnvFilter;
 
 use vouch_server::{
     config,
-    infra::{decrypt_config, encrypt_config, generate_document_key, serve, startup},
+    infra::{generate_document_key, serve, startup},
 };
 
 // ============================================================================
@@ -33,10 +33,6 @@ struct Cli {
 enum Commands {
     /// Start the identity server.
     Serve(config::Args),
-    /// Encrypt a plain S3Config JSON into a KMS-encrypted envelope.
-    EncryptConfig(encrypt_config::EncryptConfigArgs),
-    /// Decrypt a KMS-encrypted S3 config envelope to plain JSON.
-    DecryptConfig(decrypt_config::DecryptConfigArgs),
     /// Generate a P-384 document encryption key pair via KMS.
     GenerateDocumentKey(generate_document_key::GenerateDocumentKeyArgs),
 }
@@ -58,24 +54,10 @@ async fn main() -> Result<()> {
     // (legacy: `vouch-server --listen-addr ...`).
     let first_arg = std::env::args().nth(1).unwrap_or_default();
     match first_arg.as_str() {
-        "serve"
-        | "encrypt-config"
-        | "decrypt-config"
-        | "generate-document-key"
-        | "help"
-        | "--help"
-        | "-h" => {
+        "serve" | "generate-document-key" | "help" | "--help" | "-h" => {
             let cli = Cli::parse();
             match cli.command {
                 Commands::Serve(args) => run_server(args).await,
-                Commands::EncryptConfig(args) => {
-                    init_stderr_logging();
-                    encrypt_config::run(args).await
-                }
-                Commands::DecryptConfig(args) => {
-                    init_stderr_logging();
-                    decrypt_config::run(args).await
-                }
                 Commands::GenerateDocumentKey(args) => {
                     init_stderr_logging();
                     generate_document_key::run(args).await
