@@ -787,18 +787,6 @@ fn cbor_map_get_bytes_by_text(
     )))
 }
 
-/// Verify a signature using typed COSE key and signature.
-///
-/// This is a type-safe wrapper for internal use.
-#[allow(dead_code)]
-pub fn verify_cose_signature_typed(
-    cose_key: &CoseKey<Raw>,
-    message: &[u8],
-    signature: &Signature<Raw>,
-) -> Result<(), VerifyError> {
-    verify_cose_signature(cose_key.as_bytes(), message, signature.as_bytes())
-}
-
 /// Verify a signature using a COSE-encoded public key.
 fn verify_cose_signature(
     cose_key: &[u8],

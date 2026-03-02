@@ -232,53 +232,11 @@ impl<'a> DerParser<'a> {
         Ok(())
     }
 
-    /// Expect a SEQUENCE (tag 0x30) and return its contents.
-    #[allow(dead_code)]
-    pub(crate) fn expect_sequence(&mut self) -> Result<&'a [u8]> {
-        let (tag, value) = self.read_tlv()?;
-        if tag != 0x30 {
-            anyhow::bail!("DER: expected SEQUENCE (0x30), got 0x{tag:02x}");
-        }
-        Ok(value)
-    }
-
-    /// Expect a SET (tag 0x31) and return its contents.
-    #[allow(dead_code)]
-    pub(crate) fn expect_set(&mut self) -> Result<&'a [u8]> {
-        let (tag, value) = self.read_tlv()?;
-        if tag != 0x31 {
-            anyhow::bail!("DER: expected SET (0x31), got 0x{tag:02x}");
-        }
-        Ok(value)
-    }
-
     /// Expect an OCTET STRING (tag 0x04) and return its contents.
     pub(crate) fn expect_octet_string(&mut self) -> Result<&'a [u8]> {
         let (tag, value) = self.read_tlv()?;
         if tag != 0x04 {
             anyhow::bail!("DER: expected OCTET STRING (0x04), got 0x{tag:02x}");
-        }
-        Ok(value)
-    }
-
-    /// Expect context-specific EXPLICIT [n] (tag 0xa0 + n) and return inner contents.
-    #[allow(dead_code)]
-    pub(crate) fn expect_context_explicit(&mut self, n: u8) -> Result<&'a [u8]> {
-        let expected_tag = 0xa0 | n;
-        let (tag, value) = self.read_tlv()?;
-        if tag != expected_tag {
-            anyhow::bail!("DER: expected context [{n}] (0x{expected_tag:02x}), got 0x{tag:02x}");
-        }
-        Ok(value)
-    }
-
-    /// Expect context-specific IMPLICIT [n] (tag 0x80 + n) and return raw value.
-    #[allow(dead_code)]
-    pub(crate) fn expect_context_implicit(&mut self, n: u8) -> Result<&'a [u8]> {
-        let expected_tag = 0x80 | n;
-        let (tag, value) = self.read_tlv()?;
-        if tag != expected_tag {
-            anyhow::bail!("DER: expected implicit [{n}] (0x{expected_tag:02x}), got 0x{tag:02x}");
         }
         Ok(value)
     }
@@ -317,17 +275,6 @@ impl<'a> DerParser<'a> {
     pub(crate) fn skip_tlv_ber(&mut self) -> Result<()> {
         let _ = self.read_tlv_ber()?;
         Ok(())
-    }
-
-    /// Expect context-specific IMPLICIT [n], tolerating BER indefinite length.
-    #[allow(dead_code)]
-    pub(crate) fn expect_context_implicit_ber(&mut self, n: u8) -> Result<&'a [u8]> {
-        let expected_tag = 0x80 | n;
-        let (tag, value) = self.read_tlv_ber()?;
-        if tag != expected_tag {
-            anyhow::bail!("BER: expected implicit [{n}] (0x{expected_tag:02x}), got 0x{tag:02x}");
-        }
-        Ok(value)
     }
 
     /// Read `[n] IMPLICIT OCTET STRING` handling both primitive and BER
@@ -384,7 +331,7 @@ mod tests {
         // A simple SEQUENCE { INTEGER 1 }
         let data = [0x30, 0x03, 0x02, 0x01, 0x01];
         let mut parser = DerParser::new(&data);
-        let seq = parser.expect_sequence().unwrap();
+        let seq = parser.expect_sequence_ber().unwrap();
         assert_eq!(seq, &[0x02, 0x01, 0x01]);
     }
 
@@ -427,7 +374,7 @@ mod tests {
     fn test_der_parser_error_on_wrong_tag() {
         let data = [0x02, 0x01, 0x01]; // INTEGER, not SEQUENCE
         let mut parser = DerParser::new(&data);
-        assert!(parser.expect_sequence().is_err());
+        assert!(parser.expect_sequence_ber().is_err());
     }
 
     #[test]
@@ -446,10 +393,12 @@ mod tests {
     }
 
     #[test]
-    fn test_der_parser_indefinite_length_rejected() {
-        let data = [0x30, 0x80, 0x00, 0x00]; // SEQUENCE with indefinite length
+    fn test_der_read_length_rejects_indefinite() {
+        // DER's read_length() must reject indefinite-length encoding (0x80).
+        // Use read_tlv() which calls read_length() (strict DER path).
+        let data = [0x04, 0x80, 0x00, 0x00]; // OCTET STRING with indefinite length
         let mut parser = DerParser::new(&data);
-        let err = parser.expect_sequence().unwrap_err();
+        let err = parser.read_tlv().unwrap_err();
         assert!(
             format!("{err}").contains("indefinite"),
             "Expected indefinite length error, got: {err}"
@@ -586,18 +535,6 @@ mod tests {
         let mut parser = DerParser::new(&data);
         let contents = parser.expect_context_explicit_ber(0).unwrap();
         assert_eq!(contents, &[0x02, 0x01, 0x99]);
-    }
-
-    /// [0] IMPLICIT with indefinite length should be accepted.
-    #[test]
-    fn test_ber_context_implicit_indefinite() {
-        // [0] IMPLICIT (tag 0x80) with indefinite length, raw bytes + EOC
-        // Note: tag 0x80 is the same as the indefinite length marker,
-        // but the parser reads tag first, then the length byte.
-        let data = [0x80, 0x80, 0x02, 0x01, 0xAB, 0x00, 0x00];
-        let mut parser = DerParser::new(&data);
-        let contents = parser.expect_context_implicit_ber(0).unwrap();
-        assert_eq!(contents, &[0x02, 0x01, 0xAB]);
     }
 
     /// 2-byte long-form length encoding (300 bytes).
