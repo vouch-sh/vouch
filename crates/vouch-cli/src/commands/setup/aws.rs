@@ -68,6 +68,7 @@ pub async fn run(profile: Option<&str>, role_arn: &str, region: Option<&str>) ->
             vouch_path.display()
         )),
         region: region.map(str::to_string),
+        output: Some("json".to_string()),
     });
     config.save()?;
 

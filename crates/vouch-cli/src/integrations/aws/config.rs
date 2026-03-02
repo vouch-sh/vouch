@@ -17,6 +17,8 @@ pub struct AwsProfile {
     pub credential_process: Option<String>,
     /// The AWS region if configured.
     pub region: Option<String>,
+    /// The output format if configured (e.g., "json", "text", "table").
+    pub output: Option<String>,
 }
 
 /// AWS config file parser and writer.
@@ -72,6 +74,7 @@ impl AwsConfig {
             name: name.to_string(),
             credential_process: section.get("credential_process").map(|s| s.to_string()),
             region: section.get("region").map(|s| s.to_string()),
+            output: section.get("output").map(|s| s.to_string()),
         })
     }
 
@@ -100,6 +103,7 @@ impl AwsConfig {
                     name: profile_name,
                     credential_process: Some(cp.to_string()),
                     region: props.get("region").map(|s| s.to_string()),
+                    output: props.get("output").map(|s| s.to_string()),
                 });
             }
         }
@@ -148,7 +152,12 @@ impl AwsConfig {
                 .set("credential_process", cp);
         }
         if let Some(ref region) = profile.region {
-            self.ini.with_section(Some(section)).set("region", region);
+            self.ini
+                .with_section(Some(section.clone()))
+                .set("region", region);
+        }
+        if let Some(ref output) = profile.output {
+            self.ini.with_section(Some(section)).set("output", output);
         }
     }
 
@@ -396,6 +405,7 @@ region = us-west-2
                 "vouch credential aws --role arn:aws:iam::123:role/Test".to_string(),
             ),
             region: Some("us-east-1".to_string()),
+            output: Some("json".to_string()),
         });
         config.save().unwrap();
 
@@ -410,6 +420,7 @@ region = us-west-2
             Some("vouch credential aws --role arn:aws:iam::123:role/Test".to_string())
         );
         assert_eq!(vouch.region, Some("us-east-1".to_string()));
+        assert_eq!(vouch.output, Some("json".to_string()));
 
         // Verify existing profile is preserved
         let existing = reloaded.get_profile("existing").unwrap();
@@ -427,6 +438,7 @@ region = us-west-2
                 "vouch credential aws --role arn:aws:iam::123:role/Test".to_string(),
             ),
             region: None,
+            output: None,
         });
         config.save().unwrap();
 
@@ -475,6 +487,7 @@ output = json
                 "vouch credential aws --role arn:aws:iam::123:role/Test".to_string(),
             ),
             region: None,
+            output: Some("json".to_string()),
         });
         config.save().unwrap();
 

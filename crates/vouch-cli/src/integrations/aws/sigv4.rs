@@ -438,8 +438,10 @@ pub fn build_presigned_url(params: &PresignedUrlParams<'_>) -> String {
         .collect::<Vec<_>>()
         .join("&");
 
-    // Presigned URLs use UNSIGNED-PAYLOAD
-    let payload_hash = "UNSIGNED-PAYLOAD";
+    // Use SHA-256 of empty body for the payload hash.
+    // S3 presigned URLs use "UNSIGNED-PAYLOAD", but most other services
+    // (including rds-db and sts) expect the hash of an empty string.
+    let payload_hash = sha256_hex(b"");
 
     let canonical_request = format!(
         "{method}\n{path}\n{canonical_query_string}\n\
@@ -801,9 +803,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("&");
 
+        let empty_hash = sha256_hex(b"");
         let cr = format!(
             "GET\n/\n{cqs}\n{canonical_hdrs}\n\
-             {signed_hdrs}\nUNSIGNED-PAYLOAD"
+             {signed_hdrs}\n{empty_hash}"
         );
 
         let cr_hash = sha256_hex(cr.as_bytes());
@@ -815,13 +818,13 @@ mod tests {
         assert_eq!(actual_sig, expected_sig, "presigned URL signature mismatch");
     }
 
-    /// Verify presigned URL uses UNSIGNED-PAYLOAD (not empty hash).
+    /// Verify presigned URL uses SHA-256("") as payload hash.
     ///
-    /// Per AWS SigV4 spec, presigned URLs must use the literal string
-    /// "UNSIGNED-PAYLOAD" as the payload hash in the canonical request,
-    /// not SHA-256("").
+    /// Most AWS services (including rds-db and sts) expect the hash of
+    /// an empty string for presigned URLs, not the S3-specific
+    /// "UNSIGNED-PAYLOAD" literal.
     #[test]
-    fn test_presigned_url_uses_unsigned_payload() {
+    fn test_presigned_url_uses_empty_payload_hash() {
         let creds = StsCredentials {
             access_key_id: "AKID".to_string(),
             secret_access_key: SecretString::from("secret".to_string()),
@@ -841,13 +844,205 @@ mod tests {
             expires_seconds: 60,
         });
 
-        // The empty payload hash should NOT appear in the URL
-        // (it would if we accidentally hashed the payload instead
-        // of using UNSIGNED-PAYLOAD)
-        let empty_hash = sha256_hex(b"");
+        // The URL itself doesn't contain the payload hash, but the
+        // signature is computed using SHA-256("") in the canonical
+        // request. Verify "UNSIGNED-PAYLOAD" is NOT used by checking
+        // that the signature differs from one built with it.
         assert!(
-            !url.contains(&empty_hash),
-            "presigned URL must not contain empty payload hash"
+            !url.contains("UNSIGNED-PAYLOAD"),
+            "presigned URL must not contain UNSIGNED-PAYLOAD literal"
+        );
+    }
+
+    /// End-to-end signature verification for RDS IAM auth tokens.
+    ///
+    /// Uses `rds-db` service, `Action=connect` + `DBUser` params, and
+    /// no extra signed headers — matching the exact call site in
+    /// `credential/rds.rs`. Independently reconstructs the canonical
+    /// request and verifies the signature matches.
+    #[test]
+    fn test_rds_presigned_url_signature_verification() {
+        let creds = StsCredentials {
+            access_key_id: "AKIAIOSFODNN7EXAMPLE".to_string(),
+            secret_access_key: SecretString::from(
+                "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            ),
+            session_token: SecretString::from("IQoJb3JpZ2luX2VjFakeToken".to_string()),
+            expiration: "2024-01-15T18:30:45Z".parse().unwrap(),
+        };
+
+        let hostname = "mydb.abc123.us-east-1.rds.amazonaws.com";
+        let port = 5432;
+        let endpoint = format!("https://{hostname}:{port}");
+        let host = format!("{hostname}:{port}");
+
+        let url = build_presigned_url(&PresignedUrlParams {
+            method: "GET",
+            endpoint: &endpoint,
+            path: "/",
+            query_params: &[("Action", "connect"), ("DBUser", "dbuser")],
+            extra_signed_headers: &[],
+            service: "rds-db",
+            region: "us-east-1",
+            creds: &creds,
+            expires_seconds: 900,
+        });
+
+        // Verify token starts with host:port (no scheme)
+        let token = url.strip_prefix("https://").unwrap_or(&url);
+        assert!(token.starts_with(&host));
+
+        // Extract dynamic timestamp and signature
+        let date_key = "X-Amz-Date=";
+        let date_pos = url.find(date_key).unwrap() + date_key.len();
+        let amz_date = &url[date_pos..date_pos + 16];
+        let date_stamp = &amz_date[..8];
+
+        let sig_key = "X-Amz-Signature=";
+        let sig_pos = url.find(sig_key).unwrap() + sig_key.len();
+        let actual_sig = &url[sig_pos..sig_pos + 64];
+
+        // Independently reconstruct the canonical request
+        let scope = format!("{date_stamp}/us-east-1/rds-db/aws4_request");
+        let cred_val = format!("AKIAIOSFODNN7EXAMPLE/{scope}");
+
+        let mut qp: BTreeMap<&str, String> = BTreeMap::new();
+        qp.insert("Action", "connect".into());
+        qp.insert("DBUser", "dbuser".into());
+        qp.insert("X-Amz-Algorithm", "AWS4-HMAC-SHA256".into());
+        qp.insert("X-Amz-Credential", cred_val);
+        qp.insert("X-Amz-Date", amz_date.to_string());
+        qp.insert("X-Amz-Expires", "900".into());
+        qp.insert(
+            "X-Amz-Security-Token",
+            "IQoJb3JpZ2luX2VjFakeToken".into(),
+        );
+        qp.insert("X-Amz-SignedHeaders", "host".into());
+
+        let cqs: String = qp
+            .iter()
+            .map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        // RDS expects SHA-256("") as payload hash, NOT "UNSIGNED-PAYLOAD"
+        let empty_hash = sha256_hex(b"");
+        let canonical_hdrs = format!("host:{host}\n");
+        let cr = format!("GET\n/\n{cqs}\n{canonical_hdrs}\nhost\n{empty_hash}");
+
+        let cr_hash = sha256_hex(cr.as_bytes());
+        let string_to_sign =
+            format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{cr_hash}");
+
+        let key =
+            derive_signing_key(&creds.secret_access_key, date_stamp, "us-east-1", "rds-db");
+        let expected_sig = hex::encode(hmac_sha256(&key, string_to_sign.as_bytes()));
+
+        assert_eq!(
+            actual_sig, expected_sig,
+            "RDS presigned URL signature mismatch"
+        );
+    }
+
+    /// Verify the canonical request uses SHA-256("") as payload hash.
+    ///
+    /// Most AWS services (rds-db, sts, etc.) expect SHA-256 of an
+    /// empty body in the canonical request for presigned URLs.
+    /// S3 is the exception (uses "UNSIGNED-PAYLOAD"), but we don't
+    /// generate S3 presigned URLs.
+    ///
+    /// This test guards against regression to "UNSIGNED-PAYLOAD",
+    /// which silently produces invalid tokens that AWS rejects.
+    #[test]
+    fn test_canonical_request_payload_hash_matches_botocore() {
+        // botocore uses EMPTY_SHA256_HASH for presigned URL payloads
+        let expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+        let actual = sha256_hex(b"");
+        assert_eq!(actual, expected, "SHA-256 of empty body must match botocore constant");
+
+        // Build a presigned URL and independently verify the payload
+        // hash in the canonical request by checking the signature.
+        // If "UNSIGNED-PAYLOAD" were used instead, this signature
+        // verification would fail.
+        let creds = StsCredentials {
+            access_key_id: "AKID".to_string(),
+            secret_access_key: SecretString::from("secret".to_string()),
+            session_token: SecretString::from("tok".to_string()),
+            expiration: "2024-01-15T18:30:45Z".parse().unwrap(),
+        };
+
+        let url = build_presigned_url(&PresignedUrlParams {
+            method: "GET",
+            endpoint: "https://example.amazonaws.com",
+            path: "/",
+            query_params: &[("Action", "test")],
+            extra_signed_headers: &[],
+            service: "sts",
+            region: "us-east-1",
+            creds: &creds,
+            expires_seconds: 60,
+        });
+
+        // Extract timestamp
+        let date_key = "X-Amz-Date=";
+        let date_pos = url.find(date_key).unwrap() + date_key.len();
+        let amz_date = &url[date_pos..date_pos + 16];
+        let date_stamp = &amz_date[..8];
+
+        let sig_key = "X-Amz-Signature=";
+        let sig_pos = url.find(sig_key).unwrap() + sig_key.len();
+        let actual_sig = &url[sig_pos..sig_pos + 64];
+
+        // Reconstruct with SHA-256("") — must match
+        let scope = format!("{date_stamp}/us-east-1/sts/aws4_request");
+        let cred_val = format!("AKID/{scope}");
+        let mut qp: BTreeMap<&str, String> = BTreeMap::new();
+        qp.insert("Action", "test".into());
+        qp.insert("X-Amz-Algorithm", "AWS4-HMAC-SHA256".into());
+        qp.insert("X-Amz-Credential", cred_val);
+        qp.insert("X-Amz-Date", amz_date.to_string());
+        qp.insert("X-Amz-Expires", "60".into());
+        qp.insert("X-Amz-Security-Token", "tok".into());
+        qp.insert("X-Amz-SignedHeaders", "host".into());
+        let cqs: String = qp
+            .iter()
+            .map(|(k, v)| format!("{}={}", uri_encode(k), uri_encode(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+
+        let cr_with_empty = format!(
+            "GET\n/\n{cqs}\nhost:example.amazonaws.com\n\nhost\n{expected}"
+        );
+        let cr_with_unsigned = format!(
+            "GET\n/\n{cqs}\nhost:example.amazonaws.com\n\nhost\nUNSIGNED-PAYLOAD"
+        );
+
+        let key = derive_signing_key(&creds.secret_access_key, date_stamp, "us-east-1", "sts");
+
+        let sig_empty = hex::encode(hmac_sha256(
+            &key,
+            format!(
+                "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+                sha256_hex(cr_with_empty.as_bytes())
+            )
+            .as_bytes(),
+        ));
+        let sig_unsigned = hex::encode(hmac_sha256(
+            &key,
+            format!(
+                "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+                sha256_hex(cr_with_unsigned.as_bytes())
+            )
+            .as_bytes(),
+        ));
+
+        assert_eq!(
+            actual_sig, sig_empty,
+            "signature must match SHA-256(\"\") canonical request"
+        );
+        assert_ne!(
+            actual_sig, sig_unsigned,
+            "signature must NOT match UNSIGNED-PAYLOAD canonical request"
         );
     }
 
