@@ -101,12 +101,7 @@ pub async fn introspect_token(
 ) -> ServiceResult<IntrospectionResult> {
     // Decode the token as an ES256 RFC 9068 access token
     let config = state.config();
-    let decoded = match decode_token(
-        token,
-        config.jwt_secret_bytes(),
-        &state.oidc_key,
-        &config.base_url,
-    ) {
+    let decoded = match decode_token(token, &state.oidc_key, &config.base_url) {
         Some(d) => d,
         None => {
             return Ok(IntrospectionResult::inactive());
@@ -171,12 +166,7 @@ pub async fn revoke_token(
 ) -> RevocationResult {
     // Try to decode to get email for audit logging
     let config = state.config();
-    let decoded = decode_token(
-        token,
-        config.jwt_secret_bytes(),
-        &state.oidc_key,
-        &config.base_url,
-    );
+    let decoded = decode_token(token, &state.oidc_key, &config.base_url);
 
     let sub = decoded.as_ref().map(|d| d.sub().to_string());
     let email = decoded.as_ref().and_then(|d| d.email().map(String::from));

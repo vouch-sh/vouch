@@ -14,7 +14,7 @@
 //!    verifies WebAuthn assertion, and issues an OAuth access token.
 
 use crate::AppState;
-use crate::crypto::jwt::{JwtType, decode_state_token};
+use crate::crypto::jwt::JwtType;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::services::auth::{
     AuthenticatorLookupParams, CreateOAuthTokenParams, LoginAssertionParams,
@@ -117,18 +117,16 @@ pub async fn exchange_fido2_assertion(
     })?;
 
     // 2. Decode and verify the challenge state JWT
-    let config = state.config();
-    let challenge_state: Fido2ChallengeState = decode_state_token(
-        &payload.state,
-        JwtType::Fido2ChallengeState,
-        config.jwt_secret.expose_secret().as_bytes(),
-    )
-    .map_err(|e| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            format!("Invalid or expired challenge state: {e}"),
-        )
-    })?;
+    let challenge_state: Fido2ChallengeState = state
+        .state_signer
+        .decode_state_token(&payload.state, JwtType::Fido2ChallengeState)
+        .await
+        .map_err(|e| {
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                format!("Invalid or expired challenge state: {e}"),
+            )
+        })?;
 
     // 3. Decode assertion fields from base64url
     let credential_id_bytes = URL_SAFE_NO_PAD

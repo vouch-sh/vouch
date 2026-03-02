@@ -77,6 +77,8 @@ pub struct AppState {
     pub ssh_ca: Option<crypto::ssh_ca::SshCa>,
     /// OIDC signing key for ES256 JWT signing.
     pub oidc_key: services::oidc::OidcSigningKey,
+    /// State token signer (Local HS256 or KMS HMAC-SHA256).
+    pub state_signer: crypto::jwt::StateTokenSigner,
     /// GitHub App for credential issuance (optional, None if not configured).
     pub github_app: Option<std::sync::Arc<services::integrations::github::GitHubApp>>,
     /// Shared HTTP client for outbound server-side API calls (no redirects).
@@ -192,6 +194,7 @@ mod redirect_tests {
             ssh_ca_kms_key_id: None,
             oidc_signing_key: None,
             oidc_signing_kms_key_id: None,
+            jwt_hmac_kms_key_id: None,
             dpop_max_age_seconds: 300,
             cleanup_interval_minutes: 0,
             auth_events_retention_days: 90,
@@ -233,6 +236,9 @@ mod redirect_tests {
             webauthn,
             ssh_ca: None,
             oidc_key: OidcSigningKey::generate().unwrap(),
+            state_signer: crypto::jwt::StateTokenSigner::local(
+                b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
+            ),
             github_app: None,
             http_client: reqwest::Client::new(),
         }

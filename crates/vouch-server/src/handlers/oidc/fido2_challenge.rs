@@ -10,7 +10,7 @@
 //! challenge, RP ID, and expiration.
 
 use crate::AppState;
-use crate::crypto::jwt::{JwtType, encode_state_token};
+use crate::crypto::jwt::JwtType;
 use crate::handlers::generate_challenge;
 use axum::{
     Json,
@@ -19,7 +19,6 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use jiff::Timestamp;
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::encoding::{Base64Url, ConvertEncoding, Raw};
@@ -81,11 +80,11 @@ pub async fn fido2_challenge(State(state): State<Arc<AppState>>) -> Response {
         exp,
     };
 
-    let state_token = match encode_state_token(
-        &challenge_state,
-        JwtType::Fido2ChallengeState,
-        state.config().jwt_secret.expose_secret().as_bytes(),
-    ) {
+    let state_token = match state
+        .state_signer
+        .encode_state_token(&challenge_state, JwtType::Fido2ChallengeState)
+        .await
+    {
         Ok(t) => t,
         Err(e) => {
             tracing::error!("Failed to encode FIDO2 challenge state: {e}");

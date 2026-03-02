@@ -16,7 +16,6 @@ use axum::{
 use axum_extra::extract::cookie::CookieJar;
 use base64::Engine;
 use jiff::Timestamp;
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
@@ -49,20 +48,22 @@ struct RegistrationState {
 }
 
 impl RegistrationState {
-    fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        crate::crypto::jwt::encode_state_token(
-            self,
-            crate::crypto::jwt::JwtType::RegistrationState,
-            secret.as_bytes(),
-        )
+    async fn encode(
+        &self,
+        signer: &crate::crypto::jwt::StateTokenSigner,
+    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
+        signer
+            .encode_state_token(self, crate::crypto::jwt::JwtType::RegistrationState)
+            .await
     }
 
-    fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        crate::crypto::jwt::decode_state_token(
-            token,
-            crate::crypto::jwt::JwtType::RegistrationState,
-            secret.as_bytes(),
-        )
+    async fn decode(
+        token: &str,
+        signer: &crate::crypto::jwt::StateTokenSigner,
+    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+        signer
+            .decode_state_token(token, crate::crypto::jwt::JwtType::RegistrationState)
+            .await
     }
 }
 
@@ -147,15 +148,13 @@ pub async fn register_start(
         exp,
     };
 
-    let state_token = reg_state
-        .encode(state.config().jwt_secret.expose_secret())
-        .map_err(|e| {
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "state_error",
-                e.to_string(),
-            )
-        })?;
+    let state_token = reg_state.encode(&state.state_signer).await.map_err(|e| {
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "state_error",
+            e.to_string(),
+        )
+    })?;
 
     Ok(Json(RegisterStartResponse {
         challenge,
@@ -178,10 +177,9 @@ pub async fn register_complete(
     tracing::info!("Registration complete");
 
     // Decode state
-    let reg_state =
-        RegistrationState::decode(&req.state, state.config().jwt_secret.expose_secret()).map_err(
-            |e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()),
-        )?;
+    let reg_state = RegistrationState::decode(&req.state, &state.state_signer)
+        .await
+        .map_err(|e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()))?;
 
     // Server-side WebAuthn attestation verification
     // Verify the attestation object, client data, RP ID, challenge, and origin
@@ -328,4 +326,80 @@ pub async fn delete_key(
         message: format!("Key '{}' has been deleted", key_name),
         sessions_revoked,
     }))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use crate::crypto::jwt::{JwtType, StateTokenSigner};
+    use crate::test_utils::TEST_JWT_SECRET;
+    use vouch_common::fido2_types::Challenge;
+
+    #[tokio::test]
+    async fn test_registration_state_roundtrip() {
+        let signer = StateTokenSigner::local(TEST_JWT_SECRET.to_vec());
+        let challenge = Challenge::from(vec![1u8; 32]);
+        let state = RegistrationState {
+            user_id: Uuid::nil(),
+            user_name: "test-user".to_string(),
+            device_name: "test-device".to_string(),
+            challenge,
+            rp_id: "test.example.com".to_string(),
+            iat: 1_000_000_000,
+            exp: 9_999_999_999,
+        };
+
+        let token = state.encode(&signer).await.expect("encode");
+        let decoded = RegistrationState::decode(&token, &signer)
+            .await
+            .expect("decode");
+
+        assert_eq!(decoded.user_id, Uuid::nil());
+        assert_eq!(decoded.user_name, "test-user");
+        assert_eq!(decoded.device_name, "test-device");
+        assert_eq!(decoded.rp_id, "test.example.com");
+    }
+
+    #[tokio::test]
+    async fn test_registration_state_wrong_secret_rejected() {
+        let signer_a = StateTokenSigner::local(TEST_JWT_SECRET.to_vec());
+        let signer_b =
+            StateTokenSigner::local(b"different_secret_at_least_32chars_long!!".to_vec());
+        let state = RegistrationState {
+            user_id: Uuid::nil(),
+            user_name: "test".to_string(),
+            device_name: "dev".to_string(),
+            challenge: Challenge::from(vec![1u8; 32]),
+            rp_id: "test.example.com".to_string(),
+            iat: 1_000_000_000,
+            exp: 9_999_999_999,
+        };
+
+        let token = state.encode(&signer_a).await.expect("encode");
+        let result = RegistrationState::decode(&token, &signer_b).await;
+        assert!(result.is_err(), "Wrong secret should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_registration_state_wrong_type_rejected() {
+        let signer = StateTokenSigner::local(TEST_JWT_SECRET.to_vec());
+        let state = RegistrationState {
+            user_id: Uuid::nil(),
+            user_name: "test".to_string(),
+            device_name: "dev".to_string(),
+            challenge: Challenge::from(vec![1u8; 32]),
+            rp_id: "test.example.com".to_string(),
+            iat: 1_000_000_000,
+            exp: 9_999_999_999,
+        };
+
+        let token = state.encode(&signer).await.expect("encode");
+
+        // Try decoding with a different JwtType via the raw signer
+        let result: Result<RegistrationState, _> = signer
+            .decode_state_token(&token, JwtType::BrowserRegistrationState)
+            .await;
+        assert!(result.is_err(), "Wrong JWT type should be rejected");
+    }
 }

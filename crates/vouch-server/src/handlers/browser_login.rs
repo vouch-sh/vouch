@@ -124,20 +124,28 @@ struct BrowserAuthenticationState {
 }
 
 impl BrowserAuthenticationState {
-    fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        crate::crypto::jwt::encode_state_token(
-            self,
-            crate::crypto::jwt::JwtType::BrowserAuthenticationState,
-            secret.as_bytes(),
-        )
+    async fn encode(
+        &self,
+        signer: &crate::crypto::jwt::StateTokenSigner,
+    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
+        signer
+            .encode_state_token(
+                self,
+                crate::crypto::jwt::JwtType::BrowserAuthenticationState,
+            )
+            .await
     }
 
-    fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        crate::crypto::jwt::decode_state_token(
-            token,
-            crate::crypto::jwt::JwtType::BrowserAuthenticationState,
-            secret.as_bytes(),
-        )
+    async fn decode(
+        token: &str,
+        signer: &crate::crypto::jwt::StateTokenSigner,
+    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+        signer
+            .decode_state_token(
+                token,
+                crate::crypto::jwt::JwtType::BrowserAuthenticationState,
+            )
+            .await
     }
 }
 
@@ -249,15 +257,13 @@ pub async fn browser_login_start(
         pending_auth: req.pending_auth,
     };
 
-    let state_token = auth_state
-        .encode(state.config().jwt_secret.expose_secret())
-        .map_err(|e| {
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "state_error",
-                e.to_string(),
-            )
-        })?;
+    let state_token = auth_state.encode(&state.state_signer).await.map_err(|e| {
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "state_error",
+            e.to_string(),
+        )
+    })?;
 
     Ok(Json(BrowserLoginStartResponse {
         challenge: URL_SAFE_NO_PAD.encode(&challenge),
@@ -343,11 +349,9 @@ pub async fn browser_login_complete(
     }
 
     // ── Phase 3: State JWT decode + expiration ───────────────────────────
-    let auth_state = BrowserAuthenticationState::decode(
-        &req.state,
-        state.config().jwt_secret.expose_secret(),
-    )
-    .map_err(|e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()))?;
+    let auth_state = BrowserAuthenticationState::decode(&req.state, &state.state_signer)
+        .await
+        .map_err(|e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()))?;
 
     let now = Timestamp::now().as_second();
     if now > auth_state.exp {
@@ -677,9 +681,9 @@ mod tests {
     #![allow(clippy::expect_used, clippy::unwrap_used)]
     use super::*;
 
-    #[test]
-    fn test_browser_auth_state_encode_decode() {
-        let secret = "test-secret";
+    #[tokio::test]
+    async fn test_browser_auth_state_encode_decode() {
+        let signer = crate::crypto::jwt::StateTokenSigner::local(b"test-secret".to_vec());
         let now = jiff::Timestamp::now().as_second();
         let state = BrowserAuthenticationState {
             challenge: vec![1, 2, 3, 4],
@@ -689,9 +693,10 @@ mod tests {
             pending_auth: Some("pending-123".to_string()),
         };
 
-        let encoded = state.encode(secret).expect("Failed to encode state");
-        let decoded =
-            BrowserAuthenticationState::decode(&encoded, secret).expect("Failed to decode state");
+        let encoded = state.encode(&signer).await.expect("Failed to encode state");
+        let decoded = BrowserAuthenticationState::decode(&encoded, &signer)
+            .await
+            .expect("Failed to decode state");
 
         assert_eq!(decoded.challenge, vec![1, 2, 3, 4]);
         assert_eq!(decoded.rp_id, "example.com");
@@ -750,8 +755,10 @@ mod tests {
     // Browser Auth State Tests
     // ========================================================================
 
-    #[test]
-    fn test_browser_auth_state_decode_wrong_secret() {
+    #[tokio::test]
+    async fn test_browser_auth_state_decode_wrong_secret() {
+        let signer = crate::crypto::jwt::StateTokenSigner::local(b"correct-secret".to_vec());
+        let wrong_signer = crate::crypto::jwt::StateTokenSigner::local(b"wrong-secret".to_vec());
         let now = jiff::Timestamp::now().as_second();
         let state = BrowserAuthenticationState {
             challenge: vec![1, 2, 3, 4],
@@ -761,10 +768,8 @@ mod tests {
             pending_auth: None,
         };
 
-        let encoded = state
-            .encode("correct-secret")
-            .expect("Failed to encode state");
-        let result = BrowserAuthenticationState::decode(&encoded, "wrong-secret");
+        let encoded = state.encode(&signer).await.expect("Failed to encode state");
+        let result = BrowserAuthenticationState::decode(&encoded, &wrong_signer).await;
 
         assert!(result.is_err());
     }

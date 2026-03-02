@@ -269,6 +269,9 @@ pub struct S3Config {
     /// AWS KMS key ID for OIDC signing (multi-region `mrk-` prefix).
     pub oidc_signing_kms_key_id: Option<String>,
 
+    /// AWS KMS key ID for HMAC state token signing.
+    pub jwt_hmac_kms_key_id: Option<String>,
+
     // Cleanup settings
     /// Cleanup interval in minutes.
     pub cleanup_interval_minutes: Option<u64>,
@@ -321,6 +324,7 @@ impl std::fmt::Debug for S3Config {
             .field("ssh_ca_kms_key_id", &self.ssh_ca_kms_key_id)
             .field("oidc_signing_key", &"[REDACTED]")
             .field("oidc_signing_kms_key_id", &self.oidc_signing_kms_key_id)
+            .field("jwt_hmac_kms_key_id", &self.jwt_hmac_kms_key_id)
             .field("cleanup_interval_minutes", &self.cleanup_interval_minutes)
             .field(
                 "auth_events_retention_days",
@@ -836,6 +840,11 @@ impl ServerConfig {
             self.oidc_signing_kms_key_id = Some(v.clone());
         }
 
+        // JWT HMAC KMS key ID
+        if let Some(v) = &s3.jwt_hmac_kms_key_id {
+            self.jwt_hmac_kms_key_id = Some(v.clone());
+        }
+
         // Cleanup settings
         if let Some(v) = s3.cleanup_interval_minutes {
             self.cleanup_interval_minutes = v;
@@ -1112,7 +1121,8 @@ mod tests {
             "version": 1,
             "rp_id": "vouch.example.com",
             "ssh_ca_kms_key_id": "mrk-abc123def456",
-            "oidc_signing_kms_key_id": "mrk-789ghi012jkl"
+            "oidc_signing_kms_key_id": "mrk-789ghi012jkl",
+            "jwt_hmac_kms_key_id": "mrk-hmac-test"
         }"#;
 
         let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
@@ -1125,6 +1135,10 @@ mod tests {
             config.oidc_signing_kms_key_id,
             Some("mrk-789ghi012jkl".to_string())
         );
+        assert_eq!(
+            config.jwt_hmac_kms_key_id,
+            Some("mrk-hmac-test".to_string())
+        );
     }
 
     #[test]
@@ -1132,10 +1146,12 @@ mod tests {
         let mut config = crate::test_utils::test_config();
         assert!(config.ssh_ca_kms_key_id.is_none());
         assert!(config.oidc_signing_kms_key_id.is_none());
+        assert!(config.jwt_hmac_kms_key_id.is_none());
 
         let s3 = S3Config {
             ssh_ca_kms_key_id: Some("mrk-ssh-key".to_string()),
             oidc_signing_kms_key_id: Some("mrk-oidc-key".to_string()),
+            jwt_hmac_kms_key_id: Some("mrk-hmac-key".to_string()),
             ..Default::default()
         };
 
@@ -1146,6 +1162,7 @@ mod tests {
             config.oidc_signing_kms_key_id,
             Some("mrk-oidc-key".to_string())
         );
+        assert_eq!(config.jwt_hmac_kms_key_id, Some("mrk-hmac-key".to_string()));
     }
 
     #[test]
@@ -1155,6 +1172,7 @@ mod tests {
         let s3 = S3Config {
             ssh_ca_kms_key_id: Some("mrk-ssh-key".to_string()),
             oidc_signing_kms_key_id: Some("mrk-oidc-key".to_string()),
+            jwt_hmac_kms_key_id: Some("mrk-hmac-key".to_string()),
             ..Default::default()
         };
 
@@ -1163,6 +1181,7 @@ mod tests {
 
         assert!(config.ssh_ca_kms_key_id.is_none());
         assert!(config.oidc_signing_kms_key_id.is_none());
+        assert!(config.jwt_hmac_kms_key_id.is_none());
     }
 
     #[test]

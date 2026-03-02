@@ -110,18 +110,13 @@ pub async fn exchange_token(
 
     // Decode and validate the subject token (supports both HS256 and ES256)
     let config = state.config();
-    let subject_decoded = decode_token(
-        params.subject_token,
-        config.jwt_secret_bytes(),
-        &state.oidc_key,
-        &config.base_url,
-    )
-    .ok_or_else(|| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            "Invalid or expired subject token",
-        )
-    })?;
+    let subject_decoded = decode_token(params.subject_token, &state.oidc_key, &config.base_url)
+        .ok_or_else(|| {
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "Invalid or expired subject token",
+            )
+        })?;
 
     // Verify the subject token's session exists
     let subject_token_hash = hash_token(params.subject_token);
@@ -160,13 +155,10 @@ pub async fn exchange_token(
         }
 
         // Decode actor token (supports both HS256 and ES256)
-        let actor_decoded = decode_token(
-            actor_token,
-            config.jwt_secret_bytes(),
-            &state.oidc_key,
-            &config.base_url,
-        )
-        .ok_or_else(|| ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid actor token"))?;
+        let actor_decoded = decode_token(actor_token, &state.oidc_key, &config.base_url)
+            .ok_or_else(|| {
+                ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid actor token")
+            })?;
 
         // Verify the actor token's session exists in the database
         let actor_token_hash = hash_token(actor_token);

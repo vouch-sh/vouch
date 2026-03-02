@@ -190,7 +190,7 @@ pub async fn exchange_authorization_code(
     params: AuthCodeExchangeParams<'_>,
 ) -> ServiceResult<AuthCodeExchangeResult> {
     // Decode and validate the authorization code
-    let auth_code = decode_authorization_code(state, params.code, params.client_id)?;
+    let auth_code = decode_authorization_code(state, params.code, params.client_id).await?;
 
     // RFC 6749 Section 10.5: Enforce single-use authorization codes.
     // Try to consume the code; if already consumed this is a replay attack.
@@ -724,12 +724,7 @@ pub async fn validate_session_token(
 ) -> ServiceResult<Option<OidcValidatedSession>> {
     // Decode the token as an ES256 RFC 9068 access token
     let config = state.config();
-    let decoded = match decode_token(
-        token,
-        config.jwt_secret_bytes(),
-        &state.oidc_key,
-        &config.base_url,
-    ) {
+    let decoded = match decode_token(token, &state.oidc_key, &config.base_url) {
         Some(d) => d,
         None => return Ok(None),
     };

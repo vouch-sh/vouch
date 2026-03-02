@@ -55,22 +55,18 @@ pub async fn status(
 
     // Validate as OAuth access token (ES256, at+jwt)
     let config = state.config();
-    let decoded = match crate::services::auth::decode_token(
-        token,
-        config.jwt_secret_bytes(),
-        &state.oidc_key,
-        &config.base_url,
-    ) {
-        Some(d) => d,
-        None => {
-            return Ok(Json(SessionStatus {
-                authenticated: false,
-                email: None,
-                expires_in_seconds: None,
-                device_name: None,
-            }));
-        }
-    };
+    let decoded =
+        match crate::services::auth::decode_token(token, &state.oidc_key, &config.base_url) {
+            Some(d) => d,
+            None => {
+                return Ok(Json(SessionStatus {
+                    authenticated: false,
+                    email: None,
+                    expires_in_seconds: None,
+                    device_name: None,
+                }));
+            }
+        };
 
     let crate::services::auth::DecodedToken::AccessToken(access_claims) = decoded;
 

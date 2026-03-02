@@ -152,20 +152,22 @@ struct BrowserRegistrationState {
 }
 
 impl BrowserRegistrationState {
-    fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        crate::crypto::jwt::encode_state_token(
-            self,
-            crate::crypto::jwt::JwtType::BrowserRegistrationState,
-            secret.as_bytes(),
-        )
+    async fn encode(
+        &self,
+        signer: &crate::crypto::jwt::StateTokenSigner,
+    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
+        signer
+            .encode_state_token(self, crate::crypto::jwt::JwtType::BrowserRegistrationState)
+            .await
     }
 
-    fn decode(token: &str, secret: &str) -> Result<Self, jsonwebtoken::errors::Error> {
-        crate::crypto::jwt::decode_state_token(
-            token,
-            crate::crypto::jwt::JwtType::BrowserRegistrationState,
-            secret.as_bytes(),
-        )
+    async fn decode(
+        token: &str,
+        signer: &crate::crypto::jwt::StateTokenSigner,
+    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+        signer
+            .decode_state_token(token, crate::crypto::jwt::JwtType::BrowserRegistrationState)
+            .await
     }
 }
 
@@ -858,15 +860,13 @@ pub async fn browser_register_start(
         exp: reg_exp,
     };
 
-    let state_token = reg_state
-        .encode(state.config().jwt_secret.expose_secret())
-        .map_err(|e| {
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "state_error",
-                e.to_string(),
-            )
-        })?;
+    let state_token = reg_state.encode(&state.state_signer).await.map_err(|e| {
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "state_error",
+            e.to_string(),
+        )
+    })?;
 
     // Extract challenge from webauthn-rs generated options
     // The challenge is exposed via the public_key.challenge field
@@ -962,11 +962,9 @@ pub async fn browser_register_complete(
     }
 
     // ── Phase 2: State JWT decode + expiration ──────────────────────────
-    let reg_state =
-        BrowserRegistrationState::decode(&req.state, state.config().jwt_secret.expose_secret())
-            .map_err(|e| {
-                ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string())
-            })?;
+    let reg_state = BrowserRegistrationState::decode(&req.state, &state.state_signer)
+        .await
+        .map_err(|e| ServiceError::api(StatusCode::BAD_REQUEST, "invalid_state", e.to_string()))?;
 
     // ── Phase 3: Base64url decode all fields ────────────────────────────
     let credential_id_bytes = URL_SAFE_NO_PAD.decode(&req.credential_id).map_err(|e| {

@@ -11,8 +11,6 @@ use crate::db::{AccessScope, Authenticator, OAuthClient, Session, User};
 use crate::services::oidc::scope::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::{Span, Timestamp};
-use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Validation, encode};
-use secrecy::ExposeSecret;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
@@ -321,44 +319,43 @@ pub struct AuthorizationCode {
 
 impl AuthorizationCode {
     /// Encode the authorization code as a JWT (RFC 8725 §3.11: explicit typ).
-    pub fn encode(&self, secret: &str) -> Result<String, jsonwebtoken::errors::Error> {
-        encode(
-            &JwtType::AuthorizationCode.to_header(),
-            self,
-            &EncodingKey::from_secret(secret.as_bytes()),
-        )
+    pub async fn encode(
+        &self,
+        signer: &crate::crypto::jwt::StateTokenSigner,
+    ) -> Result<String, crate::crypto::jwt::StateTokenError> {
+        signer
+            .encode_state_token(self, JwtType::AuthorizationCode)
+            .await
     }
 
     /// Decode an authorization code from a JWT.
     ///
     /// Validates `typ`, `iss`, and `aud` per RFC 8725.
-    pub fn decode(
+    pub async fn decode(
         token: &str,
-        secret: &str,
+        signer: &crate::crypto::jwt::StateTokenSigner,
         expected_issuer: &str,
         expected_client_id: &str,
-    ) -> Result<Self, jsonwebtoken::errors::Error> {
-        let mut validation = Validation::new(Algorithm::HS256);
-        validation.required_spec_claims.clear();
+    ) -> Result<Self, crate::crypto::jwt::StateTokenError> {
+        let claims: Self = signer
+            .decode_state_token(token, JwtType::AuthorizationCode)
+            .await?;
+
         // RFC 8725 §3.8: Validate issuer
-        validation.set_issuer(&[expected_issuer]);
-        // RFC 8725 §3.9: Validate audience (client_id)
-        validation.set_audience(&[expected_client_id]);
-
-        let data = jsonwebtoken::decode::<Self>(
-            token,
-            &DecodingKey::from_secret(secret.as_bytes()),
-            &validation,
-        )?;
-
-        // RFC 8725 §3.11: Validate typ header
-        if data.header.typ.as_deref() != Some(JwtType::AuthorizationCode.as_header_str()) {
-            return Err(jsonwebtoken::errors::Error::from(
-                jsonwebtoken::errors::ErrorKind::InvalidToken,
+        if claims.iss != expected_issuer {
+            return Err(crate::crypto::jwt::StateTokenError::Validation(
+                "Issuer mismatch".to_string(),
             ));
         }
 
-        Ok(data.claims)
+        // RFC 8725 §3.9: Validate audience (client_id)
+        if claims.aud != expected_client_id {
+            return Err(crate::crypto::jwt::StateTokenError::Validation(
+                "Audience mismatch".to_string(),
+            ));
+        }
+
+        Ok(claims)
     }
 }
 
@@ -603,12 +600,10 @@ pub async fn issue_authorization_code(
         exp,
     };
 
-    let code = auth_code
-        .encode(state.config().jwt_secret.expose_secret())
-        .map_err(|e| {
-            tracing::error!("Failed to encode authorization code: {}", e);
-            ServiceError::Internal("Failed to generate authorization code".to_string())
-        })?;
+    let code = auth_code.encode(&state.state_signer).await.map_err(|e| {
+        tracing::error!("Failed to encode authorization code: {}", e);
+        ServiceError::Internal("Failed to generate authorization code".to_string())
+    })?;
 
     // RFC 6749 Section 10.5: Store code hash for single-use enforcement.
     let code_hash = crate::crypto::hash_token(&code);
@@ -644,17 +639,18 @@ pub async fn issue_authorization_code(
 ///
 /// # Errors
 /// Returns `ServiceError::OAuth` with `invalid_grant` if the code is invalid or expired.
-pub fn decode_authorization_code(
+pub async fn decode_authorization_code(
     state: &Arc<AppState>,
     code: &str,
     client_id: &str,
 ) -> ServiceResult<AuthorizationCode> {
     let auth_code = AuthorizationCode::decode(
         code,
-        state.config().jwt_secret.expose_secret(),
+        &state.state_signer,
         &state.config().base_url,
         client_id,
     )
+    .await
     .map_err(|_| {
         ServiceError::oauth(
             OAuthErrorCode::InvalidGrant,
@@ -803,6 +799,119 @@ mod tests {
             github_refresh_token: None,
         }
     }
+
+    // =========================================================================
+    // AuthorizationCode encode/decode tests (RFC 8725 §3.8/§3.9)
+    // =========================================================================
+
+    fn test_auth_code(iss: &str, aud: &str) -> AuthorizationCode {
+        AuthorizationCode {
+            iss: iss.to_string(),
+            aud: aud.to_string(),
+            client_id: aud.to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            user_id: "user-1".to_string(),
+            email: "test@example.com".to_string(),
+            authenticator_id: "auth-1".to_string(),
+            aaguid: None,
+            scope: ScopeSet::parse("openid"),
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt: None,
+            iat: 1_000_000_000,
+            exp: 9_999_999_999,
+        }
+    }
+
+    #[tokio::test]
+    async fn test_authorization_code_roundtrip() {
+        let signer = crate::crypto::jwt::StateTokenSigner::local(
+            crate::test_utils::TEST_JWT_SECRET.to_vec(),
+        );
+        let code = test_auth_code("https://example.com", "client-a");
+
+        let token = code.encode(&signer).await.unwrap();
+        let decoded = AuthorizationCode::decode(&token, &signer, "https://example.com", "client-a")
+            .await
+            .unwrap();
+
+        assert_eq!(decoded.iss, "https://example.com");
+        assert_eq!(decoded.aud, "client-a");
+        assert_eq!(decoded.user_id, "user-1");
+        assert_eq!(decoded.email, "test@example.com");
+    }
+
+    #[tokio::test]
+    async fn test_authorization_code_decode_wrong_issuer() {
+        let signer = crate::crypto::jwt::StateTokenSigner::local(
+            crate::test_utils::TEST_JWT_SECRET.to_vec(),
+        );
+        let code = test_auth_code("https://attacker.com", "client-a");
+
+        let token = code.encode(&signer).await.unwrap();
+        let result =
+            AuthorizationCode::decode(&token, &signer, "https://example.com", "client-a").await;
+
+        assert!(result.is_err(), "Wrong issuer must be rejected");
+        match result.unwrap_err() {
+            crate::crypto::jwt::StateTokenError::Validation(msg) => {
+                assert!(msg.contains("Issuer"), "Error should mention issuer: {msg}");
+            }
+            other => panic!("Expected Validation error, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_authorization_code_decode_wrong_audience() {
+        let signer = crate::crypto::jwt::StateTokenSigner::local(
+            crate::test_utils::TEST_JWT_SECRET.to_vec(),
+        );
+        let code = test_auth_code("https://example.com", "client-a");
+
+        let token = code.encode(&signer).await.unwrap();
+        let result = AuthorizationCode::decode(
+            &token,
+            &signer,
+            "https://example.com",
+            "client-b", // Different client_id
+        )
+        .await;
+
+        assert!(result.is_err(), "Wrong audience must be rejected");
+        match result.unwrap_err() {
+            crate::crypto::jwt::StateTokenError::Validation(msg) => {
+                assert!(
+                    msg.contains("Audience"),
+                    "Error should mention audience: {msg}"
+                );
+            }
+            other => panic!("Expected Validation error, got: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_authorization_code_decode_wrong_secret() {
+        let signer_a = crate::crypto::jwt::StateTokenSigner::local(
+            crate::test_utils::TEST_JWT_SECRET.to_vec(),
+        );
+        let signer_b = crate::crypto::jwt::StateTokenSigner::local(
+            b"different_secret_at_least_32chars_long!!".to_vec(),
+        );
+        let code = test_auth_code("https://example.com", "client-a");
+
+        let token = code.encode(&signer_a).await.unwrap();
+        let result =
+            AuthorizationCode::decode(&token, &signer_b, "https://example.com", "client-a").await;
+
+        assert!(result.is_err(), "Wrong secret must be rejected");
+    }
+
+    // =========================================================================
+    // Validate authorize request tests
+    // =========================================================================
 
     #[test]
     fn test_validate_authorize_request_valid() {

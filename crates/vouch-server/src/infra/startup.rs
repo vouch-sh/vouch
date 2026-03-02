@@ -328,7 +328,9 @@ async fn build_app_state(
 
     // Create a KMS client if any KMS key IDs are configured but no client
     // was provided (e.g., non-S3 deployments that still use KMS signing).
-    let kms_needs = config.ssh_ca_kms_key_id.is_some() || config.oidc_signing_kms_key_id.is_some();
+    let kms_needs = config.ssh_ca_kms_key_id.is_some()
+        || config.oidc_signing_kms_key_id.is_some()
+        || config.jwt_hmac_kms_key_id.is_some();
     let kms_client = if kms_needs && kms_client.is_none() {
         tracing::info!("Creating KMS client for signing key access");
         let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest());
@@ -406,6 +408,18 @@ async fn build_app_state(
         key
     };
 
+    // Initialize state token signer (Local HS256 or KMS HMAC-SHA256)
+    let state_signer = if let Some(key_id) = &config.jwt_hmac_kms_key_id {
+        let client = kms_client
+            .as_ref()
+            .context("KMS client required for HMAC state token signing")?
+            .clone();
+        tracing::info!("State token signer initialized (KMS HMAC): {key_id}");
+        crate::crypto::jwt::StateTokenSigner::from_kms(client, key_id.clone())
+    } else {
+        crate::crypto::jwt::StateTokenSigner::local(config.jwt_secret_bytes().to_vec())
+    };
+
     // Build shared HTTP client for outbound API calls (GitHub, OIDC, etc.)
     let http_client =
         vouch_common::http::server_client(&format!("vouch-server/{}", env!("CARGO_PKG_VERSION")))
@@ -472,6 +486,7 @@ async fn build_app_state(
         webauthn,
         ssh_ca,
         oidc_key,
+        state_signer,
         github_app,
         http_client,
     });

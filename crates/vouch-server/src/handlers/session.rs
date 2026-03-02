@@ -94,19 +94,14 @@ pub async fn extract_resource_token(
 
     // 2. Decode as ES256 at+jwt using the OIDC signing key
     let config = state.config();
-    let decoded = crate::services::auth::decode_token(
-        &token,
-        config.jwt_secret_bytes(),
-        &state.oidc_key,
-        &config.base_url,
-    )
-    .ok_or_else(|| {
-        ServiceError::api(
-            StatusCode::UNAUTHORIZED,
-            "invalid_token",
-            "Invalid or expired access token",
-        )
-    })?;
+    let decoded = crate::services::auth::decode_token(&token, &state.oidc_key, &config.base_url)
+        .ok_or_else(|| {
+            ServiceError::api(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Invalid or expired access token",
+            )
+        })?;
 
     let crate::services::auth::DecodedToken::AccessToken(access_claims) = decoded;
 
@@ -415,15 +410,11 @@ pub async fn get_resource_auth_context(state: &AppState, jar: &CookieJar) -> Aut
 
     // Decode using ES256 access token path only
     let config = state.config();
-    let decoded = match crate::services::auth::decode_token(
-        token,
-        config.jwt_secret_bytes(),
-        &state.oidc_key,
-        &config.base_url,
-    ) {
-        Some(d) => d,
-        None => return AuthContext::unauthenticated(),
-    };
+    let decoded =
+        match crate::services::auth::decode_token(token, &state.oidc_key, &config.base_url) {
+            Some(d) => d,
+            None => return AuthContext::unauthenticated(),
+        };
 
     // Verify session exists in DB
     let token_hash = hash_token(token);

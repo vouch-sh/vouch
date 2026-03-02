@@ -131,6 +131,11 @@ pub struct Args {
     #[arg(long, env = "VOUCH_OIDC_SIGNING_KMS_KEY_ID")]
     pub oidc_signing_kms_key_id: Option<String>,
 
+    /// AWS KMS key ID for HMAC state token signing.
+    /// When set, KMS HMAC-SHA256 is used instead of local VOUCH_JWT_SECRET.
+    #[arg(long, env = "VOUCH_JWT_HMAC_KMS_KEY_ID")]
+    pub jwt_hmac_kms_key_id: Option<String>,
+
     /// Maximum age of DPoP proofs in seconds.
     #[arg(long, env = "VOUCH_DPOP_MAX_AGE", default_value = "300")]
     pub dpop_max_age: i64,
@@ -266,6 +271,9 @@ pub struct ServerConfig {
     /// AWS KMS key ID for OIDC signing (multi-region `mrk-` prefix).
     /// When set, KMS signing is used and `oidc_signing_key` is ignored.
     pub oidc_signing_kms_key_id: Option<String>,
+    /// AWS KMS key ID for HMAC state token signing.
+    /// When set, KMS HMAC-SHA256 is used instead of local `jwt_secret`.
+    pub jwt_hmac_kms_key_id: Option<String>,
     /// Maximum age of DPoP proofs in seconds (default: 300).
     pub dpop_max_age_seconds: i64,
     /// Cleanup task interval in minutes (default: 15).
@@ -370,6 +378,7 @@ impl ServerConfig {
             ssh_ca_kms_key_id: args.ssh_ca_kms_key_id,
             oidc_signing_key: args.oidc_signing_key.map(SecretString::from),
             oidc_signing_kms_key_id: args.oidc_signing_kms_key_id,
+            jwt_hmac_kms_key_id: args.jwt_hmac_kms_key_id,
             dpop_max_age_seconds: args.dpop_max_age,
             cleanup_interval_minutes: args.cleanup_interval,
             auth_events_retention_days: args.auth_events_retention_days,
@@ -461,34 +470,39 @@ impl ServerConfig {
     /// Validate that all required configuration is present.
     /// Call this after all config sources (env, S3) have been merged.
     pub fn validate(&self) -> Result<()> {
-        let secret = self.jwt_secret.expose_secret();
-        if secret.len() < 32 {
-            anyhow::bail!(
-                "VOUCH_JWT_SECRET must be at least 32 characters (set via env var or S3 config)"
-            );
-        }
+        // Skip jwt_secret validation when KMS HMAC signing is configured.
+        if self.jwt_hmac_kms_key_id.is_none() {
+            let secret = self.jwt_secret.expose_secret();
+            if secret.len() < 32 {
+                anyhow::bail!(
+                    "VOUCH_JWT_SECRET must be at least 32 characters \
+                     (set via env var or S3 config), or set VOUCH_JWT_HMAC_KMS_KEY_ID \
+                     to use KMS HMAC signing instead"
+                );
+            }
 
-        // Reject degenerate secrets (e.g., all same character like "aaaaa...").
-        let bytes = secret.as_bytes();
-        let first = bytes.first().copied().unwrap_or(0);
-        let all_same = bytes.iter().all(|&b| b == first);
-        if all_same {
-            anyhow::bail!("VOUCH_JWT_SECRET must not consist of a single repeated character");
-        }
+            // Reject degenerate secrets (e.g., all same character like "aaaaa...").
+            let bytes = secret.as_bytes();
+            let first = bytes.first().copied().unwrap_or(0);
+            let all_same = bytes.iter().all(|&b| b == first);
+            if all_same {
+                anyhow::bail!("VOUCH_JWT_SECRET must not consist of a single repeated character");
+            }
 
-        // Warn if the secret has low entropy (fewer than 8 unique bytes).
-        let mut unique = std::collections::HashSet::new();
-        for &b in bytes {
-            unique.insert(b);
-        }
-        if unique.len() < 8 {
-            tracing::warn!(
-                target: "security",
-                "VOUCH_JWT_SECRET has low entropy ({} unique bytes out of {}). \
-                 Consider using a stronger secret with more character variety.",
-                unique.len(),
-                bytes.len(),
-            );
+            // Warn if the secret has low entropy (fewer than 8 unique bytes).
+            let mut unique = std::collections::HashSet::new();
+            for &b in bytes {
+                unique.insert(b);
+            }
+            if unique.len() < 8 {
+                tracing::warn!(
+                    target: "security",
+                    "VOUCH_JWT_SECRET has low entropy ({} unique bytes out of {}). \
+                     Consider using a stronger secret with more character variety.",
+                    unique.len(),
+                    bytes.len(),
+                );
+            }
         }
 
         Ok(())
@@ -530,4 +544,52 @@ pub fn resolve_dsql_endpoints(endpoints: &HashMap<String, String>) -> Result<Str
     })?;
 
     Ok(url.clone())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use crate::test_utils::test_config;
+    use secrecy::SecretString;
+
+    #[test]
+    fn test_validate_kms_key_id_bypasses_secret_check() {
+        let mut config = test_config();
+        config.jwt_secret = SecretString::from("");
+        config.jwt_hmac_kms_key_id = Some("mrk-test-key".to_string());
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validate_short_secret_without_kms_fails() {
+        let mut config = test_config();
+        config.jwt_secret = SecretString::from("short");
+        config.jwt_hmac_kms_key_id = None;
+
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("at least 32 characters"),
+            "Error should mention length: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_degenerate_secret_rejected() {
+        let mut config = test_config();
+        config.jwt_secret = SecretString::from("a".repeat(32));
+        config.jwt_hmac_kms_key_id = None;
+
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("repeated character"),
+            "Error should mention repeated: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_good_secret_accepted() {
+        let config = test_config();
+        assert!(config.validate().is_ok());
+    }
 }
