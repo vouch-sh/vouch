@@ -69,9 +69,8 @@ impl std::fmt::Debug for S3TlsConfig {
 
 /// Nested ACME (Let's Encrypt) configuration from S3.
 ///
-/// This is promoted to the envelope wrapper (alongside `tls` and `version`)
-/// so that external ACME certificate renewal processes can read it directly
-/// from the S3 object without KMS decryption.
+/// Stored as `_acme` in the S3 config JSON so that external ACME certificate
+/// renewal processes can read it directly from the S3 object.
 #[derive(Clone, Deserialize, Serialize)]
 pub struct S3AcmeConfig {
     /// ACME account private key (PEM or base64-encoded).
@@ -230,7 +229,7 @@ pub struct S3Config {
     /// Nested TLS config.
     pub tls: Option<S3TlsConfig>,
 
-    // ACME configuration (promoted to envelope wrapper for external access)
+    // ACME configuration
     /// Nested ACME config.
     #[serde(rename = "_acme")]
     pub acme: Option<S3AcmeConfig>,
@@ -378,11 +377,12 @@ async fn fetch_s3_raw(client: &S3Client, source: &S3ConfigSource) -> Result<(Vec
 
 /// Decrypt a `document_key` config entry to recover the P-384 HPKE key pair.
 ///
-/// Calls `kms:Decrypt` (plain, no NitroTPM attestation) to decrypt the private
-/// key ciphertext, then derives the HPKE key pair from the DER.
+/// Calls `kms:Decrypt` (uses NitroTPM attestation when available) to decrypt
+/// the private key ciphertext, then derives the HPKE key pair from the DER.
 async fn decrypt_document_key(
     kms_client: &KmsClient,
     doc_key: &S3DocumentKeyConfig,
+    use_attestation: bool,
 ) -> Result<DocumentKeyMaterial> {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
@@ -391,23 +391,18 @@ async fn decrypt_document_key(
         .decode(&doc_key.encrypted_private_key)
         .context("Failed to base64-decode document_key.encrypted_private_key")?;
 
-    let response = kms_client
-        .decrypt()
-        .key_id(&doc_key.kms_key_id)
-        .ciphertext_blob(aws_smithy_types::Blob::new(encrypted_bytes))
-        .send()
-        .await
-        .context("KMS Decrypt for document_key failed")?;
-
-    let plaintext_blob = response
-        .plaintext()
-        .context("KMS Decrypt response missing plaintext for document_key")?;
+    let plaintext = tpm_decrypt::kms_decrypt(
+        kms_client,
+        &doc_key.kms_key_id,
+        &encrypted_bytes,
+        use_attestation,
+    )
+    .await
+    .context("KMS Decrypt for document_key failed")?;
 
     let (public_key, private_key) =
-        crate::crypto::document_crypto::p384_hpke_keys_from_private_key_der(
-            plaintext_blob.as_ref(),
-        )
-        .context("Failed to extract P-384 HPKE keys from document_key DER")?;
+        crate::crypto::document_crypto::p384_hpke_keys_from_private_key_der(&plaintext)
+            .context("Failed to extract P-384 HPKE keys from document_key DER")?;
 
     tracing::info!("Document encryption key decrypted via KMS");
 
@@ -419,20 +414,15 @@ async fn decrypt_document_key(
 
 /// Fetch configuration from S3.
 ///
-/// If the S3 object is an encrypted envelope (contains `kms_key_id`), decrypts it
-/// using NitroTPM-attested KMS before parsing. The `tls` and `version` fields from
-/// the envelope wrapper are merged into the resulting `S3Config`.
-///
-/// If the S3 object is plain JSON (no `kms_key_id`), parses it directly (backwards
-/// compatible with existing configs).
-///
-/// If the config contains a `document_key` section, the P-384 private key is
-/// decrypted via KMS (plain, no NitroTPM) and returned as `DocumentKeyMaterial`.
+/// Parses the S3 object as plain JSON. If the config contains a `document_key`
+/// section, the P-384 private key is decrypted via KMS (with NitroTPM attestation
+/// when available) and returned as `DocumentKeyMaterial`.
 ///
 /// # Arguments
 /// * `s3_client` - S3 client for fetching the config object
 /// * `source` - S3 bucket/key/region configuration
-/// * `kms_client` - Optional KMS client; required for encrypted envelopes and document keys
+/// * `kms_client` - Optional KMS client; required for document key decryption
+/// * `use_attestation` - Whether to use NitroTPM attestation for KMS calls
 ///
 /// Returns the parsed config, the ETag for change detection, and optionally the
 /// document key material for `HpkeDocumentCrypto`.
@@ -440,69 +430,18 @@ pub async fn fetch_s3_config(
     s3_client: &S3Client,
     source: &S3ConfigSource,
     kms_client: Option<&KmsClient>,
+    use_attestation: bool,
 ) -> Result<(S3Config, String, Option<DocumentKeyMaterial>)> {
     let (raw_bytes, etag) = fetch_s3_raw(s3_client, source).await?;
 
-    let config = if tpm_decrypt::is_encrypted_envelope(&raw_bytes) {
-        tracing::info!("S3 config format: encrypted envelope (KMS + NitroTPM attestation)");
+    let config: S3Config =
+        serde_json::from_slice(&raw_bytes).context("Failed to parse S3 config JSON")?;
 
-        let kms = kms_client.ok_or_else(|| {
-            anyhow::anyhow!(
-                "S3 config is an encrypted envelope but no KMS client is available. \
-                 This should not happen when running on AWS."
-            )
-        })?;
-
-        // Parse the envelope wrapper
-        let envelope: tpm_decrypt::EncryptedEnvelope =
-            serde_json::from_slice(&raw_bytes).context("Failed to parse encrypted envelope")?;
-
-        tracing::info!(
-            "Envelope version: {}, KMS key: {}, TLS in wrapper: {}",
-            envelope.version,
-            envelope.kms_key_id,
-            envelope.tls.is_some()
-        );
-
-        // Extract wrapper fields (TLS, ACME, and version) before decryption
-        let wrapper_tls = envelope.tls.clone();
-        let wrapper_acme = envelope.acme.clone();
-        let wrapper_version = envelope.version;
-
-        // Decrypt the inner config via attested KMS call
-        let plaintext = tpm_decrypt::decrypt_envelope(kms, &envelope).await?;
-
-        // Parse the decrypted JSON as S3Config
-        let mut config: S3Config =
-            serde_json::from_slice(&plaintext).context("Failed to parse decrypted S3 config")?;
-
-        // Merge wrapper fields into the config
-        // TLS from wrapper takes precedence (allows hot-reload without decryption)
-        if wrapper_tls.is_some() {
-            config.tls = wrapper_tls;
-        }
-        // ACME from wrapper (for external certificate renewal processes)
-        if wrapper_acme.is_some() {
-            config.acme = wrapper_acme;
-        }
-        // Version from wrapper (envelope version, not inner config version)
-        if config.version.is_none() {
-            config.version = Some(wrapper_version);
-        }
-
-        tracing::info!("S3 config decrypted and parsed successfully");
-        config
-    } else {
-        tracing::info!("S3 config format: plain JSON");
-        serde_json::from_slice(&raw_bytes).context("Failed to parse S3 config JSON")?
-    };
-
-    // If the config has a document_key, decrypt it independently
     let doc_keys = if let Some(doc_key_config) = &config.document_key {
         let kms = kms_client.ok_or_else(|| {
             anyhow::anyhow!("S3 config has document_key but no KMS client is available")
         })?;
-        Some(decrypt_document_key(kms, doc_key_config).await?)
+        Some(decrypt_document_key(kms, doc_key_config, use_attestation).await?)
     } else {
         None
     };
@@ -546,9 +485,6 @@ pub async fn check_config_changed(
 /// 1. Polls S3 every `poll_interval_seconds` using HEAD requests
 /// 2. Re-fetches config only when ETag changes
 /// 3. Automatically reloads TLS certificates when they change
-///
-/// For encrypted envelope configs, runtime updates only read TLS from the
-/// plaintext wrapper — no KMS decryption is needed for hot-reload.
 pub fn start_s3_config_task(
     s3_client: S3Client,
     source: S3ConfigSource,
@@ -575,9 +511,7 @@ pub fn start_s3_config_task(
                         new_etag
                     );
 
-                    // For runtime updates, only TLS can change. If the config is
-                    // an encrypted envelope, TLS is in the plaintext wrapper — we
-                    // don't need to decrypt. Fetch raw bytes and handle both cases.
+                    // For runtime updates, only TLS can change.
                     match fetch_runtime_config(&s3_client, &source).await {
                         Ok((s3_cfg, etag)) => {
                             if let Err(e) = apply_config_update(&config, &tls_config, s3_cfg).await
@@ -604,37 +538,16 @@ pub fn start_s3_config_task(
 
 /// Fetch S3 config for runtime updates (polling).
 ///
-/// For encrypted envelopes, only extracts the plaintext wrapper fields (TLS, version)
-/// without performing KMS decryption. For plain JSON, parses the full config.
-///
-/// Since `apply_config_update` only applies TLS changes at runtime, this is sufficient.
+/// Parses the S3 object as plain JSON. Since `apply_config_update` only applies
+/// TLS changes at runtime, most fields are ignored.
 async fn fetch_runtime_config(
     s3_client: &S3Client,
     source: &S3ConfigSource,
 ) -> Result<(S3Config, String)> {
     let (raw_bytes, etag) = fetch_s3_raw(s3_client, source).await?;
-
-    if tpm_decrypt::is_encrypted_envelope(&raw_bytes) {
-        // Encrypted envelope — extract only the wrapper fields (no decryption needed).
-        // Only TLS changes are applied at runtime, and TLS lives in the wrapper.
-        let envelope: tpm_decrypt::EncryptedEnvelope = serde_json::from_slice(&raw_bytes)
-            .context("Failed to parse encrypted envelope during polling")?;
-
-        let config = S3Config {
-            version: Some(envelope.version),
-            tls: envelope.tls,
-            acme: envelope.acme,
-            ..S3Config::default()
-        };
-
-        tracing::debug!("Encrypted envelope: extracted wrapper TLS for runtime update");
-        Ok((config, etag))
-    } else {
-        // Plain JSON — parse full config (unchanged behavior)
-        let config: S3Config =
-            serde_json::from_slice(&raw_bytes).context("Failed to parse S3 config JSON")?;
-        Ok((config, etag))
-    }
+    let config: S3Config =
+        serde_json::from_slice(&raw_bytes).context("Failed to parse S3 config JSON")?;
+    Ok((config, etag))
 }
 
 /// Apply S3 configuration update to the running server.
@@ -1163,6 +1076,48 @@ mod tests {
             Some("mrk-oidc-key".to_string())
         );
         assert_eq!(config.jwt_hmac_kms_key_id, Some("mrk-hmac-key".to_string()));
+    }
+
+    #[test]
+    fn test_s3_acme_config_debug_redacts_account_key() {
+        let acme = S3AcmeConfig {
+            account_key: "super-secret-pem-key".to_string(),
+            email: "admin@example.com".to_string(),
+        };
+        let debug = format!("{acme:?}");
+        assert!(
+            debug.contains("[REDACTED]"),
+            "Debug output must redact account_key"
+        );
+        assert!(
+            !debug.contains("super-secret-pem-key"),
+            "Debug output must not leak the actual key"
+        );
+        assert!(
+            debug.contains("admin@example.com"),
+            "Debug output should show email"
+        );
+    }
+
+    #[test]
+    fn test_s3_document_key_config_debug_redacts_encrypted_key() {
+        let dk = S3DocumentKeyConfig {
+            kms_key_id: "mrk-test-123".to_string(),
+            encrypted_private_key: "c2VjcmV0LWNpcGhlcnRleHQ=".to_string(),
+        };
+        let debug = format!("{dk:?}");
+        assert!(
+            debug.contains("[REDACTED]"),
+            "Debug output must redact encrypted_private_key"
+        );
+        assert!(
+            !debug.contains("c2VjcmV0LWNpcGhlcnRleHQ="),
+            "Debug output must not leak the actual ciphertext"
+        );
+        assert!(
+            debug.contains("mrk-test-123"),
+            "Debug output should show kms_key_id"
+        );
     }
 
     #[test]

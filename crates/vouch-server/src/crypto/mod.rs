@@ -3,7 +3,7 @@
 //!
 //! This module groups all cryptographic operations into a single audit boundary:
 //! JWT signing/verification, SSH certificate authority, WebAuthn COSE verification,
-//! TPM/KMS envelope decryption, and encoding utilities.
+//! NitroTPM-attested KMS decryption, and encoding utilities.
 
 pub(crate) mod ber;
 pub mod cose;
