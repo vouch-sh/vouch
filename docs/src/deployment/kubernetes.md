@@ -11,17 +11,12 @@ Deploy Vouch on Kubernetes using the Helm chart.
 ## Install
 
 ```bash
-# Add the Vouch Helm repository
-helm repo add vouch https://charts.vouch.sh
-helm repo update
-
-# Install
-helm install vouch-server vouch/vouch-server \
+# Install from OCI registry
+helm install vouch-server oci://ghcr.io/vouch-sh/charts/vouch-server \
+  --version 0.1.0 \
   --namespace vouch \
   --create-namespace \
-  --set config.rpId=auth.example.com \
-  --set config.jwtSecret=<your-secret> \
-  --set config.baseUrl=https://auth.example.com
+  --values my-values.yaml
 ```
 
 ## Values
@@ -32,36 +27,50 @@ Key values to configure:
 # values.yaml
 image:
   repository: ghcr.io/vouch-sh/vouch
-  tag: latest
+  pullPolicy: IfNotPresent
+  tag: ""  # defaults to chart appVersion
 
-config:
-  rpId: auth.example.com
-  rpName: "My Organization"
-  baseUrl: https://auth.example.com
-  sessionHours: 8
+serviceAccount:
+  create: true
+  annotations: {}
 
-# Database
-database:
-  # SQLite (default, with PVC)
-  type: sqlite
-  # Or PostgreSQL
-  # type: postgres
-  # url: postgres://user:pass@host:5432/vouch
+podSecurityContext:
+  fsGroup: 65532
 
-# TLS (if not using ingress TLS termination)
-tls:
-  enabled: false
-  # cert: <base64-encoded>
-  # key: <base64-encoded>
+securityContext:
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop:
+      - ALL
+  readOnlyRootFilesystem: true
+  runAsNonRoot: true
+  runAsUser: 65532
+  seccompProfile:
+    type: RuntimeDefault
 
-# SSH CA
-sshCa:
-  enabled: true
-  # key: <base64-encoded>
+service:
+  type: ClusterIP
+  port: 3000
 
-# Secrets (reference existing K8s secrets)
-existingSecret: vouch-secrets
-# The secret should contain keys: jwt-secret, ssh-ca-key, tls-cert, tls-key
+# Environment variables for vouch-server
+env:
+  VOUCH_LISTEN_ADDR: "0.0.0.0:3000"
+  VOUCH_DATABASE_URL: "sqlite:/data/vouch.db?mode=rwc"
+  VOUCH_RP_ID: "auth.example.com"
+  VOUCH_BASE_URL: "https://auth.example.com"
+  RUST_LOG: "info,vouch_server=debug"
+
+# Secret environment variables
+# Reference an existing secret containing keys like:
+# - VOUCH_JWT_SECRET
+# - VOUCH_OIDC_ISSUER
+# - VOUCH_OIDC_CLIENT_ID
+# - VOUCH_OIDC_CLIENT_SECRET
+existingSecret: ""
+
+# Or create a new secret (not recommended for production)
+secrets: {}
+  # VOUCH_JWT_SECRET: ""
 
 # Ingress
 ingress:
@@ -91,8 +100,19 @@ resources:
 # Persistence (for SQLite)
 persistence:
   enabled: true
+  existingClaim: ""
+  storageClass: ""
+  accessMode: ReadWriteOnce
   size: 1Gi
-  storageClass: gp3
+  mountPath: /data
+
+# Health check configuration
+healthcheck:
+  path: /health
+  initialDelaySeconds: 5
+  periodSeconds: 10
+  timeoutSeconds: 3
+  failureThreshold: 3
 ```
 
 ## Using Kubernetes Secrets
@@ -102,10 +122,10 @@ Create secrets for sensitive values:
 ```bash
 kubectl create secret generic vouch-secrets \
   --namespace vouch \
-  --from-literal=jwt-secret='<your-64-character-secret>' \
-  --from-file=ssh-ca-key=./ssh_ca_key \
-  --from-file=tls-cert=./tls_cert.pem \
-  --from-file=tls-key=./tls_key.pem
+  --from-literal=VOUCH_JWT_SECRET='<your-64-character-secret>' \
+  --from-literal=VOUCH_OIDC_ISSUER='https://accounts.google.com' \
+  --from-literal=VOUCH_OIDC_CLIENT_ID='...' \
+  --from-literal=VOUCH_OIDC_CLIENT_SECRET='...'
 ```
 
 Then reference in values:
@@ -126,8 +146,8 @@ For air-gapped environments:
 
 2. Save and transfer the container image:
    ```bash
-   docker pull ghcr.io/vouch-sh/vouch:1.0.0
-   docker save ghcr.io/vouch-sh/vouch:1.0.0 -o vouch-1.0.0.tar
+   docker pull ghcr.io/vouch-sh/vouch:0.1.0
+   docker save ghcr.io/vouch-sh/vouch:0.1.0 -o vouch-0.1.0.tar
    # Transfer and load into your private registry
    ```
 
@@ -143,8 +163,8 @@ For air-gapped environments:
 ## Upgrading
 
 ```bash
-helm repo update
-helm upgrade vouch-server vouch/vouch-server \
+helm upgrade vouch-server oci://ghcr.io/vouch-sh/charts/vouch-server \
+  --version <new-version> \
   --namespace vouch \
   --values my-values.yaml
 ```

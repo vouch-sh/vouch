@@ -23,8 +23,8 @@ docker pull ghcr.io/vouch-sh/vouch:latest
 docker compose up -d
 
 # Or via Helm
-helm repo update
-helm upgrade vouch-server vouch/vouch-server --namespace vouch
+helm upgrade vouch-server oci://ghcr.io/vouch-sh/charts/vouch-server \
+  --version <new-version> --namespace vouch
 
 # Verify
 curl -k https://auth.example.com/health

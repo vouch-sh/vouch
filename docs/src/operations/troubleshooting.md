@@ -11,16 +11,6 @@
 3. Check TLS: `openssl s_client -connect auth.example.com:443`
 4. Check firewall rules (port 443 must be accessible)
 
-### Enrollment Fails
-
-**Device code expires**
-- Codes expire after 10 minutes
-- Have the user run `vouch enroll` again for a fresh code
-
-**"Email domain not allowed"**
-- The user's email domain is not in the server's `VOUCH_ALLOWED_DOMAINS` list
-- Update the allowed domains configuration
-
 ### SCIM Provisioning Issues
 
 **User not de-provisioned**

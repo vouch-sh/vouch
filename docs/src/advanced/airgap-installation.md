@@ -367,7 +367,7 @@ curl -k https://auth.internal/health
 # Expected: {"status":"healthy"}
 
 # Verify SSH CA is loaded (if configured)
-curl -k https://auth.internal/.well-known/ssh-ca.pub
+curl -k https://auth.internal/v1/credentials/ssh/ca
 # Expected: ssh-ed25519 AAAA... vouch-ca@auth.internal
 ```
 
@@ -377,7 +377,7 @@ The SSH CA public key must be trusted by all SSH servers in the air-gapped envir
 
 ```bash
 # Fetch CA public key via API
-curl -k https://auth.internal/.well-known/ssh-ca.pub > vouch-ca.pub
+curl -k https://auth.internal/v1/credentials/ssh/ca > vouch-ca.pub
 
 # Copy to all SSH servers
 scp vouch-ca.pub root@server:/etc/ssh/vouch-ca.pub
