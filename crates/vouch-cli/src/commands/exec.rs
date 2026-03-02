@@ -249,7 +249,10 @@ async fn inject_github_credentials(cmd: &mut Command, server: &str) -> Result<()
 pub(crate) async fn fetch_github_token(server: &str) -> Result<serde_json::Value> {
     let client = crate::client::VouchClient::new(server).await?;
     client
-        .get_authenticated("/v1/credentials/github/token")
+        .post_authenticated(
+            "/v1/credentials/github/token",
+            &vouch_common::GitHubTokenRequest::default(),
+        )
         .await
         .context("failed to get GitHub token from Vouch server")
 }
