@@ -45,6 +45,7 @@ jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 mime_guess = { workspace = true }
 mimalloc = { workspace = true, features = ["secure"] }
+p256 = { workspace = true, features = ["ecdsa"] }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 rust-embed = { workspace = true, features = ["axum-ex", "deterministic-timestamps", "mime-guess"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum"] }
@@ -55,6 +56,8 @@ secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "migrate", "derive", "macros", "sqlite", "postgres", "tls-rustls"] }
+signature = { workspace = true }
+spki = { workspace = true, features = ["std"] }
 ssh-key = { workspace = true, features = ["std", "ed25519", "encryption", "rand_core", "getrandom"] }
 subtle = { workspace = true }
 tempfile = { workspace = true }

@@ -61,7 +61,8 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 
     // Load S3 config if configured (BEFORE database connection).
     // If the config has a document_key, also recovers the HPKE key pair.
-    let (s3_client, s3_source, initial_etag, doc_keys) = load_s3_config(&mut config).await?;
+    let (s3_client, s3_source, initial_etag, doc_keys, kms_client) =
+        load_s3_config(&mut config).await?;
 
     tracing::info!("Starting vouch-server on {}", config.listen_addr);
 
@@ -144,7 +145,7 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     }
 
     // Build AppState and start background tasks
-    let state = build_app_state(&config, db.clone(), doc_keys).await?;
+    let state = build_app_state(&config, db.clone(), doc_keys, kms_client).await?;
 
     // Start background cleanup task if enabled
     let cleanup_handle = if config.cleanup_interval_minutes > 0 {
@@ -190,10 +191,11 @@ async fn load_s3_config(
     Option<s3_config::S3ConfigSource>,
     Option<String>,
     Option<DocumentKeyMaterial>,
+    Option<aws_sdk_kms::Client>,
 )> {
     let Some(bucket) = &config.s3_config_bucket else {
         tracing::info!("Configuration source: environment variables");
-        return Ok((None, None, None, None));
+        return Ok((None, None, None, None, None));
     };
 
     tracing::info!(
@@ -238,7 +240,13 @@ async fn load_s3_config(
     config.merge_s3_config(&s3_cfg, false); // Initial merge - all fields allowed
     tracing::info!("S3 configuration merged (etag: {etag})");
 
-    Ok((Some(s3_client), Some(source), Some(etag), doc_keys))
+    Ok((
+        Some(s3_client),
+        Some(source),
+        Some(etag),
+        doc_keys,
+        Some(kms_client),
+    ))
 }
 
 /// Connect to the database and run migrations.
@@ -309,6 +317,7 @@ async fn build_app_state(
     config: &config::ServerConfig,
     db: Pool,
     doc_keys: Option<DocumentKeyMaterial>,
+    kms_client: Option<aws_sdk_kms::Client>,
 ) -> Result<Arc<AppState>> {
     // Build WebAuthn instance
     // Use base_url as origin (handles localhost with http and port correctly)
@@ -317,15 +326,40 @@ async fn build_app_state(
         webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)?.rp_name(&config.rp_name);
     let webauthn = webauthn_builder.build()?;
 
+    // Create a KMS client if any KMS key IDs are configured but no client
+    // was provided (e.g., non-S3 deployments that still use KMS signing).
+    let kms_needs = config.ssh_ca_kms_key_id.is_some() || config.oidc_signing_kms_key_id.is_some();
+    let kms_client = if kms_needs && kms_client.is_none() {
+        tracing::info!("Creating KMS client for signing key access");
+        let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(
+                config
+                    .s3_config_region
+                    .as_ref()
+                    .map(|r| aws_config::Region::new(r.clone())),
+            )
+            .load()
+            .await;
+        Some(aws_sdk_kms::Client::new(&sdk_config))
+    } else {
+        kms_client
+    };
+
     // Initialize SSH CA if configured
     // Priority: KMS key ID > PEM content (VOUCH_SSH_CA_KEY) > file path (VOUCH_SSH_CA_KEY_PATH)
     let ssh_ca = if let Some(key_id) = &config.ssh_ca_kms_key_id {
-        tracing::info!(
-            "SSH CA: KMS signing configured (key_id={}), \
-             not yet implemented — skipping local key loading",
-            key_id,
-        );
-        None
+        let client = kms_client
+            .as_ref()
+            .context("KMS client required for SSH CA KMS signing")?
+            .clone();
+        let ca = ssh_ca::SshCa::from_kms(client, key_id.clone(), &config.rp_id)
+            .await
+            .context("Failed to initialize KMS SSH CA")?;
+        let pub_key = ca
+            .public_key()
+            .context("KMS SSH CA loaded but public key is not extractable")?;
+        tracing::info!("SSH CA initialized (KMS): {}", pub_key);
+        Some(ca)
     } else {
         match ssh_ca::SshCa::load(
             config.ssh_ca_key.as_ref().map(|s| s.expose_secret()),
@@ -351,23 +385,30 @@ async fn build_app_state(
     };
 
     // Initialize OIDC signing key (ES256 for AWS and OIDC ID tokens)
-    if let Some(key_id) = &config.oidc_signing_kms_key_id {
-        tracing::info!(
-            "OIDC signing: KMS signing configured (key_id={}), not yet implemented",
-            key_id,
-        );
-    }
+    // Priority: KMS key ID > PEM content (VOUCH_OIDC_SIGNING_KEY) > generate ephemeral
+    let oidc_key = if let Some(key_id) = &config.oidc_signing_kms_key_id {
+        let client = kms_client
+            .as_ref()
+            .context("KMS client required for OIDC KMS signing")?
+            .clone();
+        let key = OidcSigningKey::from_kms(client, key_id.clone())
+            .await
+            .context("Failed to initialize KMS OIDC signing key")?;
+        tracing::info!("OIDC signing key initialized (KMS): {}", key.key_id());
+        key
+    } else {
+        let key = OidcSigningKey::load_or_generate(
+            config.oidc_signing_key.as_ref().map(|s| s.expose_secret()),
+        )?;
 
-    let oidc_key = OidcSigningKey::load_or_generate(
-        config.oidc_signing_key.as_ref().map(|s| s.expose_secret()),
-    )?;
-
-    if config.oidc_signing_key.is_none() {
-        tracing::warn!(
-            "Using ephemeral OIDC signing key -- all issued tokens will be \
-             invalidated on server restart. Set VOUCH_OIDC_SIGNING_KEY to persist."
-        );
-    }
+        if config.oidc_signing_key.is_none() {
+            tracing::warn!(
+                "Using ephemeral OIDC signing key -- all issued tokens will be \
+                 invalidated on server restart. Set VOUCH_OIDC_SIGNING_KEY to persist."
+            );
+        }
+        key
+    };
 
     // Build shared HTTP client for outbound API calls (GitHub, OIDC, etc.)
     let http_client =

@@ -414,7 +414,8 @@ pub async fn exchange_authorization_code(
             acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
             access_token: Some(access_token.expose_secret()),
         },
-    )?;
+    )
+    .await?;
 
     // Record usage event for registered clients
     if let Some(ref auth_client) = authenticated_client
@@ -596,7 +597,10 @@ struct IdTokenParams<'a> {
 }
 
 /// Generate an OIDC ID token.
-fn generate_id_token(state: &Arc<AppState>, params: IdTokenParams<'_>) -> ServiceResult<String> {
+async fn generate_id_token(
+    state: &Arc<AppState>,
+    params: IdTokenParams<'_>,
+) -> ServiceResult<String> {
     let now = Timestamp::now();
     let expires_seconds = i64::try_from(params.expires_in)
         .map_err(|_| ServiceError::Internal("Invalid expires_in value".to_string()))?;
@@ -637,6 +641,7 @@ fn generate_id_token(state: &Arc<AppState>, params: IdTokenParams<'_>) -> Servic
     state
         .oidc_key
         .sign_jwt(&claims)
+        .await
         .map_err(|e| ServiceError::Internal(format!("Failed to generate ID token: {e}")))
 }
 

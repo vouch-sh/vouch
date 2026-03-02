@@ -340,6 +340,7 @@ pub async fn create_oauth_access_token(
     let token = state
         .oidc_key
         .sign_access_token_jwt(&claims)
+        .await
         .map_err(|e| ServiceError::Internal(format!("Access token signing failed: {e}")))?;
 
     // Store session in database (authenticator_id is server-side only)
@@ -452,10 +453,10 @@ mod tests {
         TEST_ISSUER, TEST_JWT_SECRET, make_test_access_token, make_test_oidc_key,
     };
 
-    #[test]
-    fn test_decode_token_routes_es256_to_access_token() {
+    #[tokio::test]
+    async fn test_decode_token_routes_es256_to_access_token() {
         let key = make_test_oidc_key();
-        let token = make_test_access_token(&key);
+        let token = make_test_access_token(&key).await;
 
         let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER);
         assert!(decoded.is_some());
@@ -468,8 +469,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_decode_token_rejects_id_token_without_at_jwt_typ() {
+    #[tokio::test]
+    async fn test_decode_token_rejects_id_token_without_at_jwt_typ() {
         // An ES256 JWT signed with the OIDC key but with typ: "JWT" (ID token)
         // should NOT be decoded as an access token.
         let key = make_test_oidc_key();
@@ -494,7 +495,7 @@ mod tests {
         };
 
         // Sign as ID token (typ: "JWT", no "at+jwt")
-        let token = key.sign_jwt(&claims).expect("sign");
+        let token = key.sign_jwt(&claims).await.expect("sign");
 
         let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER);
         assert!(decoded.is_none(), "ID token should be rejected");
@@ -508,8 +509,8 @@ mod tests {
         assert!(decode_token("abc123", TEST_JWT_SECRET, &key, TEST_ISSUER).is_none());
     }
 
-    #[test]
-    fn test_decode_token_rejects_expired_access_token() {
+    #[tokio::test]
+    async fn test_decode_token_rejects_expired_access_token() {
         let key = make_test_oidc_key();
 
         let claims = AccessTokenClaims {
@@ -531,15 +532,15 @@ mod tests {
             acr: None,
         };
 
-        let token = key.sign_access_token_jwt(&claims).expect("sign");
+        let token = key.sign_access_token_jwt(&claims).await.expect("sign");
         let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER);
         assert!(decoded.is_none(), "Expired token should be rejected");
     }
 
-    #[test]
-    fn test_decoded_token_accessors() {
+    #[tokio::test]
+    async fn test_decoded_token_accessors() {
         let key = make_test_oidc_key();
-        let token = make_test_access_token(&key);
+        let token = make_test_access_token(&key).await;
         let decoded = decode_token(&token, TEST_JWT_SECRET, &key, TEST_ISSUER).unwrap();
 
         assert_eq!(decoded.sub(), "user-123");

@@ -112,6 +112,7 @@ pub async fn issue_aws_token(
     // Sign the token with ES256
     let id_token = oidc_key
         .sign_jwt(&id_claims)
+        .await
         .map_err(|e| AwsError::TokenSign(e.to_string()))?;
 
     tracing::info!("Issued AWS OIDC token for {}", redact_email(user_email));

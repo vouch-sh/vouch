@@ -804,7 +804,7 @@ pub fn make_test_oidc_key() -> OidcSigningKey {
 }
 
 /// Create a test ES256 access token signed by the given OIDC key.
-pub fn make_test_access_token(key: &OidcSigningKey) -> String {
+pub async fn make_test_access_token(key: &OidcSigningKey) -> String {
     use crate::services::auth::AccessTokenClaims;
     use crate::services::oidc::scope::ScopeSet;
 
@@ -826,5 +826,5 @@ pub fn make_test_access_token(key: &OidcSigningKey) -> String {
         amr: None,
         acr: None,
     };
-    key.sign_access_token_jwt(&claims).expect("sign")
+    key.sign_access_token_jwt(&claims).await.expect("sign")
 }
