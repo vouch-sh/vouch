@@ -29,27 +29,6 @@ Sessions are stored in multiple locations for different access patterns:
 | `~/.vouch/cookie.txt` | Netscape cookie file for `curl -b` usage | File permissions 0600 |
 | Server database | Server-side session record | Token hash stored, not plaintext |
 
-## Checking Session Status
-
-```bash
-$ vouch status
-Authenticated as you@company.com
-Session expires in 7h 42m
-Authenticated at 2025-01-15T09:00:00Z
-```
-
-## Ending a Session
-
-```bash
-vouch logout
-```
-
-This clears the session from:
-- Agent memory
-- Config file
-- Cookie file
-- Server-side session record (revoked)
-
 ## Server-Side Session Management
 
 ### Cleanup

@@ -20,7 +20,7 @@ curl -k https://auth.example.com/health
 # Expected: {"status":"healthy"}
 
 # SSH CA public key (if configured)
-curl -k https://auth.example.com/.well-known/ssh-ca.pub
+curl -k https://auth.example.com/v1/credentials/ssh/ca
 # Expected: ssh-ed25519 AAAA... vouch-ca@...
 
 # OIDC discovery

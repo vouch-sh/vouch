@@ -5,7 +5,7 @@ Vouch uses external identity providers (IdPs) to verify user identity during enr
 ## Purpose
 
 - Verify the user is a member of your organization during enrollment
-- Pull user attributes (email, name, groups) from your existing identity system
+- Pull user attributes (email) from your existing identity system
 - No separate user database to maintain in Vouch
 
 ## Configuration
@@ -34,11 +34,10 @@ External IdP claims are mapped to Vouch user attributes:
 | External Claim | Vouch Attribute | Required |
 |----------------|-----------------|----------|
 | `email` | User email / principal | Yes |
-| `name` or `given_name`+`family_name` | Display name | No |
-| `groups` | Group memberships | No |
+| `email_verified` | Email verification status | Yes (must be `true`) |
+| `hd` | Google Workspace hosted domain | No (Google-specific) |
 
 ## User Lifecycle
 
 - User exists in external IdP but not Vouch — Enrollment creates Vouch user
 - User removed from external IdP — Existing Vouch sessions continue until expiry; re-enrollment blocked
-- User's groups change in external IdP — Updated on next enrollment/re-enrollment

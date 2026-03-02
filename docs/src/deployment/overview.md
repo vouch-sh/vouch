@@ -10,9 +10,9 @@ Before deploying, ensure you have:
 - [ ] **TLS certificate** — Valid certificate for your domain (or use Let's Encrypt)
 - [ ] **Database** — SQLite (single node) or PostgreSQL (multi-node)
 - [ ] **Identity provider** — Google Workspace
-- [ ] **JWT secret** — Cryptographically random string, minimum 32 characters
-- [ ] **SSH CA key** (optional) — Ed25519 key pair for signing SSH certificates
-- [ ] **OIDC signing key** (optional) — P-256 EC key for signing ID tokens
+- [ ] **JWT secret** — Cryptographically random string, minimum 32 characters (or use AWS KMS HMAC)
+- [ ] **SSH CA key** (optional) — Ed25519 key pair for signing SSH certificates (or use AWS KMS)
+- [ ] **OIDC signing key** (optional) — P-256 EC key for signing ID tokens (or use AWS KMS)
 
 ## Architecture
 
@@ -70,11 +70,13 @@ For production, you'll also want:
 ```bash
 VOUCH_TLS_CERT=<base64-encoded-pem>  # TLS certificate
 VOUCH_TLS_KEY=<base64-encoded-pem>   # TLS private key
-VOUCH_SSH_CA_KEY=<base64-encoded-pem> # SSH CA key
+VOUCH_SSH_CA_KEY=<base64-encoded-pem> # SSH CA key (or VOUCH_SSH_CA_KMS_KEY_ID)
 VOUCH_OIDC_ISSUER=https://accounts.google.com  # External IdP
 VOUCH_OIDC_CLIENT_ID=...
 VOUCH_OIDC_CLIENT_SECRET=...
 ```
+
+For AWS deployments, you can use KMS for all signing operations instead of managing local keys. See the [Configuration Reference](configuration.md) for KMS options.
 
 ## Sizing
 

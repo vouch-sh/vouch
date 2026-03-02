@@ -9,7 +9,7 @@ All Vouch server configuration is done via environment variables (prefixed with 
 | `VOUCH_RP_ID` | Yes | `localhost` | Relying Party ID (domain, e.g., `vouch.sh`). Used as the WebAuthn RP ID. |
 | `VOUCH_RP_NAME` | No | `Vouch` | Relying Party display name shown in browser prompts and UI. |
 | `VOUCH_DATABASE_URL` | Yes | `sqlite:vouch.db?mode=rwc` | Database connection URL. Supports `sqlite:`, `postgres:`, and Aurora DSQL endpoints. |
-| `VOUCH_JWT_SECRET` | **Yes** | _(empty)_ | JWT signing secret. **Must be at least 32 characters.** Must not consist of a single repeated character. Used to sign all OAuth tokens and session cookies. |
+| `VOUCH_JWT_SECRET` | **Conditional** | _(empty)_ | JWT signing secret. **Must be at least 32 characters.** Must not consist of a single repeated character. Used to sign internal state tokens. Required unless `VOUCH_JWT_HMAC_KMS_KEY_ID` is set. |
 | `VOUCH_BASE_URL` | No | `https://{rp_id}` | Base URL for this server. Auto-derived from `VOUCH_RP_ID` if not set (`http://localhost:{port}` for local dev, `https://{rp_id}` for production). |
 | `VOUCH_ORG_NAME` | No | _(none)_ | Organization name for branding in the UI. Falls back to `VOUCH_RP_NAME` if not set. |
 | `VOUCH_ALLOWED_DOMAINS` | No | _(none)_ | Comma-separated list of allowed email domains for enrollment (e.g., `example.com,corp.example.com`). If not set, all domains are allowed. Normalized to lowercase. |
@@ -50,6 +50,14 @@ These variables configure an external OpenID Connect identity provider for enrol
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `VOUCH_OIDC_SIGNING_KEY` | No | _(auto-generate)_ | OIDC signing key content (base64-encoded PEM format, P-256 ECDSA). Used for signing OIDC ID tokens with ES256 algorithm. If not set, an ephemeral key is generated on each server restart (not recommended for production). |
+
+## AWS KMS
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `VOUCH_SSH_CA_KMS_KEY_ID` | No | _(none)_ | AWS KMS key ID for SSH CA signing (Ed25519). When set, overrides `VOUCH_SSH_CA_KEY` and `VOUCH_SSH_CA_KEY_PATH`. |
+| `VOUCH_OIDC_SIGNING_KMS_KEY_ID` | No | _(none)_ | AWS KMS key ID for OIDC token signing (P-256 ECDSA). When set, overrides `VOUCH_OIDC_SIGNING_KEY`. |
+| `VOUCH_JWT_HMAC_KMS_KEY_ID` | No | _(none)_ | AWS KMS key ID for HMAC state token signing. When set, `VOUCH_JWT_SECRET` is not required. |
 
 ## DPoP
 
