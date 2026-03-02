@@ -117,16 +117,6 @@ pub fn verify_login_assertion(
     let expected_origin = format!("https://{}", params.rp_id);
     let expected_challenge = URL_SAFE_NO_PAD.encode(params.challenge);
 
-    // Debug logging for signature verification (debug builds only)
-    #[cfg(debug_assertions)]
-    {
-        tracing::debug!(
-            "verify_login_assertion: sig_len={}, auth_data_len={}",
-            params.signature.len(),
-            params.authenticator_data.len()
-        );
-    }
-
     let result = webauthn_verify::verify_assertion(
         params.authenticator_data,
         params.client_data_json,

@@ -115,11 +115,21 @@ pub struct Args {
     #[arg(long, env = "VOUCH_SSH_CA_KEY")]
     pub ssh_ca_key: Option<String>,
 
+    /// AWS KMS key ID for SSH CA signing (multi-region mrk- prefix).
+    /// When set, KMS signing is used instead of local SSH CA key.
+    #[arg(long, env = "VOUCH_SSH_CA_KMS_KEY_ID")]
+    pub ssh_ca_kms_key_id: Option<String>,
+
     /// OIDC signing key content (PEM format, P-256 EC).
     /// Used for signing OIDC ID tokens with ES256 algorithm.
     /// If not set, an ephemeral key will be generated.
     #[arg(long, env = "VOUCH_OIDC_SIGNING_KEY")]
     pub oidc_signing_key: Option<String>,
+
+    /// AWS KMS key ID for OIDC signing (multi-region mrk- prefix).
+    /// When set, KMS signing is used instead of local OIDC signing key.
+    #[arg(long, env = "VOUCH_OIDC_SIGNING_KMS_KEY_ID")]
+    pub oidc_signing_kms_key_id: Option<String>,
 
     /// Maximum age of DPoP proofs in seconds.
     #[arg(long, env = "VOUCH_DPOP_MAX_AGE", default_value = "300")]
@@ -357,9 +367,9 @@ impl ServerConfig {
             cli_download_windows: args.cli_download_windows,
             ssh_ca_key_path,
             ssh_ca_key: args.ssh_ca_key.map(SecretString::from),
-            ssh_ca_kms_key_id: None,
+            ssh_ca_kms_key_id: args.ssh_ca_kms_key_id,
             oidc_signing_key: args.oidc_signing_key.map(SecretString::from),
-            oidc_signing_kms_key_id: None,
+            oidc_signing_kms_key_id: args.oidc_signing_kms_key_id,
             dpop_max_age_seconds: args.dpop_max_age,
             cleanup_interval_minutes: args.cleanup_interval,
             auth_events_retention_days: args.auth_events_retention_days,

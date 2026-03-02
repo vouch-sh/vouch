@@ -144,7 +144,7 @@ impl OidcSigningKey {
             hex::encode(pub_bytes.get(..8).unwrap_or(pub_bytes))
         );
 
-        tracing::info!("KMS OIDC signing key initialized: {}", kid);
+        tracing::debug!("KMS OIDC signing key initialized: {}", kid);
 
         Ok(Self::Kms {
             signer,

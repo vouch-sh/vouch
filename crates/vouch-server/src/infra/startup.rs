@@ -331,15 +331,11 @@ async fn build_app_state(
     let kms_needs = config.ssh_ca_kms_key_id.is_some() || config.oidc_signing_kms_key_id.is_some();
     let kms_client = if kms_needs && kms_client.is_none() {
         tracing::info!("Creating KMS client for signing key access");
-        let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(
-                config
-                    .s3_config_region
-                    .as_ref()
-                    .map(|r| aws_config::Region::new(r.clone())),
-            )
-            .load()
-            .await;
+        let mut builder = aws_config::defaults(aws_config::BehaviorVersion::latest());
+        if let Some(region) = &config.s3_config_region {
+            builder = builder.region(aws_config::Region::new(region.clone()));
+        }
+        let sdk_config = builder.load().await;
         Some(aws_sdk_kms::Client::new(&sdk_config))
     } else {
         kms_client

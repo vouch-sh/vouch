@@ -890,17 +890,6 @@ fn verify_es256(
     point.extend_from_slice(&x);
     point.extend_from_slice(&y);
 
-    // Detailed logging for debugging (debug builds only)
-    #[cfg(debug_assertions)]
-    {
-        tracing::debug!(
-            "verify_es256: x_len={}, y_len={}, point_len={}",
-            x.len(),
-            y.len(),
-            point.len()
-        );
-    }
-
     // Try raw format first (64 bytes, r || s) - used by browser WebAuthn
     // Then try DER/ASN.1 format (70-72 bytes) - used by CTAP2/YubiKey
     if signature.len() == 64 {

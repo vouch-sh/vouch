@@ -155,7 +155,7 @@ impl KmsSignerEd25519 {
         let public_key_bytes =
             parse_spki_ed25519(der).context("Failed to parse Ed25519 SPKI from KMS")?;
 
-        tracing::info!(
+        tracing::debug!(
             "KMS Ed25519 signer initialized (pubkey={})",
             hex::encode(public_key_bytes.get(..8).unwrap_or(&public_key_bytes)),
         );
@@ -175,6 +175,8 @@ impl KmsSignerEd25519 {
     ///
     /// Returns the 64-byte raw Ed25519 signature.
     pub(crate) async fn sign_raw(&self, message: &[u8]) -> Result<[u8; 64]> {
+        tracing::debug!(key_id = %self.key_id, msg_len = message.len(), "kms:Sign Ed25519");
+
         let resp = self
             .kms_client
             .sign()
@@ -197,6 +199,7 @@ impl KmsSignerEd25519 {
 
         let mut result = [0u8; 64];
         result.copy_from_slice(sig);
+        tracing::debug!("kms:Sign Ed25519 succeeded");
         Ok(result)
     }
 
@@ -302,7 +305,7 @@ impl KmsSignerP256 {
         let public_key_bytes =
             parse_spki_p256(der).context("Failed to parse P-256 SPKI from KMS")?;
 
-        tracing::info!(
+        tracing::debug!(
             "KMS P-256 signer initialized (pubkey_prefix={})",
             hex::encode(public_key_bytes.get(..8).unwrap_or(&public_key_bytes)),
         );
@@ -323,6 +326,8 @@ impl KmsSignerP256 {
     ///
     /// Returns the DER-encoded ECDSA signature.
     pub(crate) async fn sign_raw(&self, message: &[u8]) -> Result<Vec<u8>> {
+        tracing::debug!(key_id = %self.key_id, msg_len = message.len(), "kms:Sign P-256 ECDSA");
+
         let resp = self
             .kms_client
             .sign()
@@ -339,6 +344,7 @@ impl KmsSignerP256 {
             .context("kms:Sign returned no signature")?
             .as_ref();
 
+        tracing::debug!("kms:Sign P-256 ECDSA succeeded");
         Ok(sig.to_vec())
     }
 
