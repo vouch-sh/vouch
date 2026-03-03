@@ -179,6 +179,25 @@ fn raw_to_document<T: DocumentType>(
     })
 }
 
+/// Build an index-value match expression.
+///
+/// In HPKE mode, matches both the HMAC-hashed value (new rows) and
+/// the plaintext value (pre-encryption rows) using `IN`. In plaintext
+/// mode, the hash equals the value so this reduces to a single `=`.
+///
+/// This is a temporary migration bridge. Once all rows have been
+/// re-encrypted and their indexes HMAC-hashed (via update-on-read or
+/// background job), this can revert to a simple equality check.
+fn index_value_condition(crypto: &dyn DocumentCrypto, value: &str) -> sea_query::SimpleExpr {
+    let hashed = crypto.hmac_index(value);
+    let col = Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexValue));
+    if hashed == value {
+        col.eq(value.to_string())
+    } else {
+        col.is_in([hashed, value.to_string()])
+    }
+}
+
 // ============================================================================
 // DocumentStore
 // ============================================================================
@@ -359,21 +378,7 @@ impl DocumentStore {
         field: &str,
         value: &str,
     ) -> Result<Option<Document<T>>> {
-        let results = self.find_all::<T>(field, value).await?;
-        Ok(results.into_iter().next())
-    }
-
-    /// Find all documents matching an indexed field.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if decryption or deserialization fails.
-    pub async fn find_all<T: DocumentType>(
-        &self,
-        field: &str,
-        value: &str,
-    ) -> Result<Vec<Document<T>>> {
-        let hashed = self.crypto.hmac_index(value);
+        let index_cond = index_value_condition(&*self.crypto, value);
 
         let stmt = Query::select()
             .columns([
@@ -396,10 +401,52 @@ impl DocumentStore {
             )
             .and_where(Expr::col((Documents::Table, Documents::DocType)).eq(T::DOC_TYPE))
             .and_where(Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexField)).eq(field))
-            .and_where(
-                Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexValue))
-                    .eq(hashed.as_str()),
+            .and_where(index_cond)
+            .order_by((Documents::Table, Documents::CreatedAt), Order::Desc)
+            .limit(1)
+            .to_owned();
+
+        let row: Option<RawDocumentRow> =
+            crate::db_fetch_optional!(&self.pool, stmt, RawDocumentRow)?;
+
+        row.map(|r| raw_to_document::<T>(&self.crypto, r))
+            .transpose()
+    }
+
+    /// Find all documents matching an indexed field.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decryption or deserialization fails.
+    pub async fn find_all<T: DocumentType>(
+        &self,
+        field: &str,
+        value: &str,
+    ) -> Result<Vec<Document<T>>> {
+        let index_cond = index_value_condition(&*self.crypto, value);
+
+        let stmt = Query::select()
+            .columns([
+                (Documents::Table, Documents::Id),
+                (Documents::Table, Documents::DocType),
+                (Documents::Table, Documents::SchemaVersion),
+                (Documents::Table, Documents::EncappedKey),
+                (Documents::Table, Documents::Data),
+                (Documents::Table, Documents::ExpiresAt),
+                (Documents::Table, Documents::CreatedAt),
+                (Documents::Table, Documents::UpdatedAt),
+                (Documents::Table, Documents::Version),
+                (Documents::Table, Documents::LastUsedAt),
+            ])
+            .from(Documents::Table)
+            .inner_join(
+                DocumentIndexes::Table,
+                Expr::col((Documents::Table, Documents::Id))
+                    .equals((DocumentIndexes::Table, DocumentIndexes::DocumentId)),
             )
+            .and_where(Expr::col((Documents::Table, Documents::DocType)).eq(T::DOC_TYPE))
+            .and_where(Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexField)).eq(field))
+            .and_where(index_cond)
             .to_owned();
 
         let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
@@ -747,7 +794,7 @@ impl DocumentStore {
     ///
     /// Returns an error if the query fails.
     pub async fn count<T: DocumentType>(&self, field: &str, value: &str) -> Result<i64> {
-        let hashed = self.crypto.hmac_index(value);
+        let index_cond = index_value_condition(&*self.crypto, value);
 
         let stmt = Query::select()
             .expr_as(
@@ -762,10 +809,7 @@ impl DocumentStore {
             )
             .and_where(Expr::col((Documents::Table, Documents::DocType)).eq(T::DOC_TYPE))
             .and_where(Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexField)).eq(field))
-            .and_where(
-                Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexValue))
-                    .eq(hashed.as_str()),
-            )
+            .and_where(index_cond)
             .to_owned();
 
         // Use a simple FromRow struct for the count result
@@ -1083,21 +1127,7 @@ impl<'a> StoreTransaction<'a> {
         field: &str,
         value: &str,
     ) -> Result<Option<Document<T>>> {
-        let mut results = self.find_all::<T>(field, value).await?;
-        Ok(results.drain(..).next())
-    }
-
-    /// Find all documents matching an indexed field within this transaction.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if decryption or deserialization fails.
-    pub async fn find_all<T: DocumentType>(
-        &mut self,
-        field: &str,
-        value: &str,
-    ) -> Result<Vec<Document<T>>> {
-        let hashed = self.crypto.hmac_index(value);
+        let index_cond = index_value_condition(&**self.crypto, value);
 
         let stmt = Query::select()
             .columns([
@@ -1120,10 +1150,51 @@ impl<'a> StoreTransaction<'a> {
             )
             .and_where(Expr::col((Documents::Table, Documents::DocType)).eq(T::DOC_TYPE))
             .and_where(Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexField)).eq(field))
-            .and_where(
-                Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexValue))
-                    .eq(hashed.as_str()),
+            .and_where(index_cond)
+            .order_by((Documents::Table, Documents::CreatedAt), Order::Desc)
+            .limit(1)
+            .to_owned();
+
+        let row: Option<RawDocumentRow> = crate::tx_fetch_optional!(self.tx, stmt, RawDocumentRow)?;
+
+        row.map(|r| raw_to_document::<T>(self.crypto, r))
+            .transpose()
+    }
+
+    /// Find all documents matching an indexed field within this transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decryption or deserialization fails.
+    pub async fn find_all<T: DocumentType>(
+        &mut self,
+        field: &str,
+        value: &str,
+    ) -> Result<Vec<Document<T>>> {
+        let index_cond = index_value_condition(&**self.crypto, value);
+
+        let stmt = Query::select()
+            .columns([
+                (Documents::Table, Documents::Id),
+                (Documents::Table, Documents::DocType),
+                (Documents::Table, Documents::SchemaVersion),
+                (Documents::Table, Documents::EncappedKey),
+                (Documents::Table, Documents::Data),
+                (Documents::Table, Documents::ExpiresAt),
+                (Documents::Table, Documents::CreatedAt),
+                (Documents::Table, Documents::UpdatedAt),
+                (Documents::Table, Documents::Version),
+                (Documents::Table, Documents::LastUsedAt),
+            ])
+            .from(Documents::Table)
+            .inner_join(
+                DocumentIndexes::Table,
+                Expr::col((Documents::Table, Documents::Id))
+                    .equals((DocumentIndexes::Table, DocumentIndexes::DocumentId)),
             )
+            .and_where(Expr::col((Documents::Table, Documents::DocType)).eq(T::DOC_TYPE))
+            .and_where(Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexField)).eq(field))
+            .and_where(index_cond)
             .to_owned();
 
         let rows: Vec<RawDocumentRow> = crate::tx_fetch_all!(self.tx, stmt, RawDocumentRow)?;
@@ -1291,7 +1362,7 @@ impl<'a> StoreTransaction<'a> {
     ///
     /// Returns an error if the query fails.
     pub async fn count<T: DocumentType>(&mut self, field: &str, value: &str) -> Result<i64> {
-        let hashed = self.crypto.hmac_index(value);
+        let index_cond = index_value_condition(&**self.crypto, value);
 
         let stmt = Query::select()
             .expr_as(
@@ -1306,10 +1377,7 @@ impl<'a> StoreTransaction<'a> {
             )
             .and_where(Expr::col((Documents::Table, Documents::DocType)).eq(T::DOC_TYPE))
             .and_where(Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexField)).eq(field))
-            .and_where(
-                Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexValue))
-                    .eq(hashed.as_str()),
-            )
+            .and_where(index_cond)
             .to_owned();
 
         #[derive(sqlx::FromRow)]
@@ -1983,5 +2051,85 @@ mod tests {
 
         let fetched = store.get::<TestDoc>(&inserted.id).await.unwrap().unwrap();
         assert_eq!(fetched.data.value, 15);
+    }
+
+    // ========================================================================
+    // index_value_condition tests
+    // ========================================================================
+
+    /// Test-only crypto that returns a different hash than the input,
+    /// simulating HPKE mode where `hmac_index` produces an opaque hash.
+    #[derive(Debug)]
+    struct HashingTestCrypto;
+
+    impl DocumentCrypto for HashingTestCrypto {
+        fn seal(
+            &self,
+            _info: &[u8],
+            _aad: &[u8],
+            plaintext: &[u8],
+        ) -> anyhow::Result<EncryptedDocument> {
+            let data =
+                String::from_utf8(plaintext.to_vec()).context("plaintext is not valid UTF-8")?;
+            Ok(EncryptedDocument {
+                encapped_key: None,
+                data,
+            })
+        }
+
+        fn open(
+            &self,
+            _info: &[u8],
+            _aad: &[u8],
+            doc: &EncryptedDocument,
+        ) -> anyhow::Result<Vec<u8>> {
+            Ok(doc.data.as_bytes().to_vec())
+        }
+
+        fn hmac_index(&self, value: &str) -> String {
+            format!("hashed:{value}")
+        }
+    }
+
+    #[test]
+    fn index_value_condition_plaintext_emits_eq() {
+        use sea_query::SqliteQueryBuilder;
+
+        let crypto = PlaintextDocumentCrypto;
+        let expr = index_value_condition(&crypto, "alice@example.com");
+
+        let (sql, _) = Query::select()
+            .column(DocumentIndexes::IndexValue)
+            .from(DocumentIndexes::Table)
+            .and_where(expr)
+            .build(SqliteQueryBuilder);
+
+        assert!(
+            sql.contains("= ?") || sql.contains("= 'alice@example.com'"),
+            "expected simple equality, got: {sql}"
+        );
+        assert!(
+            !sql.contains("IN"),
+            "plaintext mode should not use IN, got: {sql}"
+        );
+    }
+
+    #[test]
+    fn index_value_condition_hpke_emits_in() {
+        use sea_query::SqliteQueryBuilder;
+
+        let crypto = HashingTestCrypto;
+        let expr = index_value_condition(&crypto, "alice@example.com");
+
+        let (sql, _) = Query::select()
+            .column(DocumentIndexes::IndexValue)
+            .from(DocumentIndexes::Table)
+            .and_where(expr)
+            .build(SqliteQueryBuilder);
+
+        assert!(
+            sql.contains("IN"),
+            "HPKE mode should use IN clause, got: {sql}"
+        );
     }
 }

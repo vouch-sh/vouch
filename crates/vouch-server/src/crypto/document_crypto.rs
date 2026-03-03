@@ -148,10 +148,14 @@ impl DocumentCrypto for HpkeDocumentCrypto {
     fn open(&self, info: &[u8], aad: &[u8], doc: &EncryptedDocument) -> Result<Vec<u8>> {
         use rustls::crypto::hpke::Hpke;
 
-        let enc_bytes = doc
-            .encapped_key
-            .as_ref()
-            .context("missing encapped_key for HPKE decryption")?;
+        let Some(enc_bytes) = doc.encapped_key.as_ref() else {
+            tracing::warn!(
+                doc_type = %String::from_utf8_lossy(info),
+                "document has no encapped_key; returning data as \
+                 unencrypted plaintext (pre-encryption row)"
+            );
+            return Ok(doc.data.as_bytes().to_vec());
+        };
         let enc_decoded = BASE64
             .decode(enc_bytes)
             .context("invalid base64 in encapped_key")?;
@@ -399,6 +403,71 @@ mod tests {
         let sealed = crypto.seal(b"test", b"aad", b"hello").unwrap();
         let opened = crypto.open(b"test", b"aad", &sealed).unwrap();
         assert_eq!(opened, b"hello");
+    }
+
+    #[test]
+    fn hpke_plaintext_fallback() {
+        let crypto = make_test_crypto();
+        let doc = EncryptedDocument {
+            encapped_key: None,
+            data: r#"{"email":"test@example.com"}"#.to_string(),
+        };
+        let opened = crypto.open(b"user", b"doc-123", &doc).unwrap();
+        assert_eq!(opened, br#"{"email":"test@example.com"}"#);
+    }
+
+    #[test]
+    fn hpke_plaintext_fallback_ignores_info_and_aad() {
+        let crypto = make_test_crypto();
+        let doc = EncryptedDocument {
+            encapped_key: None,
+            data: "hello".to_string(),
+        };
+        // Different info/aad values should not affect fallback
+        let a = crypto.open(b"user", b"doc-1", &doc).unwrap();
+        let b = crypto.open(b"session", b"doc-999", &doc).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, b"hello");
+    }
+
+    #[test]
+    fn hpke_plaintext_fallback_empty_data() {
+        let crypto = make_test_crypto();
+        let doc = EncryptedDocument {
+            encapped_key: None,
+            data: String::new(),
+        };
+        let opened = crypto.open(b"user", b"doc-1", &doc).unwrap();
+        assert!(opened.is_empty());
+    }
+
+    #[test]
+    fn hpke_open_invalid_base64_in_encapped_key() {
+        let crypto = make_test_crypto();
+        let doc = EncryptedDocument {
+            encapped_key: Some("not-valid-base64!!!".to_string()),
+            data: BASE64.encode(b"ciphertext"),
+        };
+        let err = crypto.open(b"user", b"doc-1", &doc).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("base64"),
+            "expected base64 error, got: {err:#}"
+        );
+    }
+
+    #[test]
+    fn hpke_open_invalid_base64_in_data() {
+        let crypto = make_test_crypto();
+        // Valid base64 for encapped_key but garbage for data
+        let doc = EncryptedDocument {
+            encapped_key: Some(BASE64.encode(b"fake-encapped-key")),
+            data: "not-valid-base64!!!".to_string(),
+        };
+        let err = crypto.open(b"user", b"doc-1", &doc).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("base64"),
+            "expected base64 error, got: {err:#}"
+        );
     }
 
     fn make_test_crypto() -> HpkeDocumentCrypto {

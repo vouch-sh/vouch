@@ -472,12 +472,20 @@ jobs:
 
               echo "Updating ${PARAM_NAME} in ${region} = ${AMI_ID}"
 
-              # Put parameter in the target region (creates or updates)
+              # Delete existing parameter first (data-type cannot be changed in-place).
+              # Once all parameters have aws:ec2:image data type, replace this
+              # delete+create with: put-parameter --overwrite
+              aws ssm delete-parameter \
+                --region "${region}" \
+                --name "${PARAM_NAME}" 2>/dev/null || true
+
+              # Create parameter with aws:ec2:image data type for AMI validation
               aws ssm put-parameter \
                 --region "${region}" \
                 --name "${PARAM_NAME}" \
                 --value "${AMI_ID}" \
                 --type String \
+                --data-type "aws:ec2:image" \
                 --overwrite \
                 --description "${DESCRIPTION}"
 
