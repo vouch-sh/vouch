@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.3.6"
+version = "2026.3.7"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.93.1"
@@ -57,11 +57,11 @@ anyhow = { version = "=1.0.102", default-features = false }
 arc-swap = { version = "=1.8.2", default-features = false }
 askama = { version = "=0.15.4", default-features = false }
 aws-config = { version = "=1.8.14", default-features = false }
-aws-lc-rs = { version = "=1.16.0", default-features = false }
+aws-lc-rs = { version = "=1.16.1", default-features = false }
 aws-sdk-dsql = { version = "=1.52.0", default-features = false }
 aws-sdk-kms = { version = "=1.102.0", default-features = false }
 aws-sdk-s3 = { version = "=1.124.0", default-features = false }
-aws-smithy-types = { version = "=1.4.5", default-features = false }
+aws-smithy-types = { version = "=1.4.6", default-features = false }
 axum = { version = "=0.8.8", default-features = false }
 axum-extra = { version = "=0.12.5", default-features = false }
 axum-server = { version = "=0.8.0", default-features = false }
