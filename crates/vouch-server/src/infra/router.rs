@@ -169,8 +169,6 @@ fn build_api_routes() -> Router<Arc<AppState>> {
             "/oauth/userinfo",
             get(handlers::oidc::userinfo).post(handlers::oidc::userinfo),
         )
-        .route("/oauth/revoke", post(handlers::oidc::revoke))
-        .route("/oauth/introspect", post(handlers::oidc::introspect))
         .route("/oauth/callback", get(handlers::enroll::oidc_callback))
         // Auth endpoints
         .route("/v1/auth/status", get(handlers::auth::status))
@@ -178,12 +176,7 @@ fn build_api_routes() -> Router<Arc<AppState>> {
         .merge(build_rate_limited_routes())
         .merge(build_credential_routes())
         .merge(build_general_limited_routes())
-        // Key management (authenticated API)
-        .route("/v1/keys", get(handlers::keys::list_keys))
-        .route(
-            "/v1/keys/{id}",
-            patch(handlers::keys::rename_key).delete(handlers::keys::delete_key),
-        )
+        .merge(build_api_management_routes())
         // Credential read-only endpoints (no rate limit needed)
         .route(
             "/v1/credentials/ssh/ca",
@@ -202,6 +195,36 @@ fn build_api_routes() -> Router<Arc<AppState>> {
             "/v1/credentials/github/status",
             get(handlers::credentials::get_github_status),
         )
+        .layer(security_headers::build_api_cors_layer())
+        .layer(SetResponseHeaderLayer::if_not_present(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::PRAGMA,
+            HeaderValue::from_static("no-cache"),
+        ))
+        .layer(SetResponseHeaderLayer::overriding(
+            header::EXPIRES,
+            HeaderValue::from_static("0"),
+        ))
+}
+
+/// Rate-limited API management routes.
+///
+/// Token operations, key management, integration config, webhook, and
+/// application CRUD endpoints that need protection from abuse.
+fn build_api_management_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        // Token operations
+        .route("/oauth/revoke", post(handlers::oidc::revoke))
+        .route("/oauth/introspect", post(handlers::oidc::introspect))
+        // Key management (authenticated API)
+        .route("/v1/keys", get(handlers::keys::list_keys))
+        .route(
+            "/v1/keys/{id}",
+            patch(handlers::keys::rename_key).delete(handlers::keys::delete_key),
+        )
         // Cloud integration config API
         .route(
             "/v1/integrations/aws",
@@ -209,7 +232,7 @@ fn build_api_routes() -> Router<Arc<AppState>> {
                 .put(handlers::integrations::set_aws_integration)
                 .delete(handlers::integrations::delete_aws_integration),
         )
-        // GitHub webhook API (payloads can be large)
+        // GitHub webhook API
         .route(
             "/api/webhooks/github",
             post(handlers::github::github_webhook).layer(DefaultBodyLimit::max(WEBHOOK_BODY_LIMIT)),
@@ -239,19 +262,34 @@ fn build_api_routes() -> Router<Arc<AppState>> {
             "/api/v1/applications/{id}/revoke",
             post(handlers::applications::revoke_tokens_api),
         )
-        .layer(security_headers::build_api_cors_layer())
-        .layer(SetResponseHeaderLayer::if_not_present(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("no-cache, no-store, must-revalidate"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            header::PRAGMA,
-            HeaderValue::from_static("no-cache"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            header::EXPIRES,
-            HeaderValue::from_static("0"),
-        ))
+        .layer(rate_limit::build_general_rate_limiter())
+}
+
+/// Rate-limited browser WebAuthn routes.
+///
+/// Login and enrollment WebAuthn endpoints generate server-side state per
+/// challenge, so rate limiting prevents memory/storage exhaustion.
+fn build_browser_auth_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route(
+            "/login/webauthn/start",
+            post(handlers::browser_login::browser_login_start),
+        )
+        .route(
+            "/login/webauthn/complete",
+            post(handlers::browser_login::browser_login_complete)
+                .layer(DefaultBodyLimit::max(LOGIN_BODY_LIMIT)),
+        )
+        .route(
+            "/enroll/webauthn/start",
+            post(handlers::enroll::browser_register_start),
+        )
+        .route(
+            "/enroll/webauthn/complete",
+            post(handlers::enroll::browser_register_complete)
+                .layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT)),
+        )
+        .layer(rate_limit::build_auth_rate_limiter())
 }
 
 /// Build all UI routes with UI CORS.
@@ -271,29 +309,11 @@ fn build_ui_routes(config: &config::ServerConfig) -> Router<Arc<AppState>> {
         )
         // Browser-based WebAuthn login (RFC 6749, RFC 9207, RFC 9700)
         .route("/login", get(handlers::browser_login::login_page))
-        .route(
-            "/login/webauthn/start",
-            post(handlers::browser_login::browser_login_start),
-        )
-        .route(
-            "/login/webauthn/complete",
-            post(handlers::browser_login::browser_login_complete)
-                .layer(DefaultBodyLimit::max(LOGIN_BODY_LIMIT)),
-        )
         // Browser-based enrollment
         .route("/device", get(handlers::enroll::device_verify_page))
         .route("/device", post(handlers::enroll::device_verify_submit))
         // Direct enrollment (browser-only, no CLI required)
         .route("/enroll/start", get(handlers::enroll::direct_enroll_start))
-        .route(
-            "/enroll/webauthn/start",
-            post(handlers::enroll::browser_register_start),
-        )
-        .route(
-            "/enroll/webauthn/complete",
-            post(handlers::enroll::browser_register_complete)
-                .layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT)),
-        )
         // Key management during enrollment (uses cookie for auth)
         .route("/enroll/keys", get(handlers::enroll::enroll_keys_page))
         .route("/logout", post(handlers::auth::logout))
@@ -344,6 +364,8 @@ fn build_ui_routes(config: &config::ServerConfig) -> Router<Arc<AppState>> {
             "/applications/{id}/secrets/{secret_id}/delete",
             post(handlers::applications::delete_secret_form),
         )
+        // Rate-limited browser WebAuthn routes
+        .merge(build_browser_auth_routes())
         // Static file serving for CSS, JS, and assets (embedded in binary via rust-embed)
         .route("/static/{*path}", get(static_assets::static_handler))
         // Browsers request /favicon.ico at the root path
