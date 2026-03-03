@@ -157,7 +157,7 @@ Vouch is designed for high-security environments:
 - **Short-lived credentials** — Minimize blast radius of compromise
 - **Audit trail** — Every credential issuance logged with attestation
 
-See the [Security Model](docs/src/security/model.md) for our security philosophy and the [Threat Model](docs/src/threat-model/overview.md) for STRIDE analysis.
+See the [Security Model](https://vouch.sh/docs/security/) for our security philosophy and the [Threat Model](https://vouch.sh/docs/threat-model/) for STRIDE analysis.
 
 ## Documentation
 
@@ -170,14 +170,13 @@ make docs-serve
 
 Key sections:
 
-- [Getting Started](docs/src/getting-started/quick-start.md) — Installation and first enrollment
+- [Getting Started](https://vouch.sh/docs/getting-started/) — Installation and first enrollment
 - [Server Deployment](docs/src/deployment/overview.md) — Deploy and configure the Vouch server
-- [Integrations](docs/src/integrations/ssh.md) — SSH, AWS, EKS, GitHub, Docker, and more
-- [Architecture](docs/src/architecture/overview.md) — System design and data flows
-- [Security Model](docs/src/security/model.md) — Security controls and incident response
-- [Threat Model](docs/src/threat-model/overview.md) — STRIDE analysis and mitigations
+- [Integrations](https://vouch.sh/docs/ssh/) — SSH, AWS, EKS, GitHub, Docker, and more
+- [Architecture](https://vouch.sh/docs/architecture/) — System design and data flows
+- [Security Model](https://vouch.sh/docs/security/) — Security controls and incident response
+- [Threat Model](https://vouch.sh/docs/threat-model/) — STRIDE analysis and mitigations
 - [Air-Gapped Deployment](docs/src/advanced/airgap.md) — On-premises installation guide
-- [Agent Delegation](docs/src/advanced/delegation.md) — AI assistant credential management
 
 ## Contributing
 
