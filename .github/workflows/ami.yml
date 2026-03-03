@@ -419,17 +419,17 @@ jobs:
             "Key=Architecture,Value=${{ matrix.arch }}" \
             "Key=CopiedFrom,Value=us-east-1"
 
-          # Propagate PCR tags from source AMI
-          for PCR_TAG in PCR4 PCR7 PCR12; do
-            PCR_VALUE=$(aws ec2 describe-tags \
+          # Propagate tags from source AMI
+          for TAG_NAME in PCR4 PCR7 PCR12 Repository BuildDate Commit; do
+            TAG_VALUE=$(aws ec2 describe-tags \
               --region us-east-1 \
-              --filters "Name=resource-id,Values=${SOURCE_AMI}" "Name=key,Values=${PCR_TAG}" \
+              --filters "Name=resource-id,Values=${SOURCE_AMI}" "Name=key,Values=${TAG_NAME}" \
               --query 'Tags[0].Value' \
               --output text 2>/dev/null || echo "None")
-            if [ "$PCR_VALUE" != "None" ] && [ -n "$PCR_VALUE" ]; then
+            if [ "$TAG_VALUE" != "None" ] && [ -n "$TAG_VALUE" ]; then
               aws ec2 create-tags --region ${{ matrix.region }} --resources "${COPIED_AMI}" --tags \
-                "Key=${PCR_TAG},Value=${PCR_VALUE}"
-              echo "Propagated ${PCR_TAG} tag to ${{ matrix.region }}"
+                "Key=${TAG_NAME},Value=${TAG_VALUE}"
+              echo "Propagated ${TAG_NAME} tag to ${{ matrix.region }}"
             fi
           done
 
