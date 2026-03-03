@@ -7,6 +7,7 @@
 pub mod audit;
 pub mod authenticator;
 pub mod authorization_code;
+pub mod challenge_state;
 pub mod credential;
 pub mod device_auth;
 pub mod dpop;

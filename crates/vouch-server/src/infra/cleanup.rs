@@ -143,6 +143,10 @@ pub async fn run_cleanup(
         "expired authorization codes"
     );
     cleanup_and_log!(
+        db::delete_expired_challenge_states(store),
+        "expired FIDO2 challenge states"
+    );
+    cleanup_and_log!(
         db::delete_expired_enrollment_sessions(store),
         "expired enrollment sessions"
     );

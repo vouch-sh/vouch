@@ -38,6 +38,25 @@ const LOGIN_BODY_LIMIT: usize = 32 * 1024;
 /// Global body size limit (per-route overrides above are more restrictive).
 const GLOBAL_BODY_LIMIT: usize = 256 * 1024;
 
+/// Print an ASCII banner at server startup.
+pub fn print_startup_banner() {
+    #[allow(clippy::print_stdout)]
+    {
+        println!(
+            r"
+                        _     
+ /\   /\___  _   _  ___| |__  
+ \ \ / / _ \| | | |/ __| '_ \ 
+  \ V / (_) | |_| | (__| | | |
+   \_/ \___/ \__,_|\___|_| |_|
+
+  Hardware-backed identity server
+  https://vouch.sh
+"
+        );
+    }
+}
+
 /// Build the complete application router with all routes, middleware, and state.
 pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> Router {
     let api_routes = build_api_routes();
@@ -177,24 +196,7 @@ fn build_api_routes() -> Router<Arc<AppState>> {
         .merge(build_credential_routes())
         .merge(build_general_limited_routes())
         .merge(build_api_management_routes())
-        // Credential read-only endpoints (no rate limit needed)
-        .route(
-            "/v1/credentials/ssh/ca",
-            get(handlers::credentials::get_ssh_ca_public_key),
-        )
-        .route(
-            "/v1/credentials/ssh/krl",
-            get(handlers::credentials::get_ssh_krl),
-        )
-        .route(
-            "/v1/credentials/ssh/krl/{serial}",
-            get(handlers::credentials::check_ssh_revocation),
-        )
-        // GitHub credential status (read-only)
-        .route(
-            "/v1/credentials/github/status",
-            get(handlers::credentials::get_github_status),
-        )
+        .merge(build_public_read_routes())
         .layer(security_headers::build_api_cors_layer())
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
@@ -208,6 +210,31 @@ fn build_api_routes() -> Router<Arc<AppState>> {
             header::EXPIRES,
             HeaderValue::from_static("0"),
         ))
+}
+
+/// Rate-limited public read-only routes.
+///
+/// SSH CA public key, KRL, and GitHub credential status endpoints are
+/// unauthenticated. Rate limiting prevents abuse and DoS.
+fn build_public_read_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route(
+            "/v1/credentials/ssh/ca",
+            get(handlers::credentials::get_ssh_ca_public_key),
+        )
+        .route(
+            "/v1/credentials/ssh/krl",
+            get(handlers::credentials::get_ssh_krl),
+        )
+        .route(
+            "/v1/credentials/ssh/krl/{serial}",
+            get(handlers::credentials::check_ssh_revocation),
+        )
+        .route(
+            "/v1/credentials/github/status",
+            get(handlers::credentials::get_github_status),
+        )
+        .layer(rate_limit::build_general_rate_limiter())
 }
 
 /// Rate-limited API management routes.

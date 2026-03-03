@@ -346,6 +346,53 @@ async fn test_rfc7644_patch_user_deactivate() {
 }
 
 // ========================================================================
+// RFC 7644 Section 3.5.3 - PATCH Unsupported Paths
+// ========================================================================
+
+#[tokio::test]
+async fn test_rfc7644_patch_unsupported_path_returns_400() {
+    // RFC 7644 Section 3.5.3: Unsupported attribute paths should return 400
+    let (app, state) = test_app().await;
+
+    let token = create_test_scim_token(&state.store, "test-patch-invalid-path").await;
+    let auth_header = format!("Bearer {}", token);
+
+    // Create a user first
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Users",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:User"], "userName": "patchpath@example.com", "active": true}"#,
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let created: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let user_id = created["id"].as_str().expect("user id");
+
+    // PATCH with an unsupported path should return 400
+    let (status, body) = http_request(
+        &app,
+        "PATCH",
+        &format!("/scim/v2/Users/{}", user_id),
+        Some(
+            r#"{"schemas": ["urn:ietf:params:scim:api:messages:2.0:PatchOp"], "Operations": [{"op": "replace", "path": "nonExistentField", "value": "test"}]}"#.to_string(),
+        ),
+        &[
+            ("Authorization", &auth_header),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST, "body: {body}");
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["scimType"], "invalidPath",
+        "Should return invalidPath scimType"
+    );
+}
+
+// ========================================================================
 // RFC 7644 Section 3.6 - DELETE User Tests
 // ========================================================================
 

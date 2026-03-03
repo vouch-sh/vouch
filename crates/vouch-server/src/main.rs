@@ -20,7 +20,7 @@ compile_error!("test-utils feature must not be enabled in release builds");
 
 use vouch_server::{
     config,
-    infra::{generate_document_key, serve, startup},
+    infra::{generate_document_key, router, serve, startup},
 };
 
 // ============================================================================
@@ -95,6 +95,8 @@ async fn run_server(args: config::Args) -> Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+
+    router::print_startup_banner();
 
     // Initialize all server components (config, database, state, background tasks)
     let components = startup::initialize(args).await?;

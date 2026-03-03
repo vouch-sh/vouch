@@ -598,6 +598,51 @@ async fn test_rfc8693_token_lifetime_capped_by_subject() {
 }
 
 #[tokio::test]
+async fn test_rfc8693_self_delegation_rejected() {
+    // Self-delegation (actor == subject) must be rejected to prevent
+    // unlimited session generation from a single authentication.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "self-delegate@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Issue a token for the same user
+    let (user_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let auth_header = client.basic_auth_header();
+
+    // Use the same user's token as both subject and actor
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/token",
+        &format!(
+            "grant_type=urn:ietf:params:oauth:grant-type:token-exchange\
+             &subject_token={user_token}\
+             &subject_token_type=urn:ietf:params:oauth:token-type:access_token\
+             &actor_token={user_token}\
+             &actor_token_type=urn:ietf:params:oauth:token-type:access_token"
+        ),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Self-delegation should be rejected: {body}"
+    );
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_request");
+    assert!(
+        error["error_description"]
+            .as_str()
+            .is_some_and(|d| d.contains("Self-delegation")),
+        "Error should mention self-delegation, got: {body}"
+    );
+}
+
+#[tokio::test]
 async fn test_rfc8693_invalid_actor_token_type() {
     // RFC 8693: Invalid actor_token_type should be rejected.
     let (app, state) = test_app().await;

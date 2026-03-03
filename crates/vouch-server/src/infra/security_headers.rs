@@ -31,7 +31,13 @@ pub fn build_api_cors_layer() -> CorsLayer {
             Method::DELETE,
             Method::OPTIONS,
         ])
-        .allow_headers([header::AUTHORIZATION, header::CONTENT_TYPE, header::ACCEPT])
+        .allow_headers([
+            header::AUTHORIZATION,
+            header::CONTENT_TYPE,
+            header::ACCEPT,
+            HeaderName::from_static("dpop"),
+        ])
+        .expose_headers([HeaderName::from_static("dpop-nonce")])
         .max_age(std::time::Duration::from_secs(3600))
 }
 

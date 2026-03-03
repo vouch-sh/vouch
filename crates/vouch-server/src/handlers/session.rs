@@ -183,8 +183,14 @@ pub async fn extract_resource_token(
                 ));
             }
             AuthScheme::Cookie => {
-                // Browser cookie sessions from the server's own UI are allowed
-                // even for DPoP-bound tokens (the server is both issuer and consumer)
+                // A token with cnf.jkt is sender-constrained and must be
+                // presented with a DPoP proof. If it arrives via cookie,
+                // either the token was stolen or misused — reject it.
+                return Err(ServiceError::api(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_token",
+                    "Sender-constrained tokens cannot be used via cookie",
+                ));
             }
         }
     }
@@ -375,6 +381,10 @@ pub async fn extract_org_admin(
 /// Create a session cookie.
 ///
 /// Returns a Cookie configured with proper security attributes.
+/// `SameSite::Lax` (not `Strict`) is required because the OIDC callback
+/// flow redirects from an external IdP (e.g. Google) → `/oauth/callback`
+/// → `/enroll/keys`. With `Strict`, the browser treats the entire redirect
+/// chain as cross-site and refuses to send the cookie on the final hop.
 #[must_use]
 pub fn create_session_cookie(token: &str, max_age_seconds: i64) -> Cookie<'static> {
     Cookie::build((vouch_common::SESSION_COOKIE_NAME, token.to_owned()))
@@ -451,4 +461,78 @@ pub async fn get_resource_auth_context(state: &AppState, jar: &CookieJar) -> Aut
 /// Both names refer to the same OAuth-token-based auth context extraction.
 pub async fn get_auth_context(state: &AppState, jar: &CookieJar) -> AuthContext {
     get_resource_auth_context(state, jar).await
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::test_utils::*;
+
+    /// Normal (non-DPoP) token via cookie should succeed.
+    #[tokio::test]
+    async fn test_cookie_session_normal_token_succeeds() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "cookie-ok@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+        let (status, _body) = http_get(&app, "/api/v1/applications", &[("Cookie", &cookie)]).await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// DPoP-bound token (with cnf.jkt) via cookie must be rejected.
+    #[tokio::test]
+    async fn test_cookie_session_dpop_bound_token_rejected() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "cookie-dpop@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with_dpop(
+            &state,
+            &user.id,
+            &user.email,
+            &auth_id,
+            "fake-jkt-thumbprint",
+        )
+        .await;
+
+        let cookie = format!("{}={token}", vouch_common::SESSION_COOKIE_NAME);
+        let (status, body) = http_get(&app, "/api/v1/applications", &[("Cookie", &cookie)]).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+        assert!(
+            body.contains("Sender-constrained"),
+            "Error should mention sender-constrained tokens, got: {body}"
+        );
+    }
+
+    /// DPoP-bound token via Bearer header (without DPoP proof) should also
+    /// be rejected, but with a different message than the cookie case.
+    #[tokio::test]
+    async fn test_bearer_dpop_bound_token_rejected() {
+        let (app, state) = test_app().await;
+        let user = create_test_user(&state.store, "bearer-dpop@example.com").await;
+        let auth_id = create_test_authenticator(&state.store, &user.id).await;
+        let token = create_test_session_with_dpop(
+            &state,
+            &user.id,
+            &user.email,
+            &auth_id,
+            "fake-jkt-thumbprint",
+        )
+        .await;
+
+        let auth = format!("Bearer {token}");
+        let (status, body) =
+            http_get(&app, "/api/v1/applications", &[("Authorization", &auth)]).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "body: {body}");
+        assert!(
+            body.contains("DPoP authorization scheme"),
+            "Error should mention DPoP scheme requirement, got: {body}"
+        );
+    }
 }

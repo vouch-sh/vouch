@@ -315,7 +315,16 @@ pub async fn patch_user(
                                 external_id = val.as_str().map(String::from);
                             }
                         }
-                        _ => {}
+                        _ => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(
+                                    ScimError::new(400, "Unsupported attribute path")
+                                        .with_type("invalidPath"),
+                                ),
+                            )
+                                .into_response();
+                        }
                     }
                 } else if let Some(val) = &op.value {
                     // Replace entire resource
