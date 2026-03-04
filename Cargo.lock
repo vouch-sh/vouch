@@ -2472,9 +2472,9 @@ checksum = "92ecc6618181def0457392ccd0ee51198e065e016d1d527a7ac1b6dc7c1f09d2"
 
 [[package]]
 name = "jiff"
-version = "0.2.22"
+version = "0.2.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "819b44bc7c87d9117eb522f14d46e918add69ff12713c475946b0a29363ed1c2"
+checksum = "1a3546dc96b6d42c5f24902af9e2538e82e39ad350b0c766eb3fbf2d8f3d8359"
 dependencies = [
  "jiff-static",
  "log",
@@ -2486,9 +2486,9 @@ dependencies = [
 
 [[package]]
 name = "jiff-static"
-version = "0.2.22"
+version = "0.2.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "470252db18ecc35fd766c0891b1e3ec6cbbcd62507e85276c01bf75d8e94d4a1"
+checksum = "2a8c8b344124222efd714b73bb41f8b5120b27a7cc1c75593a6ff768d9d05aa4"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -4983,7 +4983,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "vouch-agent"
-version = "2026.3.8"
+version = "2026.3.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5008,7 +5008,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-cli"
-version = "2026.3.8"
+version = "2026.3.9"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
@@ -5055,7 +5055,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-common"
-version = "2026.3.8"
+version = "2026.3.9"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -5075,7 +5075,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-server"
-version = "2026.3.8"
+version = "2026.3.9"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -5138,7 +5138,7 @@ dependencies = [
 
 [[package]]
 name = "vouch-tests"
-version = "2026.3.8"
+version = "2026.3.9"
 dependencies = [
  "anyhow",
  "aws-lc-rs",
