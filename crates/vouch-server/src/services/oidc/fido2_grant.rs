@@ -85,6 +85,8 @@ pub struct Fido2AssertionResult {
     pub expires_in: u64,
     /// Granted scope.
     pub scope: Option<ScopeSet>,
+    /// Authenticated user's email address.
+    pub email: String,
 }
 
 /// Exchange a FIDO2 assertion for an OAuth access token.
@@ -128,11 +130,13 @@ pub async fn exchange_fido2_assertion(
             )
         })?;
 
-    // 2b. Enforce single-use: consume the challenge state atomically
+    // 2b. Enforce single-use: mark the challenge as used atomically
     let state_hash = crate::crypto::hash_token(&payload.state);
-    let consumed = db::try_consume_challenge_state(&state.store, &state_hash)
+    let expires_at = jiff::Timestamp::from_second(challenge_state.exp)
+        .unwrap_or_else(|_| jiff::Timestamp::now());
+    let consumed = db::try_mark_challenge_used(&state.store, &state_hash, expires_at)
         .await
-        .map_err(|e| ServiceError::Internal(format!("Failed to consume challenge state: {e}")))?;
+        .map_err(|e| ServiceError::Internal(format!("Failed to mark challenge used: {e}")))?;
     if !consumed {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidGrant,
@@ -296,5 +300,6 @@ pub async fn exchange_fido2_assertion(
         token_type: token_type.to_string(),
         expires_in,
         scope: Some(scope),
+        email: user.email,
     })
 }

@@ -7,43 +7,39 @@ use super::store::DocumentStore;
 use anyhow::Result;
 use jiff::Timestamp;
 
-/// Record an issued FIDO2 challenge state.
-pub async fn store_challenge_state(
+/// Atomically mark a FIDO2 challenge as used.
+///
+/// Returns `true` if the challenge was successfully marked (first use).
+/// Returns `false` if a record with the same hash already exists
+/// (replay or concurrent use).
+///
+/// The transaction ensures no TOCTOU race: two concurrent requests
+/// with the same challenge cannot both succeed because the second
+/// `find_one` will see the first's insert.
+pub async fn try_mark_challenge_used(
     store: &DocumentStore,
     state_hash: &str,
     expires_at: Timestamp,
-) -> Result<()> {
-    let doc = ChallengeStateDoc {
-        state_hash: state_hash.to_string(),
-        expires_at,
-        consumed_at: None,
-    };
-    store.insert(&doc).await?;
-    Ok(())
-}
+) -> Result<bool> {
+    let mut tx = store.begin().await?;
 
-/// Try to consume a FIDO2 challenge state.
-///
-/// Returns `true` if the state was successfully consumed (first use).
-/// Returns `false` if already consumed, does not exist, or was
-/// concurrently consumed by another request (optimistic lock).
-pub async fn try_consume_challenge_state(store: &DocumentStore, state_hash: &str) -> Result<bool> {
-    let now = Timestamp::now();
-
-    let doc = store
+    let existing = tx
         .find_one::<ChallengeStateDoc>("state_hash", state_hash)
         .await?;
-    let Some(doc) = doc else {
-        return Ok(false);
-    };
-
-    if doc.data.consumed_at.is_some() || doc.data.expires_at <= now {
+    if existing.is_some() {
         return Ok(false);
     }
 
-    let mut data = doc.data;
-    data.consumed_at = Some(now);
-    store.compare_and_update(&doc.id, doc.version, &data).await
+    let now = Timestamp::now();
+    let doc = ChallengeStateDoc {
+        state_hash: state_hash.to_string(),
+        expires_at,
+        consumed_at: Some(now),
+    };
+    tx.insert(&doc).await?;
+    tx.commit().await?;
+
+    Ok(true)
 }
 
 /// Delete expired challenge states.

@@ -296,9 +296,26 @@ pub async fn rename_key(
     Path(key_id): Path<String>,
     Json(req): Json<RenameKeyRequest>,
 ) -> Result<Json<RenameKeyResponse>, ServiceError> {
+    // Pure validation first — reject malformed input before DB access
+    if uuid::Uuid::try_parse(&key_id).is_err() {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_key_id",
+            "Key ID must be a valid UUID",
+        ));
+    }
+    let name = req.name.trim();
+    if name.is_empty() || name.len() > 256 {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_name",
+            "Key name must be between 1 and 256 characters",
+        ));
+    }
+
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    let message = key_svc::rename_key(&state.store, &token.sub, &key_id, &req.name).await?;
+    let message = key_svc::rename_key(&state.store, &token.sub, &key_id, name).await?;
 
     Ok(Json(RenameKeyResponse { message }))
 }
@@ -312,6 +329,15 @@ pub async fn delete_key(
     State(state): State<Arc<AppState>>,
     Path(key_id): Path<String>,
 ) -> Result<Json<DeleteKeyResponse>, ServiceError> {
+    // Pure validation first — reject malformed key IDs before DB access
+    if uuid::Uuid::try_parse(&key_id).is_err() {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_key_id",
+            "Key ID must be a valid UUID",
+        ));
+    }
+
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
     // Use auth_time as the freshness anchor; default to epoch (always stale) if absent
     key_svc::require_fresh_timestamp(

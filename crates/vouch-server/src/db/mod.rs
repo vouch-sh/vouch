@@ -177,9 +177,7 @@ pub use pending_oauth::{
 };
 
 // Re-export challenge state functions (FIDO2 single-use enforcement)
-pub use challenge_states::{
-    delete_expired_challenge_states, store_challenge_state, try_consume_challenge_state,
-};
+pub use challenge_states::{delete_expired_challenge_states, try_mark_challenge_used};
 
 // Re-export authorization code functions (RFC 6749 Section 10.5)
 pub use authorization_codes::{

@@ -95,3 +95,69 @@ pub fn cose_key_to_cbor(key: &COSEKey) -> Result<Vec<u8>, CoseError> {
 
     Ok(buf)
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use webauthn_rs::prelude::{COSEAlgorithm, COSEEC2Key, COSEKey, COSEKeyType, ECDSACurve};
+
+    #[test]
+    fn test_ec2_p256_key_roundtrip() {
+        let key = COSEKey {
+            type_: COSEAlgorithm::ES256,
+            key: COSEKeyType::EC_EC2(COSEEC2Key {
+                curve: ECDSACurve::SECP256R1,
+                x: vec![1u8; 32].into(),
+                y: vec![2u8; 32].into(),
+            }),
+        };
+
+        let cbor = cose_key_to_cbor(&key).unwrap();
+        assert!(!cbor.is_empty());
+
+        // Decode and verify structure
+        let value: ciborium::Value = ciborium::from_reader(cbor.as_slice()).expect("valid CBOR");
+        let map = match value {
+            ciborium::Value::Map(m) => m,
+            other => panic!("Expected CBOR map, got: {other:?}"),
+        };
+
+        // kty = 2 (EC2)
+        assert!(map.iter().any(|(k, v)| {
+            matches!(k, ciborium::Value::Integer(i) if *i == 1.into())
+                && matches!(v, ciborium::Value::Integer(i) if *i == 2.into())
+        }));
+    }
+
+    #[test]
+    fn test_ec2_p384_key() {
+        let key = COSEKey {
+            type_: COSEAlgorithm::ES384,
+            key: COSEKeyType::EC_EC2(COSEEC2Key {
+                curve: ECDSACurve::SECP384R1,
+                x: vec![3u8; 48].into(),
+                y: vec![4u8; 48].into(),
+            }),
+        };
+
+        let cbor = cose_key_to_cbor(&key).unwrap();
+        assert!(!cbor.is_empty());
+    }
+
+    #[test]
+    fn test_deterministic_output() {
+        let key = COSEKey {
+            type_: COSEAlgorithm::ES256,
+            key: COSEKeyType::EC_EC2(COSEEC2Key {
+                curve: ECDSACurve::SECP256R1,
+                x: vec![5u8; 32].into(),
+                y: vec![6u8; 32].into(),
+            }),
+        };
+
+        let cbor1 = cose_key_to_cbor(&key).unwrap();
+        let cbor2 = cose_key_to_cbor(&key).unwrap();
+        assert_eq!(cbor1, cbor2, "COSE serialization must be deterministic");
+    }
+}

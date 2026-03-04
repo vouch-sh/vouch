@@ -138,3 +138,105 @@ pub fn apply_security_layers(
         router
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use crate::test_utils::*;
+
+    #[tokio::test]
+    async fn test_x_frame_options_header() {
+        let state = test_app_state().await;
+        let config = state.config();
+        let router = apply_security_layers_to_test_router(state.clone(), &config);
+
+        let resp = http_get_full(&router, "/health", &[]).await;
+        assert_eq!(resp.headers.get("x-frame-options").unwrap(), "DENY");
+    }
+
+    #[tokio::test]
+    async fn test_x_content_type_options_header() {
+        let state = test_app_state().await;
+        let config = state.config();
+        let router = apply_security_layers_to_test_router(state.clone(), &config);
+
+        let resp = http_get_full(&router, "/health", &[]).await;
+        assert_eq!(
+            resp.headers.get("x-content-type-options").unwrap(),
+            "nosniff"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_content_security_policy_header() {
+        let state = test_app_state().await;
+        let config = state.config();
+        let router = apply_security_layers_to_test_router(state.clone(), &config);
+
+        let resp = http_get_full(&router, "/health", &[]).await;
+        let csp = resp
+            .headers
+            .get("content-security-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(csp.contains("default-src 'self'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+    }
+
+    #[tokio::test]
+    async fn test_referrer_policy_header() {
+        let state = test_app_state().await;
+        let config = state.config();
+        let router = apply_security_layers_to_test_router(state.clone(), &config);
+
+        let resp = http_get_full(&router, "/health", &[]).await;
+        assert_eq!(
+            resp.headers.get("referrer-policy").unwrap(),
+            "strict-origin-when-cross-origin"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_permissions_policy_header() {
+        let state = test_app_state().await;
+        let config = state.config();
+        let router = apply_security_layers_to_test_router(state.clone(), &config);
+
+        let resp = http_get_full(&router, "/health", &[]).await;
+        let pp = resp
+            .headers
+            .get("permissions-policy")
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(pp.contains("camera=()"));
+        assert!(pp.contains("microphone=()"));
+    }
+
+    #[tokio::test]
+    async fn test_cross_origin_opener_policy_header() {
+        let state = test_app_state().await;
+        let config = state.config();
+        let router = apply_security_layers_to_test_router(state.clone(), &config);
+
+        let resp = http_get_full(&router, "/health", &[]).await;
+        assert_eq!(
+            resp.headers.get("cross-origin-opener-policy").unwrap(),
+            "same-origin"
+        );
+    }
+
+    /// Build a minimal router with security headers for testing.
+    fn apply_security_layers_to_test_router(
+        state: std::sync::Arc<crate::AppState>,
+        config: &crate::config::ServerConfig,
+    ) -> axum::Router {
+        use axum::routing::get;
+
+        let router: axum::Router<std::sync::Arc<crate::AppState>> =
+            axum::Router::new().route("/health", get(|| async { "ok" }));
+
+        super::apply_security_layers(router, config).with_state(state)
+    }
+}

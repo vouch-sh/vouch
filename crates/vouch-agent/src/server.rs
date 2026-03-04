@@ -14,7 +14,7 @@ use crate::wire;
 use serde::de::DeserializeOwned;
 
 use jiff::Timestamp;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::ExposeSecret;
 use std::sync::Arc;
 use tokio::net::UnixStream;
 use tokio::sync::{Semaphore, watch};
@@ -205,11 +205,7 @@ async fn handle_store_session(
     };
 
     let user_email = params.user_email;
-    let session = Session::new(
-        SecretString::from(params.token),
-        user_email.clone(),
-        expires_at,
-    );
+    let session = Session::new(params.token, user_email.clone(), expires_at);
 
     state.store_session(session).await;
 

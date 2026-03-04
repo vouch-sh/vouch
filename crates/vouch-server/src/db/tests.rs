@@ -2267,23 +2267,19 @@ fn test_scim_filter_parse_emoji_value() {
 // ========================================================================
 
 #[tokio::test]
-async fn test_challenge_state_store_and_consume() {
+async fn test_challenge_state_mark_used() {
     let (store, _audit) = test_db().await;
 
-    let state_hash = "sha256_test_hash_store_consume";
+    let state_hash = "sha256_test_hash_mark_used";
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(300))
         .unwrap();
 
-    store_challenge_state(&store, state_hash, expires_at)
+    // First use should succeed
+    let used = try_mark_challenge_used(&store, state_hash, expires_at)
         .await
-        .expect("Failed to store challenge state");
-
-    // First consumption should succeed
-    let consumed = try_consume_challenge_state(&store, state_hash)
-        .await
-        .expect("Failed to consume challenge state");
-    assert!(consumed, "First consumption should succeed");
+        .expect("Failed to mark challenge used");
+    assert!(used, "First use should succeed");
 }
 
 #[tokio::test]
@@ -2295,52 +2291,34 @@ async fn test_challenge_state_replay_rejected() {
         .checked_add(jiff::SignedDuration::from_secs(300))
         .unwrap();
 
-    store_challenge_state(&store, state_hash, expires_at)
+    // First use succeeds
+    let first = try_mark_challenge_used(&store, state_hash, expires_at)
         .await
-        .expect("Failed to store challenge state");
+        .expect("Failed on first use");
+    assert!(first, "First use should succeed");
 
-    // First consumption succeeds
-    let first = try_consume_challenge_state(&store, state_hash)
+    // Second use must fail (replay)
+    let second = try_mark_challenge_used(&store, state_hash, expires_at)
         .await
-        .expect("Failed on first consume");
-    assert!(first, "First consumption should succeed");
-
-    // Second consumption must fail (replay)
-    let second = try_consume_challenge_state(&store, state_hash)
-        .await
-        .expect("Failed on second consume");
-    assert!(!second, "Second consumption (replay) should be rejected");
+        .expect("Failed on second use");
+    assert!(!second, "Second use (replay) should be rejected");
 }
 
 #[tokio::test]
-async fn test_challenge_state_unknown_hash_rejected() {
+async fn test_challenge_state_new_hash_succeeds() {
     let (store, _audit) = test_db().await;
 
-    // Consuming a hash that was never stored should fail
-    let consumed = try_consume_challenge_state(&store, "nonexistent_hash")
-        .await
-        .expect("Failed to consume");
-    assert!(!consumed, "Unknown challenge state should be rejected");
-}
-
-#[tokio::test]
-async fn test_challenge_state_expired_rejected() {
-    let (store, _audit) = test_db().await;
-
-    let state_hash = "sha256_test_hash_expired";
-    // Already expired
-    let expires_at = jiff::Timestamp::now()
-        .checked_sub(jiff::SignedDuration::from_secs(10))
-        .unwrap();
-
-    store_challenge_state(&store, state_hash, expires_at)
-        .await
-        .expect("Failed to store challenge state");
-
-    let consumed = try_consume_challenge_state(&store, state_hash)
-        .await
-        .expect("Failed to consume");
-    assert!(!consumed, "Expired challenge state should be rejected");
+    // A never-seen hash should succeed on first use
+    let used = try_mark_challenge_used(
+        &store,
+        "never_seen_hash",
+        jiff::Timestamp::now()
+            .checked_add(jiff::SignedDuration::from_secs(300))
+            .unwrap(),
+    )
+    .await
+    .expect("Failed to mark challenge used");
+    assert!(used, "New challenge hash should succeed");
 }
 
 #[test]

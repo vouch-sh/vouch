@@ -178,8 +178,10 @@ mod protocol_types {
     /// StoreSessionParams serialization round-trip.
     #[test]
     fn test_store_session_params_roundtrip() {
+        use secrecy::ExposeSecret;
+
         let params = StoreSessionParams {
-            token: "jwt_token".to_string(),
+            token: secrecy::SecretString::from("jwt_token"),
             user_email: "user@example.com".to_string(),
             expires_at: "2099-12-31T23:59:59Z".to_string(),
             server_url: Some("https://vouch.example.com".to_string()),
@@ -188,7 +190,7 @@ mod protocol_types {
         let json = serde_json::to_string(&params).unwrap();
         let deserialized: StoreSessionParams = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(deserialized.token, "jwt_token");
+        assert_eq!(deserialized.token.expose_secret(), "jwt_token");
         assert_eq!(deserialized.user_email, "user@example.com");
         assert_eq!(deserialized.expires_at, "2099-12-31T23:59:59Z");
         assert_eq!(
@@ -201,7 +203,7 @@ mod protocol_types {
     #[test]
     fn test_store_session_params_no_server_url() {
         let params = StoreSessionParams {
-            token: "jwt_token".to_string(),
+            token: secrecy::SecretString::from("jwt_token"),
             user_email: "user@example.com".to_string(),
             expires_at: "2099-12-31T23:59:59Z".to_string(),
             server_url: None,
@@ -254,7 +256,7 @@ mod protocol_types {
     #[test]
     fn test_request_with_params() {
         let params = StoreSessionParams {
-            token: "jwt".to_string(),
+            token: secrecy::SecretString::from("jwt"),
             user_email: "user@example.com".to_string(),
             expires_at: "2099-12-31T23:59:59Z".to_string(),
             server_url: None,

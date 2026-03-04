@@ -1,8 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! JSON-RPC 2.0 protocol types for agent IPC.
 
+use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
 use tracing::warn;
+
+/// Serialize a `SecretString` by exposing the secret value.
+///
+/// Required because `secrecy` intentionally does not implement `Serialize`
+/// for `SecretString` to prevent accidental leakage. This explicit serializer
+/// is only used for IPC over a Unix socket, not for logging or external APIs.
+fn serialize_secret_string<S: serde::Serializer>(
+    secret: &SecretString,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(secret.expose_secret())
+}
 
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Serialize, Deserialize)]
@@ -147,8 +160,9 @@ pub const CACHE_MISS: i32 = -32002;
 /// Parameters for `store_session` method.
 #[derive(Serialize, Deserialize)]
 pub struct StoreSessionParams {
-    /// JWT token.
-    pub token: String,
+    /// JWT token (redacted in Debug output via `SecretString`).
+    #[serde(serialize_with = "serialize_secret_string")]
+    pub token: SecretString,
     /// User's email.
     pub user_email: String,
     /// ISO 8601 expiration timestamp.
@@ -230,7 +244,7 @@ mod tests {
     #[test]
     fn test_request_with_params() {
         let params = StoreSessionParams {
-            token: "test_token".to_string(),
+            token: SecretString::from("test_token"),
             user_email: "test@example.com".to_string(),
             expires_at: "2099-12-31T23:59:59Z".to_string(),
             server_url: None,

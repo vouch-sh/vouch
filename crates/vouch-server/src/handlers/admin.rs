@@ -73,10 +73,7 @@ pub async fn create_scim_token(
     jar: CookieJar,
     Json(req): Json<CreateScimTokenRequest>,
 ) -> Result<Json<CreateScimTokenResponse>, ServiceError> {
-    let (_user, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
-
-    // Validate description length
+    // Pure validation first — no DB cost for malformed requests
     if let Some(ref desc) = req.description
         && desc.len() > 256
     {
@@ -87,7 +84,6 @@ pub async fn create_scim_token(
         ));
     }
 
-    // Validate expiration (required, 1-365 days)
     if req.expires_in_days < 1 || req.expires_in_days > 365 {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
@@ -95,6 +91,9 @@ pub async fn create_scim_token(
             "expires_in_days must be between 1 and 365",
         ));
     }
+
+    let (_user, org_id) =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Generate a secure random token
     let mut token_bytes = [0u8; 32];
@@ -246,5 +245,72 @@ mod tests {
             http_delete(&app, &format!("/api/v1/org/scim-tokens/{valid_uuid}"), &[]).await;
 
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // ================================================================
+    // Validation-before-auth tests (Phase 1E defense-in-depth)
+    // ================================================================
+
+    #[tokio::test]
+    async fn test_create_scim_token_expires_zero_returns_400_without_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/org/scim-tokens",
+            r#"{"description": "test", "expires_in_days": 0}"#,
+            &[], // No auth header
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "expires_in_days=0 must return 400 (not 401) even without auth: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_scim_token_expires_366_returns_400_without_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/org/scim-tokens",
+            r#"{"description": "test", "expires_in_days": 366}"#,
+            &[], // No auth header
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "expires_in_days=366 must return 400 (not 401) even without auth: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_scim_token_long_description_returns_400_without_auth() {
+        let (app, _state) = test_app().await;
+
+        let long_desc = "x".repeat(257);
+        let body_json = format!(
+            r#"{{"description": "{}", "expires_in_days": 30}}"#,
+            long_desc
+        );
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/org/scim-tokens",
+            &body_json,
+            &[], // No auth header
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "Description >256 chars must return 400 (not 401) even without auth: {body}"
+        );
     }
 }

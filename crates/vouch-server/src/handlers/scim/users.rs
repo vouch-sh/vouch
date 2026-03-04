@@ -27,20 +27,20 @@ pub async fn list_users(
     headers: HeaderMap,
     Query(query): Query<ScimListQuery>,
 ) -> Response {
+    // Pure validation first — no DB cost for malformed requests
+    let start_index = query.start_index.unwrap_or(1);
+    let count = query.count.unwrap_or(100).min(100);
+
+    if let Err((status, json)) = super::validate_list_params(query.filter.as_deref(), start_index) {
+        return (status, json).into_response();
+    }
+
     // Authenticate and check scope
     let auth = match authenticate_scim(&state, &headers).await {
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
     if let Err((status, json)) = auth.require_scope(ScimScope::UsersRead) {
-        return (status, json).into_response();
-    }
-
-    let start_index = query.start_index.unwrap_or(1);
-    let count = query.count.unwrap_or(100).min(100);
-
-    // Validate query parameters before DB access
-    if let Err((status, json)) = super::validate_list_params(query.filter.as_deref(), start_index) {
         return (status, json).into_response();
     }
 
@@ -122,7 +122,8 @@ pub async fn create_user(
         return (status, json).into_response();
     }
 
-    // Extract email from userName or emails
+    // Extract email from userName or emails (RFC 7643: userName is not
+    // required to be an email, so we accept whatever the IdP sends)
     let email = if user.user_name.contains('@') {
         user.user_name.clone()
     } else if let Some(emails) = &user.emails {
