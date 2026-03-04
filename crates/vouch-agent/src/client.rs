@@ -127,7 +127,7 @@ impl AgentClient {
         server_url: Option<&str>,
     ) -> Result<()> {
         let params = StoreSessionParams {
-            token: token.to_string(),
+            token: secrecy::SecretString::from(token),
             user_email: user_email.to_string(),
             expires_at: expires_at.to_string(),
             server_url: server_url.map(String::from),

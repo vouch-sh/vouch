@@ -73,6 +73,9 @@ pub struct TokenResponse {
     pub id_token: Option<String>,
     /// RFC 6749 Section 3.3: The scope of the access token.
     pub scope: Option<ScopeSet>,
+    /// User email (included in FIDO2 assertion grant responses).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 // Custom Debug that redacts tokens to prevent accidental log exposure.
@@ -84,6 +87,7 @@ impl std::fmt::Debug for TokenResponse {
             .field("expires_in", &self.expires_in)
             .field("id_token", &"[REDACTED]")
             .field("scope", &self.scope)
+            .field("email", &self.email)
             .finish()
     }
 }
@@ -415,6 +419,7 @@ async fn handle_authorization_code_grant(
             expires_in: result.expires_in,
             id_token: Some(result.id_token),
             scope: Some(result.scope),
+            email: None,
         })
         .into_response(),
         Err(e) => e.into_oauth_response().into_response(),
@@ -633,6 +638,7 @@ async fn handle_fido2_assertion_grant(
                 expires_in: result.expires_in,
                 id_token: None,
                 scope: result.scope,
+                email: Some(result.email),
             }),
         )
             .into_response(),
@@ -663,6 +669,7 @@ async fn handle_jwt_bearer_grant(
             expires_in: result.expires_in,
             id_token: None,
             scope: result.scope,
+            email: None,
         })
         .into_response(),
         Err(e) => e.into_oauth_response().into_response(),

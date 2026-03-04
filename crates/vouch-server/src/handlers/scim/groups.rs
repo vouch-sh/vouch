@@ -26,20 +26,20 @@ pub async fn list_groups(
     headers: HeaderMap,
     Query(query): Query<ScimListQuery>,
 ) -> Response {
+    // Pure validation first — no DB cost for malformed requests
+    let start_index = query.start_index.unwrap_or(1);
+    let count = query.count.unwrap_or(100).min(100);
+
+    if let Err((status, json)) = super::validate_list_params(query.filter.as_deref(), start_index) {
+        return (status, json).into_response();
+    }
+
     // Authenticate and check scope
     let auth = match authenticate_scim(&state, &headers).await {
         Ok(auth) => auth,
         Err((status, json)) => return (status, json).into_response(),
     };
     if let Err((status, json)) = auth.require_scope(ScimScope::GroupsRead) {
-        return (status, json).into_response();
-    }
-
-    let start_index = query.start_index.unwrap_or(1);
-    let count = query.count.unwrap_or(100).min(100);
-
-    // Validate query parameters before DB access
-    if let Err((status, json)) = super::validate_list_params(query.filter.as_deref(), start_index) {
         return (status, json).into_response();
     }
 
@@ -114,6 +114,18 @@ pub async fn create_group(
     headers: HeaderMap,
     Json(group): Json<ScimGroup>,
 ) -> Response {
+    // Pure validation first — no DB cost for malformed requests
+    if group.display_name.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ScimError::new(
+                400,
+                "displayName is required and must not be empty",
+            )),
+        )
+            .into_response();
+    }
+
     // Authenticate and check scope
     let auth = match authenticate_scim(&state, &headers).await {
         Ok(auth) => auth,

@@ -1016,3 +1016,87 @@ async fn test_validation_start_index_at_boundary_succeeds() {
 
     assert_eq!(status, StatusCode::OK);
 }
+
+// ========================================================================
+// Validation-Before-Auth Tests (Phase 1A/1B defense-in-depth)
+// ========================================================================
+
+#[tokio::test]
+async fn test_validation_before_auth_filter_too_long_no_token() {
+    // Malformed filter should return 400 without requiring auth
+    let (app, _state) = test_app().await;
+
+    let long_filter = format!("userName eq \"{}\"", "a".repeat(1100));
+    let encoded_filter = urlencoding::encode(&long_filter);
+
+    let (status, body) = http_get(
+        &app,
+        &format!("/scim/v2/Users?filter={}", encoded_filter),
+        &[], // No auth header
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Oversized filter must return 400 (not 401) even without auth: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_validation_before_auth_start_index_too_large_no_token() {
+    // Oversized startIndex should return 400 without requiring auth
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(
+        &app,
+        "/scim/v2/Users?startIndex=9999999",
+        &[], // No auth header
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Oversized startIndex must return 400 (not 401) even without auth: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_validation_before_auth_groups_start_index_no_token() {
+    // Groups endpoint also validates before auth
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(
+        &app,
+        "/scim/v2/Groups?startIndex=9999999",
+        &[], // No auth header
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Groups: oversized startIndex must return 400 (not 401) even without auth: {body}"
+    );
+}
+
+#[tokio::test]
+async fn test_validation_before_auth_create_group_empty_name_no_token() {
+    // Empty displayName should return 400 without requiring auth
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_post_json(
+        &app,
+        "/scim/v2/Groups",
+        r#"{"schemas": ["urn:ietf:params:scim:schemas:core:2.0:Group"], "displayName": "  "}"#,
+        &[], // No auth header
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "Empty displayName must return 400 (not 401) even without auth: {body}"
+    );
+}

@@ -69,9 +69,7 @@ pub async fn create_application_api(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateApplicationRequest>,
 ) -> Result<Json<CreateApplicationResponse>, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
-
-    // Validate inputs
+    // ── Pure format validation first — no DB cost for malformed requests ──
     let name = req.name.trim();
     if name.is_empty() {
         return Err(ServiceError::api(
@@ -91,42 +89,6 @@ pub async fn create_application_api(
                 "Invalid application type. Must be: web, native, spa, or service",
             )
         })?;
-
-    // Parse access scope (default to personal if not provided)
-    let access_scope = req
-        .access_scope
-        .as_ref()
-        .and_then(|s| s.parse::<AccessScope>().ok())
-        .unwrap_or_default();
-
-    // Get user to check org membership
-    let user = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get user: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?
-        .ok_or_else(|| ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
-
-    // Validate: Organization scope requires user to have an org
-    if access_scope == AccessScope::Organization && user.org_id.is_none() {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_access_scope",
-            "Organization scope requires organization membership",
-        ));
-    }
-
-    // Set org_id only for organization-scoped apps
-    let org_id = if access_scope == AccessScope::Organization {
-        user.org_id.as_deref()
-    } else {
-        None
-    };
 
     // For non-service apps, at least one redirect URI is required
     if !matches!(app_type, OAuthClientType::Service) && req.redirect_uris.is_empty() {
@@ -232,6 +194,45 @@ pub async fn create_application_api(
             }
         }
     }
+
+    // ── Authentication — validated input is good, now check credentials ──
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+
+    // Parse access scope (default to personal if not provided)
+    let access_scope = req
+        .access_scope
+        .as_ref()
+        .and_then(|s| s.parse::<AccessScope>().ok())
+        .unwrap_or_default();
+
+    // Get user to check org membership
+    let user = db::get_user_by_id(&state.store, &token.sub)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?
+        .ok_or_else(|| ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
+
+    // Validate: Organization scope requires user to have an org
+    if access_scope == AccessScope::Organization && user.org_id.is_none() {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_access_scope",
+            "Organization scope requires organization membership",
+        ));
+    }
+
+    // Set org_id only for organization-scoped apps
+    let org_id = if access_scope == AccessScope::Organization {
+        user.org_id.as_deref()
+    } else {
+        None
+    };
 
     // Create the application with FAPI settings included at creation time
     let (client, client_id) = db::create_oauth_client(
@@ -373,6 +374,81 @@ pub async fn update_application_api(
     ValidPath(app_id): ValidPath<ValidUuid>,
     Json(req): Json<UpdateApplicationRequest>,
 ) -> Result<Json<ApplicationResponse>, ServiceError> {
+    // ── Pure format validation first — no DB cost for malformed requests ──
+    // Validate request-provided redirect URIs (if any)
+    if let Some(ref uris) = req.redirect_uris
+        && let Err(invalid) = validate_redirect_uris(uris)
+    {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_redirect_uris",
+            format!(
+                "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
+                invalid.join(", ")
+            ),
+        ));
+    }
+
+    // Validate request-provided resource URIs (if any)
+    if let Some(ref uris) = req.resource_uris {
+        for uri_str in uris {
+            if let Err(e) = ResourceUri::parse(uri_str) {
+                return Err(ServiceError::api(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_resource_uri",
+                    format!("Invalid resource URI '{uri_str}': {e}"),
+                ));
+            }
+        }
+    }
+
+    // Validate JWKS JSON format if provided
+    let jwks_trimmed = req.jwks.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let jwks_uri_trimmed = req
+        .jwks_uri
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    if let Some(jwks_json) = jwks_trimmed {
+        match serde_json::from_str::<serde_json::Value>(jwks_json) {
+            Ok(val) => {
+                if !val
+                    .get("keys")
+                    .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
+                {
+                    return Err(ServiceError::api(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_jwks",
+                        "JWKS must be a JSON object with a non-empty \"keys\" array",
+                    ));
+                }
+            }
+            Err(_) => {
+                return Err(ServiceError::api(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_jwks",
+                    "JWKS must be valid JSON",
+                ));
+            }
+        }
+    }
+
+    // Validate JWKS URI format if provided
+    if let Some(jwks_uri_val) = jwks_uri_trimmed {
+        match url::Url::parse(jwks_uri_val) {
+            Ok(parsed) if parsed.scheme() == "https" => {}
+            _ => {
+                return Err(ServiceError::api(
+                    StatusCode::BAD_REQUEST,
+                    "invalid_jwks_uri",
+                    "JWKS URI must be a valid https:// URL",
+                ));
+            }
+        }
+    }
+
+    // ── Authentication — validated input is good, now check credentials ──
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Get existing application
@@ -444,7 +520,7 @@ pub async fn update_application_api(
         None
     };
 
-    // Apply updates
+    // Apply updates (merge request values with existing client record)
     let name = req.name.as_deref().unwrap_or(&client.name);
     let description = req.description.as_deref().or(client.description.as_deref());
     let redirect_uris = req
@@ -452,35 +528,12 @@ pub async fn update_application_api(
         .clone()
         .unwrap_or_else(|| client.redirect_uris.clone());
 
-    // Validate redirect URIs are valid URLs
-    if let Err(invalid) = validate_redirect_uris(&redirect_uris) {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_redirect_uris",
-            format!(
-                "Invalid redirect URI(s): {}. Each URI must be a valid http:// or https:// URL.",
-                invalid.join(", ")
-            ),
-        ));
-    }
-
     // RFC 8707: Resource URIs default to existing if not provided.
     let resource_uris = req
         .resource_uris
         .as_deref()
         .map(|u| u.to_vec())
         .unwrap_or_else(|| client.resource_uris.clone());
-
-    // Validate resource URIs per RFC 8707 (absolute URI, no fragment).
-    for uri_str in &resource_uris {
-        if let Err(e) = ResourceUri::parse(uri_str) {
-            return Err(ServiceError::api(
-                StatusCode::BAD_REQUEST,
-                "invalid_resource_uri",
-                format!("Invalid resource URI '{uri_str}': {e}"),
-            ));
-        }
-    }
 
     // Determine FAPI profile
     let is_fapi = req
@@ -502,14 +555,7 @@ pub async fn update_application_api(
         ));
     }
 
-    // FAPI validation: require JWKS or JWKS URI
-    let jwks_trimmed = req.jwks.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let jwks_uri_trimmed = req
-        .jwks_uri
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
+    // FAPI validation: require JWKS or JWKS URI (request or existing)
     if is_fapi
         && jwks_trimmed.is_none()
         && jwks_uri_trimmed.is_none()
@@ -521,45 +567,6 @@ pub async fn update_application_api(
             "missing_jwks",
             "FAPI 2.0 requires jwks or jwks_uri for private_key_jwt authentication",
         ));
-    }
-
-    // Validate JWKS JSON if provided
-    if let Some(jwks_json) = jwks_trimmed {
-        match serde_json::from_str::<serde_json::Value>(jwks_json) {
-            Ok(val) => {
-                if !val
-                    .get("keys")
-                    .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
-                {
-                    return Err(ServiceError::api(
-                        StatusCode::BAD_REQUEST,
-                        "invalid_jwks",
-                        "JWKS must be a JSON object with a non-empty \"keys\" array",
-                    ));
-                }
-            }
-            Err(_) => {
-                return Err(ServiceError::api(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_jwks",
-                    "JWKS must be valid JSON",
-                ));
-            }
-        }
-    }
-
-    // Validate JWKS URI if provided
-    if let Some(jwks_uri_val) = jwks_uri_trimmed {
-        match url::Url::parse(jwks_uri_val) {
-            Ok(parsed) if parsed.scheme() == "https" => {}
-            _ => {
-                return Err(ServiceError::api(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_jwks_uri",
-                    "JWKS URI must be a valid https:// URL",
-                ));
-            }
-        }
     }
 
     // Compute FAPI-related values
@@ -1754,5 +1761,85 @@ mod tests {
         assert_eq!(status, StatusCode::CONFLICT);
         let json: serde_json::Value = serde_json::from_str(&body).expect("valid json");
         assert_eq!(json["code"], "last_secret");
+    }
+
+    // ========================================================================
+    // Validation-before-auth tests (Phase 1C defense-in-depth)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_create_app_empty_name_returns_400_without_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/applications",
+            r#"{"name": "  ", "application_type": "web", "redirect_uris": ["https://example.com/cb"]}"#,
+            &[], // No auth header
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "Empty name must return 400 (not 401) even without auth: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_app_invalid_type_returns_400_without_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/applications",
+            r#"{"name": "Test", "application_type": "invalid", "redirect_uris": ["https://example.com/cb"]}"#,
+            &[], // No auth header
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "Invalid app type must return 400 (not 401) even without auth: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_app_malformed_redirect_uri_returns_400_without_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/applications",
+            r#"{"name": "Test", "application_type": "web", "redirect_uris": ["not-a-url"]}"#,
+            &[], // No auth header
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "Malformed redirect URI must return 400 (not 401) even without auth: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_create_app_invalid_jwks_returns_400_without_auth() {
+        let (app, _state) = test_app().await;
+
+        let (status, body) = http_post_json(
+            &app,
+            "/api/v1/applications",
+            r#"{"name": "Test", "application_type": "web", "redirect_uris": ["https://example.com/cb"], "jwks": "not-json"}"#,
+            &[], // No auth header
+        )
+        .await;
+
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "Invalid JWKS must return 400 (not 401) even without auth: {body}"
+        );
     }
 }

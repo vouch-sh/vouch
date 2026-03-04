@@ -83,8 +83,7 @@ struct AssertionPayload {
 struct Fapi2TokenResponse {
     access_token: secrecy::SecretString,
     expires_in: u64,
-    #[serde(default)]
-    email: Option<String>,
+    email: String,
     /// `expires_at` may be included by some server versions.
     #[serde(default)]
     expires_at: Option<String>,
@@ -243,7 +242,7 @@ async fn run_fapi_login(
     let (expires_at_str, expires_at_ts) =
         resolve_expiry(fapi_token.expires_at.as_deref(), fapi_token.expires_in);
 
-    let email = fapi_token.email.as_deref().unwrap_or("").to_string();
+    let email = fapi_token.email;
 
     // Reconstruct an owned key for auto-provision (avoids keychain
     // round-trip that can silently fail on some platforms).
@@ -328,7 +327,7 @@ async fn run_fapi_login_with_nonce(
     let (expires_at_str, expires_at_ts) =
         resolve_expiry(fapi_token.expires_at.as_deref(), fapi_token.expires_in);
 
-    let email = fapi_token.email.as_deref().unwrap_or("").to_string();
+    let email = fapi_token.email;
 
     // Reconstruct an owned key for auto-provision.
     let owned_key = fapi_key

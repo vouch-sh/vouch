@@ -35,12 +35,7 @@ pub async fn issue_ssh_certificate(
     State(state): State<Arc<AppState>>,
     Json(request): Json<SshCertificateRequest>,
 ) -> Result<Json<SshCertificateResponse>, ServiceError> {
-    // Validate token and get user email
-    let (_token, user_email) =
-        extract_resource_token_with_email(&state, &headers, &jar, method.as_str(), uri.path())
-            .await?;
-
-    // Get SSH CA
+    // Check config before auth — zero-cost in-memory check avoids DB queries
     let ssh_ca = state.ssh_ca.as_ref().ok_or_else(|| {
         ServiceError::api(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -48,6 +43,11 @@ pub async fn issue_ssh_certificate(
             "SSH Certificate Authority is not configured",
         )
     })?;
+
+    // Validate token and get user email
+    let (_token, user_email) =
+        extract_resource_token_with_email(&state, &headers, &jar, method.as_str(), uri.path())
+            .await?;
 
     // Certificate validity matches session duration
     let valid_seconds = state.config().session_hours * 3600;
@@ -229,13 +229,41 @@ pub async fn get_aws_token(
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
-    // Validate token and get user email
-    let (token, user_email) =
-        extract_resource_token_with_email(&state, &headers, &jar, method.as_str(), uri.path())
-            .await?;
+    // Single auth + user lookup (avoids duplicate get_user_by_id)
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+
+    // Get user record once — extract both email and org_id
+    let user = db::get_user_by_id(&state.store, &token.sub)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user by ID: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
+        })?;
+
+    let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
 
     // Get user's organization domain (hd claim) if they belong to an org
-    let hd = get_user_org_domain(&state, &token.sub).await?;
+    let hd = if let Some(ref org_id) = user.org_id {
+        db::get_organization_domain(&state.store, org_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to get organization domain: {e}");
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    "Internal database error",
+                )
+            })?
+    } else {
+        None
+    };
 
     // Issue AWS token
     let config = state.config();
@@ -286,49 +314,6 @@ pub async fn get_aws_token(
 }
 
 // ============================================================================
-// Helper Functions
-// ============================================================================
-
-/// Get the user's organization domain (hd claim) if they belong to an organization.
-///
-/// This looks up the user by ID, then fetches their organization's domain
-/// which is the Google Workspace hosted domain (hd claim) from their OIDC enrollment.
-async fn get_user_org_domain(
-    state: &AppState,
-    user_id: &str,
-) -> Result<Option<String>, ServiceError> {
-    // Get user to find their org_id
-    let user = db::get_user_by_id(&state.store, user_id)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get user by ID: {e}");
-            ServiceError::api(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "db_error",
-                "Internal database error",
-            )
-        })?;
-
-    // If user has an org, get the org's domain
-    if let Some(user) = user
-        && let Some(org_id) = user.org_id
-    {
-        let domain = db::get_organization_domain(&state.store, &org_id)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to get organization domain: {e}");
-                ServiceError::api(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    "Internal database error",
-                )
-            })?;
-        return Ok(domain);
-    }
-
-    Ok(None)
-}
-
 // ============================================================================
 // GitHub Token Endpoint
 // ============================================================================
@@ -411,6 +396,15 @@ pub async fn get_github_token(
     State(state): State<Arc<AppState>>,
     Json(request): Json<GitHubTokenRequest>,
 ) -> Result<Json<GitHubTokenResponse>, ServiceError> {
+    // Check config before auth — zero-cost in-memory check avoids DB queries
+    let github_app = state.github_app.as_ref().ok_or_else(|| {
+        ServiceError::api(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "github_not_configured",
+            "GitHub App is not configured",
+        )
+    })?;
+
     // Validate token
     let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
@@ -438,15 +432,6 @@ pub async fn get_github_token(
         .get("user-agent")
         .and_then(|h| h.to_str().ok())
         .map(String::from);
-
-    // Verify GitHub App is configured
-    let github_app = state.github_app.as_ref().ok_or_else(|| {
-        ServiceError::api(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "github_not_configured",
-            "GitHub App is not configured",
-        )
-    })?;
 
     // Verify user has an organization
     let org_id = user.org_id.as_ref().ok_or_else(|| {

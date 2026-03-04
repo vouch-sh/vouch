@@ -85,6 +85,8 @@ pub struct Fido2AssertionResult {
     pub expires_in: u64,
     /// Granted scope.
     pub scope: Option<ScopeSet>,
+    /// Authenticated user's email address.
+    pub email: String,
 }
 
 /// Exchange a FIDO2 assertion for an OAuth access token.
@@ -298,5 +300,6 @@ pub async fn exchange_fido2_assertion(
         token_type: token_type.to_string(),
         expires_in,
         scope: Some(scope),
+        email: user.email,
     })
 }

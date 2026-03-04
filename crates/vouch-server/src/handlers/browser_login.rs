@@ -434,10 +434,11 @@ pub async fn browser_login_complete(
     }
 
     let client_data: ClientData = serde_json::from_str(client_data_str).map_err(|e| {
+        tracing::debug!("Client data JSON parse error: {e}");
         ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_input",
-            format!("Client data JSON is malformed: {e}"),
+            "Client data JSON is malformed",
         )
     })?;
 
