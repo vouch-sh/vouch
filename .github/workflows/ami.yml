@@ -407,13 +407,14 @@ jobs:
           VERSION="${{ needs.prepare.outputs.version }}"
           SOURCE_AMI="${{ steps.source.outputs.ami_id }}"
 
-          # Copy the AMI
+          # Copy the AMI (--copy-image-tags propagates all source tags)
           COPIED_AMI=$(aws ec2 copy-image \
             --region ${{ matrix.region }} \
             --source-region us-east-1 \
             --source-image-id "${SOURCE_AMI}" \
             --name "vouch-server-${VERSION}-${{ matrix.arch }}" \
             --description "Vouch Server ${VERSION} - Attestable AMI with dm-verity" \
+            --copy-image-tags \
             --query 'ImageId' \
             --output text)
 
@@ -422,27 +423,6 @@ jobs:
 
           # Wait for the copy to complete
           aws ec2 wait image-available --region ${{ matrix.region }} --image-ids "${COPIED_AMI}"
-
-          # Tag the copied AMI
-          aws ec2 create-tags --region ${{ matrix.region }} --resources "${COPIED_AMI}" --tags \
-            "Key=Name,Value=vouch-server-${VERSION}" \
-            "Key=Version,Value=${VERSION}" \
-            "Key=Architecture,Value=${{ matrix.arch }}" \
-            "Key=CopiedFrom,Value=us-east-1"
-
-          # Propagate tags from source AMI
-          for TAG_NAME in PCR4 PCR7 PCR12 Repository BuildDate Commit; do
-            TAG_VALUE=$(aws ec2 describe-tags \
-              --region us-east-1 \
-              --filters "Name=resource-id,Values=${SOURCE_AMI}" "Name=key,Values=${TAG_NAME}" \
-              --query 'Tags[0].Value' \
-              --output text 2>/dev/null || echo "None")
-            if [ "$TAG_VALUE" != "None" ] && [ -n "$TAG_VALUE" ]; then
-              aws ec2 create-tags --region ${{ matrix.region }} --resources "${COPIED_AMI}" --tags \
-                "Key=${TAG_NAME},Value=${TAG_VALUE}"
-              echo "Propagated ${TAG_NAME} tag to ${{ matrix.region }}"
-            fi
-          done
 
   update-ssm-parameters:
     name: Update SSM (${{ matrix.arch }} in ${{ matrix.region }})
