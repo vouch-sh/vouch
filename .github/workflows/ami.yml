@@ -26,6 +26,8 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
       s3_prefix: ${{ steps.s3.outputs.s3_prefix }}
+      copy_regions: ${{ steps.regions.outputs.copy_regions }}
+      all_regions: ${{ steps.regions.outputs.all_regions }}
 
     steps:
       - name: Determine tag
@@ -75,6 +77,13 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
           role-session-name: prepare-ami-build
           mask-aws-account-id: true
+
+      - name: Set regions
+        id: regions
+        run: |
+          # Target regions to copy AMIs to (source region is us-east-1)
+          echo 'copy_regions=["us-west-2","eu-central-1","eu-west-3"]' >> "$GITHUB_OUTPUT"
+          echo 'all_regions=["us-east-1","us-west-2","eu-central-1","eu-west-3"]' >> "$GITHUB_OUTPUT"
 
       - name: Set S3 paths
         id: s3
@@ -146,6 +155,8 @@ jobs:
           export S3_PREFIX="${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}"
           export S3_PARENT_PREFIX="${{ needs.prepare.outputs.s3_prefix }}"
           export SB_KEY_S3_PATH="s3://${{ vars.AMI_BUILD_BUCKET }}/${{ needs.prepare.outputs.s3_prefix }}/secureboot"
+          # envsubst needs literal $VAR names, not shell expansion
+          # shellcheck disable=SC2016
           envsubst '$VERSION $AWS_REGION $S3_BUCKET $S3_PREFIX $S3_PARENT_PREFIX $SB_KEY_S3_PATH' < packaging/ami/user-data.sh.tpl > /tmp/user-data.sh
 
           # Launch AL2023 instance with user-data
@@ -181,7 +192,7 @@ jobs:
               break
             fi
 
-            if [ $attempt -eq 120 ]; then
+            if [ "$attempt" -eq 120 ]; then
               echo "Build timed out after 1 hour"
               # Try to get logs anyway
               aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/build.log" /tmp/build.log 2>/dev/null && cat /tmp/build.log || true
@@ -348,7 +359,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [x86_64, arm64]
-        region: [us-west-2]
+        region: ${{ fromJSON(needs.prepare.outputs.copy_regions) }}
 
     steps:
       - name: Configure AWS credentials
@@ -434,67 +445,68 @@ jobs:
           done
 
   update-ssm-parameters:
-    name: Update SSM Parameters
+    name: Update SSM (${{ matrix.arch }} in ${{ matrix.region }})
     runs-on: ubuntu-latest
     needs: [prepare, copy-ami]
     if: always() && needs.copy-ami.result == 'success'
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x86_64, arm64]
+        region: ${{ fromJSON(needs.prepare.outputs.all_regions) }}
 
     steps:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
         with:
           role-to-assume: ${{ vars.ASSUME_ROLE_ARN }}
-          aws-region: us-east-1
-          role-session-name: update-ssm-parameters
+          aws-region: ${{ matrix.region }}
+          role-session-name: update-ssm-${{ matrix.arch }}-${{ matrix.region }}
           mask-aws-account-id: true
 
-      - name: Update SSM parameters for latest AMI IDs
+      - name: Update SSM parameter for latest AMI ID
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
           BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-          for region in us-east-1 us-west-2; do
-            for arch in x86_64 arm64; do
-              # Get the AMI ID for this region/arch
-              AMI_ID=$(aws ec2 describe-images \
-                --region "${region}" \
-                --filters "Name=name,Values=vouch-server-${VERSION}-${arch}" \
-                --query 'Images[0].ImageId' \
-                --output text)
+          # Get the AMI ID for this region/arch
+          AMI_ID=$(aws ec2 describe-images \
+            --region "${{ matrix.region }}" \
+            --filters "Name=name,Values=vouch-server-${VERSION}-${{ matrix.arch }}" \
+            --query 'Images[0].ImageId' \
+            --output text)
 
-              if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "None" ]; then
-                echo "::error::Could not find AMI for ${region}/${arch}"
-                exit 1
-              fi
+          if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "None" ]; then
+            echo "::error::Could not find AMI for ${{ matrix.region }}/${{ matrix.arch }}"
+            exit 1
+          fi
 
-              PARAM_NAME="/vouch-server/ami/${arch}/latest"
-              DESCRIPTION="Vouch Server ${VERSION} AMI for ${arch} (built ${BUILD_DATE})"
+          PARAM_NAME="/vouch-server/ami/${{ matrix.arch }}/latest"
+          DESCRIPTION="Vouch Server ${VERSION} AMI for ${{ matrix.arch }} (built ${BUILD_DATE})"
 
-              echo "Updating ${PARAM_NAME} in ${region} = ${AMI_ID}"
+          echo "Updating ${PARAM_NAME} in ${{ matrix.region }} = ${AMI_ID}"
 
-              aws ssm put-parameter \
-                --region "${region}" \
-                --name "${PARAM_NAME}" \
-                --value "${AMI_ID}" \
-                --type String \
-                --data-type "aws:ec2:image" \
-                --overwrite \
-                --description "${DESCRIPTION}"
+          aws ssm put-parameter \
+            --region "${{ matrix.region }}" \
+            --name "${PARAM_NAME}" \
+            --value "${AMI_ID}" \
+            --type String \
+            --data-type "aws:ec2:image" \
+            --overwrite \
+            --description "${DESCRIPTION}"
 
-              # Tag the parameter with metadata
-              aws ssm add-tags-to-resource \
-                --region "${region}" \
-                --resource-type Parameter \
-                --resource-id "${PARAM_NAME}" \
-                --tags \
-                  "Key=Version,Value=${VERSION}" \
-                  "Key=BuildDate,Value=${BUILD_DATE}" \
-                  "Key=Repository,Value=${{ github.repository }}" \
-                  "Key=Commit,Value=${{ github.sha }}"
+          # Tag the parameter with metadata
+          aws ssm add-tags-to-resource \
+            --region "${{ matrix.region }}" \
+            --resource-type Parameter \
+            --resource-id "${PARAM_NAME}" \
+            --tags \
+              "Key=Version,Value=${VERSION}" \
+              "Key=BuildDate,Value=${BUILD_DATE}" \
+              "Key=Repository,Value=${{ github.repository }}" \
+              "Key=Commit,Value=${{ github.sha }}"
 
-              echo "Updated ${PARAM_NAME} in ${region} to ${AMI_ID}"
-            done
-          done
+          echo "Updated ${PARAM_NAME} in ${{ matrix.region }} to ${AMI_ID}"
 
   summary:
     name: Build Summary
@@ -514,31 +526,35 @@ jobs:
         run: |
           VERSION="${{ needs.prepare.outputs.version }}"
 
-          echo "## Vouch Server AMI Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Version:** ${VERSION}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### AMI IDs" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Region | Architecture | AMI ID |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------|--------------|--------|" >> $GITHUB_STEP_SUMMARY
+          cat >> "$GITHUB_STEP_SUMMARY" << EOF
+          ## Vouch Server AMI Build Summary
 
-          for region in us-east-1 us-west-2; do
+          **Version:** ${VERSION}
+
+          ### AMI IDs
+
+          | Region | Architecture | AMI ID |
+          |--------|--------------|--------|
+          EOF
+
+          for region in $(echo '${{ needs.prepare.outputs.all_regions }}' | jq -r '.[]'); do
             for arch in x86_64 arm64; do
               AMI_ID=$(aws ec2 describe-images \
                 --region "${region}" \
                 --filters "Name=name,Values=vouch-server-${VERSION}-${arch}" \
                 --query 'Images[0].ImageId' \
                 --output text 2>/dev/null || echo "N/A")
-              echo "| ${region} | ${arch} | \`${AMI_ID}\` |" >> $GITHUB_STEP_SUMMARY
+              echo "| ${region} | ${arch} | \`${AMI_ID}\` |" >> "$GITHUB_STEP_SUMMARY"
             done
           done
 
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### PCR Measurements" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Architecture | PCR4 (Boot Binary) | PCR7 (Secure Boot Policy) | PCR12 (Kernel Cmdline) |" >> $GITHUB_STEP_SUMMARY
-          echo "|--------------|--------------------|--------------------------|-----------------------|" >> $GITHUB_STEP_SUMMARY
+          cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+
+          ### PCR Measurements
+
+          | Architecture | PCR4 (Boot Binary) | PCR7 (Secure Boot Policy) | PCR12 (Kernel Cmdline) |
+          |--------------|--------------------|--------------------------|-----------------------|
+          EOF
 
           for arch in x86_64 arm64; do
             AMI_ID=$(aws ec2 describe-images \
@@ -558,44 +574,46 @@ jobs:
                 if [ "$PCR_VALUE" = "None" ]; then PCR_VALUE="N/A"; fi
                 eval "${PCR_TAG}=\${PCR_VALUE}"
               done
-              echo "| ${arch} | \`${PCR4:0:16}...\` | \`${PCR7:0:16}...\` | \`${PCR12:0:16}...\` |" >> $GITHUB_STEP_SUMMARY
+              echo "| ${arch} | \`${PCR4:0:16}...\` | \`${PCR7:0:16}...\` | \`${PCR12:0:16}...\` |" >> "$GITHUB_STEP_SUMMARY"
             else
-              echo "| ${arch} | N/A | N/A | N/A |" >> $GITHUB_STEP_SUMMARY
+              echo "| ${arch} | N/A | N/A | N/A |" >> "$GITHUB_STEP_SUMMARY"
             fi
           done
 
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Features" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "- UEFI Secure Boot with custom key hierarchy" >> $GITHUB_STEP_SUMMARY
-          echo "- dm-verity filesystem protection" >> $GITHUB_STEP_SUMMARY
-          echo "- TPM 2.0 attestation support (PCR4, PCR7, PCR12)" >> $GITHUB_STEP_SUMMARY
-          echo "- No SSH or interactive access" >> $GITHUB_STEP_SUMMARY
-          echo "- Configuration via AWS Secrets Manager" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Usage" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "# Launch instance with configuration" >> $GITHUB_STEP_SUMMARY
-          echo "aws ec2 run-instances \\" >> $GITHUB_STEP_SUMMARY
-          echo "  --image-id <AMI_ID> \\" >> $GITHUB_STEP_SUMMARY
-          echo "  --instance-type t3.medium \\" >> $GITHUB_STEP_SUMMARY
-          echo "  --metadata-options 'HttpTokens=required,InstanceMetadataTags=enabled' \\" >> $GITHUB_STEP_SUMMARY
-          echo "  --tag-specifications 'ResourceType=instance,Tags=[{Key=VouchSecretName,Value=vouch-server/config}]'" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### SSM Parameter Store" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Latest AMI IDs are published to SSM Parameter Store in each region:" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Parameter | Description |" >> $GITHUB_STEP_SUMMARY
-          echo "|-----------|-------------|" >> $GITHUB_STEP_SUMMARY
-          echo "| \`/vouch-server/ami/x86_64/latest\` | Latest x86_64 AMI ID |" >> $GITHUB_STEP_SUMMARY
-          echo "| \`/vouch-server/ami/arm64/latest\` | Latest arm64 AMI ID |" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo '```bash' >> $GITHUB_STEP_SUMMARY
-          echo "# Query latest AMI in your region" >> $GITHUB_STEP_SUMMARY
-          echo 'AMI_ID=$(aws ssm get-parameter \' >> $GITHUB_STEP_SUMMARY
-          echo '  --name "/vouch-server/ami/x86_64/latest" \' >> $GITHUB_STEP_SUMMARY
-          echo "  --query 'Parameter.Value' --output text)" >> $GITHUB_STEP_SUMMARY
-          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat >> "$GITHUB_STEP_SUMMARY" << 'EOF'
+
+          ### Features
+
+          - UEFI Secure Boot with custom key hierarchy
+          - dm-verity filesystem protection
+          - TPM 2.0 attestation support (PCR4, PCR7, PCR12)
+          - No SSH or interactive access
+          - Configuration via AWS Secrets Manager
+
+          ### Usage
+
+          ```bash
+          # Launch instance with configuration
+          aws ec2 run-instances \
+            --image-id <AMI_ID> \
+            --instance-type t3.medium \
+            --metadata-options 'HttpTokens=required,InstanceMetadataTags=enabled' \
+            --tag-specifications 'ResourceType=instance,Tags=[{Key=VouchSecretName,Value=vouch-server/config}]'
+          ```
+
+          ### SSM Parameter Store
+
+          Latest AMI IDs are published to SSM Parameter Store in each region:
+
+          | Parameter | Description |
+          |-----------|-------------|
+          | `/vouch-server/ami/x86_64/latest` | Latest x86_64 AMI ID |
+          | `/vouch-server/ami/arm64/latest` | Latest arm64 AMI ID |
+
+          ```bash
+          # Query latest AMI in your region
+          AMI_ID=$(aws ssm get-parameter \
+            --name "/vouch-server/ami/x86_64/latest" \
+            --query 'Parameter.Value' --output text)
+          ```
+          EOF
