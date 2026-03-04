@@ -51,9 +51,12 @@ pub async fn list_users(
         Ok(users) => users,
         Err(e) => {
             if e.downcast_ref::<ScimFilterError>().is_some() {
+                tracing::debug!("SCIM filter parse error: {e}");
                 return (
                     StatusCode::BAD_REQUEST,
-                    Json(ScimError::new(400, e.to_string()).with_type("invalidFilter")),
+                    Json(
+                        ScimError::new(400, "Invalid filter expression").with_type("invalidFilter"),
+                    ),
                 )
                     .into_response();
             }
@@ -312,7 +315,16 @@ pub async fn patch_user(
                                 external_id = val.as_str().map(String::from);
                             }
                         }
-                        _ => {}
+                        _ => {
+                            return (
+                                StatusCode::BAD_REQUEST,
+                                Json(
+                                    ScimError::new(400, "Unsupported attribute path")
+                                        .with_type("invalidPath"),
+                                ),
+                            )
+                                .into_response();
+                        }
                     }
                 } else if let Some(val) = &op.value {
                     // Replace entire resource

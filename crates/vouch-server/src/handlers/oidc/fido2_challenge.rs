@@ -11,6 +11,7 @@
 
 use crate::AppState;
 use crate::crypto::jwt::JwtType;
+use crate::db;
 use crate::handlers::generate_challenge;
 use axum::{
     Json,
@@ -98,6 +99,24 @@ pub async fn fido2_challenge(State(state): State<Arc<AppState>>) -> Response {
                 .into_response();
         }
     };
+
+    // Store challenge state hash for single-use enforcement
+    let state_hash = crate::crypto::hash_token(&state_token);
+    let expires_at = match Timestamp::from_second(exp) {
+        Ok(ts) => ts,
+        Err(_) => Timestamp::now(),
+    };
+    if let Err(e) = db::store_challenge_state(&state.store, &state_hash, expires_at).await {
+        tracing::error!("Failed to store FIDO2 challenge state: {e}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "server_error",
+                "error_description": "Failed to persist challenge state"
+            })),
+        )
+            .into_response();
+    }
 
     (
         StatusCode::OK,

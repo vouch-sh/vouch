@@ -50,9 +50,13 @@ pub async fn list_groups(
             Ok(groups) => groups,
             Err(e) => {
                 if e.downcast_ref::<ScimFilterError>().is_some() {
+                    tracing::debug!("SCIM filter parse error: {e}");
                     return (
                         StatusCode::BAD_REQUEST,
-                        Json(ScimError::new(400, e.to_string()).with_type("invalidFilter")),
+                        Json(
+                            ScimError::new(400, "Invalid filter expression")
+                                .with_type("invalidFilter"),
+                        ),
                     )
                         .into_response();
                 }

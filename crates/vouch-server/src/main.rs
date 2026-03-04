@@ -11,9 +11,16 @@ use anyhow::Result;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+// Prevent test-utils from being enabled in release builds. The feature gates
+// functions that bypass security invariants (e.g. upsert_user without FIDO2,
+// TestCoseVerifier that accepts any signature). If a CI pipeline or Docker build
+// accidentally enables --all-features, this halts compilation.
+#[cfg(all(feature = "test-utils", not(debug_assertions)))]
+compile_error!("test-utils feature must not be enabled in release builds");
+
 use vouch_server::{
     config,
-    infra::{generate_document_key, serve, startup},
+    infra::{generate_document_key, router, serve, startup},
 };
 
 // ============================================================================
@@ -88,6 +95,8 @@ async fn run_server(args: config::Args) -> Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
+
+    router::print_startup_banner();
 
     // Initialize all server components (config, database, state, background tasks)
     let components = startup::initialize(args).await?;

@@ -17,6 +17,7 @@
 pub(crate) mod audit;
 mod authenticators;
 mod authorization_codes;
+mod challenge_states;
 mod config;
 mod credentials;
 mod device_auth;
@@ -173,6 +174,11 @@ pub use pending_oauth::{
     CreatePendingOAuthParams, PendingOAuthAuthorization, consume_pending_oauth_authorization,
     create_pending_oauth_authorization, delete_expired_pending_oauth_authorizations,
     get_pending_oauth_authorization,
+};
+
+// Re-export challenge state functions (FIDO2 single-use enforcement)
+pub use challenge_states::{
+    delete_expired_challenge_states, store_challenge_state, try_consume_challenge_state,
 };
 
 // Re-export authorization code functions (RFC 6749 Section 10.5)

@@ -128,6 +128,18 @@ pub async fn exchange_fido2_assertion(
             )
         })?;
 
+    // 2b. Enforce single-use: consume the challenge state atomically
+    let state_hash = crate::crypto::hash_token(&payload.state);
+    let consumed = db::try_consume_challenge_state(&state.store, &state_hash)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Failed to consume challenge state: {e}")))?;
+    if !consumed {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "Challenge state has already been used or expired",
+        ));
+    }
+
     // 3. Decode assertion fields from base64url
     let credential_id_bytes = URL_SAFE_NO_PAD
         .decode(&payload.credential_id)

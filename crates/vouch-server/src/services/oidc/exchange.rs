@@ -160,6 +160,14 @@ pub async fn exchange_token(
                 ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid actor token")
             })?;
 
+        // Block self-delegation: actor and subject must be different users
+        if actor_decoded.sub() == subject_decoded.sub() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequest,
+                "Self-delegation is not permitted",
+            ));
+        }
+
         // Verify the actor token's session exists in the database
         let actor_token_hash = hash_token(actor_token);
         if !matches!(

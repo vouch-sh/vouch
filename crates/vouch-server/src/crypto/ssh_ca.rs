@@ -237,16 +237,18 @@ impl SshCa {
             bail!("Could not extract valid principals from email");
         }
 
-        // Generate serial number: timestamp in upper 32 bits, random in lower 32
+        // Generate serial number: full 64 bits of randomness.
+        // The certificate itself carries valid_after/valid_before, so
+        // encoding a timestamp in the serial is unnecessary. Using 64
+        // random bits makes collision probability negligible (~2^-64).
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0);
-        let mut rand_bytes = [0u8; 4];
+        let mut rand_bytes = [0u8; 8];
         aws_lc_rs::rand::fill(&mut rand_bytes)
             .map_err(|_| anyhow::anyhow!("Failed to generate random serial bytes"))?;
-        let rand_part = u32::from_be_bytes(rand_bytes) as u64;
-        let serial = (now << 32) | rand_part;
+        let serial = u64::from_be_bytes(rand_bytes);
 
         // Calculate validity period
         let valid_after = now;
@@ -386,6 +388,40 @@ mod tests {
         assert!(SshCa::extract_principals("notanemail").is_err());
         assert!(SshCa::extract_principals("").is_err());
         assert!(SshCa::extract_principals("@domain.com").is_err());
+    }
+
+    #[test]
+    fn test_serial_is_full_64bit_random() {
+        let ca_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let ca = SshCa::Local {
+            private_key: Box::new(ca_key),
+            rp_id: "test.example.com".to_string(),
+        };
+
+        let user_key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let user_pub = user_key.public_key().to_openssh().unwrap();
+
+        // Generate multiple certificates and verify serial uniqueness
+        let mut serials = std::collections::HashSet::new();
+        for _ in 0..50 {
+            let signed = ca
+                .sign_certificate(&user_pub, "serial-test@example.com", 3600)
+                .unwrap();
+            assert!(
+                serials.insert(signed.serial),
+                "Serial collision detected: {}",
+                signed.serial
+            );
+        }
+
+        // With 64-bit random serials, the probability of all 50 fitting
+        // in the lower 32 bits is astronomically small (~2^-1600).
+        let has_high_bits = serials.iter().any(|s| *s > u64::from(u32::MAX));
+        assert!(
+            has_high_bits,
+            "Expected at least one serial using bits above 32. \
+             All serials fit in 32 bits, suggesting entropy is too low."
+        );
     }
 
     #[test]

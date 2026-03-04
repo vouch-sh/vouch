@@ -641,6 +641,43 @@ pub async fn create_test_session_for_client(
     result.token.expose_secret().to_string()
 }
 
+/// Create a test session with a DPoP binding (sender-constrained token).
+///
+/// The token will have a `cnf.jkt` claim, making it a sender-constrained
+/// token that requires DPoP proof for validation.
+pub async fn create_test_session_with_dpop(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+    auth_id: &str,
+    dpop_jkt: &str,
+) -> String {
+    use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+    use crate::services::oidc::scope::ScopeSet;
+    use secrecy::ExposeSecret;
+
+    let result = create_oauth_access_token(
+        state,
+        CreateOAuthTokenParams {
+            user_id,
+            email,
+            authenticator_id: Some(auth_id),
+            client_id: &state.config().base_url,
+            scope: Some(ScopeSet::all()),
+            dpop_jkt: Some(dpop_jkt),
+            act: None,
+            audience: None,
+            auth_time: Some(jiff::Timestamp::now().as_second()),
+            amr: None,
+            acr: None,
+        },
+    )
+    .await
+    .expect("Failed to create DPoP-bound test session");
+
+    result.token.expose_secret().to_string()
+}
+
 /// Create a SCIM bearer token for testing.
 pub async fn create_test_scim_token(store: &DocumentStore, description: &str) -> String {
     use aws_lc_rs::digest::{self, SHA256};
