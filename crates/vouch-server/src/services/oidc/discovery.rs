@@ -134,7 +134,6 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         grant_types_supported: vec![
             "authorization_code".to_string(),
             "client_credentials".to_string(),
-            "refresh_token".to_string(),
             "urn:ietf:params:oauth:grant-type:device_code".to_string(),
             "urn:ietf:params:oauth:grant-type:token-exchange".to_string(),
             "urn:ietf:params:oauth:grant-type:jwt-bearer".to_string(),

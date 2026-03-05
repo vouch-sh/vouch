@@ -292,7 +292,7 @@ async fn test_rfc7591_response_cache_headers() {
         resp.headers
             .get("cache-control")
             .and_then(|v| v.to_str().ok()),
-        Some("no-store"),
+        Some("no-cache, no-store, must-revalidate"),
         "RFC 7591 Section 3.2.1: Cache-Control: no-store"
     );
     assert_eq!(
@@ -478,33 +478,6 @@ async fn test_rfc7591_register_device_code_grant() {
             .iter()
             .any(|g| g == "urn:ietf:params:oauth:grant-type:device_code")
     );
-}
-
-/// Combining authorization_code with refresh_token should succeed.
-#[tokio::test]
-async fn test_rfc7591_register_auth_code_with_refresh_token() {
-    let (app, state) = test_app().await;
-    let auth = bearer_token_unique(&state, "refresh").await;
-
-    let body = serde_json::json!({
-        "grant_types": ["authorization_code", "refresh_token"],
-        "redirect_uris": ["https://example.com/callback"],
-        "client_name": "Refresh App"
-    });
-
-    let (status, body) = http_post_json(
-        &app,
-        "/oauth/register",
-        &body.to_string(),
-        &[("Authorization", &auth)],
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::CREATED);
-    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
-    let grant_types = json["grant_types"].as_array().unwrap();
-    assert!(grant_types.iter().any(|g| g == "authorization_code"));
-    assert!(grant_types.iter().any(|g| g == "refresh_token"));
 }
 
 /// Multiple redirect URIs should succeed.
@@ -1066,8 +1039,8 @@ async fn test_rfc7591_discovery_grant_types_include_client_credentials() {
         "grant_types_supported must include client_credentials"
     );
     assert!(
-        grant_types.iter().any(|g| g == "refresh_token"),
-        "grant_types_supported must include refresh_token"
+        !grant_types.iter().any(|g| g == "refresh_token"),
+        "grant_types_supported must NOT include refresh_token"
     );
 }
 

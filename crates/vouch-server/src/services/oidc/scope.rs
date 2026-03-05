@@ -106,6 +106,20 @@ impl ScopeSet {
         Self(self.0.intersection(&other.0).copied().collect())
     }
 
+    /// Return a new scope set with user-specific scopes (`openid`, `email`) removed.
+    ///
+    /// Used for M2M tokens where user-specific scopes are meaningless.
+    #[must_use]
+    pub fn without_user_scopes(&self) -> Self {
+        Self(
+            self.0
+                .iter()
+                .copied()
+                .filter(|s| !matches!(s, OAuthScope::OpenId | OAuthScope::Email))
+                .collect(),
+        )
+    }
+
     /// Produce a space-separated string (RFC 6749 Section 3.3).
     ///
     /// Ordering is deterministic: `openid` always precedes `email`.

@@ -619,6 +619,8 @@ pub async fn oidc_callback(
             auth_time: Some(now.as_second()),
             amr: Some(AuthMethod::all_fido2().to_vec()),
             acr: Some(ACR_AAL3.to_string()),
+            hardware_verified: true,
+            session_purpose: db::SessionPurpose::OAuthAccessToken,
         },
     )
     .await
@@ -1206,6 +1208,8 @@ pub async fn browser_register_complete(
             auth_time: None,
             amr: Some(AuthMethod::all_fido2().to_vec()),
             acr: Some(ACR_AAL3.to_string()),
+            hardware_verified: true,
+            session_purpose: db::SessionPurpose::OAuthAccessToken,
         },
     )
     .await

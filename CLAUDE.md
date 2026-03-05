@@ -76,7 +76,7 @@ make docker-build
 make docker-run
 ```
 
-**Toolchain:** Rust 1.93.0, edition 2024 (pinned in `rust-toolchain.toml`). Max line width 100 chars (`.rustfmt.toml`). Release profile uses `lto = true`, `codegen-units = 1`, `opt-level = "z"`, `panic = "abort"`, `strip = true`.
+**Toolchain:** Rust 1.94.0, edition 2024 (pinned in `rust-toolchain.toml`). Max line width 100 chars (`.rustfmt.toml`). Release profile uses `lto = true`, `codegen-units = 1`, `opt-level = "z"`, `panic = "abort"`, `strip = true`.
 
 ## Code Conventions
 

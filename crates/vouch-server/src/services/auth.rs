@@ -257,12 +257,19 @@ pub struct CreateOAuthTokenParams<'a> {
     pub amr: Option<Vec<AuthMethod>>,
     /// RFC 9068 Section 2.2: Authentication context class reference.
     pub acr: Option<String>,
+    /// Whether FIDO2 hardware verification was performed.
+    /// `false` for M2M tokens issued via `client_credentials` grant.
+    pub hardware_verified: bool,
+    /// Session purpose for the database record.
+    pub session_purpose: SessionPurpose,
 }
 
 /// Result of creating a session token.
 pub struct CreateSessionResult {
     /// The JWT token.
     pub token: SecretString,
+    /// Token lifetime in seconds.
+    pub expires_in: u64,
 }
 
 /// Create an OAuth 2.0 access token per RFC 9068.
@@ -319,7 +326,7 @@ pub async fn create_oauth_access_token(
             None
         },
         email_verified: if has_email_scope { Some(true) } else { None },
-        hardware_verified: true,
+        hardware_verified: params.hardware_verified,
         cnf,
         auth_time: params.auth_time,
         act: params.act,
@@ -342,13 +349,16 @@ pub async fn create_oauth_access_token(
         &token_hash,
         params.authenticator_id,
         expires,
-        SessionPurpose::OAuthAccessToken,
+        params.session_purpose,
     )
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to store session: {e}")))?;
 
+    let expires_in = state.config().session_hours * 3600;
+
     Ok(CreateSessionResult {
         token: SecretString::from(token),
+        expires_in,
     })
 }
 

@@ -484,7 +484,7 @@ jobs:
             -v "${{ github.workspace }}:/app" \
             -w /app \
             -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
-            rust:1.93-alpine sh -c '
+            rust:1.94.0-alpine sh -c '
               apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig cmake make g++ perl linux-headers
               export OPENSSL_STATIC=1
               export OPENSSL_LIB_DIR=/usr/lib

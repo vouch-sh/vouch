@@ -101,7 +101,11 @@ pub async fn fido2_challenge(State(state): State<Arc<AppState>>) -> Response {
 
     (
         StatusCode::OK,
-        [("cache-control", "no-store"), ("pragma", "no-cache")],
+        [
+            ("cache-control", "no-cache, no-store, must-revalidate"),
+            ("pragma", "no-cache"),
+            ("expires", "0"),
+        ],
         Json(Fido2ChallengeResponse {
             challenge: challenge.to_base64url(),
             rp_id: state.config().rp_id.clone(),

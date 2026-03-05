@@ -28,6 +28,7 @@
 //! - [`discovery`] - OIDC Discovery document and JWKS generation
 //! - [`authorization`] - Authorization code issuance and validation
 //! - [`token`] - Token endpoint logic (auth code, device code grants)
+//! - [`client_credentials`] - Client credentials grant (RFC 6749 Section 4.4)
 //! - [`exchange`] - Token exchange (RFC 8693)
 //! - [`jwt_bearer`] - JWT client authentication and bearer grants (RFC 7523)
 //! - [`jar`] - JWT-Secured Authorization Request validation (RFC 9101)
@@ -36,6 +37,7 @@
 pub mod amr;
 pub mod authorization;
 pub mod claims;
+pub mod client_credentials;
 pub mod discovery;
 pub mod dpop;
 pub mod exchange;

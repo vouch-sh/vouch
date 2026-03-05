@@ -308,6 +308,8 @@ pub async fn exchange_token(
             // require hardware keys. Revisit if non-FIDO2 flows are added.
             amr: Some(crate::services::oidc::amr::AuthMethod::all_fido2().to_vec()),
             acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
+            hardware_verified: true,
+            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
         },
     )
     .await?;

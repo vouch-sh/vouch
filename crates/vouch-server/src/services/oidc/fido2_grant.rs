@@ -283,6 +283,8 @@ pub async fn exchange_fido2_assertion(
             auth_time: Some(now),
             amr: Some(AuthMethod::all_fido2().to_vec()),
             acr: Some(ACR_AAL3.to_string()),
+            hardware_verified: true,
+            session_purpose: db::SessionPurpose::OAuthAccessToken,
         },
     )
     .await?;
@@ -293,12 +295,10 @@ pub async fn exchange_fido2_assertion(
         "Bearer"
     };
 
-    let expires_in = state.config().session_hours * 3600;
-
     Ok(Fido2AssertionResult {
         access_token: session_result.token.expose_secret().to_string(),
         token_type: token_type.to_string(),
-        expires_in,
+        expires_in: session_result.expires_in,
         scope: Some(scope),
         email: user.email,
     })

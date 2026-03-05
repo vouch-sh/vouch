@@ -40,7 +40,6 @@ const ALLOWED_GRANT_TYPES: &[&str] = &[
     "authorization_code",
     "client_credentials",
     "urn:ietf:params:oauth:grant-type:device_code",
-    "refresh_token",
     "urn:ietf:params:oauth:grant-type:token-exchange",
     "urn:ietf:params:oauth:grant-type:jwt-bearer",
     "urn:ietf:params:oauth:grant-type:fido2-assertion",
@@ -1428,7 +1427,7 @@ mod tests {
         let json = r#"{
             "redirect_uris": ["https://example.com/callback", "https://example.com/callback2"],
             "token_endpoint_auth_method": "client_secret_basic",
-            "grant_types": ["authorization_code", "refresh_token"],
+            "grant_types": ["authorization_code", "client_credentials"],
             "response_types": ["code"],
             "client_name": "Full Example App",
             "client_uri": "https://example.com",
@@ -1464,7 +1463,7 @@ mod tests {
             req.grant_types,
             Some(vec![
                 "authorization_code".to_string(),
-                "refresh_token".to_string(),
+                "client_credentials".to_string(),
             ])
         );
         assert_eq!(req.response_types, Some(vec!["code".to_string()]));
@@ -1674,8 +1673,8 @@ mod tests {
             "device_code URN must be an allowed grant type"
         );
         assert!(
-            ALLOWED_GRANT_TYPES.contains(&"refresh_token"),
-            "refresh_token must be an allowed grant type"
+            !ALLOWED_GRANT_TYPES.contains(&"refresh_token"),
+            "refresh_token must NOT be an allowed grant type"
         );
     }
 

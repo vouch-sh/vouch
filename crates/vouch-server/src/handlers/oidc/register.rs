@@ -80,7 +80,11 @@ pub async fn register(
     // Cache-Control: no-store, Pragma: no-cache (per RFC 7591 Section 3.2.1)
     (
         StatusCode::CREATED,
-        [("cache-control", "no-store"), ("pragma", "no-cache")],
+        [
+            ("cache-control", "no-cache, no-store, must-revalidate"),
+            ("pragma", "no-cache"),
+            ("expires", "0"),
+        ],
         Json(response),
     )
         .into_response()
@@ -114,7 +118,11 @@ pub async fn read_client(
     match read_client_configuration(&state, &client_id, token).await {
         Ok(response) => (
             StatusCode::OK,
-            [("cache-control", "no-store"), ("pragma", "no-cache")],
+            [
+                ("cache-control", "no-cache, no-store, must-revalidate"),
+                ("pragma", "no-cache"),
+                ("expires", "0"),
+            ],
             Json(response),
         )
             .into_response(),

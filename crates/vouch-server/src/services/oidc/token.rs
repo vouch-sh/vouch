@@ -389,11 +389,13 @@ pub async fn exchange_authorization_code(
             auth_time: Some(auth_code.iat),
             amr: Some(AuthMethod::all_fido2().to_vec()),
             acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
+            hardware_verified: true,
+            session_purpose: db::SessionPurpose::OAuthAccessToken,
         },
     )
     .await?;
     let access_token = session_result.token;
-    let expires_in = state.config().session_hours * 3600;
+    let expires_in = session_result.expires_in;
 
     // Generate ID token (with at_hash computed from the access token)
     let id_token = generate_id_token(
@@ -738,6 +740,12 @@ pub async fn validate_session_token(
         Some(s) => s,
         None => return Ok(None),
     };
+
+    // M2M tokens (client_credentials grant) are not valid at user-facing endpoints.
+    // Reject them explicitly rather than relying on get_user_by_id returning None.
+    if session.session_type == db::SessionPurpose::M2MAccessToken {
+        return Ok(None);
+    }
 
     // Get user from the sub claim
     let user = match db::get_user_by_id(&state.store, decoded.sub())

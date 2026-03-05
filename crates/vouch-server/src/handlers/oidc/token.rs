@@ -9,6 +9,7 @@ use crate::AppState;
 use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::{
     ScopeSet,
+    client_credentials::exchange_client_credentials,
     exchange::{TokenExchangeParams, exchange_token},
     jwt_bearer::{client_auth::authenticate_client_jwt, grant::exchange_jwt_bearer_grant},
     token::{AuthCodeExchangeParams, exchange_authorization_code, validate_dpop_if_present},
@@ -35,6 +36,8 @@ const FIDO2_ASSERTION_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:fido2
 pub enum OAuthGrantType {
     /// Standard OAuth 2.0 authorization code grant.
     AuthorizationCode,
+    /// Client credentials grant (RFC 6749 Section 4.4).
+    ClientCredentials,
     /// Device authorization grant (RFC 8628).
     DeviceCode,
     /// Token exchange grant (RFC 8693).
@@ -51,6 +54,7 @@ impl std::str::FromStr for OAuthGrantType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "authorization_code" => Ok(Self::AuthorizationCode),
+            "client_credentials" => Ok(Self::ClientCredentials),
             "urn:ietf:params:oauth:grant-type:device_code" => Ok(Self::DeviceCode),
             "urn:ietf:params:oauth:grant-type:token-exchange" => Ok(Self::TokenExchange),
             JWT_BEARER_GRANT_TYPE => Ok(Self::JwtBearer),
@@ -289,7 +293,7 @@ pub async fn token(
             Json(OAuthErrorResponse {
                 error: "unsupported_grant_type".to_string(),
                 error_description: Some(
-                    format!("Supported grant types: authorization_code, urn:ietf:params:oauth:grant-type:device_code, urn:ietf:params:oauth:grant-type:token-exchange, {JWT_BEARER_GRANT_TYPE}, {FIDO2_ASSERTION_GRANT_TYPE}"),
+                    format!("Supported grant types: authorization_code, client_credentials, urn:ietf:params:oauth:grant-type:device_code, urn:ietf:params:oauth:grant-type:token-exchange, {JWT_BEARER_GRANT_TYPE}, {FIDO2_ASSERTION_GRANT_TYPE}"),
                 ),
                 error_uri: None,
             }),
@@ -300,6 +304,9 @@ pub async fn token(
     match grant_type {
         OAuthGrantType::AuthorizationCode => {
             handle_authorization_code_grant(State(state), headers, params).await
+        }
+        OAuthGrantType::ClientCredentials => {
+            handle_client_credentials_grant(State(state), headers, params).await
         }
         OAuthGrantType::DeviceCode => handle_device_code_grant(State(state), params).await,
         OAuthGrantType::TokenExchange => {
@@ -422,6 +429,94 @@ async fn handle_authorization_code_grant(
             email: None,
         })
         .into_response(),
+        Err(e) => e.into_oauth_response().into_response(),
+    }
+}
+
+/// Handle client credentials grant (RFC 6749 Section 4.4).
+///
+/// Requires client authentication via `client_secret_basic` or `client_secret_post`.
+/// Issues an access token with `hardware_verified: false` and no ID token.
+async fn handle_client_credentials_grant(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    params: TokenRequest,
+) -> Response {
+    // RFC 6749 Section 4.4.2: Client authentication is REQUIRED
+    let client_auth = match extract_client_auth(&headers, &params) {
+        Ok(auth) => auth,
+        Err(resp) => return resp,
+    };
+
+    let Some((authenticated_client, _client_id)) =
+        (match authenticate_client_any(&state, client_auth).await {
+            Ok(result) => result,
+            Err(resp) => return resp,
+        })
+    else {
+        return ServiceError::oauth(
+            OAuthErrorCode::InvalidClient,
+            "Client authentication required for client_credentials grant",
+        )
+        .into_oauth_response()
+        .into_response();
+    };
+
+    // RFC 6749 Section 4.4: client_credentials requires a confidential client
+    if authenticated_client.is_public {
+        return ServiceError::oauth(
+            OAuthErrorCode::UnauthorizedClient,
+            "Public clients are not allowed to use client_credentials grant",
+        )
+        .into_oauth_response()
+        .into_response();
+    }
+
+    // Extract client info for audit logging
+    let client_info = crate::handlers::extractors::ClientInfo::from_headers(&headers);
+
+    match exchange_client_credentials(
+        &state,
+        &authenticated_client.client,
+        params.scope.as_deref(),
+    )
+    .await
+    {
+        Ok(result) => {
+            // Record audit event
+            if let Err(e) = crate::db::record_oauth_event(
+                &state.audit,
+                &authenticated_client.client.id,
+                crate::db::OAuthEventType::TokenIssued,
+                None,
+                client_info.client_ip.as_deref(),
+                client_info.user_agent.as_deref(),
+                Some("grant_type=client_credentials"),
+            )
+            .await
+            {
+                tracing::warn!("Failed to record OAuth event: {e}");
+            }
+
+            // RFC 6749 Section 5.1: Cache-Control and Pragma headers
+            (
+                StatusCode::OK,
+                [
+                    ("cache-control", "no-cache, no-store, must-revalidate"),
+                    ("pragma", "no-cache"),
+                    ("expires", "0"),
+                ],
+                Json(TokenResponse {
+                    access_token: result.access_token,
+                    token_type: result.token_type,
+                    expires_in: result.expires_in,
+                    id_token: None,
+                    scope: result.scope,
+                    email: None,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => e.into_oauth_response().into_response(),
     }
 }
@@ -631,7 +726,11 @@ async fn handle_fido2_assertion_grant(
     {
         Ok(result) => (
             StatusCode::OK,
-            [("cache-control", "no-store"), ("pragma", "no-cache")],
+            [
+                ("cache-control", "no-cache, no-store, must-revalidate"),
+                ("pragma", "no-cache"),
+                ("expires", "0"),
+            ],
             Json(TokenResponse {
                 access_token: result.access_token,
                 token_type: result.token_type,
@@ -763,8 +862,14 @@ mod tests {
     }
 
     #[test]
-    fn test_oauth_grant_type_from_str_rejects_unknown() {
+    fn test_oauth_grant_type_from_str_client_credentials() {
         let result: Result<OAuthGrantType, _> = "client_credentials".parse();
+        assert_eq!(result, Ok(OAuthGrantType::ClientCredentials));
+    }
+
+    #[test]
+    fn test_oauth_grant_type_from_str_rejects_unknown() {
+        let result: Result<OAuthGrantType, _> = "password".parse();
         assert!(result.is_err());
 
         let result2: Result<OAuthGrantType, _> = "".parse();
