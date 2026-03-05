@@ -559,6 +559,8 @@ pub async fn create_test_session(
             auth_time: Some(jiff::Timestamp::now().as_second()),
             amr: None,
             acr: None,
+            hardware_verified: true,
+            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
         },
     )
     .await
@@ -596,6 +598,8 @@ pub async fn create_test_session_with_iat(
             auth_time: Some(iat),
             amr: None,
             acr: None,
+            hardware_verified: true,
+            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
         },
     )
     .await
@@ -633,6 +637,8 @@ pub async fn create_test_session_for_client(
             auth_time: Some(jiff::Timestamp::now().as_second()),
             amr: None,
             acr: None,
+            hardware_verified: true,
+            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
         },
     )
     .await
@@ -670,6 +676,8 @@ pub async fn create_test_session_with_dpop(
             auth_time: Some(jiff::Timestamp::now().as_second()),
             amr: None,
             acr: None,
+            hardware_verified: true,
+            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
         },
     )
     .await

@@ -258,6 +258,8 @@ pub async fn device_token(
                     auth_time: Some(now_secs),
                     amr: Some(AuthMethod::all_fido2().to_vec()),
                     acr: Some(ACR_AAL3.to_string()),
+                    hardware_verified: true,
+                    session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
                 },
             )
             .await
@@ -269,7 +271,7 @@ pub async fn device_token(
             })?;
 
             let token = session_result.token;
-            let expires_in = state.config().session_hours * 3600;
+            let expires_in = session_result.expires_in;
 
             tracing::info!(
                 "Device authorization complete for: {}",

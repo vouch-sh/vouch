@@ -187,11 +187,11 @@ pub async fn exchange_jwt_bearer_grant(
             auth_time: None,
             amr: None,
             acr: None,
+            hardware_verified: true,
+            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
         },
     )
     .await?;
-
-    let expires_in = config.session_hours * 3600;
 
     tracing::info!(
         "Issued JWT bearer grant token for user {} via issuer {}",
@@ -202,7 +202,7 @@ pub async fn exchange_jwt_bearer_grant(
     Ok(JwtBearerGrantResult {
         access_token: session_result.token.expose_secret().to_string(),
         token_type: "Bearer".to_string(),
-        expires_in,
+        expires_in: session_result.expires_in,
         scope,
     })
 }

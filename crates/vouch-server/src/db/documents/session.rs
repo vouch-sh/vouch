@@ -11,6 +11,9 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 pub enum SessionPurpose {
     #[serde(rename = "oauth_access_token")]
     OAuthAccessToken,
+    /// Machine-to-machine access token issued via `client_credentials` grant.
+    #[serde(rename = "m2m_access_token")]
+    M2MAccessToken,
 }
 
 /// An authenticated session (DPoP-bound access token).

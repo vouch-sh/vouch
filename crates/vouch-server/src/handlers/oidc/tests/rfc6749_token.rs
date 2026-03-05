@@ -92,13 +92,28 @@ async fn test_rfc6749_unsupported_grant_type() {
     // RFC 6749 Section 5.2: Unsupported grant_type returns specific error.
     let (app, _state) = test_app().await;
 
-    let (status, body) =
-        http_post_form(&app, "/oauth/token", "grant_type=client_credentials", &[]).await;
+    let (status, body) = http_post_form(&app, "/oauth/token", "grant_type=password", &[]).await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
     assert_eq!(
         error["error"], "unsupported_grant_type",
         "Unknown grant type must return unsupported_grant_type"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc6749_client_credentials_requires_auth() {
+    // RFC 6749 Section 4.4.2: Client authentication is REQUIRED.
+    let (app, _state) = test_app().await;
+
+    let (status, body) =
+        http_post_form(&app, "/oauth/token", "grant_type=client_credentials", &[]).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        error["error"], "invalid_client",
+        "Unauthenticated client_credentials must return invalid_client"
     );
 }

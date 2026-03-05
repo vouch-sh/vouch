@@ -577,6 +577,8 @@ pub async fn browser_login_complete(
             auth_time: Some(auth_now.as_second()),
             amr: Some(AuthMethod::all_fido2().to_vec()),
             acr: Some(ACR_AAL3.to_string()),
+            hardware_verified: true,
+            session_purpose: db::SessionPurpose::OAuthAccessToken,
         },
     )
     .await
