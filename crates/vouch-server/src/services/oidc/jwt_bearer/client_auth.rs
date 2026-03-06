@@ -134,6 +134,15 @@ pub async fn authenticate_client_jwt(
         ClientAuthError::InvalidCredentials
     })?;
 
+    // 7b. FAPI 2.0: jti is REQUIRED for replay prevention
+    if client.is_fapi() && validated.claims.jti.is_none() {
+        tracing::warn!(
+            "FAPI 2.0 client {} submitted JWT assertion without jti",
+            client.client_id
+        );
+        return Err(ClientAuthError::InvalidCredentials);
+    }
+
     // 8. Check JTI for replay (RFC 7523 Section 3)
     //    Atomic insert with UNIQUE(jti, client_id) prevents TOCTOU races.
     if let Some(ref jti) = validated.claims.jti {

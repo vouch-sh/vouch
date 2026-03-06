@@ -197,6 +197,9 @@ pub struct AccessTokenClaims {
     pub exp: i64,
     /// RFC 9068 Section 2.2: REQUIRED. Issued at time (Unix timestamp).
     pub iat: i64,
+    /// RFC 8725 §3.4: Not before time (set to iat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nbf: Option<i64>,
     /// RFC 9068 Section 2.2: REQUIRED. Unique token identifier.
     pub jti: String,
     /// RFC 9068 Section 2.2: REQUIRED. OAuth client that requested this token.
@@ -319,6 +322,7 @@ pub async fn create_oauth_access_token(
         aud,
         exp: expires.as_second(),
         iat: now.as_second(),
+        nbf: Some(now.as_second()),
         jti,
         client_id: params.client_id.to_string(),
         scope: params.scope.clone(),
@@ -480,6 +484,7 @@ mod tests {
             aud: "client-abc".to_string(),
             exp: 9_999_999_999,
             iat: 1_000_000_000,
+            nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
             scope: None,
@@ -518,6 +523,7 @@ mod tests {
             aud: "client-abc".to_string(),
             exp: 1, // Expired in 1970
             iat: 0,
+            nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
             scope: None,
@@ -603,6 +609,7 @@ mod tests {
             aud: "client-abc".to_string(),
             exp: 9_999_999_999,
             iat: 1_000_000_000,
+            nbf: None,
             jti: "jti-1".to_string(),
             client_id: "client-abc".to_string(),
             scope: None,

@@ -91,6 +91,9 @@ pub struct OidcDiscoveryDocument {
     pub request_object_signing_alg_values_supported: Option<Vec<String>>,
     /// RFC 9101: Whether all authorization requests must use signed Request Objects.
     pub require_signed_request_object: bool,
+    /// RFC 9396 §11.3: Supported authorization detail types.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_details_types_supported: Option<Vec<String>>,
     /// OAuth 2.0 Mutual TLS Client Authentication — not supported.
     ///
     /// Explicitly advertised as `false` so FAPI 2.0 conformance tools know we do
@@ -196,6 +199,8 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "EdDSA".to_string(),
         ]),
         require_signed_request_object: false,
+        // RFC 9396 §11.3: Server accepts any authorization detail type (opaque)
+        authorization_details_types_supported: None,
         // We use DPoP (not mTLS) for sender-constrained tokens.
         tls_client_certificate_bound_access_tokens: false,
     }

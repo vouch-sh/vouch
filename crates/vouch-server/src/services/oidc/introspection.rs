@@ -50,6 +50,9 @@ pub struct IntrospectionResult {
     /// RFC 9396: Rich authorization details.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authorization_details: Option<serde_json::Value>,
+    /// RFC 9449 §7: DPoP confirmation claim for sender-constrained tokens.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cnf: Option<crate::services::oidc::dpop::CnfClaim>,
 }
 
 impl IntrospectionResult {
@@ -71,6 +74,7 @@ impl IntrospectionResult {
             aud: None,
             iss: None,
             authorization_details: None,
+            cnf: None,
         }
     }
 }
@@ -146,19 +150,24 @@ pub async fn introspect_token(
         None => None,
     };
 
+    // RFC 9449 §7: DPoP-bound tokens report token_type "DPoP" and include cnf
+    let is_dpop = claims.cnf.is_some();
+    let token_type = if is_dpop { "DPoP" } else { "Bearer" };
+
     // RFC 9068 access token — populate client_id from the JWT
     Ok(IntrospectionResult {
         active: true,
         scope: claims.scope.clone(),
         client_id: Some(claims.client_id.clone()),
         username: claims.email.clone(),
-        token_type: Some("Bearer".to_string()),
+        token_type: Some(token_type.to_string()),
         exp: Some(claims.exp),
         iat: Some(claims.iat),
         sub: Some(claims.sub.clone()),
         aud: Some(claims.aud.clone()),
         iss: Some(claims.iss.clone()),
         authorization_details,
+        cnf: claims.cnf.clone(),
     })
 }
 

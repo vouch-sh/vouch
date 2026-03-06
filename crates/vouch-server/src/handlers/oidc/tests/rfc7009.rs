@@ -57,15 +57,14 @@ async fn test_revoke_valid_token() {
 }
 
 #[tokio::test]
-async fn test_revoke_invalid_token_returns_ok() {
-    // RFC 7009 Section 2.1: Invalid token should also return 200 (security best practice)
+async fn test_revoke_without_client_auth_returns_401() {
+    // RFC 7009 §2.1: Revocation without client credentials returns 401.
     let (app, _state) = test_app().await;
 
     let (status, _body) =
         http_post_form(&app, "/oauth/revoke", "token=completely_invalid_token", &[]).await;
 
-    // Per RFC 7009, always return 200 to prevent token oracle attacks
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 }
 
 #[tokio::test]
@@ -336,13 +335,11 @@ async fn test_rfc7009_revocation_client_auth_required() {
 
     let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
 
-    // Revoke WITHOUT client credentials
+    // Revoke WITHOUT client credentials — RFC 7009 §2.1 requires 401
     let (status, _) =
         http_post_form(&app, "/oauth/revoke", &format!("token={access_token}"), &[]).await;
 
-    // Per RFC 7009, revoke endpoint always returns 200 to prevent oracle attacks,
-    // but the revocation should NOT actually happen without auth.
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
 
     // Verify token is still active via introspection
     let auth_header = client.basic_auth_header();

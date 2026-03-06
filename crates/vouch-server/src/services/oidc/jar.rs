@@ -318,6 +318,28 @@ pub async fn validate_request_object(
         }
     }
 
+    // 7b. FAPI 2.0: iss, aud, and exp are REQUIRED for FAPI clients
+    if client.is_fapi() {
+        if claims.iss.is_none() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequestObject,
+                "FAPI 2.0: Request Object must contain 'iss' claim",
+            ));
+        }
+        if claims.aud.is_none() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequestObject,
+                "FAPI 2.0: Request Object must contain 'aud' claim",
+            ));
+        }
+        if claims.exp.is_none() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequestObject,
+                "FAPI 2.0: Request Object must contain 'exp' claim",
+            ));
+        }
+    }
+
     // 8. Nesting prevention — reject if request or request_uri in payload
     if claims.request.is_some() {
         return Err(ServiceError::oauth(
