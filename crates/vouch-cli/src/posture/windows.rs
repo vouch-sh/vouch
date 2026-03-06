@@ -14,6 +14,8 @@ pub fn detect(posture: &mut DevicePosture) {
     detect_secure_boot(posture);
     detect_os_auto_update(posture);
     detect_uptime(posture);
+    detect_edr(posture);
+    detect_mdm(posture);
 }
 
 /// Detect Windows version from PowerShell / registry.
@@ -173,6 +175,84 @@ fn detect_uptime(posture: &mut DevicePosture) {
             posture.uptime_secs = Some(secs as u64);
         }
     }
+}
+
+/// Detect endpoint detection & response (EDR) agents on Windows.
+///
+/// Checks for known EDR services via `sc query`. No elevation required
+/// to query service existence.
+fn detect_edr(posture: &mut DevicePosture) {
+    // CrowdStrike Falcon — Windows service
+    if is_service_running("CSFalconService") {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("CrowdStrike".to_string());
+        return;
+    }
+
+    // SentinelOne — Windows service
+    if is_service_running("SentinelAgent") {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("SentinelOne".to_string());
+        return;
+    }
+
+    // Carbon Black — Windows service
+    if is_service_running("CbDefenseService") || is_service_running("CbDefense") {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("Carbon Black".to_string());
+        return;
+    }
+
+    // Microsoft Defender for Endpoint — check if Sense (EDR component) is running
+    // Note: basic Windows Defender (antivirus) is always present on Win 10+;
+    // we specifically check for the EDR service "Sense" (MDE).
+    if is_service_running("Sense") {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("Microsoft Defender".to_string());
+        return;
+    }
+
+    // Trellix (formerly McAfee)
+    if is_service_running("mfemms") || is_service_running("McAfeeFramework") {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("Trellix".to_string());
+        return;
+    }
+
+    // 1Password Device Trust (Kolide)
+    if is_service_running("launcher.kolide-k2") {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("1Password Device Trust".to_string());
+        return;
+    }
+
+    posture.edr_detected = Some(false);
+}
+
+/// Detect mobile device management (MDM) on Windows.
+fn detect_mdm(posture: &mut DevicePosture) {
+    // Microsoft Intune — MDM enrollment
+    if is_service_running("IntuneManagementExtension") {
+        posture.mdm_detected = Some(true);
+        posture.mdm_technology = Some("Intune".to_string());
+        return;
+    }
+
+    // Workspace ONE (VMware / Omnissa)
+    if is_service_running("AirWatchService") {
+        posture.mdm_detected = Some(true);
+        posture.mdm_technology = Some("Workspace ONE".to_string());
+        return;
+    }
+
+    posture.mdm_detected = Some(false);
+}
+
+/// Check if a Windows service is in RUNNING state via `sc query`.
+fn is_service_running(service: &str) -> bool {
+    run_command("sc", &["query", service])
+        .as_deref()
+        .is_some_and(|s| s.contains("RUNNING"))
 }
 
 /// Run a command and capture stdout. Returns `None` on any failure.

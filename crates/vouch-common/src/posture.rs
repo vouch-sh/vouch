@@ -124,6 +124,27 @@ pub struct DevicePosture {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_control_technology: Option<String>,
 
+    // ── Endpoint security (EDR) ────────────────────────────────────
+
+    /// Whether an endpoint detection & response agent is running.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edr_detected: Option<bool>,
+
+    /// EDR product name (e.g., "crowdstrike", "sentinelone", "carbon_black",
+    /// "microsoft_defender", "trellix").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub edr_technology: Option<String>,
+
+    // ── Mobile device management (MDM) ──────────────────────────────
+
+    /// Whether an MDM agent is installed on this device.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mdm_detected: Option<bool>,
+
+    /// MDM product name (e.g., "jamf", "kandji", "workspace_one", "intune").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mdm_technology: Option<String>,
+
     // ── SSH session ─────────────────────────────────────────────────
 
     /// Whether the CLI is running inside an SSH session.
@@ -203,6 +224,8 @@ impl DevicePosture {
         lower(&mut self.tpm_version);
         lower(&mut self.auto_update_technology);
         lower(&mut self.access_control_technology);
+        lower(&mut self.edr_technology);
+        lower(&mut self.mdm_technology);
         lower(&mut self.ssh_client_ip);
         lower(&mut self.parent_process);
         // cli_version and collected_at are not lowercased — they're metadata
@@ -266,6 +289,10 @@ mod tests {
             uptime_secs: Some(86400),
             access_control_enforcing: Some(true),
             access_control_technology: Some("SELinux".to_string()),
+            edr_detected: Some(true),
+            edr_technology: Some("CrowdStrike".to_string()),
+            mdm_detected: Some(true),
+            mdm_technology: Some("Jamf".to_string()),
             ..Default::default()
         };
 
@@ -276,6 +303,10 @@ mod tests {
         assert!(deserialized.auto_update_enabled.unwrap());
         assert_eq!(deserialized.uptime_secs, Some(86400));
         assert!(deserialized.access_control_enforcing.unwrap());
+        assert!(deserialized.edr_detected.unwrap());
+        assert_eq!(deserialized.edr_technology.as_deref(), Some("CrowdStrike"));
+        assert!(deserialized.mdm_detected.unwrap());
+        assert_eq!(deserialized.mdm_technology.as_deref(), Some("Jamf"));
     }
 
     #[test]
@@ -310,6 +341,8 @@ mod tests {
             access_control_technology: Some("SELinux".to_string()),
             auto_update_technology: Some("SoftwareUpdate".to_string()),
             parent_process: Some("Bash".to_string()),
+            edr_technology: Some("CrowdStrike".to_string()),
+            mdm_technology: Some("Jamf".to_string()),
             cli_version: Some("1.0.0".to_string()),
             ..Default::default()
         };
@@ -324,6 +357,8 @@ mod tests {
         assert_eq!(posture.access_control_technology.as_deref(), Some("selinux"));
         assert_eq!(posture.auto_update_technology.as_deref(), Some("softwareupdate"));
         assert_eq!(posture.parent_process.as_deref(), Some("bash"));
+        assert_eq!(posture.edr_technology.as_deref(), Some("crowdstrike"));
+        assert_eq!(posture.mdm_technology.as_deref(), Some("jamf"));
         // cli_version is NOT lowercased (metadata)
         assert_eq!(posture.cli_version.as_deref(), Some("1.0.0"));
     }

@@ -15,6 +15,8 @@ pub fn detect(posture: &mut DevicePosture) {
     detect_os_auto_update(posture);
     detect_uptime(posture);
     detect_gatekeeper(posture);
+    detect_edr(posture);
+    detect_mdm(posture);
 }
 
 /// Detect macOS version using `sw_vers`.
@@ -159,6 +161,102 @@ fn detect_gatekeeper(posture: &mut DevicePosture) {
         posture.access_control_enforcing = Some(output.contains("assessments enabled"));
         posture.access_control_technology = Some("Gatekeeper".to_string());
     }
+}
+
+/// Detect endpoint detection & response (EDR) agents on macOS.
+///
+/// Checks for known EDR agent install directories and binaries.
+/// No elevation required.
+fn detect_edr(posture: &mut DevicePosture) {
+    // CrowdStrike Falcon — install directory and falconctl binary
+    if std::path::Path::new("/Library/CS").exists()
+        || std::path::Path::new("/Applications/Falcon.app").exists()
+    {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("CrowdStrike".to_string());
+        return;
+    }
+
+    // SentinelOne — install directory
+    if std::path::Path::new("/Library/Sentinel").exists()
+        || std::path::Path::new("/Applications/SentinelOne").exists()
+    {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("SentinelOne".to_string());
+        return;
+    }
+
+    // Carbon Black (VMware) — install directory
+    if std::path::Path::new("/Applications/VMware Carbon Black Cloud").exists()
+        || std::path::Path::new("/Library/Application Support/com.vmware.carbonblack.cloud")
+            .exists()
+    {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("Carbon Black".to_string());
+        return;
+    }
+
+    // Microsoft Defender for Endpoint
+    if std::path::Path::new("/Applications/Microsoft Defender.app").exists()
+        || std::path::Path::new("/Library/Application Support/Microsoft/Defender").exists()
+    {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("Microsoft Defender".to_string());
+        return;
+    }
+
+    // 1Password Device Trust (Kolide)
+    if std::path::Path::new("/usr/local/kolide-k2/bin/launcher").exists() {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("1Password Device Trust".to_string());
+        return;
+    }
+
+    posture.edr_detected = Some(false);
+}
+
+/// Detect mobile device management (MDM) agents on macOS.
+///
+/// Checks for known MDM agent install directories. No elevation required.
+fn detect_mdm(posture: &mut DevicePosture) {
+    // Jamf Pro
+    if std::path::Path::new("/usr/local/jamf/bin/jamf").exists() {
+        posture.mdm_detected = Some(true);
+        posture.mdm_technology = Some("Jamf".to_string());
+        return;
+    }
+
+    // Kandji
+    if std::path::Path::new("/Library/Kandji").exists() {
+        posture.mdm_detected = Some(true);
+        posture.mdm_technology = Some("Kandji".to_string());
+        return;
+    }
+
+    // Workspace ONE (VMware / Omnissa)
+    if std::path::Path::new("/Library/Application Support/AirWatch").exists()
+        || std::path::Path::new("/Applications/Workspace ONE Intelligent Hub.app").exists()
+    {
+        posture.mdm_detected = Some(true);
+        posture.mdm_technology = Some("Workspace ONE".to_string());
+        return;
+    }
+
+    // Mosyle
+    if std::path::Path::new("/Library/Application Support/Mosyle").exists() {
+        posture.mdm_detected = Some(true);
+        posture.mdm_technology = Some("Mosyle".to_string());
+        return;
+    }
+
+    // Fleetsmith (Apple Business Essentials)
+    if std::path::Path::new("/Library/Fleetsmith").exists() {
+        posture.mdm_detected = Some(true);
+        posture.mdm_technology = Some("Fleetsmith".to_string());
+        return;
+    }
+
+    posture.mdm_detected = Some(false);
 }
 
 /// Run a command and capture stdout. Returns `None` on any failure.

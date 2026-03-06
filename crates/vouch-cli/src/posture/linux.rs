@@ -15,6 +15,7 @@ pub fn detect(posture: &mut DevicePosture) {
     detect_os_auto_update(posture);
     detect_uptime(posture);
     detect_access_control(posture);
+    detect_edr(posture);
 }
 
 /// Detect Linux distribution and version from `/etc/os-release`.
@@ -226,6 +227,76 @@ fn detect_access_control(posture: &mut DevicePosture) {
         posture.access_control_enforcing = Some(val.trim() == "Y");
         posture.access_control_technology = Some("AppArmor".to_string());
     }
+}
+
+/// Detect endpoint detection & response (EDR) agents on Linux.
+///
+/// Checks for known EDR agent processes by looking for their install paths
+/// and systemd service status. No root required.
+fn detect_edr(posture: &mut DevicePosture) {
+    // CrowdStrike Falcon — check for install directory and service
+    if std::path::Path::new("/opt/CrowdStrike").exists()
+        || is_service_active("falcon-sensor")
+    {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("CrowdStrike".to_string());
+        return;
+    }
+
+    // SentinelOne — check for install directory and service
+    if std::path::Path::new("/opt/sentinelone").exists()
+        || is_service_active("sentineld")
+    {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("SentinelOne".to_string());
+        return;
+    }
+
+    // Carbon Black (VMware) — check for install directory and service
+    if std::path::Path::new("/opt/carbonblack").exists()
+        || std::path::Path::new("/var/opt/carbonblack").exists()
+        || is_service_active("cbagentd")
+    {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("Carbon Black".to_string());
+        return;
+    }
+
+    // Microsoft Defender for Endpoint — check for install directory and service
+    if std::path::Path::new("/opt/microsoft/mdatp").exists()
+        || is_service_active("mdatp")
+    {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("Microsoft Defender".to_string());
+        return;
+    }
+
+    // Trellix (formerly McAfee) — check for install directory
+    if std::path::Path::new("/opt/McAfee").exists()
+        || std::path::Path::new("/opt/trellix").exists()
+    {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("Trellix".to_string());
+        return;
+    }
+
+    // 1Password Device Trust (Kolide) — check for agent binary
+    if std::path::Path::new("/usr/local/kolide-k2/bin/launcher").exists()
+        || is_service_active("launcher.kolide-k2")
+    {
+        posture.edr_detected = Some(true);
+        posture.edr_technology = Some("1Password Device Trust".to_string());
+        return;
+    }
+
+    posture.edr_detected = Some(false);
+}
+
+/// Check if a systemd service is active.
+fn is_service_active(service: &str) -> bool {
+    run_command("systemctl", &["is-active", service])
+        .as_deref()
+        .is_some_and(|s| s.trim() == "active")
 }
 
 /// Run a command and capture stdout. Returns `None` on any failure.
