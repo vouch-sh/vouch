@@ -4,6 +4,7 @@
 //! Implements:
 //! - OpenID Connect Discovery 1.0 Section 4
 //! - RFC 7517 JSON Web Key (JWK) format
+//! - RFC 9396 OAuth 2.0 Rich Authorization Requests (authorization_details supported)
 
 use crate::AppState;
 use crate::services::ServiceError;

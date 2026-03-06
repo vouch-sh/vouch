@@ -74,6 +74,9 @@ pub struct AuthorizeQuery {
     /// RFC 9101: JWT-Secured Authorization Request (Request Object).
     #[serde(default)]
     request: Option<String>,
+    /// RFC 9396: Rich authorization details (JSON string).
+    #[serde(default)]
+    authorization_details: Option<String>,
 }
 
 /// GET /oauth/authorize
@@ -205,6 +208,7 @@ pub async fn authorize(
         acr_values: params.acr_values.clone(),
         max_age: params.max_age,
         prompt: parsed_prompt,
+        authorization_details: params.authorization_details.clone(),
     };
 
     let validated = match validate_authorize_request(request_params) {
@@ -406,6 +410,23 @@ pub async fn authorize(
             // Access granted - issue authorization code.
             // Direct (non-PAR) authorization requests have no DPoP at the
             // browser authorization endpoint; key binding is not applicable.
+            let ad_json = match validated
+                .authorization_details()
+                .map(|ad| ad.to_json_string())
+                .transpose()
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("Failed to serialize authorization_details: {e}");
+                    return oauth_error_redirect(
+                        validated.redirect_uri(),
+                        "server_error",
+                        "Internal error processing authorization_details",
+                        validated.state(),
+                        &state.config().base_url,
+                    );
+                }
+            };
             let code_params = AuthorizationCodeParams {
                 client_id: validated.client_id(),
                 redirect_uri: validated.redirect_uri(),
@@ -421,6 +442,7 @@ pub async fn authorize(
                 acr_values: validated.acr_values(),
                 dpop_jkt: None,
                 auth_code_lifetime_seconds: auth_code_lifetime,
+                authorization_details: ad_json.as_deref(),
             };
 
             issue_code_and_redirect(
@@ -465,6 +487,23 @@ async fn store_pending_and_redirect(
 ) -> Response {
     let scope_str = validated.scope().to_space_separated();
     let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
+    let ad_str = match validated
+        .authorization_details()
+        .map(|ad| ad.to_json_string())
+        .transpose()
+    {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!("Failed to serialize authorization_details: {e}");
+            return oauth_error_redirect(
+                validated.redirect_uri(),
+                "server_error",
+                "Internal error processing authorization_details",
+                validated.state(),
+                &state.config().base_url,
+            );
+        }
+    };
     let pending_params = CreatePendingOAuthParams {
         client_id: validated.client_id(),
         redirect_uri: validated.redirect_uri(),
@@ -479,6 +518,7 @@ async fn store_pending_and_redirect(
         max_age: max_age_i64,
         prompt: validated.prompt().map(|p| p.as_str()),
         dpop_jkt,
+        authorization_details: ad_str.as_deref(),
     };
 
     match db::create_pending_oauth_authorization(&state.store, pending_params).await {
@@ -601,6 +641,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                 acr_values: pending.acr_values.as_deref(),
                 dpop_jkt: pending.dpop_jkt.as_deref(),
                 auth_code_lifetime_seconds: auth_code_lifetime,
+                authorization_details: pending.authorization_details.as_deref(),
             };
 
             issue_code_and_redirect(
@@ -821,6 +862,23 @@ async fn handle_jar_request(
 
             // Issue authorization code. JAR flow has no DPoP key binding at
             // the browser authorization endpoint.
+            let ad_json = match validated
+                .authorization_details()
+                .map(|ad| ad.to_json_string())
+                .transpose()
+            {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!("Failed to serialize authorization_details: {e}");
+                    return oauth_error_redirect(
+                        validated.redirect_uri(),
+                        "server_error",
+                        "Internal error processing authorization_details",
+                        validated.state(),
+                        &state.config().base_url,
+                    );
+                }
+            };
             let code_params = AuthorizationCodeParams {
                 client_id: validated.client_id(),
                 redirect_uri: validated.redirect_uri(),
@@ -836,6 +894,7 @@ async fn handle_jar_request(
                 acr_values: validated.acr_values(),
                 dpop_jkt: None,
                 auth_code_lifetime_seconds: auth_code_lifetime,
+                authorization_details: ad_json.as_deref(),
             };
 
             issue_code_and_redirect(
@@ -923,6 +982,7 @@ async fn handle_par_request(
         acr_values: par.acr_values.clone(),
         max_age: par.max_age.and_then(|v| u64::try_from(v).ok()),
         prompt: parsed_prompt,
+        authorization_details: par.authorization_details.clone(),
     };
 
     let validated = match validate_authorize_request(request_params) {
@@ -1077,6 +1137,7 @@ async fn handle_par_request(
                 acr_values: validated.acr_values(),
                 dpop_jkt: par.dpop_jkt.as_deref(),
                 auth_code_lifetime_seconds: auth_code_lifetime,
+                authorization_details: par.authorization_details.as_deref(),
             };
 
             issue_code_and_redirect(

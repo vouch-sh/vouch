@@ -21,6 +21,8 @@ pub struct Session {
     pub expires_at: Timestamp,
     pub created_at: Timestamp,
     pub session_type: SessionPurpose,
+    /// RFC 9396: Rich authorization details (JSON string).
+    pub authorization_details: Option<String>,
 }
 
 impl From<Document<SessionDoc>> for Session {
@@ -34,6 +36,7 @@ impl From<Document<SessionDoc>> for Session {
             expires_at: doc.data.expires_at,
             created_at: doc.created_at,
             session_type: doc.data.session_type,
+            authorization_details: doc.data.authorization_details,
         }
     }
 }
@@ -43,6 +46,7 @@ impl From<Document<SessionDoc>> for Session {
 /// `authenticator_id` is optional for OIDC-authenticated users who haven't
 /// registered a security key yet.
 /// `user_email` is denormalized into the session document.
+#[allow(clippy::too_many_arguments)]
 pub async fn create_session(
     store: &DocumentStore,
     user_id: &str,
@@ -51,6 +55,7 @@ pub async fn create_session(
     authenticator_id: Option<&str>,
     expires_at: Timestamp,
     session_type: SessionPurpose,
+    authorization_details: Option<&str>,
 ) -> Result<String> {
     let doc = SessionDoc {
         user_id: user_id.to_string(),
@@ -59,6 +64,7 @@ pub async fn create_session(
         authenticator_id: authenticator_id.map(String::from),
         session_type,
         expires_at,
+        authorization_details: authorization_details.map(String::from),
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)

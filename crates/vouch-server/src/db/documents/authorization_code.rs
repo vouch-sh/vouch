@@ -14,6 +14,9 @@ pub struct AuthorizationCodeDoc {
     pub user_id: String,
     pub expires_at: Timestamp,
     pub consumed_at: Option<Timestamp>,
+    /// RFC 9396: Rich authorization details (JSON string, stored server-side).
+    #[serde(default)]
+    pub authorization_details: Option<String>,
 }
 
 impl DocumentType for AuthorizationCodeDoc {

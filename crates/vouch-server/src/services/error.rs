@@ -144,6 +144,8 @@ pub enum OAuthErrorCode {
     InvalidSoftwareStatement,
     /// RFC 7591 Section 3.2.2: Software statement issuer is not trusted.
     UnapprovedSoftwareStatement,
+    /// RFC 9396 Section 7: The authorization_details parameter is invalid.
+    InvalidAuthorizationDetails,
 }
 
 impl std::fmt::Display for OAuthErrorCode {
@@ -166,7 +168,8 @@ impl OAuthErrorCode {
             | Self::InvalidRedirectUri
             | Self::InvalidClientMetadata
             | Self::InvalidSoftwareStatement
-            | Self::UnapprovedSoftwareStatement => StatusCode::BAD_REQUEST,
+            | Self::UnapprovedSoftwareStatement
+            | Self::InvalidAuthorizationDetails => StatusCode::BAD_REQUEST,
             Self::InvalidClient | Self::UnauthorizedClient => StatusCode::UNAUTHORIZED,
             Self::InsufficientUserAuthentication => StatusCode::UNAUTHORIZED,
             Self::InvalidGrant
@@ -208,6 +211,7 @@ impl OAuthErrorCode {
             Self::InvalidClientMetadata => "invalid_client_metadata",
             Self::InvalidSoftwareStatement => "invalid_software_statement",
             Self::UnapprovedSoftwareStatement => "unapproved_software_statement",
+            Self::InvalidAuthorizationDetails => "invalid_authorization_details",
         }
     }
 }

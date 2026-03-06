@@ -81,6 +81,7 @@ pub async fn exchange_client_credentials(
             acr: None,
             hardware_verified: false,
             session_purpose: SessionPurpose::M2MAccessToken,
+            authorization_details: None,
         },
     )
     .await?;

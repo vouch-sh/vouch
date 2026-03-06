@@ -262,6 +262,8 @@ pub struct CreateOAuthTokenParams<'a> {
     pub hardware_verified: bool,
     /// Session purpose for the database record.
     pub session_purpose: SessionPurpose,
+    /// RFC 9396: Rich authorization details (JSON string, stored in session).
+    pub authorization_details: Option<&'a str>,
 }
 
 /// Result of creating a session token.
@@ -350,6 +352,7 @@ pub async fn create_oauth_access_token(
         params.authenticator_id,
         expires,
         params.session_purpose,
+        params.authorization_details,
     )
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to store session: {e}")))?;

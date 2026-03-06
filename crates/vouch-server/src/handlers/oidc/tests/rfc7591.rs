@@ -1110,6 +1110,7 @@ async fn test_rfc7591_e2e_registered_client_auth_code_flow() {
         dpop_jkt: None,
         auth_code_lifetime_seconds:
             crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+        authorization_details: None,
     };
 
     let code = issue_authorization_code(&state, code_params)

@@ -28,6 +28,9 @@ pub struct SessionDoc {
     pub authenticator_id: Option<String>,
     pub session_type: SessionPurpose,
     pub expires_at: Timestamp,
+    /// RFC 9396: Rich authorization details (JSON string, stored opaquely).
+    #[serde(default)]
+    pub authorization_details: Option<String>,
 }
 
 impl DocumentType for SessionDoc {

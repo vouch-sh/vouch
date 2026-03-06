@@ -47,6 +47,9 @@ pub struct IntrospectionResult {
     /// RFC 7662 Section 2.2: String representing the issuer of the token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iss: Option<String>,
+    /// RFC 9396: Rich authorization details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_details: Option<serde_json::Value>,
 }
 
 impl IntrospectionResult {
@@ -67,6 +70,7 @@ impl IntrospectionResult {
             sub: None,
             aud: None,
             iss: None,
+            authorization_details: None,
         }
     }
 }
@@ -108,16 +112,12 @@ pub async fn introspect_token(
         }
     };
 
-    // Verify session exists in database
+    // Verify session exists in database and retrieve it for authorization_details.
     let token_hash = hash_token(token);
-    let session_exists = matches!(
-        db::get_session_by_token_hash(&state.store, &token_hash).await,
-        Ok(Some(_))
-    );
-
-    if !session_exists {
-        return Ok(IntrospectionResult::inactive());
-    }
+    let session = match db::get_session_by_token_hash(&state.store, &token_hash).await {
+        Ok(Some(s)) => s,
+        _ => return Ok(IntrospectionResult::inactive()),
+    };
 
     let DecodedToken::AccessToken(claims) = decoded;
 
@@ -129,6 +129,22 @@ pub async fn introspect_token(
     {
         return Ok(IntrospectionResult::inactive());
     }
+
+    // RFC 9396: Deserialize authorization_details from session.
+    let authorization_details = match session.authorization_details.as_deref() {
+        Some(ad) => match serde_json::from_str(ad) {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to deserialize authorization_details \
+                     for session {}: {e}",
+                    session.id
+                );
+                None
+            }
+        },
+        None => None,
+    };
 
     // RFC 9068 access token — populate client_id from the JWT
     Ok(IntrospectionResult {
@@ -142,6 +158,7 @@ pub async fn introspect_token(
         sub: Some(claims.sub.clone()),
         aud: Some(claims.aud.clone()),
         iss: Some(claims.iss.clone()),
+        authorization_details,
     })
 }
 

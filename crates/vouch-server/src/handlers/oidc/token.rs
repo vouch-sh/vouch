@@ -80,6 +80,9 @@ pub struct TokenResponse {
     /// User email (included in FIDO2 assertion grant responses).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email: Option<String>,
+    /// RFC 9396: Rich authorization details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_details: Option<serde_json::Value>,
 }
 
 // Custom Debug that redacts tokens to prevent accidental log exposure.
@@ -92,6 +95,7 @@ impl std::fmt::Debug for TokenResponse {
             .field("id_token", &"[REDACTED]")
             .field("scope", &self.scope)
             .field("email", &self.email)
+            .field("authorization_details", &self.authorization_details)
             .finish()
     }
 }
@@ -152,6 +156,9 @@ pub struct TokenRequest {
     /// RFC 7521 Section 4.1: The assertion for JWT bearer grants.
     #[serde(default)]
     pub assertion: Option<String>,
+    /// RFC 9396: Rich authorization details (JSON array).
+    #[serde(default)]
+    pub authorization_details: Option<String>,
 }
 
 // Custom Debug that redacts secrets to prevent accidental log exposure.
@@ -176,6 +183,7 @@ impl std::fmt::Debug for TokenRequest {
             .field("client_assertion", &"[REDACTED]")
             .field("client_assertion_type", &self.client_assertion_type)
             .field("assertion", &"[REDACTED]")
+            .field("authorization_details", &self.authorization_details)
             .finish()
     }
 }
@@ -194,6 +202,9 @@ pub struct TokenExchangeResponse {
     /// RFC 6749 Section 3.3: The scope of the access token.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope: Option<ScopeSet>,
+    /// RFC 9396: Rich authorization details.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authorization_details: Option<serde_json::Value>,
 }
 
 // Custom Debug that redacts access_token to prevent accidental log exposure.
@@ -205,6 +216,7 @@ impl std::fmt::Debug for TokenExchangeResponse {
             .field("token_type", &self.token_type)
             .field("expires_in", &self.expires_in)
             .field("scope", &self.scope)
+            .field("authorization_details", &self.authorization_details)
             .finish()
     }
 }
@@ -283,6 +295,15 @@ pub async fn token(
         return token_error_response(
             "invalid_request",
             &format!("assertion exceeds maximum length of {MAX_ASSERTION_LEN}"),
+        );
+    }
+    // RFC 9396: authorization_details size limit (same as MAX_ASSERTION_LEN = 8192)
+    if let Some(ref v) = params.authorization_details
+        && v.len() > MAX_ASSERTION_LEN
+    {
+        return token_error_response(
+            "invalid_authorization_details",
+            &format!("authorization_details exceeds maximum length of {MAX_ASSERTION_LEN}"),
         );
     }
 
@@ -417,6 +438,7 @@ async fn handle_authorization_code_grant(
         dpop_proof,
         client_id: exchange_client_id,
         resource: params.resource.as_deref(),
+        authorization_details: params.authorization_details.as_deref(),
     };
 
     match exchange_authorization_code(&state, exchange_params).await {
@@ -427,6 +449,7 @@ async fn handle_authorization_code_grant(
             id_token: Some(result.id_token),
             scope: Some(result.scope),
             email: None,
+            authorization_details: result.authorization_details.map(|ad| ad.to_json_value()),
         })
         .into_response(),
         Err(e) => e.into_oauth_response().into_response(),
@@ -513,6 +536,7 @@ async fn handle_client_credentials_grant(
                     id_token: None,
                     scope: result.scope,
                     email: None,
+                    authorization_details: None,
                 }),
             )
                 .into_response()
@@ -610,6 +634,7 @@ async fn handle_token_exchange_grant(
         requested_token_type: params.requested_token_type.as_deref(),
         client_id: &authenticated_client.client.client_id,
         dpop_jkt: dpop_jkt.as_deref(),
+        authorization_details: params.authorization_details.as_deref(),
     };
 
     match exchange_token(&state, exchange_params).await {
@@ -619,6 +644,7 @@ async fn handle_token_exchange_grant(
             token_type: result.token_type,
             expires_in: result.expires_in,
             scope: result.scope,
+            authorization_details: result.authorization_details.map(|ad| ad.to_json_value()),
         })
         .into_response(),
         Err(e) => e.into_oauth_response().into_response(),
@@ -738,6 +764,7 @@ async fn handle_fido2_assertion_grant(
                 id_token: None,
                 scope: result.scope,
                 email: Some(result.email),
+                authorization_details: None,
             }),
         )
             .into_response(),
@@ -769,6 +796,7 @@ async fn handle_jwt_bearer_grant(
             id_token: None,
             scope: result.scope,
             email: None,
+            authorization_details: None,
         })
         .into_response(),
         Err(e) => e.into_oauth_response().into_response(),

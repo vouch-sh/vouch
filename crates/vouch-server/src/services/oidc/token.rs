@@ -7,6 +7,7 @@
 //! - RFC 9449 - DPoP (Demonstrating Proof of Possession)
 
 use super::authorization::CodeChallengeMethod;
+use super::authorization_details::AuthorizationDetails;
 use super::dpop::{self, CnfClaim, DpopError, ValidatedDpopProof};
 use super::scope::{OAuthScope, ScopeSet};
 use crate::AppState;
@@ -44,6 +45,8 @@ pub struct AuthCodeExchangeParams<'a> {
     pub client_id: &'a str,
     /// RFC 8707 Section 2: Target resource indicator (OPTIONAL).
     pub resource: Option<&'a str>,
+    /// RFC 9396 Section 6: Authorization details for downscoping.
+    pub authorization_details: Option<&'a str>,
 }
 
 /// Client credentials for authentication (RFC 6749 Section 2.3).
@@ -74,6 +77,8 @@ pub struct AuthCodeExchangeResult {
     pub id_token: String,
     /// Granted scope.
     pub scope: ScopeSet,
+    /// RFC 9396: Rich authorization details.
+    pub authorization_details: Option<AuthorizationDetails>,
 }
 
 /// Authenticated client information.
@@ -350,6 +355,46 @@ pub async fn exchange_authorization_code(
         }
     }
 
+    // RFC 9396: Retrieve authorization_details from server-side storage.
+    let granted_ad_json = db::get_authorization_code_details(&state.store, &code_hash)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?;
+    let granted_ad = granted_ad_json
+        .as_deref()
+        .map(AuthorizationDetails::parse)
+        .transpose()?;
+
+    // RFC 9396 Section 6: If the token request includes authorization_details,
+    // it MUST be a subset of the granted details (downscoping).
+    let (effective_ad, effective_ad_json_owned);
+    if let Some(requested_raw) = params.authorization_details {
+        let requested_ad = AuthorizationDetails::parse(requested_raw)?;
+        match &granted_ad {
+            Some(granted) => {
+                if !requested_ad.is_subset_of(granted) {
+                    return Err(ServiceError::oauth(
+                        OAuthErrorCode::InvalidAuthorizationDetails,
+                        "Requested authorization_details is not a \
+                         subset of the granted authorization_details",
+                    ));
+                }
+            }
+            None => {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidAuthorizationDetails,
+                    "authorization_details was not granted \
+                     during authorization",
+                ));
+            }
+        }
+        effective_ad_json_owned = Some(requested_ad.to_json_string()?);
+        effective_ad = Some(requested_ad);
+    } else {
+        effective_ad_json_owned = granted_ad_json;
+        effective_ad = granted_ad;
+    }
+    let effective_ad_json = effective_ad_json_owned.as_deref();
+
     // RFC 8707: Resource narrowing — determine the audience for the access token.
     // The resource from the auth code (granted at authorization time) takes precedence.
     let audience = match (auth_code.resource.as_deref(), params.resource) {
@@ -391,6 +436,7 @@ pub async fn exchange_authorization_code(
             acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
             hardware_verified: true,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
+            authorization_details: effective_ad_json,
         },
     )
     .await?;
@@ -460,6 +506,7 @@ pub async fn exchange_authorization_code(
         expires_in,
         id_token,
         scope: auth_code.scope,
+        authorization_details: effective_ad,
     })
 }
 
