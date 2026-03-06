@@ -648,7 +648,10 @@ pub async fn browser_login_complete(
 // ============================================================================
 
 /// Validate Origin header for CSRF protection (RFC 9700).
-fn validate_origin(headers: &HeaderMap, expected_origin: &str) -> Result<(), ServiceError> {
+pub(crate) fn validate_origin(
+    headers: &HeaderMap,
+    expected_origin: &str,
+) -> Result<(), ServiceError> {
     let origin = headers
         .get("Origin")
         .and_then(|h| h.to_str().ok())

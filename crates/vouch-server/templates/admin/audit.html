@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% import "macros/auth.html" as auth_macros %}
+
+{% block title %}Vouch - Audit Log{% endblock %}
+
+{% block header_right %}
+{{ auth_macros::header_auth(auth) }}
+{% endblock %}
+
+{% block content %}
+<div class="flex-1 p-5">
+    <div class="max-w-5xl mx-auto">
+        <div class="mb-6 flex items-center justify-between">
+            <div>
+                <h1 class="text-2xl font-bold text-gray-200 mb-1">Audit Log</h1>
+                <p class="text-gray-400 text-sm">Security events for your organization.</p>
+            </div>
+            <nav class="flex gap-3 text-sm">
+                <a href="/admin" class="text-gray-400 hover:text-gray-200">Members</a>
+                <a href="/admin/audit" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">Audit Log</a>
+            </nav>
+        </div>
+
+        {# Event type filter #}
+        <div class="mb-4 flex items-center gap-2 text-sm">
+            <span class="text-gray-400">Filter:</span>
+            <a href="/admin/audit" class="px-2 py-1 rounded {% if event_type_filter.is_none() %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">All</a>
+            <a href="/admin/audit?event_type=auth_login" class="px-2 py-1 rounded {% if event_type_filter.as_deref() == Some("auth_login") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Logins</a>
+            <a href="/admin/audit?event_type=admin_promote" class="px-2 py-1 rounded {% if event_type_filter.as_deref() == Some("admin_promote") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Promotions</a>
+            <a href="/admin/audit?event_type=admin_demote" class="px-2 py-1 rounded {% if event_type_filter.as_deref() == Some("admin_demote") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Demotions</a>
+            <a href="/admin/audit?event_type=admin_deactivate" class="px-2 py-1 rounded {% if event_type_filter.as_deref() == Some("admin_deactivate") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Deactivations</a>
+            <a href="/admin/audit?event_type=admin_remove_user" class="px-2 py-1 rounded {% if event_type_filter.as_deref() == Some("admin_remove_user") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Removals</a>
+            <a href="/admin/audit?event_type=admin_revoke_credentials" class="px-2 py-1 rounded {% if event_type_filter.as_deref() == Some("admin_revoke_credentials") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Revocations</a>
+        </div>
+
+        <div class="bg-vouch-surface border border-vouch-border rounded-lg overflow-hidden">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="border-b border-vouch-border text-left text-gray-400">
+                        <th class="px-4 py-3 font-medium">Time</th>
+                        <th class="px-4 py-3 font-medium">Event</th>
+                        <th class="px-4 py-3 font-medium">Domain</th>
+                        <th class="px-4 py-3 font-medium">Details</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for event in events %}
+                    <tr class="border-b border-vouch-border last:border-b-0">
+                        <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{{ event.created_at }}</td>
+                        <td class="px-4 py-3">
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
+                                {% if event.event_type.starts_with("admin_") %}bg-purple-900/30 text-purple-400
+                                {% elif event.event_type == "auth_login" %}bg-blue-900/30 text-blue-400
+                                {% elif event.event_type == "scim_operation" %}bg-yellow-900/30 text-yellow-400
+                                {% else %}bg-gray-700 text-gray-400{% endif %}">
+                                {{ event.event_type }}
+                            </span>
+                        </td>
+                        <td class="px-4 py-3 text-gray-400">{{ event.email_domain.as_deref().unwrap_or("-") }}</td>
+                        <td class="px-4 py-3 text-gray-500 text-xs font-mono max-w-xs truncate" title="{{ event.data }}">{{ event.data }}</td>
+                    </tr>
+                    {% endfor %}
+                    {% if events.is_empty() %}
+                    <tr>
+                        <td colspan="4" class="px-4 py-8 text-center text-gray-500">No audit events found.</td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+
+        {% if has_more %}
+        {% if let Some(cursor) = next_cursor %}
+        <div class="mt-4 flex justify-center">
+            <a href="/admin/audit?after={{ cursor }}{% if let Some(et) = event_type_filter %}&event_type={{ et }}{% endif %}" class="px-4 py-2 text-sm rounded bg-vouch-surface border border-vouch-border text-gray-300 hover:bg-gray-700">Older events</a>
+        </div>
+        {% endif %}
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

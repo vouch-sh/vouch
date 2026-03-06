@@ -169,6 +169,56 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Get users in an organization with cursor-based pagination.
+///
+/// Returns up to `limit` users ordered by ID. If `after_id` is `Some`,
+/// only returns users with IDs after the cursor. The boolean indicates
+/// whether more results exist.
+pub async fn get_users_by_org_paginated(
+    store: &DocumentStore,
+    org_id: &str,
+    after_id: Option<&str>,
+    limit: u64,
+) -> Result<(Vec<User>, bool)> {
+    let (docs, has_more) = store
+        .find_paginated::<UserDoc>("org_id", org_id, after_id, limit)
+        .await?;
+    let users = docs.into_iter().map(User::from).collect();
+    Ok((users, has_more))
+}
+
+/// Update a user's org admin status.
+pub async fn update_user_admin_status(
+    store: &DocumentStore,
+    user_id: &str,
+    is_admin: bool,
+) -> Result<bool> {
+    if let Some(doc) = store.get::<UserDoc>(user_id).await? {
+        let mut data = doc.data;
+        data.is_org_admin = is_admin;
+        store.update(user_id, &data).await?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Update a user's active status.
+pub async fn update_user_active_status(
+    store: &DocumentStore,
+    user_id: &str,
+    active: bool,
+) -> Result<bool> {
+    if let Some(doc) = store.get::<UserDoc>(user_id).await? {
+        let mut data = doc.data;
+        data.active = active;
+        store.update(user_id, &data).await?;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Update a user's GitHub identity.
 pub async fn update_user_github_identity(
     store: &DocumentStore,
