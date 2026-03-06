@@ -579,6 +579,7 @@ pub async fn browser_login_complete(
             acr: Some(ACR_AAL3.to_string()),
             hardware_verified: true,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
         },
     )
     .await

@@ -260,6 +260,7 @@ pub async fn device_token(
                     acr: Some(ACR_AAL3.to_string()),
                     hardware_verified: true,
                     session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+                    authorization_details: None,
                 },
             )
             .await

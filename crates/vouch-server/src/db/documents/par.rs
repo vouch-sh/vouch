@@ -30,6 +30,9 @@ pub struct PushedAuthorizationRequestDoc {
     pub dpop_jkt: Option<String>,
     pub expires_at: Timestamp,
     pub consumed_at: Option<Timestamp>,
+    /// RFC 9396: Rich authorization details (JSON string).
+    #[serde(default)]
+    pub authorization_details: Option<String>,
 }
 
 impl DocumentType for PushedAuthorizationRequestDoc {

@@ -621,6 +621,7 @@ pub async fn oidc_callback(
             acr: Some(ACR_AAL3.to_string()),
             hardware_verified: true,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
         },
     )
     .await
@@ -1210,6 +1211,7 @@ pub async fn browser_register_complete(
             acr: Some(ACR_AAL3.to_string()),
             hardware_verified: true,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
         },
     )
     .await

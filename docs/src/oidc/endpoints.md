@@ -8,7 +8,7 @@ This chapter lists the standard OIDC and OAuth 2.0 endpoints exposed by the Vouc
 - `GET /.well-known/oauth-authorization-server` — OAuth Authorization Server Metadata alias (RFC 8414 Section 3)
 - `GET /oauth/jwks` — Public keys for token verification (RFC 7517)
 - `GET /oauth/authorize` — Authorization endpoint
-- `POST /oauth/token` — Token issuance (authorization code, device code, token exchange, JWT bearer, FIDO2 assertion)
+- `POST /oauth/token` — Token issuance (authorization code, device code, token exchange, JWT bearer, FIDO2 assertion); supports `authorization_details` for downscoping (RFC 9396)
 - `POST /oauth/revoke` — Token revocation (RFC 7009)
 - `POST /oauth/introspect` — Token introspection (RFC 7662)
 - `POST /oauth/par` — Pushed Authorization Requests (RFC 9126)

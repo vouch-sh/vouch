@@ -12,6 +12,7 @@ use crate::services::auth::{
     ActorClaim, CreateOAuthTokenParams, MAX_DELEGATION_DEPTH, create_oauth_access_token,
     decode_token,
 };
+use crate::services::oidc::authorization_details::AuthorizationDetails;
 use crate::services::oidc::scope::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::Timestamp;
@@ -49,6 +50,8 @@ pub struct TokenExchangeParams<'a> {
     pub client_id: &'a str,
     /// RFC 9449: DPoP JWK thumbprint for sender-constrained token binding.
     pub dpop_jkt: Option<&'a str>,
+    /// RFC 9396 Section 6: Authorization details for narrowing.
+    pub authorization_details: Option<&'a str>,
 }
 
 /// Result of a token exchange (RFC 8693 Section 2.2).
@@ -64,6 +67,8 @@ pub struct TokenExchangeResult {
     pub expires_in: u64,
     /// RFC 8693 Section 2.2: Granted scope (may be subset of requested).
     pub scope: Option<ScopeSet>,
+    /// RFC 9396: Rich authorization details (inherited from subject token).
+    pub authorization_details: Option<AuthorizationDetails>,
 }
 
 /// Exchange a token for a new token (RFC 8693).
@@ -290,6 +295,41 @@ pub async fn exchange_token(
     // Get authenticator_id from the session record (server-side, not from JWT)
     let authenticator_id = subject_session.authenticator_id.as_deref();
 
+    // RFC 9396: Inherit authorization_details from subject token session.
+    let inherited_ad = subject_session.authorization_details.as_deref();
+    let inherited_ad_parsed = inherited_ad.map(AuthorizationDetails::parse).transpose()?;
+
+    // RFC 9396 Section 6: If the exchange request includes
+    // authorization_details, it must be a subset of the inherited set.
+    let (effective_ad, effective_ad_json);
+    if let Some(requested_raw) = params.authorization_details {
+        let requested_ad = AuthorizationDetails::parse(requested_raw)?;
+        match &inherited_ad_parsed {
+            Some(inherited) => {
+                if !requested_ad.is_subset_of(inherited) {
+                    return Err(ServiceError::oauth(
+                        OAuthErrorCode::InvalidAuthorizationDetails,
+                        "Requested authorization_details is not a \
+                         subset of the inherited authorization_details",
+                    ));
+                }
+            }
+            None => {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidAuthorizationDetails,
+                    "No authorization_details to narrow — \
+                     subject token has none",
+                ));
+            }
+        }
+        let json = requested_ad.to_json_string()?;
+        effective_ad = Some(requested_ad);
+        effective_ad_json = Some(json);
+    } else {
+        effective_ad = inherited_ad_parsed;
+        effective_ad_json = inherited_ad.map(String::from);
+    }
+
     // Generate the exchanged token as an RFC 9068 access token (ES256)
     let session_result = create_oauth_access_token(
         state,
@@ -310,6 +350,7 @@ pub async fn exchange_token(
             acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
             hardware_verified: true,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: effective_ad_json.as_deref(),
         },
     )
     .await?;
@@ -360,6 +401,7 @@ pub async fn exchange_token(
         token_type: token_type.to_string(),
         expires_in,
         scope: granted_scope,
+        authorization_details: effective_ad,
     })
 }
 

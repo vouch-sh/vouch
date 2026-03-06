@@ -189,6 +189,7 @@ pub async fn exchange_jwt_bearer_grant(
             acr: None,
             hardware_verified: true,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
         },
     )
     .await?;

@@ -280,6 +280,7 @@ async fn test_rfc7523_private_key_jwt_client_auth_full_flow() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
         },
     )
     .await
@@ -344,6 +345,7 @@ async fn test_rfc7523_private_key_jwt_jti_replay_rejected() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
         },
     )
     .await
@@ -422,6 +424,7 @@ async fn test_rfc7523_private_key_jwt_expired_assertion_rejected() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
         },
     )
     .await
@@ -488,6 +491,7 @@ async fn test_rfc7523_private_key_jwt_wrong_audience() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
         },
     )
     .await
@@ -548,6 +552,7 @@ async fn test_rfc7523_private_key_jwt_wrong_key() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
         },
     )
     .await
@@ -600,6 +605,7 @@ async fn test_rfc7523_private_key_jwt_iss_sub_mismatch() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
         },
     )
     .await
@@ -667,6 +673,7 @@ async fn test_rfc7521_mutual_exclusion_secret_and_assertion() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
         },
     )
     .await

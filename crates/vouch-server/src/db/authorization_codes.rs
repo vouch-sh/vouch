@@ -14,6 +14,7 @@ pub async fn store_authorization_code(
     client_id: &str,
     user_id: &str,
     expires_at: Timestamp,
+    authorization_details: Option<&str>,
 ) -> Result<()> {
     let doc = AuthorizationCodeDoc {
         code_hash: code_hash.to_string(),
@@ -21,6 +22,7 @@ pub async fn store_authorization_code(
         user_id: user_id.to_string(),
         expires_at,
         consumed_at: None,
+        authorization_details: authorization_details.map(String::from),
     };
     store.insert(&doc).await?;
     Ok(())
@@ -96,6 +98,20 @@ pub async fn get_consumed_code_owner(
         Some(d) if d.data.consumed_at.is_some() => Ok(Some((d.data.user_id, d.data.client_id))),
         _ => Ok(None),
     }
+}
+
+/// Get the authorization_details for an authorization code (RFC 9396).
+///
+/// Used after consuming the code to retrieve server-side stored
+/// authorization details for the token response.
+pub async fn get_authorization_code_details(
+    store: &DocumentStore,
+    code_hash: &str,
+) -> Result<Option<String>> {
+    let doc = store
+        .find_one::<AuthorizationCodeDoc>("code_hash", code_hash)
+        .await?;
+    Ok(doc.and_then(|d| d.data.authorization_details))
 }
 
 /// Delete expired authorization codes.

@@ -29,6 +29,9 @@ pub struct PendingOAuthAuthDoc {
     pub prompt: Option<String>,
     /// RFC 9449 DPoP key thumbprint.
     pub dpop_jkt: Option<String>,
+    /// RFC 9396: Rich authorization details (JSON string).
+    #[serde(default)]
+    pub authorization_details: Option<String>,
 }
 
 impl DocumentType for PendingOAuthAuthDoc {

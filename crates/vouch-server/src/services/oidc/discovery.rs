@@ -4,6 +4,7 @@
 //! Implements:
 //! - OpenID Connect Discovery 1.0 Section 4
 //! - RFC 7517 JSON Web Key (JWK) format
+//! - RFC 9396 OAuth 2.0 Rich Authorization Requests (authorization_details supported)
 
 use crate::AppState;
 use crate::services::ServiceError;
@@ -142,6 +143,7 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         subject_types_supported: vec!["public".to_string()],
         id_token_signing_alg_values_supported: vec!["ES256".to_string()],
         token_endpoint_auth_methods_supported: vec![
+            "none".to_string(),
             "client_secret_basic".to_string(),
             "client_secret_post".to_string(),
             "private_key_jwt".to_string(),

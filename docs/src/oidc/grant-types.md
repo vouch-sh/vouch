@@ -20,6 +20,19 @@ This chapter describes the OAuth 2.0 grant types, scopes, and client authenticat
 | `email` | `email`, `email_verified` | [OpenID Connect Core §5.4](https://openid.net/specs/openid-connect-core-1_0.html#ScopeClaims) |
 | `hardware` | `hardware_verified`, `hardware_aaguid` | Vouch-specific |
 
+## Rich Authorization Requests (RFC 9396)
+
+In addition to scopes, clients can request fine-grained authorization using the `authorization_details` parameter — a JSON array of typed objects. This parameter is supported on:
+
+- **Authorization endpoint** (`/oauth/authorize`) — include in query parameters
+- **PAR endpoint** (`/oauth/par`) — include in the POST body
+- **Token endpoint** (`/oauth/token`) — include to downscope (must be a subset of granted details)
+- **Token exchange** — inherited from the subject token; can be narrowed
+- **Introspection** (`/oauth/introspect`) — returned when granted
+- **JAR** (Request Objects) — include in the signed JWT
+
+Each entry in the array must be a JSON object with a required `type` string field. Vouch treats authorization details as opaque — no type-specific validation is performed. Clients downscope by omitting entire entries, not by modifying fields within an entry.
+
 ## Client Authentication Methods
 
 | Method | Description | Specification |

@@ -632,6 +632,7 @@ async fn test_rfc9470_acr_values_carried_to_token() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
         },
     )
     .await
@@ -705,6 +706,7 @@ async fn test_rfc9470_unsatisfiable_acr_in_token_exchange_rejected() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
         },
     )
     .await

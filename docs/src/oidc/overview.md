@@ -25,6 +25,7 @@ Vouch is a **fully OIDC-compliant identity provider**, implementing OAuth 2.0 an
 - DPoP (RFC 9449) — Demonstrating Proof of Possession
 - Step Up Authentication Challenge Protocol (RFC 9470) — `acr_values` and `max_age` in authorization requests
 - OAuth 2.0 Security Best Current Practice (RFC 9700) — followed
+- Rich Authorization Requests (RFC 9396) — fine-grained `authorization_details` beyond scopes
 - OAuth 2.0 Dynamic Client Registration (RFC 7591) — programmatic client registration
 
 ## Why OIDC

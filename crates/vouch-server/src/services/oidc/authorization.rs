@@ -140,6 +140,8 @@ pub struct AuthorizationCodeParams<'a> {
     /// FAPI 2.0 clients use 60s; standard clients use 300s.
     /// Use `fapi::auth_code_lifetime_seconds(&client)` to compute the correct value.
     pub auth_code_lifetime_seconds: i64,
+    /// RFC 9396: Rich authorization details (JSON string for server-side storage).
+    pub authorization_details: Option<&'a str>,
 }
 
 /// Authorization request parameters (from query string).
@@ -170,6 +172,8 @@ pub struct AuthorizeRequestParams {
     pub max_age: Option<u64>,
     /// OIDC Core Section 3.1.2.1: Requested prompt behavior.
     pub prompt: Option<Prompt>,
+    /// RFC 9396: Rich authorization details (raw JSON string from request).
+    pub authorization_details: Option<String>,
 }
 
 /// Validated authorization request ready for code issuance.
@@ -193,6 +197,8 @@ pub struct ValidatedAuthRequest {
     max_age: Option<u64>,
     /// OIDC Core: Requested prompt behavior.
     prompt: Option<Prompt>,
+    /// RFC 9396: Validated authorization details.
+    authorization_details: Option<super::authorization_details::AuthorizationDetails>,
 }
 
 impl ValidatedAuthRequest {
@@ -260,6 +266,14 @@ impl ValidatedAuthRequest {
     #[must_use]
     pub fn prompt(&self) -> Option<Prompt> {
         self.prompt
+    }
+
+    /// RFC 9396: Validated authorization details.
+    #[must_use]
+    pub fn authorization_details(
+        &self,
+    ) -> Option<&super::authorization_details::AuthorizationDetails> {
+        self.authorization_details.as_ref()
     }
 }
 
@@ -481,6 +495,15 @@ pub fn validate_authorize_request(
         ));
     };
 
+    // RFC 9396: Parse and validate authorization_details if present
+    let parsed_authorization_details = if let Some(ref raw) = params.authorization_details {
+        Some(super::authorization_details::AuthorizationDetails::parse(
+            raw,
+        )?)
+    } else {
+        None
+    };
+
     let scope = ScopeSet::parse(&params.scope.unwrap_or_else(|| "openid".to_string()));
 
     // RFC 8707 Section 2: Validate resource parameter if present
@@ -506,6 +529,7 @@ pub fn validate_authorize_request(
         acr_values: params.acr_values,
         max_age: params.max_age,
         prompt: params.prompt,
+        authorization_details: parsed_authorization_details,
     })
 }
 
@@ -615,6 +639,7 @@ pub async fn issue_authorization_code(
         params.client_id,
         params.user_id,
         expires_at,
+        params.authorization_details,
     )
     .await
     {
@@ -928,6 +953,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -952,6 +978,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -979,6 +1006,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1000,6 +1028,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1024,6 +1053,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1052,6 +1082,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1169,6 +1200,7 @@ mod tests {
             acr_values: Some("urn:nist:authentication:assurance-level:aal3".to_string()),
             max_age: None,
             prompt: None,
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1195,6 +1227,7 @@ mod tests {
             acr_values: None,
             max_age: Some(300),
             prompt: None,
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1218,6 +1251,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: Some(Prompt::Login),
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1241,6 +1275,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: Some(Prompt::Silent),
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1264,6 +1299,7 @@ mod tests {
             acr_values: Some("a".repeat(513)),
             max_age: None,
             prompt: None,
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1316,6 +1352,7 @@ mod tests {
             acr_values: Some("aal3\", injected=\"bad".to_string()),
             max_age: None,
             prompt: None,
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1344,6 +1381,7 @@ mod tests {
             acr_values: Some("aal3\rnewline".to_string()),
             max_age: None,
             prompt: None,
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1365,6 +1403,7 @@ mod tests {
             acr_values: None,
             max_age: Some(31_536_001), // 1 year + 1 second
             prompt: None,
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);
@@ -1393,6 +1432,7 @@ mod tests {
             acr_values: None,
             max_age: Some(31_536_000),
             prompt: None,
+            authorization_details: None,
         };
 
         let result = validate_authorize_request(params);

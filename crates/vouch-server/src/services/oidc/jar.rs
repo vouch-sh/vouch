@@ -77,6 +77,9 @@ struct RequestObjectClaims {
     max_age: Option<u64>,
     #[serde(default)]
     prompt: Option<String>,
+    /// RFC 9396: Rich authorization details.
+    #[serde(default)]
+    authorization_details: Option<serde_json::Value>,
 
     // Nesting prevention — must NOT be present
     #[serde(default)]
@@ -385,7 +388,22 @@ pub async fn validate_request_object(
         None => None,
     };
 
-    // 12. Build the authorization request parameters
+    // 12. RFC 9396: Parse authorization_details from Request Object if present
+    let authorization_details_str = if let Some(ref ad_value) = claims.authorization_details {
+        let raw = serde_json::to_string(ad_value).map_err(|e| {
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidRequestObject,
+                format!("Invalid authorization_details in Request Object: {e}"),
+            )
+        })?;
+        // Validate via AuthorizationDetails::parse to enforce constraints
+        super::authorization_details::AuthorizationDetails::parse(&raw)?;
+        Some(raw)
+    } else {
+        None
+    };
+
+    // 13. Build the authorization request parameters
     Ok(AuthorizeRequestParams {
         response_type,
         client_id: claims.client_id.unwrap_or_else(|| client.client_id.clone()),
@@ -399,6 +417,7 @@ pub async fn validate_request_object(
         acr_values: claims.acr_values,
         max_age: claims.max_age,
         prompt: parsed_prompt,
+        authorization_details: authorization_details_str,
     })
 }
 

@@ -561,6 +561,7 @@ pub async fn create_test_session(
             acr: None,
             hardware_verified: true,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
         },
     )
     .await
@@ -600,6 +601,7 @@ pub async fn create_test_session_with_iat(
             acr: None,
             hardware_verified: true,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
         },
     )
     .await
@@ -639,6 +641,7 @@ pub async fn create_test_session_for_client(
             acr: None,
             hardware_verified: true,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
         },
     )
     .await
@@ -678,6 +681,7 @@ pub async fn create_test_session_with_dpop(
             acr: None,
             hardware_verified: true,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
         },
     )
     .await

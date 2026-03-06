@@ -1023,6 +1023,7 @@ async fn test_rfc9449_dpop_nonce_required_token_endpoint_returns_nonce_header() 
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
         },
     )
     .await
@@ -1103,6 +1104,7 @@ async fn test_rfc9449_dpop_nonce_required_retry_with_nonce_succeeds() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
+            authorization_details: None,
         },
     )
     .await
