@@ -1,25 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Cross-platform posture detection.
 
+use std::process::Command;
+
 use vouch_common::posture::DevicePosture;
 
-/// Detect SSH session and execution context, setting flat fields directly.
+/// Detect execution context, setting flat fields directly.
 pub fn detect(posture: &mut DevicePosture) {
-    // SSH session
-    let ssh_connection = std::env::var("SSH_CONNECTION").ok();
-    let ssh_client = std::env::var("SSH_CLIENT").ok();
-    let ssh_tty = std::env::var("SSH_TTY").ok();
-
-    let detected = ssh_connection.is_some() || ssh_client.is_some() || ssh_tty.is_some();
-    posture.ssh_session_detected = Some(detected);
-
-    // SSH_CONNECTION format: "client_ip client_port server_ip server_port"
-    posture.ssh_client_ip = ssh_connection
-        .as_deref()
-        .and_then(|s| s.split_whitespace().next())
-        .map(String::from);
-
-    // Execution context
     posture.elevated = Some(detect_elevated());
     posture.tty = Some(std::io::IsTerminal::is_terminal(&std::io::stdin()));
     posture.parent_process = detect_parent_process();
@@ -40,21 +27,30 @@ fn detect_elevated() -> bool {
     false
 }
 
+/// Extract PPID from `/proc/self/stat` content.
+///
+/// Format: `pid (comm) state ppid ...`
+/// The comm field may contain spaces and parens, so we find the last `)`.
+#[cfg(target_os = "linux")]
+fn parse_ppid_from_proc_stat(stat: &str) -> Option<String> {
+    let after_comm = stat.rfind(')')?;
+    let rest = stat.get(after_comm + 2..)?;
+    let mut fields = rest.split_whitespace();
+    let _state = fields.next()?;
+    let ppid = fields.next()?;
+    Some(ppid.to_string())
+}
+
 /// Get the name of the parent process.
 #[cfg(target_os = "linux")]
 fn detect_parent_process() -> Option<String> {
-    let ppid = std::env::var("PPID").ok().or_else(|| {
-        // Read /proc/self/stat to get ppid (field 4)
-        let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
-        // Format: pid (comm) state ppid ...
-        // Find closing paren, then skip state, get ppid
-        let after_comm = stat.rfind(')')?;
-        let rest = stat.get(after_comm + 2..)?;
-        let mut fields = rest.split_whitespace();
-        let _state = fields.next()?;
-        let ppid = fields.next()?;
-        Some(ppid.to_string())
-    })?;
+    let ppid = std::env::var("PPID")
+        .ok()
+        .filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_digit()))
+        .or_else(|| {
+            let stat = std::fs::read_to_string("/proc/self/stat").ok()?;
+            parse_ppid_from_proc_stat(&stat)
+        })?;
 
     // Read /proc/{ppid}/comm
     let comm_path = format!("/proc/{ppid}/comm");
@@ -79,7 +75,10 @@ fn detect_parent_process() -> Option<String> {
 
     let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
     // ps may return full path; extract basename
-    name.rsplit('/').next().map(String::from).filter(|s| !s.is_empty())
+    name.rsplit('/')
+        .next()
+        .map(String::from)
+        .filter(|s| !s.is_empty())
 }
 
 #[cfg(target_os = "windows")]
@@ -90,4 +89,59 @@ fn detect_parent_process() -> Option<String> {
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn detect_parent_process() -> Option<String> {
     None
+}
+
+/// Run a command and capture stdout. Returns `None` on any failure.
+pub fn run_command(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    use super::parse_ppid_from_proc_stat;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_ppid_from_proc_stat_normal() {
+        let stat = "1234 (bash) S 1111 1234 1234 0 -1 4194304";
+        assert_eq!(parse_ppid_from_proc_stat(stat).as_deref(), Some("1111"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_ppid_from_proc_stat_comm_with_spaces() {
+        // comm can contain spaces and parens
+        let stat = "5678 (Web Content (pid 42)) S 9999 5678 5678 0 -1 0";
+        assert_eq!(parse_ppid_from_proc_stat(stat).as_deref(), Some("9999"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_ppid_from_proc_stat_empty() {
+        assert_eq!(parse_ppid_from_proc_stat(""), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_parse_ppid_from_proc_stat_no_closing_paren() {
+        assert_eq!(parse_ppid_from_proc_stat("1234 (bash"), None);
+    }
 }

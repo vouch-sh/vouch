@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! macOS-specific device posture detection.
 
-use std::process::Command;
-
 use vouch_common::posture::DevicePosture;
+
+use super::common::run_command;
 
 /// Run all macOS-specific posture detection and populate the struct.
 pub fn detect(posture: &mut DevicePosture) {
@@ -33,7 +33,12 @@ fn detect_os_version(posture: &mut DevicePosture) {
             posture.os_build = Some(build);
         }
     }
-    posture.os_distribution = Some("macOS".to_string());
+    posture.os_distribution = Some(
+        run_command("sw_vers", &["-productName"])
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "macOS".to_string()),
+    );
 }
 
 /// Detect FileVault status via `fdesetup status`.
@@ -55,17 +60,9 @@ fn detect_screen_lock(posture: &mut DevicePosture) {
         &["read", "com.apple.screensaver", "askForPassword"],
     );
 
-    posture.screen_lock_enabled = Some(
-        ask_output
-            .as_deref()
-            .map(|s| s.trim() == "1")
-            .unwrap_or(false),
-    );
+    posture.screen_lock_enabled = ask_output.as_deref().map(|s| s.trim() == "1");
 
-    let idle_output = run_command(
-        "defaults",
-        &["read", "com.apple.screensaver", "idleTime"],
-    );
+    let idle_output = run_command("defaults", &["read", "com.apple.screensaver", "idleTime"]);
 
     posture.screen_lock_idle_timeout_secs = idle_output
         .as_deref()
@@ -85,22 +82,32 @@ fn detect_firewall(posture: &mut DevicePosture) {
     }
 }
 
-/// Detect Secure Boot on macOS.
+/// Detect Secure Boot, SIP, and TPM/Secure Enclave on macOS.
 ///
-/// Apple Silicon Macs always have Secure Boot. Check SIP status via `csrutil`.
+/// - `secure_boot_enabled`: `Some(true)` for Apple Silicon (always Full
+///   Security). `None` for Intel (requires root to query).
+/// - `sip_enabled`: parsed from `csrutil status`.
+/// - `tpm_present`: true for Apple Silicon (Secure Enclave) or Intel T2
+///   (detected via the T2-only `eficheck` binary).
 fn detect_secure_boot(posture: &mut DevicePosture) {
+    // SIP — separate from Secure Boot
     let sip_output = run_command("csrutil", &["status"]);
-    posture.secure_boot_enabled = Some(
+    posture.sip_enabled = Some(
         sip_output
             .as_deref()
             .map(|s| s.contains("enabled"))
             .unwrap_or(false),
     );
 
-    // Apple Silicon always has Secure Enclave (equivalent to TPM)
     let is_arm = std::env::consts::ARCH == "aarch64";
-    posture.tpm_present = Some(is_arm); // Secure Enclave on Apple Silicon
-    // tpm_version not applicable for Secure Enclave
+
+    // Secure Boot: Apple Silicon always runs Full Security.
+    // Intel requires root (`bputil`), so we report None.
+    posture.secure_boot_enabled = if is_arm { Some(true) } else { None };
+
+    // T2 chip on Intel Macs ships eficheck; Apple Silicon has Secure Enclave
+    let has_t2 = std::path::Path::new("/usr/libexec/firmwarecheckers/eficheck/eficheck").exists();
+    posture.tpm_present = Some(is_arm || has_t2);
 }
 
 /// Detect macOS automatic software update configuration.
@@ -109,15 +116,14 @@ fn detect_secure_boot(posture: &mut DevicePosture) {
 fn detect_os_auto_update(posture: &mut DevicePosture) {
     let output = run_command(
         "defaults",
-        &["read", "/Library/Preferences/com.apple.SoftwareUpdate", "AutomaticCheckEnabled"],
+        &[
+            "read",
+            "/Library/Preferences/com.apple.SoftwareUpdate",
+            "AutomaticCheckEnabled",
+        ],
     );
 
-    posture.auto_update_enabled = Some(
-        output
-            .as_deref()
-            .map(|s| s.trim() == "1")
-            .unwrap_or(false),
-    );
+    posture.auto_update_enabled = Some(output.as_deref().map(|s| s.trim() == "1").unwrap_or(false));
     posture.auto_update_technology = Some("SoftwareUpdate".to_string());
 }
 
@@ -134,12 +140,7 @@ fn read_boot_uptime() -> Option<u64> {
     let output = run_command("sysctl", &["-n", "kern.boottime"])?;
 
     // Parse "{ sec = NNNN, usec = NNNN } ..."
-    let sec_str = output
-        .split("sec = ")
-        .nth(1)?
-        .split(',')
-        .next()?
-        .trim();
+    let sec_str = output.split("sec = ").nth(1)?.split(',').next()?.trim();
 
     let boot_secs: i64 = sec_str.parse().ok()?;
     let now_secs = jiff::Timestamp::now().as_second();
@@ -166,111 +167,74 @@ fn detect_gatekeeper(posture: &mut DevicePosture) {
 /// Detect endpoint detection & response (EDR) agents on macOS.
 ///
 /// Checks for known EDR agent install directories and binaries.
-/// No elevation required.
+/// Reports all detected agents. No elevation required.
 fn detect_edr(posture: &mut DevicePosture) {
-    // CrowdStrike Falcon — install directory and falconctl binary
+    // CrowdStrike Falcon (docs behind auth at falcon.crowdstrike.com)
     if std::path::Path::new("/Library/CS").exists()
         || std::path::Path::new("/Applications/Falcon.app").exists()
     {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("CrowdStrike".to_string());
-        return;
+        posture.edr.push("crowdstrike".to_string());
     }
 
-    // SentinelOne — install directory
+    // SentinelOne
     if std::path::Path::new("/Library/Sentinel").exists()
         || std::path::Path::new("/Applications/SentinelOne").exists()
     {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("SentinelOne".to_string());
-        return;
+        posture.edr.push("sentinelone".to_string());
     }
 
-    // Carbon Black (VMware) — install directory
+    // Carbon Black (Broadcom)
     if std::path::Path::new("/Applications/VMware Carbon Black Cloud").exists()
         || std::path::Path::new("/Library/Application Support/com.vmware.carbonblack.cloud")
             .exists()
     {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("Carbon Black".to_string());
-        return;
+        posture.edr.push("carbon black".to_string());
     }
 
     // Microsoft Defender for Endpoint
+    // https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-endpoint-mac
     if std::path::Path::new("/Applications/Microsoft Defender.app").exists()
         || std::path::Path::new("/Library/Application Support/Microsoft/Defender").exists()
     {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("Microsoft Defender".to_string());
-        return;
+        posture.edr.push("microsoft defender".to_string());
     }
 
     // 1Password Device Trust (Kolide)
+    // https://support.1password.com/device-trust/
     if std::path::Path::new("/usr/local/kolide-k2/bin/launcher").exists() {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("1Password Device Trust".to_string());
-        return;
+        posture.edr.push("1password device trust".to_string());
     }
-
-    posture.edr_detected = Some(false);
 }
 
 /// Detect mobile device management (MDM) agents on macOS.
 ///
-/// Checks for known MDM agent install directories. No elevation required.
+/// Checks for known MDM agent install directories.
+/// Reports all detected agents. No elevation required.
 fn detect_mdm(posture: &mut DevicePosture) {
     // Jamf Pro
     if std::path::Path::new("/usr/local/jamf/bin/jamf").exists() {
-        posture.mdm_detected = Some(true);
-        posture.mdm_technology = Some("Jamf".to_string());
-        return;
+        posture.mdm.push("jamf".to_string());
     }
 
     // Kandji
     if std::path::Path::new("/Library/Kandji").exists() {
-        posture.mdm_detected = Some(true);
-        posture.mdm_technology = Some("Kandji".to_string());
-        return;
+        posture.mdm.push("kandji".to_string());
     }
 
-    // Workspace ONE (VMware / Omnissa)
+    // Workspace ONE (Omnissa, formerly VMware)
     if std::path::Path::new("/Library/Application Support/AirWatch").exists()
         || std::path::Path::new("/Applications/Workspace ONE Intelligent Hub.app").exists()
     {
-        posture.mdm_detected = Some(true);
-        posture.mdm_technology = Some("Workspace ONE".to_string());
-        return;
+        posture.mdm.push("workspace one".to_string());
     }
 
     // Mosyle
     if std::path::Path::new("/Library/Application Support/Mosyle").exists() {
-        posture.mdm_detected = Some(true);
-        posture.mdm_technology = Some("Mosyle".to_string());
-        return;
+        posture.mdm.push("mosyle".to_string());
     }
 
     // Fleetsmith (Apple Business Essentials)
     if std::path::Path::new("/Library/Fleetsmith").exists() {
-        posture.mdm_detected = Some(true);
-        posture.mdm_technology = Some("Fleetsmith".to_string());
-        return;
+        posture.mdm.push("fleetsmith".to_string());
     }
-
-    posture.mdm_detected = Some(false);
-}
-
-/// Run a command and capture stdout. Returns `None` on any failure.
-fn run_command(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program)
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }

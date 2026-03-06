@@ -171,12 +171,36 @@ async fn run_fapi_login(
     let assertion_b64 = URL_SAFE_NO_PAD.encode(&payload_json);
 
     // Step 5: Collect device posture (RFC 9396 authorization_details).
+    // Posture collection runs subprocesses serially; cap total time to avoid
+    // blocking login if any command hangs (e.g. a stalled systemctl call).
     let authorization_details = {
-        let posture = vouch_cli::posture::collect();
-        tracing::debug!("Collected device posture: {:?}", posture);
-        posture
-            .to_authorization_details_json()
-            .ok()
+        let posture_result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::task::spawn_blocking(vouch_cli::posture::collect),
+        )
+        .await;
+        match posture_result {
+            Ok(Ok(posture)) => {
+                tracing::debug!(
+                    os = posture.os.as_deref(),
+                    os_version = posture.os_version.as_deref(),
+                    disk_encrypted = posture.disk_encryption_enabled,
+                    firewall = posture.firewall_enabled,
+                    edr_count = posture.edr.len(),
+                    mdm_count = posture.mdm.len(),
+                    "Collected device posture"
+                );
+                posture.to_authorization_details_json().ok()
+            }
+            Ok(Err(e)) => {
+                tracing::debug!("Posture collection task failed: {e}");
+                None
+            }
+            Err(_) => {
+                tracing::debug!("Posture collection timed out, continuing without posture");
+                None
+            }
+        }
     };
 
     // Step 6: Build client_assertion (private_key_jwt) and DPoP proof.

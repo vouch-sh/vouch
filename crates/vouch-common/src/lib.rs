@@ -7,9 +7,9 @@ pub(crate) mod cookie;
 pub mod encoding;
 pub(crate) mod error;
 pub mod fido2_types;
-pub mod posture;
 pub mod fixtures;
 pub mod http;
+pub mod posture;
 pub(crate) mod url;
 
 #[cfg(test)]

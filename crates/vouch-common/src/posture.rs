@@ -22,14 +22,27 @@ pub const POSTURE_TYPE: &str = "device_posture";
 /// Serialized as a JSON object within an RFC 9396 `authorization_details`
 /// array entry. Every field is `Option<T>` — detection is best-effort and
 /// platform-dependent. All field names are flat and device-agnostic.
+///
+/// # Privacy
+///
+/// # Trust model
+///
+/// All posture data is self-attested by the client. The server cannot
+/// independently verify these claims without MDM attestation or device
+/// certificates. Treat posture data as advisory — useful for policy hints
+/// and audit trails, but not a substitute for server-side enforcement.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DevicePosture {
     /// RFC 9396: the authorization detail type.
     #[serde(rename = "type")]
     pub detail_type: String,
 
-    // ── OS info ──────────────────────────────────────────────────────
+    /// Schema version for forward compatibility.
+    /// Always present so the server can distinguish "old client" from
+    /// "detection failed" when a field is absent.
+    pub posture_version: u32,
 
+    // ── OS info ──────────────────────────────────────────────────────
     /// Operating system identifier (e.g., "macos", "linux", "windows").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub os: Option<String>,
@@ -50,12 +63,7 @@ pub struct DevicePosture {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub arch: Option<String>,
 
-    /// Client hostname.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hostname: Option<String>,
-
     // ── Disk encryption ─────────────────────────────────────────────
-
     /// Whether disk encryption is enabled on the system volume.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_encryption_enabled: Option<bool>,
@@ -65,7 +73,6 @@ pub struct DevicePosture {
     pub disk_encryption_technology: Option<String>,
 
     // ── Screen lock ─────────────────────────────────────────────────
-
     /// Whether screen lock on idle is enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screen_lock_enabled: Option<bool>,
@@ -75,7 +82,6 @@ pub struct DevicePosture {
     pub screen_lock_idle_timeout_secs: Option<u64>,
 
     // ── Firewall ────────────────────────────────────────────────────
-
     /// Whether the firewall is enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub firewall_enabled: Option<bool>,
@@ -85,10 +91,13 @@ pub struct DevicePosture {
     pub firewall_technology: Option<String>,
 
     // ── Secure boot / TPM ───────────────────────────────────────────
-
     /// Whether secure boot is enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secure_boot_enabled: Option<bool>,
+
+    /// Whether System Integrity Protection is enabled (macOS only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sip_enabled: Option<bool>,
 
     /// Whether a TPM (or Secure Enclave) is present.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -99,7 +108,6 @@ pub struct DevicePosture {
     pub tpm_version: Option<String>,
 
     // ── OS auto-update ──────────────────────────────────────────────
-
     /// Whether automatic OS updates are enabled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_update_enabled: Option<bool>,
@@ -109,13 +117,11 @@ pub struct DevicePosture {
     pub auto_update_technology: Option<String>,
 
     // ── System uptime ───────────────────────────────────────────────
-
     /// Seconds since last boot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub uptime_secs: Option<u64>,
 
     // ── Mandatory access control ────────────────────────────────────
-
     /// Whether mandatory access control is enforcing (SELinux, AppArmor, Gatekeeper).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_control_enforcing: Option<bool>,
@@ -125,38 +131,18 @@ pub struct DevicePosture {
     pub access_control_technology: Option<String>,
 
     // ── Endpoint security (EDR) ────────────────────────────────────
-
-    /// Whether an endpoint detection & response agent is running.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub edr_detected: Option<bool>,
-
-    /// EDR product name (e.g., "crowdstrike", "sentinelone", "carbon_black",
-    /// "microsoft_defender", "trellix").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub edr_technology: Option<String>,
+    /// Detected EDR agents, lowercased (e.g., `["crowdstrike", "microsoft defender"]`).
+    /// Empty when no EDR is detected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub edr: Vec<String>,
 
     // ── Mobile device management (MDM) ──────────────────────────────
-
-    /// Whether an MDM agent is installed on this device.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mdm_detected: Option<bool>,
-
-    /// MDM product name (e.g., "jamf", "kandji", "workspace_one", "intune").
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mdm_technology: Option<String>,
-
-    // ── SSH session ─────────────────────────────────────────────────
-
-    /// Whether the CLI is running inside an SSH session.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ssh_session_detected: Option<bool>,
-
-    /// Remote client IP address (from SSH_CONNECTION).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ssh_client_ip: Option<String>,
+    /// Detected MDM agents, lowercased (e.g., `["jamf"]`).
+    /// Empty when no MDM is detected.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mdm: Vec<String>,
 
     // ── Execution context ───────────────────────────────────────────
-
     /// Whether the CLI is running with elevated privileges (root/admin).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub elevated: Option<bool>,
@@ -170,7 +156,6 @@ pub struct DevicePosture {
     pub parent_process: Option<String>,
 
     // ── Meta ────────────────────────────────────────────────────────
-
     /// CLI version that collected this posture.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_version: Option<String>,
@@ -186,6 +171,7 @@ impl DevicePosture {
     pub fn new() -> Self {
         Self {
             detail_type: POSTURE_TYPE.to_string(),
+            posture_version: 1,
             ..Default::default()
         }
     }
@@ -206,6 +192,7 @@ impl DevicePosture {
     ///
     /// Called after collection to normalize platform-specific casing
     /// (e.g., "FileVault" → "filevault", "Ubuntu" → "ubuntu").
+    /// `os_version` is intentionally preserved as-is (e.g., "24H2").
     pub fn normalize(&mut self) {
         fn lower(opt: &mut Option<String>) {
             if let Some(ref mut s) = *opt {
@@ -213,20 +200,24 @@ impl DevicePosture {
             }
         }
 
+        fn lower_vec(vec: &mut [String]) {
+            for s in vec.iter_mut() {
+                *s = s.to_lowercase();
+            }
+        }
+
         lower(&mut self.os);
-        lower(&mut self.os_version);
+        // os_version preserved — versions like "24H2" are case-sensitive identifiers
         lower(&mut self.os_distribution);
         lower(&mut self.os_build);
         lower(&mut self.arch);
-        lower(&mut self.hostname);
         lower(&mut self.disk_encryption_technology);
         lower(&mut self.firewall_technology);
         lower(&mut self.tpm_version);
         lower(&mut self.auto_update_technology);
         lower(&mut self.access_control_technology);
-        lower(&mut self.edr_technology);
-        lower(&mut self.mdm_technology);
-        lower(&mut self.ssh_client_ip);
+        lower_vec(&mut self.edr);
+        lower_vec(&mut self.mdm);
         lower(&mut self.parent_process);
         // cli_version and collected_at are not lowercased — they're metadata
     }
@@ -246,6 +237,7 @@ mod tests {
     fn test_posture_serializes_as_rar_array() {
         let posture = DevicePosture {
             detail_type: POSTURE_TYPE.to_string(),
+            posture_version: 1,
             os: Some("macos".to_string()),
             os_version: Some("15.3.1".to_string()),
             ..Default::default()
@@ -255,16 +247,20 @@ mod tests {
         let parsed: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0]["type"], "device_posture");
+        assert_eq!(parsed[0]["posture_version"], 1);
         assert_eq!(parsed[0]["os"], "macos");
         assert_eq!(parsed[0]["os_version"], "15.3.1");
         // None fields should be absent
         assert!(parsed[0].get("arch").is_none());
+        // posture_version is always present (no skip_serializing_if)
+        assert!(parsed[0].get("posture_version").is_some());
     }
 
     #[test]
-    fn test_posture_default_has_type() {
+    fn test_posture_default_has_type_and_version() {
         let posture = DevicePosture::new();
         assert_eq!(posture.detail_type, "device_posture");
+        assert_eq!(posture.posture_version, 1);
     }
 
     #[test]
@@ -276,8 +272,6 @@ mod tests {
             disk_encryption_technology: Some("LUKS".to_string()),
             firewall_enabled: Some(true),
             firewall_technology: Some("ufw".to_string()),
-            ssh_session_detected: Some(true),
-            ssh_client_ip: Some("192.168.1.100".to_string()),
             elevated: Some(false),
             tty: Some(true),
             parent_process: Some("bash".to_string()),
@@ -289,10 +283,8 @@ mod tests {
             uptime_secs: Some(86400),
             access_control_enforcing: Some(true),
             access_control_technology: Some("SELinux".to_string()),
-            edr_detected: Some(true),
-            edr_technology: Some("CrowdStrike".to_string()),
-            mdm_detected: Some(true),
-            mdm_technology: Some("Jamf".to_string()),
+            edr: vec!["crowdstrike".to_string()],
+            mdm: vec!["jamf".to_string()],
             ..Default::default()
         };
 
@@ -303,10 +295,8 @@ mod tests {
         assert!(deserialized.auto_update_enabled.unwrap());
         assert_eq!(deserialized.uptime_secs, Some(86400));
         assert!(deserialized.access_control_enforcing.unwrap());
-        assert!(deserialized.edr_detected.unwrap());
-        assert_eq!(deserialized.edr_technology.as_deref(), Some("CrowdStrike"));
-        assert!(deserialized.mdm_detected.unwrap());
-        assert_eq!(deserialized.mdm_technology.as_deref(), Some("Jamf"));
+        assert_eq!(deserialized.edr, vec!["crowdstrike"]);
+        assert_eq!(deserialized.mdm, vec!["jamf"]);
     }
 
     #[test]
@@ -334,15 +324,15 @@ mod tests {
         let mut posture = DevicePosture {
             detail_type: POSTURE_TYPE.to_string(),
             os: Some("Linux".to_string()),
+            os_version: Some("24H2".to_string()),
             os_distribution: Some("Ubuntu".to_string()),
-            hostname: Some("MyHost".to_string()),
             disk_encryption_technology: Some("LUKS".to_string()),
             firewall_technology: Some("UFW".to_string()),
             access_control_technology: Some("SELinux".to_string()),
             auto_update_technology: Some("SoftwareUpdate".to_string()),
             parent_process: Some("Bash".to_string()),
-            edr_technology: Some("CrowdStrike".to_string()),
-            mdm_technology: Some("Jamf".to_string()),
+            edr: vec!["CrowdStrike".to_string(), "Microsoft Defender".to_string()],
+            mdm: vec!["JAMF".to_string()],
             cli_version: Some("1.0.0".to_string()),
             ..Default::default()
         };
@@ -350,15 +340,22 @@ mod tests {
         posture.normalize();
 
         assert_eq!(posture.os.as_deref(), Some("linux"));
+        // os_version is NOT lowercased (e.g., "24H2" preserved)
+        assert_eq!(posture.os_version.as_deref(), Some("24H2"));
         assert_eq!(posture.os_distribution.as_deref(), Some("ubuntu"));
-        assert_eq!(posture.hostname.as_deref(), Some("myhost"));
         assert_eq!(posture.disk_encryption_technology.as_deref(), Some("luks"));
         assert_eq!(posture.firewall_technology.as_deref(), Some("ufw"));
-        assert_eq!(posture.access_control_technology.as_deref(), Some("selinux"));
-        assert_eq!(posture.auto_update_technology.as_deref(), Some("softwareupdate"));
+        assert_eq!(
+            posture.access_control_technology.as_deref(),
+            Some("selinux")
+        );
+        assert_eq!(
+            posture.auto_update_technology.as_deref(),
+            Some("softwareupdate")
+        );
         assert_eq!(posture.parent_process.as_deref(), Some("bash"));
-        assert_eq!(posture.edr_technology.as_deref(), Some("crowdstrike"));
-        assert_eq!(posture.mdm_technology.as_deref(), Some("jamf"));
+        assert_eq!(posture.edr, vec!["crowdstrike", "microsoft defender"]);
+        assert_eq!(posture.mdm, vec!["jamf"]); // "JAMF" → "jamf"
         // cli_version is NOT lowercased (metadata)
         assert_eq!(posture.cli_version.as_deref(), Some("1.0.0"));
     }

@@ -33,7 +33,7 @@ pub fn run(format: OutputFormat) -> Result<()> {
 }
 
 fn print_text(p: &vouch_common::posture::DevicePosture) {
-    println!("Device Posture");
+    println!("Device Posture (v{})", p.posture_version);
     println!("{}", "-".repeat(50));
 
     // OS info
@@ -52,10 +52,6 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
     if let Some(ref arch) = p.arch {
         println!("  Architecture:    {arch}");
     }
-    if let Some(ref hostname) = p.hostname {
-        println!("  Hostname:        {hostname}");
-    }
-
     println!();
 
     // Disk encryption
@@ -101,6 +97,10 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
         let status = if enabled { "enabled" } else { "disabled" };
         println!("  Secure boot:     {status}");
     }
+    if let Some(sip) = p.sip_enabled {
+        let status = if sip { "enabled" } else { "disabled" };
+        println!("  SIP:             {status}");
+    }
     if let Some(tpm) = p.tpm_present {
         let status = if tpm { "present" } else { "not detected" };
         if let Some(ref ver) = p.tpm_version {
@@ -132,21 +132,29 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
     // Access control (SELinux/AppArmor/Gatekeeper)
     if let Some(enforcing) = p.access_control_enforcing {
         let tech = p.access_control_technology.as_deref().unwrap_or("unknown");
-        let status = if enforcing { "enforcing" } else { "permissive/disabled" };
+        let status = if enforcing {
+            "enforcing"
+        } else {
+            "permissive/disabled"
+        };
         println!("  Access control:  {tech} ({status})");
     }
 
-    println!();
-
-    // SSH session
-    if let Some(detected) = p.ssh_session_detected {
-        if detected {
-            let client = p.ssh_client_ip.as_deref().unwrap_or("unknown");
-            println!("  SSH session:     yes (from {client})");
-        } else {
-            println!("  SSH session:     no");
-        }
+    // EDR agents
+    if p.edr.is_empty() {
+        println!("  EDR:             not detected");
+    } else {
+        println!("  EDR:             {}", p.edr.join(", "));
     }
+
+    // MDM agents
+    if p.mdm.is_empty() {
+        println!("  MDM:             not detected");
+    } else {
+        println!("  MDM:             {}", p.mdm.join(", "));
+    }
+
+    println!();
 
     // Execution context
     if let Some(elevated) = p.elevated {

@@ -7,10 +7,10 @@
 
 mod common;
 
-#[cfg(target_os = "macos")]
-mod macos;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
@@ -27,7 +27,6 @@ pub fn collect() -> DevicePosture {
     // Cross-platform basics
     posture.os = Some(std::env::consts::OS.to_string());
     posture.arch = Some(std::env::consts::ARCH.to_string());
-    posture.hostname = gethostname::gethostname().to_str().map(String::from);
     posture.cli_version = Some(env!("CARGO_PKG_VERSION").to_string());
     posture.collected_at = Some(jiff::Timestamp::now().to_string());
 

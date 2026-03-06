@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Linux-specific device posture detection.
 
-use std::process::Command;
-
 use vouch_common::posture::DevicePosture;
+
+use super::common::run_command;
 
 /// Run all Linux-specific posture detection and populate the struct.
 pub fn detect(posture: &mut DevicePosture) {
@@ -142,8 +142,8 @@ fn detect_secure_boot(posture: &mut DevicePosture) {
     posture.secure_boot_enabled = detect_secure_boot_status();
 
     // TPM: check /dev/tpm0 or /dev/tpmrm0
-    let tpm_present = std::path::Path::new("/dev/tpm0").exists()
-        || std::path::Path::new("/dev/tpmrm0").exists();
+    let tpm_present =
+        std::path::Path::new("/dev/tpm0").exists() || std::path::Path::new("/dev/tpmrm0").exists();
     posture.tpm_present = Some(tpm_present);
 
     if tpm_present {
@@ -210,7 +210,11 @@ fn read_proc_uptime() -> Option<u64> {
     let content = std::fs::read_to_string("/proc/uptime").ok()?;
     let secs_str = content.split_whitespace().next()?;
     let secs_f64: f64 = secs_str.parse().ok()?;
-    Some(secs_f64 as u64)
+    if secs_f64 >= 0.0 {
+        Some(secs_f64 as u64)
+    } else {
+        None
+    }
 }
 
 /// Detect mandatory access control policy (SELinux or AppArmor).
@@ -232,64 +236,45 @@ fn detect_access_control(posture: &mut DevicePosture) {
 /// Detect endpoint detection & response (EDR) agents on Linux.
 ///
 /// Checks for known EDR agent processes by looking for their install paths
-/// and systemd service status. No root required.
+/// and systemd service status. Reports all detected agents. No root required.
 fn detect_edr(posture: &mut DevicePosture) {
-    // CrowdStrike Falcon — check for install directory and service
-    if std::path::Path::new("/opt/CrowdStrike").exists()
-        || is_service_active("falcon-sensor")
-    {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("CrowdStrike".to_string());
-        return;
+    // CrowdStrike Falcon (docs behind auth at falcon.crowdstrike.com)
+    if std::path::Path::new("/opt/CrowdStrike").exists() || is_service_active("falcon-sensor") {
+        posture.edr.push("crowdstrike".to_string());
     }
 
-    // SentinelOne — check for install directory and service
-    if std::path::Path::new("/opt/sentinelone").exists()
-        || is_service_active("sentineld")
-    {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("SentinelOne".to_string());
-        return;
+    // SentinelOne
+    if std::path::Path::new("/opt/sentinelone").exists() || is_service_active("sentineld") {
+        posture.edr.push("sentinelone".to_string());
     }
 
-    // Carbon Black (VMware) — check for install directory and service
+    // Carbon Black (Broadcom)
     if std::path::Path::new("/opt/carbonblack").exists()
         || std::path::Path::new("/var/opt/carbonblack").exists()
         || is_service_active("cbagentd")
     {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("Carbon Black".to_string());
-        return;
+        posture.edr.push("carbon black".to_string());
     }
 
-    // Microsoft Defender for Endpoint — check for install directory and service
-    if std::path::Path::new("/opt/microsoft/mdatp").exists()
-        || is_service_active("mdatp")
+    // Microsoft Defender for Endpoint
+    // https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-endpoint-linux
+    if std::path::Path::new("/opt/microsoft/mdatp").exists() || is_service_active("mdatp") {
+        posture.edr.push("microsoft defender".to_string());
+    }
+
+    // Trellix (formerly McAfee)
+    if std::path::Path::new("/opt/McAfee").exists() || std::path::Path::new("/opt/trellix").exists()
     {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("Microsoft Defender".to_string());
-        return;
+        posture.edr.push("trellix".to_string());
     }
 
-    // Trellix (formerly McAfee) — check for install directory
-    if std::path::Path::new("/opt/McAfee").exists()
-        || std::path::Path::new("/opt/trellix").exists()
-    {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("Trellix".to_string());
-        return;
-    }
-
-    // 1Password Device Trust (Kolide) — check for agent binary
+    // 1Password Device Trust (Kolide)
+    // https://support.1password.com/device-trust/
     if std::path::Path::new("/usr/local/kolide-k2/bin/launcher").exists()
         || is_service_active("launcher.kolide-k2")
     {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("1Password Device Trust".to_string());
-        return;
+        posture.edr.push("1password device trust".to_string());
     }
-
-    posture.edr_detected = Some(false);
 }
 
 /// Check if a systemd service is active.
@@ -299,26 +284,43 @@ fn is_service_active(service: &str) -> bool {
         .is_some_and(|s| s.trim() == "active")
 }
 
-/// Run a command and capture stdout. Returns `None` on any failure.
-fn run_command(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program)
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
 /// Remove surrounding quotes from a value (e.g., `"Ubuntu"` → `Ubuntu`).
 fn unquote(s: &str) -> String {
-    s.trim()
-        .trim_matches('"')
-        .trim_matches('\'')
-        .to_string()
+    s.trim().trim_matches('"').trim_matches('\'').to_string()
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_unquote_double_quotes() {
+        assert_eq!(unquote("\"Ubuntu\""), "Ubuntu");
+    }
+
+    #[test]
+    fn test_unquote_single_quotes() {
+        assert_eq!(unquote("'22.04'"), "22.04");
+    }
+
+    #[test]
+    fn test_unquote_no_quotes() {
+        assert_eq!(unquote("fedora"), "fedora");
+    }
+
+    #[test]
+    fn test_unquote_whitespace() {
+        assert_eq!(unquote("  \"Ubuntu\"  "), "Ubuntu");
+    }
+
+    #[test]
+    fn test_unquote_empty() {
+        assert_eq!(unquote(""), "");
+    }
 }

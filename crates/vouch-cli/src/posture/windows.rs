@@ -5,6 +5,8 @@ use std::process::Command;
 
 use vouch_common::posture::DevicePosture;
 
+use super::common::run_command;
+
 /// Run all Windows-specific posture detection and populate the struct.
 pub fn detect(posture: &mut DevicePosture) {
     detect_os_version(posture);
@@ -20,9 +22,7 @@ pub fn detect(posture: &mut DevicePosture) {
 
 /// Detect Windows version from PowerShell / registry.
 fn detect_os_version(posture: &mut DevicePosture) {
-    if let Some(output) = run_powershell(
-        "[System.Environment]::OSVersion.Version.ToString()",
-    ) {
+    if let Some(output) = run_powershell("[System.Environment]::OSVersion.Version.ToString()") {
         let version = output.trim().to_string();
         if !version.is_empty() {
             posture.os_version = Some(version);
@@ -77,12 +77,7 @@ fn detect_screen_lock(posture: &mut DevicePosture) {
         "(Get-ItemProperty 'HKCU:\\Control Panel\\Desktop' -ErrorAction SilentlyContinue).ScreenSaverIsSecure",
     );
 
-    posture.screen_lock_enabled = Some(
-        secure_output
-            .as_deref()
-            .map(|s| s.trim() == "1")
-            .unwrap_or(false),
-    );
+    posture.screen_lock_enabled = secure_output.as_deref().map(|s| s.trim() == "1");
 
     let timeout_output = run_powershell(
         "(Get-ItemProperty 'HKCU:\\Control Panel\\Desktop' -ErrorAction SilentlyContinue).ScreenSaveTimeOut",
@@ -95,10 +90,7 @@ fn detect_screen_lock(posture: &mut DevicePosture) {
 
 /// Detect Windows Firewall status via `netsh`.
 fn detect_firewall(posture: &mut DevicePosture) {
-    if let Some(output) = run_command(
-        "netsh",
-        &["advfirewall", "show", "allprofiles", "state"],
-    ) {
+    if let Some(output) = run_command("netsh", &["advfirewall", "show", "allprofiles", "state"]) {
         // Check if any profile has "State ON"
         let enabled = output.lines().any(|line| {
             let lower = line.to_lowercase();
@@ -172,80 +164,65 @@ fn detect_uptime(posture: &mut DevicePosture) {
         "((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds",
     ) {
         if let Ok(secs) = output.trim().parse::<f64>() {
-            posture.uptime_secs = Some(secs as u64);
+            if secs >= 0.0 {
+                posture.uptime_secs = Some(secs as u64);
+            }
         }
     }
 }
 
 /// Detect endpoint detection & response (EDR) agents on Windows.
 ///
-/// Checks for known EDR services via `sc query`. No elevation required
-/// to query service existence.
+/// Checks for known EDR services via `sc query`. Reports all detected
+/// agents. No elevation required to query service existence.
 fn detect_edr(posture: &mut DevicePosture) {
-    // CrowdStrike Falcon — Windows service
+    // CrowdStrike Falcon (docs behind auth at falcon.crowdstrike.com)
     if is_service_running("CSFalconService") {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("CrowdStrike".to_string());
-        return;
+        posture.edr.push("crowdstrike".to_string());
     }
 
-    // SentinelOne — Windows service
+    // SentinelOne
     if is_service_running("SentinelAgent") {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("SentinelOne".to_string());
-        return;
+        posture.edr.push("sentinelone".to_string());
     }
 
-    // Carbon Black — Windows service
+    // Carbon Black (Broadcom)
     if is_service_running("CbDefenseService") || is_service_running("CbDefense") {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("Carbon Black".to_string());
-        return;
+        posture.edr.push("carbon black".to_string());
     }
 
-    // Microsoft Defender for Endpoint — check if Sense (EDR component) is running
-    // Note: basic Windows Defender (antivirus) is always present on Win 10+;
-    // we specifically check for the EDR service "Sense" (MDE).
+    // Microsoft Defender for Endpoint (Sense = EDR component, not basic Defender antivirus)
+    // https://learn.microsoft.com/en-us/defender-endpoint/configure-endpoints-script
     if is_service_running("Sense") {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("Microsoft Defender".to_string());
-        return;
+        posture.edr.push("microsoft defender".to_string());
     }
 
     // Trellix (formerly McAfee)
     if is_service_running("mfemms") || is_service_running("McAfeeFramework") {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("Trellix".to_string());
-        return;
+        posture.edr.push("trellix".to_string());
     }
 
     // 1Password Device Trust (Kolide)
+    // https://support.1password.com/device-trust/
     if is_service_running("launcher.kolide-k2") {
-        posture.edr_detected = Some(true);
-        posture.edr_technology = Some("1Password Device Trust".to_string());
-        return;
+        posture.edr.push("1password device trust".to_string());
     }
-
-    posture.edr_detected = Some(false);
 }
 
 /// Detect mobile device management (MDM) on Windows.
+///
+/// Reports all detected agents.
 fn detect_mdm(posture: &mut DevicePosture) {
-    // Microsoft Intune — MDM enrollment
+    // Microsoft Intune
+    // https://learn.microsoft.com/en-us/mem/intune/apps/intune-management-extension
     if is_service_running("IntuneManagementExtension") {
-        posture.mdm_detected = Some(true);
-        posture.mdm_technology = Some("Intune".to_string());
-        return;
+        posture.mdm.push("intune".to_string());
     }
 
-    // Workspace ONE (VMware / Omnissa)
+    // Workspace ONE (Omnissa, formerly VMware)
     if is_service_running("AirWatchService") {
-        posture.mdm_detected = Some(true);
-        posture.mdm_technology = Some("Workspace ONE".to_string());
-        return;
+        posture.mdm.push("workspace one".to_string());
     }
-
-    posture.mdm_detected = Some(false);
 }
 
 /// Check if a Windows service is in RUNNING state via `sc query`.
@@ -253,22 +230,6 @@ fn is_service_running(service: &str) -> bool {
     run_command("sc", &["query", service])
         .as_deref()
         .is_some_and(|s| s.contains("RUNNING"))
-}
-
-/// Run a command and capture stdout. Returns `None` on any failure.
-fn run_command(program: &str, args: &[&str]) -> Option<String> {
-    let output = Command::new(program)
-        .args(args)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Run a PowerShell command and capture stdout.
