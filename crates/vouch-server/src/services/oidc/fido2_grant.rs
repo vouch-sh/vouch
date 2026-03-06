@@ -21,6 +21,7 @@ use crate::services::auth::{
     create_oauth_access_token, lookup_and_verify_authenticator, verify_login_assertion,
 };
 use crate::services::oidc::amr::{ACR_AAL3, AuthMethod};
+use crate::services::oidc::authorization_details::AuthorizationDetails;
 use crate::services::oidc::dpop::ValidatedDpopProof;
 use crate::services::oidc::scope::ScopeSet;
 use crate::services::oidc::token::AuthenticatedClient;
@@ -73,6 +74,8 @@ pub struct Fido2AssertionParams<'a> {
     pub dpop_proof: Option<ValidatedDpopProof>,
     /// Requested scope.
     pub scope: Option<&'a str>,
+    /// RFC 9396: Raw authorization_details JSON string.
+    pub authorization_details: Option<&'a str>,
 }
 
 /// Result of a successful FIDO2 assertion grant exchange.
@@ -87,6 +90,8 @@ pub struct Fido2AssertionResult {
     pub scope: Option<ScopeSet>,
     /// Authenticated user's email address.
     pub email: String,
+    /// RFC 9396: Validated authorization details (if provided).
+    pub authorization_details: Option<serde_json::Value>,
 }
 
 /// Exchange a FIDO2 assertion for an OAuth access token.
@@ -260,7 +265,18 @@ pub async fn exchange_fido2_assertion(
         }
     });
 
-    // 9. Create OAuth access token
+    // 9. Validate authorization_details if provided (RFC 9396)
+    let validated_ad = params
+        .authorization_details
+        .map(AuthorizationDetails::parse)
+        .transpose()?;
+
+    let ad_json_owned = validated_ad
+        .as_ref()
+        .map(|ad| ad.to_json_string())
+        .transpose()?;
+
+    // 10. Create OAuth access token
     let scope = params
         .scope
         .map(ScopeSet::parse)
@@ -285,7 +301,7 @@ pub async fn exchange_fido2_assertion(
             acr: Some(ACR_AAL3.to_string()),
             hardware_verified: true,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
+            authorization_details: ad_json_owned.as_deref(),
         },
     )
     .await?;
@@ -302,5 +318,6 @@ pub async fn exchange_fido2_assertion(
         expires_in: session_result.expires_in,
         scope: Some(scope),
         email: user.email,
+        authorization_details: validated_ad.map(|ad| ad.to_json_value()),
     })
 }

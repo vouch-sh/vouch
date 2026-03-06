@@ -733,6 +733,7 @@ async fn handle_fido2_assertion_grant(
         },
         dpop_proof,
         scope: params.scope.as_deref(),
+        authorization_details: params.authorization_details.as_deref(),
     };
 
     match crate::services::oidc::fido2_grant::exchange_fido2_assertion(&state, exchange_params)
@@ -745,7 +746,7 @@ async fn handle_fido2_assertion_grant(
             id_token: None,
             scope: result.scope,
             email: Some(result.email),
-            authorization_details: None,
+            authorization_details: result.authorization_details,
         }),
         Err(e) => e.into_oauth_response().into_response(),
     }
