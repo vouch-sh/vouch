@@ -4,7 +4,8 @@
 use std::process::Command;
 
 use vouch_common::posture::{
-    DevicePosture, DiskEncryption, FirewallStatus, ScreenLock, SecureBoot,
+    DevicePosture, DiskEncryption, FirewallStatus, MacPolicy, OsAutoUpdate, ScreenLock, SecureBoot,
+    SystemUptime,
 };
 
 /// Run all Linux-specific posture detection and populate the struct.
@@ -14,6 +15,9 @@ pub fn detect(posture: &mut DevicePosture) {
     posture.screen_lock = detect_screen_lock();
     posture.firewall = detect_firewall();
     posture.secure_boot = detect_secure_boot();
+    posture.os_auto_update = detect_os_auto_update();
+    posture.system_uptime = detect_uptime();
+    posture.mac_policy = detect_mac_policy();
 }
 
 /// Detect Linux distribution and version from `/etc/os-release`.
@@ -195,6 +199,72 @@ fn detect_secure_boot_status() -> Option<bool> {
             }
         }
     }
+    None
+}
+
+/// Detect OS automatic update configuration.
+///
+/// Checks for common auto-update services: `unattended-upgrades` (Debian/Ubuntu),
+/// `dnf-automatic` (Fedora/RHEL).
+fn detect_os_auto_update() -> Option<OsAutoUpdate> {
+    // Debian/Ubuntu: unattended-upgrades
+    if let Some(output) = run_command("systemctl", &["is-active", "unattended-upgrades"])
+        && output.trim() == "active"
+    {
+        return Some(OsAutoUpdate {
+            enabled: true,
+            technology: Some("unattended-upgrades".to_string()),
+        });
+    }
+
+    // Fedora/RHEL: dnf-automatic
+    if let Some(output) = run_command("systemctl", &["is-active", "dnf-automatic.timer"])
+        && output.trim() == "active"
+    {
+        return Some(OsAutoUpdate {
+            enabled: true,
+            technology: Some("dnf-automatic".to_string()),
+        });
+    }
+
+    Some(OsAutoUpdate {
+        enabled: false,
+        technology: None,
+    })
+}
+
+/// Detect system uptime from `/proc/uptime`.
+///
+/// The first field is the total seconds since boot (as a float).
+fn detect_uptime() -> Option<SystemUptime> {
+    let content = std::fs::read_to_string("/proc/uptime").ok()?;
+    let secs_str = content.split_whitespace().next()?;
+    let secs_f64: f64 = secs_str.parse().ok()?;
+    Some(SystemUptime {
+        uptime_secs: secs_f64 as u64,
+    })
+}
+
+/// Detect mandatory access control policy (SELinux or AppArmor).
+fn detect_mac_policy() -> Option<MacPolicy> {
+    // SELinux: check /sys/fs/selinux/enforce
+    if let Ok(val) = std::fs::read_to_string("/sys/fs/selinux/enforce") {
+        let enforcing = val.trim() == "1";
+        return Some(MacPolicy {
+            enforcing: Some(enforcing),
+            technology: Some("SELinux".to_string()),
+        });
+    }
+
+    // AppArmor: check /sys/module/apparmor/parameters/enabled
+    if let Ok(val) = std::fs::read_to_string("/sys/module/apparmor/parameters/enabled") {
+        let enabled = val.trim() == "Y";
+        return Some(MacPolicy {
+            enforcing: Some(enabled),
+            technology: Some("AppArmor".to_string()),
+        });
+    }
+
     None
 }
 

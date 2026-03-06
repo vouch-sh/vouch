@@ -70,6 +70,22 @@ pub struct DevicePosture {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub secure_boot: Option<SecureBoot>,
 
+    /// OS automatic update configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub os_auto_update: Option<OsAutoUpdate>,
+
+    /// System uptime (time since last boot).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_uptime: Option<SystemUptime>,
+
+    /// Mandatory access control policy (SELinux, AppArmor).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mac_policy: Option<MacPolicy>,
+
+    /// Gatekeeper status (macOS only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gatekeeper: Option<Gatekeeper>,
+
     /// CLI version that collected this posture.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cli_version: Option<String>,
@@ -145,6 +161,41 @@ pub struct SecureBoot {
     /// TPM version (e.g., "2.0").
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tpm_version: Option<String>,
+}
+
+/// OS automatic update configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OsAutoUpdate {
+    /// Whether automatic updates are enabled.
+    pub enabled: bool,
+    /// Update technology (e.g., "unattended-upgrades", "SoftwareUpdate", "Windows Update").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub technology: Option<String>,
+}
+
+/// System uptime.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemUptime {
+    /// Seconds since last boot.
+    pub uptime_secs: u64,
+}
+
+/// Mandatory access control policy status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MacPolicy {
+    /// Whether the policy is in enforcing mode.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enforcing: Option<bool>,
+    /// MAC technology (e.g., "SELinux", "AppArmor").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub technology: Option<String>,
+}
+
+/// Gatekeeper status (macOS only).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Gatekeeper {
+    /// Whether Gatekeeper is enabled.
+    pub enabled: bool,
 }
 
 impl DevicePosture {
@@ -232,6 +283,16 @@ mod tests {
                 tpm_present: Some(true),
                 tpm_version: Some("2.0".to_string()),
             }),
+            os_auto_update: Some(OsAutoUpdate {
+                enabled: true,
+                technology: Some("unattended-upgrades".to_string()),
+            }),
+            system_uptime: Some(SystemUptime { uptime_secs: 86400 }),
+            mac_policy: Some(MacPolicy {
+                enforcing: Some(true),
+                technology: Some("SELinux".to_string()),
+            }),
+            gatekeeper: None,
             ..Default::default()
         };
 
@@ -239,5 +300,8 @@ mod tests {
         let deserialized: DevicePosture = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.os.as_deref(), Some("linux"));
         assert!(deserialized.disk_encryption.as_ref().unwrap().enabled);
+        assert!(deserialized.os_auto_update.as_ref().unwrap().enabled);
+        assert_eq!(deserialized.system_uptime.as_ref().unwrap().uptime_secs, 86400);
+        assert!(deserialized.mac_policy.as_ref().unwrap().enforcing.unwrap());
     }
 }

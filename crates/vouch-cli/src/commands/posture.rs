@@ -112,6 +112,42 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
         }
     }
 
+    // OS auto-update
+    if let Some(ref au) = p.os_auto_update {
+        let status = if au.enabled { "enabled" } else { "not detected" };
+        let tech = au.technology.as_deref().unwrap_or("");
+        if tech.is_empty() {
+            println!("  Auto-update:     {status}");
+        } else {
+            println!("  Auto-update:     {status} ({tech})");
+        }
+    }
+
+    // System uptime
+    if let Some(ref up) = p.system_uptime {
+        let days = up.uptime_secs / 86400;
+        let hours = (up.uptime_secs % 86400) / 3600;
+        let mins = (up.uptime_secs % 3600) / 60;
+        println!("  Uptime:          {days}d {hours}h {mins}m");
+    }
+
+    // MAC policy (SELinux/AppArmor)
+    if let Some(ref mac) = p.mac_policy {
+        let tech = mac.technology.as_deref().unwrap_or("unknown");
+        let status = match mac.enforcing {
+            Some(true) => "enforcing",
+            Some(false) => "permissive/loaded",
+            None => "unknown",
+        };
+        println!("  MAC policy:      {tech} ({status})");
+    }
+
+    // Gatekeeper (macOS)
+    if let Some(ref gk) = p.gatekeeper {
+        let status = if gk.enabled { "enabled" } else { "disabled" };
+        println!("  Gatekeeper:      {status}");
+    }
+
     println!();
 
     // SSH session

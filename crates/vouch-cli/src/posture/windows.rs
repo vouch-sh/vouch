@@ -4,7 +4,8 @@
 use std::process::Command;
 
 use vouch_common::posture::{
-    DevicePosture, DiskEncryption, FirewallStatus, ScreenLock, SecureBoot,
+    DevicePosture, DiskEncryption, FirewallStatus, OsAutoUpdate, ScreenLock, SecureBoot,
+    SystemUptime,
 };
 
 /// Run all Windows-specific posture detection and populate the struct.
@@ -14,6 +15,8 @@ pub fn detect(posture: &mut DevicePosture) {
     posture.screen_lock = detect_screen_lock();
     posture.firewall = detect_firewall();
     posture.secure_boot = detect_secure_boot();
+    posture.os_auto_update = detect_os_auto_update();
+    posture.system_uptime = detect_uptime();
 }
 
 /// Detect Windows version from `ver` command or registry.
@@ -154,6 +157,42 @@ fn detect_secure_boot() -> Option<SecureBoot> {
         enabled: secure_boot_enabled,
         tpm_present: Some(tpm_present),
         tpm_version,
+    })
+}
+
+/// Detect Windows Update automatic update configuration.
+///
+/// Reads the `AUOptions` registry value. Values:
+/// - 2: Notify before download
+/// - 3: Auto download, notify install
+/// - 4: Auto download and install
+fn detect_os_auto_update() -> Option<OsAutoUpdate> {
+    let output = run_powershell(
+        "(Get-ItemProperty \
+         'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update' \
+         -ErrorAction SilentlyContinue).AUOptions",
+    );
+
+    let enabled = output
+        .as_deref()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .is_some_and(|v| v >= 3);
+
+    Some(OsAutoUpdate {
+        enabled,
+        technology: Some("Windows Update".to_string()),
+    })
+}
+
+/// Detect system uptime via WMI `LastBootUpTime`.
+fn detect_uptime() -> Option<SystemUptime> {
+    let output = run_powershell(
+        "((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds",
+    )?;
+
+    let secs: f64 = output.trim().parse().ok()?;
+    Some(SystemUptime {
+        uptime_secs: secs as u64,
     })
 }
 

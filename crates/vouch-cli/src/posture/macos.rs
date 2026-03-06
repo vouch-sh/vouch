@@ -4,7 +4,8 @@
 use std::process::Command;
 
 use vouch_common::posture::{
-    DevicePosture, DiskEncryption, FirewallStatus, ScreenLock, SecureBoot,
+    DevicePosture, DiskEncryption, FirewallStatus, Gatekeeper, OsAutoUpdate, ScreenLock,
+    SecureBoot, SystemUptime,
 };
 
 /// Run all macOS-specific posture detection and populate the struct.
@@ -14,6 +15,9 @@ pub fn detect(posture: &mut DevicePosture) {
     posture.screen_lock = detect_screen_lock();
     posture.firewall = detect_firewall();
     posture.secure_boot = detect_secure_boot();
+    posture.os_auto_update = detect_os_auto_update();
+    posture.system_uptime = detect_uptime();
+    posture.gatekeeper = detect_gatekeeper();
 }
 
 /// Detect macOS version using `sw_vers`.
@@ -108,6 +112,62 @@ fn detect_secure_boot() -> Option<SecureBoot> {
         tpm_present: Some(is_arm), // Secure Enclave on Apple Silicon
         tpm_version: None,         // Not applicable for Secure Enclave
     })
+}
+
+/// Detect macOS automatic software update configuration.
+///
+/// Reads `com.apple.SoftwareUpdate AutomaticCheckEnabled` via `defaults`.
+fn detect_os_auto_update() -> Option<OsAutoUpdate> {
+    let output = run_command(
+        "defaults",
+        &["read", "/Library/Preferences/com.apple.SoftwareUpdate", "AutomaticCheckEnabled"],
+    );
+
+    let enabled = output
+        .as_deref()
+        .map(|s| s.trim() == "1")
+        .unwrap_or(false);
+
+    Some(OsAutoUpdate {
+        enabled,
+        technology: Some("SoftwareUpdate".to_string()),
+    })
+}
+
+/// Detect system uptime via `sysctl kern.boottime`.
+///
+/// Output format: `{ sec = 1709123456, usec = 0 } ...`
+fn detect_uptime() -> Option<SystemUptime> {
+    let output = run_command("sysctl", &["-n", "kern.boottime"])?;
+
+    // Parse "{ sec = NNNN, usec = NNNN } ..."
+    let sec_str = output
+        .split("sec = ")
+        .nth(1)?
+        .split(',')
+        .next()?
+        .trim();
+
+    let boot_secs: i64 = sec_str.parse().ok()?;
+    let now_secs = jiff::Timestamp::now().as_second();
+    let uptime = now_secs.saturating_sub(boot_secs);
+
+    if uptime >= 0 {
+        Some(SystemUptime {
+            uptime_secs: uptime as u64,
+        })
+    } else {
+        None
+    }
+}
+
+/// Detect Gatekeeper status via `spctl --status`.
+///
+/// Output: "assessments enabled" or "assessments disabled".
+fn detect_gatekeeper() -> Option<Gatekeeper> {
+    let output = run_command("spctl", &["--status"])?;
+    let enabled = output.contains("assessments enabled");
+    Some(Gatekeeper { enabled })
 }
 
 /// Run a command and capture stdout. Returns `None` on any failure.
