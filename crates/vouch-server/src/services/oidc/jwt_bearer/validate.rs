@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// HS* and "none" are unconditionally rejected to prevent symmetric key
 /// confusion attacks (RFC 7523 Section 3).
-pub const SUPPORTED_ALGORITHMS: &[&str] = &["ES256", "RS256", "PS256"];
+pub const SUPPORTED_ALGORITHMS: &[&str] = &["ES256", "RS256", "PS256", "EdDSA"];
 
 /// Clock skew tolerance in seconds.
 ///
@@ -129,7 +129,7 @@ pub fn parse_assertion_header(assertion: &str) -> ServiceResult<JwtAssertionHead
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             format!(
-                "Unsupported JWT assertion algorithm: {}. Supported: ES256, RS256, PS256",
+                "Unsupported JWT assertion algorithm: {}. Supported: ES256, RS256, PS256, EdDSA",
                 header.alg
             ),
         ));
@@ -275,6 +275,7 @@ pub fn map_algorithm(alg: &str) -> ServiceResult<jsonwebtoken::Algorithm> {
         "ES256" => Ok(jsonwebtoken::Algorithm::ES256),
         "RS256" => Ok(jsonwebtoken::Algorithm::RS256),
         "PS256" => Ok(jsonwebtoken::Algorithm::PS256),
+        "EdDSA" => Ok(jsonwebtoken::Algorithm::EdDSA),
         _ => Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClient,
             format!("Unsupported algorithm: {alg}"),
@@ -314,9 +315,9 @@ mod tests {
     fn test_supported_algorithms() {
         assert!(SUPPORTED_ALGORITHMS.contains(&"ES256"));
         assert!(SUPPORTED_ALGORITHMS.contains(&"RS256"));
+        assert!(SUPPORTED_ALGORITHMS.contains(&"EdDSA"));
         assert!(!SUPPORTED_ALGORITHMS.contains(&"HS256"));
         assert!(!SUPPORTED_ALGORITHMS.contains(&"none"));
-        assert!(!SUPPORTED_ALGORITHMS.contains(&"EdDSA"));
     }
 
     #[test]
@@ -380,10 +381,10 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_assertion_header_rejects_eddsa() {
+    fn test_parse_assertion_header_accepts_eddsa() {
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "EdDSA"}));
-        let result = parse_assertion_header(&jwt);
-        assert!(result.is_err(), "EdDSA must be rejected");
+        let header = parse_assertion_header(&jwt).expect("EdDSA should be accepted");
+        assert_eq!(header.alg, "EdDSA");
     }
 
     #[test]
@@ -849,6 +850,12 @@ mod tests {
     fn test_map_algorithm_rs256() {
         let alg = map_algorithm("RS256").expect("RS256 should be mapped");
         assert_eq!(alg, jsonwebtoken::Algorithm::RS256);
+    }
+
+    #[test]
+    fn test_map_algorithm_eddsa() {
+        let alg = map_algorithm("EdDSA").expect("EdDSA should be mapped");
+        assert_eq!(alg, jsonwebtoken::Algorithm::EdDSA);
     }
 
     #[test]

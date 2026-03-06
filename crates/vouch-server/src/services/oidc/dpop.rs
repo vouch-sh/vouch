@@ -22,14 +22,16 @@ use crate::db::{self, store::DocumentStore};
 const NONCE_VALIDITY_SECONDS: i64 = 300;
 
 /// Supported DPoP signing algorithms (asymmetric only per RFC 9449).
-pub const SUPPORTED_ALGORITHMS: &[&str] = &["ES256", "RS256", "EdDSA"];
+///
+/// RS256 is excluded per FAPI 2.0 Section 5.2.2.
+pub const SUPPORTED_ALGORITHMS: &[&str] = &["ES256", "PS256", "EdDSA"];
 
 /// DPoP JWT header.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DpopHeader {
     /// Type must be "dpop+jwt".
     pub typ: String,
-    /// Algorithm used for signing (ES256, RS256, EdDSA).
+    /// Algorithm used for signing (ES256, PS256, EdDSA).
     pub alg: String,
     /// JSON Web Key (embedded public key).
     pub jwk: DpopJwk,
@@ -271,7 +273,7 @@ fn parse_and_verify_dpop_proof(proof: &str) -> Result<(DpopHeader, DpopClaims), 
     // Map algorithm string to jsonwebtoken Algorithm
     let algorithm = match header.alg.as_str() {
         "ES256" => jsonwebtoken::Algorithm::ES256,
-        "RS256" => jsonwebtoken::Algorithm::RS256,
+        "PS256" => jsonwebtoken::Algorithm::PS256,
         "EdDSA" => jsonwebtoken::Algorithm::EdDSA,
         alg => return Err(DpopError::UnsupportedAlgorithm(alg.to_string())),
     };
@@ -386,10 +388,10 @@ fn build_decoding_key(jwk: &DpopJwk, alg: &str) -> Result<jsonwebtoken::Decoding
             jsonwebtoken::DecodingKey::from_ec_components(&ec.x, &ec.y)
                 .map_err(|e| DpopError::InvalidFormat(format!("Invalid EC key: {e}")))
         }
-        (DpopJwk::Rsa(rsa), "RS256") => {
+        (DpopJwk::Rsa(rsa), "PS256") => {
             if rsa.kty != "RSA" {
                 return Err(DpopError::InvalidFormat(
-                    "RS256 requires RSA key".to_string(),
+                    "PS256 requires RSA key".to_string(),
                 ));
             }
             // jsonwebtoken expects base64url-encoded strings

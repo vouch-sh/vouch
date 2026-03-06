@@ -296,6 +296,7 @@ pub fn find_matching_key(
     let expected_kty = match header.alg.as_str() {
         "ES256" => "EC",
         "RS256" | "PS256" => "RSA",
+        "EdDSA" => "OKP",
         _ => {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClient,
@@ -355,6 +356,27 @@ fn build_decoding_key_from_jwk(
             })?;
             jsonwebtoken::DecodingKey::from_rsa_components(n, e).map_err(|e| {
                 tracing::debug!("Invalid RSA key in JWKS: {e}");
+                ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
+            })
+        }
+        ("OKP", "EdDSA") => {
+            let x = key.x.as_deref().ok_or_else(|| {
+                ServiceError::oauth(OAuthErrorCode::InvalidClient, "OKP key missing x component")
+            })?;
+            let crv = key.crv.as_deref().ok_or_else(|| {
+                ServiceError::oauth(
+                    OAuthErrorCode::InvalidClient,
+                    "OKP key missing crv component",
+                )
+            })?;
+            if crv != "Ed25519" {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClient,
+                    "EdDSA requires OKP key with Ed25519 curve",
+                ));
+            }
+            jsonwebtoken::DecodingKey::from_ed_components(x).map_err(|e| {
+                tracing::debug!("Invalid Ed25519 key in JWKS: {e}");
                 ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid key in JWKS")
             })
         }
@@ -422,6 +444,23 @@ mod tests {
             y: None,
             n: Some(RSA_N.to_string()),
             e: Some(RSA_E.to_string()),
+        }
+    }
+
+    /// Ed25519 public key x-coordinate (base64url, 32 bytes of zeros for testing).
+    const OKP_X: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+    fn okp_jwk_entry(kid: Option<&str>, alg: Option<&str>, use_: Option<&str>) -> JwkEntry {
+        JwkEntry {
+            kty: "OKP".to_string(),
+            kid: kid.map(String::from),
+            alg: alg.map(String::from),
+            use_: use_.map(String::from),
+            crv: Some("Ed25519".to_string()),
+            x: Some(OKP_X.to_string()),
+            y: None,
+            n: None,
+            e: None,
         }
     }
 
@@ -643,7 +682,7 @@ mod tests {
         let jwks = JwkSet {
             keys: vec![ec_jwk_entry(None, None, None)],
         };
-        let hdr = header("EdDSA", None);
+        let hdr = header("ES384", None);
 
         let result = find_matching_key(&jwks, &hdr);
         assert!(result.is_err());
@@ -843,7 +882,7 @@ mod tests {
     #[test]
     fn test_build_decoding_key_unknown_algorithm() {
         let key = ec_jwk_entry(None, None, None);
-        let result = build_decoding_key_from_jwk(&key, "EdDSA");
+        let result = build_decoding_key_from_jwk(&key, "ES384");
         assert!(result.is_err());
     }
 
@@ -919,5 +958,81 @@ mod tests {
             result.is_ok(),
             "PS256 with valid RSA key should produce a decoding key"
         );
+    }
+
+    // ====================================================================
+    // EdDSA / OKP support
+    // ====================================================================
+
+    #[test]
+    fn test_find_matching_key_algorithm_fallback_eddsa() {
+        let jwks = JwkSet {
+            keys: vec![okp_jwk_entry(None, None, None)],
+        };
+        let hdr = header("EdDSA", None);
+
+        let result = find_matching_key(&jwks, &hdr);
+        assert!(
+            result.is_ok(),
+            "should match OKP key by algorithm fallback for EdDSA"
+        );
+    }
+
+    #[test]
+    fn test_build_decoding_key_okp_eddsa_valid() {
+        let key = okp_jwk_entry(None, None, None);
+        let result = build_decoding_key_from_jwk(&key, "EdDSA");
+        assert!(
+            result.is_ok(),
+            "EdDSA with valid OKP key should produce a decoding key"
+        );
+    }
+
+    #[test]
+    fn test_build_decoding_key_okp_missing_x() {
+        let mut key = okp_jwk_entry(None, None, None);
+        key.x = None;
+
+        let result = build_decoding_key_from_jwk(&key, "EdDSA");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ServiceError::OAuth { code, description } => {
+                assert_eq!(code, OAuthErrorCode::InvalidClient);
+                assert_eq!(description, "OKP key missing x component");
+            }
+            other => panic!("Expected OAuth error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_build_decoding_key_okp_missing_crv() {
+        let mut key = okp_jwk_entry(None, None, None);
+        key.crv = None;
+
+        let result = build_decoding_key_from_jwk(&key, "EdDSA");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ServiceError::OAuth { code, description } => {
+                assert_eq!(code, OAuthErrorCode::InvalidClient);
+                assert_eq!(description, "OKP key missing crv component");
+            }
+            other => panic!("Expected OAuth error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_build_decoding_key_okp_wrong_curve() {
+        let mut key = okp_jwk_entry(None, None, None);
+        key.crv = Some("Ed448".to_string());
+
+        let result = build_decoding_key_from_jwk(&key, "EdDSA");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            ServiceError::OAuth { code, description } => {
+                assert_eq!(code, OAuthErrorCode::InvalidClient);
+                assert_eq!(description, "EdDSA requires OKP key with Ed25519 curve");
+            }
+            other => panic!("Expected OAuth error, got: {other:?}"),
+        }
     }
 }
