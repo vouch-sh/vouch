@@ -12,6 +12,7 @@ pub mod init;
 pub mod keys;
 pub mod login;
 pub mod logout;
+pub mod posture;
 pub mod register;
 pub mod setup;
 pub mod status;

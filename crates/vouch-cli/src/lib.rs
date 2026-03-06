@@ -9,6 +9,7 @@ pub(crate) mod utils;
 pub mod fapi;
 pub mod fido2;
 pub mod http;
+pub mod posture;
 
 // Re-export commonly used types
 pub use fido2::{AuthenticationResult, FidoDevice, RegistrationResult, YubiKey};

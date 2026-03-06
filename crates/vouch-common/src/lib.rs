@@ -9,6 +9,7 @@ pub(crate) mod error;
 pub mod fido2_types;
 pub mod fixtures;
 pub mod http;
+pub mod posture;
 pub(crate) mod url;
 
 #[cfg(test)]

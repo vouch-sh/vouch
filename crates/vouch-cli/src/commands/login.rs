@@ -56,13 +56,16 @@ pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
 /// FAPI 2.0 assertion grant request form fields.
 ///
 /// Sent as `application/x-www-form-urlencoded` to `POST /oauth/token`.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 struct Fido2AssertionTokenRequest {
     grant_type: &'static str,
     client_assertion_type: &'static str,
     client_assertion: String,
     assertion: String,
     scope: &'static str,
+    /// RFC 9396: Device posture as authorization_details JSON array.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    authorization_details: Option<String>,
 }
 
 /// JSON payload encoded into the `assertion` form field.
@@ -167,7 +170,40 @@ async fn run_fapi_login(
         serde_json::to_vec(&payload).context("failed to serialize assertion payload")?;
     let assertion_b64 = URL_SAFE_NO_PAD.encode(&payload_json);
 
-    // Step 5: Build client_assertion (private_key_jwt) and DPoP proof.
+    // Step 5: Collect device posture (RFC 9396 authorization_details).
+    // Posture collection runs subprocesses serially; cap total time to avoid
+    // blocking login if any command hangs (e.g. a stalled systemctl call).
+    let authorization_details = {
+        let posture_result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            tokio::task::spawn_blocking(vouch_cli::posture::collect),
+        )
+        .await;
+        match posture_result {
+            Ok(Ok(posture)) => {
+                tracing::debug!(
+                    os = posture.os.as_deref(),
+                    os_version = posture.os_version.as_deref(),
+                    disk_encrypted = posture.disk_encryption_enabled,
+                    firewall = posture.firewall_enabled,
+                    edr_count = posture.edr.len(),
+                    mdm_count = posture.mdm.len(),
+                    "Collected device posture"
+                );
+                posture.to_authorization_details_json().ok()
+            }
+            Ok(Err(e)) => {
+                tracing::debug!("Posture collection task failed: {e}");
+                None
+            }
+            Err(_) => {
+                tracing::debug!("Posture collection timed out, continuing without posture");
+                None
+            }
+        }
+    };
+
+    // Step 6: Build client_assertion (private_key_jwt) and DPoP proof.
     let client_assertion =
         ClientAssertionBuilder::new(&client_id, &token_endpoint_url).build(fapi_key)?;
 
@@ -181,6 +217,7 @@ async fn run_fapi_login(
         client_assertion: client_assertion.assertion,
         assertion: assertion_b64,
         scope: "openid email",
+        authorization_details,
     };
 
     // FIDO2 touch just completed — we have hardware proof of user presence.
@@ -292,6 +329,7 @@ async fn run_fapi_login_with_nonce(
         client_assertion: client_assertion.assertion,
         assertion: request.assertion.clone(),
         scope: request.scope,
+        authorization_details: request.authorization_details.clone(),
     };
 
     // Still within the same FIDO2 session — user presence confirmed by prior touch.
