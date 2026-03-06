@@ -319,6 +319,38 @@ fn build_browser_auth_routes() -> Router<Arc<AppState>> {
         .layer(rate_limit::build_auth_rate_limiter())
 }
 
+/// Rate-limited admin member management routes.
+fn build_admin_routes() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/admin", get(handlers::admin::admin_members_page))
+        .route(
+            "/admin/members/{id}/promote",
+            post(handlers::admin::promote_member),
+        )
+        .route(
+            "/admin/members/{id}/demote",
+            post(handlers::admin::demote_member),
+        )
+        .route(
+            "/admin/members/{id}/deactivate",
+            post(handlers::admin::deactivate_member),
+        )
+        .route(
+            "/admin/members/{id}/activate",
+            post(handlers::admin::activate_member),
+        )
+        .route(
+            "/admin/members/{id}/revoke-credentials",
+            post(handlers::admin::revoke_member_credentials),
+        )
+        .route(
+            "/admin/members/{id}/remove",
+            post(handlers::admin::remove_member),
+        )
+        .route("/admin/audit", get(handlers::admin::admin_audit_page))
+        .layer(rate_limit::build_general_rate_limiter())
+}
+
 /// Build all UI routes with UI CORS.
 fn build_ui_routes(config: &config::ServerConfig) -> Router<Arc<AppState>> {
     Router::new()
@@ -391,33 +423,8 @@ fn build_ui_routes(config: &config::ServerConfig) -> Router<Arc<AppState>> {
             "/applications/{id}/secrets/{secret_id}/delete",
             post(handlers::applications::delete_secret_form),
         )
-        // Admin member management UI
-        .route("/admin", get(handlers::admin::admin_members_page))
-        .route(
-            "/admin/members/{id}/promote",
-            post(handlers::admin::promote_member),
-        )
-        .route(
-            "/admin/members/{id}/demote",
-            post(handlers::admin::demote_member),
-        )
-        .route(
-            "/admin/members/{id}/deactivate",
-            post(handlers::admin::deactivate_member),
-        )
-        .route(
-            "/admin/members/{id}/activate",
-            post(handlers::admin::activate_member),
-        )
-        .route(
-            "/admin/members/{id}/revoke-credentials",
-            post(handlers::admin::revoke_member_credentials),
-        )
-        .route(
-            "/admin/members/{id}/remove",
-            post(handlers::admin::remove_member),
-        )
-        .route("/admin/audit", get(handlers::admin::admin_audit_page))
+        // Admin member management UI (rate-limited)
+        .merge(build_admin_routes())
         // Rate-limited browser WebAuthn routes
         .merge(build_browser_auth_routes())
         // Static file serving for CSS, JS, and assets (embedded in binary via rust-embed)

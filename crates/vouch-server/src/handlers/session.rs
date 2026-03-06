@@ -359,6 +359,14 @@ pub async fn extract_org_admin(
             ServiceError::api(StatusCode::UNAUTHORIZED, "unauthorized", "User not found")
         })?;
 
+    if !user.active {
+        return Err(ServiceError::api(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "User account is deactivated",
+        ));
+    }
+
     if !user.is_org_admin {
         return Err(ServiceError::api(
             StatusCode::FORBIDDEN,
@@ -440,10 +448,10 @@ pub async fn get_resource_auth_context(state: &AppState, jar: &CookieJar) -> Aut
     let user_id = decoded.sub().to_string();
     let user_email = decoded.email().map(String::from);
 
-    // Look up user to check org membership and admin status
+    // Look up user to check active status, org membership, and admin status
     let (has_org, is_org_admin) = match db::get_user_by_id(&state.store, &user_id).await {
-        Ok(Some(user)) => (user.org_id.is_some(), user.is_org_admin),
-        _ => (false, false),
+        Ok(Some(user)) if user.active => (user.org_id.is_some(), user.is_org_admin),
+        _ => return AuthContext::unauthenticated(),
     };
 
     AuthContext {

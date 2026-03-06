@@ -61,7 +61,7 @@
                             <div class="flex items-center justify-end gap-1">
                                 {# Promote/Demote #}
                                 {% if member.is_org_admin %}
-                                <form method="POST" action="/admin/members/{{ member.id }}/demote" onsubmit="return confirm('Demote {{ member.email }} from admin?')">
+                                <form method="POST" action="/admin/members/{{ member.id }}/demote" data-confirm-message="Demote this user from admin?">
                                     <button type="submit" class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600" title="Demote to member">Demote</button>
                                 </form>
                                 {% else %}
@@ -72,7 +72,7 @@
 
                                 {# Activate/Deactivate #}
                                 {% if member.active %}
-                                <form method="POST" action="/admin/members/{{ member.id }}/deactivate" onsubmit="return confirm('Deactivate {{ member.email }}? Their sessions will be invalidated.')">
+                                <form method="POST" action="/admin/members/{{ member.id }}/deactivate" data-confirm-message="Deactivate this user? Their sessions will be invalidated.">
                                     <button type="submit" class="px-2 py-1 text-xs rounded bg-yellow-900/40 text-yellow-400 hover:bg-yellow-900/60" title="Deactivate user">Deactivate</button>
                                 </form>
                                 {% else %}
@@ -83,13 +83,13 @@
 
                                 {# Revoke Credentials #}
                                 {% if member.key_count > 0 %}
-                                <form method="POST" action="/admin/members/{{ member.id }}/revoke-credentials" onsubmit="return confirm('Revoke all credentials for {{ member.email }}? This will delete {{ member.key_count }} key(s) and invalidate all sessions. The user will need to re-enroll.')">
+                                <form method="POST" action="/admin/members/{{ member.id }}/revoke-credentials" data-confirm-message="Revoke all credentials for this user? This will delete their key(s) and invalidate all sessions. The user will need to re-enroll.">
                                     <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60" title="Revoke all credentials">Revoke Keys</button>
                                 </form>
                                 {% endif %}
 
                                 {# Remove #}
-                                <form method="POST" action="/admin/members/{{ member.id }}/remove" onsubmit="return confirm('Remove {{ member.email }} from the organization? This permanently deletes the user and all their data.')">
+                                <form method="POST" action="/admin/members/{{ member.id }}/remove" data-confirm-message="Remove this user from the organization? This permanently deletes the user and all their data.">
                                     <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60" title="Remove from organization">Remove</button>
                                 </form>
                             </div>
@@ -115,4 +115,8 @@
         {% endif %}
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/admin.js"></script>
 {% endblock %}
