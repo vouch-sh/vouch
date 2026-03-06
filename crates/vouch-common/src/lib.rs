@@ -3,7 +3,6 @@
 
 pub mod aaguid;
 pub(crate) mod api;
-pub(crate) mod config;
 pub(crate) mod cookie;
 pub mod encoding;
 pub(crate) mod error;
@@ -25,7 +24,6 @@ pub use aaguid::{
     extract_public_key_from_auth_data, lookup_device_model,
 };
 pub use api::*;
-pub use config::{VouchConfig, config_path, read_config};
 pub use cookie::{
     SessionCookie, clear_cookie, cookie_path, is_cookie_expired, read_cookie, write_cookie,
 };
