@@ -30,6 +30,7 @@
 pub mod audit;
 #[cfg(unix)]
 pub mod client;
+mod config;
 pub mod daemon;
 pub mod error;
 #[cfg(unix)]
