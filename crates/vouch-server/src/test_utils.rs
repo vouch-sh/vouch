@@ -867,6 +867,7 @@ pub async fn make_test_access_token(key: &OidcSigningKey) -> String {
         aud: "client-abc".to_string(),
         exp: 9_999_999_999,
         iat: 1_000_000_000,
+        nbf: None,
         jti: "jti-1".to_string(),
         client_id: "client-abc".to_string(),
         scope: Some(ScopeSet::parse("openid email")),

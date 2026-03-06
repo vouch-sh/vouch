@@ -121,8 +121,10 @@ pub async fn device_code(
     .await
     .map_err(|e| ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string()))?;
 
-    // Build verification URL
+    // Build verification URLs
     let verification_uri = format!("{}/device", state.config().base_url);
+    // RFC 8628 §3.2: Include verification_uri_complete with embedded user_code
+    let verification_uri_complete = Some(format!("{verification_uri}?user_code={user_code}"));
 
     tracing::info!("Created device auth request, user_code: {}", user_code);
 
@@ -130,6 +132,7 @@ pub async fn device_code(
         device_code,
         user_code,
         verification_uri,
+        verification_uri_complete,
         expires_in: state.config().device_code_expires_seconds,
         interval: state.config().device_poll_interval_seconds,
     }))

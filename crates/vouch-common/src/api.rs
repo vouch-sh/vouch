@@ -165,6 +165,9 @@ pub struct DeviceCodeResponse {
     pub user_code: String,
     /// URL where user should go to enter the code.
     pub verification_uri: String,
+    /// RFC 8628 §3.2: Complete URI with user_code for one-click flows.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verification_uri_complete: Option<String>,
     /// Seconds until codes expire.
     pub expires_in: u64,
     /// Minimum polling interval in seconds.

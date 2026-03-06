@@ -10,7 +10,12 @@ use crate::services::oidc::introspection::{
     IntrospectionResult, introspect_token as svc_introspect, revoke_token as svc_revoke,
 };
 use crate::services::oidc::token::authenticate_client;
-use axum::{Json, extract::State, http::HeaderMap, http::StatusCode};
+use axum::{
+    Json,
+    extract::State,
+    http::{HeaderMap, StatusCode},
+    response::{IntoResponse, Response},
+};
 use secrecy::SecretString;
 use serde::Deserialize;
 use std::sync::Arc;
@@ -66,28 +71,27 @@ pub async fn revoke(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::Form(params): axum::Form<RevokeRequest>,
-) -> StatusCode {
+) -> Response {
     // RFC 7009 Section 2.1: Authenticate the calling client.
     // Supports both client_secret_basic (header) and client_secret_post (body).
-    // Return 200 OK without revoking if authentication fails or is missing,
-    // to prevent unauthenticated revocation and oracle attacks.
     let credentials =
         extract_client_credentials(&headers, params.client_id.as_deref(), params.client_secret);
     match credentials {
         Some(creds) => {
             if authenticate_client(&state, &creds).await.is_err() {
-                return StatusCode::OK;
+                // RFC 7009 §2.1: Invalid client credentials → 401
+                return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic")]).into_response();
             }
         }
         None => {
-            // No credentials provided — do not proceed with revocation
-            return StatusCode::OK;
+            // No credentials provided → 401
+            return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic")]).into_response();
         }
     }
 
     let _result = svc_revoke(&state, &params.token, params.token_type_hint.as_deref()).await;
-    // Always return 200 per RFC 7009 Section 2
-    StatusCode::OK
+    // Always return 200 per RFC 7009 Section 2 (for valid clients)
+    StatusCode::OK.into_response()
 }
 
 /// POST /oauth/introspect
@@ -99,7 +103,7 @@ pub async fn introspect(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     axum::Form(params): axum::Form<IntrospectRequest>,
-) -> Json<IntrospectionResult> {
+) -> Response {
     // RFC 7662 Section 2.1: The introspection endpoint MUST authenticate the caller.
     // Supports both client_secret_basic (header) and client_secret_post (body).
     let credentials =
@@ -108,13 +112,13 @@ pub async fn introspect(
         Some(creds) => match authenticate_client(&state, &creds).await {
             Ok(client) => Some(client.client.client_id),
             Err(_) => {
-                // Return inactive to prevent oracle attacks (RFC 7662)
-                return Json(IntrospectionResult::inactive());
+                // RFC 7662 §2.1: Invalid client credentials → 401
+                return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic")]).into_response();
             }
         },
         None => {
-            // No credentials provided - return inactive per RFC 7662
-            return Json(IntrospectionResult::inactive());
+            // No credentials provided → 401
+            return (StatusCode::UNAUTHORIZED, [("www-authenticate", "Basic")]).into_response();
         }
     };
 
@@ -126,7 +130,7 @@ pub async fn introspect(
     )
     .await
     {
-        Ok(result) => Json(result),
-        Err(_) => Json(IntrospectionResult::inactive()),
+        Ok(result) => Json(result).into_response(),
+        Err(_) => Json(IntrospectionResult::inactive()).into_response(),
     }
 }

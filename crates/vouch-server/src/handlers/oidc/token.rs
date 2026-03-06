@@ -442,7 +442,7 @@ async fn handle_authorization_code_grant(
     };
 
     match exchange_authorization_code(&state, exchange_params).await {
-        Ok(result) => Json(TokenResponse {
+        Ok(result) => token_success_response(TokenResponse {
             access_token: result.access_token,
             token_type: result.token_type,
             expires_in: result.expires_in,
@@ -450,8 +450,7 @@ async fn handle_authorization_code_grant(
             scope: Some(result.scope),
             email: None,
             authorization_details: result.authorization_details.map(|ad| ad.to_json_value()),
-        })
-        .into_response(),
+        }),
         Err(e) => e.into_oauth_response().into_response(),
     }
 }
@@ -521,25 +520,15 @@ async fn handle_client_credentials_grant(
                 tracing::warn!("Failed to record OAuth event: {e}");
             }
 
-            // RFC 6749 Section 5.1: Cache-Control and Pragma headers
-            (
-                StatusCode::OK,
-                [
-                    ("cache-control", "no-cache, no-store, must-revalidate"),
-                    ("pragma", "no-cache"),
-                    ("expires", "0"),
-                ],
-                Json(TokenResponse {
-                    access_token: result.access_token,
-                    token_type: result.token_type,
-                    expires_in: result.expires_in,
-                    id_token: None,
-                    scope: result.scope,
-                    email: None,
-                    authorization_details: None,
-                }),
-            )
-                .into_response()
+            token_success_response(TokenResponse {
+                access_token: result.access_token,
+                token_type: result.token_type,
+                expires_in: result.expires_in,
+                id_token: None,
+                scope: result.scope,
+                email: None,
+                authorization_details: None,
+            })
         }
         Err(e) => e.into_oauth_response().into_response(),
     }
@@ -638,15 +627,14 @@ async fn handle_token_exchange_grant(
     };
 
     match exchange_token(&state, exchange_params).await {
-        Ok(result) => Json(TokenExchangeResponse {
+        Ok(result) => token_success_response(TokenExchangeResponse {
             access_token: result.access_token,
             issued_token_type: result.issued_token_type,
             token_type: result.token_type,
             expires_in: result.expires_in,
             scope: result.scope,
             authorization_details: result.authorization_details.map(|ad| ad.to_json_value()),
-        })
-        .into_response(),
+        }),
         Err(e) => e.into_oauth_response().into_response(),
     }
 }
@@ -750,24 +738,15 @@ async fn handle_fido2_assertion_grant(
     match crate::services::oidc::fido2_grant::exchange_fido2_assertion(&state, exchange_params)
         .await
     {
-        Ok(result) => (
-            StatusCode::OK,
-            [
-                ("cache-control", "no-cache, no-store, must-revalidate"),
-                ("pragma", "no-cache"),
-                ("expires", "0"),
-            ],
-            Json(TokenResponse {
-                access_token: result.access_token,
-                token_type: result.token_type,
-                expires_in: result.expires_in,
-                id_token: None,
-                scope: result.scope,
-                email: Some(result.email),
-                authorization_details: None,
-            }),
-        )
-            .into_response(),
+        Ok(result) => token_success_response(TokenResponse {
+            access_token: result.access_token,
+            token_type: result.token_type,
+            expires_in: result.expires_in,
+            id_token: None,
+            scope: result.scope,
+            email: Some(result.email),
+            authorization_details: None,
+        }),
         Err(e) => e.into_oauth_response().into_response(),
     }
 }
@@ -789,7 +768,7 @@ async fn handle_jwt_bearer_grant(
     };
 
     match exchange_jwt_bearer_grant(&state, &assertion, params.scope.as_deref()).await {
-        Ok(result) => Json(TokenResponse {
+        Ok(result) => token_success_response(TokenResponse {
             access_token: result.access_token,
             token_type: result.token_type,
             expires_in: result.expires_in,
@@ -797,8 +776,7 @@ async fn handle_jwt_bearer_grant(
             scope: result.scope,
             email: None,
             authorization_details: None,
-        })
-        .into_response(),
+        }),
         Err(e) => e.into_oauth_response().into_response(),
     }
 }
@@ -813,6 +791,26 @@ fn is_valid_pkce_verifier(verifier: &str) -> bool {
         && verifier.bytes().all(
             |b| matches!(b, b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~'),
         )
+}
+
+/// Build a token success response with RFC 6749 §5.1 cache headers.
+///
+/// RFC 6749 §5.1: "The authorization server MUST include the HTTP
+/// `Cache-Control` response header field with a value of `no-store`
+/// in any response containing tokens, credentials, or other sensitive
+/// information, as well as the `Pragma` response header field with a
+/// value of `no-cache`."
+fn token_success_response(body: impl Serialize) -> Response {
+    (
+        StatusCode::OK,
+        [
+            ("cache-control", "no-cache, no-store, must-revalidate"),
+            ("pragma", "no-cache"),
+            ("expires", "0"),
+        ],
+        Json(body),
+    )
+        .into_response()
 }
 
 /// Build a `use_dpop_nonce` error response with the `DPoP-Nonce` header.
