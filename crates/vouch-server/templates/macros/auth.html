@@ -11,6 +11,9 @@
         <a href="/applications" class="text-gray-400 hover:text-gray-200">Apps</a>
         {% endif %}
         <a href="/integrations" class="text-gray-400 hover:text-gray-200">Integrations</a>
+        {% if auth.is_org_admin %}
+        <a href="/admin" class="text-gray-400 hover:text-gray-200">Admin</a>
+        {% endif %}
     </nav>
     {# Separator #}
     <span class="text-gray-600">|</span>

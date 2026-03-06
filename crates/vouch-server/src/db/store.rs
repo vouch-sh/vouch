@@ -458,6 +458,70 @@ impl DocumentStore {
         Ok(results)
     }
 
+    /// Find documents matching an indexed field with cursor-based pagination.
+    ///
+    /// Returns up to `limit` documents ordered by ID (UUID v7, time-ordered).
+    /// If `after_id` is `Some`, only returns documents with IDs greater than the cursor.
+    /// The boolean indicates whether more results exist beyond this page.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decryption or deserialization fails.
+    pub async fn find_paginated<T: DocumentType>(
+        &self,
+        field: &str,
+        value: &str,
+        after_id: Option<&str>,
+        limit: u64,
+    ) -> Result<(Vec<Document<T>>, bool)> {
+        let index_cond = index_value_condition(&*self.crypto, value);
+
+        let mut query = Query::select();
+        query
+            .columns([
+                (Documents::Table, Documents::Id),
+                (Documents::Table, Documents::DocType),
+                (Documents::Table, Documents::SchemaVersion),
+                (Documents::Table, Documents::EncappedKey),
+                (Documents::Table, Documents::Data),
+                (Documents::Table, Documents::ExpiresAt),
+                (Documents::Table, Documents::CreatedAt),
+                (Documents::Table, Documents::UpdatedAt),
+                (Documents::Table, Documents::Version),
+                (Documents::Table, Documents::LastUsedAt),
+            ])
+            .from(Documents::Table)
+            .inner_join(
+                DocumentIndexes::Table,
+                Expr::col((Documents::Table, Documents::Id))
+                    .equals((DocumentIndexes::Table, DocumentIndexes::DocumentId)),
+            )
+            .and_where(Expr::col((Documents::Table, Documents::DocType)).eq(T::DOC_TYPE))
+            .and_where(Expr::col((DocumentIndexes::Table, DocumentIndexes::IndexField)).eq(field))
+            .and_where(index_cond);
+
+        if let Some(cursor) = after_id {
+            query.and_where(Expr::col((Documents::Table, Documents::Id)).gt(cursor));
+        }
+
+        // Fetch one extra to detect whether there are more pages.
+        let stmt = query
+            .order_by((Documents::Table, Documents::Id), Order::Asc)
+            .limit(limit + 1)
+            .to_owned();
+
+        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
+
+        let has_more = rows.len() as u64 > limit;
+        let take = if has_more { limit as usize } else { rows.len() };
+
+        let mut results = Vec::with_capacity(take);
+        for row in rows.into_iter().take(take) {
+            results.push(raw_to_document::<T>(&self.crypto, row)?);
+        }
+        Ok((results, has_more))
+    }
+
     /// Find documents matching multiple index criteria (AND).
     ///
     /// # Errors

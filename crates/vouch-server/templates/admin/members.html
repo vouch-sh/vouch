@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% import "macros/auth.html" as auth_macros %}
+
+{% block title %}Vouch - Organization Members{% endblock %}
+
+{% block header_right %}
+{{ auth_macros::header_auth(auth) }}
+{% endblock %}
+
+{% block content %}
+<div class="flex-1 p-5">
+    <div class="max-w-5xl mx-auto">
+        <div class="mb-6 flex items-center justify-between">
+            <div>
+                <h1 class="text-2xl font-bold text-gray-200 mb-1">Organization Members</h1>
+                <p class="text-gray-400 text-sm">Manage members, roles, and credentials.</p>
+            </div>
+            <nav class="flex gap-3 text-sm">
+                <a href="/admin" class="text-vouch-accent hover:text-vouch-accent-hover font-medium">Members</a>
+                <a href="/admin/audit" class="text-gray-400 hover:text-gray-200">Audit Log</a>
+            </nav>
+        </div>
+
+        <div class="bg-vouch-surface border border-vouch-border rounded-lg overflow-hidden">
+            <table class="w-full text-sm">
+                <thead>
+                    <tr class="border-b border-vouch-border text-left text-gray-400">
+                        <th class="px-4 py-3 font-medium">Email</th>
+                        <th class="px-4 py-3 font-medium">Role</th>
+                        <th class="px-4 py-3 font-medium">Status</th>
+                        <th class="px-4 py-3 font-medium">Keys</th>
+                        <th class="px-4 py-3 font-medium text-right">Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for member in members %}
+                    <tr class="border-b border-vouch-border last:border-b-0{% if member.is_self %} bg-vouch-bg/50{% endif %}">
+                        <td class="px-4 py-3 text-gray-200">
+                            {{ member.email }}
+                            {% if member.is_self %}
+                            <span class="text-xs text-gray-500 ml-1">(you)</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3">
+                            {% if member.is_org_admin %}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-vouch-accent/10 text-vouch-accent">Admin</span>
+                            {% else %}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-700 text-gray-400">Member</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3">
+                            {% if member.active %}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-green-900/30 text-green-400">Active</span>
+                            {% else %}
+                            <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-red-900/30 text-red-400">Inactive</span>
+                            {% endif %}
+                        </td>
+                        <td class="px-4 py-3 text-gray-400">{{ member.key_count }}</td>
+                        <td class="px-4 py-3 text-right">
+                            {% if !member.is_self %}
+                            <div class="flex items-center justify-end gap-1">
+                                {# Promote/Demote #}
+                                {% if member.is_org_admin %}
+                                <form method="POST" action="/admin/members/{{ member.id }}/demote" onsubmit="return confirm('Demote {{ member.email }} from admin?')">
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600" title="Demote to member">Demote</button>
+                                </form>
+                                {% else %}
+                                <form method="POST" action="/admin/members/{{ member.id }}/promote">
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-gray-700 text-gray-300 hover:bg-gray-600" title="Promote to admin">Promote</button>
+                                </form>
+                                {% endif %}
+
+                                {# Activate/Deactivate #}
+                                {% if member.active %}
+                                <form method="POST" action="/admin/members/{{ member.id }}/deactivate" onsubmit="return confirm('Deactivate {{ member.email }}? Their sessions will be invalidated.')">
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-yellow-900/40 text-yellow-400 hover:bg-yellow-900/60" title="Deactivate user">Deactivate</button>
+                                </form>
+                                {% else %}
+                                <form method="POST" action="/admin/members/{{ member.id }}/activate">
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-green-900/40 text-green-400 hover:bg-green-900/60" title="Reactivate user">Activate</button>
+                                </form>
+                                {% endif %}
+
+                                {# Revoke Credentials #}
+                                {% if member.key_count > 0 %}
+                                <form method="POST" action="/admin/members/{{ member.id }}/revoke-credentials" onsubmit="return confirm('Revoke all credentials for {{ member.email }}? This will delete {{ member.key_count }} key(s) and invalidate all sessions. The user will need to re-enroll.')">
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60" title="Revoke all credentials">Revoke Keys</button>
+                                </form>
+                                {% endif %}
+
+                                {# Remove #}
+                                <form method="POST" action="/admin/members/{{ member.id }}/remove" onsubmit="return confirm('Remove {{ member.email }} from the organization? This permanently deletes the user and all their data.')">
+                                    <button type="submit" class="px-2 py-1 text-xs rounded bg-red-900/40 text-red-400 hover:bg-red-900/60" title="Remove from organization">Remove</button>
+                                </form>
+                            </div>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                    {% if members.is_empty() %}
+                    <tr>
+                        <td colspan="5" class="px-4 py-8 text-center text-gray-500">No members found.</td>
+                    </tr>
+                    {% endif %}
+                </tbody>
+            </table>
+        </div>
+
+        {% if has_more %}
+        {% if let Some(cursor) = next_cursor %}
+        <div class="mt-4 flex justify-center">
+            <a href="/admin?after={{ cursor }}" class="px-4 py-2 text-sm rounded bg-vouch-surface border border-vouch-border text-gray-300 hover:bg-gray-700">Next page</a>
+        </div>
+        {% endif %}
+        {% endif %}
+    </div>
+</div>
+{% endblock %}

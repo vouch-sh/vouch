@@ -77,8 +77,13 @@ pub struct AuditEventFilter {
     pub user_id: Option<String>,
     /// Filter by email (computes HMAC for lookup).
     pub email: Option<String>,
+    /// Filter by email domain (plaintext match on domain portion).
+    pub email_domain: Option<String>,
     /// Filter events created after this timestamp.
     pub since: Option<String>,
+    /// Cursor for pagination: only return events with ID less than this
+    /// (events are ordered newest-first, so "before" means older events).
+    pub before_id: Option<String>,
     /// Maximum number of events to return.
     pub limit: Option<u64>,
 }
@@ -185,11 +190,17 @@ impl AuditStore {
                 let hmac = self.crypto.hmac_index(email);
                 q.and_where(Expr::col(AuditEvents::EmailHmac).eq(hmac));
             }
+            if let Some(ref domain) = filter.email_domain {
+                q.and_where(Expr::col(AuditEvents::EmailDomain).eq(domain.as_str()));
+            }
             if let Some(ref since) = filter.since {
                 q.and_where(Expr::col(AuditEvents::CreatedAt).gt(since.as_str()));
             }
+            if let Some(ref before) = filter.before_id {
+                q.and_where(Expr::col(AuditEvents::Id).lt(before.as_str()));
+            }
 
-            q.order_by(AuditEvents::CreatedAt, Order::Desc);
+            q.order_by(AuditEvents::Id, Order::Desc);
 
             if let Some(limit) = filter.limit {
                 q.limit(limit);
@@ -204,6 +215,36 @@ impl AuditStore {
             events.push(raw_to_audit_event(row));
         }
         Ok(events)
+    }
+
+    /// Query audit events with pagination support.
+    ///
+    /// Wraps `query_events` and uses the limit+1 trick to detect more pages.
+    /// Returns the events and a boolean indicating whether more results exist.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails.
+    pub async fn query_events_paginated(
+        &self,
+        filter: &AuditEventFilter,
+        page_size: u64,
+    ) -> Result<(Vec<AuditEvent>, bool)> {
+        let f = AuditEventFilter {
+            event_type: filter.event_type.clone(),
+            user_id: filter.user_id.clone(),
+            email: filter.email.clone(),
+            email_domain: filter.email_domain.clone(),
+            since: filter.since.clone(),
+            before_id: filter.before_id.clone(),
+            limit: Some(page_size + 1),
+        };
+        let mut events = self.query_events(&f).await?;
+        let has_more = events.len() as u64 > page_size;
+        if has_more {
+            events.pop();
+        }
+        Ok((events, has_more))
     }
 
     /// Delete old events of a given type before a timestamp.
