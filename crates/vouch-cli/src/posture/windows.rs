@@ -3,25 +3,21 @@
 
 use std::process::Command;
 
-use vouch_common::posture::{
-    DevicePosture, DiskEncryption, FirewallStatus, OsAutoUpdate, ScreenLock, SecureBoot,
-    SystemUptime,
-};
+use vouch_common::posture::DevicePosture;
 
 /// Run all Windows-specific posture detection and populate the struct.
 pub fn detect(posture: &mut DevicePosture) {
     detect_os_version(posture);
-    posture.disk_encryption = detect_bitlocker();
-    posture.screen_lock = detect_screen_lock();
-    posture.firewall = detect_firewall();
-    posture.secure_boot = detect_secure_boot();
-    posture.os_auto_update = detect_os_auto_update();
-    posture.system_uptime = detect_uptime();
+    detect_bitlocker(posture);
+    detect_screen_lock(posture);
+    detect_firewall(posture);
+    detect_secure_boot(posture);
+    detect_os_auto_update(posture);
+    detect_uptime(posture);
 }
 
-/// Detect Windows version from `ver` command or registry.
+/// Detect Windows version from PowerShell / registry.
 fn detect_os_version(posture: &mut DevicePosture) {
-    // Use PowerShell to read from registry — more reliable than `ver`
     if let Some(output) = run_powershell(
         "[System.Environment]::OSVersion.Version.ToString()",
     ) {
@@ -50,79 +46,72 @@ fn detect_os_version(posture: &mut DevicePosture) {
     }
 }
 
-/// Detect BitLocker status via `manage-bde` (which may require elevation)
-/// or PowerShell WMI (which may work without elevation).
-fn detect_bitlocker() -> Option<DiskEncryption> {
-    // Try WMI query for BitLocker — ProtectionStatus is readable without elevation
-    // in some configurations
+/// Detect BitLocker status via WMI.
+fn detect_bitlocker(posture: &mut DevicePosture) {
     let output = run_powershell(
         "(Get-CimInstance -Namespace 'Root\\CIMV2\\Security\\MicrosoftVolumeEncryption' \
          -ClassName Win32_EncryptableVolume -Filter \"DriveLetter='C:'\" \
          -ErrorAction SilentlyContinue).ProtectionStatus",
-    )?;
+    );
 
-    let status = output.trim();
-    match status {
-        "1" => Some(DiskEncryption {
-            enabled: true,
-            technology: Some("BitLocker".to_string()),
-        }),
-        "0" => Some(DiskEncryption {
-            enabled: false,
-            technology: Some("BitLocker".to_string()),
-        }),
-        _ => None,
+    if let Some(status) = output.as_deref().map(|s| s.trim()) {
+        match status {
+            "1" => {
+                posture.disk_encryption_enabled = Some(true);
+                posture.disk_encryption_technology = Some("BitLocker".to_string());
+            }
+            "0" => {
+                posture.disk_encryption_enabled = Some(false);
+                posture.disk_encryption_technology = Some("BitLocker".to_string());
+            }
+            _ => {}
+        }
     }
 }
 
 /// Detect screen lock configuration from registry.
-fn detect_screen_lock() -> Option<ScreenLock> {
+fn detect_screen_lock(posture: &mut DevicePosture) {
     let secure_output = run_powershell(
         "(Get-ItemProperty 'HKCU:\\Control Panel\\Desktop' -ErrorAction SilentlyContinue).ScreenSaverIsSecure",
     );
 
-    let enabled = secure_output
-        .as_deref()
-        .map(|s| s.trim() == "1")
-        .unwrap_or(false);
+    posture.screen_lock_enabled = Some(
+        secure_output
+            .as_deref()
+            .map(|s| s.trim() == "1")
+            .unwrap_or(false),
+    );
 
     let timeout_output = run_powershell(
         "(Get-ItemProperty 'HKCU:\\Control Panel\\Desktop' -ErrorAction SilentlyContinue).ScreenSaveTimeOut",
     );
 
-    let idle_timeout_secs = timeout_output
+    posture.screen_lock_idle_timeout_secs = timeout_output
         .as_deref()
         .and_then(|s| s.trim().parse::<u64>().ok());
-
-    Some(ScreenLock {
-        enabled,
-        idle_timeout_secs,
-    })
 }
 
 /// Detect Windows Firewall status via `netsh`.
-fn detect_firewall() -> Option<FirewallStatus> {
-    let output = run_command(
+fn detect_firewall(posture: &mut DevicePosture) {
+    if let Some(output) = run_command(
         "netsh",
         &["advfirewall", "show", "allprofiles", "state"],
-    )?;
+    ) {
+        // Check if any profile has "State ON"
+        let enabled = output.lines().any(|line| {
+            let lower = line.to_lowercase();
+            lower.contains("state") && lower.contains("on")
+        });
 
-    // Check if any profile has "State ON"
-    let enabled = output.lines().any(|line| {
-        let lower = line.to_lowercase();
-        lower.contains("state") && lower.contains("on")
-    });
-
-    Some(FirewallStatus {
-        enabled,
-        technology: Some("Windows Firewall".to_string()),
-    })
+        posture.firewall_enabled = Some(enabled);
+        posture.firewall_technology = Some("Windows Firewall".to_string());
+    }
 }
 
 /// Detect Secure Boot and TPM on Windows.
-fn detect_secure_boot() -> Option<SecureBoot> {
+fn detect_secure_boot(posture: &mut DevicePosture) {
     let sb_output = run_powershell("Confirm-SecureBootUEFI");
-    let secure_boot_enabled = sb_output
+    posture.secure_boot_enabled = sb_output
         .as_deref()
         .map(|s| s.trim().eq_ignore_ascii_case("true"));
 
@@ -133,9 +122,10 @@ fn detect_secure_boot() -> Option<SecureBoot> {
     let tpm_present = tpm_output
         .as_deref()
         .is_some_and(|s| s.trim().eq_ignore_ascii_case("true"));
+    posture.tpm_present = Some(tpm_present);
 
-    let tpm_version = if tpm_present {
-        run_powershell(
+    if tpm_present {
+        posture.tpm_version = run_powershell(
             "(Get-CimInstance -ClassName Win32_Tpm -Namespace 'Root\\CIMV2\\Security\\MicrosoftTpm' \
              -ErrorAction SilentlyContinue).SpecVersion",
         )
@@ -148,16 +138,8 @@ fn detect_secure_boot() -> Option<SecureBoot> {
                 .trim()
                 .to_string()
         })
-        .filter(|s| !s.is_empty())
-    } else {
-        None
-    };
-
-    Some(SecureBoot {
-        enabled: secure_boot_enabled,
-        tpm_present: Some(tpm_present),
-        tpm_version,
-    })
+        .filter(|s| !s.is_empty());
+    }
 }
 
 /// Detect Windows Update automatic update configuration.
@@ -166,7 +148,7 @@ fn detect_secure_boot() -> Option<SecureBoot> {
 /// - 2: Notify before download
 /// - 3: Auto download, notify install
 /// - 4: Auto download and install
-fn detect_os_auto_update() -> Option<OsAutoUpdate> {
+fn detect_os_auto_update(posture: &mut DevicePosture) {
     let output = run_powershell(
         "(Get-ItemProperty \
          'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\WindowsUpdate\\Auto Update' \
@@ -178,22 +160,19 @@ fn detect_os_auto_update() -> Option<OsAutoUpdate> {
         .and_then(|s| s.trim().parse::<u32>().ok())
         .is_some_and(|v| v >= 3);
 
-    Some(OsAutoUpdate {
-        enabled,
-        technology: Some("Windows Update".to_string()),
-    })
+    posture.auto_update_enabled = Some(enabled);
+    posture.auto_update_technology = Some("Windows Update".to_string());
 }
 
 /// Detect system uptime via WMI `LastBootUpTime`.
-fn detect_uptime() -> Option<SystemUptime> {
-    let output = run_powershell(
+fn detect_uptime(posture: &mut DevicePosture) {
+    if let Some(output) = run_powershell(
         "((Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime).TotalSeconds",
-    )?;
-
-    let secs: f64 = output.trim().parse().ok()?;
-    Some(SystemUptime {
-        uptime_secs: secs as u64,
-    })
+    ) {
+        if let Ok(secs) = output.trim().parse::<f64>() {
+            posture.uptime_secs = Some(secs as u64);
+        }
+    }
 }
 
 /// Run a command and capture stdout. Returns `None` on any failure.

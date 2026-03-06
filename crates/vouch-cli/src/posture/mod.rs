@@ -32,8 +32,7 @@ pub fn collect() -> DevicePosture {
     posture.collected_at = Some(jiff::Timestamp::now().to_string());
 
     // Cross-platform: SSH session, execution context
-    posture.ssh_session = Some(common::detect_ssh_session());
-    posture.execution_context = Some(common::detect_execution_context());
+    common::detect(&mut posture);
 
     // Platform-specific detection
     #[cfg(target_os = "macos")]
@@ -45,5 +44,6 @@ pub fn collect() -> DevicePosture {
     #[cfg(target_os = "windows")]
     windows::detect(&mut posture);
 
+    posture.normalize();
     posture
 }

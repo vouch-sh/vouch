@@ -3,21 +3,18 @@
 
 use std::process::Command;
 
-use vouch_common::posture::{
-    DevicePosture, DiskEncryption, FirewallStatus, MacPolicy, OsAutoUpdate, ScreenLock, SecureBoot,
-    SystemUptime,
-};
+use vouch_common::posture::DevicePosture;
 
 /// Run all Linux-specific posture detection and populate the struct.
 pub fn detect(posture: &mut DevicePosture) {
     detect_os_version(posture);
-    posture.disk_encryption = detect_disk_encryption();
-    posture.screen_lock = detect_screen_lock();
-    posture.firewall = detect_firewall();
-    posture.secure_boot = detect_secure_boot();
-    posture.os_auto_update = detect_os_auto_update();
-    posture.system_uptime = detect_uptime();
-    posture.mac_policy = detect_mac_policy();
+    detect_disk_encryption(posture);
+    detect_screen_lock(posture);
+    detect_firewall(posture);
+    detect_secure_boot(posture);
+    detect_os_auto_update(posture);
+    detect_uptime(posture);
+    detect_access_control(posture);
 }
 
 /// Detect Linux distribution and version from `/etc/os-release`.
@@ -43,7 +40,7 @@ fn detect_os_version(posture: &mut DevicePosture) {
 /// Checks if the root filesystem is on a device-mapper `crypt` device
 /// by inspecting `/sys/block/*/dm/uuid` for `CRYPT-` prefixed entries,
 /// and `lsblk` for `crypt` type entries.
-fn detect_disk_encryption() -> Option<DiskEncryption> {
+fn detect_disk_encryption(posture: &mut DevicePosture) {
     // Method 1: Check for CRYPT- in dm UUIDs via sysfs
     if let Ok(entries) = std::fs::read_dir("/sys/block") {
         for entry in entries.flatten() {
@@ -51,10 +48,9 @@ fn detect_disk_encryption() -> Option<DiskEncryption> {
             if let Ok(uuid) = std::fs::read_to_string(&uuid_path)
                 && uuid.trim().starts_with("CRYPT-")
             {
-                return Some(DiskEncryption {
-                    enabled: true,
-                    technology: Some("LUKS".to_string()),
-                });
+                posture.disk_encryption_enabled = Some(true);
+                posture.disk_encryption_technology = Some("LUKS".to_string());
+                return;
             }
         }
     }
@@ -63,28 +59,23 @@ fn detect_disk_encryption() -> Option<DiskEncryption> {
     if let Some(output) = run_command("lsblk", &["-o", "TYPE", "--noheadings"])
         && output.lines().any(|line| line.trim() == "crypt")
     {
-        return Some(DiskEncryption {
-            enabled: true,
-            technology: Some("LUKS".to_string()),
-        });
+        posture.disk_encryption_enabled = Some(true);
+        posture.disk_encryption_technology = Some("LUKS".to_string());
+        return;
     }
 
-    // If neither method detected encryption, report it as not detected
-    // (could be unencrypted, or detection couldn't determine status)
-    Some(DiskEncryption {
-        enabled: false,
-        technology: None,
-    })
+    // Neither method detected encryption
+    posture.disk_encryption_enabled = Some(false);
 }
 
 /// Detect GNOME screen lock settings via `gsettings`.
 ///
-/// Only works for GNOME desktop. Returns `None` for other DEs or headless.
-fn detect_screen_lock() -> Option<ScreenLock> {
+/// Only works for GNOME desktop. Skips headless/TTY sessions.
+fn detect_screen_lock(posture: &mut DevicePosture) {
     // Check if we're in a graphical session
     let session_type = std::env::var("XDG_SESSION_TYPE").ok();
     if session_type.as_deref() == Some("tty") {
-        return None; // Headless/TTY session — screen lock not applicable
+        return; // Headless/TTY session — screen lock not applicable
     }
 
     // Try GNOME settings
@@ -94,7 +85,7 @@ fn detect_screen_lock() -> Option<ScreenLock> {
     );
 
     if let Some(output) = lock_output {
-        let enabled = output.trim() == "true";
+        posture.screen_lock_enabled = Some(output.trim() == "true");
 
         let delay_output = run_command(
             "gsettings",
@@ -102,91 +93,70 @@ fn detect_screen_lock() -> Option<ScreenLock> {
         );
 
         // gsettings returns "uint32 N" format
-        let idle_timeout_secs = delay_output.as_deref().and_then(|s| {
+        posture.screen_lock_idle_timeout_secs = delay_output.as_deref().and_then(|s| {
             s.trim()
                 .strip_prefix("uint32 ")
                 .and_then(|n| n.parse::<u64>().ok())
         });
-
-        return Some(ScreenLock {
-            enabled,
-            idle_timeout_secs,
-        });
     }
-
-    None
 }
 
 /// Detect firewall status on Linux.
 ///
-/// Checks ufw (via systemd service status) and iptables rules.
-fn detect_firewall() -> Option<FirewallStatus> {
+/// Checks ufw, firewalld, and nftables via systemd service status.
+fn detect_firewall(posture: &mut DevicePosture) {
     // Check ufw via systemd
     if let Some(output) = run_command("systemctl", &["is-active", "ufw"])
         && output.trim() == "active"
     {
-        return Some(FirewallStatus {
-            enabled: true,
-            technology: Some("ufw".to_string()),
-        });
+        posture.firewall_enabled = Some(true);
+        posture.firewall_technology = Some("ufw".to_string());
+        return;
     }
 
     // Check firewalld via systemd
     if let Some(output) = run_command("systemctl", &["is-active", "firewalld"])
         && output.trim() == "active"
     {
-        return Some(FirewallStatus {
-            enabled: true,
-            technology: Some("firewalld".to_string()),
-        });
+        posture.firewall_enabled = Some(true);
+        posture.firewall_technology = Some("firewalld".to_string());
+        return;
     }
 
     // Check nftables via systemd
     if let Some(output) = run_command("systemctl", &["is-active", "nftables"])
         && output.trim() == "active"
     {
-        return Some(FirewallStatus {
-            enabled: true,
-            technology: Some("nftables".to_string()),
-        });
+        posture.firewall_enabled = Some(true);
+        posture.firewall_technology = Some("nftables".to_string());
+        return;
     }
 
-    Some(FirewallStatus {
-        enabled: false,
-        technology: None,
-    })
+    posture.firewall_enabled = Some(false);
 }
 
 /// Detect Secure Boot and TPM status from sysfs (no root required).
-fn detect_secure_boot() -> Option<SecureBoot> {
+fn detect_secure_boot(posture: &mut DevicePosture) {
     // Secure Boot: check /sys/firmware/efi/efivars/SecureBoot-*
-    let secure_boot_enabled = detect_secure_boot_status();
+    posture.secure_boot_enabled = detect_secure_boot_status();
 
-    // TPM: check /dev/tpm0 or /dev/tpmrm0 and version
+    // TPM: check /dev/tpm0 or /dev/tpmrm0
     let tpm_present = std::path::Path::new("/dev/tpm0").exists()
         || std::path::Path::new("/dev/tpmrm0").exists();
+    posture.tpm_present = Some(tpm_present);
 
-    let tpm_version = if tpm_present {
-        std::fs::read_to_string("/sys/class/tpm/tpm0/tpm_version_major")
+    if tpm_present {
+        posture.tpm_version = std::fs::read_to_string("/sys/class/tpm/tpm0/tpm_version_major")
             .ok()
             .map(|v| {
                 let major = v.trim();
                 format!("{major}.0")
-            })
-    } else {
-        None
-    };
-
-    Some(SecureBoot {
-        enabled: secure_boot_enabled,
-        tpm_present: Some(tpm_present),
-        tpm_version,
-    })
+            });
+    }
 }
 
 /// Check Secure Boot via EFI variables.
 fn detect_secure_boot_status() -> Option<bool> {
-    // Look for SecureBoot-* in efivars
     let efivars = std::fs::read_dir("/sys/firmware/efi/efivars").ok()?;
     for entry in efivars.flatten() {
         let name = entry.file_name();
@@ -194,7 +164,6 @@ fn detect_secure_boot_status() -> Option<bool> {
         if name_str.starts_with("SecureBoot-") {
             // Read the variable: first 4 bytes are attributes, 5th byte is the value
             if let Ok(data) = std::fs::read(entry.path()) {
-                // The value byte (after 4-byte attribute header) is 1 if enabled
                 return data.get(4).map(|&b| b == 1);
             }
         }
@@ -204,68 +173,59 @@ fn detect_secure_boot_status() -> Option<bool> {
 
 /// Detect OS automatic update configuration.
 ///
-/// Checks for common auto-update services: `unattended-upgrades` (Debian/Ubuntu),
-/// `dnf-automatic` (Fedora/RHEL).
-fn detect_os_auto_update() -> Option<OsAutoUpdate> {
+/// Checks for `unattended-upgrades` (Debian/Ubuntu) and `dnf-automatic` (Fedora/RHEL).
+fn detect_os_auto_update(posture: &mut DevicePosture) {
     // Debian/Ubuntu: unattended-upgrades
     if let Some(output) = run_command("systemctl", &["is-active", "unattended-upgrades"])
         && output.trim() == "active"
     {
-        return Some(OsAutoUpdate {
-            enabled: true,
-            technology: Some("unattended-upgrades".to_string()),
-        });
+        posture.auto_update_enabled = Some(true);
+        posture.auto_update_technology = Some("unattended-upgrades".to_string());
+        return;
     }
 
     // Fedora/RHEL: dnf-automatic
     if let Some(output) = run_command("systemctl", &["is-active", "dnf-automatic.timer"])
         && output.trim() == "active"
     {
-        return Some(OsAutoUpdate {
-            enabled: true,
-            technology: Some("dnf-automatic".to_string()),
-        });
+        posture.auto_update_enabled = Some(true);
+        posture.auto_update_technology = Some("dnf-automatic".to_string());
+        return;
     }
 
-    Some(OsAutoUpdate {
-        enabled: false,
-        technology: None,
-    })
+    posture.auto_update_enabled = Some(false);
 }
 
 /// Detect system uptime from `/proc/uptime`.
 ///
 /// The first field is the total seconds since boot (as a float).
-fn detect_uptime() -> Option<SystemUptime> {
+fn detect_uptime(posture: &mut DevicePosture) {
+    if let Some(secs) = read_proc_uptime() {
+        posture.uptime_secs = Some(secs);
+    }
+}
+
+fn read_proc_uptime() -> Option<u64> {
     let content = std::fs::read_to_string("/proc/uptime").ok()?;
     let secs_str = content.split_whitespace().next()?;
     let secs_f64: f64 = secs_str.parse().ok()?;
-    Some(SystemUptime {
-        uptime_secs: secs_f64 as u64,
-    })
+    Some(secs_f64 as u64)
 }
 
 /// Detect mandatory access control policy (SELinux or AppArmor).
-fn detect_mac_policy() -> Option<MacPolicy> {
+fn detect_access_control(posture: &mut DevicePosture) {
     // SELinux: check /sys/fs/selinux/enforce
     if let Ok(val) = std::fs::read_to_string("/sys/fs/selinux/enforce") {
-        let enforcing = val.trim() == "1";
-        return Some(MacPolicy {
-            enforcing: Some(enforcing),
-            technology: Some("SELinux".to_string()),
-        });
+        posture.access_control_enforcing = Some(val.trim() == "1");
+        posture.access_control_technology = Some("SELinux".to_string());
+        return;
     }
 
     // AppArmor: check /sys/module/apparmor/parameters/enabled
     if let Ok(val) = std::fs::read_to_string("/sys/module/apparmor/parameters/enabled") {
-        let enabled = val.trim() == "Y";
-        return Some(MacPolicy {
-            enforcing: Some(enabled),
-            technology: Some("AppArmor".to_string()),
-        });
+        posture.access_control_enforcing = Some(val.trim() == "Y");
+        posture.access_control_technology = Some("AppArmor".to_string());
     }
-
-    None
 }
 
 /// Run a command and capture stdout. Returns `None` on any failure.

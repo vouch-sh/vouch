@@ -1,40 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Cross-platform posture detection.
 
-use vouch_common::posture::{ExecutionContext, SshSession};
+use vouch_common::posture::DevicePosture;
 
-/// Detect whether the CLI is running inside an SSH session.
-///
-/// Checks for the presence of `SSH_CONNECTION`, `SSH_CLIENT`, or `SSH_TTY`
-/// environment variables. Extracts the client IP from `SSH_CONNECTION`.
-#[must_use]
-pub fn detect_ssh_session() -> SshSession {
+/// Detect SSH session and execution context, setting flat fields directly.
+pub fn detect(posture: &mut DevicePosture) {
+    // SSH session
     let ssh_connection = std::env::var("SSH_CONNECTION").ok();
     let ssh_client = std::env::var("SSH_CLIENT").ok();
     let ssh_tty = std::env::var("SSH_TTY").ok();
 
     let detected = ssh_connection.is_some() || ssh_client.is_some() || ssh_tty.is_some();
+    posture.ssh_session_detected = Some(detected);
 
     // SSH_CONNECTION format: "client_ip client_port server_ip server_port"
-    let client_ip = ssh_connection
+    posture.ssh_client_ip = ssh_connection
         .as_deref()
         .and_then(|s| s.split_whitespace().next())
         .map(String::from);
 
-    SshSession {
-        detected,
-        client_ip,
-    }
-}
-
-/// Detect the execution context of the CLI binary.
-#[must_use]
-pub fn detect_execution_context() -> ExecutionContext {
-    ExecutionContext {
-        elevated: Some(detect_elevated()),
-        tty: Some(std::io::IsTerminal::is_terminal(&std::io::stdin())),
-        parent_process: detect_parent_process(),
-    }
+    // Execution context
+    posture.elevated = Some(detect_elevated());
+    posture.tty = Some(std::io::IsTerminal::is_terminal(&std::io::stdin()));
+    posture.parent_process = detect_parent_process();
 }
 
 /// Check whether the CLI is running with elevated privileges.
@@ -96,8 +84,6 @@ fn detect_parent_process() -> Option<String> {
 
 #[cfg(target_os = "windows")]
 fn detect_parent_process() -> Option<String> {
-    // On Windows, we'd need to use the Windows API to get parent process info.
-    // Skip for now — the signal is less useful on Windows.
     None
 }
 
