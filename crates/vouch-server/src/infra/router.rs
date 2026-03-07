@@ -135,6 +135,25 @@ fn build_general_limited_routes() -> Router<Arc<AppState>> {
             "/api/v1/org/scim-tokens/{id}",
             delete(handlers::admin::delete_scim_token),
         )
+        // Posture policy management API
+        .route(
+            "/api/v1/org/posture-policies",
+            get(handlers::posture_policies::list_policies)
+                .post(handlers::posture_policies::create_policy),
+        )
+        .route(
+            "/api/v1/org/posture-policies/validate",
+            post(handlers::posture_policies::validate_policy),
+        )
+        .route(
+            "/api/v1/org/posture-policies/preconfigured/{slug}",
+            patch(handlers::posture_policies::update_preconfigured),
+        )
+        .route(
+            "/api/v1/org/posture-policies/{id}",
+            patch(handlers::posture_policies::update_custom_policy)
+                .delete(handlers::posture_policies::delete_policy),
+        )
         // SCIM 2.0 endpoints (RFC 7643/7644)
         .route(
             "/scim/v2/ServiceProviderConfig",

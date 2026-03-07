@@ -276,6 +276,16 @@ pub async fn exchange_fido2_assertion(
         .map(|ad| ad.to_json_string())
         .transpose()?;
 
+    // 9b. Evaluate device posture policies (if org has active policies)
+    if let Some(ref org_id) = user.org_id {
+        crate::services::posture::evaluate_posture_policies(
+            &state.store,
+            org_id,
+            ad_json_owned.as_deref(),
+        )
+        .await?;
+    }
+
     // 10. Create OAuth access token
     let scope = params
         .scope

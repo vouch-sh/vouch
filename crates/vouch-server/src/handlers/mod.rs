@@ -18,6 +18,7 @@ pub mod integrations;
 pub mod keys;
 pub mod legal;
 pub mod oidc;
+pub mod posture_policies;
 pub mod registration;
 pub mod scim;
 pub mod session;
