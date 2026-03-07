@@ -188,7 +188,6 @@ fn detect_firewall(posture: &mut DevicePosture) {
     {
         posture.firewall_enabled = Some(true);
         posture.firewall_technology = Some("nftables".to_string());
-        return;
     }
 
     // No systemd-managed firewall detected. Note: raw iptables/nftables
@@ -251,7 +250,6 @@ fn detect_os_auto_update(posture: &mut DevicePosture) {
     {
         posture.auto_update_enabled = Some(true);
         posture.auto_update_technology = Some("dnf-automatic".to_string());
-        return;
     }
 
     // No recognized auto-update service detected. Leave as None
