@@ -927,7 +927,7 @@ pub async fn admin_policies_page(
             name: p.name.to_string(),
             description: p.description.to_string(),
             cel_expression: p.cel_expression.to_string(),
-            active: active_slugs.iter().any(|s| s == p.slug),
+            active: active_slugs.iter().any(|s| s == p.slug.as_str()),
         })
         .collect();
 
@@ -1125,11 +1125,13 @@ pub async fn create_custom_policy(
     .await
     .map_err(|e| ServiceError::Internal(format!("Failed to create policy: {e}")))?;
 
+    let cel_hash = cel_expression_hash(&form.cel_expression);
     let data = serde_json::json!({
         "action": "custom_policy_created",
         "policy_id": policy.id,
         "policy_name": policy.name,
         "admin_user_id": admin.id,
+        "cel_expression_hash": cel_hash,
     });
     let _ = state
         .audit
@@ -1211,11 +1213,13 @@ pub async fn update_custom_policy(
         ));
     }
 
+    let cel_hash = cel_expression_hash(&form.cel_expression);
     let data = serde_json::json!({
         "action": "custom_policy_updated",
         "policy_id": &*id,
         "policy_name": form.name,
         "admin_user_id": admin.id,
+        "cel_expression_hash": cel_hash,
     });
     let _ = state
         .audit
@@ -1351,11 +1355,13 @@ pub async fn toggle_custom_policy(
     } else {
         "deactivated"
     };
+    let cel_hash = cel_expression_hash(&policy.cel_expression);
     let data = serde_json::json!({
         "action": format!("custom_policy_{action}"),
         "policy_id": &*id,
         "policy_name": policy.name,
         "admin_user_id": admin.id,
+        "cel_expression_hash": cel_hash,
     });
     let _ = state
         .audit
@@ -1375,6 +1381,19 @@ pub async fn toggle_custom_policy(
     );
 
     Ok(Redirect::to("/admin/policies").into_response())
+}
+
+/// SHA-256 hash of a CEL expression, truncated to 16 hex chars.
+///
+/// Included in audit events to trace which version of a policy was in
+/// effect at the time of an admin action.
+fn cel_expression_hash(expression: &str) -> String {
+    let hash = digest::digest(&SHA256, expression.as_bytes());
+    hash.as_ref()
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Response for validating a CEL expression (JSON API for CEL playground).

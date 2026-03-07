@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! macOS-specific device posture detection.
 
-use vouch_common::posture::DevicePosture;
+use vouch_common::posture::{DevicePosture, EdrAgent, MdmAgent};
 
 use super::common::run_command;
 
@@ -254,14 +254,14 @@ fn detect_edr(posture: &mut DevicePosture) {
     if std::path::Path::new("/Library/CS").exists()
         || std::path::Path::new("/Applications/Falcon.app").exists()
     {
-        posture.edr.push("crowdstrike".to_string());
+        posture.edr.push(EdrAgent::CrowdStrike);
     }
 
     // SentinelOne
     if std::path::Path::new("/Library/Sentinel").exists()
         || std::path::Path::new("/Applications/SentinelOne").exists()
     {
-        posture.edr.push("sentinelone".to_string());
+        posture.edr.push(EdrAgent::SentinelOne);
     }
 
     // Carbon Black (Broadcom)
@@ -269,7 +269,7 @@ fn detect_edr(posture: &mut DevicePosture) {
         || std::path::Path::new("/Library/Application Support/com.vmware.carbonblack.cloud")
             .exists()
     {
-        posture.edr.push("carbon black".to_string());
+        posture.edr.push(EdrAgent::CarbonBlack);
     }
 
     // Microsoft Defender for Endpoint
@@ -277,13 +277,13 @@ fn detect_edr(posture: &mut DevicePosture) {
     if std::path::Path::new("/Applications/Microsoft Defender.app").exists()
         || std::path::Path::new("/Library/Application Support/Microsoft/Defender").exists()
     {
-        posture.edr.push("microsoft defender".to_string());
+        posture.edr.push(EdrAgent::MicrosoftDefender);
     }
 
     // 1Password Device Trust (Kolide)
     // https://support.1password.com/device-trust/
     if std::path::Path::new("/usr/local/kolide-k2/bin/launcher").exists() {
-        posture.edr.push("1password device trust".to_string());
+        posture.edr.push(EdrAgent::OnePasswordDeviceTrust);
     }
 }
 
@@ -294,28 +294,28 @@ fn detect_edr(posture: &mut DevicePosture) {
 fn detect_mdm(posture: &mut DevicePosture) {
     // Jamf Pro
     if std::path::Path::new("/usr/local/jamf/bin/jamf").exists() {
-        posture.mdm.push("jamf".to_string());
+        posture.mdm.push(MdmAgent::Jamf);
     }
 
     // Kandji
     if std::path::Path::new("/Library/Kandji").exists() {
-        posture.mdm.push("kandji".to_string());
+        posture.mdm.push(MdmAgent::Kandji);
     }
 
     // Workspace ONE (Omnissa, formerly VMware)
     if std::path::Path::new("/Library/Application Support/AirWatch").exists()
         || std::path::Path::new("/Applications/Workspace ONE Intelligent Hub.app").exists()
     {
-        posture.mdm.push("workspace one".to_string());
+        posture.mdm.push(MdmAgent::WorkspaceOne);
     }
 
     // Mosyle
     if std::path::Path::new("/Library/Application Support/Mosyle").exists() {
-        posture.mdm.push("mosyle".to_string());
+        posture.mdm.push(MdmAgent::Mosyle);
     }
 
     // Fleetsmith (Apple Business Essentials)
     if std::path::Path::new("/Library/Fleetsmith").exists() {
-        posture.mdm.push("fleetsmith".to_string());
+        posture.mdm.push(MdmAgent::Fleetsmith);
     }
 }

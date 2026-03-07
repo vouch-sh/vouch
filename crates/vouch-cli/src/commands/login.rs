@@ -182,7 +182,7 @@ async fn run_fapi_login(
         match posture_result {
             Ok(Ok(posture)) => {
                 tracing::debug!(
-                    os = posture.os.as_deref(),
+                    os = posture.os.as_ref().map(|o| o.as_str()),
                     os_version = posture.os_version.as_deref(),
                     disk_encrypted = posture.disk_encryption_enabled,
                     firewall = posture.firewall_enabled,

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Linux-specific device posture detection.
 
-use vouch_common::posture::DevicePosture;
+use vouch_common::posture::{DevicePosture, EdrAgent};
 
 use super::common::run_command;
 
@@ -302,12 +302,12 @@ fn detect_access_control(posture: &mut DevicePosture) {
 fn detect_edr(posture: &mut DevicePosture) {
     // CrowdStrike Falcon (docs behind auth at falcon.crowdstrike.com)
     if std::path::Path::new("/opt/CrowdStrike").exists() || is_service_active("falcon-sensor") {
-        posture.edr.push("crowdstrike".to_string());
+        posture.edr.push(EdrAgent::CrowdStrike);
     }
 
     // SentinelOne
     if std::path::Path::new("/opt/sentinelone").exists() || is_service_active("sentineld") {
-        posture.edr.push("sentinelone".to_string());
+        posture.edr.push(EdrAgent::SentinelOne);
     }
 
     // Carbon Black (Broadcom)
@@ -315,19 +315,19 @@ fn detect_edr(posture: &mut DevicePosture) {
         || std::path::Path::new("/var/opt/carbonblack").exists()
         || is_service_active("cbagentd")
     {
-        posture.edr.push("carbon black".to_string());
+        posture.edr.push(EdrAgent::CarbonBlack);
     }
 
     // Microsoft Defender for Endpoint
     // https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-endpoint-linux
     if std::path::Path::new("/opt/microsoft/mdatp").exists() || is_service_active("mdatp") {
-        posture.edr.push("microsoft defender".to_string());
+        posture.edr.push(EdrAgent::MicrosoftDefender);
     }
 
     // Trellix (formerly McAfee)
     if std::path::Path::new("/opt/McAfee").exists() || std::path::Path::new("/opt/trellix").exists()
     {
-        posture.edr.push("trellix".to_string());
+        posture.edr.push(EdrAgent::Trellix);
     }
 
     // 1Password Device Trust (Kolide)
@@ -335,7 +335,7 @@ fn detect_edr(posture: &mut DevicePosture) {
     if std::path::Path::new("/usr/local/kolide-k2/bin/launcher").exists()
         || is_service_active("launcher.kolide-k2")
     {
-        posture.edr.push("1password device trust".to_string());
+        posture.edr.push(EdrAgent::OnePasswordDeviceTrust);
     }
 }
 

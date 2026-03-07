@@ -17,6 +17,217 @@ use serde::{Deserialize, Serialize};
 /// RFC 9396 authorization_details type for device posture claims.
 pub const POSTURE_TYPE: &str = "device_posture";
 
+// ── String-backed enums ────────────────────────────────────────────
+//
+// These enums provide compile-time safety for well-known values while
+// remaining wire-compatible (they serialize to/from plain JSON strings).
+// All are closed enums — unknown values are rejected at deserialization.
+// Adding a new variant produces compile errors everywhere that needs
+// updating.
+
+/// Operating system identifier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OperatingSystem {
+    MacOs,
+    Linux,
+    Windows,
+}
+
+impl OperatingSystem {
+    /// The canonical string representation.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::MacOs => "macos",
+            Self::Linux => "linux",
+            Self::Windows => "windows",
+        }
+    }
+
+    /// The `OperatingSystem` for the current compile target.
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::MacOs
+    }
+
+    /// The `OperatingSystem` for the current compile target.
+    #[cfg(target_os = "linux")]
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::Linux
+    }
+
+    /// The `OperatingSystem` for the current compile target.
+    #[cfg(target_os = "windows")]
+    #[must_use]
+    pub fn from_env() -> Self {
+        Self::Windows
+    }
+}
+
+impl std::fmt::Display for OperatingSystem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for OperatingSystem {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for OperatingSystem {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "macos" => Ok(Self::MacOs),
+            "linux" => Ok(Self::Linux),
+            "windows" => Ok(Self::Windows),
+            _ => Err(serde::de::Error::custom(format!(
+                "unknown OperatingSystem: \"{s}\""
+            ))),
+        }
+    }
+}
+
+/// Endpoint detection and response (EDR) agents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EdrAgent {
+    CrowdStrike,
+    SentinelOne,
+    CarbonBlack,
+    MicrosoftDefender,
+    Trellix,
+    OnePasswordDeviceTrust,
+}
+
+impl EdrAgent {
+    /// The canonical string representation.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::CrowdStrike => "crowdstrike",
+            Self::SentinelOne => "sentinelone",
+            Self::CarbonBlack => "carbon black",
+            Self::MicrosoftDefender => "microsoft defender",
+            Self::Trellix => "trellix",
+            Self::OnePasswordDeviceTrust => "1password device trust",
+        }
+    }
+}
+
+impl std::fmt::Display for EdrAgent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for EdrAgent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for EdrAgent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "crowdstrike" => Ok(Self::CrowdStrike),
+            "sentinelone" => Ok(Self::SentinelOne),
+            "carbon black" => Ok(Self::CarbonBlack),
+            "microsoft defender" => Ok(Self::MicrosoftDefender),
+            "trellix" => Ok(Self::Trellix),
+            "1password device trust" => Ok(Self::OnePasswordDeviceTrust),
+            _ => Err(serde::de::Error::custom(format!(
+                "unknown EdrAgent: \"{s}\""
+            ))),
+        }
+    }
+}
+
+/// Mobile device management (MDM) agents.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MdmAgent {
+    Jamf,
+    Kandji,
+    WorkspaceOne,
+    Mosyle,
+    Fleetsmith,
+    Intune,
+}
+
+impl MdmAgent {
+    /// The canonical string representation.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Jamf => "jamf",
+            Self::Kandji => "kandji",
+            Self::WorkspaceOne => "workspace one",
+            Self::Mosyle => "mosyle",
+            Self::Fleetsmith => "fleetsmith",
+            Self::Intune => "intune",
+        }
+    }
+}
+
+impl std::fmt::Display for MdmAgent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl Serialize for MdmAgent {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for MdmAgent {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        match s.as_str() {
+            "jamf" => Ok(Self::Jamf),
+            "kandji" => Ok(Self::Kandji),
+            "workspace one" => Ok(Self::WorkspaceOne),
+            "mosyle" => Ok(Self::Mosyle),
+            "fleetsmith" => Ok(Self::Fleetsmith),
+            "intune" => Ok(Self::Intune),
+            _ => Err(serde::de::Error::custom(format!(
+                "unknown MdmAgent: \"{s}\""
+            ))),
+        }
+    }
+}
+
+/// RFC 9396 type tag — always serializes as `"device_posture"`.
+///
+/// This is a zero-size marker that replaces the old `String` field,
+/// preventing accidental mutation of the type discriminator.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PostureTypeTag;
+
+impl Serialize for PostureTypeTag {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(POSTURE_TYPE)
+    }
+}
+
+impl<'de> Deserialize<'de> for PostureTypeTag {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let s = String::deserialize(deserializer)?;
+        if s == POSTURE_TYPE {
+            Ok(Self)
+        } else {
+            Err(serde::de::Error::custom(format!(
+                "expected \"{POSTURE_TYPE}\", got \"{s}\""
+            )))
+        }
+    }
+}
+
 /// Device posture collected by the CLI at authentication time.
 ///
 /// Serialized as a JSON object within an RFC 9396 `authorization_details`
@@ -33,9 +244,9 @@ pub const POSTURE_TYPE: &str = "device_posture";
 /// and audit trails, but not a substitute for server-side enforcement.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DevicePosture {
-    /// RFC 9396: the authorization detail type.
+    /// RFC 9396: the authorization detail type (always "device_posture").
     #[serde(rename = "type")]
-    pub detail_type: String,
+    pub detail_type: PostureTypeTag,
 
     /// Schema version for forward compatibility.
     /// Always present so the server can distinguish "old client" from
@@ -43,9 +254,9 @@ pub struct DevicePosture {
     pub posture_version: u32,
 
     // ── OS info ──────────────────────────────────────────────────────
-    /// Operating system identifier (e.g., "macos", "linux", "windows").
+    /// Operating system identifier.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub os: Option<String>,
+    pub os: Option<OperatingSystem>,
 
     /// OS version string (e.g., "15.3.1", "24.04", "10.0.26100").
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -134,13 +345,13 @@ pub struct DevicePosture {
     /// Detected EDR agents, lowercased (e.g., `["crowdstrike", "microsoft defender"]`).
     /// Empty when no EDR is detected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub edr: Vec<String>,
+    pub edr: Vec<EdrAgent>,
 
     // ── Mobile device management (MDM) ──────────────────────────────
     /// Detected MDM agents, lowercased (e.g., `["jamf"]`).
     /// Empty when no MDM is detected.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub mdm: Vec<String>,
+    pub mdm: Vec<MdmAgent>,
 
     // ── Execution context ───────────────────────────────────────────
     /// Whether the CLI is running with elevated privileges (root/admin).
@@ -170,7 +381,7 @@ impl DevicePosture {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            detail_type: POSTURE_TYPE.to_string(),
+            detail_type: PostureTypeTag,
             posture_version: 1,
             ..Default::default()
         }
@@ -200,13 +411,6 @@ impl DevicePosture {
             }
         }
 
-        fn lower_vec(vec: &mut [String]) {
-            for s in vec.iter_mut() {
-                *s = s.to_lowercase();
-            }
-        }
-
-        lower(&mut self.os);
         // os_version preserved — versions like "24H2" are case-sensitive identifiers
         lower(&mut self.os_distribution);
         lower(&mut self.os_build);
@@ -216,8 +420,7 @@ impl DevicePosture {
         lower(&mut self.tpm_version);
         lower(&mut self.auto_update_technology);
         lower(&mut self.access_control_technology);
-        lower_vec(&mut self.edr);
-        lower_vec(&mut self.mdm);
+
         lower(&mut self.parent_process);
         // cli_version and collected_at are not lowercased — they're metadata
     }
@@ -236,9 +439,9 @@ mod tests {
     #[test]
     fn test_posture_serializes_as_rar_array() {
         let posture = DevicePosture {
-            detail_type: POSTURE_TYPE.to_string(),
+            detail_type: PostureTypeTag,
             posture_version: 1,
-            os: Some("macos".to_string()),
+            os: Some(OperatingSystem::MacOs),
             os_version: Some("15.3.1".to_string()),
             ..Default::default()
         };
@@ -259,15 +462,15 @@ mod tests {
     #[test]
     fn test_posture_default_has_type_and_version() {
         let posture = DevicePosture::new();
-        assert_eq!(posture.detail_type, "device_posture");
+        assert_eq!(posture.detail_type, PostureTypeTag);
         assert_eq!(posture.posture_version, 1);
     }
 
     #[test]
     fn test_posture_round_trips() {
         let posture = DevicePosture {
-            detail_type: POSTURE_TYPE.to_string(),
-            os: Some("linux".to_string()),
+            detail_type: PostureTypeTag,
+            os: Some(OperatingSystem::Linux),
             disk_encryption_enabled: Some(true),
             disk_encryption_technology: Some("LUKS".to_string()),
             firewall_enabled: Some(true),
@@ -283,26 +486,26 @@ mod tests {
             uptime_secs: Some(86400),
             access_control_enforcing: Some(true),
             access_control_technology: Some("SELinux".to_string()),
-            edr: vec!["crowdstrike".to_string()],
-            mdm: vec!["jamf".to_string()],
+            edr: vec![EdrAgent::CrowdStrike],
+            mdm: vec![MdmAgent::Jamf],
             ..Default::default()
         };
 
         let json = serde_json::to_string(&posture).unwrap();
         let deserialized: DevicePosture = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.os.as_deref(), Some("linux"));
+        assert_eq!(deserialized.os, Some(OperatingSystem::Linux));
         assert!(deserialized.disk_encryption_enabled.unwrap());
         assert!(deserialized.auto_update_enabled.unwrap());
         assert_eq!(deserialized.uptime_secs, Some(86400));
         assert!(deserialized.access_control_enforcing.unwrap());
-        assert_eq!(deserialized.edr, vec!["crowdstrike"]);
-        assert_eq!(deserialized.mdm, vec!["jamf"]);
+        assert_eq!(deserialized.edr, vec![EdrAgent::CrowdStrike]);
+        assert_eq!(deserialized.mdm, vec![MdmAgent::Jamf]);
     }
 
     #[test]
     fn test_flat_fields_serialize_as_top_level_keys() {
         let posture = DevicePosture {
-            detail_type: POSTURE_TYPE.to_string(),
+            detail_type: PostureTypeTag,
             disk_encryption_enabled: Some(true),
             disk_encryption_technology: Some("FileVault".to_string()),
             firewall_enabled: Some(false),
@@ -322,8 +525,8 @@ mod tests {
     #[test]
     fn test_normalize_lowercases_all_strings() {
         let mut posture = DevicePosture {
-            detail_type: POSTURE_TYPE.to_string(),
-            os: Some("Linux".to_string()),
+            detail_type: PostureTypeTag,
+            os: Some(OperatingSystem::Linux),
             os_version: Some("24H2".to_string()),
             os_distribution: Some("Ubuntu".to_string()),
             disk_encryption_technology: Some("LUKS".to_string()),
@@ -331,15 +534,16 @@ mod tests {
             access_control_technology: Some("SELinux".to_string()),
             auto_update_technology: Some("SoftwareUpdate".to_string()),
             parent_process: Some("Bash".to_string()),
-            edr: vec!["CrowdStrike".to_string(), "Microsoft Defender".to_string()],
-            mdm: vec!["JAMF".to_string()],
+            edr: vec![EdrAgent::CrowdStrike],
+            mdm: vec![MdmAgent::Jamf],
             cli_version: Some("1.0.0".to_string()),
             ..Default::default()
         };
 
         posture.normalize();
 
-        assert_eq!(posture.os.as_deref(), Some("linux"));
+        // OperatingSystem variants are already lowercase
+        assert_eq!(posture.os, Some(OperatingSystem::Linux));
         // os_version is NOT lowercased (e.g., "24H2" preserved)
         assert_eq!(posture.os_version.as_deref(), Some("24H2"));
         assert_eq!(posture.os_distribution.as_deref(), Some("ubuntu"));
@@ -354,9 +558,94 @@ mod tests {
             Some("softwareupdate")
         );
         assert_eq!(posture.parent_process.as_deref(), Some("bash"));
-        assert_eq!(posture.edr, vec!["crowdstrike", "microsoft defender"]);
-        assert_eq!(posture.mdm, vec!["jamf"]); // "JAMF" → "jamf"
+        // Known EDR/MDM variants are already lowercase
+        assert_eq!(posture.edr[0], EdrAgent::CrowdStrike);
+        assert_eq!(posture.mdm[0], MdmAgent::Jamf);
         // cli_version is NOT lowercased (metadata)
         assert_eq!(posture.cli_version.as_deref(), Some("1.0.0"));
+    }
+
+    #[test]
+    fn test_os_enum_serde_round_trip() {
+        assert_eq!(
+            serde_json::to_string(&OperatingSystem::MacOs).unwrap(),
+            "\"macos\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperatingSystem::Linux).unwrap(),
+            "\"linux\""
+        );
+        assert_eq!(
+            serde_json::to_string(&OperatingSystem::Windows).unwrap(),
+            "\"windows\""
+        );
+
+        let os: OperatingSystem = serde_json::from_str("\"macos\"").unwrap();
+        assert_eq!(os, OperatingSystem::MacOs);
+
+        // Unknown OS values are rejected (no Other variant)
+        let err = serde_json::from_str::<OperatingSystem>("\"freebsd\"");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_edr_agent_serde_round_trip() {
+        assert_eq!(
+            serde_json::to_string(&EdrAgent::CrowdStrike).unwrap(),
+            "\"crowdstrike\""
+        );
+
+        let agent: EdrAgent = serde_json::from_str("\"crowdstrike\"").unwrap();
+        assert_eq!(agent, EdrAgent::CrowdStrike);
+
+        // Unknown EDR agents are rejected (no Other variant)
+        let err = serde_json::from_str::<EdrAgent>("\"custom agent\"");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_posture_type_tag_serde() {
+        let tag = PostureTypeTag;
+        assert_eq!(serde_json::to_string(&tag).unwrap(), "\"device_posture\"");
+
+        let tag: PostureTypeTag = serde_json::from_str("\"device_posture\"").unwrap();
+        assert_eq!(tag, PostureTypeTag);
+
+        let err = serde_json::from_str::<PostureTypeTag>("\"wrong_type\"");
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_wire_format_unchanged() {
+        // Verify the JSON format is backward-compatible with the old
+        // String-based fields.
+        let posture = DevicePosture {
+            detail_type: PostureTypeTag,
+            posture_version: 1,
+            os: Some(OperatingSystem::MacOs),
+            edr: vec![EdrAgent::CrowdStrike, EdrAgent::SentinelOne],
+            mdm: vec![MdmAgent::Jamf],
+            ..Default::default()
+        };
+
+        let json = serde_json::to_string(&posture).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        // Type tag serializes as plain string
+        assert_eq!(parsed["type"], "device_posture");
+        // OperatingSystem serializes as plain string
+        assert_eq!(parsed["os"], "macos");
+        // EDR serializes as array of plain strings
+        assert_eq!(parsed["edr"][0], "crowdstrike");
+        assert_eq!(parsed["edr"][1], "sentinelone");
+        // MDM serializes as array of plain strings
+        assert_eq!(parsed["mdm"][0], "jamf");
+
+        // Verify the old JSON format can still be deserialized
+        let old_json = r#"{"type":"device_posture","posture_version":1,"os":"macos","edr":["crowdstrike"],"mdm":["jamf"]}"#;
+        let deserialized: DevicePosture = serde_json::from_str(old_json).unwrap();
+        assert_eq!(deserialized.os, Some(OperatingSystem::MacOs));
+        assert_eq!(deserialized.edr, vec![EdrAgent::CrowdStrike]);
+        assert_eq!(deserialized.mdm, vec![MdmAgent::Jamf]);
     }
 }

@@ -3,7 +3,7 @@
 
 use std::process::Command;
 
-use vouch_common::posture::DevicePosture;
+use vouch_common::posture::{DevicePosture, EdrAgent, MdmAgent};
 
 use super::common::run_command;
 
@@ -199,34 +199,34 @@ fn detect_uptime(posture: &mut DevicePosture) {
 fn detect_edr(posture: &mut DevicePosture) {
     // CrowdStrike Falcon (docs behind auth at falcon.crowdstrike.com)
     if is_service_running("CSFalconService") {
-        posture.edr.push("crowdstrike".to_string());
+        posture.edr.push(EdrAgent::CrowdStrike);
     }
 
     // SentinelOne
     if is_service_running("SentinelAgent") {
-        posture.edr.push("sentinelone".to_string());
+        posture.edr.push(EdrAgent::SentinelOne);
     }
 
     // Carbon Black (Broadcom)
     if is_service_running("CbDefenseService") || is_service_running("CbDefense") {
-        posture.edr.push("carbon black".to_string());
+        posture.edr.push(EdrAgent::CarbonBlack);
     }
 
     // Microsoft Defender for Endpoint (Sense = EDR component, not basic Defender antivirus)
     // https://learn.microsoft.com/en-us/defender-endpoint/configure-endpoints-script
     if is_service_running("Sense") {
-        posture.edr.push("microsoft defender".to_string());
+        posture.edr.push(EdrAgent::MicrosoftDefender);
     }
 
     // Trellix (formerly McAfee)
     if is_service_running("mfemms") || is_service_running("McAfeeFramework") {
-        posture.edr.push("trellix".to_string());
+        posture.edr.push(EdrAgent::Trellix);
     }
 
     // 1Password Device Trust (Kolide)
     // https://support.1password.com/device-trust/
     if is_service_running("launcher.kolide-k2") {
-        posture.edr.push("1password device trust".to_string());
+        posture.edr.push(EdrAgent::OnePasswordDeviceTrust);
     }
 }
 
@@ -237,12 +237,12 @@ fn detect_mdm(posture: &mut DevicePosture) {
     // Microsoft Intune
     // https://learn.microsoft.com/en-us/mem/intune/apps/intune-management-extension
     if is_service_running("IntuneManagementExtension") {
-        posture.mdm.push("intune".to_string());
+        posture.mdm.push(MdmAgent::Intune);
     }
 
     // Workspace ONE (Omnissa, formerly VMware)
     if is_service_running("AirWatchService") {
-        posture.mdm.push("workspace one".to_string());
+        posture.mdm.push(MdmAgent::WorkspaceOne);
     }
 }
 
