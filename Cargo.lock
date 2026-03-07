@@ -988,7 +988,7 @@ dependencies = [
 [[package]]
 name = "cel"
 version = "0.12.0"
-source = "git+https://github.com/cel-rust/cel-rust?branch=master#5f99cdf66a71c9ef85be5d18cb98d7b0983a3e3c"
+source = "git+https://github.com/cel-rust/cel-rust?rev=5f99cdf66a71c9ef85be5d18cb98d7b0983a3e3c#5f99cdf66a71c9ef85be5d18cb98d7b0983a3e3c"
 dependencies = [
  "antlr4rust",
  "lazy_static",
