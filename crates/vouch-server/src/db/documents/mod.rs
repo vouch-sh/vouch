@@ -18,6 +18,7 @@ pub mod oauth;
 pub mod organization;
 pub mod par;
 pub mod pending_oauth;
+pub mod posture_policy;
 pub mod scim;
 pub mod session;
 pub mod user;

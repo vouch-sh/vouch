@@ -144,14 +144,16 @@ fn print_text(p: &vouch_common::posture::DevicePosture) {
     if p.edr.is_empty() {
         println!("  EDR:             not detected");
     } else {
-        println!("  EDR:             {}", p.edr.join(", "));
+        let names: Vec<&str> = p.edr.iter().map(|a| a.as_str()).collect();
+        println!("  EDR:             {}", names.join(", "));
     }
 
     // MDM agents
     if p.mdm.is_empty() {
         println!("  MDM:             not detected");
     } else {
-        println!("  MDM:             {}", p.mdm.join(", "));
+        let names: Vec<&str> = p.mdm.iter().map(|a| a.as_str()).collect();
+        println!("  MDM:             {}", names.join(", "));
     }
 
     println!();

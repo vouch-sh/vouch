@@ -182,15 +182,21 @@ async fn run_fapi_login(
         match posture_result {
             Ok(Ok(posture)) => {
                 tracing::debug!(
-                    os = posture.os.as_deref(),
+                    os = posture.os.as_ref().map(|o| o.as_str()),
                     os_version = posture.os_version.as_deref(),
                     disk_encrypted = posture.disk_encryption_enabled,
                     firewall = posture.firewall_enabled,
+                    screen_lock = posture.screen_lock_enabled,
+                    secure_boot = posture.secure_boot_enabled,
                     edr_count = posture.edr.len(),
                     mdm_count = posture.mdm.len(),
                     "Collected device posture"
                 );
-                posture.to_authorization_details_json().ok()
+                let json = posture.to_authorization_details_json().ok();
+                if let Some(ref j) = json {
+                    tracing::trace!(payload = %j, "Device posture payload");
+                }
+                json
             }
             Ok(Err(e)) => {
                 tracing::debug!("Posture collection task failed: {e}");

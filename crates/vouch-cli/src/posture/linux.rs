@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Linux-specific device posture detection.
 
-use vouch_common::posture::DevicePosture;
+use vouch_common::posture::{DevicePosture, EdrAgent};
 
 use super::common::run_command;
 
@@ -69,9 +69,10 @@ fn detect_disk_encryption(posture: &mut DevicePosture) {
     posture.disk_encryption_enabled = Some(false);
 }
 
-/// Detect GNOME screen lock settings via `gsettings`.
+/// Detect screen lock settings on Linux.
 ///
-/// Only works for GNOME desktop. Skips headless/TTY sessions.
+/// Supports GNOME (via `gsettings`) and KDE Plasma (via `kreadconfig6`
+/// / `kreadconfig5`). Skips headless/TTY sessions.
 fn detect_screen_lock(posture: &mut DevicePosture) {
     // Check if we're in a graphical session
     let session_type = std::env::var("XDG_SESSION_TYPE").ok();
@@ -80,6 +81,16 @@ fn detect_screen_lock(posture: &mut DevicePosture) {
     }
 
     // Try GNOME settings
+    if detect_screen_lock_gnome(posture) {
+        return;
+    }
+
+    // Try KDE Plasma settings
+    detect_screen_lock_kde(posture);
+}
+
+/// GNOME screen lock via `gsettings`.
+fn detect_screen_lock_gnome(posture: &mut DevicePosture) -> bool {
     let lock_output = run_command(
         "gsettings",
         &["get", "org.gnome.desktop.screensaver", "lock-enabled"],
@@ -99,6 +110,53 @@ fn detect_screen_lock(posture: &mut DevicePosture) {
                 .strip_prefix("uint32 ")
                 .and_then(|n| n.parse::<u64>().ok())
         });
+        return true;
+    }
+    false
+}
+
+/// KDE Plasma screen lock via `kreadconfig6` (Plasma 6) or `kreadconfig5`.
+fn detect_screen_lock_kde(posture: &mut DevicePosture) {
+    let kread = if run_command("kreadconfig6", &["--help"]).is_some() {
+        "kreadconfig6"
+    } else if run_command("kreadconfig5", &["--help"]).is_some() {
+        "kreadconfig5"
+    } else {
+        return;
+    };
+
+    let lock_output = run_command(
+        kread,
+        &[
+            "--file",
+            "kscreenlockerrc",
+            "--group",
+            "Daemon",
+            "--key",
+            "Autolock",
+        ],
+    );
+
+    if let Some(output) = lock_output {
+        posture.screen_lock_enabled = Some(output.trim() == "true");
+
+        let timeout_output = run_command(
+            kread,
+            &[
+                "--file",
+                "kscreenlockerrc",
+                "--group",
+                "Daemon",
+                "--key",
+                "Timeout",
+            ],
+        );
+
+        // KDE Timeout is in minutes; convert to seconds
+        posture.screen_lock_idle_timeout_secs = timeout_output
+            .as_deref()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|mins| mins * 60);
     }
 }
 
@@ -130,10 +188,11 @@ fn detect_firewall(posture: &mut DevicePosture) {
     {
         posture.firewall_enabled = Some(true);
         posture.firewall_technology = Some("nftables".to_string());
-        return;
     }
 
-    posture.firewall_enabled = Some(false);
+    // No systemd-managed firewall detected. Note: raw iptables/nftables
+    // rules may still be active but we can't reliably detect those
+    // without root. Leave as None rather than asserting false.
 }
 
 /// Detect Secure Boot and TPM status from sysfs (no root required).
@@ -191,10 +250,11 @@ fn detect_os_auto_update(posture: &mut DevicePosture) {
     {
         posture.auto_update_enabled = Some(true);
         posture.auto_update_technology = Some("dnf-automatic".to_string());
-        return;
     }
 
-    posture.auto_update_enabled = Some(false);
+    // No recognized auto-update service detected. Leave as None
+    // rather than asserting false — the distro may use a different
+    // mechanism (e.g., PackageKit, zypper-autopatch).
 }
 
 /// Detect system uptime from `/proc/uptime`.
@@ -240,12 +300,12 @@ fn detect_access_control(posture: &mut DevicePosture) {
 fn detect_edr(posture: &mut DevicePosture) {
     // CrowdStrike Falcon (docs behind auth at falcon.crowdstrike.com)
     if std::path::Path::new("/opt/CrowdStrike").exists() || is_service_active("falcon-sensor") {
-        posture.edr.push("crowdstrike".to_string());
+        posture.edr.push(EdrAgent::CrowdStrike);
     }
 
     // SentinelOne
     if std::path::Path::new("/opt/sentinelone").exists() || is_service_active("sentineld") {
-        posture.edr.push("sentinelone".to_string());
+        posture.edr.push(EdrAgent::SentinelOne);
     }
 
     // Carbon Black (Broadcom)
@@ -253,19 +313,19 @@ fn detect_edr(posture: &mut DevicePosture) {
         || std::path::Path::new("/var/opt/carbonblack").exists()
         || is_service_active("cbagentd")
     {
-        posture.edr.push("carbon black".to_string());
+        posture.edr.push(EdrAgent::CarbonBlack);
     }
 
     // Microsoft Defender for Endpoint
     // https://learn.microsoft.com/en-us/defender-endpoint/microsoft-defender-endpoint-linux
     if std::path::Path::new("/opt/microsoft/mdatp").exists() || is_service_active("mdatp") {
-        posture.edr.push("microsoft defender".to_string());
+        posture.edr.push(EdrAgent::MicrosoftDefender);
     }
 
     // Trellix (formerly McAfee)
     if std::path::Path::new("/opt/McAfee").exists() || std::path::Path::new("/opt/trellix").exists()
     {
-        posture.edr.push("trellix".to_string());
+        posture.edr.push(EdrAgent::Trellix);
     }
 
     // 1Password Device Trust (Kolide)
@@ -273,7 +333,7 @@ fn detect_edr(posture: &mut DevicePosture) {
     if std::path::Path::new("/usr/local/kolide-k2/bin/launcher").exists()
         || is_service_active("launcher.kolide-k2")
     {
-        posture.edr.push("1password device trust".to_string());
+        posture.edr.push(EdrAgent::OnePasswordDeviceTrust);
     }
 }
 
