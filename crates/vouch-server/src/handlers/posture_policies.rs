@@ -7,9 +7,7 @@
 use crate::AppState;
 use crate::db;
 use crate::services::error::ServiceError;
-use crate::services::posture::{
-    self, MAX_ACTIVE_POLICIES, PRECONFIGURED_POLICIES,
-};
+use crate::services::posture::{self, MAX_ACTIVE_POLICIES, PRECONFIGURED_POLICIES};
 use axum::extract::{OriginalUri, State};
 use axum::http::{Method, StatusCode};
 use axum::response::IntoResponse;
@@ -19,8 +17,8 @@ use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-use super::session::extract_org_admin;
 use super::ValidPath;
+use super::session::extract_org_admin;
 
 // ============================================================================
 // Response Types
@@ -135,24 +133,13 @@ pub async fn list_policies(
     headers: axum::http::HeaderMap,
     jar: CookieJar,
 ) -> Result<Json<ListPoliciesResponse>, ServiceError> {
-    let (_user, org_id) = extract_org_admin(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-    )
-    .await?;
+    let (_user, org_id) =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Get active preconfigured slugs
-    let active_slugs =
-        db::get_active_preconfigured_slugs(&state.store, &org_id)
-            .await
-            .map_err(|e| {
-                ServiceError::Internal(format!(
-                    "Failed to load posture config: {e}"
-                ))
-            })?;
+    let active_slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Failed to load posture config: {e}")))?;
 
     // Build preconfigured policy entries
     let mut policies: Vec<PolicyEntry> = PRECONFIGURED_POLICIES
@@ -163,9 +150,7 @@ pub async fn list_policies(
             name: p.name.to_string(),
             description: Some(p.description.to_string()),
             cel_expression: p.cel_expression.to_string(),
-            active: active_slugs
-                .iter()
-                .any(|s| s == p.slug),
+            active: active_slugs.iter().any(|s| s == p.slug),
             policy_type: "preconfigured".to_string(),
             created_at: None,
             updated_at: None,
@@ -173,14 +158,9 @@ pub async fn list_policies(
         .collect();
 
     // Add custom policies
-    let custom =
-        db::list_custom_policies(&state.store, &org_id)
-            .await
-            .map_err(|e| {
-                ServiceError::Internal(format!(
-                    "Failed to load custom policies: {e}"
-                ))
-            })?;
+    let custom = db::list_custom_policies(&state.store, &org_id)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Failed to load custom policies: {e}")))?;
 
     for p in custom {
         policies.push(PolicyEntry {
@@ -212,8 +192,7 @@ pub async fn create_policy(
     headers: axum::http::HeaderMap,
     jar: CookieJar,
     Json(req): Json<CreatePolicyRequest>,
-) -> Result<(StatusCode, Json<CreatePolicyResponse>), ServiceError>
-{
+) -> Result<(StatusCode, Json<CreatePolicyResponse>), ServiceError> {
     // Validate inputs
     if req.name.is_empty() || req.name.len() > 100 {
         return Err(ServiceError::api(
@@ -223,9 +202,7 @@ pub async fn create_policy(
         ));
     }
 
-    if req.cel_expression.is_empty()
-        || req.cel_expression.len() > 1024
-    {
+    if req.cel_expression.is_empty() || req.cel_expression.len() > 1024 {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "invalid_request",
@@ -246,14 +223,8 @@ pub async fn create_policy(
     // Validate CEL syntax
     posture::validate_cel_expression(&req.cel_expression)?;
 
-    let (_user, org_id) = extract_org_admin(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-    )
-    .await?;
+    let (_user, org_id) =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let policy = db::create_custom_policy(
         &state.store,
@@ -265,11 +236,7 @@ pub async fn create_policy(
         },
     )
     .await
-    .map_err(|e| {
-        ServiceError::Internal(format!(
-            "Failed to create policy: {e}"
-        ))
-    })?;
+    .map_err(|e| ServiceError::Internal(format!("Failed to create policy: {e}")))?;
 
     Ok((
         StatusCode::CREATED,
@@ -307,40 +274,21 @@ pub async fn update_preconfigured(
         ));
     }
 
-    let (_user, org_id) = extract_org_admin(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-    )
-    .await?;
+    let (_user, org_id) =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Check max active limit when activating
     if req.active {
-        let current =
-            db::count_active_policies(&state.store, &org_id)
-                .await
-                .map_err(|e| {
-                    ServiceError::Internal(format!(
-                        "Failed to count policies: {e}"
-                    ))
-                })?;
+        let current = db::count_active_policies(&state.store, &org_id)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Failed to count policies: {e}")))?;
 
         // Check if this slug is already active (doesn't count toward new)
-        let active_slugs = db::get_active_preconfigured_slugs(
-            &state.store,
-            &org_id,
-        )
-        .await
-        .map_err(|e| {
-            ServiceError::Internal(format!(
-                "Failed to load posture config: {e}"
-            ))
-        })?;
+        let active_slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Failed to load posture config: {e}")))?;
 
-        let already_active =
-            active_slugs.iter().any(|s| s == &slug);
+        let already_active = active_slugs.iter().any(|s| s == &slug);
 
         if !already_active && current >= MAX_ACTIVE_POLICIES {
             return Err(ServiceError::api(
@@ -355,14 +303,9 @@ pub async fn update_preconfigured(
     }
 
     // Update the active slugs
-    let mut active_slugs =
-        db::get_active_preconfigured_slugs(&state.store, &org_id)
-            .await
-            .map_err(|e| {
-                ServiceError::Internal(format!(
-                    "Failed to load posture config: {e}"
-                ))
-            })?;
+    let mut active_slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Failed to load posture config: {e}")))?;
 
     if req.active {
         if !active_slugs.iter().any(|s| s == &slug) {
@@ -372,17 +315,9 @@ pub async fn update_preconfigured(
         active_slugs.retain(|s| s != &slug);
     }
 
-    db::set_preconfigured_active(
-        &state.store,
-        &org_id,
-        active_slugs,
-    )
-    .await
-    .map_err(|e| {
-        ServiceError::Internal(format!(
-            "Failed to update posture config: {e}"
-        ))
-    })?;
+    db::set_preconfigured_active(&state.store, &org_id, active_slugs)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Failed to update posture config: {e}")))?;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -432,39 +367,21 @@ pub async fn update_custom_policy(
         ));
     }
 
-    let (_user, org_id) = extract_org_admin(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-    )
-    .await?;
+    let (_user, org_id) =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Check max active limit when activating
     if req.active == Some(true) {
-        let policy =
-            db::get_custom_policy(&state.store, &id)
-                .await
-                .map_err(|e| {
-                    ServiceError::Internal(format!(
-                        "Failed to get policy: {e}"
-                    ))
-                })?;
+        let policy = db::get_custom_policy(&state.store, &id)
+            .await
+            .map_err(|e| ServiceError::Internal(format!("Failed to get policy: {e}")))?;
 
         if let Some(ref p) = policy
             && !p.active
         {
-            let current = db::count_active_policies(
-                &state.store,
-                &org_id,
-            )
-            .await
-            .map_err(|e| {
-                ServiceError::Internal(format!(
-                    "Failed to count policies: {e}"
-                ))
-            })?;
+            let current = db::count_active_policies(&state.store, &org_id)
+                .await
+                .map_err(|e| ServiceError::Internal(format!("Failed to count policies: {e}")))?;
 
             if current >= MAX_ACTIVE_POLICIES {
                 return Err(ServiceError::api(
@@ -479,10 +396,7 @@ pub async fn update_custom_policy(
         }
     }
 
-    let description_param = req
-        .description
-        .as_ref()
-        .map(|d| d.as_deref());
+    let description_param = req.description.as_ref().map(|d| d.as_deref());
 
     let result = db::update_custom_policy(
         &state.store,
@@ -496,11 +410,7 @@ pub async fn update_custom_policy(
         },
     )
     .await
-    .map_err(|e| {
-        ServiceError::Internal(format!(
-            "Failed to update policy: {e}"
-        ))
-    })?;
+    .map_err(|e| ServiceError::Internal(format!("Failed to update policy: {e}")))?;
 
     match result {
         Some(policy) => Ok(Json(CreatePolicyResponse {
@@ -533,23 +443,12 @@ pub async fn delete_policy(
     jar: CookieJar,
     ValidPath(id): ValidPath<String>,
 ) -> Result<Response, ServiceError> {
-    let (_user, org_id) = extract_org_admin(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-    )
-    .await?;
+    let (_user, org_id) =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    let deleted =
-        db::delete_custom_policy(&state.store, &id, &org_id)
-            .await
-            .map_err(|e| {
-                ServiceError::Internal(format!(
-                    "Failed to delete policy: {e}"
-                ))
-            })?;
+    let deleted = db::delete_custom_policy(&state.store, &id, &org_id)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Failed to delete policy: {e}")))?;
 
     if deleted {
         Ok(StatusCode::NO_CONTENT.into_response())
@@ -574,18 +473,9 @@ pub async fn validate_policy(
     Json(req): Json<ValidateRequest>,
 ) -> Result<Json<ValidateResponse>, ServiceError> {
     // Auth check (any org admin can validate)
-    let _auth = extract_org_admin(
-        &state,
-        &headers,
-        &jar,
-        method.as_str(),
-        uri.path(),
-    )
-    .await?;
+    let _auth = extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    if req.cel_expression.is_empty()
-        || req.cel_expression.len() > 1024
-    {
+    if req.cel_expression.is_empty() || req.cel_expression.len() > 1024 {
         return Ok(Json(ValidateResponse {
             valid: false,
             error: Some(
@@ -598,9 +488,7 @@ pub async fn validate_policy(
     }
 
     // Try to compile
-    if let Err(e) =
-        posture::validate_cel_expression(&req.cel_expression)
-    {
+    if let Err(e) = posture::validate_cel_expression(&req.cel_expression) {
         return Ok(Json(ValidateResponse {
             valid: false,
             error: Some(format!("{e}")),
@@ -609,13 +497,8 @@ pub async fn validate_policy(
     }
 
     // If test posture provided, evaluate
-    let test_result = if let Some(ref test_posture) =
-        req.test_posture
-    {
-        match posture::test_cel_expression(
-            &req.cel_expression,
-            test_posture,
-        ) {
+    let test_result = if let Some(ref test_posture) = req.test_posture {
+        match posture::test_cel_expression(&req.cel_expression, test_posture) {
             Ok(pass) => Some(TestResult { pass }),
             Err(_) => Some(TestResult { pass: false }),
         }

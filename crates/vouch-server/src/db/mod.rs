@@ -193,10 +193,10 @@ pub use enrollment::{EnrolledUser, EnrollmentResult, enroll_user_with_org};
 
 // Re-export posture policy types and functions
 pub use posture_policies::{
-    CreateCustomPolicyParams, CustomPosturePolicy, UpdateCustomPolicyParams,
-    count_active_policies, create_custom_policy, delete_custom_policy,
-    get_active_custom_policies, get_active_preconfigured_slugs, get_custom_policy,
-    list_custom_policies, set_preconfigured_active, update_custom_policy,
+    CreateCustomPolicyParams, CustomPosturePolicy, UpdateCustomPolicyParams, count_active_policies,
+    create_custom_policy, delete_custom_policy, get_active_custom_policies,
+    get_active_preconfigured_slugs, get_custom_policy, list_custom_policies,
+    set_preconfigured_active, update_custom_policy,
 };
 
 #[cfg(test)]

@@ -60,9 +60,9 @@ checksum = "5192cca8006f1fd4f7237516f40fa183bb07f8fbdfedaa0036de5ea9b0b45e78"
 
 [[package]]
 name = "antlr4rust"
-version = "0.3.0-rc2"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d240d49ee89063f90fa0cb18aead41a5893cd544a1785983dc3bf5c3d5faa58b"
+checksum = "093d520274bfff7278d776f7ea12981a0a0a6f96db90964658e0f38fc6e9a6a6"
 dependencies = [
  "better_any",
  "bit-set",
@@ -986,26 +986,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "cel-interpreter"
-version = "0.10.0"
+name = "cel"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a76c07820046cc8239526fceec6df147a979ae48644dbad274fc3ce38ab0973b"
+checksum = "ca1e5eda1b0f8476181bed1bfc9232a91d62ff0b9f1bc0e48afff3cbcb5b0b5c"
 dependencies = [
- "cel-parser",
+ "antlr4rust",
+ "lazy_static",
  "nom",
  "paste",
  "serde",
  "thiserror 1.0.69",
-]
-
-[[package]]
-name = "cel-parser"
-version = "0.10.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "546fb134998490c5c47fc7a29c7535e725d2e403f172040e8f263d0b318bff5f"
-dependencies = [
- "antlr4rust",
- "lazy_static",
 ]
 
 [[package]]
@@ -5172,7 +5163,7 @@ dependencies = [
  "axum-extra",
  "axum-server",
  "base64 0.22.1",
- "cel-interpreter",
+ "cel",
  "ciborium",
  "clap",
  "dotenvy",

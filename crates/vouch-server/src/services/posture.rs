@@ -9,7 +9,7 @@
 use crate::db;
 use crate::db::store::DocumentStore;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
-use cel_interpreter::{Context, Program, Value};
+use cel::{Context, Program, Value};
 use std::collections::HashMap;
 use vouch_common::posture::DevicePosture;
 
@@ -141,14 +141,7 @@ fn build_cel_context(posture: &DevicePosture) -> Context<'_> {
     // OS info
     map.insert(
         "os".into(),
-        Value::String(
-            posture
-                .os
-                .as_deref()
-                .unwrap_or("")
-                .to_string()
-                .into(),
-        ),
+        Value::String(posture.os.as_deref().unwrap_or("").to_string().into()),
     );
     map.insert(
         "os_version".into(),
@@ -174,25 +167,11 @@ fn build_cel_context(posture: &DevicePosture) -> Context<'_> {
     );
     map.insert(
         "os_build".into(),
-        Value::String(
-            posture
-                .os_build
-                .as_deref()
-                .unwrap_or("")
-                .to_string()
-                .into(),
-        ),
+        Value::String(posture.os_build.as_deref().unwrap_or("").to_string().into()),
     );
     map.insert(
         "arch".into(),
-        Value::String(
-            posture
-                .arch
-                .as_deref()
-                .unwrap_or("")
-                .to_string()
-                .into(),
-        ),
+        Value::String(posture.arch.as_deref().unwrap_or("").to_string().into()),
     );
 
     // Disk encryption
@@ -325,10 +304,7 @@ fn build_cel_context(posture: &DevicePosture) -> Context<'_> {
         "elevated".into(),
         Value::Bool(posture.elevated.unwrap_or(false)),
     );
-    map.insert(
-        "tty".into(),
-        Value::Bool(posture.tty.unwrap_or(false)),
-    );
+    map.insert("tty".into(), Value::Bool(posture.tty.unwrap_or(false)));
     map.insert(
         "parent_process".into(),
         Value::String(
@@ -373,9 +349,7 @@ fn evaluate_cel(expression: &str, ctx: &Context<'_>) -> bool {
     let program = match compile_result {
         Ok(Ok(p)) => p,
         Ok(Err(e)) => {
-            tracing::warn!(
-                "CEL compile error during evaluation: {e}"
-            );
+            tracing::warn!("CEL compile error during evaluation: {e}");
             return false;
         }
         Err(_) => {
@@ -387,9 +361,7 @@ fn evaluate_cel(expression: &str, ctx: &Context<'_>) -> bool {
     match program.execute(ctx) {
         Ok(Value::Bool(result)) => result,
         Ok(_) => {
-            tracing::warn!(
-                "CEL expression returned non-bool value"
-            );
+            tracing::warn!("CEL expression returned non-bool value");
             false
         }
         Err(e) => {
@@ -403,10 +375,7 @@ fn evaluate_cel(expression: &str, ctx: &Context<'_>) -> bool {
 ///
 /// Returns `Ok(true)` if the policy passes, `Ok(false)` if it fails,
 /// or `Err` if the expression cannot be compiled.
-pub fn test_cel_expression(
-    expression: &str,
-    posture: &DevicePosture,
-) -> ServiceResult<bool> {
+pub fn test_cel_expression(expression: &str, posture: &DevicePosture) -> ServiceResult<bool> {
     // Reuse validation (handles empty, panics, parse errors)
     validate_cel_expression(expression)?;
 
@@ -443,103 +412,61 @@ pub fn remediation_for_slug(slug: &str, os: Option<&str>) -> String {
     match (slug, os) {
         // Disk encryption
         ("disk_encryption", "macos") => {
-            "Enable FileVault in System Settings > Privacy & Security"
-                .to_string()
+            "Enable FileVault in System Settings > Privacy & Security".to_string()
         }
-        ("disk_encryption", "linux") => {
-            "Enable LUKS encryption with cryptsetup".to_string()
-        }
+        ("disk_encryption", "linux") => "Enable LUKS encryption with cryptsetup".to_string(),
         ("disk_encryption", "windows") => {
-            "Enable BitLocker in Settings > Device encryption"
-                .to_string()
+            "Enable BitLocker in Settings > Device encryption".to_string()
         }
-        ("disk_encryption", _) => {
-            "Enable full-disk encryption on your device".to_string()
-        }
+        ("disk_encryption", _) => "Enable full-disk encryption on your device".to_string(),
 
         // Firewall
         ("firewall", "macos") => {
-            "Enable Firewall in System Settings > Network > Firewall"
-                .to_string()
+            "Enable Firewall in System Settings > Network > Firewall".to_string()
         }
-        ("firewall", "linux") => {
-            "Enable firewall with: sudo ufw enable".to_string()
-        }
-        ("firewall", "windows") => {
-            "Enable Windows Firewall in Windows Security"
-                .to_string()
-        }
-        ("firewall", _) => {
-            "Enable your system firewall".to_string()
-        }
+        ("firewall", "linux") => "Enable firewall with: sudo ufw enable".to_string(),
+        ("firewall", "windows") => "Enable Windows Firewall in Windows Security".to_string(),
+        ("firewall", _) => "Enable your system firewall".to_string(),
 
         // Screen lock
-        ("screen_lock", "macos") => {
-            "Set screen lock in System Settings > Lock Screen"
-                .to_string()
-        }
-        ("screen_lock", "linux") => {
-            "Configure screen lock in your display settings"
-                .to_string()
-        }
+        ("screen_lock", "macos") => "Set screen lock in System Settings > Lock Screen".to_string(),
+        ("screen_lock", "linux") => "Configure screen lock in your display settings".to_string(),
         ("screen_lock", "windows") => {
-            "Set screen lock in Settings > Accounts > Sign-in options"
-                .to_string()
+            "Set screen lock in Settings > Accounts > Sign-in options".to_string()
         }
-        ("screen_lock", _) => {
-            "Enable screen lock on your device".to_string()
-        }
+        ("screen_lock", _) => "Enable screen lock on your device".to_string(),
 
         // Endpoint protection
         ("endpoint_protection", "macos" | "linux") => {
-            "Install an EDR agent (e.g., CrowdStrike, SentinelOne)"
-                .to_string()
+            "Install an EDR agent (e.g., CrowdStrike, SentinelOne)".to_string()
         }
-        ("endpoint_protection", "windows") => {
-            "Install an EDR agent (e.g., CrowdStrike, \
+        ("endpoint_protection", "windows") => "Install an EDR agent (e.g., CrowdStrike, \
              Microsoft Defender for Endpoint)"
-                .to_string()
-        }
+            .to_string(),
         ("endpoint_protection", _) => {
-            "Install an endpoint detection and response (EDR) agent"
-                .to_string()
+            "Install an endpoint detection and response (EDR) agent".to_string()
         }
 
         // Platform integrity
-        ("platform_integrity", "macos") => {
-            "Secure Boot is managed by Apple and should be enabled \
+        ("platform_integrity", "macos") => "Secure Boot is managed by Apple and should be enabled \
              by default"
-                .to_string()
-        }
+            .to_string(),
         ("platform_integrity", "linux" | "windows") => {
-            "Enable Secure Boot in your UEFI/BIOS firmware settings"
-                .to_string()
+            "Enable Secure Boot in your UEFI/BIOS firmware settings".to_string()
         }
-        ("platform_integrity", _) => {
-            "Enable Secure Boot on your device".to_string()
-        }
+        ("platform_integrity", _) => "Enable Secure Boot on your device".to_string(),
 
         // OS currency
-        ("os_currency", "macos") => {
-            "Update macOS to a supported version (14 or later)"
-                .to_string()
-        }
-        ("os_currency", "windows") => {
-            "Update Windows to a supported version (build 26100 \
+        ("os_currency", "macos") => "Update macOS to a supported version (14 or later)".to_string(),
+        ("os_currency", "windows") => "Update Windows to a supported version (build 26100 \
              or later)"
-                .to_string()
-        }
-        ("os_currency", _) => {
-            "Update your operating system to a supported version"
-                .to_string()
-        }
+            .to_string(),
+        ("os_currency", _) => "Update your operating system to a supported version".to_string(),
 
         // Unknown slug (custom policy)
-        _ => {
-            "Contact your organization administrator for device \
+        _ => "Contact your organization administrator for device \
              compliance requirements"
-                .to_string()
-        }
+            .to_string(),
     }
 }
 
@@ -565,21 +492,12 @@ pub async fn evaluate_posture_policies(
     // Load active preconfigured slugs
     let active_slugs = db::get_active_preconfigured_slugs(store, org_id)
         .await
-        .map_err(|e| {
-            ServiceError::Internal(format!(
-                "Failed to load posture config: {e}"
-            ))
-        })?;
+        .map_err(|e| ServiceError::Internal(format!("Failed to load posture config: {e}")))?;
 
     // Load active custom policies
-    let active_custom =
-        db::get_active_custom_policies(store, org_id)
-            .await
-            .map_err(|e| {
-                ServiceError::Internal(format!(
-                    "Failed to load custom policies: {e}"
-                ))
-            })?;
+    let active_custom = db::get_active_custom_policies(store, org_id)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Failed to load custom policies: {e}")))?;
 
     // No active policies → no enforcement
     if active_slugs.is_empty() && active_custom.is_empty() {
@@ -597,8 +515,7 @@ pub async fn evaluate_posture_policies(
         if let Some(policy) = get_preconfigured_policy(slug)
             && !evaluate_cel(policy.cel_expression, &ctx)
         {
-            let remediation =
-                remediation_for_slug(policy.slug, os);
+            let remediation = remediation_for_slug(policy.slug, os);
             return Err(ServiceError::oauth(
                 OAuthErrorCode::AccessDenied,
                 format!(
@@ -633,9 +550,7 @@ pub async fn evaluate_posture_policies(
 /// Extract `DevicePosture` from the `authorization_details` JSON string.
 ///
 /// Looks for an entry with `type: "device_posture"` in the RFC 9396 array.
-fn extract_device_posture(
-    ad_json: Option<&str>,
-) -> ServiceResult<DevicePosture> {
+fn extract_device_posture(ad_json: Option<&str>) -> ServiceResult<DevicePosture> {
     let json = ad_json.ok_or_else(|| {
         ServiceError::oauth(
             OAuthErrorCode::AccessDenied,
@@ -643,32 +558,22 @@ fn extract_device_posture(
         )
     })?;
 
-    let entries: Vec<serde_json::Value> =
-        serde_json::from_str(json).map_err(|e| {
-            ServiceError::oauth(
-                OAuthErrorCode::AccessDenied,
-                format!(
-                    "Invalid authorization_details format: {e}"
-                ),
-            )
-        })?;
+    let entries: Vec<serde_json::Value> = serde_json::from_str(json).map_err(|e| {
+        ServiceError::oauth(
+            OAuthErrorCode::AccessDenied,
+            format!("Invalid authorization_details format: {e}"),
+        )
+    })?;
 
     for entry in &entries {
-        let type_name = entry
-            .get("type")
-            .and_then(serde_json::Value::as_str);
+        let type_name = entry.get("type").and_then(serde_json::Value::as_str);
         if type_name == Some(vouch_common::posture::POSTURE_TYPE) {
-            let posture: DevicePosture =
-                serde_json::from_value(entry.clone()).map_err(
-                    |e| {
-                        ServiceError::oauth(
-                            OAuthErrorCode::AccessDenied,
-                            format!(
-                                "Invalid device posture data: {e}"
-                            ),
-                        )
-                    },
-                )?;
+            let posture: DevicePosture = serde_json::from_value(entry.clone()).map_err(|e| {
+                ServiceError::oauth(
+                    OAuthErrorCode::AccessDenied,
+                    format!("Invalid device posture data: {e}"),
+                )
+            })?;
             return Ok(posture);
         }
     }
@@ -737,9 +642,7 @@ mod tests {
             disk_encryption_enabled: Some(true),
             disk_encryption_technology: Some("filevault".to_string()),
             firewall_enabled: Some(true),
-            firewall_technology: Some(
-                "application firewall".to_string(),
-            ),
+            firewall_technology: Some("application firewall".to_string()),
             screen_lock_enabled: Some(true),
             screen_lock_idle_timeout_secs: Some(300),
             secure_boot_enabled: Some(true),
@@ -758,15 +661,9 @@ mod tests {
 
     #[test]
     fn test_validate_cel_expression_valid() {
-        validate_cel_expression(
-            "posture.disk_encryption_enabled == true",
-        )
-        .unwrap();
+        validate_cel_expression("posture.disk_encryption_enabled == true").unwrap();
         validate_cel_expression("size(posture.edr) > 0").unwrap();
-        validate_cel_expression(
-            "posture.os == \"macos\" || posture.os == \"linux\"",
-        )
-        .unwrap();
+        validate_cel_expression("posture.os == \"macos\" || posture.os == \"linux\"").unwrap();
     }
 
     #[test]
@@ -776,10 +673,7 @@ mod tests {
         // Whitespace-only expression
         assert!(validate_cel_expression("   ").is_err());
         // Unterminated string literal (causes parser panic, caught)
-        assert!(
-            validate_cel_expression("posture.os == \"unterminated")
-                .is_err()
-        );
+        assert!(validate_cel_expression("posture.os == \"unterminated").is_err());
     }
 
     #[test]
@@ -806,20 +700,14 @@ mod tests {
     fn test_evaluate_firewall_pass() {
         let posture = sample_posture();
         let ctx = build_cel_context(&posture);
-        assert!(evaluate_cel(
-            "posture.firewall_enabled == true",
-            &ctx
-        ));
+        assert!(evaluate_cel("posture.firewall_enabled == true", &ctx));
     }
 
     #[test]
     fn test_evaluate_screen_lock_pass() {
         let posture = sample_posture();
         let ctx = build_cel_context(&posture);
-        assert!(evaluate_cel(
-            "posture.screen_lock_enabled == true",
-            &ctx
-        ));
+        assert!(evaluate_cel("posture.screen_lock_enabled == true", &ctx));
     }
 
     #[test]
@@ -840,10 +728,7 @@ mod tests {
     fn test_evaluate_secure_boot_pass() {
         let posture = sample_posture();
         let ctx = build_cel_context(&posture);
-        assert!(evaluate_cel(
-            "posture.secure_boot_enabled == true",
-            &ctx
-        ));
+        assert!(evaluate_cel("posture.secure_boot_enabled == true", &ctx));
     }
 
     #[test]
@@ -892,18 +777,9 @@ mod tests {
             "posture.disk_encryption_enabled == true",
             &ctx
         ));
-        assert!(!evaluate_cel(
-            "posture.firewall_enabled == true",
-            &ctx
-        ));
-        assert!(!evaluate_cel(
-            "posture.screen_lock_enabled == true",
-            &ctx
-        ));
-        assert!(!evaluate_cel(
-            "posture.secure_boot_enabled == true",
-            &ctx
-        ));
+        assert!(!evaluate_cel("posture.firewall_enabled == true", &ctx));
+        assert!(!evaluate_cel("posture.screen_lock_enabled == true", &ctx));
+        assert!(!evaluate_cel("posture.secure_boot_enabled == true", &ctx));
     }
 
     #[test]
@@ -916,14 +792,8 @@ mod tests {
     #[test]
     fn test_all_preconfigured_policies_compile() {
         for policy in PRECONFIGURED_POLICIES {
-            Program::compile(policy.cel_expression).unwrap_or_else(
-                |e| {
-                    panic!(
-                        "Policy '{}' failed to compile: {e}",
-                        policy.slug
-                    )
-                },
-            );
+            Program::compile(policy.cel_expression)
+                .unwrap_or_else(|e| panic!("Policy '{}' failed to compile: {e}", policy.slug));
         }
     }
 
@@ -943,22 +813,16 @@ mod tests {
     #[test]
     fn test_test_cel_expression_pass() {
         let posture = sample_posture();
-        let result = test_cel_expression(
-            "posture.disk_encryption_enabled == true",
-            &posture,
-        )
-        .unwrap();
+        let result =
+            test_cel_expression("posture.disk_encryption_enabled == true", &posture).unwrap();
         assert!(result);
     }
 
     #[test]
     fn test_test_cel_expression_fail() {
         let posture = minimal_posture();
-        let result = test_cel_expression(
-            "posture.disk_encryption_enabled == true",
-            &posture,
-        )
-        .unwrap();
+        let result =
+            test_cel_expression("posture.disk_encryption_enabled == true", &posture).unwrap();
         assert!(!result);
     }
 
@@ -968,13 +832,7 @@ mod tests {
         // Empty expression rejected
         assert!(test_cel_expression("", &posture).is_err());
         // Unterminated string (parser panic caught)
-        assert!(
-            test_cel_expression(
-                "posture.os == \"unterminated",
-                &posture
-            )
-            .is_err()
-        );
+        assert!(test_cel_expression("posture.os == \"unterminated", &posture).is_err());
     }
 
     #[test]
@@ -991,27 +849,21 @@ mod tests {
 
     #[test]
     fn test_remediation_windows() {
-        let r =
-            remediation_for_slug("screen_lock", Some("windows"));
+        let r = remediation_for_slug("screen_lock", Some("windows"));
         assert!(r.contains("Sign-in options"));
     }
 
     #[test]
     fn test_remediation_unknown_slug() {
-        let r =
-            remediation_for_slug("custom_thing", Some("macos"));
+        let r = remediation_for_slug("custom_thing", Some("macos"));
         assert!(r.contains("Contact your organization"));
     }
 
     #[test]
     fn test_get_preconfigured_policy() {
-        assert!(
-            get_preconfigured_policy("disk_encryption").is_some()
-        );
+        assert!(get_preconfigured_policy("disk_encryption").is_some());
         assert!(get_preconfigured_policy("firewall").is_some());
-        assert!(
-            get_preconfigured_policy("nonexistent").is_none()
-        );
+        assert!(get_preconfigured_policy("nonexistent").is_none());
     }
 
     #[test]
@@ -1024,8 +876,7 @@ mod tests {
     #[test]
     fn test_extract_device_posture_from_ad() {
         let json = r#"[{"type":"device_posture","posture_version":1,"os":"macos","disk_encryption_enabled":true}]"#;
-        let posture =
-            extract_device_posture(Some(json)).unwrap();
+        let posture = extract_device_posture(Some(json)).unwrap();
         assert_eq!(posture.os.as_deref(), Some("macos"));
         assert_eq!(posture.disk_encryption_enabled, Some(true));
     }

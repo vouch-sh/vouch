@@ -54,9 +54,7 @@ pub async fn get_posture_config(
     store: &DocumentStore,
     org_id: &str,
 ) -> Result<Option<Document<PostureConfigDoc>>> {
-    store
-        .find_one::<PostureConfigDoc>("org_id", org_id)
-        .await
+    store.find_one::<PostureConfigDoc>("org_id", org_id).await
 }
 
 /// Set which preconfigured policy slugs are active for an org.
@@ -183,10 +181,7 @@ pub async fn update_custom_policy(
     }
 
     let updated = CustomPosturePolicyDoc {
-        name: params
-            .name
-            .map(String::from)
-            .unwrap_or(doc.data.name),
+        name: params.name.map(String::from).unwrap_or(doc.data.name),
         description: match params.description {
             Some(d) => d.map(String::from),
             None => doc.data.description,
@@ -209,11 +204,7 @@ pub async fn update_custom_policy(
 /// Delete a custom posture policy.
 ///
 /// Returns `true` if the policy was found and deleted, `false` if not found.
-pub async fn delete_custom_policy(
-    store: &DocumentStore,
-    id: &str,
-    org_id: &str,
-) -> Result<bool> {
+pub async fn delete_custom_policy(store: &DocumentStore, id: &str, org_id: &str) -> Result<bool> {
     let doc = store.get::<CustomPosturePolicyDoc>(id).await?;
     let Some(doc) = doc else {
         return Ok(false);
@@ -229,15 +220,8 @@ pub async fn delete_custom_policy(
 }
 
 /// Count total active policies for an org (preconfigured + custom).
-pub async fn count_active_policies(
-    store: &DocumentStore,
-    org_id: &str,
-) -> Result<usize> {
-    let preconfigured_count = get_active_preconfigured_slugs(store, org_id)
-        .await?
-        .len();
-    let custom_active = get_active_custom_policies(store, org_id)
-        .await?
-        .len();
+pub async fn count_active_policies(store: &DocumentStore, org_id: &str) -> Result<usize> {
+    let preconfigured_count = get_active_preconfigured_slugs(store, org_id).await?.len();
+    let custom_active = get_active_custom_policies(store, org_id).await?.len();
     Ok(preconfigured_count + custom_active)
 }
