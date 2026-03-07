@@ -22,7 +22,6 @@
 use super::extractors::ClientInfo;
 use crate::AppState;
 use crate::crypto::generate_challenge;
-use crate::crypto::webauthn_verify;
 use crate::db::{self, AuthEventParams, AuthEventType};
 use crate::handlers::session::{create_session_cookie, get_auth_context};
 use crate::impl_template_response;
@@ -520,22 +519,21 @@ pub async fn browser_login_complete(
     let authenticator = lookup_result.authenticator;
     let user = lookup_result.user;
 
-    // Server-side WebAuthn signature verification
-    let expected_origin = format!("https://{}", auth_state.rp_id);
-    let expected_challenge = URL_SAFE_NO_PAD.encode(&auth_state.challenge);
+    // Server-side WebAuthn signature verification (offloaded to a blocking
+    // thread — see verify_login_assertion for rationale).
     let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
 
-    let verification_result = webauthn_verify::verify_assertion(
-        &authenticator_data,
-        &client_data_json,
-        &signature,
-        &authenticator.public_key,
-        &auth_state.rp_id,
-        &expected_challenge,
-        &expected_origin,
+    use crate::services::auth::{LoginAssertionParams, verify_login_assertion};
+    let verification_result = verify_login_assertion(LoginAssertionParams {
+        authenticator_data,
+        client_data_json,
+        signature,
+        public_key: authenticator.public_key.clone(),
+        rp_id: auth_state.rp_id.clone(),
+        challenge: auth_state.challenge.clone(),
         stored_counter,
-        true, // require_user_verification
-    )
+    })
+    .await
     .map_err(|e| {
         log_failure(&user.id, Some(&authenticator.id), &e.to_string());
         ServiceError::api(
@@ -548,12 +546,12 @@ pub async fn browser_login_complete(
     tracing::info!(
         "Browser WebAuthn assertion verified for user {}: counter={}, uv={}",
         redact_email(&user.email),
-        verification_result.counter,
+        verification_result.new_counter,
         verification_result.user_verified
     );
 
     // Update counter in database (WebAuthn counter is u32, stored as i32)
-    let new_counter = verification_result.counter as i32;
+    let new_counter = verification_result.new_counter as i32;
     db::update_authenticator_counter(&state.store, &authenticator.id, new_counter)
         .await
         .map_err(|e| {

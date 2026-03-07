@@ -254,7 +254,10 @@ impl GitHubApp {
     }
 
     /// Generate a JWT for authenticating as the GitHub App (RS256, 10-min validity).
-    pub fn generate_app_jwt(&self) -> Result<String> {
+    ///
+    /// RS256 signing is offloaded to a blocking thread to avoid starving
+    /// the tokio runtime on 1-vCPU instances.
+    pub async fn generate_app_jwt(&self) -> Result<String> {
         let now = jiff::Timestamp::now();
         // GitHub recommends setting iat to 60 seconds in the past to account for clock drift
         let iat = now.as_second() - 60;
@@ -267,12 +270,17 @@ impl GitHubApp {
             iss: self.app_id.0.to_string(),
         };
 
-        // Use from_rsa_der - our RsaPrivateKeyDer already converted PKCS#1 to PKCS#8
-        let encoding_key = EncodingKey::from_rsa_der(self.private_key.as_bytes());
-        let header = Header::new(Algorithm::RS256);
+        let private_key_bytes = self.private_key.as_bytes().to_vec();
 
-        jsonwebtoken::encode(&header, &claims, &encoding_key)
-            .map_err(|e| anyhow::anyhow!("Failed to generate GitHub App JWT: {e}"))
+        tokio::task::spawn_blocking(move || {
+            let encoding_key = EncodingKey::from_rsa_der(&private_key_bytes);
+            let header = Header::new(Algorithm::RS256);
+
+            jsonwebtoken::encode(&header, &claims, &encoding_key)
+                .map_err(|e| anyhow::anyhow!("Failed to generate GitHub App JWT: {e}"))
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("GitHub App JWT signing task failed: {e}"))?
     }
 
     /// Get installation details from GitHub.
@@ -280,7 +288,7 @@ impl GitHubApp {
         &self,
         installation_id: GitHubInstallationId,
     ) -> Result<InstallationDetails> {
-        let jwt = self.generate_app_jwt()?;
+        let jwt = self.generate_app_jwt().await?;
 
         let url = format!(
             "https://api.github.com/app/installations/{}",
@@ -325,7 +333,7 @@ impl GitHubApp {
         repositories: Option<&[String]>,
         permissions: Option<&HashMap<String, String>>,
     ) -> Result<GitHubInstallationToken> {
-        let jwt = self.generate_app_jwt()?;
+        let jwt = self.generate_app_jwt().await?;
 
         let url = format!(
             "https://api.github.com/app/installations/{}/access_tokens",
