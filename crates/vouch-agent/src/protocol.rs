@@ -17,6 +17,23 @@ fn serialize_secret_string<S: serde::Serializer>(
     serializer.serialize_str(secret.expose_secret())
 }
 
+/// Supported JSON-RPC methods for agent IPC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Method {
+    Ping,
+    GetSession,
+    StoreSession,
+    ClearSession,
+    GetToken,
+    StoreSshCredentials,
+    ClearSshCredentials,
+    HasSshCredentials,
+    CacheCredential,
+    GetCachedCredential,
+    ClearCredentialCache,
+}
+
 /// JSON-RPC 2.0 request.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -25,7 +42,7 @@ pub struct Request {
     /// Request ID.
     pub id: u64,
     /// Method name.
-    pub method: String,
+    pub method: Method,
     /// Method parameters (optional).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub params: Option<serde_json::Value>,
@@ -33,28 +50,28 @@ pub struct Request {
 
 impl Request {
     /// Create a new request.
-    pub fn new(id: u64, method: &str) -> Self {
+    pub fn new(id: u64, method: Method) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             id,
-            method: method.to_string(),
+            method,
             params: None,
         }
     }
 
     /// Create a new request with parameters.
-    pub fn with_params<T: Serialize>(id: u64, method: &str, params: T) -> Self {
+    pub fn with_params<T: Serialize>(id: u64, method: Method, params: T) -> Self {
         let params = match serde_json::to_value(params) {
             Ok(v) => v,
             Err(e) => {
-                warn!("Failed to serialize request params for '{method}': {e}");
+                warn!("Failed to serialize request params for '{method:?}': {e}");
                 serde_json::Value::Null
             }
         };
         Self {
             jsonrpc: "2.0".to_string(),
             id,
-            method: method.to_string(),
+            method,
             params: Some(params),
         }
     }
@@ -233,11 +250,11 @@ mod tests {
 
     #[test]
     fn test_request_new() {
-        let req = Request::new(1, "ping");
+        let req = Request::new(1, Method::Ping);
 
         assert_eq!(req.jsonrpc, "2.0");
         assert_eq!(req.id, 1);
-        assert_eq!(req.method, "ping");
+        assert_eq!(req.method, Method::Ping);
         assert!(req.params.is_none());
     }
 
@@ -249,11 +266,11 @@ mod tests {
             expires_at: "2099-12-31T23:59:59Z".to_string(),
             server_url: None,
         };
-        let req = Request::with_params(2, "store_session", &params);
+        let req = Request::with_params(2, Method::StoreSession, &params);
 
         assert_eq!(req.jsonrpc, "2.0");
         assert_eq!(req.id, 2);
-        assert_eq!(req.method, "store_session");
+        assert_eq!(req.method, Method::StoreSession);
         assert!(req.params.is_some());
     }
 
@@ -284,12 +301,36 @@ mod tests {
 
     #[test]
     fn test_request_serialization() {
-        let req = Request::new(42, "get_session");
+        let req = Request::new(42, Method::GetSession);
         let json = serde_json::to_string(&req).expect("serialization should succeed");
 
         assert!(json.contains("\"jsonrpc\":\"2.0\""));
         assert!(json.contains("\"id\":42"));
         assert!(json.contains("\"method\":\"get_session\""));
+    }
+
+    #[test]
+    fn test_method_serde_roundtrip() {
+        // Verify all variants serialize to snake_case and roundtrip correctly
+        let methods = [
+            (Method::Ping, "\"ping\""),
+            (Method::GetSession, "\"get_session\""),
+            (Method::StoreSession, "\"store_session\""),
+            (Method::ClearSession, "\"clear_session\""),
+            (Method::GetToken, "\"get_token\""),
+            (Method::StoreSshCredentials, "\"store_ssh_credentials\""),
+            (Method::ClearSshCredentials, "\"clear_ssh_credentials\""),
+            (Method::HasSshCredentials, "\"has_ssh_credentials\""),
+            (Method::CacheCredential, "\"cache_credential\""),
+            (Method::GetCachedCredential, "\"get_cached_credential\""),
+            (Method::ClearCredentialCache, "\"clear_credential_cache\""),
+        ];
+        for (method, expected_json) in methods {
+            let json = serde_json::to_string(&method).expect("serialize");
+            assert_eq!(json, expected_json, "serialization mismatch for {method:?}");
+            let back: Method = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(back, method, "roundtrip mismatch for {method:?}");
+        }
     }
 
     #[test]

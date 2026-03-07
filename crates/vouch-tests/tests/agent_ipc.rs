@@ -5,7 +5,7 @@
 //! serialization without requiring a running agent or Unix sockets.
 
 use vouch_agent::protocol::{
-    NOT_AUTHENTICATED, Request, Response, SESSION_EXPIRED, StoreSessionParams,
+    Method, NOT_AUTHENTICATED, Request, Response, SESSION_EXPIRED, StoreSessionParams,
     StoreSshCredentialsParams,
 };
 use vouch_agent::state::{AgentState, Session, SessionInfo};
@@ -244,11 +244,11 @@ mod protocol_types {
     /// JSON-RPC request creation.
     #[test]
     fn test_request_creation() {
-        let request = Request::new(42, "get_session");
+        let request = Request::new(42, Method::GetSession);
 
         assert_eq!(request.jsonrpc, "2.0");
         assert_eq!(request.id, 42);
-        assert_eq!(request.method, "get_session");
+        assert_eq!(request.method, Method::GetSession);
         assert!(request.params.is_none());
     }
 
@@ -262,9 +262,9 @@ mod protocol_types {
             server_url: None,
         };
 
-        let request = Request::with_params(1, "store_session", &params);
+        let request = Request::with_params(1, Method::StoreSession, &params);
 
-        assert_eq!(request.method, "store_session");
+        assert_eq!(request.method, Method::StoreSession);
         assert!(request.params.is_some());
 
         // Verify params are correctly embedded

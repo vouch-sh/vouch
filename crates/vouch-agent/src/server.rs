@@ -4,10 +4,12 @@
 use crate::audit::{self, AuditEvent};
 use crate::error::Result;
 use crate::protocol::{
-    CacheCredentialParams, GetCachedCredentialParams, Request, Response, StoreSessionParams,
-    StoreSshCredentialsParams,
+    CacheCredentialParams, GetCachedCredentialParams, Method, Request, Response,
+    StoreSessionParams, StoreSshCredentialsParams,
 };
-use crate::socket::{bind_socket, ensure_vouch_dir, remove_socket, socket_path};
+use crate::socket::{
+    bind_socket, ensure_vouch_dir, remove_socket, socket_path, validate_vouch_dir_ownership,
+};
 use crate::ssh_agent::{SshAgentState, SshCredentials};
 use crate::state::{AgentState, CachedCredential, Session, SessionInfo};
 use crate::wire;
@@ -56,6 +58,9 @@ impl AgentServer {
         // Ensure vouch directory exists
         ensure_vouch_dir()?;
 
+        // Validate directory ownership and symlink safety
+        validate_vouch_dir_ownership()?;
+
         // Remove stale socket if it exists
         remove_socket()?;
 
@@ -72,6 +77,31 @@ impl AgentServer {
                 result = listener.accept() => {
                     match result {
                         Ok((stream, _)) => {
+                            // Verify peer UID matches our UID (like gpg-agent/libassuan)
+                            match crate::socket::get_peer_credentials(&stream) {
+                                Ok(peer) => {
+                                    let my_uid = crate::socket::current_uid();
+                                    if peer.uid != my_uid {
+                                        warn!(
+                                            peer_uid = peer.uid,
+                                            peer_pid = peer.pid,
+                                            expected_uid = my_uid,
+                                            "Rejecting IPC connection: UID mismatch"
+                                        );
+                                        audit::log_event(AuditEvent::ConnectionRejected {
+                                            peer_uid: peer.uid,
+                                            peer_pid: peer.pid,
+                                            reason: "uid mismatch".to_string(),
+                                        });
+                                        continue;
+                                    }
+                                }
+                                Err(e) => {
+                                    // Best-effort: allow connection if peer creds unavailable
+                                    debug!("Could not verify peer credentials: {e}");
+                                }
+                            }
+
                             let permit = match Arc::clone(&semaphore).try_acquire_owned() {
                                 Ok(permit) => permit,
                                 Err(_) => {
@@ -104,6 +134,20 @@ impl AgentServer {
     }
 }
 
+/// Intermediate request type for wire deserialization.
+///
+/// Keeps `method` as a raw string so we can distinguish "valid JSON but unknown
+/// method" (→ `method_not_found`) from "malformed JSON" (→ `parse_error`).
+#[derive(serde::Deserialize)]
+struct RawRequest {
+    #[allow(dead_code)]
+    jsonrpc: String,
+    id: u64,
+    method: String,
+    #[serde(default)]
+    params: Option<serde_json::Value>,
+}
+
 /// Handle a single client connection.
 async fn handle_connection(
     mut stream: UnixStream,
@@ -117,8 +161,8 @@ async fn handle_connection(
             None => return Ok(()), // Client disconnected
         };
 
-        // Parse request
-        let request: Request = match serde_json::from_slice(&buf) {
+        // Parse as RawRequest first to separate parse errors from unknown methods
+        let raw: RawRequest = match serde_json::from_slice(&buf) {
             Ok(req) => req,
             Err(e) => {
                 warn!("Invalid request: {e}");
@@ -128,7 +172,26 @@ async fn handle_connection(
             }
         };
 
-        debug!("Request: method={}", request.method);
+        // Try to resolve the method string into a known Method variant
+        let method: Method =
+            match serde_json::from_value(serde_json::Value::String(raw.method.clone())) {
+                Ok(m) => m,
+                Err(_) => {
+                    warn!("Unknown method: {}", raw.method);
+                    let response = Response::method_not_found(raw.id);
+                    send_response(&mut stream, &response).await?;
+                    continue;
+                }
+            };
+
+        let request = Request {
+            jsonrpc: "2.0".to_string(),
+            id: raw.id,
+            method,
+            params: raw.params,
+        };
+
+        debug!("Request: method={:?}", request.method);
 
         // Handle request
         let response = handle_request(&request, &state, &ssh_state).await;
@@ -142,19 +205,18 @@ async fn handle_request(
     state: &Arc<AgentState>,
     ssh_state: &Arc<SshAgentState>,
 ) -> Response {
-    match request.method.as_str() {
-        "ping" => handle_ping(request),
-        "get_session" => handle_get_session(request, state, ssh_state).await,
-        "store_session" => handle_store_session(request, state, ssh_state).await,
-        "clear_session" => handle_clear_session(request, state, ssh_state).await,
-        "get_token" => handle_get_token(request, state).await,
-        "store_ssh_credentials" => handle_store_ssh_credentials(request, ssh_state).await,
-        "clear_ssh_credentials" => handle_clear_ssh_credentials(request, ssh_state).await,
-        "has_ssh_credentials" => handle_has_ssh_credentials(request, ssh_state).await,
-        "cache_credential" => handle_cache_credential(request, state).await,
-        "get_cached_credential" => handle_get_cached_credential(request, state).await,
-        "clear_credential_cache" => handle_clear_credential_cache(request, state).await,
-        _ => Response::method_not_found(request.id),
+    match request.method {
+        Method::Ping => handle_ping(request),
+        Method::GetSession => handle_get_session(request, state, ssh_state).await,
+        Method::StoreSession => handle_store_session(request, state, ssh_state).await,
+        Method::ClearSession => handle_clear_session(request, state, ssh_state).await,
+        Method::GetToken => handle_get_token(request, state).await,
+        Method::StoreSshCredentials => handle_store_ssh_credentials(request, ssh_state).await,
+        Method::ClearSshCredentials => handle_clear_ssh_credentials(request, ssh_state).await,
+        Method::HasSshCredentials => handle_has_ssh_credentials(request, ssh_state).await,
+        Method::CacheCredential => handle_cache_credential(request, state).await,
+        Method::GetCachedCredential => handle_get_cached_credential(request, state).await,
+        Method::ClearCredentialCache => handle_clear_credential_cache(request, state).await,
     }
 }
 

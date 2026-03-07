@@ -3,7 +3,7 @@
 
 use crate::error::{AgentError, Result};
 use std::path::{Path, PathBuf};
-use tokio::net::UnixListener;
+use tokio::net::{UnixListener, UnixStream};
 
 /// Default socket filename.
 const SOCKET_FILENAME: &str = "agent.sock";
@@ -101,6 +101,80 @@ pub(crate) fn set_socket_permissions(path: &Path) -> Result<()> {
             path.display()
         ))
     })
+}
+
+/// Get the current process's real UID.
+#[allow(unsafe_code)]
+pub(crate) fn current_uid() -> u32 {
+    // SAFETY: getuid() is always safe — it reads the process's real UID
+    // with no side effects.
+    unsafe { libc::getuid() }
+}
+
+/// Peer credential information extracted from a Unix socket connection.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PeerCredentials {
+    /// UID of the connecting process.
+    pub uid: u32,
+    /// PID of the connecting process (0 if unavailable).
+    pub pid: u32,
+}
+
+/// Get the peer credentials (UID/PID) of a connected Unix stream.
+///
+/// Uses the stdlib's `peer_cred()` which wraps `SO_PEERCRED` on Linux
+/// and `getpeereid` on macOS — no unsafe needed.
+///
+/// # Errors
+///
+/// Returns `AgentError::SocketPath` if peer credentials cannot be retrieved.
+pub(crate) fn get_peer_credentials(stream: &UnixStream) -> Result<PeerCredentials> {
+    let cred = stream
+        .peer_cred()
+        .map_err(|e| AgentError::SocketPath(format!("failed to get peer credentials: {e}")))?;
+
+    Ok(PeerCredentials {
+        uid: cred.uid(),
+        pid: cred.pid().map_or(0, |p| p as u32),
+    })
+}
+
+/// Validate that the vouch directory is safe to use.
+///
+/// Checks that `~/.vouch/` is not a symlink and is owned by the current user.
+/// Prevents symlink attacks where an attacker pre-creates the directory pointing
+/// to an attacker-controlled location.
+///
+/// # Errors
+///
+/// Returns `AgentError::SocketPath` if the directory fails validation.
+pub(crate) fn validate_vouch_dir_ownership() -> Result<()> {
+    let dir = vouch_dir()?;
+
+    // Use symlink_metadata (lstat) — does NOT follow symlinks
+    let metadata = std::fs::symlink_metadata(&dir)
+        .map_err(|e| AgentError::SocketPath(format!("cannot stat {}: {e}", dir.display())))?;
+
+    // Reject symlinks
+    if metadata.file_type().is_symlink() {
+        return Err(AgentError::SocketPath(format!(
+            "{} is a symlink — refusing to use it (possible symlink attack)",
+            dir.display()
+        )));
+    }
+
+    // Verify ownership matches current user
+    use std::os::unix::fs::MetadataExt;
+    let dir_uid = metadata.uid();
+    let my_uid = current_uid();
+    if dir_uid != my_uid {
+        return Err(AgentError::SocketPath(format!(
+            "{} is owned by UID {dir_uid}, but agent is running as UID {my_uid}",
+            dir.display()
+        )));
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]

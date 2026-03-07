@@ -3,8 +3,8 @@
 
 use crate::error::{AgentError, Result};
 use crate::protocol::{
-    CACHE_MISS, CacheCredentialParams, GetCachedCredentialParams, NOT_AUTHENTICATED, Request,
-    Response, SESSION_EXPIRED, StoreSessionParams, StoreSshCredentialsParams,
+    CACHE_MISS, CacheCredentialParams, GetCachedCredentialParams, Method, NOT_AUTHENTICATED,
+    Request, Response, SESSION_EXPIRED, StoreSessionParams, StoreSshCredentialsParams,
 };
 use crate::socket::socket_path;
 use crate::state::CachedCredential;
@@ -53,14 +53,18 @@ impl AgentClient {
     }
 
     /// Send a request and receive a response.
-    async fn call(&mut self, method: &str, params: Option<serde_json::Value>) -> Result<Response> {
+    async fn call(
+        &mut self,
+        method: Method,
+        params: Option<serde_json::Value>,
+    ) -> Result<Response> {
         let id = self.next_id;
         self.next_id += 1;
 
         let request = Request {
             jsonrpc: "2.0".to_string(),
             id,
-            method: method.to_string(),
+            method,
             params,
         };
 
@@ -85,7 +89,7 @@ impl AgentClient {
     ///
     /// Returns `AgentError::Protocol` if ping fails.
     pub async fn ping(&mut self) -> Result<()> {
-        let response = self.call("ping", None).await?;
+        let response = self.call(Method::Ping, None).await?;
 
         if response.error.is_some() {
             return Err(AgentError::Protocol("ping failed".to_string()));
@@ -101,7 +105,7 @@ impl AgentClient {
     /// Returns `AgentError::NotAuthenticated` if no session exists.
     /// Returns `AgentError::SessionExpired` if the session has expired.
     pub async fn get_session(&mut self) -> Result<SessionInfo> {
-        let response = self.call("get_session", None).await?;
+        let response = self.call(Method::GetSession, None).await?;
 
         if let Some(error) = &response.error {
             return Err(check_auth_error(error));
@@ -134,7 +138,7 @@ impl AgentClient {
         };
 
         let response = self
-            .call("store_session", Some(serde_json::to_value(params)?))
+            .call(Method::StoreSession, Some(serde_json::to_value(params)?))
             .await?;
 
         if let Some(error) = response.error {
@@ -150,7 +154,7 @@ impl AgentClient {
     ///
     /// Returns `AgentError::Protocol` if the request fails.
     pub async fn clear_session(&mut self) -> Result<()> {
-        let response = self.call("clear_session", None).await?;
+        let response = self.call(Method::ClearSession, None).await?;
 
         if let Some(error) = response.error {
             return Err(AgentError::Protocol(error.message));
@@ -166,7 +170,7 @@ impl AgentClient {
     /// Returns `AgentError::NotAuthenticated` if no session exists.
     /// Returns `AgentError::SessionExpired` if the session has expired.
     pub async fn get_token(&mut self) -> Result<SecretString> {
-        let response = self.call("get_token", None).await?;
+        let response = self.call(Method::GetToken, None).await?;
 
         if let Some(error) = &response.error {
             return Err(check_auth_error(error));
@@ -212,7 +216,10 @@ impl AgentClient {
         };
 
         let response = self
-            .call("store_ssh_credentials", Some(serde_json::to_value(params)?))
+            .call(
+                Method::StoreSshCredentials,
+                Some(serde_json::to_value(params)?),
+            )
             .await?;
 
         if let Some(error) = response.error {
@@ -228,7 +235,7 @@ impl AgentClient {
     ///
     /// Returns `AgentError::Protocol` if the request fails.
     pub async fn clear_ssh_credentials(&mut self) -> Result<()> {
-        let response = self.call("clear_ssh_credentials", None).await?;
+        let response = self.call(Method::ClearSshCredentials, None).await?;
 
         if let Some(error) = response.error {
             return Err(AgentError::Protocol(error.message));
@@ -243,7 +250,7 @@ impl AgentClient {
     ///
     /// Returns `AgentError::Protocol` if the request fails.
     pub async fn has_ssh_credentials(&mut self) -> Result<bool> {
-        let response = self.call("has_ssh_credentials", None).await?;
+        let response = self.call(Method::HasSshCredentials, None).await?;
 
         if let Some(error) = response.error {
             return Err(AgentError::Protocol(error.message));
@@ -275,7 +282,7 @@ impl AgentClient {
         };
 
         let response = self
-            .call("cache_credential", Some(serde_json::to_value(params)?))
+            .call(Method::CacheCredential, Some(serde_json::to_value(params)?))
             .await?;
 
         if let Some(error) = response.error {
@@ -301,7 +308,10 @@ impl AgentClient {
         };
 
         let response = self
-            .call("get_cached_credential", Some(serde_json::to_value(params)?))
+            .call(
+                Method::GetCachedCredential,
+                Some(serde_json::to_value(params)?),
+            )
             .await?;
 
         if let Some(error) = &response.error {
@@ -326,7 +336,7 @@ impl AgentClient {
     ///
     /// Returns `AgentError::Protocol` if the request fails.
     pub async fn clear_credential_cache(&mut self) -> Result<()> {
-        let response = self.call("clear_credential_cache", None).await?;
+        let response = self.call(Method::ClearCredentialCache, None).await?;
 
         if let Some(error) = response.error {
             return Err(AgentError::Protocol(error.message));
