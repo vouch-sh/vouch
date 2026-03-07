@@ -211,14 +211,15 @@ pub async fn exchange_fido2_assertion(
     // 6. Verify WebAuthn assertion
     let stored_counter = u32::try_from(authenticator.counter).unwrap_or(0);
     let assertion_result = verify_login_assertion(LoginAssertionParams {
-        authenticator_data: &authenticator_data_bytes,
-        client_data_json: &client_data_json_bytes,
-        signature: &signature_bytes,
-        public_key: &authenticator.public_key,
-        rp_id: &challenge_state.rp_id,
-        challenge: challenge_state.challenge.as_bytes(),
+        authenticator_data: authenticator_data_bytes,
+        client_data_json: client_data_json_bytes,
+        signature: signature_bytes,
+        public_key: authenticator.public_key.clone(),
+        rp_id: challenge_state.rp_id.clone(),
+        challenge: challenge_state.challenge.as_bytes().to_vec(),
         stored_counter,
     })
+    .await
     .map_err(|e| {
         tracing::warn!(
             "FIDO2 assertion grant: assertion verification failed for user {}: {e}",

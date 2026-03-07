@@ -78,19 +78,19 @@ pub async fn lookup_and_verify_authenticator(
 }
 
 /// Parameters for verifying a WebAuthn login assertion.
-pub struct LoginAssertionParams<'a> {
+pub struct LoginAssertionParams {
     /// Authenticator data from the assertion.
-    pub authenticator_data: &'a [u8],
+    pub authenticator_data: Vec<u8>,
     /// Client data JSON from the assertion.
-    pub client_data_json: &'a [u8],
+    pub client_data_json: Vec<u8>,
     /// Signature from the assertion.
-    pub signature: &'a [u8],
+    pub signature: Vec<u8>,
     /// Public key of the authenticator.
-    pub public_key: &'a [u8],
+    pub public_key: Vec<u8>,
     /// Relying party ID.
-    pub rp_id: &'a str,
+    pub rp_id: String,
     /// Expected challenge (raw bytes).
-    pub challenge: &'a [u8],
+    pub challenge: Vec<u8>,
     /// Current counter value from the database.
     pub stored_counter: u32,
 }
@@ -105,40 +105,51 @@ pub struct LoginAssertionResult {
 
 /// Verify a WebAuthn login assertion (WebAuthn Level 2 Section 7.2).
 ///
-/// Performs signature verification, user verification check, and counter
-/// validation as specified in the WebAuthn authentication ceremony.
+/// Runs signature verification on a blocking thread as a fairness
+/// optimization: on small (1-vCPU) instances, ECDSA/Ed25519
+/// verification (~0.5-2 ms) would monopolize the single worker thread,
+/// stalling all other I/O. Unlike the KMS SSH-CA path (which would
+/// deadlock without `spawn_blocking`), this is purely about runtime
+/// fairness — local crypto doesn't block on async I/O.
 ///
 /// # Errors
 ///
 /// Returns `ServiceError::OAuth` with `InvalidGrant` if verification fails.
-pub fn verify_login_assertion(
-    params: LoginAssertionParams<'_>,
+pub async fn verify_login_assertion(
+    params: LoginAssertionParams,
 ) -> ServiceResult<LoginAssertionResult> {
-    let expected_origin = format!("https://{}", params.rp_id);
-    let expected_challenge = URL_SAFE_NO_PAD.encode(params.challenge);
+    tokio::task::spawn_blocking(move || {
+        let expected_origin = format!("https://{}", params.rp_id);
+        let expected_challenge = URL_SAFE_NO_PAD.encode(&params.challenge);
 
-    let result = webauthn_verify::verify_assertion(
-        params.authenticator_data,
-        params.client_data_json,
-        params.signature,
-        params.public_key,
-        params.rp_id,
-        &expected_challenge,
-        &expected_origin,
-        params.stored_counter,
-        true, // require_user_verification
-    )
-    .map_err(|e| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            format!("WebAuthn verification failed: {e}"),
+        let result = webauthn_verify::verify_assertion(
+            &params.authenticator_data,
+            &params.client_data_json,
+            &params.signature,
+            &params.public_key,
+            &params.rp_id,
+            &expected_challenge,
+            &expected_origin,
+            params.stored_counter,
+            true, // require_user_verification
         )
-    })?;
+        .map_err(|e| {
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                format!("WebAuthn verification failed: {e}"),
+            )
+        })?;
 
-    Ok(LoginAssertionResult {
-        new_counter: result.counter,
-        user_verified: result.user_verified,
+        Ok(LoginAssertionResult {
+            new_counter: result.counter,
+            user_verified: result.user_verified,
+        })
     })
+    .await
+    .map_err(|e| {
+        tracing::error!("WebAuthn verification task failed: {e}");
+        ServiceError::Internal("WebAuthn verification failed".to_string())
+    })?
 }
 
 /// Actor claim for delegation chains (RFC 8693 Section 4.1).

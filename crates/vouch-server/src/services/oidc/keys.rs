@@ -244,15 +244,29 @@ impl OidcSigningKey {
             Self::Local {
                 der_bytes, key_id, ..
             } => {
-                let encoding_key = EncodingKey::from_ec_der(der_bytes);
-                let mut header = Header::new(Algorithm::ES256);
-                if let Some(t) = typ {
-                    header.typ = Some(t.to_string());
-                }
-                header.kid = Some(key_id.clone());
+                // Serialize claims and clone key material before crossing
+                // the spawn_blocking boundary (avoids T: Send + 'static).
+                let claims_value = serde_json::to_value(claims)
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize JWT claims: {e}"))?;
+                let der = der_bytes.clone();
+                let kid = key_id.clone();
+                let typ_owned = typ.map(String::from);
 
-                jsonwebtoken::encode(&header, claims, &encoding_key)
-                    .map_err(|e| anyhow::anyhow!("Failed to sign JWT: {e}"))
+                // Offload ES256 signing to a blocking thread to avoid
+                // starving the tokio runtime on 1-vCPU instances.
+                tokio::task::spawn_blocking(move || {
+                    let encoding_key = EncodingKey::from_ec_der(&der);
+                    let mut header = Header::new(Algorithm::ES256);
+                    if let Some(t) = typ_owned {
+                        header.typ = Some(t);
+                    }
+                    header.kid = Some(kid);
+
+                    jsonwebtoken::encode(&header, &claims_value, &encoding_key)
+                        .map_err(|e| anyhow::anyhow!("Failed to sign JWT: {e}"))
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("JWT signing task failed: {e}"))?
             }
             Self::Kms { signer, key_id, .. } => {
                 sign_jwt_with_kms(signer, key_id, claims, typ).await

@@ -220,6 +220,13 @@ impl KmsSignerEd25519 {
 /// - `block_in_place` which panics on the `current_thread` runtime
 ///   used by `#[tokio::test]`
 /// - Calling `block_on` on a tokio worker thread, which would deadlock
+///
+/// # Caller contract
+///
+/// `try_sign` blocks the calling thread until the KMS round-trip
+/// completes. Callers MUST invoke this from a `spawn_blocking` context
+/// (or a non-tokio thread) to avoid blocking a tokio worker thread and
+/// starving the I/O reactor.
 impl signature::Signer<ssh_key::Signature> for KmsSignerEd25519 {
     fn try_sign(&self, msg: &[u8]) -> std::result::Result<ssh_key::Signature, signature::Error> {
         let handle = tokio::runtime::Handle::current();
