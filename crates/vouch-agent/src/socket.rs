@@ -129,9 +129,9 @@ pub(crate) struct PeerCredentials {
 ///
 /// Returns `AgentError::SocketPath` if peer credentials cannot be retrieved.
 pub(crate) fn get_peer_credentials(stream: &UnixStream) -> Result<PeerCredentials> {
-    let cred = stream.peer_cred().map_err(|e| {
-        AgentError::SocketPath(format!("failed to get peer credentials: {e}"))
-    })?;
+    let cred = stream
+        .peer_cred()
+        .map_err(|e| AgentError::SocketPath(format!("failed to get peer credentials: {e}")))?;
 
     Ok(PeerCredentials {
         uid: cred.uid(),
@@ -152,9 +152,8 @@ pub(crate) fn validate_vouch_dir_ownership() -> Result<()> {
     let dir = vouch_dir()?;
 
     // Use symlink_metadata (lstat) — does NOT follow symlinks
-    let metadata = std::fs::symlink_metadata(&dir).map_err(|e| {
-        AgentError::SocketPath(format!("cannot stat {}: {e}", dir.display()))
-    })?;
+    let metadata = std::fs::symlink_metadata(&dir)
+        .map_err(|e| AgentError::SocketPath(format!("cannot stat {}: {e}", dir.display())))?;
 
     // Reject symlinks
     if metadata.file_type().is_symlink() {

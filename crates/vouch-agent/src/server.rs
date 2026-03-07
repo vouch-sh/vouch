@@ -173,17 +173,16 @@ async fn handle_connection(
         };
 
         // Try to resolve the method string into a known Method variant
-        let method: Method = match serde_json::from_value(serde_json::Value::String(
-            raw.method.clone(),
-        )) {
-            Ok(m) => m,
-            Err(_) => {
-                warn!("Unknown method: {}", raw.method);
-                let response = Response::method_not_found(raw.id);
-                send_response(&mut stream, &response).await?;
-                continue;
-            }
-        };
+        let method: Method =
+            match serde_json::from_value(serde_json::Value::String(raw.method.clone())) {
+                Ok(m) => m,
+                Err(_) => {
+                    warn!("Unknown method: {}", raw.method);
+                    let response = Response::method_not_found(raw.id);
+                    send_response(&mut stream, &response).await?;
+                    continue;
+                }
+            };
 
         let request = Request {
             jsonrpc: "2.0".to_string(),

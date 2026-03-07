@@ -53,7 +53,11 @@ impl AgentClient {
     }
 
     /// Send a request and receive a response.
-    async fn call(&mut self, method: Method, params: Option<serde_json::Value>) -> Result<Response> {
+    async fn call(
+        &mut self,
+        method: Method,
+        params: Option<serde_json::Value>,
+    ) -> Result<Response> {
         let id = self.next_id;
         self.next_id += 1;
 
@@ -212,7 +216,10 @@ impl AgentClient {
         };
 
         let response = self
-            .call(Method::StoreSshCredentials, Some(serde_json::to_value(params)?))
+            .call(
+                Method::StoreSshCredentials,
+                Some(serde_json::to_value(params)?),
+            )
             .await?;
 
         if let Some(error) = response.error {
@@ -301,7 +308,10 @@ impl AgentClient {
         };
 
         let response = self
-            .call(Method::GetCachedCredential, Some(serde_json::to_value(params)?))
+            .call(
+                Method::GetCachedCredential,
+                Some(serde_json::to_value(params)?),
+            )
             .await?;
 
         if let Some(error) = &response.error {
