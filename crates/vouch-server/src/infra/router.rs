@@ -375,6 +375,16 @@ fn build_admin_routes() -> Router<Arc<AppState>> {
             "/admin/policies/custom/{id}/toggle",
             post(handlers::admin::toggle_custom_policy),
         )
+        // SCIM token management UI
+        .route(
+            "/admin/scim-tokens",
+            get(handlers::admin::admin_scim_tokens_page)
+                .post(handlers::admin::admin_create_scim_token),
+        )
+        .route(
+            "/admin/scim-tokens/{id}/revoke",
+            post(handlers::admin::admin_revoke_scim_token),
+        )
         .layer(rate_limit::build_general_rate_limiter())
 }
 

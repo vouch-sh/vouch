@@ -36,13 +36,13 @@ pub async fn issue_ssh_certificate(
     Json(request): Json<SshCertificateRequest>,
 ) -> Result<Json<SshCertificateResponse>, ServiceError> {
     // Check config before auth — zero-cost in-memory check avoids DB queries
-    let ssh_ca = state.ssh_ca.as_ref().ok_or_else(|| {
-        ServiceError::api(
+    if state.ssh_ca.is_none() {
+        return Err(ServiceError::api(
             StatusCode::SERVICE_UNAVAILABLE,
             "ssh_ca_not_configured",
             "SSH Certificate Authority is not configured",
-        )
-    })?;
+        ));
+    }
 
     // Validate token and get user email
     let (_token, user_email) =
@@ -52,21 +52,42 @@ pub async fn issue_ssh_certificate(
     // Certificate validity matches session duration
     let valid_seconds = state.config().session_hours * 3600;
 
-    // Sign the certificate
-    let signed = ssh_ca
-        .sign_certificate(&request.public_key, &user_email, valid_seconds)
-        .map_err(|e| {
-            tracing::warn!(
-                "Failed to sign SSH certificate for {}: {}",
-                redact_email(&user_email),
-                e
-            );
-            ServiceError::api(
-                StatusCode::BAD_REQUEST,
-                "signing_failed",
-                "Failed to sign certificate",
-            )
-        })?;
+    // Sign the certificate on a blocking thread to avoid deadlocking
+    // the tokio runtime. The ssh-key crate's sign path uses
+    // std::thread::scope + block_on internally, which blocks the
+    // current worker thread. On a 1-vCPU instance (1 worker thread),
+    // this deadlocks because hyper's I/O driver can't make progress.
+    let state_clone = state.clone();
+    let public_key = request.public_key.clone();
+    let email = user_email.clone();
+    let signed = tokio::task::spawn_blocking(move || {
+        let ssh_ca = state_clone
+            .ssh_ca
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("SSH CA not configured"))?;
+        ssh_ca.sign_certificate(&public_key, &email, valid_seconds)
+    })
+    .await
+    .map_err(|e| {
+        tracing::error!("SSH signing task panicked: {e}");
+        ServiceError::api(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "signing_failed",
+            "Failed to sign certificate",
+        )
+    })?
+    .map_err(|e| {
+        tracing::warn!(
+            "Failed to sign SSH certificate for {}: {}",
+            redact_email(&user_email),
+            e
+        );
+        ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "signing_failed",
+            "Failed to sign certificate",
+        )
+    })?;
 
     tracing::info!(
         "Issued SSH certificate for {} with principals {:?}, serial {}",
