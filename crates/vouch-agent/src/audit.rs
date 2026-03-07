@@ -56,6 +56,15 @@ pub enum AuditEvent {
     },
     /// All cached credentials were cleared.
     CredentialCacheCleared,
+    /// An IPC connection was rejected due to peer credential mismatch.
+    ConnectionRejected {
+        /// UID of the rejected peer.
+        peer_uid: u32,
+        /// PID of the rejected peer (0 if unavailable).
+        peer_pid: u32,
+        /// Reason for rejection.
+        reason: String,
+    },
 }
 
 /// Wrapper that adds a timestamp to every audit record.

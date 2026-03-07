@@ -7,7 +7,9 @@ use crate::protocol::{
     CacheCredentialParams, GetCachedCredentialParams, Request, Response, StoreSessionParams,
     StoreSshCredentialsParams,
 };
-use crate::socket::{bind_socket, ensure_vouch_dir, remove_socket, socket_path};
+use crate::socket::{
+    bind_socket, ensure_vouch_dir, remove_socket, socket_path, validate_vouch_dir_ownership,
+};
 use crate::ssh_agent::{SshAgentState, SshCredentials};
 use crate::state::{AgentState, CachedCredential, Session, SessionInfo};
 use crate::wire;
@@ -56,6 +58,9 @@ impl AgentServer {
         // Ensure vouch directory exists
         ensure_vouch_dir()?;
 
+        // Validate directory ownership and symlink safety
+        validate_vouch_dir_ownership()?;
+
         // Remove stale socket if it exists
         remove_socket()?;
 
@@ -72,6 +77,31 @@ impl AgentServer {
                 result = listener.accept() => {
                     match result {
                         Ok((stream, _)) => {
+                            // Verify peer UID matches our UID (like gpg-agent/libassuan)
+                            match crate::socket::get_peer_credentials(&stream) {
+                                Ok(peer) => {
+                                    let my_uid = crate::socket::current_uid();
+                                    if peer.uid != my_uid {
+                                        warn!(
+                                            peer_uid = peer.uid,
+                                            peer_pid = peer.pid,
+                                            expected_uid = my_uid,
+                                            "Rejecting IPC connection: UID mismatch"
+                                        );
+                                        audit::log_event(AuditEvent::ConnectionRejected {
+                                            peer_uid: peer.uid,
+                                            peer_pid: peer.pid,
+                                            reason: "uid mismatch".to_string(),
+                                        });
+                                        continue;
+                                    }
+                                }
+                                Err(e) => {
+                                    // Best-effort: allow connection if peer creds unavailable
+                                    debug!("Could not verify peer credentials: {e}");
+                                }
+                            }
+
                             let permit = match Arc::clone(&semaphore).try_acquire_owned() {
                                 Ok(permit) => permit,
                                 Err(_) => {
