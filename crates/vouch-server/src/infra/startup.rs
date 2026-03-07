@@ -5,6 +5,7 @@
 //! building `AppState`, and starting background tasks.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
@@ -221,7 +222,11 @@ async fn load_s3_config(
 
     // Create KMS client for document key decryption and signing.
     // Uses the same SDK config (region, credentials) as S3.
-    let kms_client = aws_sdk_kms::Client::new(&sdk_config);
+    let kms_client = aws_sdk_kms::Client::from_conf(
+        aws_sdk_kms::config::Builder::from(&sdk_config)
+            .timeout_config(kms_timeout_config())
+            .build(),
+    );
 
     let source = s3_config::S3ConfigSource {
         bucket: bucket.clone(),
@@ -340,7 +345,11 @@ async fn build_app_state(
             builder = builder.region(aws_config::Region::new(region.clone()));
         }
         let sdk_config = builder.load().await;
-        Some(aws_sdk_kms::Client::new(&sdk_config))
+        Some(aws_sdk_kms::Client::from_conf(
+            aws_sdk_kms::config::Builder::from(&sdk_config)
+                .timeout_config(kms_timeout_config())
+                .build(),
+        ))
     } else {
         kms_client
     };
@@ -494,4 +503,17 @@ async fn build_app_state(
     });
 
     Ok(state)
+}
+
+/// Timeout configuration for AWS KMS API calls.
+///
+/// The AWS SDK has no default timeouts, so all KMS operations (Sign,
+/// GetPublicKey, GenerateMac, VerifyMac, Decrypt) can hang indefinitely.
+/// These values are aggressive because KMS calls are same-region within AWS.
+fn kms_timeout_config() -> aws_sdk_kms::config::timeout::TimeoutConfig {
+    aws_sdk_kms::config::timeout::TimeoutConfig::builder()
+        .connect_timeout(Duration::from_secs(1))
+        .operation_attempt_timeout(Duration::from_secs(2))
+        .operation_timeout(Duration::from_secs(5))
+        .build()
 }
