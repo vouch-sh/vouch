@@ -14,7 +14,7 @@ mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
-use vouch_common::posture::DevicePosture;
+use vouch_common::posture::{DevicePosture, OperatingSystem};
 
 /// Collect device posture from the current system.
 ///
@@ -25,7 +25,7 @@ pub fn collect() -> DevicePosture {
     let mut posture = DevicePosture::new();
 
     // Cross-platform basics
-    posture.os = Some(std::env::consts::OS.to_string());
+    posture.os = Some(OperatingSystem::from_env());
     posture.arch = Some(std::env::consts::ARCH.to_string());
     posture.cli_version = Some(env!("CARGO_PKG_VERSION").to_string());
     posture.collected_at = Some(jiff::Timestamp::now().to_string());

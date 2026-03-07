@@ -135,6 +135,11 @@ fn build_general_limited_routes() -> Router<Arc<AppState>> {
             "/api/v1/org/scim-tokens/{id}",
             delete(handlers::admin::delete_scim_token),
         )
+        // CEL validation API (used by admin UI CEL playground)
+        .route(
+            "/api/v1/org/policies/validate",
+            post(handlers::admin::validate_cel_api),
+        )
         // SCIM 2.0 endpoints (RFC 7643/7644)
         .route(
             "/scim/v2/ServiceProviderConfig",
@@ -348,6 +353,28 @@ fn build_admin_routes() -> Router<Arc<AppState>> {
             post(handlers::admin::remove_member),
         )
         .route("/admin/audit", get(handlers::admin::admin_audit_page))
+        // Posture policy management UI
+        .route("/admin/policies", get(handlers::admin::admin_policies_page))
+        .route(
+            "/admin/policies/preconfigured/{slug}/toggle",
+            post(handlers::admin::toggle_preconfigured_policy),
+        )
+        .route(
+            "/admin/policies/custom",
+            post(handlers::admin::create_custom_policy),
+        )
+        .route(
+            "/admin/policies/custom/{id}",
+            post(handlers::admin::update_custom_policy),
+        )
+        .route(
+            "/admin/policies/custom/{id}/delete",
+            post(handlers::admin::delete_custom_policy),
+        )
+        .route(
+            "/admin/policies/custom/{id}/toggle",
+            post(handlers::admin::toggle_custom_policy),
+        )
         .layer(rate_limit::build_general_rate_limiter())
 }
 

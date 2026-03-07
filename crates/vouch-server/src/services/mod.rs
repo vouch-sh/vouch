@@ -49,6 +49,7 @@ pub(crate) mod error;
 pub mod integrations;
 pub(crate) mod keys;
 pub mod oidc;
+pub(crate) mod posture;
 
 // Protocol modules will be added here as they are implemented:
 // pub mod scim;

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! macOS-specific device posture detection.
 
-use vouch_common::posture::DevicePosture;
+use vouch_common::posture::{DevicePosture, EdrAgent, MdmAgent};
 
 use super::common::run_command;
 
@@ -41,43 +41,94 @@ fn detect_os_version(posture: &mut DevicePosture) {
     );
 }
 
-/// Detect FileVault status via `fdesetup status`.
+/// Detect FileVault status via `fdesetup isactive`.
 ///
-/// Does not require root. Output is either:
-/// - "FileVault is On."
-/// - "FileVault is Off."
+/// Uses exit codes (no text parsing): exit 0 = on, exit 1 = off.
+/// Does not require root.
 fn detect_filevault(posture: &mut DevicePosture) {
-    if let Some(output) = run_command("fdesetup", &["status"]) {
-        posture.disk_encryption_enabled = Some(output.contains("FileVault is On"));
+    let result = std::process::Command::new("fdesetup")
+        .arg("isactive")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+
+    if let Ok(status) = result {
+        posture.disk_encryption_enabled = Some(status.success());
         posture.disk_encryption_technology = Some("FileVault".to_string());
     }
 }
 
-/// Detect screen lock configuration via `defaults read`.
+/// Detect screen lock configuration.
+///
+/// Uses `sysadminctl -screenLock status` which works on all modern macOS
+/// versions. The legacy `com.apple.screensaver askForPassword` defaults
+/// key no longer exists on macOS 15+.
+///
+/// Note: `sysadminctl` writes to stderr (via NSLog), not stdout.
+///
+/// Output examples:
+/// - `"screenLock delay is immediate"` — enabled, 0 second delay
+/// - `"screenLock delay is 300 seconds"` — enabled, 5 minute delay
+/// - `"screenLock is off"` — disabled
 fn detect_screen_lock(posture: &mut DevicePosture) {
-    let ask_output = run_command(
-        "defaults",
-        &["read", "com.apple.screensaver", "askForPassword"],
-    );
+    if let Some(output) = run_command_stderr("sysadminctl", &["-screenLock", "status"]) {
+        let line = output.trim().to_lowercase();
+        if line.contains("is off") {
+            posture.screen_lock_enabled = Some(false);
+        } else if line.contains("delay is") {
+            posture.screen_lock_enabled = Some(true);
+            if line.contains("immediate") {
+                posture.screen_lock_idle_timeout_secs = Some(0);
+            } else if let Some(secs) = extract_seconds(&line) {
+                posture.screen_lock_idle_timeout_secs = Some(secs);
+            }
+        }
+    }
+}
 
-    posture.screen_lock_enabled = ask_output.as_deref().map(|s| s.trim() == "1");
+/// Extract seconds from sysadminctl output like "delay is 300 seconds".
+fn extract_seconds(line: &str) -> Option<u64> {
+    let after_is = line.split("delay is ").nth(1)?;
+    let num_str = after_is.split_whitespace().next()?;
+    num_str.parse::<u64>().ok()
+}
 
-    let idle_output = run_command("defaults", &["read", "com.apple.screensaver", "idleTime"]);
+/// Run a command and capture stderr. Some macOS tools (sysadminctl)
+/// write their output to stderr via NSLog.
+fn run_command_stderr(program: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .ok()?;
 
-    posture.screen_lock_idle_timeout_secs = idle_output
-        .as_deref()
-        .and_then(|s| s.trim().parse::<u64>().ok());
+    if !output.status.success() {
+        return None;
+    }
+
+    Some(String::from_utf8_lossy(&output.stderr).into_owned())
 }
 
 /// Detect macOS Application Firewall status.
 ///
 /// Uses `socketfilterfw --getglobalstate`. No elevation required.
+/// Parses the machine-readable `(State = N)` value from the output:
+/// - State 0: disabled
+/// - State 1: enabled (allow specific)
+/// - State 2: enabled (block all incoming)
 fn detect_firewall(posture: &mut DevicePosture) {
     if let Some(output) = run_command(
         "/usr/libexec/ApplicationFirewall/socketfilterfw",
         &["--getglobalstate"],
     ) {
-        posture.firewall_enabled = Some(output.contains("enabled"));
+        let state = output
+            .split("State = ")
+            .nth(1)
+            .and_then(|s| s.split(')').next())
+            .and_then(|s| s.trim().parse::<u32>().ok());
+
+        posture.firewall_enabled = state.map(|s| s > 0);
         posture.firewall_technology = Some("Application Firewall".to_string());
     }
 }
@@ -112,19 +163,49 @@ fn detect_secure_boot(posture: &mut DevicePosture) {
 
 /// Detect macOS automatic software update configuration.
 ///
-/// Reads `com.apple.SoftwareUpdate AutomaticCheckEnabled` via `defaults`.
+/// The `AutomaticCheckEnabled` key was removed in macOS 15+. Modern
+/// macOS uses `AutomaticDownload` (auto-download enabled) and
+/// `AutomaticallyInstallMacOSUpdates` (auto-install enabled). We check
+/// both, preferring `AutomaticDownload` as the primary signal.
 fn detect_os_auto_update(posture: &mut DevicePosture) {
-    let output = run_command(
-        "defaults",
-        &[
-            "read",
-            "/Library/Preferences/com.apple.SoftwareUpdate",
-            "AutomaticCheckEnabled",
-        ],
-    );
+    let plist = "/Library/Preferences/com.apple.SoftwareUpdate";
 
-    posture.auto_update_enabled = Some(output.as_deref().map(|s| s.trim() == "1").unwrap_or(false));
-    posture.auto_update_technology = Some("SoftwareUpdate".to_string());
+    // macOS 15+: AutomaticDownload
+    let download = run_command("defaults", &["read", plist, "AutomaticDownload"]);
+    if let Some(ref val) = download
+        && val.trim() == "1"
+    {
+        posture.auto_update_enabled = Some(true);
+        posture.auto_update_technology = Some("SoftwareUpdate".to_string());
+        return;
+    }
+
+    // macOS 15+: AutomaticallyInstallMacOSUpdates
+    let install = run_command(
+        "defaults",
+        &["read", plist, "AutomaticallyInstallMacOSUpdates"],
+    );
+    if let Some(ref val) = install
+        && val.trim() == "1"
+    {
+        posture.auto_update_enabled = Some(true);
+        posture.auto_update_technology = Some("SoftwareUpdate".to_string());
+        return;
+    }
+
+    // Legacy: AutomaticCheckEnabled (macOS <= 14)
+    let check = run_command("defaults", &["read", plist, "AutomaticCheckEnabled"]);
+    if let Some(ref val) = check {
+        posture.auto_update_enabled = Some(val.trim() == "1");
+        posture.auto_update_technology = Some("SoftwareUpdate".to_string());
+        return;
+    }
+
+    // If all keys are absent, we can't determine the state
+    if download.is_some() || install.is_some() || check.is_some() {
+        posture.auto_update_enabled = Some(false);
+        posture.auto_update_technology = Some("SoftwareUpdate".to_string());
+    }
 }
 
 /// Detect system uptime via `sysctl kern.boottime`.
@@ -173,14 +254,14 @@ fn detect_edr(posture: &mut DevicePosture) {
     if std::path::Path::new("/Library/CS").exists()
         || std::path::Path::new("/Applications/Falcon.app").exists()
     {
-        posture.edr.push("crowdstrike".to_string());
+        posture.edr.push(EdrAgent::CrowdStrike);
     }
 
     // SentinelOne
     if std::path::Path::new("/Library/Sentinel").exists()
         || std::path::Path::new("/Applications/SentinelOne").exists()
     {
-        posture.edr.push("sentinelone".to_string());
+        posture.edr.push(EdrAgent::SentinelOne);
     }
 
     // Carbon Black (Broadcom)
@@ -188,7 +269,7 @@ fn detect_edr(posture: &mut DevicePosture) {
         || std::path::Path::new("/Library/Application Support/com.vmware.carbonblack.cloud")
             .exists()
     {
-        posture.edr.push("carbon black".to_string());
+        posture.edr.push(EdrAgent::CarbonBlack);
     }
 
     // Microsoft Defender for Endpoint
@@ -196,13 +277,13 @@ fn detect_edr(posture: &mut DevicePosture) {
     if std::path::Path::new("/Applications/Microsoft Defender.app").exists()
         || std::path::Path::new("/Library/Application Support/Microsoft/Defender").exists()
     {
-        posture.edr.push("microsoft defender".to_string());
+        posture.edr.push(EdrAgent::MicrosoftDefender);
     }
 
     // 1Password Device Trust (Kolide)
     // https://support.1password.com/device-trust/
     if std::path::Path::new("/usr/local/kolide-k2/bin/launcher").exists() {
-        posture.edr.push("1password device trust".to_string());
+        posture.edr.push(EdrAgent::OnePasswordDeviceTrust);
     }
 }
 
@@ -213,28 +294,28 @@ fn detect_edr(posture: &mut DevicePosture) {
 fn detect_mdm(posture: &mut DevicePosture) {
     // Jamf Pro
     if std::path::Path::new("/usr/local/jamf/bin/jamf").exists() {
-        posture.mdm.push("jamf".to_string());
+        posture.mdm.push(MdmAgent::Jamf);
     }
 
     // Kandji
     if std::path::Path::new("/Library/Kandji").exists() {
-        posture.mdm.push("kandji".to_string());
+        posture.mdm.push(MdmAgent::Kandji);
     }
 
     // Workspace ONE (Omnissa, formerly VMware)
     if std::path::Path::new("/Library/Application Support/AirWatch").exists()
         || std::path::Path::new("/Applications/Workspace ONE Intelligent Hub.app").exists()
     {
-        posture.mdm.push("workspace one".to_string());
+        posture.mdm.push(MdmAgent::WorkspaceOne);
     }
 
     // Mosyle
     if std::path::Path::new("/Library/Application Support/Mosyle").exists() {
-        posture.mdm.push("mosyle".to_string());
+        posture.mdm.push(MdmAgent::Mosyle);
     }
 
     // Fleetsmith (Apple Business Essentials)
     if std::path::Path::new("/Library/Fleetsmith").exists() {
-        posture.mdm.push("fleetsmith".to_string());
+        posture.mdm.push(MdmAgent::Fleetsmith);
     }
 }
