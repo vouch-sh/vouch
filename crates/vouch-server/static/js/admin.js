@@ -16,6 +16,20 @@ document.addEventListener("DOMContentLoaded", function () {
     });
   });
 
+  // Copy button for SCIM token display
+  var copyBtn = document.getElementById("btn-copy-token");
+  if (copyBtn) {
+    copyBtn.addEventListener("click", function () {
+      var tokenEl = document.getElementById("new-token-value");
+      if (tokenEl && navigator.clipboard) {
+        navigator.clipboard.writeText(tokenEl.textContent).then(function () {
+          copyBtn.textContent = "Copied!";
+          setTimeout(function () { copyBtn.textContent = "Copy"; }, 2000);
+        });
+      }
+    });
+  }
+
   // CEL Playground for posture policies page
   var playground = document.getElementById("cel-playground");
   if (!playground) return;

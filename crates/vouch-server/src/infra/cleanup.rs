@@ -16,8 +16,16 @@ use crate::db;
 use crate::db::audit::AuditStore;
 use crate::db::store::DocumentStore;
 use aws_lc_rs::rand as aws_rand;
-use jiff::{Timestamp, ToSpan};
+use jiff::{Span, Timestamp};
 use tokio::task::JoinHandle;
+
+/// Compute a retention cutoff timestamp by subtracting days from now.
+///
+/// `jiff::Timestamp` only supports time-based units, so we convert days to hours.
+fn retention_cutoff(now: Timestamp, days: i64) -> Option<Timestamp> {
+    let hours = days.checked_mul(24)?;
+    now.checked_sub(Span::new().hours(hours)).ok()
+}
 
 /// Log cleanup results: info on deletions, warn on errors, silent on zero.
 macro_rules! cleanup_and_log {
@@ -152,25 +160,25 @@ pub async fn run_cleanup(
     );
 
     // Clean up old audit events with retention cutoffs (AuditStore)
-    if let Ok(cutoff) = now.checked_sub(auth_events_retention_days.days()) {
+    if let Some(cutoff) = retention_cutoff(now, auth_events_retention_days) {
         cleanup_and_log!(db::delete_old_auth_events(audit, cutoff), "old auth events");
     }
 
-    if let Ok(cutoff) = now.checked_sub(oauth_events_retention_days.days()) {
+    if let Some(cutoff) = retention_cutoff(now, oauth_events_retention_days) {
         cleanup_and_log!(
             db::delete_old_oauth_usage_events(audit, cutoff),
             "old OAuth usage events"
         );
     }
 
-    if let Ok(cutoff) = now.checked_sub(oauth_events_retention_days.days()) {
+    if let Some(cutoff) = retention_cutoff(now, oauth_events_retention_days) {
         cleanup_and_log!(
             db::delete_old_github_credential_events(audit, cutoff),
             "old GitHub credential events"
         );
     }
 
-    if let Ok(cutoff) = now.checked_sub(auth_events_retention_days.days()) {
+    if let Some(cutoff) = retention_cutoff(now, auth_events_retention_days) {
         cleanup_and_log!(
             db::delete_old_scim_audit_logs(audit, cutoff),
             "old SCIM audit logs"
@@ -206,4 +214,49 @@ pub async fn run_cleanup(
     );
 
     tracing::debug!("Background cleanup tasks complete");
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_retention_cutoff_30_days() {
+        let now = Timestamp::now();
+        let cutoff = retention_cutoff(now, 30).expect("30 days should not overflow");
+        let diff_secs = now.duration_since(cutoff).as_secs();
+        let expected_secs: i64 = 30 * 24 * 3600;
+        assert!(
+            (expected_secs - 5..=expected_secs + 5).contains(&diff_secs),
+            "30-day cutoff should be ~{expected_secs}s ago, got {diff_secs}s"
+        );
+    }
+
+    #[test]
+    fn test_retention_cutoff_one_day() {
+        let now = Timestamp::now();
+        let cutoff = retention_cutoff(now, 1).expect("1 day should not overflow");
+        let diff_secs = now.duration_since(cutoff).as_secs();
+        let expected_secs: i64 = 24 * 3600;
+        assert!(
+            (expected_secs - 5..=expected_secs + 5).contains(&diff_secs),
+            "1-day cutoff should be ~{expected_secs}s ago, got {diff_secs}s"
+        );
+    }
+
+    #[test]
+    fn test_retention_cutoff_is_in_the_past() {
+        let now = Timestamp::now();
+        let cutoff = retention_cutoff(now, 90).expect("90 days should not overflow");
+        assert!(cutoff < now, "cutoff must be before now");
+    }
+
+    #[test]
+    fn test_retention_cutoff_zero_days_returns_now() {
+        let now = Timestamp::now();
+        let cutoff = retention_cutoff(now, 0).expect("0 days should not overflow");
+        let diff_secs = now.duration_since(cutoff).as_secs().abs();
+        assert!(diff_secs <= 1, "0-day cutoff should be ~now");
+    }
 }
