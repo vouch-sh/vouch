@@ -105,9 +105,12 @@ pub struct LoginAssertionResult {
 
 /// Verify a WebAuthn login assertion (WebAuthn Level 2 Section 7.2).
 ///
-/// Runs signature verification on a blocking thread to avoid starving
-/// the tokio runtime on small (1-vCPU) instances where ECDSA/Ed25519
-/// verification (~0.5-2 ms) would block the single worker thread.
+/// Runs signature verification on a blocking thread as a fairness
+/// optimization: on small (1-vCPU) instances, ECDSA/Ed25519
+/// verification (~0.5-2 ms) would monopolize the single worker thread,
+/// stalling all other I/O. Unlike the KMS SSH-CA path (which would
+/// deadlock without `spawn_blocking`), this is purely about runtime
+/// fairness — local crypto doesn't block on async I/O.
 ///
 /// # Errors
 ///
