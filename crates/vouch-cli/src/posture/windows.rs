@@ -71,16 +71,37 @@ fn detect_bitlocker(posture: &mut DevicePosture) {
     }
 }
 
-/// Detect screen lock configuration from registry.
+/// Detect screen lock configuration.
+///
+/// Checks both the modern `MaxInactivityTimeDeviceLock` Group Policy
+/// (used by Intune/SCCM) and the legacy screensaver registry keys.
+/// The GP value takes precedence since it's the MDM-managed setting.
 fn detect_screen_lock(posture: &mut DevicePosture) {
+    // Modern: Group Policy / Intune managed lock timeout (in seconds)
+    let gp_output = run_powershell(
+        "(Get-ItemProperty \
+         'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Policies\\System' \
+         -ErrorAction SilentlyContinue).InactivityTimeoutSecs",
+    );
+    if let Some(ref val) = gp_output {
+        if let Ok(secs) = val.trim().parse::<u64>() {
+            posture.screen_lock_enabled = Some(secs > 0);
+            posture.screen_lock_idle_timeout_secs = Some(secs);
+            return;
+        }
+    }
+
+    // Legacy: screensaver-based lock
     let secure_output = run_powershell(
-        "(Get-ItemProperty 'HKCU:\\Control Panel\\Desktop' -ErrorAction SilentlyContinue).ScreenSaverIsSecure",
+        "(Get-ItemProperty 'HKCU:\\Control Panel\\Desktop' \
+         -ErrorAction SilentlyContinue).ScreenSaverIsSecure",
     );
 
     posture.screen_lock_enabled = secure_output.as_deref().map(|s| s.trim() == "1");
 
     let timeout_output = run_powershell(
-        "(Get-ItemProperty 'HKCU:\\Control Panel\\Desktop' -ErrorAction SilentlyContinue).ScreenSaveTimeOut",
+        "(Get-ItemProperty 'HKCU:\\Control Panel\\Desktop' \
+         -ErrorAction SilentlyContinue).ScreenSaveTimeOut",
     );
 
     posture.screen_lock_idle_timeout_secs = timeout_output

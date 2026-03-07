@@ -138,12 +138,16 @@ pub async fn list_custom_policies(
 }
 
 /// Get active custom posture policies for an org.
+///
+/// Filters at the DB level using indexed `org_id` + `active` fields.
 pub async fn get_active_custom_policies(
     store: &DocumentStore,
     org_id: &str,
 ) -> Result<Vec<CustomPosturePolicy>> {
-    let all = list_custom_policies(store, org_id).await?;
-    Ok(all.into_iter().filter(|p| p.active).collect())
+    let docs = store
+        .find_by_indexes::<CustomPosturePolicyDoc>(&[("org_id", org_id), ("active", "true")])
+        .await?;
+    Ok(docs.into_iter().map(CustomPosturePolicy::from).collect())
 }
 
 /// Get a custom posture policy by ID.

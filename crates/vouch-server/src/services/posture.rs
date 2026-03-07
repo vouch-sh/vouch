@@ -9,12 +9,14 @@
 use crate::db;
 use crate::db::store::DocumentStore;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
-use cel::{Context, Program, Value};
+use cel::{Context, ExecutionError, FunctionContext, Program, Value};
 use std::collections::HashMap;
+use std::sync::Arc;
 use vouch_common::posture::DevicePosture;
 
 /// Maximum number of active policies (preconfigured + custom combined).
-pub const MAX_ACTIVE_POLICIES: usize = 5;
+/// There are 6 preconfigured policies, so 8 allows all 6 + 2 custom.
+pub const MAX_ACTIVE_POLICIES: usize = 8;
 
 // ============================================================
 // Preconfigured Policies (code-defined)
@@ -60,16 +62,22 @@ pub const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
         description: "Require Secure Boot to be enabled",
         cel_expression: "posture.secure_boot_enabled == true",
     },
+    // OS version thresholds — review with each major OS release.
+    // Last updated: 2026-03-06
+    //   macOS: 25.0.0 = Sequoia (N-1 from Tahoe 26)
+    //   Windows: 10.0.26100 = 24H2
+    // Linux is excluded — distributions manage versions independently.
+    // Admins can create custom policies for specific distro versions
+    // (e.g., `posture.os_distribution == "ubuntu" && semver(posture.os_version) >= semver("22.04.0")`).
     PreconfiguredPolicy {
-        slug: "os_currency",
-        name: "OS Currency",
+        slug: "os_recency",
+        name: "OS Recency",
         description: "Require a supported OS version (N-1)",
-        // macOS 14+ (Sonoma), Windows 10 build 26100+, Linux always passes
         cel_expression: concat!(
-            "(posture.os == \"macos\" && posture.os_version >= \"14\")",
+            "(posture.os == \"macos\"",
+            " && semver(posture.os_version) >= semver(\"25.0.0\"))",
             " || (posture.os == \"windows\"",
-            " && posture.os_version >= \"10.0.26100\")",
-            " || (posture.os == \"linux\")",
+            " && semver(posture.os_version) >= semver(\"10.0.26100\"))",
         ),
     },
 ];
@@ -103,9 +111,12 @@ pub fn validate_cel_expression(expression: &str) -> ServiceResult<()> {
             "CEL expression must not be empty",
         ));
     }
-    // Program::compile may panic on certain malformed inputs (e.g.
-    // unterminated string literals), so catch panics and treat them
-    // as validation failures.
+    // The cel 0.12.0 ANTLR parser contains `panic!` and `expect()` in
+    // its parse tree visitor. With `panic = "abort"` (release profile),
+    // `catch_unwind` is a no-op — the primary defense is auth-before-
+    // compilation so only org admins can trigger parsing, plus the 1024-
+    // char input limit. `catch_unwind` still protects debug/test builds
+    // where `panic = "unwind"` is used.
     let compile_result = std::panic::catch_unwind(|| Program::compile(trimmed));
     match compile_result {
         Ok(Ok(_)) => Ok(()),
@@ -126,6 +137,61 @@ pub fn validate_cel_expression(expression: &str) -> ServiceResult<()> {
 // CEL Context Building
 // ============================================================
 
+fn insert_opt_string(map: &mut HashMap<String, Value>, key: &str, val: Option<&str>) {
+    map.insert(
+        key.into(),
+        Value::String(val.unwrap_or("").to_string().into()),
+    );
+}
+
+fn insert_opt_bool(map: &mut HashMap<String, Value>, key: &str, val: Option<bool>) {
+    map.insert(key.into(), Value::Bool(val.unwrap_or(false)));
+}
+
+fn insert_opt_uint(map: &mut HashMap<String, Value>, key: &str, val: Option<u64>) {
+    map.insert(key.into(), Value::UInt(val.unwrap_or(0)));
+}
+
+fn insert_string_list(map: &mut HashMap<String, Value>, key: &str, val: &[String]) {
+    let list: Vec<Value> = val
+        .iter()
+        .map(|s| Value::String(s.clone().into()))
+        .collect();
+    map.insert(key.into(), Value::List(list.into()));
+}
+
+/// CEL function: `semver("15.3.1")` → integer for numeric comparison.
+///
+/// Parses a version string into `major * 1_000_000 + minor * 1_000 + patch`.
+/// Supports 1-3 components: "15" → 15_000_000, "15.3" → 15_003_000,
+/// "15.3.1" → 15_003_001. Use for correct version comparisons:
+/// `semver(posture.os_version) >= semver("14.0.0")`
+fn cel_semver(ftx: &FunctionContext, value: Arc<String>) -> Result<Value, ExecutionError> {
+    let mut parts = value.splitn(4, '.');
+    let parse = |s: &str, ftx: &FunctionContext| -> Result<i64, ExecutionError> {
+        s.parse::<i64>()
+            .map_err(|_| ftx.error(format!("invalid semver component: '{s}'")))
+    };
+    let major = parts
+        .next()
+        .ok_or_else(|| ftx.error("empty version string"))?;
+    let major = parse(major, ftx)?;
+    let minor = parts
+        .next()
+        .map(|s| parse(s, ftx))
+        .transpose()?
+        .unwrap_or(0);
+    let patch = parts
+        .next()
+        .map(|s| parse(s, ftx))
+        .transpose()?
+        .unwrap_or(0);
+    if parts.next().is_some() {
+        return Err(ftx.error("expected 1-3 version components"));
+    }
+    Ok(Value::Int(major * 1_000_000 + minor * 1_000 + patch))
+}
+
 /// Convert a `DevicePosture` into a CEL context with a `posture` map variable.
 ///
 /// Optional fields default to safe values when `None`:
@@ -135,203 +201,97 @@ pub fn validate_cel_expression(expression: &str) -> ServiceResult<()> {
 /// - `Vec<String>` → empty list
 fn build_cel_context(posture: &DevicePosture) -> Context<'_> {
     let mut ctx = Context::default();
-
     let mut map: HashMap<String, Value> = HashMap::new();
 
     // OS info
-    map.insert(
-        "os".into(),
-        Value::String(posture.os.as_deref().unwrap_or("").to_string().into()),
+    insert_opt_string(&mut map, "os", posture.os.as_deref());
+    insert_opt_string(&mut map, "os_version", posture.os_version.as_deref());
+    insert_opt_string(
+        &mut map,
+        "os_distribution",
+        posture.os_distribution.as_deref(),
     );
-    map.insert(
-        "os_version".into(),
-        Value::String(
-            posture
-                .os_version
-                .as_deref()
-                .unwrap_or("")
-                .to_string()
-                .into(),
-        ),
-    );
-    map.insert(
-        "os_distribution".into(),
-        Value::String(
-            posture
-                .os_distribution
-                .as_deref()
-                .unwrap_or("")
-                .to_string()
-                .into(),
-        ),
-    );
-    map.insert(
-        "os_build".into(),
-        Value::String(posture.os_build.as_deref().unwrap_or("").to_string().into()),
-    );
-    map.insert(
-        "arch".into(),
-        Value::String(posture.arch.as_deref().unwrap_or("").to_string().into()),
-    );
+    insert_opt_string(&mut map, "os_build", posture.os_build.as_deref());
+    insert_opt_string(&mut map, "arch", posture.arch.as_deref());
 
     // Disk encryption
-    map.insert(
-        "disk_encryption_enabled".into(),
-        Value::Bool(posture.disk_encryption_enabled.unwrap_or(false)),
+    insert_opt_bool(
+        &mut map,
+        "disk_encryption_enabled",
+        posture.disk_encryption_enabled,
     );
-    map.insert(
-        "disk_encryption_technology".into(),
-        Value::String(
-            posture
-                .disk_encryption_technology
-                .as_deref()
-                .unwrap_or("")
-                .to_string()
-                .into(),
-        ),
+    insert_opt_string(
+        &mut map,
+        "disk_encryption_technology",
+        posture.disk_encryption_technology.as_deref(),
     );
 
     // Screen lock
-    map.insert(
-        "screen_lock_enabled".into(),
-        Value::Bool(posture.screen_lock_enabled.unwrap_or(false)),
-    );
-    map.insert(
-        "screen_lock_idle_timeout_secs".into(),
-        Value::UInt(posture.screen_lock_idle_timeout_secs.unwrap_or(0)),
+    insert_opt_bool(&mut map, "screen_lock_enabled", posture.screen_lock_enabled);
+    insert_opt_uint(
+        &mut map,
+        "screen_lock_idle_timeout_secs",
+        posture.screen_lock_idle_timeout_secs,
     );
 
     // Firewall
-    map.insert(
-        "firewall_enabled".into(),
-        Value::Bool(posture.firewall_enabled.unwrap_or(false)),
-    );
-    map.insert(
-        "firewall_technology".into(),
-        Value::String(
-            posture
-                .firewall_technology
-                .as_deref()
-                .unwrap_or("")
-                .to_string()
-                .into(),
-        ),
+    insert_opt_bool(&mut map, "firewall_enabled", posture.firewall_enabled);
+    insert_opt_string(
+        &mut map,
+        "firewall_technology",
+        posture.firewall_technology.as_deref(),
     );
 
     // Secure boot / TPM
-    map.insert(
-        "secure_boot_enabled".into(),
-        Value::Bool(posture.secure_boot_enabled.unwrap_or(false)),
-    );
-    map.insert(
-        "sip_enabled".into(),
-        Value::Bool(posture.sip_enabled.unwrap_or(false)),
-    );
-    map.insert(
-        "tpm_present".into(),
-        Value::Bool(posture.tpm_present.unwrap_or(false)),
-    );
-    map.insert(
-        "tpm_version".into(),
-        Value::String(
-            posture
-                .tpm_version
-                .as_deref()
-                .unwrap_or("")
-                .to_string()
-                .into(),
-        ),
-    );
+    insert_opt_bool(&mut map, "secure_boot_enabled", posture.secure_boot_enabled);
+    insert_opt_bool(&mut map, "sip_enabled", posture.sip_enabled);
+    insert_opt_bool(&mut map, "tpm_present", posture.tpm_present);
+    insert_opt_string(&mut map, "tpm_version", posture.tpm_version.as_deref());
 
     // Auto-update
-    map.insert(
-        "auto_update_enabled".into(),
-        Value::Bool(posture.auto_update_enabled.unwrap_or(false)),
-    );
-    map.insert(
-        "auto_update_technology".into(),
-        Value::String(
-            posture
-                .auto_update_technology
-                .as_deref()
-                .unwrap_or("")
-                .to_string()
-                .into(),
-        ),
+    insert_opt_bool(&mut map, "auto_update_enabled", posture.auto_update_enabled);
+    insert_opt_string(
+        &mut map,
+        "auto_update_technology",
+        posture.auto_update_technology.as_deref(),
     );
 
     // Uptime
-    map.insert(
-        "uptime_secs".into(),
-        Value::UInt(posture.uptime_secs.unwrap_or(0)),
-    );
+    insert_opt_uint(&mut map, "uptime_secs", posture.uptime_secs);
 
     // Access control
-    map.insert(
-        "access_control_enforcing".into(),
-        Value::Bool(posture.access_control_enforcing.unwrap_or(false)),
+    insert_opt_bool(
+        &mut map,
+        "access_control_enforcing",
+        posture.access_control_enforcing,
     );
-    map.insert(
-        "access_control_technology".into(),
-        Value::String(
-            posture
-                .access_control_technology
-                .as_deref()
-                .unwrap_or("")
-                .to_string()
-                .into(),
-        ),
+    insert_opt_string(
+        &mut map,
+        "access_control_technology",
+        posture.access_control_technology.as_deref(),
     );
 
-    // EDR (list of strings)
-    let edr_list: Vec<Value> = posture
-        .edr
-        .iter()
-        .map(|s| Value::String(s.clone().into()))
-        .collect();
-    map.insert("edr".into(), Value::List(edr_list.into()));
-
-    // MDM (list of strings)
-    let mdm_list: Vec<Value> = posture
-        .mdm
-        .iter()
-        .map(|s| Value::String(s.clone().into()))
-        .collect();
-    map.insert("mdm".into(), Value::List(mdm_list.into()));
+    // Lists
+    insert_string_list(&mut map, "edr", &posture.edr);
+    insert_string_list(&mut map, "mdm", &posture.mdm);
 
     // Execution context
-    map.insert(
-        "elevated".into(),
-        Value::Bool(posture.elevated.unwrap_or(false)),
-    );
-    map.insert("tty".into(), Value::Bool(posture.tty.unwrap_or(false)));
-    map.insert(
-        "parent_process".into(),
-        Value::String(
-            posture
-                .parent_process
-                .as_deref()
-                .unwrap_or("")
-                .to_string()
-                .into(),
-        ),
+    insert_opt_bool(&mut map, "elevated", posture.elevated);
+    insert_opt_bool(&mut map, "tty", posture.tty);
+    insert_opt_string(
+        &mut map,
+        "parent_process",
+        posture.parent_process.as_deref(),
     );
 
     // Meta
-    map.insert(
-        "cli_version".into(),
-        Value::String(
-            posture
-                .cli_version
-                .as_deref()
-                .unwrap_or("")
-                .to_string()
-                .into(),
-        ),
-    );
+    insert_opt_string(&mut map, "cli_version", posture.cli_version.as_deref());
 
-    ctx.add_variable("posture", Value::Map(map.into()))
-        .unwrap_or(());
+    if let Err(e) = ctx.add_variable("posture", Value::Map(map.into())) {
+        tracing::error!("Failed to add posture variable to CEL context: {e}");
+    }
+
+    ctx.add_function("semver", cel_semver);
 
     ctx
 }
@@ -430,7 +390,10 @@ pub fn remediation_for_slug(slug: &str, os: Option<&str>) -> String {
 
         // Screen lock
         ("screen_lock", "macos") => "Set screen lock in System Settings > Lock Screen".to_string(),
-        ("screen_lock", "linux") => "Configure screen lock in your display settings".to_string(),
+        ("screen_lock", "linux") => "Configure screen lock in your display settings. \
+             If authenticating via SSH, screen lock status may not be \
+             detectable — try authenticating from a graphical session"
+            .to_string(),
         ("screen_lock", "windows") => {
             "Set screen lock in Settings > Accounts > Sign-in options".to_string()
         }
@@ -457,14 +420,17 @@ pub fn remediation_for_slug(slug: &str, os: Option<&str>) -> String {
         ("platform_integrity", _) => "Enable Secure Boot on your device".to_string(),
 
         // OS currency
-        ("os_currency", "macos") => "Update macOS to a supported version (14 or later)".to_string(),
-        ("os_currency", "windows") => "Update Windows to a supported version (build 26100 \
+        ("os_recency", "macos") => "Update macOS to a supported version (14 or later)".to_string(),
+        ("os_recency", "windows") => "Update Windows to a supported version (build 26100 \
              or later)"
             .to_string(),
-        ("os_currency", _) => "Update your operating system to a supported version".to_string(),
+        ("os_recency", "linux") => "Linux is not covered by the built-in OS recency check. \
+             Your organization may have a custom policy for your distribution"
+            .to_string(),
+        ("os_recency", _) => "Update your operating system to a supported version".to_string(),
 
         // Unknown slug (custom policy)
-        _ => "Contact your organization administrator for device \
+        _ => "Check your device settings to meet your organization's \
              compliance requirements"
             .to_string(),
     }
@@ -530,14 +496,12 @@ pub async fn evaluate_posture_policies(
     // Evaluate custom policies
     for policy in &active_custom {
         if !evaluate_cel(&policy.cel_expression, &ctx) {
-            let remediation = "Contact your organization \
-                administrator for device compliance requirements"
-                .to_string();
             return Err(ServiceError::oauth(
                 OAuthErrorCode::AccessDenied,
                 format!(
                     "Device posture policy '{}' not satisfied. \
-                     {remediation}",
+                     Check your device settings to meet your \
+                     organization's compliance requirements",
                     policy.name
                 ),
             ));
@@ -568,12 +532,14 @@ fn extract_device_posture(ad_json: Option<&str>) -> ServiceResult<DevicePosture>
     for entry in &entries {
         let type_name = entry.get("type").and_then(serde_json::Value::as_str);
         if type_name == Some(vouch_common::posture::POSTURE_TYPE) {
-            let posture: DevicePosture = serde_json::from_value(entry.clone()).map_err(|e| {
-                ServiceError::oauth(
-                    OAuthErrorCode::AccessDenied,
-                    format!("Invalid device posture data: {e}"),
-                )
-            })?;
+            let mut posture: DevicePosture =
+                serde_json::from_value(entry.clone()).map_err(|e| {
+                    ServiceError::oauth(
+                        OAuthErrorCode::AccessDenied,
+                        format!("Invalid device posture data: {e}"),
+                    )
+                })?;
+            posture.normalize();
             return Ok(posture);
         }
     }
@@ -582,45 +548,6 @@ fn extract_device_posture(ad_json: Option<&str>) -> ServiceResult<DevicePosture>
         OAuthErrorCode::AccessDenied,
         "Device posture data is required by organization policy",
     ))
-}
-
-// ============================================================
-// Posture Schema (for admin UI reference)
-// ============================================================
-
-/// Returns the posture field schema as a JSON-serializable map.
-///
-/// Used by the list endpoint to provide field reference for custom CEL.
-#[must_use]
-pub fn posture_schema() -> serde_json::Value {
-    serde_json::json!({
-        "os": "string",
-        "os_version": "string",
-        "os_distribution": "string",
-        "os_build": "string",
-        "arch": "string",
-        "disk_encryption_enabled": "bool",
-        "disk_encryption_technology": "string",
-        "screen_lock_enabled": "bool",
-        "screen_lock_idle_timeout_secs": "uint",
-        "firewall_enabled": "bool",
-        "firewall_technology": "string",
-        "secure_boot_enabled": "bool",
-        "sip_enabled": "bool",
-        "tpm_present": "bool",
-        "tpm_version": "string",
-        "auto_update_enabled": "bool",
-        "auto_update_technology": "string",
-        "uptime_secs": "uint",
-        "access_control_enforcing": "bool",
-        "access_control_technology": "string",
-        "edr": "list<string>",
-        "mdm": "list<string>",
-        "elevated": "bool",
-        "tty": "bool",
-        "parent_process": "string",
-        "cli_version": "string"
-    })
 }
 
 #[cfg(test)]
@@ -638,7 +565,7 @@ mod tests {
             detail_type: "device_posture".to_string(),
             posture_version: 1,
             os: Some("macos".to_string()),
-            os_version: Some("15.3.1".to_string()),
+            os_version: Some("26.3.1".to_string()),
             disk_encryption_enabled: Some(true),
             disk_encryption_technology: Some("filevault".to_string()),
             firewall_enabled: Some(true),
@@ -732,41 +659,43 @@ mod tests {
     }
 
     #[test]
-    fn test_evaluate_os_currency_macos_pass() {
+    fn test_evaluate_os_recency_macos_pass() {
         let posture = sample_posture();
         let ctx = build_cel_context(&posture);
         let expr = PRECONFIGURED_POLICIES
             .iter()
-            .find(|p| p.slug == "os_currency")
+            .find(|p| p.slug == "os_recency")
             .unwrap()
             .cel_expression;
         assert!(evaluate_cel(expr, &ctx));
     }
 
     #[test]
-    fn test_evaluate_os_currency_old_macos_fail() {
+    fn test_evaluate_os_recency_old_macos_fail() {
         let mut posture = sample_posture();
-        posture.os_version = Some("13.0".to_string());
+        posture.os_version = Some("24.4.0".to_string());
         let ctx = build_cel_context(&posture);
         let expr = PRECONFIGURED_POLICIES
             .iter()
-            .find(|p| p.slug == "os_currency")
+            .find(|p| p.slug == "os_recency")
             .unwrap()
             .cel_expression;
         assert!(!evaluate_cel(expr, &ctx));
     }
 
     #[test]
-    fn test_evaluate_os_currency_linux_always_passes() {
+    fn test_evaluate_os_recency_linux_does_not_pass() {
         let mut posture = minimal_posture();
         posture.os = Some("linux".to_string());
         let ctx = build_cel_context(&posture);
         let expr = PRECONFIGURED_POLICIES
             .iter()
-            .find(|p| p.slug == "os_currency")
+            .find(|p| p.slug == "os_recency")
             .unwrap()
             .cel_expression;
-        assert!(evaluate_cel(expr, &ctx));
+        // Linux is not covered by the preconfigured os_recency policy;
+        // admins should create per-distro custom policies instead.
+        assert!(!evaluate_cel(expr, &ctx));
     }
 
     #[test]
@@ -856,7 +785,7 @@ mod tests {
     #[test]
     fn test_remediation_unknown_slug() {
         let r = remediation_for_slug("custom_thing", Some("macos"));
-        assert!(r.contains("Contact your organization"));
+        assert!(r.contains("compliance requirements"));
     }
 
     #[test]
@@ -867,9 +796,56 @@ mod tests {
     }
 
     #[test]
+    fn test_semver_comparison() {
+        let posture = sample_posture();
+        let ctx = build_cel_context(&posture);
+        // 26.3.1 >= 25.0.0
+        assert!(evaluate_cel(
+            "semver(posture.os_version) >= semver(\"25.0.0\")",
+            &ctx,
+        ));
+        // 26.3.1 < 27.0.0
+        assert!(evaluate_cel(
+            "semver(posture.os_version) < semver(\"27.0.0\")",
+            &ctx,
+        ));
+        // 9.0.0 should NOT be >= 14.0.0 (unlike lexicographic)
+        let mut old = minimal_posture();
+        old.os_version = Some("9.0.0".to_string());
+        let old_ctx = build_cel_context(&old);
+        assert!(!evaluate_cel(
+            "semver(posture.os_version) >= semver(\"14.0.0\")",
+            &old_ctx,
+        ));
+    }
+
+    #[test]
+    fn test_semver_compared_to_int() {
+        let posture = sample_posture();
+        let ctx = build_cel_context(&posture);
+        // semver("26.3.1") = 26_003_001, which is >= 25
+        assert!(evaluate_cel("semver(posture.os_version) >= 25", &ctx,));
+    }
+
+    #[test]
+    fn test_semver_two_components() {
+        let mut posture = minimal_posture();
+        posture.os_version = Some("10.0".to_string());
+        let ctx = build_cel_context(&posture);
+        assert!(evaluate_cel(
+            "semver(posture.os_version) >= semver(\"10\")",
+            &ctx,
+        ));
+        assert!(!evaluate_cel(
+            "semver(posture.os_version) >= semver(\"11\")",
+            &ctx,
+        ));
+    }
+
+    #[test]
     fn test_is_valid_preconfigured_slug() {
         assert!(is_valid_preconfigured_slug("disk_encryption"));
-        assert!(is_valid_preconfigured_slug("os_currency"));
+        assert!(is_valid_preconfigured_slug("os_recency"));
         assert!(!is_valid_preconfigured_slug("custom"));
     }
 
@@ -892,14 +868,5 @@ mod tests {
         let json = r#"[{"type":"other_thing"}]"#;
         let result = extract_device_posture(Some(json));
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_posture_schema_has_expected_fields() {
-        let schema = posture_schema();
-        assert_eq!(schema["os"], "string");
-        assert_eq!(schema["disk_encryption_enabled"], "bool");
-        assert_eq!(schema["edr"], "list<string>");
-        assert_eq!(schema["uptime_secs"], "uint");
     }
 }

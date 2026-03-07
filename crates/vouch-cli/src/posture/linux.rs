@@ -69,9 +69,10 @@ fn detect_disk_encryption(posture: &mut DevicePosture) {
     posture.disk_encryption_enabled = Some(false);
 }
 
-/// Detect GNOME screen lock settings via `gsettings`.
+/// Detect screen lock settings on Linux.
 ///
-/// Only works for GNOME desktop. Skips headless/TTY sessions.
+/// Supports GNOME (via `gsettings`) and KDE Plasma (via `kreadconfig6`
+/// / `kreadconfig5`). Skips headless/TTY sessions.
 fn detect_screen_lock(posture: &mut DevicePosture) {
     // Check if we're in a graphical session
     let session_type = std::env::var("XDG_SESSION_TYPE").ok();
@@ -80,6 +81,16 @@ fn detect_screen_lock(posture: &mut DevicePosture) {
     }
 
     // Try GNOME settings
+    if detect_screen_lock_gnome(posture) {
+        return;
+    }
+
+    // Try KDE Plasma settings
+    detect_screen_lock_kde(posture);
+}
+
+/// GNOME screen lock via `gsettings`.
+fn detect_screen_lock_gnome(posture: &mut DevicePosture) -> bool {
     let lock_output = run_command(
         "gsettings",
         &["get", "org.gnome.desktop.screensaver", "lock-enabled"],
@@ -99,6 +110,53 @@ fn detect_screen_lock(posture: &mut DevicePosture) {
                 .strip_prefix("uint32 ")
                 .and_then(|n| n.parse::<u64>().ok())
         });
+        return true;
+    }
+    false
+}
+
+/// KDE Plasma screen lock via `kreadconfig6` (Plasma 6) or `kreadconfig5`.
+fn detect_screen_lock_kde(posture: &mut DevicePosture) {
+    let kread = if run_command("kreadconfig6", &["--help"]).is_some() {
+        "kreadconfig6"
+    } else if run_command("kreadconfig5", &["--help"]).is_some() {
+        "kreadconfig5"
+    } else {
+        return;
+    };
+
+    let lock_output = run_command(
+        kread,
+        &[
+            "--file",
+            "kscreenlockerrc",
+            "--group",
+            "Daemon",
+            "--key",
+            "Autolock",
+        ],
+    );
+
+    if let Some(output) = lock_output {
+        posture.screen_lock_enabled = Some(output.trim() == "true");
+
+        let timeout_output = run_command(
+            kread,
+            &[
+                "--file",
+                "kscreenlockerrc",
+                "--group",
+                "Daemon",
+                "--key",
+                "Timeout",
+            ],
+        );
+
+        // KDE Timeout is in minutes; convert to seconds
+        posture.screen_lock_idle_timeout_secs = timeout_output
+            .as_deref()
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(|mins| mins * 60);
     }
 }
 
@@ -133,7 +191,9 @@ fn detect_firewall(posture: &mut DevicePosture) {
         return;
     }
 
-    posture.firewall_enabled = Some(false);
+    // No systemd-managed firewall detected. Note: raw iptables/nftables
+    // rules may still be active but we can't reliably detect those
+    // without root. Leave as None rather than asserting false.
 }
 
 /// Detect Secure Boot and TPM status from sysfs (no root required).
@@ -194,7 +254,9 @@ fn detect_os_auto_update(posture: &mut DevicePosture) {
         return;
     }
 
-    posture.auto_update_enabled = Some(false);
+    // No recognized auto-update service detected. Leave as None
+    // rather than asserting false — the distro may use a different
+    // mechanism (e.g., PackageKit, zypper-autopatch).
 }
 
 /// Detect system uptime from `/proc/uptime`.

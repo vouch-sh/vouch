@@ -22,7 +22,13 @@ fn detect_elevated() -> bool {
     }
 }
 
-#[cfg(not(unix))]
+/// Check elevation on Windows via `net session` (succeeds only if admin).
+#[cfg(target_os = "windows")]
+fn detect_elevated() -> bool {
+    run_command("net", &["session"]).is_some()
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
 fn detect_elevated() -> bool {
     false
 }
