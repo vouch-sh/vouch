@@ -4,11 +4,14 @@
 //! Configures package managers (Cargo, pip, npm) to use Vouch for
 //! AWS CodeArtifact registry authentication.
 
+use std::collections::BTreeMap;
+
 use anyhow::{Context, Result};
 use secrecy::ExposeSecret;
 
 use crate::commands::credential::codeartifact::resolve_codeartifact_params;
 use crate::config::{CodeArtifactProfile, Config};
+use crate::integrations::aws::codeartifact::{CodeArtifactRegistry, parse_codeartifact_url};
 use crate::integrations::aws::get_local_aws_role;
 use crate::integrations::aws::sts::Arn;
 use crate::integrations::cargo::CargoConfig;
@@ -358,7 +361,125 @@ fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
     Ok(())
 }
 
+/// Parse CodeArtifact entries from `.npmrc` content.
+///
+/// Scans for `_authToken` lines whose prefix contains a CodeArtifact host,
+/// returning `(line_prefix, registry)` pairs. The `line_prefix` is the
+/// portion before `:_authToken=` (e.g., `//host/npm/repo/`) so callers
+/// can match lines during rewrite.
+fn parse_npmrc_codeartifact_entries(content: &str) -> Vec<(String, CodeArtifactRegistry)> {
+    let mut entries = Vec::new();
+    for line in content.lines() {
+        let trimmed = line.trim();
+        // Match lines like: //{ca_host}/npm/{repo}/:_authToken={token}
+        if let Some((prefix, _token)) = trimmed.split_once(":_authToken=") {
+            // prefix is e.g. "//host/npm/repo/"
+            let host_and_path = prefix.strip_prefix("//").unwrap_or(prefix);
+            if let Some(registry) = parse_codeartifact_url(host_and_path) {
+                entries.push((prefix.to_string(), registry));
+            }
+        }
+    }
+    entries
+}
+
+/// Auto-refresh any CodeArtifact npm tokens found in `~/.npmrc`.
+///
+/// Parses `~/.npmrc` for `_authToken` lines pointing at CodeArtifact hosts,
+/// fetches a fresh token for each unique domain, and rewrites the tokens
+/// in place. Best-effort: logs errors via `tracing` but never fails the
+/// login flow.
+pub(crate) async fn auto_refresh_npmrc(server: &str) {
+    if let Err(e) = try_refresh_npmrc(server).await {
+        tracing::debug!("CodeArtifact npmrc refresh skipped: {e}");
+    }
+}
+
+/// Inner implementation for `auto_refresh_npmrc` that returns `Result`
+/// for ergonomic error handling.
+async fn try_refresh_npmrc(server: &str) -> Result<()> {
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    let npmrc_path = home.join(".npmrc");
+
+    let content = match std::fs::read_to_string(&npmrc_path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).context("failed to read ~/.npmrc"),
+    };
+
+    let entries = parse_npmrc_codeartifact_entries(&content);
+    if entries.is_empty() {
+        return Ok(());
+    }
+
+    // Deduplicate by (domain, owner, region) — multiple repos share one token
+    let mut tokens: BTreeMap<String, secrecy::SecretString> = BTreeMap::new();
+    for (_prefix, registry) in &entries {
+        let key = format!("{}:{}:{}", registry.domain, registry.domain_owner, registry.region);
+        if tokens.contains_key(&key) {
+            continue;
+        }
+        match crate::commands::credential::codeartifact::get_token(
+            server,
+            &registry.domain,
+            &registry.domain_owner,
+            &registry.region,
+        )
+        .await
+        {
+            Ok(token) => {
+                tokens.insert(key, token.authorization_token);
+            }
+            Err(e) => {
+                tracing::debug!(
+                    "Failed to refresh CodeArtifact token for {}-{}: {e}",
+                    registry.domain,
+                    registry.domain_owner
+                );
+            }
+        }
+    }
+
+    if tokens.is_empty() {
+        return Ok(());
+    }
+
+    // Build a lookup from line prefix to the fresh token
+    let mut prefix_to_token: BTreeMap<&str, &secrecy::SecretString> = BTreeMap::new();
+    for (prefix, registry) in &entries {
+        let key = format!("{}:{}:{}", registry.domain, registry.domain_owner, registry.region);
+        if let Some(token) = tokens.get(&key) {
+            prefix_to_token.insert(prefix.as_str(), token);
+        }
+    }
+
+    // Rewrite ~/.npmrc line by line, replacing matched _authToken values
+    let mut new_lines: Vec<String> = Vec::new();
+    let mut refreshed = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some((prefix, _old_token)) = trimmed.split_once(":_authToken=")
+            && let Some(new_token) = prefix_to_token.get(prefix)
+        {
+            new_lines.push(format!("{prefix}:_authToken={}", new_token.expose_secret()));
+            refreshed = true;
+            continue;
+        }
+        new_lines.push(line.to_string());
+    }
+
+    if refreshed {
+        let new_content = new_lines.join("\n") + "\n";
+        crate::utils::atomic_write_secure(&npmrc_path, new_content.as_bytes())
+            .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
+        println!("Refreshed CodeArtifact token in ~/.npmrc");
+    }
+
+    Ok(())
+}
+
 #[cfg(test)]
+#[allow(clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use clap::ValueEnum;
@@ -372,5 +493,55 @@ mod tests {
         assert_eq!(Tool::from_str("npm", true), Ok(Tool::Npm));
         assert!(Tool::from_str("maven", true).is_err());
         assert!(Tool::from_str("", true).is_err());
+    }
+
+    #[test]
+    fn test_parse_npmrc_codeartifact_entries_basic() {
+        let content = "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/my-repo/:_authToken=old-token\n\
+                        registry=https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/my-repo/\n";
+        let entries = parse_npmrc_codeartifact_entries(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].0,
+            "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/my-repo/"
+        );
+        assert_eq!(entries[0].1.domain, "my-domain");
+        assert_eq!(entries[0].1.domain_owner, "123456789012");
+        assert_eq!(entries[0].1.region, "us-east-1");
+    }
+
+    #[test]
+    fn test_parse_npmrc_codeartifact_entries_no_matches() {
+        let content = "//registry.npmjs.org/:_authToken=some-token\n\
+                        registry=https://registry.npmjs.org/\n";
+        let entries = parse_npmrc_codeartifact_entries(content);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_parse_npmrc_codeartifact_entries_multiple_repos_same_domain() {
+        let content = "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo-a/:_authToken=tok-a\n\
+                        //my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo-b/:_authToken=tok-b\n";
+        let entries = parse_npmrc_codeartifact_entries(content);
+        assert_eq!(entries.len(), 2);
+        // Both share the same domain/owner/region
+        assert_eq!(entries[0].1.domain, entries[1].1.domain);
+        assert_eq!(entries[0].1.domain_owner, entries[1].1.domain_owner);
+        assert_eq!(entries[0].1.region, entries[1].1.region);
+        // But have different prefixes (different repos)
+        assert_ne!(entries[0].0, entries[1].0);
+    }
+
+    #[test]
+    fn test_parse_npmrc_codeartifact_entries_mixed_content() {
+        let content = "# A comment\n\
+                        \n\
+                        //registry.npmjs.org/:_authToken=npm-token\n\
+                        //my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/my-repo/:_authToken=ca-token\n\
+                        registry=https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/my-repo/\n\
+                        save-exact=true\n";
+        let entries = parse_npmrc_codeartifact_entries(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.domain, "my-domain");
     }
 }
