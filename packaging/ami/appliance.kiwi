@@ -45,7 +45,7 @@
 
     <packages type="image">
         <namedCollection name="core"/>
-        <namedCollection name="ami-minimal"/>
+        <namedCollection name="ami-minimal-kernel6.18"/>
         <!-- Base system utilities -->
         <package name="pciutils"/>
         <package name="gzip"/>
