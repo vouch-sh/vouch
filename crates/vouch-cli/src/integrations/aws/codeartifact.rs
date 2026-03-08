@@ -96,6 +96,16 @@ pub fn parse_codeartifact_url(url: &str) -> Option<CodeArtifactRegistry> {
     })
 }
 
+impl CodeArtifactRegistry {
+    /// Stable cache key for deduplicating token fetches across repositories.
+    ///
+    /// All repositories within a single domain share one authorization token,
+    /// so this key combines domain, owner, and region.
+    pub fn token_cache_key(&self) -> String {
+        format!("{}:{}:{}", self.domain, self.domain_owner, self.region)
+    }
+}
+
 /// Response from CodeArtifact `GetAuthorizationToken` API.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]

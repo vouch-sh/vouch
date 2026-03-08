@@ -38,7 +38,7 @@ pub enum Tool {
 ///
 /// # Arguments
 /// * `server` - Vouch server URL
-/// * `tool` - Package manager to configure ("cargo", "pip", "npm")
+/// * `tool` - Package manager to configure ("cargo", "pip", "npm", "pnpm", "uv")
 /// * `domain` - CodeArtifact domain name (optional if profile configured)
 /// * `domain_owner` - AWS account ID that owns the domain (optional if profile configured)
 /// * `region` - AWS region (optional if profile configured)
@@ -287,7 +287,7 @@ fn get_pip_config_dir() -> Result<std::path::PathBuf> {
     // Respect PIP_CONFIG_FILE if set
     if let Ok(pip_config) = std::env::var("PIP_CONFIG_FILE") {
         let path = std::path::PathBuf::from(pip_config);
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             return Ok(parent.to_path_buf());
         }
     }
@@ -356,7 +356,10 @@ fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
         );
     }
 
-    if let Some(array) = doc.get_mut("index").and_then(|i| i.as_array_of_tables_mut()) {
+    if let Some(array) = doc
+        .get_mut("index")
+        .and_then(|i| i.as_array_of_tables_mut())
+    {
         // Look for an existing entry with our name
         let mut found = false;
         for table in array.iter_mut() {
@@ -390,7 +393,7 @@ fn get_uv_config_dir() -> Result<std::path::PathBuf> {
     // Respect UV_CONFIG_FILE if set
     if let Ok(uv_config) = std::env::var("UV_CONFIG_FILE") {
         let path = std::path::PathBuf::from(uv_config);
-        if let Some(parent) = path.parent() {
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
             return Ok(parent.to_path_buf());
         }
     }
@@ -445,25 +448,14 @@ fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     let npmrc_path = home.join(".npmrc");
 
-    // Read existing content, preserving lines not related to this registry
-    let ca_prefix = format!("//{ca_host}/npm/{repository}/");
-    let ca_registry = format!("registry=https://{ca_host}/npm/{repository}/");
-    let mut lines: Vec<String> = if npmrc_path.exists() {
+    let existing = if npmrc_path.exists() {
         std::fs::read_to_string(&npmrc_path)
             .with_context(|| format!("failed to read {}", npmrc_path.display()))?
-            .lines()
-            .filter(|line| !line.starts_with(&ca_prefix) && !line.starts_with(&ca_registry))
-            .map(String::from)
-            .collect()
     } else {
-        Vec::new()
+        String::new()
     };
 
-    // Append the new CodeArtifact entries
-    lines.push(format!("{ca_prefix}:_authToken={token}"));
-    lines.push(format!("registry=https://{ca_host}/npm/{repository}/"));
-
-    let content = lines.join("\n") + "\n";
+    let content = build_npmrc_content(&existing, ca_host, repository, token);
 
     crate::utils::atomic_write_secure(&npmrc_path, content.as_bytes())
         .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
@@ -515,9 +507,7 @@ fn install_pnpm_token_helper() -> Result<std::path::PathBuf> {
                 helper_path.display()
             );
             println!("To use vouch for pnpm CodeArtifact authentication, either:");
-            println!(
-                "  1. Rename the existing file and re-run this command:"
-            );
+            println!("  1. Rename the existing file and re-run this command:");
             println!(
                 "     mv {} {}.bak",
                 helper_path.display(),
@@ -529,9 +519,7 @@ fn install_pnpm_token_helper() -> Result<std::path::PathBuf> {
         }
     }
 
-    let script = format!(
-        "#!/bin/sh\nexec \"{vouch_path_str}\" credential codeartifact \"$@\"\n"
-    );
+    let script = format!("#!/bin/sh\nexec \"{vouch_path_str}\" credential codeartifact \"$@\"\n");
 
     crate::utils::atomic_write_executable(&helper_path, script.as_bytes())
         .with_context(|| format!("failed to write {}", helper_path.display()))?;
@@ -558,34 +546,18 @@ fn install_pnpm_token_helper() -> Result<std::path::PathBuf> {
 ///
 /// Preserves existing entries while updating/adding the `tokenHelper`
 /// directive for the given CodeArtifact registry.
-fn write_npmrc_pnpm(
-    ca_host: &str,
-    repository: &str,
-    helper_path: &std::path::Path,
-) -> Result<()> {
+fn write_npmrc_pnpm(ca_host: &str, repository: &str, helper_path: &std::path::Path) -> Result<()> {
     let home = dirs::home_dir().context("could not determine home directory")?;
     let npmrc_path = home.join(".npmrc");
 
-    let ca_prefix = format!("//{ca_host}/npm/{repository}/");
-    let ca_registry = format!("registry=https://{ca_host}/npm/{repository}/");
-    let mut lines: Vec<String> = if npmrc_path.exists() {
+    let existing = if npmrc_path.exists() {
         std::fs::read_to_string(&npmrc_path)
             .with_context(|| format!("failed to read {}", npmrc_path.display()))?
-            .lines()
-            .filter(|line| !line.starts_with(&ca_prefix) && !line.starts_with(&ca_registry))
-            .map(String::from)
-            .collect()
     } else {
-        Vec::new()
+        String::new()
     };
 
-    lines.push(format!(
-        "{ca_prefix}:tokenHelper={}",
-        helper_path.display()
-    ));
-    lines.push(format!("registry=https://{ca_host}/npm/{repository}/"));
-
-    let content = lines.join("\n") + "\n";
+    let content = build_npmrc_pnpm_content(&existing, ca_host, repository, helper_path);
 
     crate::utils::atomic_write_secure(&npmrc_path, content.as_bytes())
         .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
@@ -658,7 +630,7 @@ async fn try_refresh_npmrc(server: &str) -> Result<()> {
     // Deduplicate by (domain, owner, region) — multiple repos share one token
     let mut tokens: BTreeMap<String, secrecy::SecretString> = BTreeMap::new();
     for (_prefix, registry) in &entries {
-        let key = format!("{}:{}:{}", registry.domain, registry.domain_owner, registry.region);
+        let key = registry.token_cache_key();
         if tokens.contains_key(&key) {
             continue;
         }
@@ -690,29 +662,21 @@ async fn try_refresh_npmrc(server: &str) -> Result<()> {
     // Build a lookup from line prefix to the fresh token
     let mut prefix_to_token: BTreeMap<&str, &secrecy::SecretString> = BTreeMap::new();
     for (prefix, registry) in &entries {
-        let key = format!("{}:{}:{}", registry.domain, registry.domain_owner, registry.region);
+        let key = registry.token_cache_key();
         if let Some(token) = tokens.get(&key) {
             prefix_to_token.insert(prefix.as_str(), token);
         }
     }
 
-    // Rewrite ~/.npmrc line by line, replacing matched _authToken values
-    let mut new_lines: Vec<String> = Vec::new();
-    let mut refreshed = false;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some((prefix, _old_token)) = trimmed.split_once(":_authToken=")
-            && let Some(new_token) = prefix_to_token.get(prefix)
-        {
-            new_lines.push(format!("{prefix}:_authToken={}", new_token.expose_secret()));
-            refreshed = true;
-            continue;
-        }
-        new_lines.push(line.to_string());
-    }
+    // Build a plain string map for the pure rewrite function
+    let plain_map: BTreeMap<&str, &str> = prefix_to_token
+        .iter()
+        .map(|(k, v)| (*k, v.expose_secret()))
+        .collect();
+
+    let (new_content, refreshed) = rewrite_npmrc_tokens(&content, &plain_map);
 
     if refreshed {
-        let new_content = new_lines.join("\n") + "\n";
         crate::utils::atomic_write_secure(&npmrc_path, new_content.as_bytes())
             .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
         println!("Refreshed CodeArtifact token in ~/.npmrc");
@@ -721,11 +685,77 @@ async fn try_refresh_npmrc(server: &str) -> Result<()> {
     Ok(())
 }
 
+/// Rewrite `.npmrc` content, replacing `_authToken` values for matched prefixes.
+///
+/// Returns the rewritten content and whether any replacements were made.
+/// Lines not matching any prefix are preserved verbatim.
+fn rewrite_npmrc_tokens(content: &str, prefix_to_token: &BTreeMap<&str, &str>) -> (String, bool) {
+    let mut new_lines: Vec<String> = Vec::new();
+    let mut changed = false;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some((prefix, _old_token)) = trimmed.split_once(":_authToken=")
+            && let Some(new_token) = prefix_to_token.get(prefix)
+        {
+            new_lines.push(format!("{prefix}:_authToken={new_token}"));
+            changed = true;
+            continue;
+        }
+        new_lines.push(line.to_string());
+    }
+    let result = new_lines.join("\n") + "\n";
+    (result, changed)
+}
+
+/// Build the content for an npm `.npmrc` with a static `_authToken`.
+///
+/// Returns the file content as a string. Existing lines not related to the
+/// given CodeArtifact registry are preserved.
+fn build_npmrc_content(existing: &str, ca_host: &str, repository: &str, token: &str) -> String {
+    let ca_prefix = format!("//{ca_host}/npm/{repository}/");
+    let ca_registry = format!("registry=https://{ca_host}/npm/{repository}/");
+    let mut lines: Vec<String> = existing
+        .lines()
+        .filter(|line| !line.starts_with(&ca_prefix) && !line.starts_with(&ca_registry))
+        .map(String::from)
+        .collect();
+
+    lines.push(format!("{ca_prefix}:_authToken={token}"));
+    lines.push(format!("registry=https://{ca_host}/npm/{repository}/"));
+
+    lines.join("\n") + "\n"
+}
+
+/// Build the content for a pnpm `.npmrc` with a `tokenHelper` directive.
+///
+/// Returns the file content as a string. Existing lines not related to the
+/// given CodeArtifact registry are preserved.
+fn build_npmrc_pnpm_content(
+    existing: &str,
+    ca_host: &str,
+    repository: &str,
+    helper_path: &std::path::Path,
+) -> String {
+    let ca_prefix = format!("//{ca_host}/npm/{repository}/");
+    let ca_registry = format!("registry=https://{ca_host}/npm/{repository}/");
+    let mut lines: Vec<String> = existing
+        .lines()
+        .filter(|line| !line.starts_with(&ca_prefix) && !line.starts_with(&ca_registry))
+        .map(String::from)
+        .collect();
+
+    lines.push(format!("{ca_prefix}:tokenHelper={}", helper_path.display()));
+    lines.push(format!("registry=https://{ca_host}/npm/{repository}/"));
+
+    lines.join("\n") + "\n"
+}
+
 #[cfg(test)]
 #[allow(clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use clap::ValueEnum;
+    use proptest::prelude::*;
 
     #[test]
     fn test_tool_value_enum() {
@@ -810,5 +840,172 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].1.domain, "other");
         assert_eq!(entries[0].1.region, "eu-west-1");
+    }
+
+    #[test]
+    fn test_parse_npmrc_empty_string() {
+        let entries = parse_npmrc_codeartifact_entries("");
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_parse_npmrc_no_trailing_newline() {
+        let content = "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/:_authToken=tok";
+        let entries = parse_npmrc_codeartifact_entries(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.domain, "my-domain");
+    }
+
+    #[test]
+    fn test_parse_npmrc_token_containing_equals() {
+        let content = "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/:_authToken=abc=def=\n";
+        let entries = parse_npmrc_codeartifact_entries(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.domain, "my-domain");
+    }
+
+    #[test]
+    fn test_parse_npmrc_pnpm_token_helper_produces_no_entries() {
+        let content = "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/:tokenHelper=/usr/local/bin/vouch-pnpm-tokenhelper\n\
+             registry=https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/\n";
+        let entries = parse_npmrc_codeartifact_entries(content);
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_rewrite_npmrc_tokens_single_replacement() {
+        let content = "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/:_authToken=old-token\n\
+                        registry=https://my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/\n";
+        let prefix = "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/";
+        let map = BTreeMap::from([(prefix, "new-token")]);
+        let (result, changed) = rewrite_npmrc_tokens(content, &map);
+        assert!(changed);
+        assert!(result.contains(":_authToken=new-token"));
+        assert!(!result.contains("old-token"));
+        assert!(result.contains("registry="));
+    }
+
+    #[test]
+    fn test_rewrite_npmrc_tokens_multiple_repos() {
+        let content = "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo-a/:_authToken=tok-a\n\
+                        //my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo-b/:_authToken=tok-b\n";
+        let prefix_a =
+            "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo-a/";
+        let prefix_b =
+            "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo-b/";
+        let map = BTreeMap::from([(prefix_a, "fresh-a"), (prefix_b, "fresh-b")]);
+        let (result, changed) = rewrite_npmrc_tokens(content, &map);
+        assert!(changed);
+        assert!(result.contains("_authToken=fresh-a"));
+        assert!(result.contains("_authToken=fresh-b"));
+    }
+
+    #[test]
+    fn test_rewrite_npmrc_tokens_preserves_non_ca_lines() {
+        let content = "# global config\n\
+                        //registry.npmjs.org/:_authToken=npm-tok\n\
+                        //my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/:_authToken=old\n\
+                        save-exact=true\n";
+        let prefix = "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/";
+        let map = BTreeMap::from([(prefix, "new")]);
+        let (result, changed) = rewrite_npmrc_tokens(content, &map);
+        assert!(changed);
+        assert!(result.contains("# global config"));
+        assert!(result.contains("//registry.npmjs.org/:_authToken=npm-tok"));
+        assert!(result.contains("save-exact=true"));
+        assert!(result.contains("_authToken=new"));
+    }
+
+    #[test]
+    fn test_rewrite_npmrc_tokens_with_leading_whitespace() {
+        let content = "  //my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/:_authToken=old\n";
+        let prefix = "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/";
+        let map = BTreeMap::from([(prefix, "new")]);
+        let (result, changed) = rewrite_npmrc_tokens(content, &map);
+        assert!(changed);
+        assert!(result.contains("_authToken=new"));
+    }
+
+    #[test]
+    fn test_rewrite_npmrc_tokens_no_matches() {
+        let content = "//registry.npmjs.org/:_authToken=npm-tok\nsave-exact=true\n";
+        let prefix = "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/";
+        let map = BTreeMap::from([(prefix, "new")]);
+        let (result, _changed) = rewrite_npmrc_tokens(content, &map);
+        assert!(result.contains("//registry.npmjs.org/:_authToken=npm-tok"));
+        assert!(result.contains("save-exact=true"));
+    }
+
+    #[test]
+    fn test_rewrite_npmrc_tokens_empty_map() {
+        let content = "//my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/:_authToken=old\n";
+        let map: BTreeMap<&str, &str> = BTreeMap::new();
+        let (_result, changed) = rewrite_npmrc_tokens(content, &map);
+        assert!(!changed);
+    }
+
+    #[test]
+    fn test_build_npmrc_content_fresh() {
+        let host = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        let content = build_npmrc_content("", host, "my-repo", "the-token");
+        assert!(content.contains(":_authToken=the-token"));
+        assert!(content.contains(&format!("registry=https://{host}/npm/my-repo/")));
+    }
+
+    #[test]
+    fn test_build_npmrc_content_idempotent() {
+        let host = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        let first = build_npmrc_content("", host, "my-repo", "tok1");
+        let second = build_npmrc_content(&first, host, "my-repo", "tok2");
+        assert!(second.contains("_authToken=tok2"));
+        assert!(!second.contains("tok1"));
+        let token_count = second.matches("_authToken").count();
+        assert_eq!(token_count, 1, "should not duplicate entries");
+    }
+
+    #[test]
+    fn test_build_npmrc_pnpm_content_fresh() {
+        let host = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        let helper = std::path::PathBuf::from("/usr/local/bin/vouch-pnpm-tokenhelper");
+        let content = build_npmrc_pnpm_content("", host, "my-repo", &helper);
+        assert!(content.contains(":tokenHelper=/usr/local/bin/vouch-pnpm-tokenhelper"));
+        assert!(content.contains(&format!("registry=https://{host}/npm/my-repo/")));
+    }
+
+    #[test]
+    fn test_build_npmrc_pnpm_content_idempotent() {
+        let host = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        let helper = std::path::PathBuf::from("/usr/local/bin/vouch-pnpm-tokenhelper");
+        let first = build_npmrc_pnpm_content("", host, "my-repo", &helper);
+        let second = build_npmrc_pnpm_content(&first, host, "my-repo", &helper);
+        let helper_count = second.matches("tokenHelper").count();
+        assert_eq!(helper_count, 1, "should not duplicate entries");
+    }
+
+    #[test]
+    fn test_token_cache_key() {
+        let registry = CodeArtifactRegistry {
+            domain: "my-domain".to_string(),
+            domain_owner: "123456789012".to_string(),
+            region: "us-east-1".to_string(),
+            domain_suffix: "amazonaws.com".to_string(),
+        };
+        assert_eq!(
+            registry.token_cache_key(),
+            "my-domain:123456789012:us-east-1"
+        );
+    }
+
+    proptest! {
+        #[test]
+        fn prop_parse_npmrc_entries_no_panic(content in "\\PC*") {
+            let _ = parse_npmrc_codeartifact_entries(&content);
+        }
+
+        #[test]
+        fn prop_rewrite_npmrc_tokens_no_panic(content in "\\PC*") {
+            let map: BTreeMap<&str, &str> = BTreeMap::new();
+            let _ = rewrite_npmrc_tokens(&content, &map);
+        }
     }
 }
