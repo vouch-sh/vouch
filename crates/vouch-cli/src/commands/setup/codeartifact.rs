@@ -27,6 +27,8 @@ pub enum Tool {
     Npm,
     /// pnpm package manager (dynamic tokenHelper).
     Pnpm,
+    /// Python uv package manager (keyring subprocess).
+    Uv,
 }
 
 /// Run the CodeArtifact setup command.
@@ -100,6 +102,7 @@ pub async fn run(
             .await
         }
         Tool::Pnpm => setup_pnpm(&ca_host, repository),
+        Tool::Uv => setup_uv(&ca_host, repository),
     }
 }
 
@@ -291,6 +294,109 @@ fn get_pip_config_dir() -> Result<std::path::PathBuf> {
 
     let home = dirs::home_dir().context("could not determine home directory")?;
     Ok(home.join(".config").join("pip"))
+}
+
+/// Configure uv for CodeArtifact using the keyring credential helper.
+///
+/// uv supports the same `keyring` subprocess protocol as pip, but does NOT
+/// read `pip.conf`. Instead, it uses its own `uv.toml` configuration file.
+/// This sets up `keyring-provider = "subprocess"` and configures the
+/// CodeArtifact index in `~/.config/uv/uv.toml`, then reuses the same
+/// `~/.local/bin/keyring` wrapper that pip setup installs.
+fn setup_uv(ca_host: &str, repository: &str) -> Result<()> {
+    let index_url = format!("https://aws@{ca_host}/pypi/{repository}/simple/");
+
+    write_uv_config(&index_url, repository)?;
+    install_keyring_wrapper()?;
+
+    println!();
+    println!("uv will automatically call Vouch to obtain a fresh CodeArtifact");
+    println!("token each time it needs to authenticate. No more 12-hour token expiry!");
+    println!();
+    println!("Note: If you also use pip, run `vouch setup codeartifact --tool pip` to");
+    println!("configure pip separately (uv does not read pip.conf).");
+
+    Ok(())
+}
+
+/// Write uv configuration file (`~/.config/uv/uv.toml`).
+///
+/// Loads the existing uv.toml (if any) via `toml_edit` to preserve other
+/// settings, then sets `keyring-provider = "subprocess"` and adds (or
+/// updates) a CodeArtifact index entry.
+fn write_uv_config(index_url: &str, repository: &str) -> Result<()> {
+    let config_dir = get_uv_config_dir()?;
+    std::fs::create_dir_all(&config_dir)
+        .with_context(|| format!("failed to create {}", config_dir.display()))?;
+
+    let config_path = config_dir.join("uv.toml");
+
+    // Load existing config or create new
+    let content = if config_path.exists() {
+        std::fs::read_to_string(&config_path)
+            .with_context(|| format!("failed to read {}", config_path.display()))?
+    } else {
+        String::new()
+    };
+
+    let mut doc = content
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("failed to parse {}", config_path.display()))?;
+
+    // Set keyring-provider = "subprocess"
+    doc.insert("keyring-provider", toml_edit::value("subprocess"));
+
+    // Find or create the [[index]] array entry for our CodeArtifact repo
+    let index_name = format!("codeartifact-{repository}");
+
+    if doc.get("index").is_none() {
+        doc.insert(
+            "index",
+            toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()),
+        );
+    }
+
+    if let Some(array) = doc.get_mut("index").and_then(|i| i.as_array_of_tables_mut()) {
+        // Look for an existing entry with our name
+        let mut found = false;
+        for table in array.iter_mut() {
+            if table.get("name").and_then(|v| v.as_str()) == Some(&index_name) {
+                table.insert("url", toml_edit::value(index_url));
+                table.insert("default", toml_edit::value(true));
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            let mut entry = toml_edit::Table::new();
+            entry.insert("name", toml_edit::value(&index_name));
+            entry.insert("url", toml_edit::value(index_url));
+            entry.insert("default", toml_edit::value(true));
+            array.push(entry);
+        }
+    }
+
+    let serialized = doc.to_string();
+    crate::utils::atomic_write_secure(&config_path, serialized.as_bytes())
+        .with_context(|| format!("failed to write {}", config_path.display()))?;
+
+    println!("Wrote uv config: {}", config_path.display());
+
+    Ok(())
+}
+
+/// Get the uv config directory path.
+fn get_uv_config_dir() -> Result<std::path::PathBuf> {
+    // Respect UV_CONFIG_FILE if set
+    if let Ok(uv_config) = std::env::var("UV_CONFIG_FILE") {
+        let path = std::path::PathBuf::from(uv_config);
+        if let Some(parent) = path.parent() {
+            return Ok(parent.to_path_buf());
+        }
+    }
+
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home.join(".config").join("uv"))
 }
 
 /// Configure npm for CodeArtifact.
@@ -628,6 +734,8 @@ mod tests {
         assert_eq!(Tool::from_str("Cargo", true), Ok(Tool::Cargo));
         assert_eq!(Tool::from_str("pip", true), Ok(Tool::Pip));
         assert_eq!(Tool::from_str("npm", true), Ok(Tool::Npm));
+        assert_eq!(Tool::from_str("pnpm", true), Ok(Tool::Pnpm));
+        assert_eq!(Tool::from_str("uv", true), Ok(Tool::Uv));
         assert!(Tool::from_str("maven", true).is_err());
         assert!(Tool::from_str("", true).is_err());
     }
