@@ -25,6 +25,8 @@ pub enum Tool {
     Pip,
     /// Node.js npm package manager.
     Npm,
+    /// pnpm package manager (dynamic tokenHelper).
+    Pnpm,
 }
 
 /// Run the CodeArtifact setup command.
@@ -97,6 +99,7 @@ pub async fn run(
             )
             .await
         }
+        Tool::Pnpm => setup_pnpm(&ca_host, repository),
     }
 }
 
@@ -321,6 +324,9 @@ async fn setup_npm(
     println!("Note: Unlike Cargo and pip, npm does not support dynamic credential");
     println!("helpers. The token written to ~/.npmrc expires in ~12 hours.");
     println!("To refresh: vouch setup codeartifact --tool npm --repository {repository}");
+    println!();
+    println!("Tip: pnpm supports dynamic credential helpers. Use --tool pnpm for");
+    println!("automatic token refresh without manual re-login.");
 
     Ok(())
 }
@@ -357,6 +363,128 @@ fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
         .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
 
     println!("Wrote npm config: {}", npmrc_path.display());
+
+    Ok(())
+}
+
+/// Configure pnpm for CodeArtifact using `tokenHelper`.
+///
+/// pnpm supports a `tokenHelper` directive in `.npmrc` that points to an
+/// executable which outputs an auth token to stdout. This is equivalent to
+/// Cargo's credential provider and pip's keyring helper — tokens are fetched
+/// dynamically on each `pnpm install`, so they never go stale.
+fn setup_pnpm(ca_host: &str, repository: &str) -> Result<()> {
+    let helper_path = install_pnpm_token_helper()?;
+    write_npmrc_pnpm(ca_host, repository, &helper_path)?;
+
+    println!();
+    println!("pnpm will automatically call Vouch to obtain a fresh CodeArtifact");
+    println!("token each time it needs to authenticate. No more 12-hour token expiry!");
+
+    Ok(())
+}
+
+/// Install a `vouch-pnpm-tokenhelper` wrapper script.
+///
+/// pnpm's `tokenHelper` requires an absolute path with no arguments, so we
+/// install a small shell script that delegates to `vouch credential codeartifact`.
+fn install_pnpm_token_helper() -> Result<std::path::PathBuf> {
+    let vouch_path = std::env::current_exe().context("could not determine vouch binary path")?;
+    let vouch_path_str = vouch_path.display();
+
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    let bin_dir = home.join(".local").join("bin");
+    std::fs::create_dir_all(&bin_dir)
+        .with_context(|| format!("failed to create {}", bin_dir.display()))?;
+
+    let helper_path = bin_dir.join("vouch-pnpm-tokenhelper");
+
+    // Don't overwrite if it exists and isn't ours
+    if helper_path.exists() {
+        let existing = std::fs::read_to_string(&helper_path)
+            .with_context(|| format!("failed to read {}", helper_path.display()))?;
+        if !existing.contains("vouch credential codeartifact") {
+            println!(
+                "Note: {} already exists (not managed by vouch).",
+                helper_path.display()
+            );
+            println!("To use vouch for pnpm CodeArtifact authentication, either:");
+            println!(
+                "  1. Rename the existing file and re-run this command:"
+            );
+            println!(
+                "     mv {} {}.bak",
+                helper_path.display(),
+                helper_path.display()
+            );
+            println!("  2. Or manually create a wrapper that runs:");
+            println!("     exec {vouch_path_str} credential codeartifact \"$@\"");
+            return Ok(helper_path);
+        }
+    }
+
+    let script = format!(
+        "#!/bin/sh\nexec \"{vouch_path_str}\" credential codeartifact \"$@\"\n"
+    );
+
+    crate::utils::atomic_write_executable(&helper_path, script.as_bytes())
+        .with_context(|| format!("failed to write {}", helper_path.display()))?;
+
+    println!("Installed pnpm token helper: {}", helper_path.display());
+
+    // Check if the bin directory is in PATH
+    let bin_dir_str = bin_dir.display().to_string();
+    let in_path = std::env::var("PATH")
+        .unwrap_or_default()
+        .split(':')
+        .any(|p| p == bin_dir_str);
+    if !in_path {
+        println!();
+        println!("WARNING: {} is not in your PATH.", bin_dir.display());
+        println!("Add it to your shell profile:");
+        println!("  export PATH=\"{}:$PATH\"", bin_dir.display());
+    }
+
+    Ok(helper_path)
+}
+
+/// Write pnpm `tokenHelper` configuration to `~/.npmrc`.
+///
+/// Preserves existing entries while updating/adding the `tokenHelper`
+/// directive for the given CodeArtifact registry.
+fn write_npmrc_pnpm(
+    ca_host: &str,
+    repository: &str,
+    helper_path: &std::path::Path,
+) -> Result<()> {
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    let npmrc_path = home.join(".npmrc");
+
+    let ca_prefix = format!("//{ca_host}/npm/{repository}/");
+    let ca_registry = format!("registry=https://{ca_host}/npm/{repository}/");
+    let mut lines: Vec<String> = if npmrc_path.exists() {
+        std::fs::read_to_string(&npmrc_path)
+            .with_context(|| format!("failed to read {}", npmrc_path.display()))?
+            .lines()
+            .filter(|line| !line.starts_with(&ca_prefix) && !line.starts_with(&ca_registry))
+            .map(String::from)
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    lines.push(format!(
+        "{ca_prefix}:tokenHelper={}",
+        helper_path.display()
+    ));
+    lines.push(format!("registry=https://{ca_host}/npm/{repository}/"));
+
+    let content = lines.join("\n") + "\n";
+
+    crate::utils::atomic_write_secure(&npmrc_path, content.as_bytes())
+        .with_context(|| format!("failed to write {}", npmrc_path.display()))?;
+
+    println!("Wrote pnpm config: {}", npmrc_path.display());
 
     Ok(())
 }
