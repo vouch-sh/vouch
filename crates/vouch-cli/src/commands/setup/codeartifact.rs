@@ -371,8 +371,17 @@ fn parse_npmrc_codeartifact_entries(content: &str) -> Vec<(String, CodeArtifactR
     let mut entries = Vec::new();
     for line in content.lines() {
         let trimmed = line.trim();
+        // Skip comments (npmrc spec: lines starting with # or ;)
+        if trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
         // Match lines like: //{ca_host}/npm/{repo}/:_authToken={token}
-        if let Some((prefix, _token)) = trimmed.split_once(":_authToken=") {
+        if let Some((prefix, token)) = trimmed.split_once(":_authToken=") {
+            // Skip env-var-substituted tokens (e.g. ${NPM_TOKEN}) to avoid
+            // clobbering the indirection with a raw token value.
+            if token.contains("${") {
+                continue;
+            }
             // prefix is e.g. "//host/npm/repo/"
             let host_and_path = prefix.strip_prefix("//").unwrap_or(prefix);
             if let Some(registry) = parse_codeartifact_url(host_and_path) {
@@ -543,5 +552,27 @@ mod tests {
         let entries = parse_npmrc_codeartifact_entries(content);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].1.domain, "my-domain");
+    }
+
+    #[test]
+    fn test_parse_npmrc_skips_commented_out_entries() {
+        let content = "\
+            # //my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/:_authToken=old\n\
+            ; //my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo2/:_authToken=old2\n\
+            //my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/active/:_authToken=live\n";
+        let entries = parse_npmrc_codeartifact_entries(content);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].0.contains("/active/"));
+    }
+
+    #[test]
+    fn test_parse_npmrc_skips_env_var_tokens() {
+        let content = "\
+            //my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com/npm/repo/:_authToken=${CODEARTIFACT_AUTH_TOKEN}\n\
+            //other-111111111111.d.codeartifact.eu-west-1.amazonaws.com/npm/pkg/:_authToken=raw-token\n";
+        let entries = parse_npmrc_codeartifact_entries(content);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1.domain, "other");
+        assert_eq!(entries[0].1.region, "eu-west-1");
     }
 }
