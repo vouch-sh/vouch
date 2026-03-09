@@ -13,7 +13,6 @@
 //! OIDC token → STS AssumeRoleWithWebIdentity → SigV4 signing for CodeCommit.
 
 use anyhow::{Context, Result};
-use std::path::PathBuf;
 use std::process::Command;
 
 use crate::config::Config;
@@ -80,7 +79,7 @@ pub async fn run(region: Option<&str>, profile: Option<&str>, configure: bool) -
     };
 
     // Symlink path for git-remote-codecommit
-    let symlink_path = get_remote_helper_symlink_path()?;
+    let symlink_path = crate::utils::vouch_helper_path("git-remote-codecommit")?;
 
     if configure {
         // Check for conflicting credential helpers
@@ -195,24 +194,6 @@ fn check_aws_config(profile: Option<&str>) -> Result<(String, Option<String>)> {
             .as_deref()
             .and_then(extract_role_from_credential_process);
         Ok((profile.name, role_arn))
-    }
-}
-
-/// Get the path for the `git-remote-codecommit` symlink.
-fn get_remote_helper_symlink_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
-
-    #[cfg(unix)]
-    {
-        Ok(home.join(".local/bin/git-remote-codecommit"))
-    }
-
-    #[cfg(windows)]
-    {
-        Ok(home
-            .join(".local")
-            .join("bin")
-            .join("git-remote-codecommit"))
     }
 }
 

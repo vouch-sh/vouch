@@ -6,7 +6,7 @@
 use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Ensure a directory exists with secure permissions (0o700 on Unix).
 ///
@@ -33,8 +33,6 @@ pub(crate) enum FileMode {
     Default,
     /// Restrictive: owner read/write only (0o600 on Unix).
     Secure,
-    /// Executable: owner rwx, group/other rx (0o755 on Unix).
-    Executable,
 }
 
 /// Atomically write content to a file with the given permission mode.
@@ -62,7 +60,6 @@ fn atomic_write_impl(path: &Path, content: &[u8], mode: FileMode) -> Result<()> 
         let unix_mode = match mode {
             FileMode::Default => None,
             FileMode::Secure => Some(0o600),
-            FileMode::Executable => Some(0o755),
         };
         if let Some(m) = unix_mode {
             fs::set_permissions(tmp.path(), fs::Permissions::from_mode(m))?;
@@ -109,13 +106,6 @@ pub fn atomic_write_secure(path: &Path, content: &[u8]) -> Result<()> {
     atomic_write_impl(path, content, FileMode::Secure)
 }
 
-/// Atomically write content to a file with executable permissions (0o755 on Unix).
-///
-/// Same as [`atomic_write`], but sets executable permissions.
-pub fn atomic_write_executable(path: &Path, content: &[u8]) -> Result<()> {
-    atomic_write_impl(path, content, FileMode::Executable)
-}
-
 /// Write content to a file with secure permissions (0o600 on Unix).
 ///
 /// Creates parent directories if they don't exist.
@@ -125,6 +115,27 @@ pub fn atomic_write_executable(path: &Path, content: &[u8]) -> Result<()> {
 /// accepts a string slice.
 pub fn write_secure_file(path: &Path, content: &str) -> Result<()> {
     atomic_write_secure(path, content.as_bytes())
+}
+
+/// Get the path for a vouch helper binary in `~/.local/bin/`.
+///
+/// All vouch helper symlinks (docker-credential-vouch, git-remote-codecommit,
+/// keyring, vouch-pnpm-tokenhelper) live in `~/.local/bin/`.
+pub(crate) fn vouch_helper_path(name: &str) -> Result<PathBuf> {
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home.join(".local").join("bin").join(name))
+}
+
+/// Check if a path is a symlink pointing to a vouch binary.
+///
+/// Returns `true` if the path is a symlink whose target filename is `vouch`.
+pub(crate) fn is_vouch_symlink(path: &Path) -> bool {
+    std::fs::read_link(path)
+        .map(|target| {
+            let s = target.to_string_lossy();
+            s.ends_with("/vouch") || s.ends_with("\\vouch")
+        })
+        .unwrap_or(false)
 }
 
 /// Create a symlink (Unix) or batch file wrapper (Windows) pointing to the vouch binary.
@@ -221,5 +232,114 @@ pub(crate) fn flock_exclusive(file: &fs::File) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-// Tests for these utilities are in vouch-tests integration tests
-// since they require filesystem access with tempfile.
+#[cfg(test)]
+#[allow(clippy::panic_in_result_fn)]
+mod tests {
+    use super::*;
+
+    // -- vouch_helper_path --
+
+    #[test]
+    fn test_vouch_helper_path_ends_with_name() -> anyhow::Result<()> {
+        let path = vouch_helper_path("keyring")?;
+        let path_str = path.to_string_lossy();
+        assert!(path_str.ends_with("/.local/bin/keyring"), "got: {path_str}");
+        Ok(())
+    }
+
+    #[test]
+    fn test_vouch_helper_path_all_helpers() -> anyhow::Result<()> {
+        let names = [
+            "keyring",
+            "vouch-pnpm-tokenhelper",
+            "docker-credential-vouch",
+            "git-remote-codecommit",
+        ];
+        for name in names {
+            let path = vouch_helper_path(name)?;
+            assert_eq!(
+                path.file_name().and_then(|n| n.to_str()),
+                Some(name),
+                "filename mismatch for {name}"
+            );
+            let parent = path
+                .parent()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str());
+            assert_eq!(parent, Some("bin"), "parent mismatch for {name}");
+        }
+        Ok(())
+    }
+
+    // -- is_vouch_symlink --
+
+    #[cfg(unix)]
+    #[test]
+    fn test_is_vouch_symlink_pointing_to_vouch() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let vouch = dir.path().join("vouch");
+        fs::write(&vouch, b"")?;
+        let link = dir.path().join("keyring");
+        std::os::unix::fs::symlink(&vouch, &link)?;
+        assert!(is_vouch_symlink(&link));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_is_vouch_symlink_non_vouch_target() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let other = dir.path().join("keyring-real");
+        fs::write(&other, b"")?;
+        let link = dir.path().join("keyring");
+        std::os::unix::fs::symlink(&other, &link)?;
+        assert!(!is_vouch_symlink(&link));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_is_vouch_symlink_regular_file() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("vouch");
+        fs::write(&file, b"")?;
+        assert!(!is_vouch_symlink(&file));
+        Ok(())
+    }
+
+    #[test]
+    fn test_is_vouch_symlink_nonexistent_path() {
+        let path = Path::new("/tmp/vouch_test_nonexistent_99999");
+        assert!(!is_vouch_symlink(path));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_is_vouch_symlink_dangling_link_to_vouch() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let link = dir.path().join("keyring");
+        std::os::unix::fs::symlink("/nonexistent/path/vouch", &link)?;
+        assert!(is_vouch_symlink(&link));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_is_vouch_symlink_dangling_link_not_vouch() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let link = dir.path().join("keyring");
+        std::os::unix::fs::symlink("/nonexistent/other-binary", &link)?;
+        assert!(!is_vouch_symlink(&link));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_is_vouch_symlink_target_contains_vouch_not_suffix() -> anyhow::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let link = dir.path().join("keyring");
+        std::os::unix::fs::symlink("/opt/vouch-server", &link)?;
+        assert!(!is_vouch_symlink(&link));
+        Ok(())
+    }
+}

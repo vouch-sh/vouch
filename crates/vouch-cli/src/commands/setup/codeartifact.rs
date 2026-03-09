@@ -181,63 +181,44 @@ fn setup_pip(ca_host: &str, repository: &str) -> Result<()> {
     Ok(())
 }
 
-/// Install a `keyring` wrapper script that delegates to `vouch credential pip`.
+/// Install a `keyring` symlink pointing to the vouch binary.
 ///
 /// pip calls `keyring get <url> <username>` when `keyring-provider = subprocess`
-/// is configured. This wrapper makes vouch handle those calls.
+/// is configured. The symlink makes vouch detect argv[0] == "keyring" and
+/// handle those calls.
 fn install_keyring_wrapper() -> Result<()> {
     let vouch_path = std::env::current_exe().context("could not determine vouch binary path")?;
-    let vouch_path_str = vouch_path.display();
+    let keyring_path = crate::utils::vouch_helper_path("keyring")?;
 
-    // Determine the install directory
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    let bin_dir = home.join(".local").join("bin");
-    std::fs::create_dir_all(&bin_dir)
-        .with_context(|| format!("failed to create {}", bin_dir.display()))?;
-
-    let keyring_path = bin_dir.join("keyring");
-
-    // Don't overwrite if it exists and isn't ours
-    if keyring_path.exists() {
-        let existing = std::fs::read_to_string(&keyring_path)
-            .with_context(|| format!("failed to read {}", keyring_path.display()))?;
-        if !existing.contains("vouch credential pip") {
-            println!(
-                "Note: {} already exists (not managed by vouch).",
-                keyring_path.display()
-            );
-            println!("To use vouch for CodeArtifact authentication, you can:");
-            println!("  1. Rename the existing keyring and re-run this command:");
-            println!(
-                "     mv {} {}.bak",
-                keyring_path.display(),
-                keyring_path.display()
-            );
-            println!("  2. Or manually create a wrapper that delegates to vouch:");
-            println!("     exec {vouch_path_str} credential pip \"$@\"");
-            return Ok(());
-        }
+    // Don't overwrite if it exists and isn't a vouch symlink
+    if (keyring_path.exists() || keyring_path.is_symlink())
+        && !crate::utils::is_vouch_symlink(&keyring_path)
+    {
+        println!(
+            "Note: {} already exists (not managed by vouch).",
+            keyring_path.display()
+        );
+        println!("To use vouch for CodeArtifact authentication, you can:");
+        println!("  1. Rename the existing keyring and re-run this command:");
+        println!(
+            "     mv {} {}.bak",
+            keyring_path.display(),
+            keyring_path.display()
+        );
+        println!("  2. Or manually create a symlink to vouch:");
+        println!(
+            "     ln -sf \"{}\" \"{}\"",
+            vouch_path.display(),
+            keyring_path.display()
+        );
+        return Ok(());
     }
 
-    let script = format!("#!/bin/sh\nexec \"{vouch_path_str}\" credential pip \"$@\"\n");
-
-    crate::utils::atomic_write_executable(&keyring_path, script.as_bytes())
-        .with_context(|| format!("failed to write {}", keyring_path.display()))?;
-
-    println!("Installed keyring wrapper: {}", keyring_path.display());
-
-    // Check if the bin directory is in PATH
-    let bin_dir_str = bin_dir.display().to_string();
-    let in_path = std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .any(|p| p == bin_dir_str);
-    if !in_path {
-        println!();
-        println!("WARNING: {} is not in your PATH.", bin_dir.display());
-        println!("Add it to your shell profile:");
-        println!("  export PATH=\"{}:$PATH\"", bin_dir.display());
-    }
+    let batch_content = format!(
+        "@echo off\r\n\"{}\" credential pip %*\r\n",
+        vouch_path.display()
+    );
+    crate::utils::create_symlink_with_fallback(&vouch_path, &keyring_path, &batch_content)?;
 
     Ok(())
 }
@@ -482,62 +463,44 @@ fn setup_pnpm(ca_host: &str, repository: &str) -> Result<()> {
     Ok(())
 }
 
-/// Install a `vouch-pnpm-tokenhelper` wrapper script.
+/// Install a `vouch-pnpm-tokenhelper` symlink pointing to the vouch binary.
 ///
-/// pnpm's `tokenHelper` requires an absolute path with no arguments, so we
-/// install a small shell script that delegates to `vouch credential codeartifact`.
+/// pnpm's `tokenHelper` requires an absolute path with no arguments.
+/// The symlink makes vouch detect argv[0] == "vouch-pnpm-tokenhelper"
+/// and dispatch to the codeartifact credential command.
 fn install_pnpm_token_helper() -> Result<std::path::PathBuf> {
     let vouch_path = std::env::current_exe().context("could not determine vouch binary path")?;
-    let vouch_path_str = vouch_path.display();
+    let helper_path = crate::utils::vouch_helper_path("vouch-pnpm-tokenhelper")?;
 
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    let bin_dir = home.join(".local").join("bin");
-    std::fs::create_dir_all(&bin_dir)
-        .with_context(|| format!("failed to create {}", bin_dir.display()))?;
-
-    let helper_path = bin_dir.join("vouch-pnpm-tokenhelper");
-
-    // Don't overwrite if it exists and isn't ours
-    if helper_path.exists() {
-        let existing = std::fs::read_to_string(&helper_path)
-            .with_context(|| format!("failed to read {}", helper_path.display()))?;
-        if !existing.contains("vouch credential codeartifact") {
-            println!(
-                "Note: {} already exists (not managed by vouch).",
-                helper_path.display()
-            );
-            println!("To use vouch for pnpm CodeArtifact authentication, either:");
-            println!("  1. Rename the existing file and re-run this command:");
-            println!(
-                "     mv {} {}.bak",
-                helper_path.display(),
-                helper_path.display()
-            );
-            println!("  2. Or manually create a wrapper that runs:");
-            println!("     exec {vouch_path_str} credential codeartifact \"$@\"");
-            return Ok(helper_path);
-        }
+    // Don't overwrite if it exists and isn't a vouch symlink
+    if (helper_path.exists() || helper_path.is_symlink())
+        && !crate::utils::is_vouch_symlink(&helper_path)
+    {
+        println!(
+            "Note: {} already exists (not managed by vouch).",
+            helper_path.display()
+        );
+        println!("To use vouch for pnpm CodeArtifact authentication, either:");
+        println!("  1. Rename the existing file and re-run this command:");
+        println!(
+            "     mv {} {}.bak",
+            helper_path.display(),
+            helper_path.display()
+        );
+        println!("  2. Or manually create a symlink to vouch:");
+        println!(
+            "     ln -sf \"{}\" \"{}\"",
+            vouch_path.display(),
+            helper_path.display()
+        );
+        return Ok(helper_path);
     }
 
-    let script = format!("#!/bin/sh\nexec \"{vouch_path_str}\" credential codeartifact \"$@\"\n");
-
-    crate::utils::atomic_write_executable(&helper_path, script.as_bytes())
-        .with_context(|| format!("failed to write {}", helper_path.display()))?;
-
-    println!("Installed pnpm token helper: {}", helper_path.display());
-
-    // Check if the bin directory is in PATH
-    let bin_dir_str = bin_dir.display().to_string();
-    let in_path = std::env::var("PATH")
-        .unwrap_or_default()
-        .split(':')
-        .any(|p| p == bin_dir_str);
-    if !in_path {
-        println!();
-        println!("WARNING: {} is not in your PATH.", bin_dir.display());
-        println!("Add it to your shell profile:");
-        println!("  export PATH=\"{}:$PATH\"", bin_dir.display());
-    }
+    let batch_content = format!(
+        "@echo off\r\n\"{}\" credential codeartifact %*\r\n",
+        vouch_path.display()
+    );
+    crate::utils::create_symlink_with_fallback(&vouch_path, &helper_path, &batch_content)?;
 
     Ok(helper_path)
 }
