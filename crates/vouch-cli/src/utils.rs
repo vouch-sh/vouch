@@ -242,8 +242,8 @@ mod tests {
     #[test]
     fn test_vouch_helper_path_ends_with_name() -> anyhow::Result<()> {
         let path = vouch_helper_path("keyring")?;
-        let path_str = path.to_string_lossy();
-        assert!(path_str.ends_with("/.local/bin/keyring"), "got: {path_str}");
+        let expected: PathBuf = [".local", "bin", "keyring"].iter().collect();
+        assert!(path.ends_with(&expected), "got: {}", path.display());
         Ok(())
     }
 
