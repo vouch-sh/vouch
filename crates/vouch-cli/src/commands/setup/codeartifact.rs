@@ -421,6 +421,45 @@ async fn setup_npm(
     Ok(())
 }
 
+/// Detect if `.npmrc` has a conflicting auth mechanism for the same registry.
+///
+/// npm uses `_authToken`, pnpm uses `tokenHelper`. Both share the same `.npmrc`
+/// and registry prefix, so only one can be active at a time for a given registry.
+/// Returns `Some("npm")` or `Some("pnpm")` if a conflict is found.
+fn detect_npmrc_conflict<'a>(
+    existing: &str,
+    ca_host: &str,
+    repository: &str,
+    setting_up: &'a str,
+) -> Option<&'a str> {
+    let ca_prefix = format!("//{ca_host}/npm/{repository}/");
+    let (conflict_key, other_tool) = match setting_up {
+        "npm" => (":tokenHelper=", "pnpm"),
+        "pnpm" => (":_authToken=", "npm"),
+        _ => return None,
+    };
+    for line in existing.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || trimmed.starts_with(';') {
+            continue;
+        }
+        if trimmed.starts_with(&ca_prefix) && trimmed.contains(conflict_key) {
+            return Some(other_tool);
+        }
+    }
+    None
+}
+
+/// Warn if `.npmrc` has a conflicting auth mechanism for the same registry.
+fn warn_npmrc_conflict(existing: &str, ca_host: &str, repository: &str, setting_up: &str) {
+    if let Some(other_tool) = detect_npmrc_conflict(existing, ca_host, repository, setting_up) {
+        println!("Note: ~/.npmrc has an existing {other_tool} configuration for this registry.");
+        println!("It will be replaced. npm and pnpm use different auth mechanisms");
+        println!("(_authToken vs tokenHelper) and cannot coexist for the same registry.");
+        println!();
+    }
+}
+
 /// Write npm configuration file (~/.npmrc).
 ///
 /// Preserves existing entries while updating/adding CodeArtifact-specific lines.
@@ -436,6 +475,7 @@ fn write_npmrc(ca_host: &str, repository: &str, token: &str) -> Result<()> {
         String::new()
     };
 
+    warn_npmrc_conflict(&existing, ca_host, repository, "npm");
     let content = build_npmrc_content(&existing, ca_host, repository, token);
 
     crate::utils::atomic_write_secure(&npmrc_path, content.as_bytes())
@@ -520,6 +560,7 @@ fn write_npmrc_pnpm(ca_host: &str, repository: &str, helper_path: &std::path::Pa
         String::new()
     };
 
+    warn_npmrc_conflict(&existing, ca_host, repository, "pnpm");
     let content = build_npmrc_pnpm_content(&existing, ca_host, repository, helper_path);
 
     crate::utils::atomic_write_secure(&npmrc_path, content.as_bytes())
@@ -957,6 +998,74 @@ mod tests {
             registry.token_cache_key(),
             "my-domain:123456789012:us-east-1"
         );
+    }
+
+    #[test]
+    fn test_detect_npmrc_conflict_pnpm_existing_when_setting_npm() {
+        let host = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        let content = format!(
+            "//{host}/npm/my-repo/:tokenHelper=/home/user/.local/bin/vouch-pnpm-tokenhelper\n\
+             registry=https://{host}/npm/my-repo/\n"
+        );
+        assert_eq!(
+            detect_npmrc_conflict(&content, host, "my-repo", "npm"),
+            Some("pnpm")
+        );
+    }
+
+    #[test]
+    fn test_detect_npmrc_conflict_npm_existing_when_setting_pnpm() {
+        let host = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        let content = format!(
+            "//{host}/npm/my-repo/:_authToken=some-token\n\
+             registry=https://{host}/npm/my-repo/\n"
+        );
+        assert_eq!(
+            detect_npmrc_conflict(&content, host, "my-repo", "pnpm"),
+            Some("npm")
+        );
+    }
+
+    #[test]
+    fn test_detect_npmrc_conflict_no_conflict_same_tool() {
+        let host = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        let content = format!(
+            "//{host}/npm/my-repo/:_authToken=some-token\n\
+             registry=https://{host}/npm/my-repo/\n"
+        );
+        // Setting up npm when npm is already there — no conflict
+        assert_eq!(
+            detect_npmrc_conflict(&content, host, "my-repo", "npm"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_detect_npmrc_conflict_different_repo_no_conflict() {
+        let host = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        let content = format!("//{host}/npm/other-repo/:tokenHelper=/usr/local/bin/helper\n");
+        // Different repo — no conflict
+        assert_eq!(
+            detect_npmrc_conflict(&content, host, "my-repo", "npm"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_detect_npmrc_conflict_commented_line_ignored() {
+        let host = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        let content = format!("# //{host}/npm/my-repo/:tokenHelper=/usr/local/bin/helper\n");
+        assert_eq!(
+            detect_npmrc_conflict(&content, host, "my-repo", "npm"),
+            None
+        );
+    }
+
+    #[test]
+    fn test_detect_npmrc_conflict_empty_content() {
+        let host = "my-domain-123456789012.d.codeartifact.us-east-1.amazonaws.com";
+        assert_eq!(detect_npmrc_conflict("", host, "my-repo", "npm"), None);
+        assert_eq!(detect_npmrc_conflict("", host, "my-repo", "pnpm"), None);
     }
 
     proptest! {
