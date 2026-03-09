@@ -6,7 +6,6 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
 
 use crate::config::Config;
 
@@ -44,7 +43,7 @@ pub async fn run(registries: &[String], configure: bool) -> Result<()> {
     let vouch_path = std::env::current_exe().context("could not determine vouch binary path")?;
 
     // Determine where to create the symlink
-    let symlink_path = get_symlink_path()?;
+    let symlink_path = crate::utils::vouch_helper_path("docker-credential-vouch")?;
 
     if configure {
         // Create symlink
@@ -94,26 +93,6 @@ pub async fn run(registries: &[String], configure: bool) -> Result<()> {
     println!("  - GitHub:      ghcr.io");
 
     Ok(())
-}
-
-/// Get the path where docker-credential-vouch should be created.
-fn get_symlink_path() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
-
-    #[cfg(unix)]
-    {
-        // On Unix, use ~/.local/bin
-        let local_bin = home.join(".local/bin");
-        Ok(local_bin.join("docker-credential-vouch"))
-    }
-
-    #[cfg(windows)]
-    {
-        // On Windows, use %USERPROFILE%\.local\bin (we'll create a .bat file)
-        // This matches the Unix convention but Docker will find .bat files
-        let local_bin = home.join(".local").join("bin");
-        Ok(local_bin.join("docker-credential-vouch"))
-    }
 }
 
 /// Create the docker-credential-vouch symlink or wrapper script.
@@ -182,7 +161,7 @@ fn print_example_config() {
 /// Check if Docker credential helper is configured.
 pub fn check_docker_config() -> DockerSetupStatus {
     // Check for symlink or batch file
-    let symlink_exists = get_symlink_path()
+    let symlink_exists = crate::utils::vouch_helper_path("docker-credential-vouch")
         .map(|p| {
             #[cfg(unix)]
             {

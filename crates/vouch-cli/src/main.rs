@@ -17,19 +17,37 @@ mod session;
 mod style;
 mod utils;
 
+/// Test if argv0 indicates invocation as `docker-credential-vouch`.
+fn is_docker_credential_argv0(argv0: &str) -> bool {
+    argv0.ends_with("docker-credential-vouch") || argv0.ends_with("docker-credential-vouch.exe")
+}
+
+/// Test if argv0 indicates invocation as `git-remote-codecommit`.
+fn is_git_remote_codecommit_argv0(argv0: &str) -> bool {
+    argv0.ends_with("git-remote-codecommit") || argv0.ends_with("git-remote-codecommit.exe")
+}
+
+/// Test if argv0 indicates invocation as `keyring`.
+fn is_keyring_argv0(argv0: &str) -> bool {
+    argv0.ends_with("/keyring")
+        || argv0.ends_with("\\keyring")
+        || argv0 == "keyring"
+        || argv0.ends_with("/keyring.exe")
+        || argv0.ends_with("\\keyring.exe")
+}
+
+/// Test if argv0 indicates invocation as `vouch-pnpm-tokenhelper`.
+fn is_pnpm_tokenhelper_argv0(argv0: &str) -> bool {
+    argv0.ends_with("vouch-pnpm-tokenhelper") || argv0.ends_with("vouch-pnpm-tokenhelper.exe")
+}
+
 /// Check if invoked as docker-credential-vouch and handle accordingly.
 /// Returns `Ok(true)` if this was a Docker credential helper invocation (handled),
 /// `Ok(false)` if not, or an error if the Docker credential helper failed.
-async fn check_docker_credential_invocation() -> Result<bool> {
-    let argv0 = std::env::args().next().unwrap_or_default();
-
-    // Check if invoked as docker-credential-vouch (via symlink or direct call)
-    if argv0.ends_with("docker-credential-vouch") || argv0.ends_with("docker-credential-vouch.exe")
-    {
-        // Docker passes the operation as the first argument
+async fn check_docker_credential_invocation(argv0: &str) -> Result<bool> {
+    if is_docker_credential_argv0(argv0) {
         let operation = std::env::args().nth(1).unwrap_or_default();
 
-        // Run the Docker credential helper
         commands::credential::docker::run(&operation)
             .await
             .map_err(|e| anyhow::anyhow!("docker-credential-vouch: {e}"))?;
@@ -49,11 +67,8 @@ async fn check_docker_credential_invocation() -> Result<bool> {
 /// Detection works via:
 /// - **Unix**: argv\[0\] ends with `git-remote-codecommit` (symlink)
 /// - **Windows**: `VOUCH_GIT_REMOTE_CODECOMMIT=1` env var (set by batch wrapper)
-async fn check_git_remote_codecommit_invocation() -> Result<bool> {
-    let argv0 = std::env::args().next().unwrap_or_default();
-
-    let is_remote_helper = argv0.ends_with("git-remote-codecommit")
-        || argv0.ends_with("git-remote-codecommit.exe")
+async fn check_git_remote_codecommit_invocation(argv0: &str) -> Result<bool> {
+    let is_remote_helper = is_git_remote_codecommit_argv0(argv0)
         || std::env::var("VOUCH_GIT_REMOTE_CODECOMMIT").is_ok_and(|v| v == "1");
 
     if is_remote_helper {
@@ -72,6 +87,65 @@ async fn check_git_remote_codecommit_invocation() -> Result<bool> {
         commands::credential::codecommit::run_remote_helper(&remote_name, &url)
             .await
             .map_err(|e| anyhow::anyhow!("git-remote-codecommit: {e}"))?;
+
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+/// Check if invoked as `keyring` (pip/uv keyring subprocess protocol).
+///
+/// pip/uv call `keyring get <url> <username>` when `keyring-provider = subprocess`
+/// is configured. When invoked via symlink, argv[0] ends with "keyring".
+async fn check_keyring_invocation(argv0: &str) -> Result<bool> {
+    if is_keyring_argv0(argv0) {
+        let operation = std::env::args().nth(1).unwrap_or_default();
+        let service_url = std::env::args().nth(2);
+        let username = std::env::args().nth(3);
+
+        commands::credential::pip::run(&operation, service_url.as_deref(), username.as_deref())
+            .await
+            .map_err(|e| anyhow::anyhow!("keyring: {e}"))?;
+
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+/// Check if invoked as `vouch-pnpm-tokenhelper` (pnpm tokenHelper protocol).
+///
+/// pnpm calls the tokenHelper executable with no arguments. It should print
+/// a CodeArtifact bearer token to stdout.
+async fn check_pnpm_tokenhelper_invocation(argv0: &str) -> Result<bool> {
+    if is_pnpm_tokenhelper_argv0(argv0) {
+        // Parse optional flags for `vouch credential codeartifact`
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let flag = |name: &str| {
+            args.iter()
+                .position(|a| a == name)
+                .and_then(|i| args.get(i + 1))
+        };
+        let domain = flag("--domain");
+        let domain_owner = flag("--domain-owner");
+        let region = flag("--region");
+        let profile = flag("--profile");
+
+        // Resolve session to get server URL
+        let session = crate::session::resolve_session()
+            .await
+            .map_err(|e| anyhow::anyhow!("vouch-pnpm-tokenhelper: {e}"))?;
+
+        commands::credential::codeartifact::run(
+            &session.server_url,
+            domain.map(String::as_str),
+            domain_owner.map(String::as_str),
+            region.map(String::as_str),
+            profile.map(String::as_str),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("vouch-pnpm-tokenhelper: {e}"))?;
 
         return Ok(true);
     }
@@ -346,13 +420,19 @@ async fn main() -> ExitCode {
 
 /// Inner entry point that returns `anyhow::Result`.
 async fn run() -> Result<()> {
-    // Check if invoked as docker-credential-vouch (via symlink)
-    if check_docker_credential_invocation().await? {
+    let argv0 = std::env::args().next().unwrap_or_default();
+
+    // Check if invoked via symlink as a helper binary
+    if check_docker_credential_invocation(&argv0).await? {
         return Ok(());
     }
-
-    // Check if invoked as git-remote-codecommit (via symlink)
-    if check_git_remote_codecommit_invocation().await? {
+    if check_git_remote_codecommit_invocation(&argv0).await? {
+        return Ok(());
+    }
+    if check_keyring_invocation(&argv0).await? {
+        return Ok(());
+    }
+    if check_pnpm_tokenhelper_invocation(&argv0).await? {
         return Ok(());
     }
 
@@ -619,5 +699,124 @@ async fn run() -> Result<()> {
         Commands::Doctor { quiet, json } => commands::doctor::run(server, quiet, json).await,
         Commands::Posture { format } => commands::posture::run(format),
         Commands::Diag(args) => commands::diag::run(args),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- docker-credential-vouch --
+
+    #[test]
+    fn test_docker_credential_argv0_unix_path() {
+        assert!(is_docker_credential_argv0(
+            "/home/user/.local/bin/docker-credential-vouch"
+        ));
+    }
+
+    #[test]
+    fn test_docker_credential_argv0_bare_name() {
+        assert!(is_docker_credential_argv0("docker-credential-vouch"));
+    }
+
+    #[test]
+    fn test_docker_credential_argv0_windows_exe() {
+        assert!(is_docker_credential_argv0("docker-credential-vouch.exe"));
+    }
+
+    #[test]
+    fn test_docker_credential_argv0_no_match() {
+        assert!(!is_docker_credential_argv0("vouch"));
+        assert!(!is_docker_credential_argv0("docker-credential-ecr"));
+        assert!(!is_docker_credential_argv0(""));
+    }
+
+    // -- git-remote-codecommit --
+
+    #[test]
+    fn test_git_remote_codecommit_argv0_unix_path() {
+        assert!(is_git_remote_codecommit_argv0(
+            "/home/user/.local/bin/git-remote-codecommit"
+        ));
+    }
+
+    #[test]
+    fn test_git_remote_codecommit_argv0_bare_name() {
+        assert!(is_git_remote_codecommit_argv0("git-remote-codecommit"));
+    }
+
+    #[test]
+    fn test_git_remote_codecommit_argv0_no_match() {
+        assert!(!is_git_remote_codecommit_argv0("vouch"));
+        assert!(!is_git_remote_codecommit_argv0("codecommit"));
+        assert!(!is_git_remote_codecommit_argv0(""));
+    }
+
+    // -- keyring --
+
+    #[test]
+    fn test_keyring_argv0_bare_name() {
+        assert!(is_keyring_argv0("keyring"));
+    }
+
+    #[test]
+    fn test_keyring_argv0_unix_full_path() {
+        assert!(is_keyring_argv0("/home/user/.local/bin/keyring"));
+    }
+
+    #[test]
+    fn test_keyring_argv0_windows_backslash() {
+        assert!(is_keyring_argv0(r"C:\Users\user\.local\bin\keyring"));
+    }
+
+    #[test]
+    fn test_keyring_argv0_exe_suffix() {
+        assert!(is_keyring_argv0("/usr/local/bin/keyring.exe"));
+        assert!(is_keyring_argv0(r"C:\bin\keyring.exe"));
+    }
+
+    #[test]
+    fn test_keyring_argv0_no_match_vouch() {
+        assert!(!is_keyring_argv0("vouch"));
+    }
+
+    #[test]
+    fn test_keyring_argv0_no_match_substring() {
+        assert!(!is_keyring_argv0("keyring-extra"));
+        assert!(!is_keyring_argv0("/bin/keyring-extra"));
+        assert!(!is_keyring_argv0("python-keyring"));
+    }
+
+    #[test]
+    fn test_keyring_argv0_no_match_empty() {
+        assert!(!is_keyring_argv0(""));
+    }
+
+    // -- vouch-pnpm-tokenhelper --
+
+    #[test]
+    fn test_pnpm_tokenhelper_argv0_unix_full_path() {
+        assert!(is_pnpm_tokenhelper_argv0(
+            "/home/user/.local/bin/vouch-pnpm-tokenhelper"
+        ));
+    }
+
+    #[test]
+    fn test_pnpm_tokenhelper_argv0_bare_name() {
+        assert!(is_pnpm_tokenhelper_argv0("vouch-pnpm-tokenhelper"));
+    }
+
+    #[test]
+    fn test_pnpm_tokenhelper_argv0_exe_suffix() {
+        assert!(is_pnpm_tokenhelper_argv0("vouch-pnpm-tokenhelper.exe"));
+    }
+
+    #[test]
+    fn test_pnpm_tokenhelper_argv0_no_match_partial() {
+        assert!(!is_pnpm_tokenhelper_argv0("pnpm-tokenhelper"));
+        assert!(!is_pnpm_tokenhelper_argv0("tokenhelper"));
+        assert!(!is_pnpm_tokenhelper_argv0("vouch"));
+        assert!(!is_pnpm_tokenhelper_argv0(""));
     }
 }
