@@ -156,12 +156,12 @@ pub use credentials::{
 
 // Re-export GitHub types and functions
 pub use github::{
-    GitHubInstallation, create_github_installation,
-    delete_github_installation_by_installation_id, delete_old_github_credential_events,
-    get_all_linked_installation_ids, get_github_installation_by_installation_id,
-    get_github_installation_by_org_and_account, get_github_installations_by_org,
-    log_github_credential_event, suspend_github_installation, unsuspend_github_installation,
-    update_github_installation_repos, update_github_installation_repos_delta,
+    GitHubInstallation, create_github_installation, delete_github_installation_by_installation_id,
+    delete_old_github_credential_events, get_all_linked_installation_ids,
+    get_github_installation_by_installation_id, get_github_installation_by_org_and_account,
+    get_github_installations_by_org, log_github_credential_event, suspend_github_installation,
+    unsuspend_github_installation, update_github_installation_repos,
+    update_github_installation_repos_delta,
 };
 
 // Re-export PAR types and functions (RFC 9126)
