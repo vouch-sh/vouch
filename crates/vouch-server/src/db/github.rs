@@ -231,50 +231,20 @@ pub async fn update_github_installation_repos_delta(
 // GitHub Credential Events (Audit Log)
 // ============================================================================
 
-/// Parameters for logging a GitHub credential event.
-pub struct GitHubCredentialEventParams<'a> {
-    pub event_type: &'a str,
-    pub user_id: &'a str,
-    pub user_email: &'a str,
-    pub org_id: Option<&'a str>,
-    pub installation_id: Option<i64>,
-    pub session_id: Option<&'a str>,
-    pub authenticator_id: Option<&'a str>,
-    pub repositories: Option<&'a str>,
-    pub permissions: Option<&'a str>,
-    pub token_expires_at: Option<&'a str>,
-    pub success: bool,
-    pub error_code: Option<&'a str>,
-    pub ip_address: Option<&'a str>,
-    pub user_agent: Option<&'a str>,
-}
-
 /// Log a GitHub credential event (audit log).
 pub async fn log_github_credential_event(
     audit: &AuditStore,
-    params: GitHubCredentialEventParams<'_>,
+    user_id: &str,
+    user_email: &str,
+    data: GitHubCredentialAuditData,
 ) -> Result<String> {
-    let data = GitHubCredentialAuditData {
-        event_type: params.event_type.to_string(),
-        org_id: params.org_id.map(String::from),
-        installation_id: params.installation_id,
-        session_id: params.session_id.map(String::from),
-        authenticator_id: params.authenticator_id.map(String::from),
-        repositories: params.repositories.map(String::from),
-        permissions: params.permissions.map(String::from),
-        token_expires_at: params.token_expires_at.map(String::from),
-        success: params.success,
-        error_code: params.error_code.map(String::from),
-        ip_address: params.ip_address.map(String::from),
-        user_agent: params.user_agent.map(String::from),
-    };
     let data_json = serde_json::to_string(&data)?;
 
     audit
         .insert_event(
             "github_credential",
-            Some(params.user_id),
-            Some(params.user_email),
+            Some(user_id),
+            Some(user_email),
             &data_json,
         )
         .await

@@ -2,7 +2,8 @@
 //! Credential issuance handlers (SSH certificates, AWS tokens, GitHub tokens, etc.).
 
 use crate::AppState;
-use crate::db::{self, GitHubCredentialEventParams};
+use crate::db;
+use crate::db::documents::audit::GitHubCredentialAuditData;
 use crate::services::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
@@ -591,31 +592,23 @@ pub async fn get_github_token(
         .saturating_sub(now.as_second())
         .max(0) as u64;
 
-    // Serialize repositories for audit log
-    let repos_json = request
-        .repositories
-        .as_ref()
-        .map(|r| serde_json::to_string(r).unwrap_or_default());
-    let perms_json = serde_json::to_string(&gh_token.permissions).unwrap_or_default();
-
     // Log audit event
     if let Err(e) = db::log_github_credential_event(
         &state.audit,
-        GitHubCredentialEventParams {
-            event_type: "token_issued",
-            user_id: &user.id,
-            user_email: &user.email,
-            org_id: Some(org_id),
+        &user.id,
+        &user.email,
+        GitHubCredentialAuditData {
+            event_type: "token_issued".to_string(),
+            org_id: Some(org_id.to_string()),
             installation_id: Some(installation.installation_id),
-            session_id: None, // Session ID not stored in JWT claims
-            authenticator_id: token.authenticator_id.as_deref(),
-            repositories: repos_json.as_deref(),
-            permissions: Some(&perms_json),
-            token_expires_at: Some(&gh_token.expires_at),
+            authenticator_id: token.authenticator_id.clone(),
+            repositories: request.repositories.clone(),
+            permissions: Some(gh_token.permissions.clone()),
+            token_expires_at: Some(gh_token.expires_at.clone()),
             success: true,
-            error_code: None,
-            ip_address: ip_address.as_deref(),
-            user_agent: user_agent.as_deref(),
+            ip_address: ip_address.clone(),
+            user_agent: user_agent.clone(),
+            ..Default::default()
         },
     )
     .await

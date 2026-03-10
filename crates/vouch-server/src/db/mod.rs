@@ -156,7 +156,7 @@ pub use credentials::{
 
 // Re-export GitHub types and functions
 pub use github::{
-    GitHubCredentialEventParams, GitHubInstallation, create_github_installation,
+    GitHubInstallation, create_github_installation,
     delete_github_installation_by_installation_id, delete_old_github_credential_events,
     get_all_linked_installation_ids, get_github_installation_by_installation_id,
     get_github_installation_by_org_and_account, get_github_installations_by_org,

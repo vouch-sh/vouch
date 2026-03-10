@@ -5,6 +5,8 @@
 //! They are NOT `DocumentType` implementations — they're the payload
 //! inside `AuditStore::insert_event(data_json)`.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Data payload for OAuth usage audit events.
@@ -27,15 +29,15 @@ pub struct ScimAuditData {
 }
 
 /// Data payload for GitHub credential audit events.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct GitHubCredentialAuditData {
     pub event_type: String,
     pub org_id: Option<String>,
     pub installation_id: Option<i64>,
     pub session_id: Option<String>,
     pub authenticator_id: Option<String>,
-    pub repositories: Option<String>,
-    pub permissions: Option<String>,
+    pub repositories: Option<Vec<String>>,
+    pub permissions: Option<HashMap<String, String>>,
     pub token_expires_at: Option<String>,
     pub success: bool,
     pub error_code: Option<String>,

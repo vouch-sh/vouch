@@ -7,13 +7,14 @@
 //! - Fetching user-accessible installations
 //! - Installation access verification
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::{
     GitHubError, GitHubInstallationId, GitHubResult, GitHubService,
     list_user_accessible_installations,
 };
-use crate::db::{self, GitHubCredentialEventParams, User};
+use crate::db::{self, User};
+use crate::db::documents::audit::GitHubCredentialAuditData;
 
 // ============================================================================
 // Installation Connection Types
@@ -96,14 +97,13 @@ impl GitHubService<'_> {
             params.org_id
         );
 
-        // Log audit event (serialize permissions for the audit log string)
-        let permissions_json = serde_json::to_string(&details.permissions).unwrap_or_default();
+        // Log audit event
         self.log_installation_event(
             "installation_connected",
             params.user,
             params.org_id,
             params.installation_id,
-            &permissions_json,
+            Some(&details.permissions),
         )
         .await;
 
@@ -184,14 +184,13 @@ impl GitHubService<'_> {
             params.user.id
         );
 
-        // Log audit event (serialize permissions for the audit log string)
-        let permissions_json = serde_json::to_string(&details.permissions).unwrap_or_default();
+        // Log audit event
         self.log_installation_event(
             "installation_reconnected",
             params.user,
             params.org_id,
             params.installation_id,
-            &permissions_json,
+            Some(&details.permissions),
         )
         .await;
 
@@ -292,25 +291,19 @@ impl GitHubService<'_> {
         user: &User,
         org_id: &str,
         installation_id: u64,
-        permissions_json: &str,
+        permissions: Option<&HashMap<String, String>>,
     ) {
         if let Err(e) = db::log_github_credential_event(
             self.audit,
-            GitHubCredentialEventParams {
-                event_type,
-                user_id: &user.id,
-                user_email: &user.email,
-                org_id: Some(org_id),
+            &user.id,
+            &user.email,
+            GitHubCredentialAuditData {
+                event_type: event_type.to_string(),
+                org_id: Some(org_id.to_string()),
                 installation_id: Some(installation_id as i64),
-                session_id: None,
-                authenticator_id: None,
-                repositories: None,
-                permissions: Some(permissions_json),
-                token_expires_at: None,
+                permissions: permissions.cloned(),
                 success: true,
-                error_code: None,
-                ip_address: None,
-                user_agent: None,
+                ..Default::default()
             },
         )
         .await

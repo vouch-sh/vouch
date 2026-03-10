@@ -294,7 +294,7 @@ pub async fn delete_scim_token(
 const MEMBERS_PAGE_SIZE: u64 = 50;
 
 /// Page size for the audit log.
-const AUDIT_PAGE_SIZE: u64 = 100;
+const AUDIT_PAGE_SIZE: u64 = 50;
 
 /// Query parameters for paginated pages.
 #[derive(Debug, Deserialize)]
