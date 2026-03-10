@@ -69,8 +69,6 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     let (s3_client, s3_source, initial_etag, doc_keys, kms_client) =
         load_s3_config(&mut config, use_attestation).await?;
 
-    tracing::info!("Starting vouch-server on {}", config.listen_addr);
-
     // Connect to database and run migrations
     let db = connect_and_migrate(&config).await?;
 
@@ -84,6 +82,19 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
         use_attestation,
     );
 
+    // AWS SDK and runtime configuration
+    let env_or =
+        |key: &str| -> String { std::env::var(key).unwrap_or_else(|_| "(empty)".into()) };
+    tracing::info!(
+        "AWS SDK: region={}, fips={}, dualstack={}, sts_regional={}, defaults_mode={}",
+        env_or("AWS_REGION"),
+        env_or("AWS_USE_FIPS_ENDPOINT"),
+        env_or("AWS_USE_DUALSTACK_ENDPOINT"),
+        env_or("AWS_STS_REGIONAL_ENDPOINTS"),
+        env_or("AWS_DEFAULTS_MODE"),
+    );
+    tracing::info!("Logging: RUST_LOG={}", env_or("RUST_LOG"));
+
     // Feature status summary — one log per feature for searchable CloudWatch events
     tracing::info!(
         "Sessions: duration={}h, dpop_max_age={}s",
@@ -92,20 +103,20 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     );
 
     if config.oidc_configured() {
+        let enrollment_domains = match &config.allowed_domains {
+            Some(domains) => domains.join(", "),
+            None => "unrestricted".to_string(),
+        };
         tracing::info!(
-            "OIDC: configured, issuer={}",
+            "OIDC: configured, issuer={}, enrollment_domains={}",
             config.oidc_issuer_url.as_deref().unwrap_or("unknown"),
+            enrollment_domains,
         );
     } else {
         tracing::warn!(
             "OIDC not configured -- enrollment (vouch enroll) will not work. \
              Set VOUCH_OIDC_ISSUER, VOUCH_OIDC_CLIENT_ID, and VOUCH_OIDC_CLIENT_SECRET"
         );
-    }
-
-    match &config.allowed_domains {
-        Some(domains) => tracing::info!("Allowed domains: {}", domains.join(", ")),
-        None => tracing::info!("Allowed domains: unrestricted"),
     }
 
     // Warn if rp_id is localhost but TLS is configured (likely production)

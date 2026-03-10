@@ -140,7 +140,6 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
         let http_handle = tokio::spawn(async move {
             match tokio::net::TcpListener::bind(http_addr).await {
                 Ok(listener) => {
-                    tracing::info!("HTTP redirect server listening on {}", http_addr);
                     let listener = listener.tap_io(|tcp| {
                         if let Err(err) = tcp.set_nodelay(true) {
                             tracing::trace!(
