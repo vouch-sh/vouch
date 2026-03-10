@@ -100,6 +100,11 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
         config.session_hours,
         config.dpop_max_age_seconds,
     );
+    tracing::info!(
+        "Device flow: code_expires={}s, poll_interval={}s",
+        config.device_code_expires_seconds,
+        config.device_poll_interval_seconds,
+    );
 
     if config.oidc_configured() {
         let enrollment_domains = match &config.allowed_domains {
@@ -116,6 +121,11 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
             "OIDC not configured -- enrollment (vouch enroll) will not work. \
              Set VOUCH_OIDC_ISSUER, VOUCH_OIDC_CLIENT_ID, and VOUCH_OIDC_CLIENT_SECRET"
         );
+    }
+
+    match &config.cors_origins {
+        Some(origins) => tracing::info!("CORS: origins={}", origins.join(", ")),
+        None => tracing::info!("CORS: same-origin only"),
     }
 
     // Warn if rp_id is localhost but TLS is configured (likely production)
