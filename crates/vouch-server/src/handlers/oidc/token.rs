@@ -237,6 +237,7 @@ const MAX_ASSERTION_LEN: usize = 8192;
 /// - `urn:ietf:params:oauth:grant-type:token-exchange` grant (RFC 8693 Section 2.1)
 pub async fn token(
     State(state): State<Arc<AppState>>,
+    client_info: crate::handlers::extractors::ClientInfo,
     headers: HeaderMap,
     axum::Form(params): axum::Form<TokenRequest>,
 ) -> Response {
@@ -327,7 +328,7 @@ pub async fn token(
             handle_authorization_code_grant(State(state), headers, params).await
         }
         OAuthGrantType::ClientCredentials => {
-            handle_client_credentials_grant(State(state), headers, params).await
+            handle_client_credentials_grant(State(state), client_info, headers, params).await
         }
         OAuthGrantType::DeviceCode => handle_device_code_grant(State(state), params).await,
         OAuthGrantType::TokenExchange => {
@@ -335,7 +336,7 @@ pub async fn token(
         }
         OAuthGrantType::JwtBearer => handle_jwt_bearer_grant(State(state), params).await,
         OAuthGrantType::Fido2Assertion => {
-            handle_fido2_assertion_grant(State(state), headers, params).await
+            handle_fido2_assertion_grant(State(state), client_info, headers, params).await
         }
     }
 }
@@ -461,6 +462,7 @@ async fn handle_authorization_code_grant(
 /// Issues an access token with `hardware_verified: false` and no ID token.
 async fn handle_client_credentials_grant(
     State(state): State<Arc<AppState>>,
+    client_info: crate::handlers::extractors::ClientInfo,
     headers: HeaderMap,
     params: TokenRequest,
 ) -> Response {
@@ -493,9 +495,6 @@ async fn handle_client_credentials_grant(
         .into_oauth_response()
         .into_response();
     }
-
-    // Extract client info for audit logging
-    let client_info = crate::handlers::extractors::ClientInfo::from_headers(&headers);
 
     match exchange_client_credentials(
         &state,
@@ -665,6 +664,7 @@ impl ClientAuthFields for TokenRequest {
 /// in the `assertion` parameter. Optionally requires DPoP for FAPI clients.
 async fn handle_fido2_assertion_grant(
     State(state): State<Arc<AppState>>,
+    client_info: crate::handlers::extractors::ClientInfo,
     headers: HeaderMap,
     params: TokenRequest,
 ) -> Response {
@@ -734,6 +734,7 @@ async fn handle_fido2_assertion_grant(
         dpop_proof,
         scope: params.scope.as_deref(),
         authorization_details: params.authorization_details.as_deref(),
+        client_info,
     };
 
     match crate::services::oidc::fido2_grant::exchange_fido2_assertion(&state, exchange_params)

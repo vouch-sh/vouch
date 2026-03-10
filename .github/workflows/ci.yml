@@ -33,10 +33,13 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    env:
+      AWS_LC_FIPS_SYS_CC: clang
+      AWS_LC_FIPS_SYS_CXX: clang++
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go clang
       - name: Setup Rust toolchain
         run: rustup show
       - name: Setup Rust cache
@@ -57,11 +60,13 @@ jobs:
         include:
           - name: linux
             runner: ubuntu-latest
-            install-deps: sudo apt-get update && sudo apt-get install -y libudev-dev
+            install-deps: sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go clang
             cargo-args: ""
+            fips-cc: clang
+            fips-cxx: clang++
           - name: macos
             runner: macos-latest
-            install-deps: ""
+            install-deps: brew install go
             cargo-args: ""
           - name: windows
             runner: windows-latest
@@ -81,6 +86,11 @@ jobs:
           shared-key: "debug-${{ runner.os }}"
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
+      - name: Set FIPS compiler
+        if: matrix.fips-cc
+        run: |
+          echo "AWS_LC_FIPS_SYS_CC=${{ matrix.fips-cc }}" >> "$GITHUB_ENV"
+          echo "AWS_LC_FIPS_SYS_CXX=${{ matrix.fips-cxx }}" >> "$GITHUB_ENV"
       - name: Run tests
         run: cargo test ${{ matrix.cargo-args }}
 
@@ -95,12 +105,16 @@ jobs:
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             packages: "-p vouch-cli -p vouch-agent -p vouch-server"
-            install: sudo apt-get update && sudo apt-get install -y libudev-dev
+            install: sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go clang
+            fips-cc: clang
+            fips-cxx: clang++
           - name: linux-arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             packages: "-p vouch-cli -p vouch-agent -p vouch-server"
-            install: sudo apt-get update && sudo apt-get install -y libudev-dev
+            install: sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go clang
+            fips-cc: clang
+            fips-cxx: clang++
           - name: macos-arm64
             runner: macos-latest
             target: aarch64-apple-darwin
@@ -131,6 +145,11 @@ jobs:
           prefix-key: "v2"
           shared-key: "release-${{ matrix.target }}"
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Set FIPS compiler
+        if: matrix.fips-cc
+        run: |
+          echo "AWS_LC_FIPS_SYS_CC=${{ matrix.fips-cc }}" >> "$GITHUB_ENV"
+          echo "AWS_LC_FIPS_SYS_CXX=${{ matrix.fips-cxx }}" >> "$GITHUB_ENV"
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
 

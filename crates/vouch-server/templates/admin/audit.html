@@ -26,13 +26,13 @@
         {# Event type filter #}
         <div class="mb-4 flex items-center gap-2 text-sm">
             <span class="text-gray-400">Filter:</span>
-            <a href="/admin/audit" class="px-2 py-1 rounded {% if event_type_filter.is_none() %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">All</a>
-            <a href="/admin/audit?event_type=auth_login" class="px-2 py-1 rounded {% if event_type_filter.as_deref() == Some("auth_login") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Logins</a>
-            <a href="/admin/audit?event_type=admin_promote" class="px-2 py-1 rounded {% if event_type_filter.as_deref() == Some("admin_promote") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Promotions</a>
-            <a href="/admin/audit?event_type=admin_demote" class="px-2 py-1 rounded {% if event_type_filter.as_deref() == Some("admin_demote") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Demotions</a>
-            <a href="/admin/audit?event_type=admin_deactivate" class="px-2 py-1 rounded {% if event_type_filter.as_deref() == Some("admin_deactivate") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Deactivations</a>
-            <a href="/admin/audit?event_type=admin_remove_user" class="px-2 py-1 rounded {% if event_type_filter.as_deref() == Some("admin_remove_user") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Removals</a>
-            <a href="/admin/audit?event_type=admin_revoke_credentials" class="px-2 py-1 rounded {% if event_type_filter.as_deref() == Some("admin_revoke_credentials") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Revocations</a>
+            <a href="/admin/audit" class="px-2 py-1 rounded {% if filter.is_none() %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">All</a>
+            <a href="/admin/audit?filter=logins" class="px-2 py-1 rounded {% if filter.as_deref() == Some("logins") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Logins</a>
+            <a href="/admin/audit?filter=promotions" class="px-2 py-1 rounded {% if filter.as_deref() == Some("promotions") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Promotions</a>
+            <a href="/admin/audit?filter=demotions" class="px-2 py-1 rounded {% if filter.as_deref() == Some("demotions") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Demotions</a>
+            <a href="/admin/audit?filter=deactivations" class="px-2 py-1 rounded {% if filter.as_deref() == Some("deactivations") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Deactivations</a>
+            <a href="/admin/audit?filter=removals" class="px-2 py-1 rounded {% if filter.as_deref() == Some("removals") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Removals</a>
+            <a href="/admin/audit?filter=revocations" class="px-2 py-1 rounded {% if filter.as_deref() == Some("revocations") %}bg-vouch-accent/10 text-vouch-accent{% else %}bg-gray-700 text-gray-400 hover:text-gray-200{% endif %}">Revocations</a>
         </div>
 
         <div class="bg-vouch-surface border border-vouch-border rounded-lg overflow-hidden">
@@ -52,7 +52,8 @@
                         <td class="px-4 py-3">
                             <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
                                 {% if event.event_type.starts_with("admin_") %}bg-purple-900/30 text-purple-400
-                                {% elif event.event_type == "auth_login" %}bg-blue-900/30 text-blue-400
+                                {% elif event.event_type.starts_with("login_") %}bg-blue-900/30 text-blue-400
+                                {% elif event.event_type == "enrollment" %}bg-green-900/30 text-green-400
                                 {% elif event.event_type == "scim_operation" %}bg-yellow-900/30 text-yellow-400
                                 {% else %}bg-gray-700 text-gray-400{% endif %}">
                                 {{ event.event_type }}
@@ -74,7 +75,7 @@
         {% if has_more %}
         {% if let Some(cursor) = next_cursor %}
         <div class="mt-4 flex justify-center">
-            <a href="/admin/audit?after={{ cursor }}{% if let Some(et) = event_type_filter %}&event_type={{ et }}{% endif %}" class="px-4 py-2 text-sm rounded bg-vouch-surface border border-vouch-border text-gray-300 hover:bg-gray-700">Older events</a>
+            <a href="/admin/audit?after={{ cursor }}{% if let Some(f) = filter %}&filter={{ f }}{% endif %}" class="px-4 py-2 text-sm rounded bg-vouch-surface border border-vouch-border text-gray-300 hover:bg-gray-700">Older events</a>
         </div>
         {% endif %}
         {% endif %}

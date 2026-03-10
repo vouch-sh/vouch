@@ -71,8 +71,8 @@ pub struct AuditEvent {
 /// Filter criteria for querying audit events.
 #[derive(Debug, Default)]
 pub struct AuditEventFilter {
-    /// Filter by event type.
-    pub event_type: Option<String>,
+    /// Filter by event types (matches any in the list).
+    pub event_types: Option<Vec<String>>,
     /// Filter by user ID.
     pub user_id: Option<String>,
     /// Filter by email (computes HMAC for lookup).
@@ -180,8 +180,10 @@ impl AuditStore {
             ])
             .from(AuditEvents::Table);
 
-            if let Some(ref et) = filter.event_type {
-                q.and_where(Expr::col(AuditEvents::EventType).eq(et.as_str()));
+            if let Some(ref types) = filter.event_types {
+                q.and_where(
+                    Expr::col(AuditEvents::EventType).is_in(types.iter().map(String::as_str)),
+                );
             }
             if let Some(ref uid) = filter.user_id {
                 q.and_where(Expr::col(AuditEvents::UserId).eq(uid.as_str()));
@@ -231,7 +233,7 @@ impl AuditStore {
         page_size: u64,
     ) -> Result<(Vec<AuditEvent>, bool)> {
         let f = AuditEventFilter {
-            event_type: filter.event_type.clone(),
+            event_types: filter.event_types.clone(),
             user_id: filter.user_id.clone(),
             email: filter.email.clone(),
             email_domain: filter.email_domain.clone(),
@@ -357,7 +359,7 @@ mod tests {
 
         let events = audit
             .query_events(&AuditEventFilter {
-                event_type: Some("auth_login".to_string()),
+                event_types: Some(vec!["auth_login".to_string()]),
                 ..AuditEventFilter::default()
             })
             .await

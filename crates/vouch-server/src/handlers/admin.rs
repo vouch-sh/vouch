@@ -294,7 +294,7 @@ pub async fn delete_scim_token(
 const MEMBERS_PAGE_SIZE: u64 = 50;
 
 /// Page size for the audit log.
-const AUDIT_PAGE_SIZE: u64 = 100;
+const AUDIT_PAGE_SIZE: u64 = 50;
 
 /// Query parameters for paginated pages.
 #[derive(Debug, Deserialize)]
@@ -302,11 +302,25 @@ pub struct PaginationParams {
     pub after: Option<String>,
 }
 
-/// Query parameters for audit page (pagination + optional event type filter).
+/// Query parameters for audit page (pagination + optional semantic filter).
 #[derive(Debug, Deserialize)]
 pub struct AuditParams {
     pub after: Option<String>,
-    pub event_type: Option<String>,
+    pub filter: Option<String>,
+}
+
+/// Map a UI filter name to the corresponding audit event types.
+fn audit_filter_event_types(filter: &str) -> Option<Vec<String>> {
+    let types: &[&str] = match filter {
+        "logins" => &["login_success", "login_failed"],
+        "promotions" => &["admin_promote"],
+        "demotions" => &["admin_demote"],
+        "deactivations" => &["admin_deactivate"],
+        "removals" => &["admin_remove_user"],
+        "revocations" => &["admin_revoke_credentials", "admin_revoke_scim_token"],
+        _ => return None,
+    };
+    Some(types.iter().map(|s| (*s).to_string()).collect())
 }
 
 /// A member row for the template.
@@ -348,7 +362,7 @@ pub struct AdminAuditTemplate {
     pub events: Vec<AuditRow>,
     pub has_more: bool,
     pub next_cursor: Option<String>,
-    pub event_type_filter: Option<String>,
+    pub filter: Option<String>,
 }
 
 impl_template_response!(AdminAuditTemplate);
@@ -875,9 +889,11 @@ pub async fn admin_audit_page(
         None => return Redirect::to("/integrations").into_response(),
     };
 
+    let event_types = params.filter.as_deref().and_then(audit_filter_event_types);
+
     let filter = AuditEventFilter {
         email_domain: Some(org_domain),
-        event_type: params.event_type.clone(),
+        event_types,
         before_id: params.after.clone(),
         ..AuditEventFilter::default()
     };
@@ -916,7 +932,7 @@ pub async fn admin_audit_page(
         events,
         has_more,
         next_cursor,
-        event_type_filter: params.event_type,
+        filter: params.filter,
     }
     .into_response()
 }

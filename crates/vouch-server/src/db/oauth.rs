@@ -486,7 +486,7 @@ pub async fn get_oauth_usage_stats(
         "oauth_client_registered",
     ] {
         let filter = AuditEventFilter {
-            event_type: Some(event_type.to_string()),
+            event_types: Some(vec![event_type.to_string()]),
             since: since.map(String::from),
             ..AuditEventFilter::default()
         };

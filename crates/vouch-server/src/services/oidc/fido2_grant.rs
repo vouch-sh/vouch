@@ -76,6 +76,8 @@ pub struct Fido2AssertionParams<'a> {
     pub scope: Option<&'a str>,
     /// RFC 9396: Raw authorization_details JSON string.
     pub authorization_details: Option<&'a str>,
+    /// Client metadata extracted from HTTP headers.
+    pub client_info: crate::handlers::extractors::ClientInfo,
 }
 
 /// Result of a successful FIDO2 assertion grant exchange.
@@ -249,15 +251,10 @@ pub async fn exchange_fido2_assertion(
         user_id: user.id.clone(),
         event_type: AuthEventType::LoginSuccess,
         authenticator_id: Some(authenticator.id.clone()),
-        client_ip: None,
-        user_agent: None,
-        client_hostname: None,
-        client_os: None,
-        client_arch: None,
-        client_version: None,
         success: true,
-        failure_reason: None,
-    };
+        ..AuthEventParams::default()
+    }
+    .with_client_info(params.client_info);
     let audit = state.audit.clone();
     let user_email = user.email.clone();
     tokio::spawn(async move {

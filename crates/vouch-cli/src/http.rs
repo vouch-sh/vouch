@@ -5,10 +5,17 @@
 //! enabling integration testing by injecting an axum router directly
 //! instead of making real network requests.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
 use vouch_common::ApiError;
+
+/// Total timeout for interactive CLI operations.
+const INTERACTIVE_TOTAL: Duration = Duration::from_secs(30);
+/// Connection timeout for interactive CLI operations.
+const INTERACTIVE_CONNECT: Duration = Duration::from_secs(10);
 
 /// HTTP response from the client.
 #[derive(Debug, Clone)]
@@ -125,11 +132,33 @@ impl ReqwestClient {
     ///
     /// Returns an error if the client cannot be built.
     pub fn new() -> Result<Self> {
-        let client = vouch_common::http::interactive_client(&format!(
-            "vouch-cli/{}",
-            env!("CARGO_PKG_VERSION")
-        ))
-        .context("failed to create HTTP client")?;
+        let user_agent = format!("vouch-cli/{}", env!("CARGO_PKG_VERSION"));
+
+        let mut default_headers = reqwest::header::HeaderMap::new();
+        if let Ok(v) = reqwest::header::HeaderValue::from_str(env!("CARGO_PKG_VERSION")) {
+            default_headers.insert("Vouch-Client-Version", v);
+        }
+        default_headers.insert(
+            "Vouch-Client-OS",
+            reqwest::header::HeaderValue::from_static(std::env::consts::OS),
+        );
+        default_headers.insert(
+            "Vouch-Client-Arch",
+            reqwest::header::HeaderValue::from_static(std::env::consts::ARCH),
+        );
+        if let Ok(hostname) = gethostname::gethostname().into_string()
+            && let Ok(v) = reqwest::header::HeaderValue::from_str(&hostname)
+        {
+            default_headers.insert("Vouch-Client-Hostname", v);
+        }
+
+        let client = reqwest::Client::builder()
+            .user_agent(&user_agent)
+            .default_headers(default_headers)
+            .timeout(INTERACTIVE_TOTAL)
+            .connect_timeout(INTERACTIVE_CONNECT)
+            .build()
+            .context("failed to create HTTP client")?;
 
         Ok(Self { client })
     }

@@ -72,7 +72,10 @@ FROM chef AS builder
 ARG SOURCE_DATE_EPOCH=0
 
 # Install build dependencies for static compilation
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+# clang is required for FIPS delocator on aarch64 (GCC-generated assembly fails to parse)
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig cmake go perl clang
+ENV AWS_LC_FIPS_SYS_CC=clang
+ENV AWS_LC_FIPS_SYS_CXX=clang++
 
 # Cook dependencies (cached until Cargo.toml/Cargo.lock change)
 COPY --from=planner /app/recipe.json recipe.json
