@@ -61,7 +61,7 @@ jobs:
             cargo-args: ""
           - name: macos
             runner: macos-latest
-            install-deps: ""
+            install-deps: brew install go
             cargo-args: ""
           - name: windows
             runner: windows-latest
