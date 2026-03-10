@@ -83,8 +83,7 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     );
 
     // AWS SDK and runtime configuration
-    let env_or =
-        |key: &str| -> String { std::env::var(key).unwrap_or_else(|_| "(empty)".into()) };
+    let env_or = |key: &str| -> String { std::env::var(key).unwrap_or_else(|_| "(empty)".into()) };
     tracing::info!(
         "AWS SDK: region={}, fips={}, dualstack={}, sts_regional={}, defaults_mode={}",
         env_or("AWS_REGION"),
@@ -105,7 +104,7 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     if config.oidc_configured() {
         let enrollment_domains = match &config.allowed_domains {
             Some(domains) => domains.join(", "),
-            None => "unrestricted".to_string(),
+            None => "(open enrollment)".to_string(),
         };
         tracing::info!(
             "OIDC: configured, issuer={}, enrollment_domains={}",
