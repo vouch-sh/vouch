@@ -15,11 +15,6 @@ pub mod timeouts {
     /// Connection timeout for credential helper operations.
     pub const CREDENTIAL_CONNECT: Duration = Duration::from_secs(5);
 
-    /// Total timeout for interactive CLI operations.
-    pub const INTERACTIVE_TOTAL: Duration = Duration::from_secs(30);
-    /// Connection timeout for interactive CLI operations.
-    pub const INTERACTIVE_CONNECT: Duration = Duration::from_secs(10);
-
     /// Total timeout for agent background operations.
     pub const AGENT_TOTAL: Duration = Duration::from_secs(5);
     /// Connection timeout for agent background operations.
@@ -49,26 +44,6 @@ pub fn credential_client(user_agent: &str) -> Result<reqwest::Client, reqwest::E
         .user_agent(user_agent)
         .timeout(timeouts::CREDENTIAL_TOTAL)
         .connect_timeout(timeouts::CREDENTIAL_CONNECT)
-        .build()
-}
-
-/// Create an HTTP client for interactive CLI operations.
-///
-/// Uses longer timeouts (30s total, 10s connect) since users expect
-/// some latency for interactive commands.
-///
-/// # Arguments
-///
-/// * `user_agent` - The User-Agent header value for outgoing requests.
-///
-/// # Errors
-///
-/// Returns an error if the client cannot be built.
-pub fn interactive_client(user_agent: &str) -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
-        .user_agent(user_agent)
-        .timeout(timeouts::INTERACTIVE_TOTAL)
-        .connect_timeout(timeouts::INTERACTIVE_CONNECT)
         .build()
 }
 
@@ -126,12 +101,6 @@ mod tests {
     }
 
     #[test]
-    fn test_interactive_client_builds() {
-        let client = interactive_client("test-cli/1.0.0");
-        assert!(client.is_ok());
-    }
-
-    #[test]
     fn test_agent_client_builds() {
         let client = agent_client("test-agent/1.0.0");
         assert!(client.is_ok());
@@ -145,15 +114,12 @@ mod tests {
 
     #[test]
     fn test_timeout_values() {
-        // Verify timeout relationships make sense
         assert!(timeouts::CREDENTIAL_CONNECT < timeouts::CREDENTIAL_TOTAL);
-        assert!(timeouts::INTERACTIVE_CONNECT < timeouts::INTERACTIVE_TOTAL);
         assert!(timeouts::AGENT_CONNECT < timeouts::AGENT_TOTAL);
         assert!(timeouts::SERVER_CONNECT < timeouts::SERVER_TOTAL);
 
-        // Agent should be fastest, interactive slowest
+        // Agent should be fastest
         assert!(timeouts::AGENT_TOTAL < timeouts::CREDENTIAL_TOTAL);
         assert!(timeouts::CREDENTIAL_TOTAL < timeouts::SERVER_TOTAL);
-        assert!(timeouts::SERVER_TOTAL < timeouts::INTERACTIVE_TOTAL);
     }
 }

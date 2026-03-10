@@ -288,6 +288,7 @@ pub async fn browser_login_start(
 #[allow(clippy::too_many_lines)]
 pub async fn browser_login_complete(
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     headers: HeaderMap,
     _jar: CookieJar,
     Json(req): Json<BrowserLoginCompleteRequest>,
@@ -296,9 +297,6 @@ pub async fn browser_login_complete(
     validate_origin(&headers, &state.config().base_url)?;
 
     tracing::info!("Browser login complete (discoverable credential flow)");
-
-    // Extract client info for audit logging
-    let client_info = ClientInfo::from_headers(&headers);
 
     // ── Phase 2: Field length bounds ─────────────────────────────────────
     // Reject obviously oversized or empty fields before any processing.
@@ -472,15 +470,11 @@ pub async fn browser_login_complete(
             user_id: user_id.to_string(),
             event_type: AuthEventType::LoginFailed,
             authenticator_id: authenticator_id.map(String::from),
-            client_ip: client_info.client_ip.clone(),
-            user_agent: client_info.user_agent.clone(),
-            client_hostname: None,
-            client_os: None,
-            client_arch: None,
-            client_version: None,
             success: false,
             failure_reason: Some(reason.to_string()),
-        };
+            ..AuthEventParams::default()
+        }
+        .with_client_info(client_info.clone());
         let audit = state.audit.clone();
         tokio::spawn(async move {
             if let Err(e) = db::insert_auth_event(&audit, &params, None).await {
@@ -591,20 +585,14 @@ pub async fn browser_login_complete(
     let token = session_result.token;
 
     // Log successful login event (fire-and-forget, consistent with failure path)
-
     let auth_event_params = AuthEventParams {
         user_id: user.id.clone(),
         event_type: AuthEventType::LoginSuccess,
         authenticator_id: Some(authenticator.id.clone()),
-        client_ip: client_info.client_ip,
-        user_agent: client_info.user_agent,
-        client_hostname: None,
-        client_os: None,
-        client_arch: None,
-        client_version: None,
         success: true,
-        failure_reason: None,
-    };
+        ..AuthEventParams::default()
+    }
+    .with_client_info(client_info);
     let audit = state.audit.clone();
     tokio::spawn(async move {
         if let Err(e) = db::insert_auth_event(&audit, &auth_event_params, None).await {

@@ -76,75 +76,92 @@ where
     }
 }
 
-/// Client information extracted from HTTP headers.
+/// Maximum length for hostname values (RFC 1035: 253 chars).
+const MAX_HOSTNAME_LEN: usize = 253;
+/// Maximum length for other client metadata header values.
+const MAX_CLIENT_HEADER_LEN: usize = 256;
+
+/// Client information extracted from the request.
+///
+/// `client_ip` comes from the TCP socket (`ConnectInfo<SocketAddr>`), not from
+/// proxy headers. This prevents IP spoofing via `X-Forwarded-For` when the
+/// server is exposed directly without a trusted reverse proxy.
 #[derive(Debug, Clone, Default)]
 pub struct ClientInfo {
-    /// Client IP address (from X-Forwarded-For or X-Real-IP headers).
+    /// Client IP address from the TCP peer socket.
     pub client_ip: Option<String>,
     /// User-Agent header.
     pub user_agent: Option<String>,
+    /// Client hostname (from `Vouch-Client-Hostname` header).
+    pub client_hostname: Option<String>,
+    /// Client OS (from `Vouch-Client-OS` header).
+    pub client_os: Option<String>,
+    /// Client CPU architecture (from `Vouch-Client-Arch` header).
+    pub client_arch: Option<String>,
+    /// Client version (from `Vouch-Client-Version` header).
+    pub client_version: Option<String>,
+}
+
+impl<S: Send + Sync> FromRequestParts<S> for ClientInfo {
+    type Rejection = std::convert::Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let client_ip = parts
+            .extensions
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|ci| ci.0.ip().to_string());
+
+        let mut info = Self::from_headers(&parts.headers);
+        info.client_ip = client_ip;
+        Ok(info)
+    }
 }
 
 impl ClientInfo {
-    /// Extract client information from HTTP headers.
+    /// Extract client metadata from HTTP headers.
     ///
-    /// Extracts:
-    /// - Client IP from X-Forwarded-For (first IP) or X-Real-IP headers
-    /// - User-Agent header
+    /// Extracts User-Agent and `Vouch-Client-*` headers. Does NOT extract
+    /// `client_ip` — that comes from the TCP socket in `FromRequestParts`.
     #[must_use]
     pub fn from_headers(headers: &HeaderMap) -> Self {
-        let client_ip = extract_client_ip(headers);
         let user_agent = headers
             .get("user-agent")
             .and_then(|h| h.to_str().ok())
             .map(String::from);
 
+        let client_hostname =
+            extract_validated_header(headers, "vouch-client-hostname", MAX_HOSTNAME_LEN);
+        let client_os = extract_validated_header(headers, "vouch-client-os", MAX_CLIENT_HEADER_LEN);
+        let client_arch =
+            extract_validated_header(headers, "vouch-client-arch", MAX_CLIENT_HEADER_LEN);
+        let client_version =
+            extract_validated_header(headers, "vouch-client-version", MAX_CLIENT_HEADER_LEN);
+
         Self {
-            client_ip,
+            client_ip: None,
             user_agent,
+            client_hostname,
+            client_os,
+            client_arch,
+            client_version,
         }
     }
 }
 
-/// Extract client IP from headers.
+/// Extract and validate a client metadata header value.
 ///
-/// Checks in order:
-/// 1. X-Forwarded-For (first IP in the list)
-/// 2. X-Real-IP
-/// 3. CF-Connecting-IP (Cloudflare)
-fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
-    // Try X-Forwarded-For first (may contain multiple IPs)
-    if let Some(xff) = headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
-        // X-Forwarded-For format: "client, proxy1, proxy2"
-        // We want the first (leftmost) IP which is the original client
-        if let Some(first_ip) = xff.split(',').next() {
-            let trimmed = first_ip.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
+/// Returns `None` if the header is missing, empty, exceeds `max_len`,
+/// or contains non-printable ASCII characters (control chars, null bytes).
+fn extract_validated_header(headers: &HeaderMap, name: &str, max_len: usize) -> Option<String> {
+    let value = headers.get(name).and_then(|h| h.to_str().ok())?;
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.len() > max_len {
+        return None;
     }
-
-    // Try X-Real-IP (single IP)
-    if let Some(real_ip) = headers.get("x-real-ip").and_then(|h| h.to_str().ok()) {
-        let trimmed = real_ip.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
+    if !trimmed.bytes().all(|b| (0x20..0x7f).contains(&b)) {
+        return None;
     }
-
-    // Try CF-Connecting-IP (Cloudflare)
-    if let Some(cf_ip) = headers
-        .get("cf-connecting-ip")
-        .and_then(|h| h.to_str().ok())
-    {
-        let trimmed = cf_ip.trim();
-        if !trimmed.is_empty() {
-            return Some(trimmed.to_string());
-        }
-    }
-
-    None
+    Some(trimmed.to_string())
 }
 
 #[cfg(test)]
@@ -152,36 +169,6 @@ fn extract_client_ip(headers: &HeaderMap) -> Option<String> {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
-
-    #[test]
-    fn test_extract_x_forwarded_for_single() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-forwarded-for", HeaderValue::from_static("192.168.1.1"));
-
-        let info = ClientInfo::from_headers(&headers);
-        assert_eq!(info.client_ip, Some("192.168.1.1".to_string()));
-    }
-
-    #[test]
-    fn test_extract_x_forwarded_for_multiple() {
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("203.0.113.1, 198.51.100.1, 192.0.2.1"),
-        );
-
-        let info = ClientInfo::from_headers(&headers);
-        assert_eq!(info.client_ip, Some("203.0.113.1".to_string()));
-    }
-
-    #[test]
-    fn test_extract_x_real_ip() {
-        let mut headers = HeaderMap::new();
-        headers.insert("x-real-ip", HeaderValue::from_static("10.0.0.1"));
-
-        let info = ClientInfo::from_headers(&headers);
-        assert_eq!(info.client_ip, Some("10.0.0.1".to_string()));
-    }
 
     #[test]
     fn test_extract_user_agent() {
@@ -204,6 +191,111 @@ mod tests {
         let info = ClientInfo::from_headers(&headers);
         assert_eq!(info.client_ip, None);
         assert_eq!(info.user_agent, None);
+        assert_eq!(info.client_hostname, None);
+        assert_eq!(info.client_os, None);
+        assert_eq!(info.client_arch, None);
+        assert_eq!(info.client_version, None);
+    }
+
+    // ========================================================================
+    // Vouch-Client-* Header Extraction Tests
+    // ========================================================================
+
+    #[test]
+    fn test_extract_vouch_client_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "vouch-client-hostname",
+            HeaderValue::from_static("dev.local"),
+        );
+        headers.insert("vouch-client-os", HeaderValue::from_static("macos"));
+        headers.insert("vouch-client-arch", HeaderValue::from_static("aarch64"));
+        headers.insert("vouch-client-version", HeaderValue::from_static("1.2.3"));
+
+        let info = ClientInfo::from_headers(&headers);
+        assert_eq!(info.client_hostname.as_deref(), Some("dev.local"));
+        assert_eq!(info.client_os.as_deref(), Some("macos"));
+        assert_eq!(info.client_arch.as_deref(), Some("aarch64"));
+        assert_eq!(info.client_version.as_deref(), Some("1.2.3"));
+    }
+
+    #[test]
+    fn test_extract_vouch_client_header_rejects_too_long() {
+        let mut headers = HeaderMap::new();
+        let long_value = "a".repeat(MAX_CLIENT_HEADER_LEN + 1);
+        headers.insert(
+            "vouch-client-os",
+            HeaderValue::from_str(&long_value).unwrap(),
+        );
+
+        let info = ClientInfo::from_headers(&headers);
+        assert_eq!(info.client_os, None);
+    }
+
+    #[test]
+    fn test_extract_vouch_client_header_rejects_empty() {
+        let mut headers = HeaderMap::new();
+        headers.insert("vouch-client-os", HeaderValue::from_static(""));
+
+        let info = ClientInfo::from_headers(&headers);
+        assert_eq!(info.client_os, None);
+    }
+
+    #[test]
+    fn test_extract_vouch_client_header_trims_whitespace() {
+        let mut headers = HeaderMap::new();
+        headers.insert("vouch-client-os", HeaderValue::from_static("  macos  "));
+
+        let info = ClientInfo::from_headers(&headers);
+        assert_eq!(info.client_os.as_deref(), Some("macos"));
+    }
+
+    #[test]
+    fn test_extract_vouch_client_hostname_max_length() {
+        let mut headers = HeaderMap::new();
+        // Exactly at the 253-char limit should be accepted
+        let hostname = "a".repeat(MAX_HOSTNAME_LEN);
+        headers.insert(
+            "vouch-client-hostname",
+            HeaderValue::from_str(&hostname).unwrap(),
+        );
+        let info = ClientInfo::from_headers(&headers);
+        assert_eq!(info.client_hostname.as_deref(), Some(hostname.as_str()));
+
+        // One over should be rejected
+        let too_long = "a".repeat(MAX_HOSTNAME_LEN + 1);
+        let mut headers2 = HeaderMap::new();
+        headers2.insert(
+            "vouch-client-hostname",
+            HeaderValue::from_str(&too_long).unwrap(),
+        );
+        let info2 = ClientInfo::from_headers(&headers2);
+        assert_eq!(info2.client_hostname, None);
+    }
+
+    #[test]
+    fn test_extract_validated_header_rejects_control_chars() {
+        let mut headers = HeaderMap::new();
+        // Tab character (0x09) is a control character
+        headers.insert(
+            "vouch-client-os",
+            HeaderValue::from_bytes(b"mac\tos").unwrap(),
+        );
+
+        let info = ClientInfo::from_headers(&headers);
+        assert_eq!(info.client_os, None);
+    }
+
+    #[test]
+    fn test_extract_validated_header_accepts_printable_ascii() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "vouch-client-version",
+            HeaderValue::from_static("1.2.3-beta+build.456"),
+        );
+
+        let info = ClientInfo::from_headers(&headers);
+        assert_eq!(info.client_version.as_deref(), Some("1.2.3-beta+build.456"));
     }
 
     #[test]

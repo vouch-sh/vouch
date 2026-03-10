@@ -10,7 +10,7 @@ use axum::{
     Form, Json,
     body::Body,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{StatusCode, header},
     response::{IntoResponse, Redirect, Response},
 };
 use axum_extra::extract::cookie::CookieJar;
@@ -925,12 +925,9 @@ const MAX_CREDENTIAL_ID_BYTES: usize = 1023;
 #[allow(clippy::unused_async, clippy::too_many_lines)]
 pub async fn browser_register_complete(
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
+    client_info: ClientInfo,
     Json(req): Json<BrowserRegisterCompleteRequest>,
 ) -> Result<impl IntoResponse, ServiceError> {
-    // Extract client info from headers (for auth event logging)
-    let client_info = ClientInfo::from_headers(&headers);
-
     // ── Phase 1: Field length bounds ────────────────────────────────────
     // Reject obviously oversized or empty fields before any processing.
     if req.state.len() > MAX_STATE_TOKEN_LEN {
@@ -1157,15 +1154,10 @@ pub async fn browser_register_complete(
         user_id: reg_state.user_id.to_string(),
         event_type: AuthEventType::Enrollment,
         authenticator_id: Some(authenticator_id.clone()),
-        client_ip: client_info.client_ip,
-        user_agent: client_info.user_agent,
-        client_hostname: None, // Browser enrollment doesn't have hostname
-        client_os: None,
-        client_arch: None,
-        client_version: None,
         success: true,
-        failure_reason: None,
-    };
+        ..AuthEventParams::default()
+    }
+    .with_client_info(client_info);
     let audit = state.audit.clone();
     let user_email_for_audit = reg_state.user_email.clone();
     tokio::spawn(async move {
