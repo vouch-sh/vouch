@@ -36,7 +36,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go
       - name: Setup Rust toolchain
         run: rustup show
       - name: Setup Rust cache
@@ -57,7 +57,7 @@ jobs:
         include:
           - name: linux
             runner: ubuntu-latest
-            install-deps: sudo apt-get update && sudo apt-get install -y libudev-dev
+            install-deps: sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go
             cargo-args: ""
           - name: macos
             runner: macos-latest
@@ -95,12 +95,12 @@ jobs:
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             packages: "-p vouch-cli -p vouch-agent -p vouch-server"
-            install: sudo apt-get update && sudo apt-get install -y libudev-dev
+            install: sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go
           - name: linux-arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             packages: "-p vouch-cli -p vouch-agent -p vouch-server"
-            install: sudo apt-get update && sudo apt-get install -y libudev-dev
+            install: sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go
           - name: macos-arm64
             runner: macos-latest
             target: aarch64-apple-darwin

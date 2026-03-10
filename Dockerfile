@@ -72,7 +72,7 @@ FROM chef AS builder
 ARG SOURCE_DATE_EPOCH=0
 
 # Install build dependencies for static compilation
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig
+RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig cmake go perl
 
 # Cook dependencies (cached until Cargo.toml/Cargo.lock change)
 COPY --from=planner /app/recipe.json recipe.json
