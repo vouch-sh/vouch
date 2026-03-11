@@ -236,8 +236,14 @@ pub async fn log_github_credential_event(
     audit: &AuditStore,
     user_id: &str,
     user_email: &str,
-    data: GitHubCredentialAuditData,
+    mut data: GitHubCredentialAuditData,
+    ip: Option<std::net::IpAddr>,
 ) -> Result<String> {
+    data.ip_address = ip.map(|a| a.to_string());
+    let geo = ip.and_then(crate::geo::lookup);
+    data.country_code = geo.as_ref().map(|g| g.country_code.clone());
+    data.asn = geo.as_ref().and_then(|g| g.asn);
+    data.org_name = geo.as_ref().and_then(|g| g.org_name.clone());
     let data_json = serde_json::to_string(&data)?;
 
     audit

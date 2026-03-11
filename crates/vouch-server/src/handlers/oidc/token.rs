@@ -510,7 +510,7 @@ async fn handle_client_credentials_grant(
                 &authenticated_client.client.id,
                 crate::db::OAuthEventType::TokenIssued,
                 None,
-                client_info.client_ip.as_deref(),
+                client_info.client_ip,
                 client_info.user_agent.as_deref(),
                 Some("grant_type=client_credentials"),
             )

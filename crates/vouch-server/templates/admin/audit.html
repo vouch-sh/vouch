@@ -40,6 +40,7 @@
                 <thead>
                     <tr class="border-b border-vouch-border text-left text-gray-400">
                         <th class="px-4 py-3 font-medium">Time</th>
+                        <th class="px-4 py-3 font-medium">IP</th>
                         <th class="px-4 py-3 font-medium">Event</th>
                         <th class="px-4 py-3 font-medium">Domain</th>
                         <th class="px-4 py-3 font-medium">Details</th>
@@ -49,6 +50,7 @@
                     {% for event in events %}
                     <tr class="border-b border-vouch-border last:border-b-0">
                         <td class="px-4 py-3 text-gray-400 whitespace-nowrap">{{ event.created_at }}</td>
+                        <td class="px-4 py-3 text-gray-400 whitespace-nowrap text-xs font-mono" title="{{ event.ip_title }}">{{ event.ip_display }}</td>
                         <td class="px-4 py-3">
                             <span class="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium
                                 {% if event.event_type.starts_with("admin_") %}bg-purple-900/30 text-purple-400
@@ -65,11 +67,15 @@
                     {% endfor %}
                     {% if events.is_empty() %}
                     <tr>
-                        <td colspan="4" class="px-4 py-8 text-center text-gray-500">No audit events found.</td>
+                        <td colspan="5" class="px-4 py-8 text-center text-gray-500">No audit events found.</td>
                     </tr>
                     {% endif %}
                 </tbody>
             </table>
+        </div>
+
+        <div class="mt-2 text-right text-xs text-gray-600">
+            This product includes GeoLite2 data created by MaxMind, available from <a href="https://www.maxmind.com" target="_blank" rel="noreferrer noopener" class="hover:text-gray-400">maxmind.com</a>.
         </div>
 
         {% if has_more %}

@@ -4,6 +4,8 @@
 //! Auth events are now stored via `AuditStore`. This module provides the
 //! domain types and a convenience wrapper.
 
+use std::net::IpAddr;
+
 use super::audit::AuditStore;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -46,7 +48,7 @@ pub struct AuthEventParams {
     #[serde(skip)]
     pub event_type: AuthEventType,
     pub authenticator_id: Option<String>,
-    pub client_ip: Option<String>,
+    pub client_ip: Option<IpAddr>,
     pub user_agent: Option<String>,
     pub client_hostname: Option<String>,
     pub client_os: Option<String>,
@@ -114,7 +116,7 @@ mod tests {
             ..AuthEventParams::default()
         }
         .with_client_info(ClientInfo {
-            client_ip: Some("1.2.3.4".into()),
+            client_ip: Some("1.2.3.4".parse().unwrap()),
             user_agent: Some("vouch-cli/1.0".into()),
             client_hostname: Some("host.local".into()),
             client_os: Some("macos".into()),
@@ -122,7 +124,7 @@ mod tests {
             client_version: Some("1.0.0".into()),
         });
 
-        assert_eq!(params.client_ip.as_deref(), Some("1.2.3.4"));
+        assert_eq!(params.client_ip, Some("1.2.3.4".parse::<IpAddr>().unwrap()));
         assert_eq!(params.user_agent.as_deref(), Some("vouch-cli/1.0"));
         assert_eq!(params.client_hostname.as_deref(), Some("host.local"));
         assert_eq!(params.client_os.as_deref(), Some("macos"));
@@ -152,7 +154,7 @@ mod tests {
     #[test]
     fn test_with_client_info_none_clears_existing_fields() {
         let params = AuthEventParams {
-            client_ip: Some("old-ip".into()),
+            client_ip: Some("10.0.0.1".parse().unwrap()),
             user_agent: Some("old-ua".into()),
             client_hostname: Some("old-host".into()),
             client_os: Some("old-os".into()),
