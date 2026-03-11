@@ -111,7 +111,7 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientInfo {
         let client_ip = parts
             .extensions
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|ci| ci.0.ip());
+            .map(|ci| ci.0.ip().to_canonical());
 
         let mut info = Self::from_headers(&parts.headers);
         info.client_ip = client_ip;
