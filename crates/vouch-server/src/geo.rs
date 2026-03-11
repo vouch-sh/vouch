@@ -40,6 +40,7 @@ pub struct GeoLocation {
 /// Returns `None` for private, loopback, or unresolvable addresses,
 /// or if the GeoIP database failed to load.
 pub fn lookup(ip: IpAddr) -> Option<GeoLocation> {
+    let ip = ip.to_canonical();
     if is_non_global(&ip) {
         return None;
     }
@@ -200,6 +201,32 @@ mod tests {
     #[test]
     fn test_lookup_ipv6_link_local_returns_none() {
         let ip: IpAddr = "fe80::1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    // ====================================================================
+    // IPv4-mapped IPv6 address tests
+    // ====================================================================
+
+    #[test]
+    fn test_lookup_ipv4_mapped_ipv6_resolves() {
+        // ::ffff:8.8.8.8 should resolve the same as 8.8.8.8
+        let ip: IpAddr = "::ffff:8.8.8.8".parse().unwrap();
+        let geo = lookup(ip);
+        assert!(geo.is_some(), "::ffff:8.8.8.8 should resolve to a country");
+        assert_eq!(geo.unwrap().country_code, "US");
+    }
+
+    #[test]
+    fn test_lookup_ipv4_mapped_ipv6_private_returns_none() {
+        // ::ffff:192.168.1.1 should be filtered as private
+        let ip: IpAddr = "::ffff:192.168.1.1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_ipv4_mapped_ipv6_loopback_returns_none() {
+        let ip: IpAddr = "::ffff:127.0.0.1".parse().unwrap();
         assert!(lookup(ip).is_none());
     }
 
