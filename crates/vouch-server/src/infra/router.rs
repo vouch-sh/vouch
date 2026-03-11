@@ -38,6 +38,16 @@ const LOGIN_BODY_LIMIT: usize = 32 * 1024;
 /// Global body size limit (per-route overrides above are more restrictive).
 const GLOBAL_BODY_LIMIT: usize = 256 * 1024;
 
+/// Format `SOURCE_DATE_EPOCH` (compile-time) as a date string for the banner.
+fn build_date() -> String {
+    option_env!("SOURCE_DATE_EPOCH")
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|&ts| ts > 0)
+        .and_then(|ts| jiff::Timestamp::from_second(ts).ok())
+        .map(|ts| ts.strftime("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "dev".to_string())
+}
+
 /// Print an ASCII banner at server startup.
 pub fn print_startup_banner() {
     #[allow(clippy::print_stdout)]
@@ -58,7 +68,7 @@ pub fn print_startup_banner() {
             option_env!("GITHUB_SHA")
                 .and_then(|s| s.get(..7))
                 .unwrap_or("dev"),
-            env!("BUILD_DATE"),
+            build_date(),
         );
     }
 }

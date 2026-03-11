@@ -95,6 +95,7 @@ COPY crates/vouch-tests/Cargo.toml crates/vouch-tests/
 # Copy actual source code
 COPY crates/vouch-common/src crates/vouch-common/src
 COPY crates/vouch-server/src crates/vouch-server/src
+COPY crates/vouch-server/data crates/vouch-server/data
 COPY crates/vouch-server/migrations crates/vouch-server/migrations
 COPY crates/vouch-server/templates crates/vouch-server/templates
 
