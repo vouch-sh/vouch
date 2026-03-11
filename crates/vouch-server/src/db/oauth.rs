@@ -437,15 +437,19 @@ pub async fn record_oauth_event(
     oauth_client_id: &str,
     event_type: OAuthEventType,
     user_id: Option<&str>,
-    ip_address: Option<&str>,
+    ip_address: Option<std::net::IpAddr>,
     user_agent: Option<&str>,
     details: Option<&str>,
 ) -> Result<String> {
+    let geo = ip_address.and_then(crate::geo::lookup);
     let data = OAuthUsageData {
         oauth_client_id: oauth_client_id.to_string(),
         details: details.map(String::from),
-        ip_address: ip_address.map(String::from),
+        ip_address: ip_address.map(|ip| ip.to_string()),
         user_agent: user_agent.map(String::from),
+        country_code: geo.as_ref().map(|g| g.country_code.clone()),
+        asn: geo.as_ref().and_then(|g| g.asn),
+        org_name: geo.as_ref().and_then(|g| g.org_name.clone()),
     };
     let data_json = serde_json::to_string(&data)?;
 

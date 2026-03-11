@@ -16,6 +16,12 @@ pub struct OAuthUsageData {
     pub details: Option<String>,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asn: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
 }
 
 /// Data payload for SCIM operation audit events.
@@ -43,4 +49,87 @@ pub struct GitHubCredentialAuditData {
     pub error_code: Option<String>,
     pub ip_address: Option<String>,
     pub user_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asn: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub org_name: Option<String>,
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_oauth_usage_data_deserialize_without_asn_fields() {
+        let json = r#"{
+            "oauth_client_id": "c1",
+            "details": null,
+            "ip_address": "1.2.3.4",
+            "user_agent": null,
+            "country_code": "US"
+        }"#;
+        let data: OAuthUsageData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.country_code.as_deref(), Some("US"));
+        assert!(data.asn.is_none());
+        assert!(data.org_name.is_none());
+    }
+
+    #[test]
+    fn test_oauth_usage_data_roundtrip_with_asn() {
+        let data = OAuthUsageData {
+            oauth_client_id: "c1".to_string(),
+            details: None,
+            ip_address: Some("8.8.8.8".to_string()),
+            user_agent: None,
+            country_code: Some("US".to_string()),
+            asn: Some(15169),
+            org_name: Some("GOOGLE".to_string()),
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let back: OAuthUsageData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.asn, Some(15169));
+        assert_eq!(back.org_name.as_deref(), Some("GOOGLE"));
+    }
+
+    #[test]
+    fn test_oauth_usage_data_serialize_none_asn_omits_keys() {
+        let data = OAuthUsageData {
+            oauth_client_id: "c1".to_string(),
+            details: None,
+            ip_address: None,
+            user_agent: None,
+            country_code: None,
+            asn: None,
+            org_name: None,
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        assert!(!json.contains("\"asn\""));
+        assert!(!json.contains("\"org_name\""));
+    }
+
+    #[test]
+    fn test_github_audit_data_deserialize_without_asn_fields() {
+        let json = r#"{"event_type":"token_issued","success":true}"#;
+        let data: GitHubCredentialAuditData = serde_json::from_str(json).unwrap();
+        assert_eq!(data.event_type, "token_issued");
+        assert!(data.asn.is_none());
+        assert!(data.org_name.is_none());
+    }
+
+    #[test]
+    fn test_github_audit_data_roundtrip_with_asn() {
+        let data = GitHubCredentialAuditData {
+            event_type: "token_issued".to_string(),
+            asn: Some(3320),
+            org_name: Some("DTAG".to_string()),
+            ..GitHubCredentialAuditData::default()
+        };
+        let json = serde_json::to_string(&data).unwrap();
+        let back: GitHubCredentialAuditData = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.asn, Some(3320));
+        assert_eq!(back.org_name.as_deref(), Some("DTAG"));
+    }
 }

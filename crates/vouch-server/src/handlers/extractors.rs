@@ -7,6 +7,8 @@ use axum::http::{HeaderMap, StatusCode};
 use http::request::Parts;
 use serde::Deserialize;
 
+use std::net::IpAddr;
+
 use crate::services::error::ServiceError;
 
 /// A validated UUID string. Rejects during deserialization if not valid.
@@ -89,7 +91,7 @@ const MAX_CLIENT_HEADER_LEN: usize = 256;
 #[derive(Debug, Clone, Default)]
 pub struct ClientInfo {
     /// Client IP address from the TCP peer socket.
-    pub client_ip: Option<String>,
+    pub client_ip: Option<IpAddr>,
     /// User-Agent header.
     pub user_agent: Option<String>,
     /// Client hostname (from `Vouch-Client-Hostname` header).
@@ -109,7 +111,7 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientInfo {
         let client_ip = parts
             .extensions
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-            .map(|ci| ci.0.ip().to_string());
+            .map(|ci| ci.0.ip());
 
         let mut info = Self::from_headers(&parts.headers);
         info.client_ip = client_ip;

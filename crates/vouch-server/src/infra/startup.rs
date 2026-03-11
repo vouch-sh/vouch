@@ -94,6 +94,9 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     );
     tracing::info!("Logging: RUST_LOG={}", env_or("RUST_LOG"));
 
+    crate::geo::warmup();
+    tracing::info!("GeoIP database initialized");
+
     // Feature status summary — one log per feature for searchable CloudWatch events
     tracing::info!(
         "Sessions: duration={}h, dpop_max_age={}s",

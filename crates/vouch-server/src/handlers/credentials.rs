@@ -19,6 +19,7 @@ use vouch_common::{
     SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
 };
 
+use super::extractors::ClientInfo;
 use super::session::{extract_resource_token, extract_resource_token_with_email};
 use crate::redact_email;
 
@@ -413,6 +414,7 @@ pub async fn get_github_status(
 pub async fn get_github_token(
     method: Method,
     uri: OriginalUri,
+    client_info: ClientInfo,
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
@@ -444,16 +446,6 @@ pub async fn get_github_token(
         .ok_or_else(|| {
             ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
         })?;
-
-    // Get client info for audit log
-    let ip_address = headers
-        .get("x-forwarded-for")
-        .and_then(|h| h.to_str().ok())
-        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string());
-    let user_agent = headers
-        .get("user-agent")
-        .and_then(|h| h.to_str().ok())
-        .map(String::from);
 
     // Verify user has an organization
     let org_id = user.org_id.as_ref().ok_or_else(|| {
@@ -606,10 +598,10 @@ pub async fn get_github_token(
             permissions: Some(gh_token.permissions.clone()),
             token_expires_at: Some(gh_token.expires_at.clone()),
             success: true,
-            ip_address: ip_address.clone(),
-            user_agent: user_agent.clone(),
+            user_agent: client_info.user_agent,
             ..Default::default()
         },
+        client_info.client_ip,
     )
     .await
     {

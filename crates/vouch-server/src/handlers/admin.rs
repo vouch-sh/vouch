@@ -352,6 +352,10 @@ pub struct AuditRow {
     pub email_domain: Option<String>,
     pub data: String,
     pub created_at: String,
+    /// Pre-formatted IP cell text, e.g. "🇺🇸 8.8.8.8" or "-".
+    pub ip_display: String,
+    /// Tooltip for the IP cell with country code and ASN.
+    pub ip_title: String,
 }
 
 /// Audit log page template.
@@ -912,12 +916,22 @@ pub async fn admin_audit_page(
 
     let events: Vec<AuditRow> = audit_events
         .iter()
-        .map(|e| AuditRow {
-            id: e.id.clone(),
-            event_type: e.event_type.clone(),
-            email_domain: e.email_domain.clone(),
-            data: e.data.clone(),
-            created_at: e.created_at.clone(),
+        .map(|e| {
+            let geo = GeoFields::from_json(&e.data);
+            let created_at = e
+                .created_at
+                .parse::<Timestamp>()
+                .map(|ts| format_timestamp(&ts))
+                .unwrap_or_else(|_| e.created_at.clone());
+            AuditRow {
+                id: e.id.clone(),
+                event_type: e.event_type.clone(),
+                email_domain: e.email_domain.clone(),
+                data: e.data.clone(),
+                created_at,
+                ip_display: geo.ip_display(),
+                ip_title: geo.ip_title(),
+            }
         })
         .collect();
 
@@ -935,6 +949,57 @@ pub async fn admin_audit_page(
         filter: params.filter,
     }
     .into_response()
+}
+
+/// Geo fields extracted from audit event JSON data.
+#[derive(Default, Deserialize)]
+struct GeoFields {
+    country_code: Option<String>,
+    ip_address: Option<String>,
+    asn: Option<u32>,
+    org_name: Option<String>,
+}
+
+impl GeoFields {
+    fn from_json(data_json: &str) -> Self {
+        serde_json::from_str::<Self>(data_json).unwrap_or_else(|e| {
+            tracing::trace!("Could not parse geo fields from audit data: {e}");
+            Self::default()
+        })
+    }
+
+    fn asn_display(&self) -> Option<String> {
+        self.asn.map(|n| match self.org_name {
+            Some(ref org) => format!("AS{n} ({org})"),
+            None => format!("AS{n}"),
+        })
+    }
+
+    fn ip_display(&self) -> String {
+        let flag = self
+            .country_code
+            .as_deref()
+            .and_then(crate::geo::country_flag)
+            .unwrap_or_default();
+        let ip = self.ip_address.as_deref().unwrap_or("-");
+
+        if flag.is_empty() {
+            ip.to_string()
+        } else {
+            format!("{flag} {ip}")
+        }
+    }
+
+    fn ip_title(&self) -> String {
+        let mut parts = Vec::new();
+        if let Some(ref cc) = self.country_code {
+            parts.push(cc.clone());
+        }
+        if let Some(asn) = self.asn_display() {
+            parts.push(asn);
+        }
+        parts.join(" · ")
+    }
 }
 
 // ============================================================================
@@ -2413,5 +2478,135 @@ mod tests {
         .await;
 
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    // ================================================================
+    // GeoFields tests
+    // ================================================================
+
+    #[test]
+    fn test_geo_fields_from_json_full_record() {
+        let json =
+            r#"{"country_code":"US","ip_address":"8.8.8.8","asn":15169,"org_name":"GOOGLE"}"#;
+        let geo = super::GeoFields::from_json(json);
+        assert_eq!(geo.country_code.as_deref(), Some("US"));
+        assert_eq!(geo.ip_address.as_deref(), Some("8.8.8.8"));
+        assert_eq!(geo.asn, Some(15169));
+        assert_eq!(geo.org_name.as_deref(), Some("GOOGLE"));
+    }
+
+    #[test]
+    fn test_geo_fields_from_json_backwards_compat_no_asn_fields() {
+        let json = r#"{"country_code":"DE","ip_address":"1.2.3.4"}"#;
+        let geo = super::GeoFields::from_json(json);
+        assert_eq!(geo.country_code.as_deref(), Some("DE"));
+        assert_eq!(geo.ip_address.as_deref(), Some("1.2.3.4"));
+        assert!(geo.asn.is_none());
+        assert!(geo.org_name.is_none());
+    }
+
+    #[test]
+    fn test_geo_fields_from_json_invalid_json_returns_default() {
+        let geo = super::GeoFields::from_json("not json");
+        assert!(geo.country_code.is_none());
+        assert!(geo.ip_address.is_none());
+        assert!(geo.asn.is_none());
+        assert!(geo.org_name.is_none());
+    }
+
+    #[test]
+    fn test_geo_fields_from_json_empty_object() {
+        let geo = super::GeoFields::from_json("{}");
+        assert!(geo.country_code.is_none());
+        assert!(geo.ip_address.is_none());
+        assert!(geo.asn.is_none());
+        assert!(geo.org_name.is_none());
+    }
+
+    #[test]
+    fn test_asn_display_with_asn_and_org() {
+        let geo = super::GeoFields {
+            asn: Some(15169),
+            org_name: Some("GOOGLE".to_string()),
+            ..super::GeoFields::default()
+        };
+        assert_eq!(geo.asn_display(), Some("AS15169 (GOOGLE)".to_string()));
+    }
+
+    #[test]
+    fn test_asn_display_with_asn_no_org() {
+        let geo = super::GeoFields {
+            asn: Some(15169),
+            ..super::GeoFields::default()
+        };
+        assert_eq!(geo.asn_display(), Some("AS15169".to_string()));
+    }
+
+    #[test]
+    fn test_asn_display_no_asn() {
+        let geo = super::GeoFields::default();
+        assert!(geo.asn_display().is_none());
+    }
+
+    #[test]
+    fn test_ip_display_with_country_and_ip() {
+        let geo = super::GeoFields {
+            country_code: Some("US".to_string()),
+            ip_address: Some("8.8.8.8".to_string()),
+            ..super::GeoFields::default()
+        };
+        let display = geo.ip_display();
+        assert!(display.contains("8.8.8.8"));
+        assert!(display.len() > "8.8.8.8".len(), "should include flag");
+    }
+
+    #[test]
+    fn test_ip_display_no_country_code() {
+        let geo = super::GeoFields {
+            ip_address: Some("8.8.8.8".to_string()),
+            ..super::GeoFields::default()
+        };
+        assert_eq!(geo.ip_display(), "8.8.8.8");
+    }
+
+    #[test]
+    fn test_ip_display_no_ip_address() {
+        let geo = super::GeoFields::default();
+        assert_eq!(geo.ip_display(), "-");
+    }
+
+    #[test]
+    fn test_ip_title_country_and_asn() {
+        let geo = super::GeoFields {
+            country_code: Some("DE".to_string()),
+            asn: Some(3320),
+            org_name: Some("DTAG".to_string()),
+            ..super::GeoFields::default()
+        };
+        assert_eq!(geo.ip_title(), "DE · AS3320 (DTAG)");
+    }
+
+    #[test]
+    fn test_ip_title_country_only() {
+        let geo = super::GeoFields {
+            country_code: Some("US".to_string()),
+            ..super::GeoFields::default()
+        };
+        assert_eq!(geo.ip_title(), "US");
+    }
+
+    #[test]
+    fn test_ip_title_asn_only() {
+        let geo = super::GeoFields {
+            asn: Some(15169),
+            ..super::GeoFields::default()
+        };
+        assert_eq!(geo.ip_title(), "AS15169");
+    }
+
+    #[test]
+    fn test_ip_title_all_none() {
+        let geo = super::GeoFields::default();
+        assert_eq!(geo.ip_title(), "");
     }
 }

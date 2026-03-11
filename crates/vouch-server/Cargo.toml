@@ -43,6 +43,7 @@ headers = { workspace = true }
 hex = { workspace = true, features = ["std"] }
 http = { workspace = true }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
+maxminddb = { workspace = true }
 jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 mime_guess = { workspace = true }
 mimalloc = { workspace = true, features = ["secure"] }
