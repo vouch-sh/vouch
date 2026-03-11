@@ -69,18 +69,35 @@ pub fn lookup(ip: IpAddr) -> Option<GeoLocation> {
 fn is_non_global(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
+            let octets = v4.octets();
             v4.is_loopback()
                 || v4.is_private()
                 || v4.is_link_local()
                 || v4.is_broadcast()
                 || v4.is_unspecified()
+                || v4.is_documentation()
+                || v4.is_multicast()
+                || (octets[0] == 100 && (octets[1] & 0xC0 == 64)) // shared/CGNAT 100.64.0.0/10
+                || (octets[0] == 192 && octets[1] == 0 && octets[2] == 0) // IETF 192.0.0.0/24
+                || (octets[0] == 192 && octets[1] == 88 && octets[2] == 99) // 6to4 192.88.99.0/24
+                || (octets[0] == 198 && (octets[1] & 0xFE == 18)) // benchmarking 198.18.0.0/15
+                || (octets[0] & 0xF0 == 240) // reserved 240.0.0.0/4
         }
         IpAddr::V6(v6) => {
             let octets = v6.octets();
             v6.is_loopback()
                 || v6.is_unspecified()
-                || (octets[0] & 0xfe == 0xfc)                        // ULA fc00::/7
+                || v6.is_multicast()
+                || (octets[0] & 0xfe == 0xfc) // ULA fc00::/7
                 || (octets[0] == 0xfe && octets[1] & 0xc0 == 0x80) // link-local fe80::/10
+                || (octets[0] == 0x20 && octets[1] == 0x01
+                    && octets[2] == 0x0d && octets[3] == 0xb8) // documentation 2001:db8::/32
+                || (octets[0] == 0x20 && octets[1] == 0x01
+                    && octets[2] == 0x00 && octets[3] == 0x02) // benchmarking 2001:2::/48
+                || (octets[0] == 0x01 && octets[1] == 0x00
+                    && octets[2] == 0x00 && octets[3] == 0x00
+                    && octets[4] == 0x00 && octets[5] == 0x00
+                    && octets[6] == 0x00 && octets[7] == 0x00) // discard 100::/64
         }
     }
 }
@@ -201,6 +218,104 @@ mod tests {
     #[test]
     fn test_lookup_ipv6_link_local_returns_none() {
         let ip: IpAddr = "fe80::1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    // ====================================================================
+    // is_non_global — additional IPv4 ranges
+    // ====================================================================
+
+    #[test]
+    fn test_lookup_cgnat_returns_none() {
+        let ip: IpAddr = "100.64.0.1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_cgnat_upper_bound_returns_none() {
+        let ip: IpAddr = "100.127.255.254".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_documentation_test_net_1_returns_none() {
+        let ip: IpAddr = "192.0.2.1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_documentation_test_net_2_returns_none() {
+        let ip: IpAddr = "198.51.100.1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_documentation_test_net_3_returns_none() {
+        let ip: IpAddr = "203.0.113.1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_ietf_protocol_returns_none() {
+        let ip: IpAddr = "192.0.0.1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_6to4_relay_returns_none() {
+        let ip: IpAddr = "192.88.99.1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_benchmarking_returns_none() {
+        let ip: IpAddr = "198.18.0.1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_benchmarking_upper_returns_none() {
+        let ip: IpAddr = "198.19.255.254".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_reserved_returns_none() {
+        let ip: IpAddr = "240.0.0.1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_multicast_v4_returns_none() {
+        let ip: IpAddr = "224.0.0.1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    // ====================================================================
+    // is_non_global — additional IPv6 ranges
+    // ====================================================================
+
+    #[test]
+    fn test_lookup_ipv6_documentation_returns_none() {
+        let ip: IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_ipv6_benchmarking_returns_none() {
+        let ip: IpAddr = "2001:2::1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_ipv6_discard_returns_none() {
+        let ip: IpAddr = "100::1".parse().unwrap();
+        assert!(lookup(ip).is_none());
+    }
+
+    #[test]
+    fn test_lookup_ipv6_multicast_returns_none() {
+        let ip: IpAddr = "ff02::1".parse().unwrap();
         assert!(lookup(ip).is_none());
     }
 
