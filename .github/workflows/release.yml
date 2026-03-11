@@ -485,7 +485,9 @@ jobs:
             -w /app \
             -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
             rust:1.94.0-alpine sh -c '
-              apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig cmake make g++ perl linux-headers
+              apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig cmake make go perl clang linux-headers
+              export AWS_LC_FIPS_SYS_CC=clang
+              export AWS_LC_FIPS_SYS_CXX=clang++
               export OPENSSL_STATIC=1
               export OPENSSL_LIB_DIR=/usr/lib
               export OPENSSL_INCLUDE_DIR=/usr/include
