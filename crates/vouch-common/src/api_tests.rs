@@ -5,9 +5,15 @@
 //! and deserialize correctly with the typed encoding wrappers.
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use crate::api::*;
+    use secrecy::ExposeSecret;
     use uuid::Uuid;
 
     // =========================================================================
@@ -361,6 +367,9 @@ mod tests {
     fn test_aws_integration_config_round_trip() {
         let config = AwsIntegrationConfig {
             default_role_arn: Some("arn:aws:iam::123456789012:role/VouchDeveloper".to_string()),
+            idc_bootstrap_role_arn: None,
+            idc_application_arn: None,
+            idc_region: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let decoded: AwsIntegrationConfig = serde_json::from_str(&json).unwrap();
@@ -368,12 +377,16 @@ mod tests {
             decoded.default_role_arn,
             Some("arn:aws:iam::123456789012:role/VouchDeveloper".to_string())
         );
+        assert!(!decoded.idc_configured());
     }
 
     #[test]
     fn test_aws_integration_config_without_role_arn() {
         let config = AwsIntegrationConfig {
             default_role_arn: None,
+            idc_bootstrap_role_arn: None,
+            idc_application_arn: None,
+            idc_region: None,
         };
         let json = serde_json::to_string(&config).unwrap();
 
@@ -385,9 +398,64 @@ mod tests {
     }
 
     #[test]
+    fn test_aws_integration_config_with_idc() {
+        let config = AwsIntegrationConfig {
+            default_role_arn: Some("arn:aws:iam::123:role/VouchDev".to_string()),
+            idc_bootstrap_role_arn: Some("arn:aws:iam::123:role/VouchIdcBootstrap".to_string()),
+            idc_application_arn: Some(
+                "arn:aws:sso::123:application/ssoins-abc/apl-xyz".to_string(),
+            ),
+            idc_region: Some("us-east-1".to_string()),
+        };
+        assert!(config.idc_configured());
+
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: AwsIntegrationConfig = serde_json::from_str(&json).unwrap();
+        assert!(decoded.idc_configured());
+        assert_eq!(
+            decoded.idc_bootstrap_role_arn.as_deref(),
+            Some("arn:aws:iam::123:role/VouchIdcBootstrap"),
+        );
+        assert_eq!(
+            decoded.idc_application_arn.as_deref(),
+            Some("arn:aws:sso::123:application/ssoins-abc/apl-xyz"),
+        );
+        assert_eq!(decoded.idc_region.as_deref(), Some("us-east-1"));
+    }
+
+    #[test]
+    fn test_aws_integration_config_idc_partial_not_configured() {
+        let config = AwsIntegrationConfig {
+            default_role_arn: None,
+            idc_bootstrap_role_arn: Some("arn:aws:iam::123:role/VouchIdcBootstrap".to_string()),
+            idc_application_arn: None,
+            idc_region: Some("us-east-1".to_string()),
+        };
+        assert!(!config.idc_configured());
+    }
+
+    #[test]
+    fn test_aws_integration_config_backward_compat() {
+        // Old JSON without IdC fields should deserialize correctly
+        let json = r#"{"default_role_arn":"arn:aws:iam::123:role/Old"}"#;
+        let decoded: AwsIntegrationConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            decoded.default_role_arn.as_deref(),
+            Some("arn:aws:iam::123:role/Old"),
+        );
+        assert!(decoded.idc_bootstrap_role_arn.is_none());
+        assert!(decoded.idc_application_arn.is_none());
+        assert!(decoded.idc_region.is_none());
+        assert!(!decoded.idc_configured());
+    }
+
+    #[test]
     fn test_integration_config_response_aws_configured() {
         let config = AwsIntegrationConfig {
             default_role_arn: Some("arn:aws:iam::111222333444:role/DevRole".to_string()),
+            idc_bootstrap_role_arn: None,
+            idc_application_arn: None,
+            idc_region: None,
         };
         let response: IntegrationConfigResponse<AwsIntegrationConfig> = IntegrationConfigResponse {
             configured: true,
@@ -402,5 +470,97 @@ mod tests {
             cfg.default_role_arn,
             Some("arn:aws:iam::111222333444:role/DevRole".to_string())
         );
+    }
+
+    #[test]
+    fn test_idc_discovery_response_roundtrip() {
+        let response = IdcDiscoveryResponse {
+            accounts: vec![
+                IdcAccountWithRoles {
+                    account_id: "123456789012".to_string(),
+                    account_name: "Production".to_string(),
+                    roles: vec![
+                        "AdministratorAccess".to_string(),
+                        "ReadOnlyAccess".to_string(),
+                    ],
+                },
+                IdcAccountWithRoles {
+                    account_id: "234567890123".to_string(),
+                    account_name: "Development".to_string(),
+                    roles: vec!["PowerUserAccess".to_string()],
+                },
+            ],
+            region: "us-east-1".to_string(),
+            errors: vec![],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let decoded: IdcDiscoveryResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.accounts.len(), 2);
+        assert_eq!(decoded.accounts[0].account_id, "123456789012");
+        assert_eq!(decoded.accounts[0].roles.len(), 2);
+        assert_eq!(decoded.accounts[1].account_name, "Development");
+        assert_eq!(decoded.region, "us-east-1");
+        assert!(decoded.errors.is_empty());
+    }
+
+    #[test]
+    fn test_idc_discovery_response_with_errors() {
+        let response = IdcDiscoveryResponse {
+            accounts: vec![IdcAccountWithRoles {
+                account_id: "123456789012".to_string(),
+                account_name: "Production".to_string(),
+                roles: vec!["AdministratorAccess".to_string()],
+            }],
+            region: "us-east-1".to_string(),
+            errors: vec![IdcDiscoveryError {
+                account_id: "999999999999".to_string(),
+                message: "Access denied".to_string(),
+            }],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let decoded: IdcDiscoveryResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.accounts.len(), 1);
+        assert_eq!(decoded.errors.len(), 1);
+        assert_eq!(decoded.errors[0].account_id, "999999999999");
+    }
+
+    #[test]
+    fn test_idc_discovery_response_errors_omitted_when_empty() {
+        let response = IdcDiscoveryResponse {
+            accounts: vec![],
+            region: "us-east-1".to_string(),
+            errors: vec![],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(!json.contains("errors"));
+        let decoded: IdcDiscoveryResponse = serde_json::from_str(&json).unwrap();
+        assert!(decoded.errors.is_empty());
+    }
+
+    #[test]
+    fn test_idc_sso_token_response_roundtrip() {
+        let response = IdcTokenResponse {
+            access_token: secrecy::SecretString::from("eyJexampletoken"),
+            expires_in: 3600,
+            region: "us-east-1".to_string(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let decoded: IdcTokenResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.access_token.expose_secret(), "eyJexampletoken");
+        assert_eq!(decoded.expires_in, 3600);
+        assert_eq!(decoded.region, "us-east-1");
+    }
+
+    #[test]
+    fn test_idc_sso_token_response_debug_redacts_token() {
+        let response = IdcTokenResponse {
+            access_token: secrecy::SecretString::from("my-secret-token"),
+            expires_in: 3600,
+            region: "us-east-1".to_string(),
+        };
+        let debug = format!("{response:?}");
+        assert!(!debug.contains("my-secret-token"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("us-east-1"));
     }
 }

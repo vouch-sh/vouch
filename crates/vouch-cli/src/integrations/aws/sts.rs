@@ -8,137 +8,28 @@ use anyhow::{Context, Result};
 use jiff::Timestamp;
 use secrecy::SecretString;
 
-/// AWS partition identifier.
+pub use vouch_common::aws::Arn;
+
+/// Parse and validate an IAM role ARN.
 ///
-/// Each partition is a fully isolated instance of the AWS infrastructure
-/// with its own DNS suffix, IAM system, and billing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Partition {
-    /// Commercial (amazonaws.com)
-    Aws,
-    /// China (amazonaws.com.cn)
-    AwsCn,
-    /// GovCloud US (amazonaws.com)
-    AwsUsGov,
-    /// European Sovereign Cloud (amazonaws.eu)
-    AwsEusc,
-    /// US ISO - C2S (c2s.ic.gov)
-    AwsIso,
-    /// US ISO-B - SC2S (sc2s.sgov.gov)
-    AwsIsoB,
-    /// UK ISO-E - ADC (cloud.adc-e.uk)
-    AwsIsoE,
-    /// US ISO-F - CSP (csp.hci.ic.gov)
-    AwsIsoF,
-}
+/// Format: `arn:{partition}:iam::{account}:role/{name}`
+///
+/// # Errors
+///
+/// Returns an error if the ARN format is invalid, the partition
+/// is unrecognized, or the resource is not an IAM role.
+pub fn parse_role_arn(arn: &str) -> Result<Arn> {
+    let parsed = Arn::parse(arn).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-impl Partition {
-    /// Parse a partition string from an ARN.
-    fn parse(s: &str) -> Result<Self> {
-        match s {
-            "aws" => Ok(Self::Aws),
-            "aws-cn" => Ok(Self::AwsCn),
-            "aws-us-gov" => Ok(Self::AwsUsGov),
-            "aws-eusc" => Ok(Self::AwsEusc),
-            "aws-iso" => Ok(Self::AwsIso),
-            "aws-iso-b" => Ok(Self::AwsIsoB),
-            "aws-iso-e" => Ok(Self::AwsIsoE),
-            "aws-iso-f" => Ok(Self::AwsIsoF),
-            _ => anyhow::bail!(
-                "Unknown AWS partition: '{s}'\n\
-                 Expected one of: aws, aws-cn, aws-us-gov, aws-eusc, \
-                 aws-iso, aws-iso-b, aws-iso-e, aws-iso-f"
-            ),
-        }
+    if !parsed.is_iam_role() {
+        anyhow::bail!(
+            "Invalid role ARN format: {arn}\n\
+             Expected: arn:<partition>:iam::<account-id>:role/<role-name>\n\
+             Example:  arn:aws:iam::123456789012:role/MyRole"
+        );
     }
 
-    /// Default region for STS API calls in this partition.
-    ///
-    /// STS `AssumeRoleWithWebIdentity` is region-agnostic — the call
-    /// succeeds against any regional endpoint regardless of where the
-    /// IAM role lives (IAM is global and has no region in its ARNs).
-    /// We pick a well-known region per partition as a last-resort
-    /// fallback when no region is configured via `--region`, the AWS
-    /// profile, or environment variables.
-    #[must_use]
-    pub fn default_sts_region(self) -> &'static str {
-        match self {
-            Self::Aws => "us-east-1",
-            Self::AwsCn => "cn-north-1",
-            Self::AwsUsGov => "us-gov-west-1",
-            Self::AwsEusc => "eusc-de-east-1",
-            Self::AwsIso => "us-iso-east-1",
-            Self::AwsIsoB => "us-isob-east-1",
-            Self::AwsIsoE => "eu-isoe-west-1",
-            Self::AwsIsoF => "us-isof-south-1",
-        }
-    }
-
-    /// DNS suffix for this partition's AWS endpoints.
-    #[must_use]
-    pub fn dns_suffix(self) -> &'static str {
-        match self {
-            Self::Aws | Self::AwsUsGov => "amazonaws.com",
-            Self::AwsCn => "amazonaws.com.cn",
-            Self::AwsEusc => "amazonaws.eu",
-            Self::AwsIso => "c2s.ic.gov",
-            Self::AwsIsoB => "sc2s.sgov.gov",
-            Self::AwsIsoE => "cloud.adc-e.uk",
-            Self::AwsIsoF => "csp.hci.ic.gov",
-        }
-    }
-}
-
-/// Parsed AWS IAM role ARN.
-#[derive(Debug)]
-pub struct Arn<'a> {
-    pub partition: Partition,
-    #[allow(dead_code)]
-    pub account: &'a str,
-    #[allow(dead_code)]
-    pub resource: &'a str,
-}
-
-impl<'a> Arn<'a> {
-    /// Parse an IAM role ARN.
-    ///
-    /// Format: `arn:{partition}:iam::{account}:role/{name}`
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the ARN format is invalid or the partition
-    /// is unrecognized.
-    pub fn parse_role_arn(arn: &'a str) -> Result<Self> {
-        let parts: Vec<&str> = arn.split(':').collect();
-
-        // A valid IAM role ARN has exactly 6 colon-separated parts:
-        // arn : partition : iam : (empty region) : account-id : role/name
-        if parts.len() < 6
-            || parts.first() != Some(&"arn")
-            || parts.get(2) != Some(&"iam")
-            || !parts
-                .get(5)
-                .is_some_and(|s| s.starts_with("role/") && s.len() > 5)
-        {
-            anyhow::bail!(
-                "Invalid role ARN format: {arn}\n\
-                 Expected: arn:<partition>:iam::<account-id>:role/<role-name>\n\
-                 Example:  arn:aws:iam::123456789012:role/MyRole"
-            );
-        }
-
-        let partition_str = parts.get(1).context("missing partition in ARN")?;
-        let partition = Partition::parse(partition_str)?;
-
-        let account = parts.get(4).context("missing account in ARN")?;
-        let resource = parts.get(5).context("missing resource in ARN")?;
-
-        Ok(Self {
-            partition,
-            account,
-            resource,
-        })
-    }
+    Ok(parsed)
 }
 
 /// AWS STS temporary credentials.
@@ -275,95 +166,50 @@ fn parse_sts_xml_response(xml: &str) -> Result<StsCredentials> {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-
-    // =========================================================================
-    // Partition tests
-    // =========================================================================
-
-    #[test]
-    fn test_partition_parse_all_valid() {
-        assert_eq!(Partition::parse("aws").unwrap(), Partition::Aws);
-        assert_eq!(Partition::parse("aws-cn").unwrap(), Partition::AwsCn);
-        assert_eq!(Partition::parse("aws-us-gov").unwrap(), Partition::AwsUsGov);
-        assert_eq!(Partition::parse("aws-eusc").unwrap(), Partition::AwsEusc);
-        assert_eq!(Partition::parse("aws-iso").unwrap(), Partition::AwsIso);
-        assert_eq!(Partition::parse("aws-iso-b").unwrap(), Partition::AwsIsoB);
-        assert_eq!(Partition::parse("aws-iso-e").unwrap(), Partition::AwsIsoE);
-        assert_eq!(Partition::parse("aws-iso-f").unwrap(), Partition::AwsIsoF);
-    }
-
-    #[test]
-    fn test_partition_parse_unknown() {
-        assert!(Partition::parse("unknown").is_err());
-        assert!(Partition::parse("").is_err());
-    }
-
-    #[test]
-    fn test_partition_default_sts_region() {
-        assert_eq!(Partition::Aws.default_sts_region(), "us-east-1");
-        assert_eq!(Partition::AwsCn.default_sts_region(), "cn-north-1");
-        assert_eq!(Partition::AwsUsGov.default_sts_region(), "us-gov-west-1");
-        assert_eq!(Partition::AwsEusc.default_sts_region(), "eusc-de-east-1");
-        assert_eq!(Partition::AwsIso.default_sts_region(), "us-iso-east-1");
-        assert_eq!(Partition::AwsIsoB.default_sts_region(), "us-isob-east-1");
-        assert_eq!(Partition::AwsIsoE.default_sts_region(), "eu-isoe-west-1");
-        assert_eq!(Partition::AwsIsoF.default_sts_region(), "us-isof-south-1");
-    }
-
-    #[test]
-    fn test_partition_dns_suffix() {
-        assert_eq!(Partition::Aws.dns_suffix(), "amazonaws.com");
-        assert_eq!(Partition::AwsCn.dns_suffix(), "amazonaws.com.cn");
-        assert_eq!(Partition::AwsUsGov.dns_suffix(), "amazonaws.com");
-        assert_eq!(Partition::AwsEusc.dns_suffix(), "amazonaws.eu");
-        assert_eq!(Partition::AwsIso.dns_suffix(), "c2s.ic.gov");
-        assert_eq!(Partition::AwsIsoB.dns_suffix(), "sc2s.sgov.gov");
-        assert_eq!(Partition::AwsIsoE.dns_suffix(), "cloud.adc-e.uk");
-        assert_eq!(Partition::AwsIsoF.dns_suffix(), "csp.hci.ic.gov");
-    }
+    use vouch_common::aws::Partition;
 
     // =========================================================================
     // Arn tests
     // =========================================================================
 
     #[test]
-    fn test_arn_parse_role_arn_valid() {
-        let arn = Arn::parse_role_arn("arn:aws:iam::123456789012:role/MyRole").unwrap();
+    fn test_parse_role_arn_valid() {
+        let arn = parse_role_arn("arn:aws:iam::123456789012:role/MyRole").unwrap();
         assert_eq!(arn.partition, Partition::Aws);
-        assert_eq!(arn.account, "123456789012");
+        assert_eq!(arn.account.as_deref(), Some("123456789012"));
         assert_eq!(arn.resource, "role/MyRole");
     }
 
     #[test]
-    fn test_arn_parse_role_arn_china() {
-        let arn = Arn::parse_role_arn("arn:aws-cn:iam::123456789012:role/MyRole").unwrap();
+    fn test_parse_role_arn_china() {
+        let arn = parse_role_arn("arn:aws-cn:iam::123456789012:role/MyRole").unwrap();
         assert_eq!(arn.partition, Partition::AwsCn);
     }
 
     #[test]
-    fn test_arn_parse_role_arn_govcloud() {
-        let arn = Arn::parse_role_arn("arn:aws-us-gov:iam::123456789012:role/MyRole").unwrap();
+    fn test_parse_role_arn_govcloud() {
+        let arn = parse_role_arn("arn:aws-us-gov:iam::123456789012:role/MyRole").unwrap();
         assert_eq!(arn.partition, Partition::AwsUsGov);
     }
 
     #[test]
-    fn test_arn_parse_role_arn_with_path() {
-        let arn = Arn::parse_role_arn("arn:aws:iam::123456789012:role/path/to/MyRole").unwrap();
+    fn test_parse_role_arn_with_path() {
+        let arn = parse_role_arn("arn:aws:iam::123456789012:role/path/to/MyRole").unwrap();
         assert_eq!(arn.resource, "role/path/to/MyRole");
     }
 
     #[test]
-    fn test_arn_parse_role_arn_invalid() {
-        assert!(Arn::parse_role_arn("invalid").is_err());
-        assert!(Arn::parse_role_arn("").is_err());
-        assert!(Arn::parse_role_arn("arn:aws:s3:::my-bucket").is_err());
-        assert!(Arn::parse_role_arn("arn:aws:iam::123456789012:user/MyUser").is_err());
-        assert!(Arn::parse_role_arn("arn:aws:iam::123456789012:role/").is_err());
+    fn test_parse_role_arn_invalid() {
+        assert!(parse_role_arn("invalid").is_err());
+        assert!(parse_role_arn("").is_err());
+        assert!(parse_role_arn("arn:aws:s3:::my-bucket").is_err());
+        assert!(parse_role_arn("arn:aws:iam::123456789012:user/MyUser").is_err());
+        assert!(parse_role_arn("arn:aws:iam::123456789012:role/").is_err());
     }
 
     #[test]
-    fn test_arn_parse_unknown_partition() {
-        assert!(Arn::parse_role_arn("arn:unknown:iam::123456789012:role/MyRole").is_err());
+    fn test_parse_role_arn_unknown_partition() {
+        assert!(parse_role_arn("arn:unknown:iam::123456789012:role/MyRole").is_err());
     }
 
     // =========================================================================

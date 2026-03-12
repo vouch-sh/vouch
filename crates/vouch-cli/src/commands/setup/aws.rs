@@ -3,17 +3,11 @@
 //!
 //! Configures AWS CLI/SDK to use Vouch for credential federation.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::PathBuf;
 
-use crate::integrations::aws::{AwsConfig, AwsProfile};
+use crate::integrations::aws::{AwsConfig, AwsProfile, aws_config_dir};
 use crate::utils::ensure_secure_dir;
-
-/// Get the AWS config directory (~/.aws).
-fn aws_config_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".aws"))
-}
 
 /// Run the AWS setup command.
 ///
@@ -69,6 +63,7 @@ pub async fn run(profile: Option<&str>, role_arn: &str, region: Option<&str>) ->
         )),
         region: region.map(str::to_string),
         output: Some("json".to_string()),
+        ..Default::default()
     });
     config.save()?;
 

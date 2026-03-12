@@ -17,6 +17,9 @@ pub struct OidcIdTokenClaims {
     pub exp: i64,
     /// Issued at time (Unix timestamp).
     pub iat: i64,
+    /// JWT ID (unique identifier for replay prevention, required by AWS IAM
+    /// Identity Center Trusted Token Issuer).
+    pub jti: String,
     /// User's email address.
     pub email: String,
     /// Email verified flag.
@@ -31,6 +34,14 @@ pub struct OidcIdTokenClaims {
     /// Can be used in AWS IAM trust policy conditions to restrict access by domain.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hd: Option<String>,
+}
+
+/// Errors from building OIDC ID token claims.
+#[derive(Debug, thiserror::Error)]
+pub enum ClaimsBuildError {
+    /// A required field was not set.
+    #[error("Missing required claim: {0}")]
+    MissingField(&'static str),
 }
 
 /// Builder for constructing OIDC ID token claims.
@@ -130,17 +141,28 @@ impl OidcIdTokenClaimsBuilder {
     /// # Errors
     ///
     /// Returns an error if required fields (issuer, subject, audience) are missing.
-    pub fn build(self) -> Result<OidcIdTokenClaims, &'static str> {
+    pub fn build(self) -> Result<OidcIdTokenClaims, ClaimsBuildError> {
         let now = jiff::Timestamp::now();
         let exp = now.as_second() + i64::try_from(self.valid_for_seconds).unwrap_or(28800);
 
         Ok(OidcIdTokenClaims {
-            iss: self.issuer.ok_or("issuer is required")?,
-            sub: self.subject.clone().ok_or("subject is required")?,
-            aud: self.audience.ok_or("audience is required")?,
+            iss: self
+                .issuer
+                .ok_or(ClaimsBuildError::MissingField("issuer"))?,
+            sub: self
+                .subject
+                .clone()
+                .ok_or(ClaimsBuildError::MissingField("subject"))?,
+            aud: self
+                .audience
+                .ok_or(ClaimsBuildError::MissingField("audience"))?,
             exp,
             iat: now.as_second(),
-            email: self.email.or(self.subject).ok_or("email is required")?,
+            jti: uuid::Uuid::now_v7().to_string(),
+            email: self
+                .email
+                .or(self.subject)
+                .ok_or(ClaimsBuildError::MissingField("email"))?,
             email_verified: true,
             hardware_verified: true,
             hardware_aaguid: self.hardware_aaguid,
@@ -156,6 +178,7 @@ impl Default for OidcIdTokenClaimsBuilder {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -179,6 +202,9 @@ mod tests {
             assert!(claims.email_verified);
             assert!(claims.hardware_verified);
             assert!(claims.hardware_aaguid.is_some());
+            assert!(!claims.jti.is_empty());
+            // Verify jti is a valid UUID
+            assert!(uuid::Uuid::parse_str(&claims.jti).is_ok());
         }
     }
 
@@ -190,7 +216,10 @@ mod tests {
             .build();
 
         assert!(result.is_err());
-        assert_eq!(result.err(), Some("issuer is required"));
+        assert!(matches!(
+            result.err(),
+            Some(ClaimsBuildError::MissingField("issuer"))
+        ));
     }
 
     #[test]
@@ -201,7 +230,10 @@ mod tests {
             .build();
 
         assert!(result.is_err());
-        assert_eq!(result.err(), Some("subject is required"));
+        assert!(matches!(
+            result.err(),
+            Some(ClaimsBuildError::MissingField("subject"))
+        ));
     }
 
     #[test]
@@ -212,7 +244,10 @@ mod tests {
             .build();
 
         assert!(result.is_err());
-        assert_eq!(result.err(), Some("audience is required"));
+        assert!(matches!(
+            result.err(),
+            Some(ClaimsBuildError::MissingField("audience"))
+        ));
     }
 
     #[test]
@@ -241,6 +276,20 @@ mod tests {
             assert_eq!(claims.sub, "user@example.com");
             assert_eq!(claims.aud, "https://vouch.example.com"); // issuer == audience for AWS
             assert_eq!(claims.email, "user@example.com");
+            assert!(!claims.jti.is_empty());
         }
+    }
+
+    #[test]
+    fn test_jti_is_unique_per_build() {
+        let claims1 =
+            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
+                .build()
+                .unwrap();
+        let claims2 =
+            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
+                .build()
+                .unwrap();
+        assert_ne!(claims1.jti, claims2.jti);
     }
 }
