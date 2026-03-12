@@ -280,12 +280,13 @@ async fn create_idc_sso_token(
     let ssooidc_client = aws_sdk_ssooidc::Client::new(&ssooidc_config);
 
     let app_arn_str = application_arn.to_string();
+    // Omit scope — Identity Center grants all scopes configured on the
+    // application, including `sso:account:access` (needed for ListAccounts).
     let token_response = ssooidc_client
         .create_token_with_iam()
         .client_id(&app_arn_str)
         .grant_type("urn:ietf:params:oauth:grant-type:jwt-bearer")
         .assertion(id_token)
-        .scope("sso:account:access")
         .send()
         .await
         .map_err(|e| classify_create_token_error(&e))?;
@@ -293,6 +294,12 @@ async fn create_idc_sso_token(
     let sso_access_token = token_response
         .access_token()
         .ok_or_else(|| AwsIdcError::CreateToken("No access token in response".to_string()))?;
+
+    let granted_scopes = token_response.scope();
+    tracing::info!(
+        "CreateTokenWithIAM granted scopes: {:?}",
+        granted_scopes,
+    );
 
     let identity_context = token_response
         .aws_additional_details()
