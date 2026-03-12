@@ -154,23 +154,32 @@ impl AuthorizationDetails {
     pub fn is_subset_of(&self, granted: &Self) -> bool {
         self.0.iter().all(|requested| granted.0.contains(requested))
     }
+}
 
-    /// Convert to a `serde_json::Value` (a JSON array).
-    #[must_use]
-    pub fn to_json_value(&self) -> serde_json::Value {
-        serde_json::Value::Array(self.0.iter().map(|d| d.0.clone()).collect())
+impl TryFrom<&serde_json::Value> for AuthorizationDetails {
+    type Error = ();
+
+    /// Reconstruct from a `serde_json::Value` that was previously
+    /// validated and stored.
+    ///
+    /// Expects a JSON array of objects with `type` fields.
+    fn try_from(value: &serde_json::Value) -> Result<Self, Self::Error> {
+        let arr = value.as_array().ok_or(())?;
+        let details: Vec<AuthorizationDetail> = arr
+            .iter()
+            .filter_map(|item| {
+                let obj = item.as_object()?;
+                obj.get("type")?.as_str()?;
+                Some(AuthorizationDetail(item.clone()))
+            })
+            .collect();
+        Ok(Self(details))
     }
+}
 
-    /// Serialize to a JSON string.
-    ///
-    /// # Errors
-    ///
-    /// Returns `ServiceError::Internal` if serialization fails (shouldn't happen
-    /// for already-validated values).
-    pub fn to_json_string(&self) -> ServiceResult<String> {
-        serde_json::to_string(&self.to_json_value()).map_err(|e| {
-            ServiceError::Internal(format!("Failed to serialize authorization_details: {e}"))
-        })
+impl From<&AuthorizationDetails> for serde_json::Value {
+    fn from(ad: &AuthorizationDetails) -> Self {
+        Self::Array(ad.0.iter().map(|d| d.0.clone()).collect())
     }
 }
 
@@ -358,11 +367,11 @@ mod tests {
     }
 
     #[test]
-    fn test_round_trip_serialize_deserialize() {
+    fn test_round_trip_via_json_value() {
         let raw = r#"[{"type":"payment","amount":100}]"#;
         let details = AuthorizationDetails::parse(raw).unwrap();
-        let json_str = details.to_json_string().unwrap();
-        let round_tripped = AuthorizationDetails::parse(&json_str).unwrap();
+        let value = serde_json::Value::from(&details);
+        let round_tripped = AuthorizationDetails::try_from(&value).unwrap();
         assert_eq!(details, round_tripped);
     }
 
@@ -370,7 +379,7 @@ mod tests {
     fn test_to_json_value() {
         let raw = r#"[{"type":"t"}]"#;
         let details = AuthorizationDetails::parse(raw).unwrap();
-        let value = details.to_json_value();
+        let value = serde_json::Value::from(&details);
         assert!(value.is_array());
         assert_eq!(value.as_array().unwrap().len(), 1);
     }

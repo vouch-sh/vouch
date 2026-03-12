@@ -450,7 +450,10 @@ async fn handle_authorization_code_grant(
             id_token: Some(result.id_token),
             scope: Some(result.scope),
             email: None,
-            authorization_details: result.authorization_details.map(|ad| ad.to_json_value()),
+            authorization_details: result
+                .authorization_details
+                .as_ref()
+                .map(serde_json::Value::from),
         }),
         Err(e) => e.into_oauth_response().into_response(),
     }
@@ -632,7 +635,10 @@ async fn handle_token_exchange_grant(
             token_type: result.token_type,
             expires_in: result.expires_in,
             scope: result.scope,
-            authorization_details: result.authorization_details.map(|ad| ad.to_json_value()),
+            authorization_details: result
+                .authorization_details
+                .as_ref()
+                .map(serde_json::Value::from),
         }),
         Err(e) => e.into_oauth_response().into_response(),
     }

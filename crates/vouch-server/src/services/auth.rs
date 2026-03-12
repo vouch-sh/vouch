@@ -276,8 +276,8 @@ pub struct CreateOAuthTokenParams<'a> {
     pub hardware_verified: bool,
     /// Session purpose for the database record.
     pub session_purpose: SessionPurpose,
-    /// RFC 9396: Rich authorization details (JSON string, stored in session).
-    pub authorization_details: Option<&'a str>,
+    /// RFC 9396: Rich authorization details (JSON array, stored in session).
+    pub authorization_details: Option<&'a serde_json::Value>,
 }
 
 /// Result of creating a session token.

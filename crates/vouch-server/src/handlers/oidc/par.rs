@@ -282,21 +282,7 @@ pub async fn par(
         // Store the pushed authorization request
         let scope_str = validated.scope().to_space_separated();
         let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
-        let ad_json = match validated
-            .authorization_details()
-            .map(|ad| ad.to_json_string())
-            .transpose()
-        {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::error!("Failed to serialize authorization_details: {e}");
-                return par_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    "Internal error processing authorization_details",
-                );
-            }
-        };
+        let ad_value = validated.authorization_details_value();
         let create_params = CreateParParams {
             client_id: validated.client_id(),
             response_type: "code",
@@ -311,7 +297,7 @@ pub async fn par(
             max_age: max_age_i64,
             prompt: validated.prompt().map(|p| p.as_str()),
             dpop_jkt,
-            authorization_details: ad_json.as_deref(),
+            authorization_details: ad_value.as_ref(),
         };
 
         return match db::create_pushed_authorization_request(&state.store, create_params).await {
@@ -403,21 +389,7 @@ pub async fn par(
     // Store the pushed authorization request
     let scope_str = validated.scope().to_space_separated();
     let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
-    let ad_json = match validated
-        .authorization_details()
-        .map(|ad| ad.to_json_string())
-        .transpose()
-    {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::error!("Failed to serialize authorization_details: {e}");
-            return par_error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "server_error",
-                "Internal error processing authorization_details",
-            );
-        }
-    };
+    let ad_value = validated.authorization_details_value();
     let create_params = CreateParParams {
         client_id: validated.client_id(),
         response_type: "code",
@@ -432,7 +404,7 @@ pub async fn par(
         max_age: max_age_i64,
         prompt: validated.prompt().map(|p| p.as_str()),
         dpop_jkt,
-        authorization_details: ad_json.as_deref(),
+        authorization_details: ad_value.as_ref(),
     };
 
     match db::create_pushed_authorization_request(&state.store, create_params).await {

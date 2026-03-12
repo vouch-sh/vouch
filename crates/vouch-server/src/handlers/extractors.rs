@@ -113,19 +113,14 @@ impl<S: Send + Sync> FromRequestParts<S> for ClientInfo {
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|ci| ci.0.ip().to_canonical());
 
-        let mut info = Self::from_headers(&parts.headers);
+        let mut info = Self::from(&parts.headers);
         info.client_ip = client_ip;
         Ok(info)
     }
 }
 
-impl ClientInfo {
-    /// Extract client metadata from HTTP headers.
-    ///
-    /// Extracts User-Agent and `Vouch-Client-*` headers. Does NOT extract
-    /// `client_ip` — that comes from the TCP socket in `FromRequestParts`.
-    #[must_use]
-    pub fn from_headers(headers: &HeaderMap) -> Self {
+impl From<&HeaderMap> for ClientInfo {
+    fn from(headers: &HeaderMap) -> Self {
         let user_agent = headers
             .get("user-agent")
             .and_then(|h| h.to_str().ok())
@@ -180,7 +175,7 @@ mod tests {
             HeaderValue::from_static("vouch-cli/0.1.0 (macos; aarch64)"),
         );
 
-        let info = ClientInfo::from_headers(&headers);
+        let info = ClientInfo::from(&headers);
         assert_eq!(
             info.user_agent,
             Some("vouch-cli/0.1.0 (macos; aarch64)".to_string())
@@ -190,7 +185,7 @@ mod tests {
     #[test]
     fn test_extract_no_headers() {
         let headers = HeaderMap::new();
-        let info = ClientInfo::from_headers(&headers);
+        let info = ClientInfo::from(&headers);
         assert_eq!(info.client_ip, None);
         assert_eq!(info.user_agent, None);
         assert_eq!(info.client_hostname, None);
@@ -214,7 +209,7 @@ mod tests {
         headers.insert("vouch-client-arch", HeaderValue::from_static("aarch64"));
         headers.insert("vouch-client-version", HeaderValue::from_static("1.2.3"));
 
-        let info = ClientInfo::from_headers(&headers);
+        let info = ClientInfo::from(&headers);
         assert_eq!(info.client_hostname.as_deref(), Some("dev.local"));
         assert_eq!(info.client_os.as_deref(), Some("macos"));
         assert_eq!(info.client_arch.as_deref(), Some("aarch64"));
@@ -230,7 +225,7 @@ mod tests {
             HeaderValue::from_str(&long_value).unwrap(),
         );
 
-        let info = ClientInfo::from_headers(&headers);
+        let info = ClientInfo::from(&headers);
         assert_eq!(info.client_os, None);
     }
 
@@ -239,7 +234,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("vouch-client-os", HeaderValue::from_static(""));
 
-        let info = ClientInfo::from_headers(&headers);
+        let info = ClientInfo::from(&headers);
         assert_eq!(info.client_os, None);
     }
 
@@ -248,7 +243,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("vouch-client-os", HeaderValue::from_static("  macos  "));
 
-        let info = ClientInfo::from_headers(&headers);
+        let info = ClientInfo::from(&headers);
         assert_eq!(info.client_os.as_deref(), Some("macos"));
     }
 
@@ -261,7 +256,7 @@ mod tests {
             "vouch-client-hostname",
             HeaderValue::from_str(&hostname).unwrap(),
         );
-        let info = ClientInfo::from_headers(&headers);
+        let info = ClientInfo::from(&headers);
         assert_eq!(info.client_hostname.as_deref(), Some(hostname.as_str()));
 
         // One over should be rejected
@@ -271,7 +266,7 @@ mod tests {
             "vouch-client-hostname",
             HeaderValue::from_str(&too_long).unwrap(),
         );
-        let info2 = ClientInfo::from_headers(&headers2);
+        let info2 = ClientInfo::from(&headers2);
         assert_eq!(info2.client_hostname, None);
     }
 
@@ -284,7 +279,7 @@ mod tests {
             HeaderValue::from_bytes(b"mac\tos").unwrap(),
         );
 
-        let info = ClientInfo::from_headers(&headers);
+        let info = ClientInfo::from(&headers);
         assert_eq!(info.client_os, None);
     }
 
@@ -296,7 +291,7 @@ mod tests {
             HeaderValue::from_static("1.2.3-beta+build.456"),
         );
 
-        let info = ClientInfo::from_headers(&headers);
+        let info = ClientInfo::from(&headers);
         assert_eq!(info.client_version.as_deref(), Some("1.2.3-beta+build.456"));
     }
 

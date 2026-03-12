@@ -3,6 +3,7 @@
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::db::document_type::{DocumentType, IndexEntry};
 
@@ -28,9 +29,9 @@ pub struct SessionDoc {
     pub authenticator_id: Option<String>,
     pub session_type: SessionPurpose,
     pub expires_at: Timestamp,
-    /// RFC 9396: Rich authorization details (JSON string, stored opaquely).
+    /// RFC 9396: Rich authorization details (JSON array).
     #[serde(default)]
-    pub authorization_details: Option<String>,
+    pub authorization_details: Option<Value>,
 }
 
 impl DocumentType for SessionDoc {

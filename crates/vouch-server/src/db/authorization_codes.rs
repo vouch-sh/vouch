@@ -14,7 +14,7 @@ pub async fn store_authorization_code(
     client_id: &str,
     user_id: &str,
     expires_at: Timestamp,
-    authorization_details: Option<&str>,
+    authorization_details: Option<&serde_json::Value>,
 ) -> Result<()> {
     let doc = AuthorizationCodeDoc {
         code_hash: code_hash.to_string(),
@@ -22,7 +22,7 @@ pub async fn store_authorization_code(
         user_id: user_id.to_string(),
         expires_at,
         consumed_at: None,
-        authorization_details: authorization_details.map(String::from),
+        authorization_details: authorization_details.cloned(),
     };
     store.insert(&doc).await?;
     Ok(())
@@ -107,7 +107,7 @@ pub async fn get_consumed_code_owner(
 pub async fn get_authorization_code_details(
     store: &DocumentStore,
     code_hash: &str,
-) -> Result<Option<String>> {
+) -> Result<Option<serde_json::Value>> {
     let doc = store
         .find_one::<AuthorizationCodeDoc>("code_hash", code_hash)
         .await?;

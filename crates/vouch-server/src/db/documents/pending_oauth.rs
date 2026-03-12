@@ -3,6 +3,7 @@
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::db::document_type::{DocumentType, IndexEntry};
 
@@ -29,9 +30,9 @@ pub struct PendingOAuthAuthDoc {
     pub prompt: Option<String>,
     /// RFC 9449 DPoP key thumbprint.
     pub dpop_jkt: Option<String>,
-    /// RFC 9396: Rich authorization details (JSON string).
+    /// RFC 9396: Rich authorization details (JSON array).
     #[serde(default)]
-    pub authorization_details: Option<String>,
+    pub authorization_details: Option<Value>,
 }
 
 impl DocumentType for PendingOAuthAuthDoc {

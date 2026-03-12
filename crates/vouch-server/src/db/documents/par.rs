@@ -3,6 +3,7 @@
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::db::document_type::{DocumentType, IndexEntry};
 
@@ -30,9 +31,9 @@ pub struct PushedAuthorizationRequestDoc {
     pub dpop_jkt: Option<String>,
     pub expires_at: Timestamp,
     pub consumed_at: Option<Timestamp>,
-    /// RFC 9396: Rich authorization details (JSON string).
+    /// RFC 9396: Rich authorization details (JSON array).
     #[serde(default)]
-    pub authorization_details: Option<String>,
+    pub authorization_details: Option<Value>,
 }
 
 impl DocumentType for PushedAuthorizationRequestDoc {

@@ -51,18 +51,20 @@ impl PreconfiguredSlug {
             Self::OsRecency => "os_recency",
         }
     }
+}
 
-    /// Parse a slug string into a `PreconfiguredSlug`.
-    #[must_use]
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for PreconfiguredSlug {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "disk_encryption" => Some(Self::DiskEncryption),
-            "firewall" => Some(Self::Firewall),
-            "screen_lock" => Some(Self::ScreenLock),
-            "endpoint_protection" => Some(Self::EndpointProtection),
-            "platform_integrity" => Some(Self::PlatformIntegrity),
-            "os_recency" => Some(Self::OsRecency),
-            _ => None,
+            "disk_encryption" => Ok(Self::DiskEncryption),
+            "firewall" => Ok(Self::Firewall),
+            "screen_lock" => Ok(Self::ScreenLock),
+            "endpoint_protection" => Ok(Self::EndpointProtection),
+            "platform_integrity" => Ok(Self::PlatformIntegrity),
+            "os_recency" => Ok(Self::OsRecency),
+            _ => Err(format!("unknown preconfigured slug: {s}")),
         }
     }
 }
@@ -157,7 +159,7 @@ pub const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
 /// Check if a slug string is a valid preconfigured policy.
 #[must_use]
 pub fn is_valid_preconfigured_slug(slug: &str) -> bool {
-    PreconfiguredSlug::from_str(slug).is_some()
+    slug.parse::<PreconfiguredSlug>().is_ok()
 }
 
 // ============================================================
@@ -553,7 +555,7 @@ pub fn remediation_for_slug(slug: PreconfiguredSlug, os: Option<&str>) -> String
 pub async fn evaluate_posture_policies(
     store: &DocumentStore,
     org_id: &str,
-    authorization_details_json: Option<&str>,
+    authorization_details: Option<&serde_json::Value>,
 ) -> ServiceResult<()> {
     // Load active preconfigured slugs
     let active_slugs = db::get_active_preconfigured_slugs(store, org_id)
@@ -571,7 +573,7 @@ pub async fn evaluate_posture_policies(
     }
 
     // Parse device posture from authorization_details
-    let posture = extract_device_posture(authorization_details_json)?;
+    let posture = extract_device_posture(authorization_details)?;
 
     let ctx = build_cel_context(&posture);
     let os = posture.os.as_ref().map(|o| o.as_str());
@@ -584,7 +586,7 @@ pub async fn evaluate_posture_policies(
     );
     let compiled = &*COMPILED_PRECONFIGURED;
     for slug_str in &active_slugs {
-        if let Some(slug) = PreconfiguredSlug::from_str(slug_str)
+        if let Ok(slug) = slug_str.parse::<PreconfiguredSlug>()
             && let Some(policy) = PRECONFIGURED_POLICIES.iter().find(|p| p.slug == slug)
         {
             let passed = compiled
@@ -635,25 +637,25 @@ pub async fn evaluate_posture_policies(
     Ok(())
 }
 
-/// Extract `DevicePosture` from the `authorization_details` JSON string.
+/// Extract `DevicePosture` from the `authorization_details` JSON value.
 ///
 /// Looks for an entry with `type: "device_posture"` in the RFC 9396 array.
-fn extract_device_posture(ad_json: Option<&str>) -> ServiceResult<DevicePosture> {
-    let json = ad_json.ok_or_else(|| {
+fn extract_device_posture(ad_value: Option<&serde_json::Value>) -> ServiceResult<DevicePosture> {
+    let value = ad_value.ok_or_else(|| {
         ServiceError::oauth(
             OAuthErrorCode::AccessDenied,
             "Device posture data is required by organization policy",
         )
     })?;
 
-    let entries: Vec<serde_json::Value> = serde_json::from_str(json).map_err(|e| {
+    let entries = value.as_array().ok_or_else(|| {
         ServiceError::oauth(
             OAuthErrorCode::AccessDenied,
-            format!("Invalid authorization_details format: {e}"),
+            "Invalid authorization_details format: expected JSON array",
         )
     })?;
 
-    for entry in &entries {
+    for entry in entries {
         let type_name = entry.get("type").and_then(serde_json::Value::as_str);
         if type_name == Some(vouch_common::posture::POSTURE_TYPE) {
             let mut posture: DevicePosture =
@@ -915,14 +917,14 @@ mod tests {
     #[test]
     fn test_preconfigured_slug_round_trip() {
         assert_eq!(
-            PreconfiguredSlug::from_str("disk_encryption"),
-            Some(PreconfiguredSlug::DiskEncryption)
+            "disk_encryption".parse::<PreconfiguredSlug>(),
+            Ok(PreconfiguredSlug::DiskEncryption)
         );
         assert_eq!(
-            PreconfiguredSlug::from_str("os_recency"),
-            Some(PreconfiguredSlug::OsRecency)
+            "os_recency".parse::<PreconfiguredSlug>(),
+            Ok(PreconfiguredSlug::OsRecency)
         );
-        assert_eq!(PreconfiguredSlug::from_str("custom"), None);
+        assert!("custom".parse::<PreconfiguredSlug>().is_err());
         assert_eq!(
             PreconfiguredSlug::DiskEncryption.as_str(),
             "disk_encryption"
@@ -985,8 +987,11 @@ mod tests {
 
     #[test]
     fn test_extract_device_posture_from_ad() {
-        let json = r#"[{"type":"device_posture","posture_version":1,"os":"macos","disk_encryption_enabled":true}]"#;
-        let posture = extract_device_posture(Some(json)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(
+            r#"[{"type":"device_posture","posture_version":1,"os":"macos","disk_encryption_enabled":true}]"#,
+        )
+        .unwrap();
+        let posture = extract_device_posture(Some(&value)).unwrap();
         assert_eq!(posture.os, Some(OperatingSystem::MacOs));
         assert_eq!(posture.disk_encryption_enabled, Some(true));
     }
@@ -999,8 +1004,8 @@ mod tests {
 
     #[test]
     fn test_extract_device_posture_no_posture_entry() {
-        let json = r#"[{"type":"other_thing"}]"#;
-        let result = extract_device_posture(Some(json));
+        let value: serde_json::Value = serde_json::from_str(r#"[{"type":"other_thing"}]"#).unwrap();
+        let result = extract_device_posture(Some(&value));
         assert!(result.is_err());
     }
 
