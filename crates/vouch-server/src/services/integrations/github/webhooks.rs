@@ -110,10 +110,8 @@ pub enum WebhookEvent {
     Unknown,
 }
 
-impl WebhookEvent {
-    /// Parse event type from X-GitHub-Event header.
-    #[must_use]
-    pub fn from_header(header: &str) -> Self {
+impl From<&str> for WebhookEvent {
+    fn from(header: &str) -> Self {
         match header {
             "installation" => Self::Installation,
             "installation_repositories" => Self::InstallationRepositories,
@@ -494,14 +492,14 @@ mod tests {
     #[test]
     fn test_webhook_event_from_header() {
         assert_eq!(
-            WebhookEvent::from_header("installation"),
+            WebhookEvent::from("installation"),
             WebhookEvent::Installation
         );
         assert_eq!(
-            WebhookEvent::from_header("installation_repositories"),
+            WebhookEvent::from("installation_repositories"),
             WebhookEvent::InstallationRepositories
         );
-        assert_eq!(WebhookEvent::from_header("push"), WebhookEvent::Unknown);
-        assert_eq!(WebhookEvent::from_header(""), WebhookEvent::Unknown);
+        assert_eq!(WebhookEvent::from("push"), WebhookEvent::Unknown);
+        assert_eq!(WebhookEvent::from(""), WebhookEvent::Unknown);
     }
 }

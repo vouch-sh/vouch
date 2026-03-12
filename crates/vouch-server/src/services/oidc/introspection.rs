@@ -134,21 +134,8 @@ pub async fn introspect_token(
         return Ok(IntrospectionResult::inactive());
     }
 
-    // RFC 9396: Deserialize authorization_details from session.
-    let authorization_details = match session.authorization_details.as_deref() {
-        Some(ad) => match serde_json::from_str(ad) {
-            Ok(v) => Some(v),
-            Err(e) => {
-                tracing::warn!(
-                    "Failed to deserialize authorization_details \
-                     for session {}: {e}",
-                    session.id
-                );
-                None
-            }
-        },
-        None => None,
-    };
+    // RFC 9396: authorization_details from session (already a Value).
+    let authorization_details = session.authorization_details;
 
     // RFC 9449 §7: DPoP-bound tokens report token_type "DPoP" and include cnf
     let is_dpop = claims.cnf.is_some();

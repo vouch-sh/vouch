@@ -32,8 +32,8 @@ pub struct PendingOAuthAuthorization {
     pub prompt: Option<String>,
     /// RFC 9449 / FAPI 2.0: DPoP key thumbprint.
     pub dpop_jkt: Option<String>,
-    /// RFC 9396: Rich authorization details (JSON string).
-    pub authorization_details: Option<String>,
+    /// RFC 9396: Rich authorization details (JSON array).
+    pub authorization_details: Option<serde_json::Value>,
 }
 
 impl From<Document<PendingOAuthAuthDoc>> for PendingOAuthAuthorization {
@@ -77,8 +77,8 @@ pub struct CreatePendingOAuthParams<'a> {
     pub max_age: Option<i64>,
     pub prompt: Option<&'a str>,
     pub dpop_jkt: Option<&'a str>,
-    /// RFC 9396: Rich authorization details (JSON string).
-    pub authorization_details: Option<&'a str>,
+    /// RFC 9396: Rich authorization details (JSON array).
+    pub authorization_details: Option<&'a serde_json::Value>,
 }
 
 /// Create a pending OAuth authorization.
@@ -107,7 +107,7 @@ pub async fn create_pending_oauth_authorization(
         max_age: params.max_age,
         prompt: params.prompt.map(String::from),
         dpop_jkt: params.dpop_jkt.map(String::from),
-        authorization_details: params.authorization_details.map(String::from),
+        authorization_details: params.authorization_details.cloned(),
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)

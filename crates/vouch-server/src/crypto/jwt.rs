@@ -73,12 +73,12 @@ impl JwtType {
             _ => None,
         }
     }
+}
 
-    /// Create a JWT header with the `typ` field set.
-    #[must_use]
-    pub fn to_header(self) -> Header {
-        Header {
-            typ: Some(self.as_header_str().to_string()),
+impl From<JwtType> for Header {
+    fn from(jwt_type: JwtType) -> Self {
+        Self {
+            typ: Some(jwt_type.as_header_str().to_string()),
             ..Default::default()
         }
     }
@@ -422,7 +422,7 @@ pub fn encode_state_token<T: Serialize>(
     secret: &[u8],
 ) -> Result<String, jsonwebtoken::errors::Error> {
     jsonwebtoken::encode(
-        &jwt_type.to_header(),
+        &Header::from(jwt_type),
         claims,
         &EncodingKey::from_secret(secret),
     )

@@ -269,17 +269,14 @@ pub async fn exchange_fido2_assertion(
         .map(AuthorizationDetails::parse)
         .transpose()?;
 
-    let ad_json_owned = validated_ad
-        .as_ref()
-        .map(|ad| ad.to_json_string())
-        .transpose()?;
+    let ad_value = validated_ad.as_ref().map(serde_json::Value::from);
 
     // 9b. Evaluate device posture policies (if org has active policies)
     if let Some(ref org_id) = user.org_id {
         crate::services::posture::evaluate_posture_policies(
             &state.store,
             org_id,
-            ad_json_owned.as_deref(),
+            ad_value.as_ref(),
         )
         .await?;
     }
@@ -309,7 +306,7 @@ pub async fn exchange_fido2_assertion(
             acr: Some(ACR_AAL3.to_string()),
             hardware_verified: true,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
-            authorization_details: ad_json_owned.as_deref(),
+            authorization_details: ad_value.as_ref(),
         },
     )
     .await?;
@@ -326,6 +323,6 @@ pub async fn exchange_fido2_assertion(
         expires_in: session_result.expires_in,
         scope: Some(scope),
         email: user.email,
-        authorization_details: validated_ad.map(|ad| ad.to_json_value()),
+        authorization_details: validated_ad.as_ref().map(serde_json::Value::from),
     })
 }

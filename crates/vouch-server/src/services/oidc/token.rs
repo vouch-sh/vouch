@@ -356,17 +356,16 @@ pub async fn exchange_authorization_code(
     }
 
     // RFC 9396: Retrieve authorization_details from server-side storage.
-    let granted_ad_json = db::get_authorization_code_details(&state.store, &code_hash)
+    let granted_ad_value = db::get_authorization_code_details(&state.store, &code_hash)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?;
-    let granted_ad = granted_ad_json
-        .as_deref()
-        .map(AuthorizationDetails::parse)
-        .transpose()?;
+    let granted_ad = granted_ad_value
+        .as_ref()
+        .and_then(|v| AuthorizationDetails::try_from(v).ok());
 
     // RFC 9396 Section 6: If the token request includes authorization_details,
     // it MUST be a subset of the granted details (downscoping).
-    let (effective_ad, effective_ad_json_owned);
+    let (effective_ad, effective_ad_value);
     if let Some(requested_raw) = params.authorization_details {
         let requested_ad = AuthorizationDetails::parse(requested_raw)?;
         match &granted_ad {
@@ -387,13 +386,12 @@ pub async fn exchange_authorization_code(
                 ));
             }
         }
-        effective_ad_json_owned = Some(requested_ad.to_json_string()?);
+        effective_ad_value = Some(serde_json::Value::from(&requested_ad));
         effective_ad = Some(requested_ad);
     } else {
-        effective_ad_json_owned = granted_ad_json;
+        effective_ad_value = granted_ad_value;
         effective_ad = granted_ad;
     }
-    let effective_ad_json = effective_ad_json_owned.as_deref();
 
     // RFC 8707: Resource narrowing — determine the audience for the access token.
     // The resource from the auth code (granted at authorization time) takes precedence.
@@ -436,7 +434,7 @@ pub async fn exchange_authorization_code(
             acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
             hardware_verified: true,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
-            authorization_details: effective_ad_json,
+            authorization_details: effective_ad_value.as_ref(),
         },
     )
     .await?;

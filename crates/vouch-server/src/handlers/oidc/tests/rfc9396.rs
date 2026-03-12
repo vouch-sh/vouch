@@ -16,7 +16,8 @@ async fn test_authorization_details_in_token_response() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_json = r#"[{"type":"payment_initiation","amount":100}]"#;
+    let ad_value: serde_json::Value =
+        serde_json::from_str(r#"[{"type":"payment_initiation","amount":100}]"#).unwrap();
     let scope_set = ScopeSet::parse("openid email");
 
     let code = issue_authorization_code(
@@ -37,7 +38,7 @@ async fn test_authorization_details_in_token_response() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: Some(ad_json),
+            authorization_details: Some(&ad_value),
         },
     )
     .await
@@ -136,7 +137,8 @@ async fn test_token_request_downscoping_subset_accepted() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let granted = r#"[{"type":"a","v":1},{"type":"b","v":2}]"#;
+    let granted: serde_json::Value =
+        serde_json::from_str(r#"[{"type":"a","v":1},{"type":"b","v":2}]"#).unwrap();
     let scope_set = ScopeSet::parse("openid");
 
     let code = issue_authorization_code(
@@ -157,7 +159,7 @@ async fn test_token_request_downscoping_subset_accepted() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: Some(granted),
+            authorization_details: Some(&granted),
         },
     )
     .await
@@ -197,7 +199,7 @@ async fn test_token_request_downscoping_non_subset_rejected() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let granted = r#"[{"type":"a","v":1}]"#;
+    let granted: serde_json::Value = serde_json::from_str(r#"[{"type":"a","v":1}]"#).unwrap();
     let scope_set = ScopeSet::parse("openid");
 
     let code = issue_authorization_code(
@@ -218,7 +220,7 @@ async fn test_token_request_downscoping_non_subset_rejected() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: Some(granted),
+            authorization_details: Some(&granted),
         },
     )
     .await
@@ -316,6 +318,7 @@ async fn test_invalid_authorization_details_json() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let scope_set = ScopeSet::parse("openid");
+    let ad_value: serde_json::Value = serde_json::from_str(r#"[{"type":"a"}]"#).unwrap();
     let code = issue_authorization_code(
         &state,
         AuthorizationCodeParams {
@@ -334,7 +337,7 @@ async fn test_invalid_authorization_details_json() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: Some(r#"[{"type":"a"}]"#),
+            authorization_details: Some(&ad_value),
         },
     )
     .await
@@ -371,6 +374,7 @@ async fn test_authorization_details_must_be_array() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
     let scope_set = ScopeSet::parse("openid");
+    let ad_value: serde_json::Value = serde_json::from_str(r#"[{"type":"a"}]"#).unwrap();
     let code = issue_authorization_code(
         &state,
         AuthorizationCodeParams {
@@ -389,7 +393,7 @@ async fn test_authorization_details_must_be_array() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: Some(r#"[{"type":"a"}]"#),
+            authorization_details: Some(&ad_value),
         },
     )
     .await
@@ -430,7 +434,8 @@ async fn test_introspection_includes_authorization_details() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_json = r#"[{"type":"credential","format":"jwt_vc"}]"#;
+    let ad_value: serde_json::Value =
+        serde_json::from_str(r#"[{"type":"credential","format":"jwt_vc"}]"#).unwrap();
     let scope_set = ScopeSet::parse("openid email");
 
     let code = issue_authorization_code(
@@ -451,7 +456,7 @@ async fn test_introspection_includes_authorization_details() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: Some(ad_json),
+            authorization_details: Some(&ad_value),
         },
     )
     .await
@@ -535,7 +540,8 @@ async fn test_token_exchange_inherits_authorization_details() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_json = r#"[{"type":"api_access","actions":["read"]}]"#;
+    let ad_value: serde_json::Value =
+        serde_json::from_str(r#"[{"type":"api_access","actions":["read"]}]"#).unwrap();
     let scope_set = ScopeSet::parse("openid email");
 
     let code = issue_authorization_code(
@@ -556,7 +562,7 @@ async fn test_token_exchange_inherits_authorization_details() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: Some(ad_json),
+            authorization_details: Some(&ad_value),
         },
     )
     .await
@@ -612,7 +618,8 @@ async fn test_token_exchange_narrows_authorization_details() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_json = r#"[{"type":"x","v":1},{"type":"y","v":2}]"#;
+    let ad_value: serde_json::Value =
+        serde_json::from_str(r#"[{"type":"x","v":1},{"type":"y","v":2}]"#).unwrap();
     let scope_set = ScopeSet::parse("openid");
 
     let code = issue_authorization_code(
@@ -633,7 +640,7 @@ async fn test_token_exchange_narrows_authorization_details() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: Some(ad_json),
+            authorization_details: Some(&ad_value),
         },
     )
     .await
@@ -689,7 +696,7 @@ async fn test_token_exchange_narrow_non_subset_rejected() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_json = r#"[{"type":"x"}]"#;
+    let ad_value: serde_json::Value = serde_json::from_str(r#"[{"type":"x"}]"#).unwrap();
     let scope_set = ScopeSet::parse("openid");
 
     let code = issue_authorization_code(
@@ -710,7 +717,7 @@ async fn test_token_exchange_narrow_non_subset_rejected() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: Some(ad_json),
+            authorization_details: Some(&ad_value),
         },
     )
     .await
@@ -764,7 +771,10 @@ async fn test_multiple_authorization_detail_entries() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_json = r#"[{"type":"payment","amount":50},{"type":"account_info","actions":["list"]},{"type":"payment","amount":200}]"#;
+    let ad_value: serde_json::Value = serde_json::from_str(
+        r#"[{"type":"payment","amount":50},{"type":"account_info","actions":["list"]},{"type":"payment","amount":200}]"#,
+    )
+    .unwrap();
     let scope_set = ScopeSet::parse("openid email");
 
     let code = issue_authorization_code(
@@ -785,7 +795,7 @@ async fn test_multiple_authorization_detail_entries() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: Some(ad_json),
+            authorization_details: Some(&ad_value),
         },
     )
     .await
@@ -818,7 +828,8 @@ async fn test_scope_and_authorization_details_coexist() {
     let auth_id = create_test_authenticator(&state.store, &user.id).await;
     let client = create_test_oauth_client(&state.store, &user.id).await;
 
-    let ad_json = r#"[{"type":"payment","amount":100}]"#;
+    let ad_value: serde_json::Value =
+        serde_json::from_str(r#"[{"type":"payment","amount":100}]"#).unwrap();
     let scope_set = ScopeSet::parse("openid email");
 
     let code = issue_authorization_code(
@@ -839,7 +850,7 @@ async fn test_scope_and_authorization_details_coexist() {
             dpop_jkt: None,
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
-            authorization_details: Some(ad_json),
+            authorization_details: Some(&ad_value),
         },
     )
     .await

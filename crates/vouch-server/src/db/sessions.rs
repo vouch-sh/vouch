@@ -21,8 +21,8 @@ pub struct Session {
     pub expires_at: Timestamp,
     pub created_at: Timestamp,
     pub session_type: SessionPurpose,
-    /// RFC 9396: Rich authorization details (JSON string).
-    pub authorization_details: Option<String>,
+    /// RFC 9396: Rich authorization details (JSON array).
+    pub authorization_details: Option<serde_json::Value>,
 }
 
 impl From<Document<SessionDoc>> for Session {
@@ -55,7 +55,7 @@ pub async fn create_session(
     authenticator_id: Option<&str>,
     expires_at: Timestamp,
     session_type: SessionPurpose,
-    authorization_details: Option<&str>,
+    authorization_details: Option<&serde_json::Value>,
 ) -> Result<String> {
     let doc = SessionDoc {
         user_id: user_id.to_string(),
@@ -64,7 +64,7 @@ pub async fn create_session(
         authenticator_id: authenticator_id.map(String::from),
         session_type,
         expires_at,
-        authorization_details: authorization_details.map(String::from),
+        authorization_details: authorization_details.cloned(),
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)

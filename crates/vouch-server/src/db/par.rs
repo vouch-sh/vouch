@@ -41,8 +41,8 @@ pub struct PushedAuthorizationRequest {
     pub prompt: Option<String>,
     /// RFC 9449 / FAPI 2.0: DPoP key thumbprint bound at PAR time.
     pub dpop_jkt: Option<String>,
-    /// RFC 9396: Rich authorization details (JSON string).
-    pub authorization_details: Option<String>,
+    /// RFC 9396: Rich authorization details (JSON array).
+    pub authorization_details: Option<serde_json::Value>,
     pub created_at: Timestamp,
     pub expires_at: Timestamp,
     pub consumed_at: Option<Timestamp>,
@@ -95,8 +95,8 @@ pub struct CreateParParams<'a> {
     pub prompt: Option<&'a str>,
     /// RFC 9449 / FAPI 2.0: DPoP key thumbprint for authorization code binding.
     pub dpop_jkt: Option<&'a str>,
-    /// RFC 9396: Rich authorization details (JSON string).
-    pub authorization_details: Option<&'a str>,
+    /// RFC 9396: Rich authorization details (JSON array).
+    pub authorization_details: Option<&'a serde_json::Value>,
 }
 
 /// Generate a cryptographically random `request_uri` per RFC 9126 Section 2.2.
@@ -148,7 +148,7 @@ pub async fn create_pushed_authorization_request(
         dpop_jkt: params.dpop_jkt.map(String::from),
         expires_at,
         consumed_at: None,
-        authorization_details: params.authorization_details.map(String::from),
+        authorization_details: params.authorization_details.cloned(),
     };
 
     let result = store.insert(&doc).await?;

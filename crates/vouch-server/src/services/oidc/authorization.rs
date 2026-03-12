@@ -140,8 +140,8 @@ pub struct AuthorizationCodeParams<'a> {
     /// FAPI 2.0 clients use 60s; standard clients use 300s.
     /// Use `fapi::auth_code_lifetime_seconds(&client)` to compute the correct value.
     pub auth_code_lifetime_seconds: i64,
-    /// RFC 9396: Rich authorization details (JSON string for server-side storage).
-    pub authorization_details: Option<&'a str>,
+    /// RFC 9396: Rich authorization details (JSON value for server-side storage).
+    pub authorization_details: Option<&'a serde_json::Value>,
 }
 
 /// Authorization request parameters (from query string).
@@ -274,6 +274,14 @@ impl ValidatedAuthRequest {
         &self,
     ) -> Option<&super::authorization_details::AuthorizationDetails> {
         self.authorization_details.as_ref()
+    }
+
+    /// RFC 9396: Validated authorization details as a JSON value.
+    #[must_use]
+    pub fn authorization_details_value(&self) -> Option<serde_json::Value> {
+        self.authorization_details
+            .as_ref()
+            .map(serde_json::Value::from)
     }
 }
 

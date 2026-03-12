@@ -296,12 +296,13 @@ pub async fn exchange_token(
     let authenticator_id = subject_session.authenticator_id.as_deref();
 
     // RFC 9396: Inherit authorization_details from subject token session.
-    let inherited_ad = subject_session.authorization_details.as_deref();
-    let inherited_ad_parsed = inherited_ad.map(AuthorizationDetails::parse).transpose()?;
+    let inherited_ad_value = subject_session.authorization_details.as_ref();
+    let inherited_ad_parsed =
+        inherited_ad_value.and_then(|v| AuthorizationDetails::try_from(v).ok());
 
     // RFC 9396 Section 6: If the exchange request includes
     // authorization_details, it must be a subset of the inherited set.
-    let (effective_ad, effective_ad_json);
+    let (effective_ad, effective_ad_value);
     if let Some(requested_raw) = params.authorization_details {
         let requested_ad = AuthorizationDetails::parse(requested_raw)?;
         match &inherited_ad_parsed {
@@ -322,12 +323,11 @@ pub async fn exchange_token(
                 ));
             }
         }
-        let json = requested_ad.to_json_string()?;
+        effective_ad_value = Some(serde_json::Value::from(&requested_ad));
         effective_ad = Some(requested_ad);
-        effective_ad_json = Some(json);
     } else {
         effective_ad = inherited_ad_parsed;
-        effective_ad_json = inherited_ad.map(String::from);
+        effective_ad_value = inherited_ad_value.cloned();
     }
 
     // Generate the exchanged token as an RFC 9068 access token (ES256)
@@ -350,7 +350,7 @@ pub async fn exchange_token(
             acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
             hardware_verified: true,
             session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
-            authorization_details: effective_ad_json.as_deref(),
+            authorization_details: effective_ad_value.as_ref(),
         },
     )
     .await?;
