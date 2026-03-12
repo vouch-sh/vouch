@@ -8,7 +8,8 @@
 //! 3. `CreateTokenWithIAM` with bootstrap creds → SSO access token
 //! 4. `GetRoleCredentials` via the SSO portal → final AWS credentials
 //!
-//! The SSO access token never leaves the server.
+//! The SSO access token is returned to the CLI for local caching,
+//! never stored server-side.
 
 use std::sync::Arc;
 
@@ -115,10 +116,20 @@ pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResu
         .idc_bootstrap_role_arn
         .as_deref()
         .ok_or(AwsIdcError::MissingField("idc_bootstrap_role_arn"))?;
+    if !bootstrap_role_arn.starts_with("arn:") {
+        return Err(AwsIdcError::MissingField(
+            "idc_bootstrap_role_arn must be a valid ARN (starts with 'arn:')",
+        ));
+    }
     let application_arn = config
         .idc_application_arn
         .as_deref()
         .ok_or(AwsIdcError::MissingField("idc_application_arn"))?;
+    if !application_arn.starts_with("arn:") {
+        return Err(AwsIdcError::MissingField(
+            "idc_application_arn must be a valid ARN (starts with 'arn:')",
+        ));
+    }
     let idc_region = config
         .idc_region
         .as_deref()
@@ -170,15 +181,10 @@ pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResu
     let session_token = SecretString::from(sts_creds.session_token());
 
     let exp = sts_creds.expiration();
-    let exp_secs = exp.secs();
-    let exp_duration = if exp_secs <= 0 {
-        return Err(AwsIdcError::StsAssume(
-            "STS returned expired bootstrap credentials".to_string(),
-        ));
-    } else {
-        #[allow(clippy::cast_sign_loss)]
-        std::time::Duration::new(exp_secs as u64, exp.subsec_nanos())
-    };
+    let exp_secs = u64::try_from(exp.secs()).map_err(|_| {
+        AwsIdcError::StsAssume("STS returned expired bootstrap credentials".to_string())
+    })?;
+    let exp_duration = std::time::Duration::new(exp_secs, exp.subsec_nanos());
 
     let bootstrap_creds = aws_credential_types::Credentials::new(
         access_key.expose_secret(),
@@ -274,14 +280,27 @@ pub async fn discover_accounts_and_roles(
     let mut join_set = tokio::task::JoinSet::new();
 
     for account in &accounts {
+        let Some(account_id) = account.account_id() else {
+            tracing::warn!("ListAccounts returned entry with no account_id, skipping");
+            continue;
+        };
+        let account_name = account.account_name().unwrap_or(account_id).to_string();
+        let account_id = account_id.to_string();
+
         let client = sso_client.clone();
         let token = token_result.access_token.clone();
-        let account_id = account.account_id.clone();
-        let account_name = account.account_name.clone();
         let sem = semaphore.clone();
 
         join_set.spawn(async move {
-            let _permit = sem.acquire().await;
+            let Ok(_permit) = sem.acquire().await else {
+                return (
+                    account_id,
+                    account_name,
+                    Err(AwsIdcError::ListAccountRoles(
+                        "semaphore closed".to_string(),
+                    )),
+                );
+            };
             let result = list_account_roles_with_client(&client, &token, &account_id).await;
             (account_id, account_name, result)
         });
@@ -325,7 +344,7 @@ pub async fn discover_accounts_and_roles(
 async fn list_accounts_with_client(
     client: &aws_sdk_sso::Client,
     access_token: &SecretString,
-) -> Result<Vec<vouch_common::IdcAccount>, AwsIdcError> {
+) -> Result<Vec<aws_sdk_sso::types::AccountInfo>, AwsIdcError> {
     let mut accounts = Vec::new();
     let mut next_token: Option<String> = None;
 
@@ -342,12 +361,7 @@ async fn list_accounts_with_client(
             .await
             .map_err(|e| AwsIdcError::ListAccounts(format!("{e}")))?;
 
-        for acct in output.account_list() {
-            accounts.push(vouch_common::IdcAccount {
-                account_id: acct.account_id().unwrap_or_default().to_string(),
-                account_name: acct.account_name().unwrap_or_default().to_string(),
-            });
-        }
+        accounts.extend_from_slice(output.account_list());
 
         match output.next_token() {
             Some(t) if !t.is_empty() => next_token = Some(t.to_string()),
@@ -382,7 +396,13 @@ async fn list_account_roles_with_client(
             .map_err(|e| AwsIdcError::ListAccountRoles(format!("{e}")))?;
 
         for role in output.role_list() {
-            roles.push(role.role_name().unwrap_or_default().to_string());
+            let Some(name) = role.role_name() else {
+                tracing::warn!(
+                    "ListAccountRoles returned entry with no role_name for account {account_id}, skipping"
+                );
+                continue;
+            };
+            roles.push(name.to_string());
         }
 
         match output.next_token() {

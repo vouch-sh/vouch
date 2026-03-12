@@ -3,7 +3,7 @@
 
 use crate::AppState;
 use crate::db;
-use crate::db::documents::audit::GitHubCredentialAuditData;
+use crate::db::documents::audit::{GitHubCredentialAuditData, IdcCredentialAuditData};
 use crate::services::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
@@ -408,12 +408,11 @@ pub async fn discover_aws_idc(
 pub async fn get_aws_idc_sso_token(
     method: Method,
     uri: OriginalUri,
+    client_info: ClientInfo,
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<vouch_common::IdcSsoTokenResponse>, ServiceError> {
-    use secrecy::ExposeSecret;
-
     let (token, user_email, hd, org_id) =
         extract_idc_context(&state, &headers, &jar, &method, &uri).await?;
 
@@ -432,8 +431,28 @@ pub async fn get_aws_idc_sso_token(
         .await
         .map_err(map_idc_error)?;
 
+    // Audit log
+    if let Err(e) = log_idc_credential_event(
+        &state,
+        &token.sub,
+        &user_email,
+        IdcCredentialAuditData {
+            event_type: "sso_token_issued".to_string(),
+            org_id: Some(org_id),
+            authenticator_id: token.authenticator_id.clone(),
+            success: true,
+            user_agent: client_info.user_agent,
+            ..Default::default()
+        },
+        client_info.client_ip,
+    )
+    .await
+    {
+        tracing::warn!("Failed to log IdC credential event: {e}");
+    }
+
     Ok(Json(vouch_common::IdcSsoTokenResponse {
-        access_token: result.access_token.expose_secret().to_string(),
+        access_token: result.access_token,
         expires_in: result.expires_in,
         region: result.region,
     }))
@@ -559,6 +578,32 @@ fn map_idc_error(e: crate::services::integrations::aws_idc::AwsIdcError) -> Serv
             )
         }
     }
+}
+
+/// Log an IdC credential audit event.
+async fn log_idc_credential_event(
+    state: &AppState,
+    user_id: &str,
+    user_email: &str,
+    mut data: IdcCredentialAuditData,
+    ip: Option<std::net::IpAddr>,
+) -> anyhow::Result<String> {
+    data.ip_address = ip.map(|a| a.to_string());
+    let geo = ip.and_then(crate::geo::lookup);
+    data.country_code = geo.as_ref().map(|g| g.country_code.clone());
+    data.asn = geo.as_ref().and_then(|g| g.asn);
+    data.org_name = geo.as_ref().and_then(|g| g.org_name.clone());
+    let data_json = serde_json::to_string(&data)?;
+
+    state
+        .audit
+        .insert_event(
+            "idc_credential",
+            Some(user_id),
+            Some(user_email),
+            &data_json,
+        )
+        .await
 }
 
 // ============================================================================

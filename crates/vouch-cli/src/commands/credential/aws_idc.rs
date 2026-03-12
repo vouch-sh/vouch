@@ -6,50 +6,11 @@
 //! can use cached SSO credentials directly.
 
 use anyhow::{Context, Result};
+use secrecy::ExposeSecret;
 
 use crate::client::VouchClient;
-use crate::config::hostname_from_url;
+use crate::integrations::aws::sso_session_name;
 use crate::sso_cache;
-
-/// Derive the SSO session name from a server URL.
-///
-/// Uses the hostname (with port if non-standard), sanitized to
-/// `[a-z0-9-]`. This becomes both the `[sso-session X]` name in
-/// `~/.aws/config` and the SHA-1 cache key in `~/.aws/sso/cache/`.
-///
-/// Examples:
-/// - `https://us.vouch.sh`    → `us-vouch-sh`
-/// - `http://localhost:3000`   → `localhost-3000`
-/// - `https://dev.vouch.sh`   → `dev-vouch-sh`
-pub fn sso_session_name(server: &str) -> Result<String> {
-    let host = hostname_from_url(server)?;
-    let sanitized: String = host
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect();
-
-    // Collapse consecutive dashes and trim
-    let mut result = String::with_capacity(sanitized.len());
-    let mut prev_dash = false;
-    for c in sanitized.chars() {
-        if c == '-' {
-            if !prev_dash {
-                result.push(c);
-            }
-            prev_dash = true;
-        } else {
-            result.push(c);
-            prev_dash = false;
-        }
-    }
-
-    let trimmed = result.trim_matches('-');
-    if trimmed.is_empty() {
-        anyhow::bail!("could not derive SSO session name from server URL: {server}");
-    }
-    Ok(trimmed.to_string())
-}
 
 /// Run the AWS Identity Center SSO token refresh command.
 ///
@@ -63,10 +24,12 @@ pub async fn run(server: &str) -> Result<()> {
         &session_name,
         server,
         &response.region,
-        &response.access_token,
+        response.access_token.expose_secret(),
         response.expires_in,
     )?;
 
+    // Saturate to i64::MAX if expires_in exceeds i64 range (practically impossible
+    // since SSO tokens last hours, but avoids a panic path)
     let expires_at = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(
             i64::try_from(response.expires_in).unwrap_or(i64::MAX),
@@ -107,7 +70,7 @@ pub async fn auto_refresh_sso_token(server: &str) {
                 &session_name,
                 server,
                 &response.region,
-                &response.access_token,
+                response.access_token.expose_secret(),
                 response.expires_in,
             ) {
                 tracing::debug!("Failed to write SSO cache: {e}");

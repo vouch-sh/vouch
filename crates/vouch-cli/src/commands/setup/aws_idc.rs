@@ -20,19 +20,14 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::client::VouchClient;
-use crate::commands::credential::aws_idc::sso_session_name;
 use crate::config::hostname_from_url;
-use crate::integrations::aws::{AwsConfig, AwsProfile, AwsSsoSession};
+use crate::integrations::aws::{
+    AwsConfig, AwsProfile, AwsSsoSession, aws_config_dir, sso_session_name,
+};
 use crate::utils::ensure_secure_dir;
 
 /// Cache TTL for IdC discovery data (4 hours — matches session duration).
 const DISCOVERY_CACHE_TTL_HOURS: i64 = 4;
-
-/// Get the AWS config directory (~/.aws).
-fn aws_config_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".aws"))
-}
 
 /// Run the AWS Identity Center setup command.
 ///
@@ -65,8 +60,12 @@ async fn run_single(
     refresh: bool,
 ) -> Result<()> {
     let session_name = sso_session_name(server)?;
-    let discovery = fetch_discovery(server, refresh).await?;
-    let effective_region = region.unwrap_or(&discovery.region);
+    let effective_region = if let Some(r) = region {
+        r.to_string()
+    } else {
+        let discovery = fetch_discovery(server, refresh).await?;
+        discovery.region
+    };
 
     let config_path = AwsConfig::default_path()?;
     let aws_dir = aws_config_dir()?;
@@ -104,7 +103,7 @@ async fn run_single(
     };
 
     // Ensure SSO session exists
-    ensure_sso_session(&mut config, &session_name, server, effective_region);
+    ensure_sso_session(&mut config, &session_name, server, &effective_region);
 
     config.set_profile(&AwsProfile {
         name: profile_name.clone(),
@@ -112,7 +111,7 @@ async fn run_single(
         sso_session: Some(session_name.clone()),
         sso_account_id: Some(account_id.to_string()),
         sso_role_name: Some(role_name.to_string()),
-        region: Some(effective_region.to_string()),
+        region: Some(effective_region),
         output: None,
     });
     config.save()?;
@@ -171,31 +170,32 @@ async fn run_discovery(server: &str, region_override: Option<&str>, refresh: boo
     // Migrate old credential_process profiles to native SSO
     let migrated = migrate_old_profiles(&mut config, &session_name, &pairs, effective_region);
 
-    // Build display labels and track which are already configured
-    let mut options: Vec<String> = Vec::with_capacity(pairs.len());
-    let mut already_configured: Vec<bool> = Vec::with_capacity(pairs.len());
-    for (account_name, account_id, role_name) in &pairs {
-        let exists = find_idc_profile(&config, &session_name, account_id, role_name).is_some();
-        already_configured.push(exists);
+    // Build display labels alongside existence flags (single pass)
+    let labeled: Vec<(bool, String)> = pairs
+        .iter()
+        .map(|(account_name, account_id, role_name)| {
+            let exists = find_idc_profile(&config, &session_name, account_id, role_name).is_some();
+            let label = if account_name.is_empty() {
+                format!("{account_id} / {role_name}")
+            } else {
+                format!("{account_name} ({account_id}) / {role_name}")
+            };
+            let label = if exists {
+                format!("{label} (exists)")
+            } else {
+                label
+            };
+            (exists, label)
+        })
+        .collect();
 
-        let label = if account_name.is_empty() {
-            format!("{account_id} / {role_name}")
-        } else {
-            format!("{account_name} ({account_id}) / {role_name}")
-        };
-        let label = if exists {
-            format!("{label} (exists)")
-        } else {
-            label
-        };
-        options.push(label);
-    }
+    let options: Vec<String> = labeled.iter().map(|(_, label)| label.clone()).collect();
 
     // Pre-select items that are NOT already configured
-    let defaults: Vec<usize> = already_configured
+    let defaults: Vec<usize> = labeled
         .iter()
         .enumerate()
-        .filter(|(_, exists)| !*exists)
+        .filter(|(_, (exists, _))| !exists)
         .map(|(i, _)| i)
         .collect();
 
@@ -250,27 +250,18 @@ async fn run_discovery(server: &str, region_override: Option<&str>, refresh: boo
     let mut added = 0u32;
     let mut skipped = 0u32;
 
-    for (account_name, account_id, role_name) in &pairs {
-        // Build label to check if this pair was selected
-        let exists = find_idc_profile(&config, &session_name, account_id, role_name).is_some();
-        let label = if account_name.is_empty() {
-            format!("{account_id} / {role_name}")
-        } else {
-            format!("{account_name} ({account_id}) / {role_name}")
-        };
-        let label = if exists {
-            format!("{label} (exists)")
-        } else {
-            label
+    for (i, (account_name, account_id, role_name)) in pairs.iter().enumerate() {
+        let Some((exists, label)) = labeled.get(i) else {
+            continue;
         };
 
-        if !selected.contains(&label) {
+        if !selected.contains(label) {
             skipped = skipped.saturating_add(1);
             continue;
         }
 
         // Skip already-configured pairs
-        if exists {
+        if *exists {
             skipped = skipped.saturating_add(1);
             continue;
         }
@@ -331,12 +322,14 @@ async fn run_discovery(server: &str, region_override: Option<&str>, refresh: boo
         if added == 1 { "" } else { "s" }
     );
 
-    // Prime the SSO cache
-    prime_sso_cache(server).await;
+    // Prime the SSO cache and show instructions only if profiles were added
+    if added > 0 {
+        prime_sso_cache(server).await;
 
-    if let Some(first_profile) = pairs.first() {
-        let name = sanitize_profile_name(&first_profile.0, &first_profile.2, &first_profile.1);
-        print_setup_instructions(&name);
+        if let Some(first_profile) = pairs.first() {
+            let name = sanitize_profile_name(&first_profile.0, &first_profile.2, &first_profile.1);
+            print_setup_instructions(&name);
+        }
     }
 
     Ok(())

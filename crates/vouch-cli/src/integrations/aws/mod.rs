@@ -12,7 +12,49 @@ pub mod sigv4;
 pub mod sts;
 
 // Re-export commonly used types
-pub use config::{AwsConfig, AwsProfile, AwsSsoSession, extract_role_from_credential_process};
+pub use config::{
+    AwsConfig, AwsProfile, AwsSsoSession, aws_config_dir, extract_role_from_credential_process,
+};
+
+/// Derive the SSO session name from a server URL.
+///
+/// Uses the hostname (with port if non-standard), sanitized to
+/// `[a-z0-9-]`. This becomes both the `[sso-session X]` name in
+/// `~/.aws/config` and the SHA-1 cache key in `~/.aws/sso/cache/`.
+///
+/// Examples:
+/// - `https://us.vouch.sh`    → `us-vouch-sh`
+/// - `http://localhost:3000`   → `localhost-3000`
+/// - `https://dev.vouch.sh`   → `dev-vouch-sh`
+pub fn sso_session_name(server: &str) -> anyhow::Result<String> {
+    let host = crate::config::hostname_from_url(server)?;
+    let sanitized: String = host
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+
+    // Collapse consecutive dashes and trim
+    let mut result = String::with_capacity(sanitized.len());
+    let mut prev_dash = false;
+    for c in sanitized.chars() {
+        if c == '-' {
+            if !prev_dash {
+                result.push(c);
+            }
+            prev_dash = true;
+        } else {
+            result.push(c);
+            prev_dash = false;
+        }
+    }
+
+    let trimmed = result.trim_matches('-');
+    if trimmed.is_empty() {
+        anyhow::bail!("could not derive SSO session name from server URL: {server}");
+    }
+    Ok(trimmed.to_string())
+}
 
 /// Resolve the AWS profile to use, auto-detecting from ~/.aws/config if not specified.
 pub fn resolve_profile(profile: Option<&str>) -> anyhow::Result<String> {
@@ -358,5 +400,86 @@ credential_process = vouch credential aws --role some-role
 
         assert!(status.configured);
         assert_eq!(status.profile_name, Some("vouch".to_string()));
+    }
+
+    // =========================================================================
+    // sso_session_name tests
+    // =========================================================================
+
+    #[test]
+    fn test_sso_session_name_standard_https() {
+        assert_eq!(
+            sso_session_name("https://us.vouch.sh").unwrap(),
+            "us-vouch-sh"
+        );
+    }
+
+    #[test]
+    fn test_sso_session_name_with_port() {
+        assert_eq!(
+            sso_session_name("http://localhost:3000").unwrap(),
+            "localhost-3000"
+        );
+    }
+
+    #[test]
+    fn test_sso_session_name_dev_subdomain() {
+        assert_eq!(
+            sso_session_name("https://dev.vouch.sh").unwrap(),
+            "dev-vouch-sh"
+        );
+    }
+
+    #[test]
+    fn test_sso_session_name_collapses_consecutive_dashes() {
+        // Hostname with multiple non-alphanumeric chars in a row
+        assert_eq!(
+            sso_session_name("https://my--host.example.com").unwrap(),
+            "my-host-example-com"
+        );
+    }
+
+    #[test]
+    fn test_sso_session_name_strips_leading_trailing_dashes() {
+        // Hostname starting/ending with dots produces leading/trailing dashes
+        assert_eq!(sso_session_name("https://vouch.sh").unwrap(), "vouch-sh");
+    }
+
+    #[test]
+    fn test_sso_session_name_lowercases() {
+        assert_eq!(
+            sso_session_name("https://US.Vouch.SH").unwrap(),
+            "us-vouch-sh"
+        );
+    }
+
+    #[test]
+    fn test_sso_session_name_standard_port_443_omitted() {
+        // Standard port should not appear in session name
+        assert_eq!(
+            sso_session_name("https://vouch.sh:443").unwrap(),
+            "vouch-sh"
+        );
+    }
+
+    #[test]
+    fn test_sso_session_name_invalid_url_errors() {
+        assert!(sso_session_name("not-a-url").is_err());
+    }
+
+    #[test]
+    fn test_sso_session_name_idempotent() {
+        // Running through the same URL twice gives the same result
+        let a = sso_session_name("https://us.vouch.sh").unwrap();
+        let b = sso_session_name("https://us.vouch.sh").unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn test_sso_session_name_ip_address() {
+        assert_eq!(
+            sso_session_name("https://192.168.1.1").unwrap(),
+            "192-168-1-1"
+        );
     }
 }

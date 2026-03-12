@@ -483,13 +483,6 @@ pub struct CloudTokenResponse {
 /// Response containing an OIDC ID token for AWS STS.
 pub type AwsTokenResponse = CloudTokenResponse;
 
-/// An AWS account available via Identity Center.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IdcAccount {
-    pub account_id: String,
-    pub account_name: String,
-}
-
 /// An AWS account with its available roles, from IdC discovery.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdcAccountWithRoles {
@@ -524,7 +517,8 @@ pub struct IdcDiscoveryResponse {
 /// from `expires_in` seconds.
 #[derive(Serialize, Deserialize)]
 pub struct IdcSsoTokenResponse {
-    pub access_token: String,
+    #[serde(serialize_with = "serialize_secret_string")]
+    pub access_token: secrecy::SecretString,
     pub expires_in: u64,
     pub region: String,
 }

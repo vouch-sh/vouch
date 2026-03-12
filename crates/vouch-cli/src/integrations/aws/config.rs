@@ -8,6 +8,12 @@ use anyhow::{Context, Result};
 use ini::Ini;
 use std::path::PathBuf;
 
+/// Get the AWS config directory (`~/.aws`).
+pub fn aws_config_dir() -> Result<PathBuf> {
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    Ok(home.join(".aws"))
+}
+
 /// Represents an AWS profile configuration.
 #[derive(Debug, Clone, Default)]
 pub struct AwsProfile {
@@ -194,7 +200,10 @@ impl AwsConfig {
     /// Set or update a profile in the config.
     ///
     /// This preserves existing keys in the profile section that are not
-    /// explicitly set in the `AwsProfile`.
+    /// explicitly set in the `AwsProfile`. Fields set to `None` are left
+    /// unchanged (not removed), so callers must use
+    /// [`remove_credential_process`] explicitly when migrating away from
+    /// `credential_process`.
     pub fn set_profile(&mut self, profile: &AwsProfile) {
         let section = Self::profile_to_section(&profile.name);
         if let Some(ref cp) = profile.credential_process {
