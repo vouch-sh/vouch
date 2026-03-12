@@ -525,6 +525,10 @@ async fn run() -> Result<()> {
         }
         Commands::Credential { command } => match command {
             CredentialCommands::Aws { role } => commands::credential::aws::run(server, &role).await,
+            CredentialCommands::AwsIdc {
+                account_id,
+                role_name,
+            } => commands::credential::aws_idc::run(server, &account_id, &role_name).await,
             CredentialCommands::Ssh { key } => {
                 commands::credential::ssh::run(server, key.as_deref()).await
             }
@@ -625,6 +629,21 @@ async fn run() -> Result<()> {
                 role,
                 region,
             } => commands::setup::aws::run(profile.as_deref(), &role, region.as_deref()).await,
+            SetupCommands::AwsIdc {
+                account_id,
+                role_name,
+                profile,
+                region,
+            } => {
+                commands::setup::aws_idc::run(
+                    server,
+                    profile.as_deref(),
+                    &account_id,
+                    &role_name,
+                    region.as_deref(),
+                )
+                .await
+            }
             SetupCommands::Ssh { hosts } => {
                 commands::setup::ssh::run(server, hosts.as_deref()).await
             }

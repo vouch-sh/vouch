@@ -490,9 +490,35 @@ pub type AwsTokenResponse = CloudTokenResponse;
 /// AWS OIDC federation configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AwsIntegrationConfig {
-    /// Default IAM role ARN to assume.
+    /// Default IAM role ARN to assume (for direct STS `AssumeRoleWithWebIdentity`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_role_arn: Option<String>,
+
+    /// IAM role ARN used to bootstrap `CreateTokenWithIAM` calls.
+    ///
+    /// This role must trust the Vouch OIDC provider and have the
+    /// `sso-oauth:CreateTokenWithIAM` permission on the IdC application.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idc_bootstrap_role_arn: Option<String>,
+
+    /// AWS IAM Identity Center application ARN (the `clientId` for
+    /// `CreateTokenWithIAM`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idc_application_arn: Option<String>,
+
+    /// AWS region where IAM Identity Center is deployed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idc_region: Option<String>,
+}
+
+impl AwsIntegrationConfig {
+    /// Returns `true` if all Identity Center fields are configured.
+    #[must_use]
+    pub fn idc_configured(&self) -> bool {
+        self.idc_bootstrap_role_arn.is_some()
+            && self.idc_application_arn.is_some()
+            && self.idc_region.is_some()
+    }
 }
 
 /// Response for GET /v1/integrations/{provider}.

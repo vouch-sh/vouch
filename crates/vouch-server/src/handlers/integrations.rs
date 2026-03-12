@@ -41,6 +41,8 @@ pub struct IntegrationsTemplate {
     pub github_accounts: Vec<String>,
     /// SSH CA public key in OpenSSH format (None if SSH CA not configured).
     pub ssh_ca_public_key: Option<String>,
+    /// AWS IAM Identity Center config (None if not configured).
+    pub idc_config: Option<AwsIntegrationConfig>,
 }
 
 impl_template_response!(IntegrationsTemplate);
@@ -91,11 +93,38 @@ pub async fn integrations_page(State(state): State<Arc<AppState>>, jar: CookieJa
         Vec::new()
     };
 
+    // Load AWS IdC config if the user belongs to an org
+    let idc_config = if auth.has_org {
+        if let Ok(session) =
+            crate::handlers::session::extract_session_from_cookie(&state, &jar).await
+        {
+            if let Ok(Some(user)) = db::get_user_by_id(&state.store, &session.sub).await {
+                if let Some(org_id) = &user.org_id {
+                    db::get_cloud_integration(&state.store, org_id, "aws")
+                        .await
+                        .ok()
+                        .flatten()
+                        .and_then(|i| serde_json::from_value::<AwsIntegrationConfig>(i.config).ok())
+                        .filter(|c| c.idc_configured())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     IntegrationsTemplate {
         auth,
         github_configured,
         github_accounts,
         ssh_ca_public_key,
+        idc_config,
     }
     .into_response()
 }

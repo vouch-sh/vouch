@@ -361,6 +361,9 @@ mod tests {
     fn test_aws_integration_config_round_trip() {
         let config = AwsIntegrationConfig {
             default_role_arn: Some("arn:aws:iam::123456789012:role/VouchDeveloper".to_string()),
+            idc_bootstrap_role_arn: None,
+            idc_application_arn: None,
+            idc_region: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let decoded: AwsIntegrationConfig = serde_json::from_str(&json).unwrap();
@@ -368,12 +371,16 @@ mod tests {
             decoded.default_role_arn,
             Some("arn:aws:iam::123456789012:role/VouchDeveloper".to_string())
         );
+        assert!(!decoded.idc_configured());
     }
 
     #[test]
     fn test_aws_integration_config_without_role_arn() {
         let config = AwsIntegrationConfig {
             default_role_arn: None,
+            idc_bootstrap_role_arn: None,
+            idc_application_arn: None,
+            idc_region: None,
         };
         let json = serde_json::to_string(&config).unwrap();
 
@@ -385,9 +392,68 @@ mod tests {
     }
 
     #[test]
+    fn test_aws_integration_config_with_idc() {
+        let config = AwsIntegrationConfig {
+            default_role_arn: Some("arn:aws:iam::123:role/VouchDev".to_string()),
+            idc_bootstrap_role_arn: Some(
+                "arn:aws:iam::123:role/VouchIdcBootstrap".to_string(),
+            ),
+            idc_application_arn: Some(
+                "arn:aws:sso::123:application/ssoins-abc/apl-xyz".to_string(),
+            ),
+            idc_region: Some("us-east-1".to_string()),
+        };
+        assert!(config.idc_configured());
+
+        let json = serde_json::to_string(&config).unwrap();
+        let decoded: AwsIntegrationConfig = serde_json::from_str(&json).unwrap();
+        assert!(decoded.idc_configured());
+        assert_eq!(
+            decoded.idc_bootstrap_role_arn.as_deref(),
+            Some("arn:aws:iam::123:role/VouchIdcBootstrap"),
+        );
+        assert_eq!(
+            decoded.idc_application_arn.as_deref(),
+            Some("arn:aws:sso::123:application/ssoins-abc/apl-xyz"),
+        );
+        assert_eq!(decoded.idc_region.as_deref(), Some("us-east-1"));
+    }
+
+    #[test]
+    fn test_aws_integration_config_idc_partial_not_configured() {
+        let config = AwsIntegrationConfig {
+            default_role_arn: None,
+            idc_bootstrap_role_arn: Some(
+                "arn:aws:iam::123:role/VouchIdcBootstrap".to_string(),
+            ),
+            idc_application_arn: None,
+            idc_region: Some("us-east-1".to_string()),
+        };
+        assert!(!config.idc_configured());
+    }
+
+    #[test]
+    fn test_aws_integration_config_backward_compat() {
+        // Old JSON without IdC fields should deserialize correctly
+        let json = r#"{"default_role_arn":"arn:aws:iam::123:role/Old"}"#;
+        let decoded: AwsIntegrationConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            decoded.default_role_arn.as_deref(),
+            Some("arn:aws:iam::123:role/Old"),
+        );
+        assert!(decoded.idc_bootstrap_role_arn.is_none());
+        assert!(decoded.idc_application_arn.is_none());
+        assert!(decoded.idc_region.is_none());
+        assert!(!decoded.idc_configured());
+    }
+
+    #[test]
     fn test_integration_config_response_aws_configured() {
         let config = AwsIntegrationConfig {
             default_role_arn: Some("arn:aws:iam::111222333444:role/DevRole".to_string()),
+            idc_bootstrap_role_arn: None,
+            idc_application_arn: None,
+            idc_region: None,
         };
         let response: IntegrationConfigResponse<AwsIntegrationConfig> = IntegrationConfigResponse {
             configured: true,

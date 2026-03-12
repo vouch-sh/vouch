@@ -161,6 +161,88 @@ pub async fn sign_and_send_json_rpc(
         .context("failed to read AWS API response body")
 }
 
+/// Send a SigV4-signed JSON POST request to an AWS service.
+///
+/// Similar to [`sign_and_send_json_rpc`] but without the `X-Amz-Target`
+/// header. Used by services that accept plain JSON bodies (e.g.,
+/// SSO-OIDC `CreateTokenWithIAM`).
+///
+/// # Arguments
+/// * `endpoint` - Full URL including path/query (e.g.,
+///   `https://oidc.us-east-1.amazonaws.com/token?aws_iam=t`)
+/// * `service` - AWS service name for signing (e.g., `sso-oauth`)
+/// * `region` - AWS region
+/// * `creds` - Temporary AWS credentials from STS
+/// * `body` - JSON request body
+pub async fn sign_and_send_json(
+    http_client: &reqwest::Client,
+    endpoint: &str,
+    service: &str,
+    region: &str,
+    creds: &StsCredentials,
+    body: &serde_json::Value,
+) -> Result<String> {
+    let url = reqwest::Url::parse(endpoint).context("invalid endpoint URL")?;
+    let host = url.host_str().context("endpoint URL has no host")?;
+    let path = url.path();
+    let query_string = url.query().unwrap_or("");
+
+    let body_str = body.to_string();
+    let now = jiff::Timestamp::now();
+    let amz_date = format_amz_date(now);
+    let date_stamp = format_date_stamp(now);
+
+    let payload_hash = sha256_hex(body_str.as_bytes());
+
+    let canonical_headers = format!(
+        "content-type:application/json\nhost:{host}\nx-amz-date:{amz_date}\nx-amz-security-token:{}\n",
+        creds.session_token.expose_secret()
+    );
+    let signed_headers = "content-type;host;x-amz-date;x-amz-security-token";
+
+    let canonical_request = format!(
+        "POST\n{path}\n{query_string}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    );
+
+    let algorithm = "AWS4-HMAC-SHA256";
+    let credential_scope = format!("{date_stamp}/{region}/{service}/aws4_request");
+    let canonical_request_hash = sha256_hex(canonical_request.as_bytes());
+
+    let string_to_sign =
+        format!("{algorithm}\n{amz_date}\n{credential_scope}\n{canonical_request_hash}");
+
+    let k_signing = derive_signing_key(&creds.secret_access_key, &date_stamp, region, service);
+    let signature = hex::encode(hmac_sha256(&k_signing, string_to_sign.as_bytes()));
+
+    let authorization = format!(
+        "{algorithm} Credential={}/{credential_scope}, SignedHeaders={signed_headers}, Signature={signature}",
+        creds.access_key_id
+    );
+
+    let response = http_client
+        .post(endpoint)
+        .header("Content-Type", "application/json")
+        .header("X-Amz-Date", &amz_date)
+        .header("X-Amz-Security-Token", creds.session_token.expose_secret())
+        .header("Authorization", &authorization)
+        .body(body_str)
+        .send()
+        .await
+        .context("failed to send AWS API request")?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let response_body = response.text().await.unwrap_or_default();
+        let truncated = truncate_error_body(&response_body, 500);
+        anyhow::bail!("{service} returned error {status}: {truncated}");
+    }
+
+    response
+        .text()
+        .await
+        .context("failed to read AWS API response body")
+}
+
 /// Send a SigV4-signed REST-style request to an AWS service.
 ///
 /// Handles both GET and POST for REST APIs that use query parameters

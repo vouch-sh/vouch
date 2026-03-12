@@ -4,6 +4,7 @@
 use clap::Subcommand;
 
 pub mod aws;
+pub mod aws_idc;
 pub(crate) mod cache;
 pub mod cargo;
 pub mod codeartifact;
@@ -27,6 +28,21 @@ pub enum CredentialCommands {
         /// AWS IAM role ARN to assume.
         #[arg(long)]
         role: String,
+    },
+    /// Obtain temporary AWS credentials via IAM Identity Center.
+    ///
+    /// Uses the Trusted Token Issuer flow: Vouch OIDC token →
+    /// bootstrap `AssumeRoleWithWebIdentity` → `CreateTokenWithIAM` →
+    /// `GetRoleCredentials`. The Identity Center configuration is
+    /// fetched from the Vouch server.
+    #[command(name = "aws-idc")]
+    AwsIdc {
+        /// Target AWS account ID.
+        #[arg(long)]
+        account_id: String,
+        /// Identity Center permission set role name.
+        #[arg(long)]
+        role_name: String,
     },
     /// Obtain an SSH certificate.
     Ssh {

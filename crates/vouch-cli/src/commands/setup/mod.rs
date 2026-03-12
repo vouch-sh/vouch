@@ -4,6 +4,7 @@
 use clap::Subcommand;
 
 pub mod aws;
+pub mod aws_idc;
 pub mod cargo;
 pub mod codeartifact;
 pub mod codecommit;
@@ -25,6 +26,27 @@ pub enum SetupCommands {
         #[arg(long)]
         role: String,
         /// AWS region to set in the profile.
+        #[arg(long)]
+        region: Option<String>,
+    },
+    /// Configure AWS CLI/SDK to use Vouch with IAM Identity Center.
+    ///
+    /// Creates an AWS profile that obtains credentials through the Identity
+    /// Center Trusted Token Issuer flow. The Identity Center configuration
+    /// (bootstrap role, application ARN, region) is fetched from the Vouch
+    /// server.
+    #[command(name = "aws-idc")]
+    AwsIdc {
+        /// Target AWS account ID.
+        #[arg(long)]
+        account_id: String,
+        /// Identity Center permission set role name.
+        #[arg(long)]
+        role_name: String,
+        /// AWS profile name to configure.
+        #[arg(long)]
+        profile: Option<String>,
+        /// AWS region to set in the profile (defaults to IdC region from server).
         #[arg(long)]
         region: Option<String>,
     },

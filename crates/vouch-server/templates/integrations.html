@@ -98,6 +98,61 @@
                 </div>
                 {% endif %}
             </div>
+            {# AWS Identity Center Integration (Org-wide) #}
+            <div class="card{% if idc_config.is_none() %} opacity-50{% endif %}"{% if idc_config.is_none() %} style="order:99"{% endif %}>
+                <div class="flex items-center gap-2 mb-1">
+                    {# AWS logo #}
+                    <svg class="w-6 h-6 {% if idc_config.is_some() %}text-orange-400{% else %}text-gray-600{% endif %} flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
+                        <path d="M7.164 16.897c-1.121-.376-1.866-.803-2.262-1.027-.396-.224-.5-.355-.5-.495 0-.113.066-.224.19-.224.103 0 .266.052.483.163 1.29.667 2.597 1.004 3.898 1.004 1.914 0 3.633-.51 5.126-1.52.12-.08.237-.127.338-.127.16 0 .247.127.247.288 0 .187-.14.395-.418.592-1.645 1.162-3.553 1.744-5.67 1.744-.542 0-1.06-.049-1.432-.398zM17.145 15.18c-.178 0-.37-.098-.37-.31 0-.237.237-.41.451-.54.95-.573 1.555-1.44 1.555-1.44.08-.126.192-.191.31-.191.178 0 .31.165.31.353 0 .108-.032.224-.098.338-.437.756-1.18 1.39-1.82 1.685-.12.055-.232.105-.338.105z"/>
+                        <path d="M6.207 13.836l.888-1.842-.078-.15L5.28 7.6h1.44l1.12 3.26c.073.215.12.372.14.47h.017c.046-.167.097-.33.155-.486L9.25 7.6h1.34L8.53 13.836H6.207zM13.32 11.4l-.488-2.33h-.016c.03.53.046.908.046 1.135V11.4h-1.196V7.6h1.82l.474 2.24h.016l.554-2.24h1.82V11.4h-1.25V10.16c0-.09.002-.197.006-.32s.016-.454.035-.99h-.016l-.604 2.55H13.32zM16.56 11.4V7.6h1.308V11.4H16.56z"/>
+                    </svg>
+                    <h2 class="text-lg font-semibold text-gray-200">AWS Identity Center</h2>
+                    <span class="text-xs bg-vouch-surface text-gray-400 px-2 py-0.5 rounded">Organization-wide</span>
+                </div>
+                <p class="text-gray-400 text-sm mb-4">Get AWS credentials via IAM Identity Center permission sets.</p>
+
+                {% if let Some(config) = idc_config %}
+                <div class="space-y-3">
+                    <div class="flex items-center gap-2">
+                        <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
+                        </svg>
+                        <span class="text-sm text-green-400">Configured</span>
+                    </div>
+                    <div class="bg-vouch-surface rounded-lg p-3 space-y-2">
+                        {% if let Some(region) = config.idc_region %}
+                        <div class="flex justify-between text-xs">
+                            <span class="text-gray-500">Region</span>
+                            <span class="text-gray-300">{{ region }}</span>
+                        </div>
+                        {% endif %}
+                        {% if let Some(app_arn) = config.idc_application_arn %}
+                        <div class="flex justify-between text-xs">
+                            <span class="text-gray-500">Application</span>
+                            <span class="text-gray-300 truncate ml-2" title="{{ app_arn }}">{{ app_arn }}</span>
+                        </div>
+                        {% endif %}
+                    </div>
+                    <div>
+                        <p class="text-xs text-gray-500 mb-1">Setup a profile:</p>
+                        <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs">vouch setup aws-idc --account-id &lt;ID&gt; --role-name &lt;NAME&gt;</code>
+                    </div>
+                </div>
+                {% elif !auth.has_org %}
+                <div class="bg-blue-900/20 border border-blue-700/30 rounded-lg p-3">
+                    <p class="text-sm text-blue-300">Requires organization membership.</p>
+                </div>
+                {% else %}
+                <div class="bg-vouch-surface rounded-lg p-3">
+                    <p class="text-sm text-gray-400">Not configured.</p>
+                    {% if auth.is_org_admin %}
+                    <p class="text-xs text-gray-500 mt-1">Configure via <code class="bg-vouch-bg px-1 rounded">PUT /v1/integrations/aws</code> with Identity Center fields.</p>
+                    {% else %}
+                    <p class="text-xs text-gray-500 mt-1">Ask an org admin to configure Identity Center.</p>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
         </div>
 
         <p class="mt-6 text-sm text-gray-500">

@@ -9,6 +9,8 @@ pub mod codecommit;
 pub mod config;
 pub mod redshift;
 pub mod sigv4;
+pub mod sso;
+pub mod sso_oidc;
 pub mod sts;
 
 // Re-export commonly used types

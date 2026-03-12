@@ -17,6 +17,9 @@ pub struct OidcIdTokenClaims {
     pub exp: i64,
     /// Issued at time (Unix timestamp).
     pub iat: i64,
+    /// JWT ID (unique identifier for replay prevention, required by AWS IAM
+    /// Identity Center Trusted Token Issuer).
+    pub jti: String,
     /// User's email address.
     pub email: String,
     /// Email verified flag.
@@ -140,6 +143,7 @@ impl OidcIdTokenClaimsBuilder {
             aud: self.audience.ok_or("audience is required")?,
             exp,
             iat: now.as_second(),
+            jti: uuid::Uuid::now_v7().to_string(),
             email: self.email.or(self.subject).ok_or("email is required")?,
             email_verified: true,
             hardware_verified: true,
@@ -156,6 +160,7 @@ impl Default for OidcIdTokenClaimsBuilder {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -179,6 +184,9 @@ mod tests {
             assert!(claims.email_verified);
             assert!(claims.hardware_verified);
             assert!(claims.hardware_aaguid.is_some());
+            assert!(!claims.jti.is_empty());
+            // Verify jti is a valid UUID
+            assert!(uuid::Uuid::parse_str(&claims.jti).is_ok());
         }
     }
 
@@ -241,6 +249,20 @@ mod tests {
             assert_eq!(claims.sub, "user@example.com");
             assert_eq!(claims.aud, "https://vouch.example.com"); // issuer == audience for AWS
             assert_eq!(claims.email, "user@example.com");
+            assert!(!claims.jti.is_empty());
         }
+    }
+
+    #[test]
+    fn test_jti_is_unique_per_build() {
+        let claims1 =
+            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
+                .build()
+                .unwrap();
+        let claims2 =
+            OidcIdTokenClaimsBuilder::for_aws("https://vouch.example.com", "user@example.com")
+                .build()
+                .unwrap();
+        assert_ne!(claims1.jti, claims2.jti);
     }
 }
