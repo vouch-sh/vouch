@@ -53,7 +53,24 @@ The audience must be the full URL including `https://` — it must match the `au
 5. Set the **Aud claim** to: `https://your-vouch-server.example.com`
 6. Save the application and note the **Application ARN**
 
-### Step 4: Assign users to the application
+### Step 4: Grant the account access scope
+
+The application needs the `sso:account:access` scope so that Vouch can discover which AWS accounts and roles are available to each user. This scope is not configurable through the AWS Console — use the AWS CLI:
+
+```bash
+aws sso-admin put-application-access-scope \
+  --application-arn "<application-arn-from-step-3>" \
+  --scope "sso:account:access"
+```
+
+Verify it was set:
+
+```bash
+aws sso-admin list-application-access-scopes \
+  --application-arn "<application-arn-from-step-3>"
+```
+
+### Step 5: Assign users to the application
 
 For Identity Center to issue tokens for your users, they must be assigned to the application:
 
@@ -62,7 +79,7 @@ For Identity Center to issue tokens for your users, they must be assigned to the
 3. Click **Assign users and groups**
 4. Select the users or groups that should have access
 
-### Step 5: Create a Bootstrap IAM Role
+### Step 6: Create a Bootstrap IAM Role
 
 This role allows the Vouch server to call `CreateTokenWithIAM` on your Identity Center application. The Vouch server assumes this role using the OIDC token it issues.
 
@@ -110,24 +127,24 @@ The resulting trust policy should look like:
 }
 ```
 
-### Step 6: Configure the application credentials
+### Step 7: Configure the application credentials
 
 The Identity Center application needs to know which IAM role is authorized to call `CreateTokenWithIAM`:
 
 1. Go to **IAM Identity Center** > **Applications**
 2. Select the application created in Step 3
 3. Under **Application credentials**, choose one of:
-   - **Enter one or more IAM roles** — paste the bootstrap role ARN from Step 5
+   - **Enter one or more IAM roles** — paste the bootstrap role ARN from Step 6
    - **Edit the application policy** — write a policy granting `sso-oauth:CreateTokenWithIAM` to the bootstrap role
 
-### Step 7: Configure Vouch
+### Step 8: Configure Vouch
 
 **Option A: Web UI**
 
 1. Log in to your Vouch server as an org admin
 2. Navigate to `/integrations`
 3. Fill in:
-   - **Bootstrap Role ARN**: the IAM role ARN from Step 5
+   - **Bootstrap Role ARN**: the IAM role ARN from Step 6
    - **Application ARN**: the Identity Center application ARN from Step 3
    - **Identity Center Region**: the AWS region where Identity Center is enabled (e.g., `us-east-1`)
 4. Click **Save**

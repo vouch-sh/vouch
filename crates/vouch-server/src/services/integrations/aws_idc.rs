@@ -285,6 +285,7 @@ async fn create_idc_sso_token(
         .client_id(&app_arn_str)
         .grant_type("urn:ietf:params:oauth:grant-type:jwt-bearer")
         .assertion(id_token)
+        .scope("sso:account:access")
         .send()
         .await
         .map_err(|e| classify_create_token_error(&e))?;
