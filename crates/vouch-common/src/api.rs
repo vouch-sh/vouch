@@ -512,15 +512,24 @@ pub struct IdcDiscoveryResponse {
 
 /// Response from `POST /v1/credentials/aws-idc/sso-token`.
 ///
-/// Returns the SSO access token for the CLI to write into the standard
-/// AWS SSO cache (`~/.aws/sso/cache/`). The CLI computes `expiresAt`
-/// from `expires_in` seconds.
+/// Returns the SSO access token and OIDC client registration for the
+/// CLI to write into the standard AWS SSO cache (`~/.aws/sso/cache/`).
+/// The CLI computes `expiresAt` from `expires_in` seconds.
 #[derive(Serialize, Deserialize)]
 pub struct IdcTokenResponse {
     #[serde(serialize_with = "serialize_secret_string")]
     pub access_token: secrecy::SecretString,
     pub expires_in: u64,
     pub region: String,
+    /// SSO OIDC client ID from `RegisterClient`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id: Option<String>,
+    /// SSO OIDC client secret from `RegisterClient`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret: Option<String>,
+    /// When the client registration expires (epoch seconds, 0 = never).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret_expires_at: Option<i64>,
 }
 
 impl std::fmt::Debug for IdcTokenResponse {
@@ -529,6 +538,9 @@ impl std::fmt::Debug for IdcTokenResponse {
             .field("access_token", &"[REDACTED]")
             .field("expires_in", &self.expires_in)
             .field("region", &self.region)
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("client_secret_expires_at", &self.client_secret_expires_at)
             .finish()
     }
 }
@@ -559,6 +571,18 @@ pub struct AwsIntegrationConfig {
     /// AWS region where IAM Identity Center is deployed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idc_region: Option<String>,
+
+    /// Cached SSO OIDC client ID from `RegisterClient`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idc_client_id: Option<String>,
+
+    /// Cached SSO OIDC client secret from `RegisterClient`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idc_client_secret: Option<String>,
+
+    /// When the cached client registration expires (epoch seconds, 0 = never).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub idc_client_secret_expires_at: Option<i64>,
 }
 
 impl AwsIntegrationConfig {

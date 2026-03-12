@@ -20,12 +20,15 @@ pub async fn run(server: &str) -> Result<()> {
     let session_name = sso_session_name(server)?;
     let response = fetch_sso_token(server).await?;
 
+    let registration = build_registration(&response);
+
     sso_cache::write_sso_token(
         &session_name,
         server,
         &response.region,
         response.access_token.expose_secret(),
         response.expires_in,
+        registration.as_ref(),
     )?;
 
     // Saturate to i64::MAX if expires_in exceeds i64 range (practically impossible
@@ -66,12 +69,14 @@ pub async fn auto_refresh_sso_token(server: &str) {
 
     match fetch_sso_token(server).await {
         Ok(response) => {
+            let registration = build_registration(&response);
             if let Err(e) = sso_cache::write_sso_token(
                 &session_name,
                 server,
                 &response.region,
                 response.access_token.expose_secret(),
                 response.expires_in,
+                registration.as_ref(),
             ) {
                 tracing::debug!("Failed to write SSO cache: {e}");
             } else {
@@ -81,6 +86,20 @@ pub async fn auto_refresh_sso_token(server: &str) {
         Err(e) => {
             tracing::debug!("Failed to refresh SSO token: {e}");
         }
+    }
+}
+
+/// Build a `ClientRegistration` from the server response, if present.
+fn build_registration(
+    response: &vouch_common::IdcTokenResponse,
+) -> Option<sso_cache::ClientRegistration> {
+    match (&response.client_id, &response.client_secret) {
+        (Some(id), Some(secret)) => Some(sso_cache::ClientRegistration {
+            client_id: id.clone(),
+            client_secret: secret.clone(),
+            client_secret_expires_at: response.client_secret_expires_at.unwrap_or(0),
+        }),
+        _ => None,
     }
 }
 

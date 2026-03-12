@@ -26,6 +26,14 @@ fn sso_cache_dir() -> Result<PathBuf> {
     Ok(home.join(".aws").join("sso").join("cache"))
 }
 
+/// OIDC client registration details from `RegisterClient`.
+pub struct ClientRegistration {
+    pub client_id: String,
+    pub client_secret: String,
+    /// Epoch seconds, 0 = never expires.
+    pub client_secret_expires_at: i64,
+}
+
 /// Write an SSO token to the standard AWS SSO cache.
 ///
 /// Creates `~/.aws/sso/cache/{sha1(session_name)}.json` with the
@@ -36,6 +44,7 @@ pub fn write_sso_token(
     region: &str,
     access_token: &str,
     expires_in: u64,
+    registration: Option<&ClientRegistration>,
 ) -> Result<()> {
     let cache_dir = sso_cache_dir()?;
     write_sso_token_to_dir(
@@ -45,6 +54,7 @@ pub fn write_sso_token(
         region,
         access_token,
         expires_in,
+        registration,
     )
 }
 
@@ -59,6 +69,7 @@ fn write_sso_token_to_dir(
     region: &str,
     access_token: &str,
     expires_in: u64,
+    registration: Option<&ClientRegistration>,
 ) -> Result<()> {
     ensure_secure_dir(cache_dir)?;
 
@@ -69,12 +80,39 @@ fn write_sso_token_to_dir(
         .context("overflow computing expiration")?;
 
     // Format matches botocore's _serialize_utc_timestamp: "%Y-%m-%dT%H:%M:%SZ"
-    let cache_entry = serde_json::json!({
+    let mut cache_entry = serde_json::json!({
         "startUrl": start_url,
         "region": region,
         "accessToken": access_token,
         "expiresAt": expires_at.strftime("%Y-%m-%dT%H:%M:%SZ").to_string(),
     });
+
+    // Include client registration fields if available — these are present
+    // in real `aws sso login` cache files and may be required for
+    // `GetRoleCredentials` to accept the token.
+    if let Some(reg) = registration {
+        let map = cache_entry
+            .as_object_mut()
+            .context("cache entry is not an object")?;
+        map.insert("clientId".to_string(), serde_json::json!(reg.client_id));
+        map.insert(
+            "clientSecret".to_string(),
+            serde_json::json!(reg.client_secret),
+        );
+        // Format matches botocore: ISO 8601 UTC
+        let reg_expires = if reg.client_secret_expires_at == 0 {
+            // 0 means never — use a far-future date
+            "2099-12-31T23:59:59Z".to_string()
+        } else {
+            let ts = jiff::Timestamp::from_second(reg.client_secret_expires_at)
+                .context("invalid client_secret_expires_at")?;
+            ts.strftime("%Y-%m-%dT%H:%M:%SZ").to_string()
+        };
+        map.insert(
+            "registrationExpiresAt".to_string(),
+            serde_json::json!(reg_expires),
+        );
+    }
 
     let json = serde_json::to_string_pretty(&cache_entry)
         .context("failed to serialize SSO cache entry")?;
@@ -120,6 +158,7 @@ mod tests {
             "us-east-1",
             "test-token",
             3600,
+            None,
         )
         .unwrap();
 
@@ -135,6 +174,44 @@ mod tests {
         assert!(
             loaded["expiresAt"].as_str().unwrap().ends_with('Z'),
             "expiresAt should end with Z (ISO 8601 UTC)"
+        );
+        // No registration fields when not provided
+        assert!(loaded.get("clientId").is_none());
+    }
+
+    #[test]
+    fn test_write_sso_token_with_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_dir = dir.path().join("sso-cache-reg");
+
+        let reg = ClientRegistration {
+            client_id: "test-client-id".to_string(),
+            client_secret: "test-client-secret".to_string(),
+            client_secret_expires_at: 1_700_000_000,
+        };
+
+        write_sso_token_to_dir(
+            &cache_dir,
+            "vouch",
+            "https://vouch.example.com",
+            "us-east-1",
+            "test-token",
+            3600,
+            Some(&reg),
+        )
+        .unwrap();
+
+        let filename = cache_filename("vouch");
+        let cache_path = cache_dir.join(format!("{filename}.json"));
+        let loaded: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&cache_path).unwrap()).unwrap();
+        assert_eq!(loaded["clientId"], "test-client-id");
+        assert_eq!(loaded["clientSecret"], "test-client-secret");
+        assert!(
+            loaded["registrationExpiresAt"]
+                .as_str()
+                .unwrap()
+                .ends_with('Z')
         );
     }
 }

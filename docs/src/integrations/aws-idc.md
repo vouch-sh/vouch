@@ -206,7 +206,7 @@ Selected pairs are written as native SSO profiles in `~/.aws/config`:
 sso_start_url = https://your-vouch-server.example.com
 sso_region = us-east-1
 
-[profile vouch-idc-production-administratoraccess]
+[profile vouch-production-administratoraccess]
 sso_session = vouch-your-vouch-server.example.com
 sso_account_id = 123456789012
 sso_role_name = AdministratorAccess
@@ -234,9 +234,9 @@ vouch login
 After FIDO2 authentication, `vouch login` automatically refreshes the SSO token and caches it locally. All AWS tools then work with the configured profiles:
 
 ```bash
-aws sts get-caller-identity --profile vouch-idc-production-administratoraccess
-aws s3 ls --profile vouch-idc-production-administratoraccess
-terraform plan   # with AWS_PROFILE=vouch-idc-production-administratoraccess
+aws sts get-caller-identity --profile vouch-production-administratoraccess
+aws s3 ls --profile vouch-production-administratoraccess
+terraform plan   # with AWS_PROFILE=vouch-production-administratoraccess
 ```
 
 To manually refresh the SSO token (e.g., if it expires mid-session):
@@ -269,4 +269,4 @@ The authenticated user has no permission set assignments in Identity Center. Ass
 
 ### Profile names
 
-Profiles follow the naming pattern `vouch-idc-{account-name}-{role-name}` (lowercased, special characters replaced with dashes). If the same role name exists across multiple accounts, the account ID is appended for disambiguation.
+Profiles follow the naming pattern `vouch-{account-name}-{role-name}` (lowercased, special characters replaced with dashes). If the same role name exists across multiple accounts, the account ID is appended for disambiguation.

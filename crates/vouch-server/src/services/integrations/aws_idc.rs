@@ -120,6 +120,20 @@ pub struct IdcTokenResult {
     pub region: String,
     /// Opaque identity context from `CreateTokenWithIAM` additional details.
     pub identity_context: Option<String>,
+    /// SSO OIDC client ID from `RegisterClient`.
+    pub client_id: Option<String>,
+    /// SSO OIDC client secret from `RegisterClient`.
+    pub client_secret: Option<String>,
+    /// When the client registration expires (epoch seconds, 0 = never).
+    pub client_secret_expires_at: Option<i64>,
+}
+
+/// Cached OIDC client registration from `RegisterClient`.
+#[derive(Debug, Clone)]
+struct OidcClientRegistration {
+    client_id: String,
+    client_secret: String,
+    client_secret_expires_at: i64,
 }
 
 /// Parsed and validated IdC configuration from the database.
@@ -127,6 +141,8 @@ struct IdcConfig {
     bootstrap_arn: Arn,
     application_arn: Arn,
     idc_region: String,
+    /// Cached client registration, if available and not expired.
+    client_registration: Option<OidcClientRegistration>,
 }
 
 /// Load and validate IdC configuration from the database.
@@ -162,10 +178,34 @@ async fn load_idc_config(store: &DocumentStore, org_id: &str) -> Result<IdcConfi
         .ok_or(AwsIdcError::MissingField("idc_region"))?
         .to_string();
 
+    // Load cached client registration if present and not expired.
+    let client_registration = match (&config.idc_client_id, &config.idc_client_secret) {
+        (Some(id), Some(secret)) => {
+            let expires_at = config.idc_client_secret_expires_at.unwrap_or(0);
+            // 0 means never expires; otherwise check against current time
+            let now_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+                .unwrap_or(0);
+            if expires_at == 0 || expires_at > now_secs {
+                Some(OidcClientRegistration {
+                    client_id: id.clone(),
+                    client_secret: secret.clone(),
+                    client_secret_expires_at: expires_at,
+                })
+            } else {
+                tracing::info!("Cached SSO OIDC client registration expired, will re-register");
+                None
+            }
+        }
+        _ => None,
+    };
+
     Ok(IdcConfig {
         bootstrap_arn,
         application_arn,
         idc_region,
+        client_registration,
     })
 }
 
@@ -198,13 +238,97 @@ async fn issue_token_and_bootstrap(
     Ok((creds, token_result.id_token))
 }
 
+/// Register an OIDC client with Identity Center via `RegisterClient`.
+///
+/// This is an unauthenticated API call. The resulting `clientId` is used
+/// with `CreateTokenWithIAM` to produce tokens that (hopefully) work
+/// with `GetRoleCredentials` / native SSO profiles.
+///
+/// The registration is cached in the org's cloud integration config.
+async fn ensure_registered_client(
+    store: &DocumentStore,
+    org_id: &str,
+    idc_config: &mut IdcConfig,
+) -> Result<OidcClientRegistration, AwsIdcError> {
+    // Return cached registration if valid
+    if let Some(ref reg) = idc_config.client_registration {
+        return Ok(reg.clone());
+    }
+
+    tracing::info!("Registering SSO OIDC client for org {org_id}");
+
+    let ssooidc_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new(idc_config.idc_region.clone()))
+        .no_credentials()
+        .load()
+        .await;
+    let ssooidc_client = aws_sdk_ssooidc::Client::new(&ssooidc_config);
+
+    let app_arn_str = idc_config.application_arn.to_string();
+    let response = ssooidc_client
+        .register_client()
+        .client_name("vouch")
+        .client_type("public")
+        .scopes("sso:account:access")
+        .entitled_application_arn(&app_arn_str)
+        .send()
+        .await
+        .map_err(|e| AwsIdcError::CreateToken(format!("RegisterClient failed: {e}")))?;
+
+    let client_id = response.client_id().unwrap_or_default().to_string();
+    let client_secret = response.client_secret().unwrap_or_default().to_string();
+    let client_secret_expires_at = response.client_secret_expires_at();
+
+    if client_id.is_empty() {
+        return Err(AwsIdcError::CreateToken(
+            "RegisterClient returned empty client_id".to_string(),
+        ));
+    }
+
+    tracing::info!(
+        "Registered SSO OIDC client for org {org_id}: client_id={client_id}, \
+         expires_at={client_secret_expires_at}"
+    );
+
+    // Persist to database
+    let integration = db::get_cloud_integration(store, org_id, "aws")
+        .await?
+        .ok_or(AwsIdcError::NotConfigured)?;
+
+    let mut config: AwsIntegrationConfig = serde_json::from_value(integration.config)
+        .map_err(|e| AwsIdcError::Database(anyhow::anyhow!("Failed to parse AWS config: {e}")))?;
+
+    config.idc_client_id = Some(client_id.clone());
+    config.idc_client_secret = Some(client_secret.clone());
+    config.idc_client_secret_expires_at = Some(client_secret_expires_at);
+
+    let config_value = serde_json::to_value(&config)
+        .map_err(|e| AwsIdcError::Database(anyhow::anyhow!("Failed to serialize config: {e}")))?;
+
+    db::upsert_cloud_integration(store, org_id, "aws", &config_value, "system").await?;
+
+    let reg = OidcClientRegistration {
+        client_id,
+        client_secret,
+        client_secret_expires_at,
+    };
+    idc_config.client_registration = Some(reg.clone());
+
+    Ok(reg)
+}
+
 /// Exchange a Vouch session for an SSO access token.
 ///
-/// Chains three operations server-side: OIDC token issuance →
-/// STS bootstrap (`AssumeRoleWithWebIdentity`) → `CreateTokenWithIAM`.
+/// Chains operations server-side: OIDC client registration (cached) →
+/// OIDC token issuance → STS bootstrap (`AssumeRoleWithWebIdentity`) →
+/// `CreateTokenWithIAM` with registered client.
 /// Used by the `/sso-token` handler.
 pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResult, AwsIdcError> {
-    let idc_config = load_idc_config(ctx.store, ctx.org_id).await?;
+    let mut idc_config = load_idc_config(ctx.store, ctx.org_id).await?;
+
+    // Ensure we have a registered OIDC client
+    let registration = ensure_registered_client(ctx.store, ctx.org_id, &mut idc_config).await?;
+
     let (bootstrap_creds, id_token) = issue_token_and_bootstrap(ctx, &idc_config).await?;
 
     let (sso_access_token, sso_expires_in, identity_context) = create_idc_sso_token(
@@ -212,6 +336,7 @@ pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResu
         &id_token,
         &idc_config.idc_region,
         bootstrap_creds,
+        Some(&registration.client_id),
     )
     .await?;
 
@@ -231,6 +356,9 @@ pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResu
         expires_in: sso_expires_in,
         region: idc_config.idc_region,
         identity_context,
+        client_id: Some(registration.client_id),
+        client_secret: Some(registration.client_secret),
+        client_secret_expires_at: Some(registration.client_secret_expires_at),
     })
 }
 
@@ -290,12 +418,17 @@ async fn bootstrap_iam_credentials(
 
 /// Exchange an OIDC token for an SSO access token via `CreateTokenWithIAM`.
 ///
+/// When `registered_client_id` is provided, uses the `RegisterClient`-issued
+/// client ID instead of the application ARN. This may produce tokens
+/// compatible with `GetRoleCredentials` / native SSO profiles.
+///
 /// Returns `(access_token, expires_in, identity_context)`.
 async fn create_idc_sso_token(
     application_arn: &Arn,
     id_token: &str,
     idc_region: &str,
     bootstrap_creds: aws_credential_types::Credentials,
+    registered_client_id: Option<&str>,
 ) -> Result<(SecretString, u64, Option<String>), AwsIdcError> {
     let ssooidc_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(aws_config::Region::new(idc_region.to_string()))
@@ -305,11 +438,21 @@ async fn create_idc_sso_token(
     let ssooidc_client = aws_sdk_ssooidc::Client::new(&ssooidc_config);
 
     let app_arn_str = application_arn.to_string();
+    let effective_client_id = registered_client_id.unwrap_or(&app_arn_str);
+    tracing::info!(
+        "CreateTokenWithIAM client_id={}",
+        if registered_client_id.is_some() {
+            "registered"
+        } else {
+            "application_arn"
+        }
+    );
+
     // Omit scope — Identity Center grants all scopes configured on the
     // application, including `sso:account:access`.
     let token_response = ssooidc_client
         .create_token_with_iam()
-        .client_id(&app_arn_str)
+        .client_id(effective_client_id)
         .grant_type("urn:ietf:params:oauth:grant-type:jwt-bearer")
         .assertion(id_token)
         .send()
@@ -541,7 +684,11 @@ async fn resolve_permission_set_names(
 pub async fn discover_accounts_and_roles(
     ctx: &IdcContext<'_>,
 ) -> Result<vouch_common::IdcDiscoveryResponse, AwsIdcError> {
-    let idc_config = load_idc_config(ctx.store, ctx.org_id).await?;
+    let mut idc_config = load_idc_config(ctx.store, ctx.org_id).await?;
+
+    // 0. Ensure we have a registered OIDC client
+    let registration = ensure_registered_client(ctx.store, ctx.org_id, &mut idc_config).await?;
+
     let (bootstrap_creds, id_token) = issue_token_and_bootstrap(ctx, &idc_config).await?;
 
     // 1. Exchange for SSO token (needed for CLI caching)
@@ -550,6 +697,7 @@ pub async fn discover_accounts_and_roles(
         &id_token,
         &idc_config.idc_region,
         bootstrap_creds.clone(),
+        Some(&registration.client_id),
     )
     .await?;
 
@@ -564,11 +712,14 @@ pub async fn discover_accounts_and_roles(
         },
     );
 
-    let token_result = IdcTokenResult {
+    let _token_result = IdcTokenResult {
         access_token: sso_access_token,
         expires_in: sso_expires_in,
         region: idc_config.idc_region.clone(),
         identity_context,
+        client_id: Some(registration.client_id),
+        client_secret: Some(registration.client_secret),
+        client_secret_expires_at: Some(registration.client_secret_expires_at),
     };
 
     // 2. Build SSO Admin + Identity Store clients (reuse same bootstrap creds)
@@ -645,7 +796,7 @@ pub async fn discover_accounts_and_roles(
 
     Ok(vouch_common::IdcDiscoveryResponse {
         accounts: discovered,
-        region: token_result.region,
+        region: _token_result.region,
         errors: Vec::new(),
     })
 }

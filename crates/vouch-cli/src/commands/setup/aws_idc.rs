@@ -574,7 +574,7 @@ fn validate_role_name(role_name: &str) -> Result<()> {
 
 /// Generate a sanitized profile name from account name and role name.
 ///
-/// Pattern: `vouch-idc-{account_name}-{role_name}`
+/// Pattern: `vouch-{account_name}-{role_name}`
 /// Falls back to account ID if account name is empty.
 fn sanitize_profile_name(account_name: &str, role_name: &str, account_id: &str) -> String {
     let account_part = if account_name.is_empty() {
@@ -583,7 +583,7 @@ fn sanitize_profile_name(account_name: &str, role_name: &str, account_id: &str) 
         account_name.to_string()
     };
 
-    let raw = format!("vouch-idc-{account_part}-{role_name}");
+    let raw = format!("vouch-{account_part}-{role_name}");
 
     let sanitized: String = raw
         .to_lowercase()
@@ -614,7 +614,7 @@ fn sanitize_profile_name(account_name: &str, role_name: &str, account_id: &str) 
 
     let trimmed = result.trim_matches('-');
     if trimmed.is_empty() {
-        "vouch-idc".to_string()
+        "vouch".to_string()
     } else {
         trimmed.to_string()
     }
@@ -685,7 +685,7 @@ mod tests {
     fn test_sanitize_profile_name_basic() {
         assert_eq!(
             sanitize_profile_name("Production", "AdministratorAccess", "123456789012"),
-            "vouch-idc-production-administratoraccess"
+            "vouch-production-administratoraccess"
         );
     }
 
@@ -693,7 +693,7 @@ mod tests {
     fn test_sanitize_profile_name_empty_account() {
         assert_eq!(
             sanitize_profile_name("", "ReadOnlyAccess", "123456789012"),
-            "vouch-idc-123456789012-readonlyaccess"
+            "vouch-123456789012-readonlyaccess"
         );
     }
 
@@ -701,7 +701,7 @@ mod tests {
     fn test_sanitize_profile_name_special_chars() {
         assert_eq!(
             sanitize_profile_name("My Account (Test)", "Admin Access", "123"),
-            "vouch-idc-my-account-test-admin-access"
+            "vouch-my-account-test-admin-access"
         );
     }
 
@@ -709,7 +709,7 @@ mod tests {
     fn test_sanitize_profile_name_consecutive_dashes() {
         assert_eq!(
             sanitize_profile_name("a--b", "c--d", "123"),
-            "vouch-idc-a-b-c-d"
+            "vouch-a-b-c-d"
         );
     }
 

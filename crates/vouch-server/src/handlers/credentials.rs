@@ -456,6 +456,9 @@ pub async fn get_aws_idc_sso_token(
         access_token: result.access_token,
         expires_in: result.expires_in,
         region: result.region,
+        client_id: result.client_id,
+        client_secret: result.client_secret,
+        client_secret_expires_at: result.client_secret_expires_at,
     }))
 }
 

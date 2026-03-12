@@ -370,6 +370,9 @@ mod tests {
             idc_bootstrap_role_arn: None,
             idc_application_arn: None,
             idc_region: None,
+            idc_client_id: None,
+            idc_client_secret: None,
+            idc_client_secret_expires_at: None,
         };
         let json = serde_json::to_string(&config).unwrap();
         let decoded: AwsIntegrationConfig = serde_json::from_str(&json).unwrap();
@@ -387,6 +390,9 @@ mod tests {
             idc_bootstrap_role_arn: None,
             idc_application_arn: None,
             idc_region: None,
+            idc_client_id: None,
+            idc_client_secret: None,
+            idc_client_secret_expires_at: None,
         };
         let json = serde_json::to_string(&config).unwrap();
 
@@ -406,6 +412,9 @@ mod tests {
                 "arn:aws:sso::123:application/ssoins-abc/apl-xyz".to_string(),
             ),
             idc_region: Some("us-east-1".to_string()),
+            idc_client_id: None,
+            idc_client_secret: None,
+            idc_client_secret_expires_at: None,
         };
         assert!(config.idc_configured());
 
@@ -430,6 +439,9 @@ mod tests {
             idc_bootstrap_role_arn: Some("arn:aws:iam::123:role/VouchIdcBootstrap".to_string()),
             idc_application_arn: None,
             idc_region: Some("us-east-1".to_string()),
+            idc_client_id: None,
+            idc_client_secret: None,
+            idc_client_secret_expires_at: None,
         };
         assert!(!config.idc_configured());
     }
@@ -456,6 +468,9 @@ mod tests {
             idc_bootstrap_role_arn: None,
             idc_application_arn: None,
             idc_region: None,
+            idc_client_id: None,
+            idc_client_secret: None,
+            idc_client_secret_expires_at: None,
         };
         let response: IntegrationConfigResponse<AwsIntegrationConfig> = IntegrationConfigResponse {
             configured: true,
@@ -543,12 +558,16 @@ mod tests {
             access_token: secrecy::SecretString::from("eyJexampletoken"),
             expires_in: 3600,
             region: "us-east-1".to_string(),
+            client_id: Some("test-client".to_string()),
+            client_secret: Some("test-secret".to_string()),
+            client_secret_expires_at: Some(1_700_000_000),
         };
         let json = serde_json::to_string(&response).unwrap();
         let decoded: IdcTokenResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.access_token.expose_secret(), "eyJexampletoken");
         assert_eq!(decoded.expires_in, 3600);
         assert_eq!(decoded.region, "us-east-1");
+        assert_eq!(decoded.client_id.as_deref(), Some("test-client"));
     }
 
     #[test]
@@ -557,6 +576,9 @@ mod tests {
             access_token: secrecy::SecretString::from("my-secret-token"),
             expires_in: 3600,
             region: "us-east-1".to_string(),
+            client_id: None,
+            client_secret: None,
+            client_secret_expires_at: None,
         };
         let debug = format!("{response:?}");
         assert!(!debug.contains("my-secret-token"));
