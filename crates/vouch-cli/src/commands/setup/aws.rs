@@ -69,6 +69,7 @@ pub async fn run(profile: Option<&str>, role_arn: &str, region: Option<&str>) ->
         )),
         region: region.map(str::to_string),
         output: Some("json".to_string()),
+        ..Default::default()
     });
     config.save()?;
 

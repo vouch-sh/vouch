@@ -42,10 +42,6 @@ pub enum AwsIdcError {
     #[error("CreateTokenWithIAM failed: {0}")]
     CreateToken(String),
 
-    /// SSO `GetRoleCredentials` failed.
-    #[error("GetRoleCredentials failed: {0}")]
-    GetRoleCredentials(String),
-
     /// SSO `ListAccounts` failed.
     #[error("ListAccounts failed: {0}")]
     ListAccounts(String),
@@ -61,8 +57,8 @@ pub enum AwsIdcError {
 
 /// Common context for all IdC operations.
 ///
-/// Groups the parameters shared by `exchange_for_idc_token`,
-/// `exchange_for_idc_credentials`, and `discover_accounts_and_roles`.
+/// Groups the parameters shared by `exchange_for_idc_token`
+/// and `discover_accounts_and_roles`.
 pub struct IdcContext<'a> {
     pub store: &'a DocumentStore,
     pub base_url: &'a str,
@@ -87,15 +83,6 @@ pub struct IdcTokenResult {
     pub identity_context: Option<String>,
 }
 
-/// Result of a successful IdC credential exchange.
-#[derive(Debug)]
-pub struct IdcCredentialsResult {
-    pub access_key_id: String,
-    pub secret_access_key: SecretString,
-    pub session_token: SecretString,
-    pub expiration: jiff::Timestamp,
-}
-
 /// Build an SSO client configured for the given region with no credentials.
 async fn build_sso_client(region: &str) -> aws_sdk_sso::Client {
     let sso_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
@@ -108,8 +95,9 @@ async fn build_sso_client(region: &str) -> aws_sdk_sso::Client {
 
 /// Exchange a Vouch session for an SSO access token.
 ///
-/// Chains three operations server-side. Used internally by
-/// [`exchange_for_idc_credentials`] and [`discover_accounts_and_roles`].
+/// Chains three operations server-side: OIDC token issuance →
+/// STS bootstrap (`AssumeRoleWithWebIdentity`) → `CreateTokenWithIAM`.
+/// Used by the `/sso-token` handler and [`discover_accounts_and_roles`].
 pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResult, AwsIdcError> {
     // 1. Read IdC config from DB
     let integration = db::get_cloud_integration(ctx.store, ctx.org_id, "aws")
@@ -243,66 +231,6 @@ pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResu
         expires_in: sso_expires_in,
         region: idc_region.to_string(),
         identity_context,
-    })
-}
-
-/// Exchange a Vouch session for AWS credentials via Identity Center.
-///
-/// Chains the full IdC flow server-side:
-/// 1. `exchange_for_idc_token` (OIDC → STS bootstrap → `CreateTokenWithIAM`)
-/// 2. `GetRoleCredentials` via the SSO portal → final AWS credentials
-///
-/// The SSO access token never leaves the server.
-pub async fn exchange_for_idc_credentials(
-    ctx: &IdcContext<'_>,
-    account_id: &str,
-    role_name: &str,
-) -> Result<IdcCredentialsResult, AwsIdcError> {
-    // Step 1: Get SSO access token
-    let token_result = exchange_for_idc_token(ctx).await?;
-
-    // Step 2: GetRoleCredentials via SSO portal
-    let sso_client = build_sso_client(&token_result.region).await;
-
-    let role_creds_output = sso_client
-        .get_role_credentials()
-        .account_id(account_id)
-        .role_name(role_name)
-        .access_token(token_result.access_token.expose_secret())
-        .send()
-        .await
-        .map_err(|e| AwsIdcError::GetRoleCredentials(format!("{e}")))?;
-
-    let role_creds = role_creds_output
-        .role_credentials()
-        .ok_or_else(|| AwsIdcError::GetRoleCredentials("No credentials in response".to_string()))?;
-
-    let access_key = role_creds
-        .access_key_id()
-        .ok_or_else(|| AwsIdcError::GetRoleCredentials("Missing access_key_id".to_string()))?;
-    let secret_key = role_creds
-        .secret_access_key()
-        .ok_or_else(|| AwsIdcError::GetRoleCredentials("Missing secret_access_key".to_string()))?;
-    let session_token = role_creds
-        .session_token()
-        .ok_or_else(|| AwsIdcError::GetRoleCredentials("Missing session_token".to_string()))?;
-    let expiration_ms = role_creds.expiration();
-
-    let expiration = jiff::Timestamp::from_millisecond(expiration_ms).map_err(|e| {
-        AwsIdcError::GetRoleCredentials(format!("Invalid expiration timestamp: {e}"))
-    })?;
-
-    tracing::info!(
-        "Issued IdC credentials for {} (org {}, account {account_id}, role {role_name})",
-        redact_email(ctx.user_email),
-        ctx.org_id,
-    );
-
-    Ok(IdcCredentialsResult {
-        access_key_id: access_key.to_string(),
-        secret_access_key: SecretString::from(secret_key),
-        session_token: SecretString::from(session_token),
-        expiration,
     })
 }
 

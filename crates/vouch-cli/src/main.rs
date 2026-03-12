@@ -14,6 +14,7 @@ mod fido2;
 mod integrations;
 mod server_url;
 mod session;
+mod sso_cache;
 mod style;
 mod utils;
 
@@ -525,10 +526,7 @@ async fn run() -> Result<()> {
         }
         Commands::Credential { command } => match command {
             CredentialCommands::Aws { role } => commands::credential::aws::run(server, &role).await,
-            CredentialCommands::AwsIdc {
-                account_id,
-                role_name,
-            } => commands::credential::aws_idc::run(server, &account_id, &role_name).await,
+            CredentialCommands::AwsIdc {} => commands::credential::aws_idc::run(server).await,
             CredentialCommands::Ssh { key } => {
                 commands::credential::ssh::run(server, key.as_deref()).await
             }

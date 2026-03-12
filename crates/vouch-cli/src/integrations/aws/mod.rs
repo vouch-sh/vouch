@@ -12,7 +12,7 @@ pub mod sigv4;
 pub mod sts;
 
 // Re-export commonly used types
-pub use config::{AwsConfig, AwsProfile, extract_role_from_credential_process};
+pub use config::{AwsConfig, AwsProfile, AwsSsoSession, extract_role_from_credential_process};
 
 /// Resolve the AWS profile to use, auto-detecting from ~/.aws/config if not specified.
 pub fn resolve_profile(profile: Option<&str>) -> anyhow::Result<String> {

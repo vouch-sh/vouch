@@ -395,36 +395,24 @@ pub async fn discover_aws_idc(
 }
 
 // ============================================================================
-// AWS Identity Center Credentials Endpoint
+// AWS Identity Center SSO Token Endpoint
 // ============================================================================
 
-/// Path parameters for the IdC credentials endpoint.
-#[derive(serde::Deserialize)]
-pub struct IdcCredentialsPath {
-    account_id: String,
-    role_name: String,
-}
-
-/// Get AWS temporary credentials via the Identity Center full server-side flow.
+/// Get an SSO access token via Identity Center.
 ///
-/// GET /v1/credentials/aws-idc/{account_id}/roles/{role_name}
+/// POST /v1/credentials/aws-idc/sso-token
 ///
-/// Performs the complete server-side exchange:
-/// OIDC token → STS bootstrap → `CreateTokenWithIAM` → `GetRoleCredentials`
-/// → final AWS temporary credentials.
-pub async fn get_aws_idc_credentials(
+/// Performs the server-side exchange:
+/// OIDC token → STS bootstrap → `CreateTokenWithIAM` → SSO access token.
+/// The CLI writes the token to `~/.aws/sso/cache/` for native AWS tool use.
+pub async fn get_aws_idc_sso_token(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
-    axum::extract::Path(path): axum::extract::Path<IdcCredentialsPath>,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<vouch_common::IdcCredentialsResponse>, ServiceError> {
-    use crate::services::integrations::aws_idc::exchange_for_idc_credentials;
+) -> Result<Json<vouch_common::IdcSsoTokenResponse>, ServiceError> {
     use secrecy::ExposeSecret;
-
-    validate_account_id(&path.account_id)?;
-    validate_role_name(&path.role_name)?;
 
     let (token, user_email, hd, org_id) =
         extract_idc_context(&state, &headers, &jar, &method, &uri).await?;
@@ -440,15 +428,14 @@ pub async fn get_aws_idc_credentials(
         hd,
         org_id: &org_id,
     };
-    let result = exchange_for_idc_credentials(&ctx, &path.account_id, &path.role_name)
+    let result = crate::services::integrations::aws_idc::exchange_for_idc_token(&ctx)
         .await
         .map_err(map_idc_error)?;
 
-    Ok(Json(vouch_common::IdcCredentialsResponse {
-        access_key_id: result.access_key_id,
-        secret_access_key: result.secret_access_key.expose_secret().to_string(),
-        session_token: result.session_token.expose_secret().to_string(),
-        expiration: result.expiration,
+    Ok(Json(vouch_common::IdcSsoTokenResponse {
+        access_token: result.access_token.expose_secret().to_string(),
+        expires_in: result.expires_in,
+        region: result.region,
     }))
 }
 
@@ -514,36 +501,6 @@ async fn extract_idc_context(
     Ok((token, user_email, hd, org_id))
 }
 
-/// Validate that `account_id` is exactly 12 ASCII digits.
-fn validate_account_id(account_id: &str) -> Result<(), ServiceError> {
-    if account_id.len() != 12 || !account_id.chars().all(|c| c.is_ascii_digit()) {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_account_id",
-            "Account ID must be exactly 12 digits",
-        ));
-    }
-    Ok(())
-}
-
-/// Validate that `role_name` matches IAM role name constraints:
-/// `[a-zA-Z0-9+=,.@_-]{1,64}`.
-fn validate_role_name(role_name: &str) -> Result<(), ServiceError> {
-    if role_name.is_empty()
-        || role_name.len() > 64
-        || !role_name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || "+=,.@_-".contains(c))
-    {
-        return Err(ServiceError::api(
-            StatusCode::BAD_REQUEST,
-            "invalid_role_name",
-            "Role name must be 1-64 characters matching [a-zA-Z0-9+=,.@_-]",
-        ));
-    }
-    Ok(())
-}
-
 /// Map `AwsIdcError` to `ServiceError` for HTTP responses.
 ///
 /// Shared across all IdC credential handlers.
@@ -575,14 +532,6 @@ fn map_idc_error(e: crate::services::integrations::aws_idc::AwsIdcError) -> Serv
                 StatusCode::BAD_GATEWAY,
                 "idc_token_error",
                 "Failed to exchange token with Identity Center",
-            )
-        }
-        AwsIdcError::GetRoleCredentials(ref msg) => {
-            tracing::error!("IdC GetRoleCredentials error: {msg}");
-            ServiceError::api(
-                StatusCode::BAD_GATEWAY,
-                "idc_credentials_error",
-                "Failed to get role credentials from Identity Center",
             )
         }
         AwsIdcError::ListAccounts(ref msg) => {

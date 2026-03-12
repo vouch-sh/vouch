@@ -1,23 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! AWS IAM Identity Center setup command.
 //!
-//! Configures AWS CLI/SDK profiles to use Vouch for Identity Center credential
-//! federation. Account and role discovery is performed server-side — the SSO
-//! access token never leaves the server.
+//! Configures AWS CLI/SDK profiles to use native SSO config with Vouch
+//! as the authentication provider. Account and role discovery is
+//! performed server-side.
 //!
 //! Two modes:
 //! - **Discovery** (`vouch setup aws-idc`): Enumerate all available
 //!   accounts/roles and create profiles for each.
 //! - **Manual** (`vouch setup aws-idc --account-id X --role-name Y`):
 //!   Create a single profile.
+//!
+//! Generates native `[sso-session]` + `[profile]` config instead of
+//! `credential_process`, so all AWS tools work natively once the SSO
+//! token is cached via `vouch login`.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::client::VouchClient;
+use crate::commands::credential::aws_idc::sso_session_name;
 use crate::config::hostname_from_url;
-use crate::integrations::aws::{AwsConfig, AwsProfile};
+use crate::integrations::aws::{AwsConfig, AwsProfile, AwsSsoSession};
 use crate::utils::ensure_secure_dir;
 
 /// Cache TTL for IdC discovery data (4 hours — matches session duration).
@@ -59,10 +64,9 @@ async fn run_single(
     region: Option<&str>,
     refresh: bool,
 ) -> Result<()> {
+    let session_name = sso_session_name(server)?;
     let discovery = fetch_discovery(server, refresh).await?;
     let effective_region = region.unwrap_or(&discovery.region);
-
-    let vouch_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("vouch"));
 
     let config_path = AwsConfig::default_path()?;
     let aws_dir = aws_config_dir()?;
@@ -74,11 +78,6 @@ async fn run_single(
     validate_account_id(account_id)?;
     validate_role_name(role_name)?;
 
-    let credential_process = format!(
-        "{} credential aws-idc --account-id {account_id} --role-name {role_name}",
-        vouch_path.display()
-    );
-
     let profile_name = match profile {
         Some(p) => {
             if config.profile_exists(p) {
@@ -89,7 +88,8 @@ async fn run_single(
             p.to_string()
         }
         None => {
-            if let Some(existing) = find_idc_profile(&config, account_id, role_name) {
+            if let Some(existing) = find_idc_profile(&config, &session_name, account_id, role_name)
+            {
                 println!(
                     "Already configured: profile [{existing}] targets \
                      account {account_id} / role {role_name}"
@@ -103,30 +103,32 @@ async fn run_single(
         }
     };
 
+    // Ensure SSO session exists
+    ensure_sso_session(&mut config, &session_name, server, effective_region);
+
     config.set_profile(&AwsProfile {
         name: profile_name.clone(),
-        credential_process: Some(credential_process),
+        credential_process: None,
+        sso_session: Some(session_name.clone()),
+        sso_account_id: Some(account_id.to_string()),
+        sso_role_name: Some(role_name.to_string()),
         region: Some(effective_region.to_string()),
-        output: Some("json".to_string()),
+        output: None,
     });
     config.save()?;
 
-    println!("Added profile [{profile_name}] to ~/.aws/config");
-    println!();
-    println!("Use AWS CLI with the profile:");
-    println!();
-    println!("  aws --profile {profile_name} sts get-caller-identity");
-    println!();
-    println!("Or set the environment variable:");
-    println!();
-    println!("  export AWS_PROFILE={profile_name}");
-    println!("  aws sts get-caller-identity");
+    // Prime the SSO cache
+    prime_sso_cache(server).await;
+
+    print_setup_instructions(&profile_name);
 
     Ok(())
 }
 
 /// Discover all available accounts/roles and let the user select which to configure.
 async fn run_discovery(server: &str, region_override: Option<&str>, refresh: bool) -> Result<()> {
+    let session_name = sso_session_name(server)?;
+
     println!("Discovering accounts and roles from Identity Center...");
     println!();
 
@@ -166,11 +168,14 @@ async fn run_discovery(server: &str, region_override: Option<&str>, refresh: boo
     let mut config =
         AwsConfig::load_from(config_path.clone()).unwrap_or_else(|_| AwsConfig::empty(config_path));
 
+    // Migrate old credential_process profiles to native SSO
+    let migrated = migrate_old_profiles(&mut config, &session_name, &pairs, effective_region);
+
     // Build display labels and track which are already configured
     let mut options: Vec<String> = Vec::with_capacity(pairs.len());
     let mut already_configured: Vec<bool> = Vec::with_capacity(pairs.len());
     for (account_name, account_id, role_name) in &pairs {
-        let exists = find_idc_profile(&config, account_id, role_name).is_some();
+        let exists = find_idc_profile(&config, &session_name, account_id, role_name).is_some();
         already_configured.push(exists);
 
         let label = if account_name.is_empty() {
@@ -196,6 +201,13 @@ async fn run_discovery(server: &str, region_override: Option<&str>, refresh: boo
 
     // If everything is already configured, show summary and exit
     if defaults.is_empty() {
+        if migrated > 0 {
+            config.save()?;
+            println!(
+                "Migrated {migrated} profile{} from credential_process to native SSO config",
+                if migrated == 1 { "" } else { "s" }
+            );
+        }
         println!(
             "All {} account/role pairs are already configured in ~/.aws/config",
             pairs.len()
@@ -224,7 +236,8 @@ async fn run_discovery(server: &str, region_override: Option<&str>, refresh: boo
         return Ok(());
     }
 
-    let vouch_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("vouch"));
+    // Ensure SSO session exists
+    ensure_sso_session(&mut config, &session_name, server, effective_region);
 
     // Pre-compute profile names and detect collisions
     let mut profile_name_counts: std::collections::HashMap<String, usize> =
@@ -239,7 +252,7 @@ async fn run_discovery(server: &str, region_override: Option<&str>, refresh: boo
 
     for (account_name, account_id, role_name) in &pairs {
         // Build label to check if this pair was selected
-        let exists = find_idc_profile(&config, account_id, role_name).is_some();
+        let exists = find_idc_profile(&config, &session_name, account_id, role_name).is_some();
         let label = if account_name.is_empty() {
             format!("{account_id} / {role_name}")
         } else {
@@ -280,23 +293,21 @@ async fn run_discovery(server: &str, region_override: Option<&str>, refresh: boo
             profile_name = format!("{profile_name}-{suffix}");
         }
 
-        let credential_process = format!(
-            "{} credential aws-idc --account-id {account_id} --role-name {role_name}",
-            vouch_path.display()
-        );
-
         config.set_profile(&AwsProfile {
             name: profile_name.clone(),
-            credential_process: Some(credential_process),
+            credential_process: None,
+            sso_session: Some(session_name.clone()),
+            sso_account_id: Some(account_id.to_string()),
+            sso_role_name: Some(role_name.to_string()),
             region: Some(effective_region.to_string()),
-            output: Some("json".to_string()),
+            output: None,
         });
 
         added = added.saturating_add(1);
     }
 
     // Detect stale profiles
-    let stale = find_stale_profiles(&config, &pairs);
+    let stale = find_stale_profiles(&config, &session_name, &pairs);
     for (profile_name, account_id, role_name) in &stale {
         println!(
             "  Warning: profile [{profile_name}] targets {account_id}/{role_name} \
@@ -304,23 +315,111 @@ async fn run_discovery(server: &str, region_override: Option<&str>, refresh: boo
         );
     }
 
-    if added > 0 {
+    if added > 0 || migrated > 0 {
         config.save()?;
     }
 
     println!();
+    if migrated > 0 {
+        println!(
+            "Migrated {migrated} profile{} to native SSO config",
+            if migrated == 1 { "" } else { "s" }
+        );
+    }
     println!(
         "Added {added} profile{} to ~/.aws/config ({skipped} skipped)",
         if added == 1 { "" } else { "s" }
     );
 
+    // Prime the SSO cache
+    prime_sso_cache(server).await;
+
     if let Some(first_profile) = pairs.first() {
         let name = sanitize_profile_name(&first_profile.0, &first_profile.2, &first_profile.1);
-        println!();
-        println!("Use: aws --profile {name} sts get-caller-identity");
+        print_setup_instructions(&name);
     }
 
     Ok(())
+}
+
+/// Print post-setup usage instructions.
+fn print_setup_instructions(profile_name: &str) {
+    println!();
+    println!("AWS profiles configured. To authenticate:");
+    println!("  vouch login");
+    println!();
+    println!("Then use any AWS tool:");
+    println!("  aws sts get-caller-identity --profile {profile_name}");
+}
+
+/// Ensure the `[sso-session <name>]` section exists in the config.
+fn ensure_sso_session(config: &mut AwsConfig, session_name: &str, server: &str, region: &str) {
+    if !config.sso_session_exists(session_name) {
+        config.set_sso_session(&AwsSsoSession {
+            name: session_name.to_string(),
+            sso_start_url: server.to_string(),
+            sso_region: region.to_string(),
+        });
+    }
+}
+
+/// Prime the SSO token cache after setup (best-effort).
+async fn prime_sso_cache(server: &str) {
+    crate::commands::credential::aws_idc::auto_refresh_sso_token(server).await;
+}
+
+/// Migrate old `credential_process`-based vouch-idc profiles to native SSO.
+///
+/// Returns the number of profiles migrated.
+fn migrate_old_profiles(
+    config: &mut AwsConfig,
+    session_name: &str,
+    discovered: &[(String, String, String)],
+    region: &str,
+) -> u32 {
+    let mut migrated = 0u32;
+
+    let profiles = config.find_all_vouch_profiles();
+    for profile in &profiles {
+        let Some(ref cp) = profile.credential_process else {
+            continue;
+        };
+        if !cp.contains("credential aws-idc") {
+            continue;
+        }
+        // Already has SSO config — skip
+        if profile.sso_session.is_some() {
+            continue;
+        }
+
+        let account_id = extract_flag(cp, "--account-id");
+        let role_name = extract_flag(cp, "--role-name");
+
+        if let (Some(aid), Some(rn)) = (account_id, role_name) {
+            // Verify the account/role still exists in discovery
+            let still_valid = discovered
+                .iter()
+                .any(|(_, disc_aid, disc_rn)| disc_aid == &aid && disc_rn == &rn);
+            if !still_valid {
+                continue;
+            }
+
+            // Remove credential_process and add SSO fields
+            config.remove_credential_process(&profile.name);
+            config.set_profile(&AwsProfile {
+                name: profile.name.clone(),
+                credential_process: None,
+                sso_session: Some(session_name.to_string()),
+                sso_account_id: Some(aid),
+                sso_role_name: Some(rn),
+                region: Some(profile.region.clone().unwrap_or_else(|| region.to_string())),
+                output: profile.output.clone(),
+            });
+            migrated = migrated.saturating_add(1);
+        }
+    }
+
+    migrated
 }
 
 // ============================================================================
@@ -415,7 +514,23 @@ async fn fetch_discovery(
 }
 
 /// Find an existing IdC profile that targets the given account/role.
-fn find_idc_profile(config: &AwsConfig, account_id: &str, role_name: &str) -> Option<String> {
+///
+/// Checks both native SSO profiles and credential_process profiles.
+fn find_idc_profile(
+    config: &AwsConfig,
+    session_name: &str,
+    account_id: &str,
+    role_name: &str,
+) -> Option<String> {
+    // Check native SSO profiles for this session
+    for profile in config.find_profiles_by_sso_session(session_name) {
+        if profile.sso_account_id.as_deref() == Some(account_id)
+            && profile.sso_role_name.as_deref() == Some(role_name)
+        {
+            return Some(profile.name.clone());
+        }
+    }
+    // Check credential_process profiles
     for profile in config.find_all_vouch_profiles() {
         if let Some(ref cp) = profile.credential_process
             && cp.contains("credential aws-idc")
@@ -502,10 +617,24 @@ fn sanitize_profile_name(account_name: &str, role_name: &str, account_id: &str) 
 /// Find stale vouch-idc profiles that no longer match any discovered pair.
 fn find_stale_profiles(
     config: &AwsConfig,
+    session_name: &str,
     discovered: &[(String, String, String)],
 ) -> Vec<(String, String, String)> {
     let mut stale = Vec::new();
 
+    // Check native SSO profiles for this session
+    for profile in config.find_profiles_by_sso_session(session_name) {
+        if let (Some(aid), Some(rn)) = (&profile.sso_account_id, &profile.sso_role_name) {
+            let found = discovered
+                .iter()
+                .any(|(_, disc_aid, disc_rn)| disc_aid == aid && disc_rn == rn);
+            if !found {
+                stale.push((profile.name.clone(), aid.clone(), rn.clone()));
+            }
+        }
+    }
+
+    // Check credential_process profiles
     for profile in config.find_all_vouch_profiles() {
         let Some(ref cp) = profile.credential_process else {
             continue;
@@ -514,7 +643,6 @@ fn find_stale_profiles(
             continue;
         }
 
-        // Extract account-id and role-name from credential_process
         let account_id = extract_flag(cp, "--account-id");
         let role_name = extract_flag(cp, "--role-name");
 
@@ -588,7 +716,41 @@ mod tests {
     }
 
     #[test]
-    fn test_find_stale_profiles() {
+    fn test_find_stale_profiles_sso_native() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let content = r#"
+[sso-session vouch]
+sso_start_url = https://vouch.example.com
+sso_region = us-east-1
+
+[profile vouch-idc-prod-admin]
+sso_session = vouch
+sso_account_id = 111
+sso_role_name = Admin
+
+[profile vouch-idc-staging-readonly]
+sso_session = vouch
+sso_account_id = 222
+sso_role_name = ReadOnly
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        // Only 111/Admin is still discovered
+        let discovered = vec![("Prod".to_string(), "111".to_string(), "Admin".to_string())];
+
+        let stale = find_stale_profiles(&config, "vouch", &discovered);
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].0, "vouch-idc-staging-readonly");
+        assert_eq!(stale[0].1, "222");
+        assert_eq!(stale[0].2, "ReadOnly");
+    }
+
+    #[test]
+    fn test_find_stale_profiles_credential_process() {
         use std::io::Write;
         use tempfile::NamedTempFile;
 
@@ -603,18 +765,41 @@ credential_process = vouch credential aws-idc --account-id 222 --role-name ReadO
         file.write_all(content.as_bytes()).unwrap();
         let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
 
-        // Only 111/Admin is still discovered
         let discovered = vec![("Prod".to_string(), "111".to_string(), "Admin".to_string())];
 
-        let stale = find_stale_profiles(&config, &discovered);
+        let stale = find_stale_profiles(&config, "vouch", &discovered);
         assert_eq!(stale.len(), 1);
         assert_eq!(stale[0].0, "vouch-idc-staging-readonly");
-        assert_eq!(stale[0].1, "222");
-        assert_eq!(stale[0].2, "ReadOnly");
     }
 
     #[test]
-    fn test_find_idc_profile_exact_match_not_prefix() {
+    fn test_find_idc_profile_sso_native() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let content = r#"
+[sso-session vouch]
+sso_start_url = https://vouch.example.com
+sso_region = us-east-1
+
+[profile vouch-idc-prod-admin]
+sso_session = vouch
+sso_account_id = 123456789012
+sso_role_name = Admin
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        assert!(find_idc_profile(&config, "vouch", "123456789012", "Admin").is_some());
+        assert!(find_idc_profile(&config, "vouch", "123", "Admin").is_none());
+        assert!(find_idc_profile(&config, "vouch", "123456789012", "ReadOnly").is_none());
+        // Different session name should not match
+        assert!(find_idc_profile(&config, "other-session", "123456789012", "Admin").is_none());
+    }
+
+    #[test]
+    fn test_find_idc_profile_credential_process() {
         use std::io::Write;
         use tempfile::NamedTempFile;
 
@@ -626,12 +811,48 @@ credential_process = vouch credential aws-idc --account-id 123456789012 --role-n
         file.write_all(content.as_bytes()).unwrap();
         let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
 
-        // Exact match
-        assert!(find_idc_profile(&config, "123456789012", "Admin").is_some());
-        // Prefix should NOT match
-        assert!(find_idc_profile(&config, "123", "Admin").is_none());
-        // Different role should NOT match
-        assert!(find_idc_profile(&config, "123456789012", "ReadOnly").is_none());
+        assert!(find_idc_profile(&config, "vouch", "123456789012", "Admin").is_some());
+        assert!(find_idc_profile(&config, "vouch", "123", "Admin").is_none());
+    }
+
+    #[test]
+    fn test_migrate_old_profiles() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let content = r#"
+[profile vouch-idc-prod-admin]
+credential_process = vouch credential aws-idc --account-id 111 --role-name Admin
+region = us-east-1
+output = json
+
+[profile vouch-idc-staging-readonly]
+credential_process = vouch credential aws-idc --account-id 222 --role-name ReadOnly
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        let mut config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        let discovered = vec![
+            ("Prod".to_string(), "111".to_string(), "Admin".to_string()),
+            (
+                "Staging".to_string(),
+                "222".to_string(),
+                "ReadOnly".to_string(),
+            ),
+        ];
+
+        let count = migrate_old_profiles(&mut config, "us-vouch-sh", &discovered, "us-east-1");
+        assert_eq!(count, 2);
+
+        let prod = config.get_profile("vouch-idc-prod-admin").unwrap();
+        assert_eq!(prod.sso_session.as_deref(), Some("us-vouch-sh"));
+        assert_eq!(prod.sso_account_id.as_deref(), Some("111"));
+        assert_eq!(prod.sso_role_name.as_deref(), Some("Admin"));
+        // credential_process should be removed
+        assert!(prod.credential_process.is_none());
+        // Region preserved from original
+        assert_eq!(prod.region.as_deref(), Some("us-east-1"));
     }
 
     #[test]

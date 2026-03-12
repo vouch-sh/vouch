@@ -517,33 +517,24 @@ pub struct IdcDiscoveryResponse {
     pub errors: Vec<IdcDiscoveryError>,
 }
 
-/// Response from `GET /v1/credentials/aws-idc/credentials`.
+/// Response from `POST /v1/credentials/aws-idc/sso-token`.
 ///
-/// Contains temporary AWS credentials obtained via the full IdC flow
-/// (server-side STS bootstrap + `CreateTokenWithIAM` + `GetRoleCredentials`).
-///
-/// Uses plain `String` for secret fields intentionally: this is a wire-format
-/// type that crosses the serde boundary. The server wraps secrets in
-/// `SecretString` internally and only exposes them here for JSON serialization.
-/// The CLI consumes these values and writes them as credential-process output,
-/// which is inherently plaintext. Compare with [`GitHubTokenResponse`] which
-/// uses `SecretString` because it is also used in server-internal contexts.
+/// Returns the SSO access token for the CLI to write into the standard
+/// AWS SSO cache (`~/.aws/sso/cache/`). The CLI computes `expiresAt`
+/// from `expires_in` seconds.
 #[derive(Serialize, Deserialize)]
-pub struct IdcCredentialsResponse {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: String,
-    /// ISO 8601 expiration timestamp.
-    pub expiration: Timestamp,
+pub struct IdcSsoTokenResponse {
+    pub access_token: String,
+    pub expires_in: u64,
+    pub region: String,
 }
 
-impl std::fmt::Debug for IdcCredentialsResponse {
+impl std::fmt::Debug for IdcSsoTokenResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IdcCredentialsResponse")
-            .field("access_key_id", &self.access_key_id)
-            .field("secret_access_key", &"[REDACTED]")
-            .field("session_token", &"[REDACTED]")
-            .field("expiration", &self.expiration)
+        f.debug_struct("IdcSsoTokenResponse")
+            .field("access_token", &"[REDACTED]")
+            .field("expires_in", &self.expires_in)
+            .field("region", &self.region)
             .finish()
     }
 }

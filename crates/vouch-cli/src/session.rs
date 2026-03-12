@@ -209,6 +209,9 @@ pub async fn store_and_finalize(
     // 4. Auto-refresh npm CodeArtifact tokens (best-effort)
     crate::commands::setup::codeartifact::auto_refresh_npmrc(server).await;
 
+    // 5. Auto-refresh AWS SSO token (best-effort)
+    crate::commands::credential::aws_idc::auto_refresh_sso_token(server).await;
+
     Ok(agent_stored)
 }
 

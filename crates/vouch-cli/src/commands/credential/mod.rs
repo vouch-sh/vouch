@@ -29,21 +29,14 @@ pub enum CredentialCommands {
         #[arg(long)]
         role: String,
     },
-    /// Obtain temporary AWS credentials via IAM Identity Center.
+    /// Refresh the AWS SSO token via Identity Center.
     ///
-    /// Uses the Trusted Token Issuer flow: Vouch OIDC token →
-    /// bootstrap `AssumeRoleWithWebIdentity` → `CreateTokenWithIAM` →
-    /// `GetRoleCredentials`. The Identity Center configuration is
-    /// fetched from the Vouch server.
+    /// Obtains an SSO access token from the Vouch server and writes it
+    /// to `~/.aws/sso/cache/` for native AWS CLI/SDK use. This is
+    /// automatically called during `vouch login` when SSO profiles
+    /// are configured.
     #[command(name = "aws-idc")]
-    AwsIdc {
-        /// Target AWS account ID.
-        #[arg(long)]
-        account_id: String,
-        /// Identity Center permission set role name.
-        #[arg(long)]
-        role_name: String,
-    },
+    AwsIdc {},
     /// Obtain an SSH certificate.
     Ssh {
         /// Path to SSH private key (default: ~/.ssh/id_ed25519_vouch).

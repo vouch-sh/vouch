@@ -537,33 +537,29 @@ mod tests {
     }
 
     #[test]
-    fn test_idc_credentials_response_roundtrip() {
-        let response = IdcCredentialsResponse {
-            access_key_id: "ASIAEXAMPLE123".to_string(),
-            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
-            session_token: "FwoGZXIvYXdzEBYaDH...EXAMPLETOKEN".to_string(),
-            expiration: jiff::Timestamp::from_second(1_700_000_000).unwrap(),
+    fn test_idc_sso_token_response_roundtrip() {
+        let response = IdcSsoTokenResponse {
+            access_token: "eyJexampletoken".to_string(),
+            expires_in: 3600,
+            region: "us-east-1".to_string(),
         };
         let json = serde_json::to_string(&response).unwrap();
-        let decoded: IdcCredentialsResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.access_key_id, "ASIAEXAMPLE123");
-        assert_eq!(decoded.secret_access_key, response.secret_access_key);
-        assert_eq!(decoded.session_token, response.session_token);
-        assert_eq!(decoded.expiration, response.expiration);
+        let decoded: IdcSsoTokenResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.access_token, "eyJexampletoken");
+        assert_eq!(decoded.expires_in, 3600);
+        assert_eq!(decoded.region, "us-east-1");
     }
 
     #[test]
-    fn test_idc_credentials_response_debug_redacts_secrets() {
-        let response = IdcCredentialsResponse {
-            access_key_id: "ASIAEXAMPLE123".to_string(),
-            secret_access_key: "my-secret-key".to_string(),
-            session_token: "my-session-token".to_string(),
-            expiration: jiff::Timestamp::from_second(1_700_000_000).unwrap(),
+    fn test_idc_sso_token_response_debug_redacts_token() {
+        let response = IdcSsoTokenResponse {
+            access_token: "my-secret-token".to_string(),
+            expires_in: 3600,
+            region: "us-east-1".to_string(),
         };
         let debug = format!("{response:?}");
-        assert!(!debug.contains("my-secret-key"));
-        assert!(!debug.contains("my-session-token"));
+        assert!(!debug.contains("my-secret-token"));
         assert!(debug.contains("[REDACTED]"));
-        assert!(debug.contains("ASIAEXAMPLE123"));
+        assert!(debug.contains("us-east-1"));
     }
 }
