@@ -483,31 +483,56 @@ pub struct CloudTokenResponse {
 /// Response containing an OIDC ID token for AWS STS.
 pub type AwsTokenResponse = CloudTokenResponse;
 
-/// Response from `GET /v1/credentials/aws-idc/token`.
-///
-/// Contains an SSO access token obtained via the server-side
-/// Trusted Token Issuer exchange (STS bootstrap + `CreateTokenWithIAM`).
+/// An AWS account available via Identity Center.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct IdcTokenResponse {
-    /// SSO access token for Identity Center portal APIs.
-    pub access_token: String,
-    /// Token validity period in seconds.
-    pub expires_in: u64,
-    /// AWS region where Identity Center is deployed.
-    pub region: String,
-    /// DNS suffix for the partition (e.g., `amazonaws.com`).
-    pub domain_suffix: String,
+pub struct IdcAccount {
+    pub account_id: String,
+    pub account_name: String,
 }
 
-// Custom Debug that would redact access_token is not needed since
-// Serialize already handles it — but we implement Display-safe Debug.
-impl IdcTokenResponse {
-    /// Redacted representation for logging.
-    pub fn redacted(&self) -> String {
-        format!(
-            "IdcTokenResponse {{ access_token: [REDACTED], expires_in: {}, region: {}, domain_suffix: {} }}",
-            self.expires_in, self.region, self.domain_suffix
-        )
+/// Response from `GET /v1/credentials/aws-idc/accounts`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IdcAccountsResponse {
+    pub accounts: Vec<IdcAccount>,
+    /// IdC region (used by the CLI for the default AWS region in profiles).
+    pub region: String,
+}
+
+/// An IAM role available for an account via Identity Center.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IdcAccountRole {
+    pub role_name: String,
+    pub account_id: String,
+}
+
+/// Response from `GET /v1/credentials/aws-idc/roles?account_id=X`.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IdcRolesResponse {
+    pub roles: Vec<IdcAccountRole>,
+}
+
+/// Response from `GET /v1/credentials/aws-idc/credentials`.
+///
+/// Contains temporary AWS credentials obtained via the full IdC flow
+/// (server-side STS bootstrap + `CreateTokenWithIAM` + `GetRoleCredentials`
+/// + optional identity-enhanced `AssumeRole`).
+#[derive(Serialize, Deserialize)]
+pub struct IdcCredentialsResponse {
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub session_token: String,
+    /// ISO 8601 expiration timestamp.
+    pub expiration: Timestamp,
+}
+
+impl std::fmt::Debug for IdcCredentialsResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdcCredentialsResponse")
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"[REDACTED]")
+            .field("session_token", &"[REDACTED]")
+            .field("expiration", &self.expiration)
+            .finish()
     }
 }
 

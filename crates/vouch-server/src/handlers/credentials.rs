@@ -337,26 +337,157 @@ pub async fn get_aws_token(
 }
 
 // ============================================================================
-// AWS Identity Center Token Endpoint
+// AWS Identity Center Discovery Endpoints
 // ============================================================================
 
-/// Get an SSO access token via the Identity Center Trusted Token Issuer flow.
+/// List AWS accounts available via Identity Center.
 ///
-/// GET /v1/credentials/aws-idc/token
+/// GET /v1/credentials/aws-idc
 ///
-/// Performs the server-side exchange: OIDC token → STS bootstrap → CreateTokenWithIAM.
-/// Returns an SSO access token that the CLI uses with `GetRoleCredentials`.
-pub async fn get_aws_idc_token(
+/// Performs the server-side token exchange, then calls SSO `ListAccounts`.
+/// The SSO access token never leaves the server.
+pub async fn list_aws_idc_accounts(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<vouch_common::IdcTokenResponse>, ServiceError> {
-    use crate::services::integrations::aws_idc::{AwsIdcError, exchange_for_idc_token};
+) -> Result<Json<vouch_common::IdcAccountsResponse>, ServiceError> {
+    let (token, user_email, hd, org_id) =
+        extract_idc_context(&state, &headers, &jar, &method, &uri).await?;
+
+    let config = state.config();
+    let (accounts, region) = crate::services::integrations::aws_idc::list_idc_accounts(
+        &state.store,
+        &config.base_url,
+        config.session_hours,
+        &state.oidc_key,
+        &user_email,
+        token.authenticator_id.as_deref(),
+        hd,
+        &org_id,
+    )
+    .await
+    .map_err(map_idc_error)?;
+
+    Ok(Json(vouch_common::IdcAccountsResponse { accounts, region }))
+}
+
+/// Path parameters for the IdC roles endpoint.
+#[derive(serde::Deserialize)]
+pub struct IdcRolesPath {
+    account_id: String,
+}
+
+/// List roles available for an account via Identity Center.
+///
+/// GET /v1/credentials/aws-idc/{account_id}/roles
+///
+/// Performs the server-side token exchange, then calls SSO `ListAccountRoles`.
+pub async fn list_aws_idc_roles(
+    method: Method,
+    uri: OriginalUri,
+    headers: HeaderMap,
+    jar: CookieJar,
+    axum::extract::Path(path): axum::extract::Path<IdcRolesPath>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<vouch_common::IdcRolesResponse>, ServiceError> {
+    let (token, user_email, hd, org_id) =
+        extract_idc_context(&state, &headers, &jar, &method, &uri).await?;
+
+    let config = state.config();
+    let roles = crate::services::integrations::aws_idc::list_idc_account_roles(
+        &state.store,
+        &config.base_url,
+        config.session_hours,
+        &state.oidc_key,
+        &user_email,
+        token.authenticator_id.as_deref(),
+        hd,
+        &org_id,
+        &path.account_id,
+    )
+    .await
+    .map_err(map_idc_error)?;
+
+    Ok(Json(vouch_common::IdcRolesResponse { roles }))
+}
+
+// ============================================================================
+// AWS Identity Center Credentials Endpoint
+// ============================================================================
+
+/// Path parameters for the IdC credentials endpoint.
+#[derive(serde::Deserialize)]
+pub struct IdcCredentialsPath {
+    account_id: String,
+    role_name: String,
+}
+
+/// Get AWS temporary credentials via the Identity Center full server-side flow.
+///
+/// GET /v1/credentials/aws-idc/{account_id}/roles/{role_name}
+///
+/// Performs the complete server-side exchange:
+/// OIDC token → STS bootstrap → `CreateTokenWithIAM` → `GetRoleCredentials`
+/// → `GetRoleCredentials` → final AWS temporary credentials.
+pub async fn get_aws_idc_credentials(
+    method: Method,
+    uri: OriginalUri,
+    headers: HeaderMap,
+    jar: CookieJar,
+    axum::extract::Path(path): axum::extract::Path<IdcCredentialsPath>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<vouch_common::IdcCredentialsResponse>, ServiceError> {
+    use crate::services::integrations::aws_idc::exchange_for_idc_credentials;
     use secrecy::ExposeSecret;
 
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let (token, user_email, hd, org_id) =
+        extract_idc_context(&state, &headers, &jar, &method, &uri).await?;
+
+    let config = state.config();
+    let result = exchange_for_idc_credentials(
+        &state.store,
+        &config.base_url,
+        config.session_hours,
+        &state.oidc_key,
+        &user_email,
+        token.authenticator_id.as_deref(),
+        hd,
+        &org_id,
+        &path.account_id,
+        &path.role_name,
+    )
+    .await
+    .map_err(map_idc_error)?;
+
+    Ok(Json(vouch_common::IdcCredentialsResponse {
+        access_key_id: result.access_key_id,
+        secret_access_key: result.secret_access_key.expose_secret().to_string(),
+        session_token: result.session_token.expose_secret().to_string(),
+        expiration: result.expiration,
+    }))
+}
+
+/// Extract auth context needed by all IdC handlers.
+///
+/// Returns `(token, user_email, hd, org_id)`.
+async fn extract_idc_context(
+    state: &AppState,
+    headers: &HeaderMap,
+    jar: &CookieJar,
+    method: &Method,
+    uri: &OriginalUri,
+) -> Result<
+    (
+        super::session::ValidatedResourceToken,
+        String,
+        Option<String>,
+        String,
+    ),
+    ServiceError,
+> {
+    let token = extract_resource_token(state, headers, jar, method.as_str(), uri.path()).await?;
 
     let user = db::get_user_by_id(&state.store, &token.sub)
         .await
@@ -372,44 +503,40 @@ pub async fn get_aws_idc_token(
             ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
         })?;
 
-    let org_id = user.org_id.as_ref().ok_or_else(|| {
-        ServiceError::api(
-            StatusCode::FORBIDDEN,
-            "org_required",
-            "Identity Center requires organizational membership",
-        )
-    })?;
+    let org_id = user
+        .org_id
+        .as_ref()
+        .ok_or_else(|| {
+            ServiceError::api(
+                StatusCode::FORBIDDEN,
+                "org_required",
+                "Identity Center requires organizational membership",
+            )
+        })?
+        .clone();
 
     let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
 
-    let hd = if let Some(ref oid) = user.org_id {
-        db::get_organization_domain(&state.store, oid)
-            .await
-            .map_err(|e| {
-                tracing::error!("Failed to get organization domain: {e}");
-                ServiceError::api(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "db_error",
-                    "Internal database error",
-                )
-            })?
-    } else {
-        None
-    };
+    let hd = db::get_organization_domain(&state.store, &org_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get organization domain: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?;
 
-    let config = state.config();
-    let result = exchange_for_idc_token(
-        &state.store,
-        &config.base_url,
-        config.session_hours,
-        &state.oidc_key,
-        &user_email,
-        token.authenticator_id.as_deref(),
-        hd,
-        org_id,
-    )
-    .await
-    .map_err(|e| match e {
+    Ok((token, user_email, hd, org_id))
+}
+
+/// Map `AwsIdcError` to `ServiceError` for HTTP responses.
+///
+/// Shared across all IdC credential handlers.
+fn map_idc_error(e: crate::services::integrations::aws_idc::AwsIdcError) -> ServiceError {
+    use crate::services::integrations::aws_idc::AwsIdcError;
+    match e {
         AwsIdcError::NotConfigured | AwsIdcError::MissingField(_) => {
             ServiceError::api(StatusCode::NOT_FOUND, "idc_not_configured", e.to_string())
         }
@@ -437,6 +564,14 @@ pub async fn get_aws_idc_token(
                 "Failed to exchange token with Identity Center",
             )
         }
+        AwsIdcError::GetRoleCredentials(ref msg) => {
+            tracing::error!("IdC GetRoleCredentials error: {msg}");
+            ServiceError::api(
+                StatusCode::BAD_GATEWAY,
+                "idc_credentials_error",
+                "Failed to get role credentials from Identity Center",
+            )
+        }
         AwsIdcError::Database(ref err) => {
             tracing::error!("IdC database error: {err}");
             ServiceError::api(
@@ -445,14 +580,7 @@ pub async fn get_aws_idc_token(
                 "Internal database error",
             )
         }
-    })?;
-
-    Ok(Json(vouch_common::IdcTokenResponse {
-        access_token: result.access_token.expose_secret().to_string(),
-        expires_in: result.expires_in,
-        region: result.region,
-        domain_suffix: result.domain_suffix,
-    }))
+    }
 }
 
 // ============================================================================

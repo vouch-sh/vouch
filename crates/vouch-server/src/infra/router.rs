@@ -131,8 +131,16 @@ fn build_credential_routes() -> Router<Arc<AppState>> {
             get(handlers::credentials::get_aws_token),
         )
         .route(
-            "/v1/credentials/aws-idc/token",
-            get(handlers::credentials::get_aws_idc_token),
+            "/v1/credentials/aws-idc",
+            get(handlers::credentials::list_aws_idc_accounts),
+        )
+        .route(
+            "/v1/credentials/aws-idc/{account_id}/roles",
+            get(handlers::credentials::list_aws_idc_roles),
+        )
+        .route(
+            "/v1/credentials/aws-idc/{account_id}/roles/{role_name}",
+            get(handlers::credentials::get_aws_idc_credentials),
         )
         .route(
             "/v1/credentials/github/token",

@@ -2,8 +2,8 @@
 //! AWS IAM Identity Center setup command.
 //!
 //! Configures AWS CLI/SDK profiles to use Vouch for Identity Center credential
-//! federation. The IdC configuration (bootstrap role, application ARN, region)
-//! is fetched from the Vouch server.
+//! federation. Account and role discovery is performed server-side — the SSO
+//! access token never leaves the server.
 //!
 //! Two modes:
 //! - **Discovery** (`vouch setup aws-idc`): Enumerate all available
@@ -12,9 +12,9 @@
 //!   Create a single profile.
 
 use anyhow::{Context, Result};
-use secrecy::SecretString;
 use std::path::PathBuf;
 
+use crate::client::VouchClient;
 use crate::integrations::aws::{AwsConfig, AwsProfile};
 use crate::utils::ensure_secure_dir;
 
@@ -49,8 +49,16 @@ async fn run_single(
     role_name: &str,
     region: Option<&str>,
 ) -> Result<()> {
-    let idc_token = fetch_idc_token(server).await?;
-    let effective_region = region.unwrap_or(&idc_token.region);
+    // Fetch IdC region from the server (accounts endpoint gives us the region)
+    let client = VouchClient::new(server).await?;
+    let accounts_resp: vouch_common::IdcAccountsResponse = client
+        .get_authenticated("/v1/credentials/aws-idc")
+        .await
+        .context(
+            "failed to get IdC accounts from Vouch server.\n\
+             Ensure AWS Identity Center is configured by your org admin.",
+        )?;
+    let effective_region = region.unwrap_or(&accounts_resp.region);
 
     let vouch_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("vouch"));
 
@@ -114,50 +122,40 @@ async fn run_single(
 
 /// Discover all available accounts/roles and create profiles.
 async fn run_discovery(server: &str, region_override: Option<&str>) -> Result<()> {
-    use crate::integrations::aws::sso;
-
     println!("Discovering accounts and roles from Identity Center...");
     println!();
 
-    let idc_token = fetch_idc_token(server).await?;
-    let effective_region = region_override.unwrap_or(&idc_token.region);
+    let client = VouchClient::new(server).await?;
 
-    let http_client =
-        vouch_common::http::credential_client(&format!("vouch-cli/{}", env!("CARGO_PKG_VERSION")))
-            .context("failed to create HTTP client")?;
+    // Fetch accounts (server-side: token exchange + SSO ListAccounts)
+    let accounts_resp: vouch_common::IdcAccountsResponse = client
+        .get_authenticated("/v1/credentials/aws-idc")
+        .await
+        .context(
+            "failed to list IdC accounts from Vouch server.\n\
+             Ensure AWS Identity Center is configured by your org admin.",
+        )?;
+    let effective_region = region_override.unwrap_or(&accounts_resp.region);
 
-    let access_token = SecretString::from(idc_token.access_token);
-
-    // Enumerate accounts
-    let accounts = sso::list_accounts(
-        &http_client,
-        &access_token,
-        &idc_token.region,
-        &idc_token.domain_suffix,
-    )
-    .await
-    .context("failed to list accounts from Identity Center")?;
-
-    if accounts.is_empty() {
+    if accounts_resp.accounts.is_empty() {
         println!("No accounts available from Identity Center.");
         println!("Check your Identity Center permission set assignments.");
         return Ok(());
     }
 
-    // Enumerate roles for each account
+    // Fetch roles for each account (server-side: token exchange + SSO ListAccountRoles)
     let mut pairs: Vec<(String, String, String)> = Vec::new();
-    for account in &accounts {
-        let roles = sso::list_account_roles(
-            &http_client,
-            &access_token,
-            &account.account_id,
-            &idc_token.region,
-            &idc_token.domain_suffix,
-        )
-        .await
-        .context("failed to list roles for account")?;
+    for account in &accounts_resp.accounts {
+        let url = format!(
+            "/v1/credentials/aws-idc/{}/roles",
+            urlencoding::encode(&account.account_id),
+        );
+        let roles_resp: vouch_common::IdcRolesResponse = client
+            .get_authenticated(&url)
+            .await
+            .context("failed to list roles for account")?;
 
-        for role in roles {
+        for role in roles_resp.roles {
             pairs.push((
                 account.account_name.clone(),
                 account.account_id.clone(),
@@ -264,28 +262,13 @@ async fn run_discovery(server: &str, region_override: Option<&str>) -> Result<()
     Ok(())
 }
 
-/// Fetch an SSO access token from the Vouch server.
-async fn fetch_idc_token(server: &str) -> Result<vouch_common::IdcTokenResponse> {
-    let client = crate::client::VouchClient::new(server).await?;
-    client
-        .get_authenticated("/v1/credentials/aws-idc/token")
-        .await
-        .context(
-            "failed to get IdC token from Vouch server.\n\
-             Ensure AWS Identity Center is configured by your org admin.",
-        )
-}
-
 /// Find an existing IdC profile that targets the given account/role.
 fn find_idc_profile(config: &AwsConfig, account_id: &str, role_name: &str) -> Option<String> {
-    let needle_account = format!("--account-id {account_id}");
-    let needle_role = format!("--role-name {role_name}");
-
     for profile in config.find_all_vouch_profiles() {
         if let Some(ref cp) = profile.credential_process
             && cp.contains("credential aws-idc")
-            && cp.contains(&needle_account)
-            && cp.contains(&needle_role)
+            && extract_flag(cp, "--account-id").as_deref() == Some(account_id)
+            && extract_flag(cp, "--role-name").as_deref() == Some(role_name)
         {
             return Some(profile.name.clone());
         }
@@ -468,5 +451,26 @@ credential_process = vouch credential aws-idc --account-id 222 --role-name ReadO
         assert_eq!(stale[0].0, "vouch-idc-staging-readonly");
         assert_eq!(stale[0].1, "222");
         assert_eq!(stale[0].2, "ReadOnly");
+    }
+
+    #[test]
+    fn test_find_idc_profile_exact_match_not_prefix() {
+        use std::io::Write;
+        use tempfile::NamedTempFile;
+
+        let content = r#"
+[profile vouch-idc-prod-admin]
+credential_process = vouch credential aws-idc --account-id 123456789012 --role-name Admin
+"#;
+        let mut file = NamedTempFile::new().unwrap();
+        file.write_all(content.as_bytes()).unwrap();
+        let config = AwsConfig::load_from(file.path().to_path_buf()).unwrap();
+
+        // Exact match
+        assert!(find_idc_profile(&config, "123456789012", "Admin").is_some());
+        // Prefix should NOT match
+        assert!(find_idc_profile(&config, "123", "Admin").is_none());
+        // Different role should NOT match
+        assert!(find_idc_profile(&config, "123456789012", "ReadOnly").is_none());
     }
 }

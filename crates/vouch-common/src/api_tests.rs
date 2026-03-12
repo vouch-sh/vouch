@@ -5,7 +5,12 @@
 //! and deserialize correctly with the typed encoding wrappers.
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use crate::api::*;
     use uuid::Uuid;
@@ -467,18 +472,77 @@ mod tests {
     }
 
     #[test]
-    fn test_idc_token_response_roundtrip() {
-        let response = IdcTokenResponse {
-            access_token: "eyJ0eXAiOiJKV1QiLCJhbGci...".to_string(),
-            expires_in: 3600,
+    fn test_idc_accounts_response_roundtrip() {
+        let response = IdcAccountsResponse {
+            accounts: vec![
+                IdcAccount {
+                    account_id: "123456789012".to_string(),
+                    account_name: "Production".to_string(),
+                },
+                IdcAccount {
+                    account_id: "234567890123".to_string(),
+                    account_name: "Development".to_string(),
+                },
+            ],
             region: "us-east-1".to_string(),
-            domain_suffix: "amazonaws.com".to_string(),
         };
         let json = serde_json::to_string(&response).unwrap();
-        let decoded: IdcTokenResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.access_token, response.access_token);
-        assert_eq!(decoded.expires_in, 3600);
+        let decoded: IdcAccountsResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.accounts.len(), 2);
+        assert_eq!(decoded.accounts[0].account_id, "123456789012");
+        assert_eq!(decoded.accounts[1].account_name, "Development");
         assert_eq!(decoded.region, "us-east-1");
-        assert_eq!(decoded.domain_suffix, "amazonaws.com");
+    }
+
+    #[test]
+    fn test_idc_roles_response_roundtrip() {
+        let response = IdcRolesResponse {
+            roles: vec![
+                IdcAccountRole {
+                    role_name: "AdministratorAccess".to_string(),
+                    account_id: "123456789012".to_string(),
+                },
+                IdcAccountRole {
+                    role_name: "ReadOnlyAccess".to_string(),
+                    account_id: "123456789012".to_string(),
+                },
+            ],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let decoded: IdcRolesResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.roles.len(), 2);
+        assert_eq!(decoded.roles[0].role_name, "AdministratorAccess");
+        assert_eq!(decoded.roles[1].role_name, "ReadOnlyAccess");
+    }
+
+    #[test]
+    fn test_idc_credentials_response_roundtrip() {
+        let response = IdcCredentialsResponse {
+            access_key_id: "ASIAEXAMPLE123".to_string(),
+            secret_access_key: "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY".to_string(),
+            session_token: "FwoGZXIvYXdzEBYaDH...EXAMPLETOKEN".to_string(),
+            expiration: jiff::Timestamp::from_second(1_700_000_000).unwrap(),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let decoded: IdcCredentialsResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.access_key_id, "ASIAEXAMPLE123");
+        assert_eq!(decoded.secret_access_key, response.secret_access_key);
+        assert_eq!(decoded.session_token, response.session_token);
+        assert_eq!(decoded.expiration, response.expiration);
+    }
+
+    #[test]
+    fn test_idc_credentials_response_debug_redacts_secrets() {
+        let response = IdcCredentialsResponse {
+            access_key_id: "ASIAEXAMPLE123".to_string(),
+            secret_access_key: "my-secret-key".to_string(),
+            session_token: "my-session-token".to_string(),
+            expiration: jiff::Timestamp::from_second(1_700_000_000).unwrap(),
+        };
+        let debug = format!("{response:?}");
+        assert!(!debug.contains("my-secret-key"));
+        assert!(!debug.contains("my-session-token"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(debug.contains("ASIAEXAMPLE123"));
     }
 }
