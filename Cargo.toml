@@ -72,8 +72,8 @@ axum-server = { version = "=0.8.0", default-features = false }
 base64 = { version = "=0.22.1", default-features = false }
 cel = { version = "=0.13.0", default-features = false }
 ciborium = { version = "=0.2.2", default-features = false }
-clap = { version = "=4.5.60", default-features = false }
-clap_complete = { version = "=4.5.66", default-features = false }
+clap = { version = "=4.5.61", default-features = false }
+clap_complete = { version = "=4.5.67", default-features = false }
 ctap-hid-fido2 = { version = "=3.5.8", default-features = false }
 dirs = { version = "=6.0.0", default-features = false }
 dotenvy = { version = "=0.15.7", default-features = false }
