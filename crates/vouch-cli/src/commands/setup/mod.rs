@@ -37,12 +37,12 @@ pub enum SetupCommands {
     /// server.
     #[command(name = "aws-idc")]
     AwsIdc {
-        /// Target AWS account ID.
-        #[arg(long)]
-        account_id: String,
-        /// Identity Center permission set role name.
-        #[arg(long)]
-        role_name: String,
+        /// Target AWS account ID. If omitted, discovers all available accounts.
+        #[arg(long, requires = "role_name")]
+        account_id: Option<String>,
+        /// Identity Center permission set role name. Required with --account-id.
+        #[arg(long, requires = "account_id")]
+        role_name: Option<String>,
         /// AWS profile name to configure.
         #[arg(long)]
         profile: Option<String>,

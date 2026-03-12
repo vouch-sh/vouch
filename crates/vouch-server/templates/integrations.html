@@ -99,7 +99,7 @@
                 {% endif %}
             </div>
             {# AWS Identity Center Integration (Org-wide) #}
-            <div class="card{% if idc_config.is_none() %} opacity-50{% endif %}"{% if idc_config.is_none() %} style="order:99"{% endif %}>
+            <div class="card{% if idc_config.is_none() && !auth.is_org_admin %} opacity-50{% endif %}"{% if idc_config.is_none() && !auth.is_org_admin %} style="order:99"{% endif %}>
                 <div class="flex items-center gap-2 mb-1">
                     {# AWS logo #}
                     <svg class="w-6 h-6 {% if idc_config.is_some() %}text-orange-400{% else %}text-gray-600{% endif %} flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
@@ -112,7 +112,8 @@
                 <p class="text-gray-400 text-sm mb-4">Get AWS credentials via IAM Identity Center permission sets.</p>
 
                 {% if let Some(config) = idc_config %}
-                <div class="space-y-3">
+                {# Configured: show current values #}
+                <div id="idc-view-mode" class="space-y-3">
                     <div class="flex items-center gap-2">
                         <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" d="m4.5 12.75 6 6 9-13.5" />
@@ -120,10 +121,10 @@
                         <span class="text-sm text-green-400">Configured</span>
                     </div>
                     <div class="bg-vouch-surface rounded-lg p-3 space-y-2">
-                        {% if let Some(region) = config.idc_region %}
+                        {% if let Some(idc_region) = config.idc_region %}
                         <div class="flex justify-between text-xs">
                             <span class="text-gray-500">Region</span>
-                            <span class="text-gray-300">{{ region }}</span>
+                            <span class="text-gray-300">{{ idc_region }}</span>
                         </div>
                         {% endif %}
                         {% if let Some(app_arn) = config.idc_application_arn %}
@@ -132,24 +133,87 @@
                             <span class="text-gray-300 truncate ml-2" title="{{ app_arn }}">{{ app_arn }}</span>
                         </div>
                         {% endif %}
+                        {% if let Some(role_arn) = config.idc_bootstrap_role_arn %}
+                        <div class="flex justify-between text-xs">
+                            <span class="text-gray-500">Bootstrap Role</span>
+                            <span class="text-gray-300 truncate ml-2" title="{{ role_arn }}">{{ role_arn }}</span>
+                        </div>
+                        {% endif %}
                     </div>
                     <div>
                         <p class="text-xs text-gray-500 mb-1">Setup a profile:</p>
-                        <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs">vouch setup aws-idc --account-id &lt;ID&gt; --role-name &lt;NAME&gt;</code>
+                        <code class="block bg-vouch-bg px-2 py-1 rounded text-gray-300 text-xs">vouch setup aws-idc</code>
                     </div>
+                    {% if auth.is_org_admin %}
+                    <div class="flex gap-2 pt-1">
+                        <button type="button" id="idc-edit-btn" class="btn-secondary text-sm">Edit</button>
+                        <form id="idc-delete-form" action="/integrations/aws-idc/delete" method="POST" class="inline">
+                            <button type="submit" class="text-sm text-red-400 hover:text-red-300 px-3 py-1.5">Remove</button>
+                        </form>
+                    </div>
+                    {% endif %}
                 </div>
+
+                {% if auth.is_org_admin %}
+                {# Edit form (hidden by default when configured) #}
+                <div id="idc-edit-mode" class="hidden">
+                    <form action="/integrations/aws-idc" method="POST" class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-300">Bootstrap Role ARN</label>
+                            <input type="text" name="idc_bootstrap_role_arn" required
+                                   class="input-field mt-1 font-mono" placeholder="arn:aws:iam::123456789012:role/VouchIdcBootstrap"
+                                   value="{{ config.idc_bootstrap_role_arn.as_deref().unwrap_or_default() }}">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-300">Application ARN</label>
+                            <input type="text" name="idc_application_arn" required
+                                   class="input-field mt-1 font-mono" placeholder="arn:aws:sso::123456789012:application/ssoins-abc/apl-xyz"
+                                   value="{{ config.idc_application_arn.as_deref().unwrap_or_default() }}">
+                        </div>
+                        <div>
+                            <label class="block text-sm font-medium text-gray-300">Identity Center Region</label>
+                            <input type="text" name="idc_region" required
+                                   class="input-field mt-1" placeholder="us-east-1"
+                                   value="{{ config.idc_region.as_deref().unwrap_or_default() }}">
+                        </div>
+                        <div class="flex justify-end gap-3">
+                            <button type="button" id="idc-cancel-btn" class="btn-secondary text-sm">Cancel</button>
+                            <button type="submit" class="btn-primary text-sm">Save</button>
+                        </div>
+                    </form>
+                </div>
+                {% endif %}
+
                 {% elif !auth.has_org %}
                 <div class="bg-blue-900/20 border border-blue-700/30 rounded-lg p-3">
                     <p class="text-sm text-blue-300">Requires organization membership.</p>
                 </div>
+                {% elif auth.is_org_admin %}
+                {# Not configured, admin can set it up #}
+                <form action="/integrations/aws-idc" method="POST" class="space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300">Bootstrap Role ARN</label>
+                        <input type="text" name="idc_bootstrap_role_arn" required
+                               class="input-field mt-1 font-mono" placeholder="arn:aws:iam::123456789012:role/VouchIdcBootstrap">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300">Application ARN</label>
+                        <input type="text" name="idc_application_arn" required
+                               class="input-field mt-1 font-mono" placeholder="arn:aws:sso::123456789012:application/ssoins-abc/apl-xyz">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300">Identity Center Region</label>
+                        <input type="text" name="idc_region" required
+                               class="input-field mt-1" placeholder="us-east-1">
+                    </div>
+                    <div class="flex justify-end gap-3">
+                        <button type="submit" class="btn-primary text-sm">Save</button>
+                    </div>
+                </form>
                 {% else %}
                 <div class="bg-vouch-surface rounded-lg p-3">
                     <p class="text-sm text-gray-400">Not configured.</p>
-                    {% if auth.is_org_admin %}
-                    <p class="text-xs text-gray-500 mt-1">Configure via <code class="bg-vouch-bg px-1 rounded">PUT /v1/integrations/aws</code> with Identity Center fields.</p>
-                    {% else %}
                     <p class="text-xs text-gray-500 mt-1">Ask an org admin to configure Identity Center.</p>
-                    {% endif %}
                 </div>
                 {% endif %}
             </div>
@@ -161,4 +225,8 @@
         </p>
     </div>
 </div>
+{% endblock %}
+
+{% block scripts %}
+<script src="/static/js/integrations.js"></script>
 {% endblock %}

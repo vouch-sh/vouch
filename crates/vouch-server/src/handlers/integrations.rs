@@ -12,7 +12,8 @@
 
 use crate::db;
 use crate::handlers::session::{
-    AuthContext, extract_org_admin, extract_user_with_org, get_resource_auth_context,
+    AuthContext, extract_org_admin, extract_session_from_cookie, extract_user_with_org,
+    get_resource_auth_context,
 };
 use crate::services::error::ServiceError;
 use crate::{AppState, impl_template_response};
@@ -22,6 +23,7 @@ use axum::extract::{OriginalUri, State};
 use axum::http::{HeaderMap, Method, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum_extra::extract::cookie::CookieJar;
+use serde::Deserialize;
 use std::sync::Arc;
 use vouch_common::{AwsIntegrationConfig, IntegrationConfigResponse};
 
@@ -240,4 +242,106 @@ pub async fn delete_aws_integration(
             "AWS integration not configured",
         ))
     }
+}
+
+// ============================================================================
+// AWS Identity Center UI Form Handlers
+// ============================================================================
+
+/// Form data for IdC configuration.
+#[derive(Deserialize)]
+pub struct IdcConfigForm {
+    idc_bootstrap_role_arn: String,
+    idc_application_arn: String,
+    idc_region: String,
+}
+
+/// POST /integrations/aws-idc — Save IdC config (UI form, org admin only).
+pub async fn save_idc_config_form(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    axum::Form(form): axum::Form<IdcConfigForm>,
+) -> Response {
+    let Some((user, org_id)) = extract_admin_from_cookie(&state, &jar).await else {
+        return Redirect::to("/enroll/start").into_response();
+    };
+
+    // Validate fields
+    let bootstrap_arn = form.idc_bootstrap_role_arn.trim();
+    let app_arn = form.idc_application_arn.trim();
+    let region = form.idc_region.trim();
+
+    if bootstrap_arn.is_empty() || app_arn.is_empty() || region.is_empty() {
+        return Redirect::to("/integrations").into_response();
+    }
+
+    let config = AwsIntegrationConfig {
+        default_role_arn: None,
+        idc_bootstrap_role_arn: Some(bootstrap_arn.to_string()),
+        idc_application_arn: Some(app_arn.to_string()),
+        idc_region: Some(region.to_string()),
+    };
+
+    let config_value = match serde_json::to_value(&config) {
+        Ok(v) => v,
+        Err(_) => return Redirect::to("/integrations").into_response(),
+    };
+
+    if let Err(e) =
+        db::upsert_cloud_integration(&state.store, &org_id, "aws", &config_value, &user.id).await
+    {
+        tracing::error!("Failed to save IdC config: {e}");
+    } else {
+        tracing::info!(
+            user_id = %user.id,
+            org_id = %org_id,
+            "AWS Identity Center configured via admin UI"
+        );
+    }
+
+    Redirect::to("/integrations").into_response()
+}
+
+/// POST /integrations/aws-idc/delete — Remove IdC config (UI form, org admin only).
+pub async fn delete_idc_config_form(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> Response {
+    let Some((user, org_id)) = extract_admin_from_cookie(&state, &jar).await else {
+        return Redirect::to("/enroll/start").into_response();
+    };
+
+    match db::delete_cloud_integration(&state.store, &org_id, "aws").await {
+        Ok(true) => {
+            tracing::info!(
+                user_id = %user.id,
+                org_id = %org_id,
+                "AWS Identity Center removed via admin UI"
+            );
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!("Failed to delete IdC config: {e}");
+        }
+    }
+
+    Redirect::to("/integrations").into_response()
+}
+
+/// Extract an org admin user from the session cookie.
+async fn extract_admin_from_cookie(
+    state: &AppState,
+    jar: &CookieJar,
+) -> Option<(db::User, String)> {
+    let session = extract_session_from_cookie(state, jar).await.ok()?;
+    let user = db::get_user_by_id(&state.store, &session.sub)
+        .await
+        .ok()??;
+
+    if !user.is_org_admin {
+        return None;
+    }
+
+    let org_id = user.org_id.clone()?;
+    Some((user, org_id))
 }

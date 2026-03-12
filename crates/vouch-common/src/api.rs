@@ -483,6 +483,34 @@ pub struct CloudTokenResponse {
 /// Response containing an OIDC ID token for AWS STS.
 pub type AwsTokenResponse = CloudTokenResponse;
 
+/// Response from `GET /v1/credentials/aws-idc/token`.
+///
+/// Contains an SSO access token obtained via the server-side
+/// Trusted Token Issuer exchange (STS bootstrap + `CreateTokenWithIAM`).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IdcTokenResponse {
+    /// SSO access token for Identity Center portal APIs.
+    pub access_token: String,
+    /// Token validity period in seconds.
+    pub expires_in: u64,
+    /// AWS region where Identity Center is deployed.
+    pub region: String,
+    /// DNS suffix for the partition (e.g., `amazonaws.com`).
+    pub domain_suffix: String,
+}
+
+// Custom Debug that would redact access_token is not needed since
+// Serialize already handles it — but we implement Display-safe Debug.
+impl IdcTokenResponse {
+    /// Redacted representation for logging.
+    pub fn redacted(&self) -> String {
+        format!(
+            "IdcTokenResponse {{ access_token: [REDACTED], expires_in: {}, region: {}, domain_suffix: {} }}",
+            self.expires_in, self.region, self.domain_suffix
+        )
+    }
+}
+
 // ============================================================================
 // Cloud Provider Integration Configs
 // ============================================================================

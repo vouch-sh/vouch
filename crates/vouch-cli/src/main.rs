@@ -638,8 +638,8 @@ async fn run() -> Result<()> {
                 commands::setup::aws_idc::run(
                     server,
                     profile.as_deref(),
-                    &account_id,
-                    &role_name,
+                    account_id.as_deref(),
+                    role_name.as_deref(),
                     region.as_deref(),
                 )
                 .await

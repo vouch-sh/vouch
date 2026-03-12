@@ -131,6 +131,10 @@ fn build_credential_routes() -> Router<Arc<AppState>> {
             get(handlers::credentials::get_aws_token),
         )
         .route(
+            "/v1/credentials/aws-idc/token",
+            get(handlers::credentials::get_aws_idc_token),
+        )
+        .route(
             "/v1/credentials/github/token",
             post(handlers::credentials::get_github_token),
         )
@@ -418,6 +422,14 @@ fn build_ui_routes(config: &config::ServerConfig) -> Router<Arc<AppState>> {
         .route(
             "/integrations",
             get(handlers::integrations::integrations_page),
+        )
+        .route(
+            "/integrations/aws-idc",
+            post(handlers::integrations::save_idc_config_form),
+        )
+        .route(
+            "/integrations/aws-idc/delete",
+            post(handlers::integrations::delete_idc_config_form),
         )
         // Browser-based WebAuthn login (RFC 6749, RFC 9207, RFC 9700)
         .route("/login", get(handlers::browser_login::login_page))

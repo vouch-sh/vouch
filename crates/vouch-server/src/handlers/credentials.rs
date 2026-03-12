@@ -337,6 +337,124 @@ pub async fn get_aws_token(
 }
 
 // ============================================================================
+// AWS Identity Center Token Endpoint
+// ============================================================================
+
+/// Get an SSO access token via the Identity Center Trusted Token Issuer flow.
+///
+/// GET /v1/credentials/aws-idc/token
+///
+/// Performs the server-side exchange: OIDC token → STS bootstrap → CreateTokenWithIAM.
+/// Returns an SSO access token that the CLI uses with `GetRoleCredentials`.
+pub async fn get_aws_idc_token(
+    method: Method,
+    uri: OriginalUri,
+    headers: HeaderMap,
+    jar: CookieJar,
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<vouch_common::IdcTokenResponse>, ServiceError> {
+    use crate::services::integrations::aws_idc::{AwsIdcError, exchange_for_idc_token};
+    use secrecy::ExposeSecret;
+
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+
+    let user = db::get_user_by_id(&state.store, &token.sub)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user by ID: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
+        })?;
+
+    let org_id = user.org_id.as_ref().ok_or_else(|| {
+        ServiceError::api(
+            StatusCode::FORBIDDEN,
+            "org_required",
+            "Identity Center requires organizational membership",
+        )
+    })?;
+
+    let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
+
+    let hd = if let Some(ref oid) = user.org_id {
+        db::get_organization_domain(&state.store, oid)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to get organization domain: {e}");
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    "Internal database error",
+                )
+            })?
+    } else {
+        None
+    };
+
+    let config = state.config();
+    let result = exchange_for_idc_token(
+        &state.store,
+        &config.base_url,
+        config.session_hours,
+        &state.oidc_key,
+        &user_email,
+        token.authenticator_id.as_deref(),
+        hd,
+        org_id,
+    )
+    .await
+    .map_err(|e| match e {
+        AwsIdcError::NotConfigured | AwsIdcError::MissingField(_) => {
+            ServiceError::api(StatusCode::NOT_FOUND, "idc_not_configured", e.to_string())
+        }
+        AwsIdcError::OidcToken(ref aws_err) => {
+            tracing::error!("IdC OIDC token error: {aws_err}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "oidc_token_error",
+                "Failed to issue OIDC token",
+            )
+        }
+        AwsIdcError::StsAssume(ref msg) => {
+            tracing::error!("IdC STS bootstrap error: {msg}");
+            ServiceError::api(
+                StatusCode::BAD_GATEWAY,
+                "sts_error",
+                "Failed to bootstrap IAM credentials",
+            )
+        }
+        AwsIdcError::CreateToken(ref msg) => {
+            tracing::error!("IdC CreateTokenWithIAM error: {msg}");
+            ServiceError::api(
+                StatusCode::BAD_GATEWAY,
+                "idc_token_error",
+                "Failed to exchange token with Identity Center",
+            )
+        }
+        AwsIdcError::Database(ref err) => {
+            tracing::error!("IdC database error: {err}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        }
+    })?;
+
+    Ok(Json(vouch_common::IdcTokenResponse {
+        access_token: result.access_token.expose_secret().to_string(),
+        expires_in: result.expires_in,
+        region: result.region,
+        domain_suffix: result.domain_suffix,
+    }))
+}
+
 // ============================================================================
 // GitHub Token Endpoint
 // ============================================================================

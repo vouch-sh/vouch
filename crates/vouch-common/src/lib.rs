@@ -3,6 +3,7 @@
 
 pub mod aaguid;
 pub(crate) mod api;
+pub mod aws;
 pub(crate) mod cookie;
 pub mod encoding;
 pub(crate) mod error;
