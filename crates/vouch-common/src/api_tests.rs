@@ -539,13 +539,13 @@ mod tests {
 
     #[test]
     fn test_idc_sso_token_response_roundtrip() {
-        let response = IdcSsoTokenResponse {
+        let response = IdcTokenResponse {
             access_token: secrecy::SecretString::from("eyJexampletoken"),
             expires_in: 3600,
             region: "us-east-1".to_string(),
         };
         let json = serde_json::to_string(&response).unwrap();
-        let decoded: IdcSsoTokenResponse = serde_json::from_str(&json).unwrap();
+        let decoded: IdcTokenResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.access_token.expose_secret(), "eyJexampletoken");
         assert_eq!(decoded.expires_in, 3600);
         assert_eq!(decoded.region, "us-east-1");
@@ -553,7 +553,7 @@ mod tests {
 
     #[test]
     fn test_idc_sso_token_response_debug_redacts_token() {
-        let response = IdcSsoTokenResponse {
+        let response = IdcTokenResponse {
             access_token: secrecy::SecretString::from("my-secret-token"),
             expires_in: 3600,
             region: "us-east-1".to_string(),

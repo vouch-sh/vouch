@@ -43,12 +43,6 @@ pub enum SetupCommands {
         /// Identity Center permission set role name. Required with --account-id.
         #[arg(long, requires = "account_id")]
         role_name: Option<String>,
-        /// AWS profile name to configure.
-        #[arg(long)]
-        profile: Option<String>,
-        /// AWS region to set in the profile (defaults to IdC region from server).
-        #[arg(long)]
-        region: Option<String>,
         /// Bypass the discovery cache and fetch fresh data from the server.
         #[arg(long)]
         refresh: bool,

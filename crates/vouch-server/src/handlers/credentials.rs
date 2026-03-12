@@ -372,26 +372,7 @@ pub async fn discover_aws_idc(
         .await
         .map_err(map_idc_error)?;
 
-    Ok(Json(vouch_common::IdcDiscoveryResponse {
-        accounts: result
-            .accounts
-            .into_iter()
-            .map(|a| vouch_common::IdcAccountWithRoles {
-                account_id: a.account_id,
-                account_name: a.account_name,
-                roles: a.roles,
-            })
-            .collect(),
-        region: result.region,
-        errors: result
-            .errors
-            .into_iter()
-            .map(|e| vouch_common::IdcDiscoveryError {
-                account_id: e.account_id,
-                message: e.message,
-            })
-            .collect(),
-    }))
+    Ok(Json(result))
 }
 
 // ============================================================================
@@ -412,7 +393,7 @@ pub async fn get_aws_idc_sso_token(
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<vouch_common::IdcSsoTokenResponse>, ServiceError> {
+) -> Result<Json<vouch_common::IdcTokenResponse>, ServiceError> {
     let (token, user_email, hd, org_id) =
         extract_idc_context(&state, &headers, &jar, &method, &uri).await?;
 
@@ -451,7 +432,7 @@ pub async fn get_aws_idc_sso_token(
         tracing::warn!("Failed to log IdC credential event: {e}");
     }
 
-    Ok(Json(vouch_common::IdcSsoTokenResponse {
+    Ok(Json(vouch_common::IdcTokenResponse {
         access_token: result.access_token,
         expires_in: result.expires_in,
         region: result.region,

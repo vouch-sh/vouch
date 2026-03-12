@@ -85,7 +85,7 @@ pub async fn auto_refresh_sso_token(server: &str) {
 }
 
 /// Fetch SSO token from the Vouch server.
-async fn fetch_sso_token(server: &str) -> Result<vouch_common::IdcSsoTokenResponse> {
+async fn fetch_sso_token(server: &str) -> Result<vouch_common::IdcTokenResponse> {
     let client = VouchClient::new(server).await?;
     client
         .post_authenticated("/v1/credentials/aws-idc/sso-token", &())

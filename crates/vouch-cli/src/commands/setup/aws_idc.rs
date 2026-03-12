@@ -38,34 +38,20 @@ const DISCOVERY_CACHE_TTL_HOURS: i64 = 4;
 /// Pass `refresh = true` to bypass the cache.
 pub async fn run(
     server: &str,
-    profile: Option<&str>,
     account_id: Option<&str>,
     role_name: Option<&str>,
-    region: Option<&str>,
     refresh: bool,
 ) -> Result<()> {
     match (account_id, role_name) {
-        (Some(aid), Some(rn)) => run_single(server, profile, aid, rn, region, refresh).await,
-        _ => run_discovery(server, region, refresh).await,
+        (Some(aid), Some(rn)) => run_single(server, aid, rn, refresh).await,
+        _ => run_discovery(server, refresh).await,
     }
 }
 
 /// Create a single profile for a specific account/role.
-async fn run_single(
-    server: &str,
-    profile: Option<&str>,
-    account_id: &str,
-    role_name: &str,
-    region: Option<&str>,
-    refresh: bool,
-) -> Result<()> {
+async fn run_single(server: &str, account_id: &str, role_name: &str, refresh: bool) -> Result<()> {
     let session_name = sso_session_name(server)?;
-    let effective_region = if let Some(r) = region {
-        r.to_string()
-    } else {
-        let discovery = fetch_discovery(server, refresh).await?;
-        discovery.region
-    };
+    let discovery = fetch_discovery(server, refresh).await?;
 
     let config_path = AwsConfig::default_path()?;
     let aws_dir = aws_config_dir()?;
@@ -77,33 +63,20 @@ async fn run_single(
     validate_account_id(account_id)?;
     validate_role_name(role_name)?;
 
-    let profile_name = match profile {
-        Some(p) => {
-            if config.profile_exists(p) {
-                println!("Profile [{p}] already exists in ~/.aws/config.");
-                println!("To update it, edit ~/.aws/config directly.");
-                return Ok(());
-            }
-            p.to_string()
-        }
-        None => {
-            if let Some(existing) = find_idc_profile(&config, &session_name, account_id, role_name)
-            {
-                println!(
-                    "Already configured: profile [{existing}] targets \
-                     account {account_id} / role {role_name}"
-                );
-                println!();
-                println!("Use it with:");
-                println!("  aws --profile {existing} sts get-caller-identity");
-                return Ok(());
-            }
-            sanitize_profile_name("", role_name, account_id)
-        }
-    };
+    if let Some(existing) = find_idc_profile(&config, &session_name, account_id, role_name) {
+        println!(
+            "Already configured: profile [{existing}] targets \
+             account {account_id} / role {role_name}"
+        );
+        println!();
+        println!("Use it with:");
+        println!("  aws --profile {existing} sts get-caller-identity");
+        return Ok(());
+    }
+    let profile_name = sanitize_profile_name("", role_name, account_id);
 
     // Ensure SSO session exists
-    ensure_sso_session(&mut config, &session_name, server, &effective_region);
+    ensure_sso_session(&mut config, &session_name, server, &discovery.region);
 
     config.set_profile(&AwsProfile {
         name: profile_name.clone(),
@@ -111,7 +84,7 @@ async fn run_single(
         sso_session: Some(session_name.clone()),
         sso_account_id: Some(account_id.to_string()),
         sso_role_name: Some(role_name.to_string()),
-        region: Some(effective_region),
+        region: Some(discovery.region),
         output: None,
     });
     config.save()?;
@@ -125,14 +98,14 @@ async fn run_single(
 }
 
 /// Discover all available accounts/roles and let the user select which to configure.
-async fn run_discovery(server: &str, region_override: Option<&str>, refresh: bool) -> Result<()> {
+async fn run_discovery(server: &str, refresh: bool) -> Result<()> {
     let session_name = sso_session_name(server)?;
 
     println!("Discovering accounts and roles from Identity Center...");
     println!();
 
     let discovery = fetch_discovery(server, refresh).await?;
-    let effective_region = region_override.unwrap_or(&discovery.region);
+    let effective_region = &discovery.region;
 
     // Show warnings for partial failures
     for err in &discovery.errors {

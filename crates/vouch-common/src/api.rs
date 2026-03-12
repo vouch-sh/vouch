@@ -516,16 +516,16 @@ pub struct IdcDiscoveryResponse {
 /// AWS SSO cache (`~/.aws/sso/cache/`). The CLI computes `expiresAt`
 /// from `expires_in` seconds.
 #[derive(Serialize, Deserialize)]
-pub struct IdcSsoTokenResponse {
+pub struct IdcTokenResponse {
     #[serde(serialize_with = "serialize_secret_string")]
     pub access_token: secrecy::SecretString,
     pub expires_in: u64,
     pub region: String,
 }
 
-impl std::fmt::Debug for IdcSsoTokenResponse {
+impl std::fmt::Debug for IdcTokenResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IdcSsoTokenResponse")
+        f.debug_struct("IdcTokenResponse")
             .field("access_token", &"[REDACTED]")
             .field("expires_in", &self.expires_in)
             .field("region", &self.region)

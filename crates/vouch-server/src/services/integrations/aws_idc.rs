@@ -240,26 +240,6 @@ pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResu
     })
 }
 
-/// Result of discovering all accounts and their roles.
-pub struct IdcDiscoveryResult {
-    pub accounts: Vec<IdcAccountWithRolesResult>,
-    pub region: String,
-    pub errors: Vec<IdcDiscoveryErrorResult>,
-}
-
-/// A discovered account with its roles.
-pub struct IdcAccountWithRolesResult {
-    pub account_id: String,
-    pub account_name: String,
-    pub roles: Vec<String>,
-}
-
-/// A partial failure when listing roles for a specific account.
-pub struct IdcDiscoveryErrorResult {
-    pub account_id: String,
-    pub message: String,
-}
-
 /// Discover all accounts and roles available via Identity Center.
 ///
 /// Performs a single token exchange, then lists all accounts and their
@@ -268,7 +248,7 @@ pub struct IdcDiscoveryErrorResult {
 /// the entire request.
 pub async fn discover_accounts_and_roles(
     ctx: &IdcContext<'_>,
-) -> Result<IdcDiscoveryResult, AwsIdcError> {
+) -> Result<vouch_common::IdcDiscoveryResponse, AwsIdcError> {
     let token_result = exchange_for_idc_token(ctx).await?;
     let sso_client = build_sso_client(&token_result.region).await;
 
@@ -312,14 +292,14 @@ pub async fn discover_accounts_and_roles(
     while let Some(result) = join_set.join_next().await {
         match result {
             Ok((account_id, account_name, Ok(roles))) => {
-                discovered.push(IdcAccountWithRolesResult {
+                discovered.push(vouch_common::IdcAccountWithRoles {
                     account_id,
                     account_name,
                     roles,
                 });
             }
             Ok((account_id, _, Err(e))) => {
-                errors.push(IdcDiscoveryErrorResult {
+                errors.push(vouch_common::IdcDiscoveryError {
                     account_id,
                     message: e.to_string(),
                 });
@@ -333,7 +313,7 @@ pub async fn discover_accounts_and_roles(
     // Sort accounts by name for stable output
     discovered.sort_by(|a, b| a.account_name.cmp(&b.account_name));
 
-    Ok(IdcDiscoveryResult {
+    Ok(vouch_common::IdcDiscoveryResponse {
         accounts: discovered,
         region: token_result.region,
         errors,
