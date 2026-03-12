@@ -514,8 +514,14 @@ pub struct IdcRolesResponse {
 /// Response from `GET /v1/credentials/aws-idc/credentials`.
 ///
 /// Contains temporary AWS credentials obtained via the full IdC flow
-/// (server-side STS bootstrap + `CreateTokenWithIAM` + `GetRoleCredentials`
-/// + optional identity-enhanced `AssumeRole`).
+/// (server-side STS bootstrap + `CreateTokenWithIAM` + `GetRoleCredentials`).
+///
+/// Uses plain `String` for secret fields intentionally: this is a wire-format
+/// type that crosses the serde boundary. The server wraps secrets in
+/// `SecretString` internally and only exposes them here for JSON serialization.
+/// The CLI consumes these values and writes them as credential-process output,
+/// which is inherently plaintext. Compare with [`GitHubTokenResponse`] which
+/// uses `SecretString` because it is also used in server-internal contexts.
 #[derive(Serialize, Deserialize)]
 pub struct IdcCredentialsResponse {
     pub access_key_id: String,

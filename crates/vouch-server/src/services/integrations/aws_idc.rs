@@ -44,9 +44,33 @@ pub enum AwsIdcError {
     #[error("GetRoleCredentials failed: {0}")]
     GetRoleCredentials(String),
 
+    /// SSO `ListAccounts` failed.
+    #[error("ListAccounts failed: {0}")]
+    ListAccounts(String),
+
+    /// SSO `ListAccountRoles` failed.
+    #[error("ListAccountRoles failed: {0}")]
+    ListAccountRoles(String),
+
     /// Database error.
     #[error("Database error: {0}")]
     Database(#[from] anyhow::Error),
+}
+
+/// Common context for all IdC operations.
+///
+/// Groups the parameters shared by `exchange_for_idc_token`,
+/// `exchange_for_idc_credentials`, `list_idc_accounts`, and
+/// `list_idc_account_roles`.
+pub struct IdcContext<'a> {
+    pub store: &'a DocumentStore,
+    pub base_url: &'a str,
+    pub session_hours: u64,
+    pub oidc_key: &'a OidcSigningKey,
+    pub user_email: &'a str,
+    pub authenticator_id: Option<&'a str>,
+    pub hd: Option<String>,
+    pub org_id: &'a str,
 }
 
 /// Result of a successful IdC token exchange.
@@ -58,8 +82,6 @@ pub struct IdcTokenResult {
     pub expires_in: u64,
     /// Identity Center region.
     pub region: String,
-    /// DNS suffix for the partition (e.g., `amazonaws.com`).
-    pub domain_suffix: String,
     /// Opaque identity context from `CreateTokenWithIAM` additional details.
     pub identity_context: Option<String>,
 }
@@ -73,34 +95,24 @@ pub struct IdcCredentialsResult {
     pub expiration: jiff::Timestamp,
 }
 
+/// Build an SSO client configured for the given region with no credentials.
+async fn build_sso_client(region: &str) -> aws_sdk_sso::Client {
+    let sso_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new(region.to_string()))
+        .no_credentials()
+        .load()
+        .await;
+    aws_sdk_sso::Client::new(&sso_config)
+}
+
 /// Exchange a Vouch session for an SSO access token.
 ///
 /// Chains three operations server-side. Used internally by
 /// [`exchange_for_idc_credentials`], [`list_idc_accounts`],
 /// and [`list_idc_account_roles`].
-///
-/// # Arguments
-/// * `store` - Document store for reading IdC config
-/// * `base_url` - Server base URL (OIDC issuer)
-/// * `session_hours` - Session duration for token validity
-/// * `oidc_key` - OIDC signing key
-/// * `user_email` - Authenticated user's email
-/// * `authenticator_id` - Authenticator ID from the session
-/// * `hd` - Organization domain (Google Workspace hosted domain)
-/// * `org_id` - Organization ID for config lookup
-#[allow(clippy::too_many_arguments)]
-pub async fn exchange_for_idc_token(
-    store: &DocumentStore,
-    base_url: &str,
-    session_hours: u64,
-    oidc_key: &OidcSigningKey,
-    user_email: &str,
-    authenticator_id: Option<&str>,
-    hd: Option<String>,
-    org_id: &str,
-) -> Result<IdcTokenResult, AwsIdcError> {
+pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResult, AwsIdcError> {
     // 1. Read IdC config from DB
-    let integration = db::get_cloud_integration(store, org_id, "aws")
+    let integration = db::get_cloud_integration(ctx.store, ctx.org_id, "aws")
         .await?
         .ok_or(AwsIdcError::NotConfigured)?;
 
@@ -126,20 +138,19 @@ pub async fn exchange_for_idc_token(
 
     // 2. Issue OIDC ID token
     let token_result = super::aws::issue_aws_token(
-        store,
-        base_url,
-        session_hours,
-        oidc_key,
-        user_email,
-        authenticator_id,
-        hd,
+        ctx.store,
+        ctx.base_url,
+        ctx.session_hours,
+        ctx.oidc_key,
+        ctx.user_email,
+        ctx.authenticator_id,
+        ctx.hd.clone(),
     )
     .await?;
 
     // Determine region/partition from the bootstrap role ARN
     let partition = Partition::from_arn(bootstrap_role_arn)
         .map_err(|e| AwsIdcError::StsAssume(format!("{e}")))?;
-    let domain_suffix = partition.dns_suffix();
     let sts_region = partition.default_sts_region();
 
     // 3. STS AssumeRoleWithWebIdentity (no credentials needed)
@@ -150,7 +161,7 @@ pub async fn exchange_for_idc_token(
         .await;
     let sts_client = aws_sdk_sts::Client::new(&sts_config);
 
-    let session_name = sanitize_session_name(user_email);
+    let session_name = sanitize_session_name(ctx.user_email);
 
     let sts_response = sts_client
         .assume_role_with_web_identity()
@@ -170,17 +181,22 @@ pub async fn exchange_for_idc_token(
     let secret_key = SecretString::from(sts_creds.secret_access_key());
     let session_token = SecretString::from(sts_creds.session_token());
 
+    let exp = sts_creds.expiration();
+    let exp_secs = exp.secs();
+    let exp_duration = if exp_secs <= 0 {
+        return Err(AwsIdcError::StsAssume(
+            "STS returned expired bootstrap credentials".to_string(),
+        ));
+    } else {
+        #[allow(clippy::cast_sign_loss)]
+        std::time::Duration::new(exp_secs as u64, exp.subsec_nanos())
+    };
+
     let bootstrap_creds = aws_credential_types::Credentials::new(
         access_key.expose_secret(),
         secret_key.expose_secret(),
         Some(session_token.expose_secret().to_string()),
-        {
-            let exp = sts_creds.expiration();
-            std::time::SystemTime::UNIX_EPOCH.checked_add(std::time::Duration::new(
-                u64::try_from(exp.secs()).unwrap_or(0),
-                exp.subsec_nanos(),
-            ))
-        },
+        std::time::SystemTime::UNIX_EPOCH.checked_add(exp_duration),
         "vouch-idc-bootstrap",
     );
 
@@ -212,8 +228,9 @@ pub async fn exchange_for_idc_token(
     let sso_expires_in = u64::try_from(token_response.expires_in()).unwrap_or(3600);
 
     tracing::info!(
-        "Issued IdC SSO token for {} (org {org_id}, identity_context={})",
-        redact_email(user_email),
+        "Issued IdC SSO token for {} (org {}, identity_context={})",
+        redact_email(ctx.user_email),
+        ctx.org_id,
         if identity_context.is_some() {
             "present"
         } else {
@@ -225,7 +242,6 @@ pub async fn exchange_for_idc_token(
         access_token: SecretString::from(sso_access_token.to_string()),
         expires_in: sso_expires_in,
         region: idc_region.to_string(),
-        domain_suffix: domain_suffix.to_string(),
         identity_context,
     })
 }
@@ -237,39 +253,16 @@ pub async fn exchange_for_idc_token(
 /// 2. `GetRoleCredentials` via the SSO portal → final AWS credentials
 ///
 /// The SSO access token never leaves the server.
-#[allow(clippy::too_many_arguments)]
 pub async fn exchange_for_idc_credentials(
-    store: &DocumentStore,
-    base_url: &str,
-    session_hours: u64,
-    oidc_key: &OidcSigningKey,
-    user_email: &str,
-    authenticator_id: Option<&str>,
-    hd: Option<String>,
-    org_id: &str,
+    ctx: &IdcContext<'_>,
     account_id: &str,
     role_name: &str,
 ) -> Result<IdcCredentialsResult, AwsIdcError> {
     // Step 1: Get SSO access token
-    let token_result = exchange_for_idc_token(
-        store,
-        base_url,
-        session_hours,
-        oidc_key,
-        user_email,
-        authenticator_id,
-        hd,
-        org_id,
-    )
-    .await?;
+    let token_result = exchange_for_idc_token(ctx).await?;
 
     // Step 2: GetRoleCredentials via SSO portal
-    let sso_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_config::Region::new(token_result.region.clone()))
-        .no_credentials()
-        .load()
-        .await;
-    let sso_client = aws_sdk_sso::Client::new(&sso_config);
+    let sso_client = build_sso_client(&token_result.region).await;
 
     let role_creds_output = sso_client
         .get_role_credentials()
@@ -300,8 +293,9 @@ pub async fn exchange_for_idc_credentials(
     })?;
 
     tracing::info!(
-        "Issued IdC credentials for {} (org {org_id}, account {account_id}, role {role_name})",
-        redact_email(user_email),
+        "Issued IdC credentials for {} (org {}, account {account_id}, role {role_name})",
+        redact_email(ctx.user_email),
+        ctx.org_id,
     );
 
     Ok(IdcCredentialsResult {
@@ -315,35 +309,12 @@ pub async fn exchange_for_idc_credentials(
 /// List all AWS accounts available to the user via Identity Center.
 ///
 /// Performs the IdC token exchange, then calls SSO `ListAccounts`.
-#[allow(clippy::too_many_arguments)]
 pub async fn list_idc_accounts(
-    store: &DocumentStore,
-    base_url: &str,
-    session_hours: u64,
-    oidc_key: &OidcSigningKey,
-    user_email: &str,
-    authenticator_id: Option<&str>,
-    hd: Option<String>,
-    org_id: &str,
+    ctx: &IdcContext<'_>,
 ) -> Result<(Vec<vouch_common::IdcAccount>, String), AwsIdcError> {
-    let token_result = exchange_for_idc_token(
-        store,
-        base_url,
-        session_hours,
-        oidc_key,
-        user_email,
-        authenticator_id,
-        hd,
-        org_id,
-    )
-    .await?;
+    let token_result = exchange_for_idc_token(ctx).await?;
 
-    let sso_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_config::Region::new(token_result.region.clone()))
-        .no_credentials()
-        .load()
-        .await;
-    let sso_client = aws_sdk_sso::Client::new(&sso_config);
+    let sso_client = build_sso_client(&token_result.region).await;
 
     let mut accounts = Vec::new();
     let mut next_token: Option<String> = None;
@@ -359,7 +330,7 @@ pub async fn list_idc_accounts(
         let output = req
             .send()
             .await
-            .map_err(|e| AwsIdcError::GetRoleCredentials(format!("ListAccounts: {e}")))?;
+            .map_err(|e| AwsIdcError::ListAccounts(format!("{e}")))?;
 
         for acct in output.account_list() {
             accounts.push(vouch_common::IdcAccount {
@@ -380,36 +351,13 @@ pub async fn list_idc_accounts(
 /// List all roles available for a specific account via Identity Center.
 ///
 /// Performs the IdC token exchange, then calls SSO `ListAccountRoles`.
-#[allow(clippy::too_many_arguments)]
 pub async fn list_idc_account_roles(
-    store: &DocumentStore,
-    base_url: &str,
-    session_hours: u64,
-    oidc_key: &OidcSigningKey,
-    user_email: &str,
-    authenticator_id: Option<&str>,
-    hd: Option<String>,
-    org_id: &str,
+    ctx: &IdcContext<'_>,
     account_id: &str,
 ) -> Result<Vec<vouch_common::IdcAccountRole>, AwsIdcError> {
-    let token_result = exchange_for_idc_token(
-        store,
-        base_url,
-        session_hours,
-        oidc_key,
-        user_email,
-        authenticator_id,
-        hd,
-        org_id,
-    )
-    .await?;
+    let token_result = exchange_for_idc_token(ctx).await?;
 
-    let sso_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_config::Region::new(token_result.region.clone()))
-        .no_credentials()
-        .load()
-        .await;
-    let sso_client = aws_sdk_sso::Client::new(&sso_config);
+    let sso_client = build_sso_client(&token_result.region).await;
 
     let mut roles = Vec::new();
     let mut next_token: Option<String> = None;
@@ -426,7 +374,7 @@ pub async fn list_idc_account_roles(
         let output = req
             .send()
             .await
-            .map_err(|e| AwsIdcError::GetRoleCredentials(format!("ListAccountRoles: {e}")))?;
+            .map_err(|e| AwsIdcError::ListAccountRoles(format!("{e}")))?;
 
         for role in output.role_list() {
             roles.push(vouch_common::IdcAccountRole {
@@ -450,7 +398,7 @@ pub async fn list_idc_account_roles(
 fn sanitize_session_name(user_email: &str) -> String {
     user_email
         .chars()
-        .filter(|c| c.is_alphanumeric() || "+=,.@_-".contains(*c))
+        .filter(|c| c.is_ascii_alphanumeric() || "+=,.@_-".contains(*c))
         .take(64)
         .collect()
 }
@@ -481,5 +429,52 @@ mod tests {
         let long_email = format!("{}@example.com", "a".repeat(100));
         let result = sanitize_session_name(&long_email);
         assert_eq!(result.len(), 64);
+    }
+
+    #[test]
+    fn test_sanitize_session_name_rejects_unicode() {
+        assert_eq!(sanitize_session_name("用户@example.com"), "@example.com");
+    }
+
+    #[test]
+    fn test_sanitize_session_name_all_invalid() {
+        assert_eq!(sanitize_session_name("日本語テスト"), "");
+    }
+
+    #[test]
+    fn test_sanitize_session_name_mixed_unicode_ascii() {
+        assert_eq!(
+            sanitize_session_name("alice.müller@example.com"),
+            "alice.mller@example.com"
+        );
+    }
+
+    #[test]
+    fn test_sanitize_session_name_exactly_64() {
+        let email = format!("{}@b.c", "a".repeat(60));
+        let result = sanitize_session_name(&email);
+        assert_eq!(result.len(), 64);
+        assert_eq!(result, email);
+    }
+
+    #[test]
+    fn test_sanitize_session_name_preserves_special_chars() {
+        assert_eq!(sanitize_session_name("a+=,.@_-b"), "a+=,.@_-b");
+    }
+
+    #[test]
+    fn test_sanitize_session_name_idempotent() {
+        let inputs = [
+            "alice@example.com",
+            "用户@example.com",
+            "a+=,.@_-b",
+            "",
+            "abc123",
+        ];
+        for input in &inputs {
+            let once = sanitize_session_name(input);
+            let twice = sanitize_session_name(&once);
+            assert_eq!(once, twice, "not idempotent for input: {input}");
+        }
     }
 }

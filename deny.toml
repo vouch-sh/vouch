@@ -8,7 +8,7 @@ all-features = true
 
 [advisories]
 ignore = [
-    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is a thin wrapper around rustls-pki-types; migration tracked separately" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile is a thin wrapper around rustls-pki-types; migration tracked separately", expires = "2026-06-12" },
 ]
 
 [licenses]

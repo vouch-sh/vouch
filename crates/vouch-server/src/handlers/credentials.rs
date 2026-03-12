@@ -357,18 +357,19 @@ pub async fn list_aws_idc_accounts(
         extract_idc_context(&state, &headers, &jar, &method, &uri).await?;
 
     let config = state.config();
-    let (accounts, region) = crate::services::integrations::aws_idc::list_idc_accounts(
-        &state.store,
-        &config.base_url,
-        config.session_hours,
-        &state.oidc_key,
-        &user_email,
-        token.authenticator_id.as_deref(),
+    let ctx = crate::services::integrations::aws_idc::IdcContext {
+        store: &state.store,
+        base_url: &config.base_url,
+        session_hours: config.session_hours,
+        oidc_key: &state.oidc_key,
+        user_email: &user_email,
+        authenticator_id: token.authenticator_id.as_deref(),
         hd,
-        &org_id,
-    )
-    .await
-    .map_err(map_idc_error)?;
+        org_id: &org_id,
+    };
+    let (accounts, region) = crate::services::integrations::aws_idc::list_idc_accounts(&ctx)
+        .await
+        .map_err(map_idc_error)?;
 
     Ok(Json(vouch_common::IdcAccountsResponse { accounts, region }))
 }
@@ -392,23 +393,26 @@ pub async fn list_aws_idc_roles(
     axum::extract::Path(path): axum::extract::Path<IdcRolesPath>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<vouch_common::IdcRolesResponse>, ServiceError> {
+    validate_account_id(&path.account_id)?;
+
     let (token, user_email, hd, org_id) =
         extract_idc_context(&state, &headers, &jar, &method, &uri).await?;
 
     let config = state.config();
-    let roles = crate::services::integrations::aws_idc::list_idc_account_roles(
-        &state.store,
-        &config.base_url,
-        config.session_hours,
-        &state.oidc_key,
-        &user_email,
-        token.authenticator_id.as_deref(),
+    let ctx = crate::services::integrations::aws_idc::IdcContext {
+        store: &state.store,
+        base_url: &config.base_url,
+        session_hours: config.session_hours,
+        oidc_key: &state.oidc_key,
+        user_email: &user_email,
+        authenticator_id: token.authenticator_id.as_deref(),
         hd,
-        &org_id,
-        &path.account_id,
-    )
-    .await
-    .map_err(map_idc_error)?;
+        org_id: &org_id,
+    };
+    let roles =
+        crate::services::integrations::aws_idc::list_idc_account_roles(&ctx, &path.account_id)
+            .await
+            .map_err(map_idc_error)?;
 
     Ok(Json(vouch_common::IdcRolesResponse { roles }))
 }
@@ -430,7 +434,7 @@ pub struct IdcCredentialsPath {
 ///
 /// Performs the complete server-side exchange:
 /// OIDC token → STS bootstrap → `CreateTokenWithIAM` → `GetRoleCredentials`
-/// → `GetRoleCredentials` → final AWS temporary credentials.
+/// → final AWS temporary credentials.
 pub async fn get_aws_idc_credentials(
     method: Method,
     uri: OriginalUri,
@@ -442,24 +446,26 @@ pub async fn get_aws_idc_credentials(
     use crate::services::integrations::aws_idc::exchange_for_idc_credentials;
     use secrecy::ExposeSecret;
 
+    validate_account_id(&path.account_id)?;
+    validate_role_name(&path.role_name)?;
+
     let (token, user_email, hd, org_id) =
         extract_idc_context(&state, &headers, &jar, &method, &uri).await?;
 
     let config = state.config();
-    let result = exchange_for_idc_credentials(
-        &state.store,
-        &config.base_url,
-        config.session_hours,
-        &state.oidc_key,
-        &user_email,
-        token.authenticator_id.as_deref(),
+    let ctx = crate::services::integrations::aws_idc::IdcContext {
+        store: &state.store,
+        base_url: &config.base_url,
+        session_hours: config.session_hours,
+        oidc_key: &state.oidc_key,
+        user_email: &user_email,
+        authenticator_id: token.authenticator_id.as_deref(),
         hd,
-        &org_id,
-        &path.account_id,
-        &path.role_name,
-    )
-    .await
-    .map_err(map_idc_error)?;
+        org_id: &org_id,
+    };
+    let result = exchange_for_idc_credentials(&ctx, &path.account_id, &path.role_name)
+        .await
+        .map_err(map_idc_error)?;
 
     Ok(Json(vouch_common::IdcCredentialsResponse {
         access_key_id: result.access_key_id,
@@ -531,6 +537,36 @@ async fn extract_idc_context(
     Ok((token, user_email, hd, org_id))
 }
 
+/// Validate that `account_id` is exactly 12 ASCII digits.
+fn validate_account_id(account_id: &str) -> Result<(), ServiceError> {
+    if account_id.len() != 12 || !account_id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_account_id",
+            "Account ID must be exactly 12 digits",
+        ));
+    }
+    Ok(())
+}
+
+/// Validate that `role_name` matches IAM role name constraints:
+/// `[a-zA-Z0-9+=,.@_-]{1,64}`.
+fn validate_role_name(role_name: &str) -> Result<(), ServiceError> {
+    if role_name.is_empty()
+        || role_name.len() > 64
+        || !role_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+=,.@_-".contains(c))
+    {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_role_name",
+            "Role name must be 1-64 characters matching [a-zA-Z0-9+=,.@_-]",
+        ));
+    }
+    Ok(())
+}
+
 /// Map `AwsIdcError` to `ServiceError` for HTTP responses.
 ///
 /// Shared across all IdC credential handlers.
@@ -570,6 +606,22 @@ fn map_idc_error(e: crate::services::integrations::aws_idc::AwsIdcError) -> Serv
                 StatusCode::BAD_GATEWAY,
                 "idc_credentials_error",
                 "Failed to get role credentials from Identity Center",
+            )
+        }
+        AwsIdcError::ListAccounts(ref msg) => {
+            tracing::error!("IdC ListAccounts error: {msg}");
+            ServiceError::api(
+                StatusCode::BAD_GATEWAY,
+                "idc_list_accounts_error",
+                "Failed to list accounts from Identity Center",
+            )
+        }
+        AwsIdcError::ListAccountRoles(ref msg) => {
+            tracing::error!("IdC ListAccountRoles error: {msg}");
+            ServiceError::api(
+                StatusCode::BAD_GATEWAY,
+                "idc_list_roles_error",
+                "Failed to list account roles from Identity Center",
             )
         }
         AwsIdcError::Database(ref err) => {

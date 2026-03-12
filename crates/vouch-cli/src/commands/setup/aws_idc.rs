@@ -69,6 +69,9 @@ async fn run_single(
     let mut config =
         AwsConfig::load_from(config_path.clone()).unwrap_or_else(|_| AwsConfig::empty(config_path));
 
+    validate_account_id(account_id)?;
+    validate_role_name(role_name)?;
+
     let credential_process = format!(
         "{} credential aws-idc --account-id {account_id} --role-name {role_name}",
         vouch_path.display()
@@ -187,9 +190,32 @@ async fn run_discovery(server: &str, region_override: Option<&str>) -> Result<()
         "Account", "Role", "Profile"
     );
 
+    // Pre-compute profile names and detect collisions
+    let mut profile_name_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (account_name, account_id, role_name) in &pairs {
+        let name = sanitize_profile_name(account_name, role_name, account_id);
+        *profile_name_counts.entry(name).or_insert(0) += 1;
+    }
+
     // Create profiles
     for (account_name, account_id, role_name) in &pairs {
-        let profile_name = sanitize_profile_name(account_name, role_name, account_id);
+        // Validate server-provided values before writing to ~/.aws/config
+        if let Err(e) = validate_account_id(account_id) {
+            tracing::warn!("Skipping invalid account from server: {e}");
+            continue;
+        }
+        if let Err(e) = validate_role_name(role_name) {
+            tracing::warn!("Skipping invalid role from server: {e}");
+            continue;
+        }
+        let mut profile_name = sanitize_profile_name(account_name, role_name, account_id);
+
+        // Disambiguate collisions by appending last 4 digits of account_id
+        if profile_name_counts.get(&profile_name).copied().unwrap_or(0) > 1 {
+            let suffix = account_id.get(8..).unwrap_or(account_id);
+            profile_name = format!("{profile_name}-{suffix}");
+        }
 
         let account_display = if account_name.is_empty() {
             account_id.clone()
@@ -276,15 +302,34 @@ fn find_idc_profile(config: &AwsConfig, account_id: &str, role_name: &str) -> Op
     None
 }
 
+/// Validate that `account_id` is exactly 12 ASCII digits.
+fn validate_account_id(account_id: &str) -> Result<()> {
+    anyhow::ensure!(
+        account_id.len() == 12 && account_id.chars().all(|c| c.is_ascii_digit()),
+        "Account ID must be exactly 12 digits, got: {account_id}"
+    );
+    Ok(())
+}
+
+/// Validate that `role_name` matches IAM role name constraints:
+/// `[a-zA-Z0-9+=,.@_-]{1,64}`.
+fn validate_role_name(role_name: &str) -> Result<()> {
+    anyhow::ensure!(
+        !role_name.is_empty()
+            && role_name.len() <= 64
+            && role_name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+=,.@_-".contains(c)),
+        "Role name must be 1-64 characters matching [a-zA-Z0-9+=,.@_-], got: {role_name}"
+    );
+    Ok(())
+}
+
 /// Generate a sanitized profile name from account name and role name.
 ///
 /// Pattern: `vouch-idc-{account_name}-{role_name}`
 /// Falls back to account ID if account name is empty.
-pub(crate) fn sanitize_profile_name(
-    account_name: &str,
-    role_name: &str,
-    account_id: &str,
-) -> String {
+fn sanitize_profile_name(account_name: &str, role_name: &str, account_id: &str) -> String {
     let account_part = if account_name.is_empty() {
         account_id.to_string()
     } else {
@@ -371,13 +416,15 @@ fn extract_flag(command: &str, flag: &str) -> Option<String> {
     None
 }
 
-/// Truncate a string to a maximum length, adding "..." if truncated.
+/// Truncate a string to a maximum display width, adding "..." if truncated.
+///
+/// Uses char count rather than byte length to handle non-ASCII safely.
 fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
+    if s.chars().count() <= max {
         s.to_string()
     } else {
         let end = max.saturating_sub(3);
-        let truncated = s.get(..end).unwrap_or(s);
+        let truncated: String = s.chars().take(end).collect();
         format!("{truncated}...")
     }
 }

@@ -36,6 +36,14 @@ pub struct OidcIdTokenClaims {
     pub hd: Option<String>,
 }
 
+/// Errors from building OIDC ID token claims.
+#[derive(Debug, thiserror::Error)]
+pub enum ClaimsBuildError {
+    /// A required field was not set.
+    #[error("Missing required claim: {0}")]
+    MissingField(&'static str),
+}
+
 /// Builder for constructing OIDC ID token claims.
 pub struct OidcIdTokenClaimsBuilder {
     issuer: Option<String>,
@@ -133,18 +141,28 @@ impl OidcIdTokenClaimsBuilder {
     /// # Errors
     ///
     /// Returns an error if required fields (issuer, subject, audience) are missing.
-    pub fn build(self) -> Result<OidcIdTokenClaims, &'static str> {
+    pub fn build(self) -> Result<OidcIdTokenClaims, ClaimsBuildError> {
         let now = jiff::Timestamp::now();
         let exp = now.as_second() + i64::try_from(self.valid_for_seconds).unwrap_or(28800);
 
         Ok(OidcIdTokenClaims {
-            iss: self.issuer.ok_or("issuer is required")?,
-            sub: self.subject.clone().ok_or("subject is required")?,
-            aud: self.audience.ok_or("audience is required")?,
+            iss: self
+                .issuer
+                .ok_or(ClaimsBuildError::MissingField("issuer"))?,
+            sub: self
+                .subject
+                .clone()
+                .ok_or(ClaimsBuildError::MissingField("subject"))?,
+            aud: self
+                .audience
+                .ok_or(ClaimsBuildError::MissingField("audience"))?,
             exp,
             iat: now.as_second(),
             jti: uuid::Uuid::now_v7().to_string(),
-            email: self.email.or(self.subject).ok_or("email is required")?,
+            email: self
+                .email
+                .or(self.subject)
+                .ok_or(ClaimsBuildError::MissingField("email"))?,
             email_verified: true,
             hardware_verified: true,
             hardware_aaguid: self.hardware_aaguid,
@@ -198,7 +216,10 @@ mod tests {
             .build();
 
         assert!(result.is_err());
-        assert_eq!(result.err(), Some("issuer is required"));
+        assert!(matches!(
+            result.err(),
+            Some(ClaimsBuildError::MissingField("issuer"))
+        ));
     }
 
     #[test]
@@ -209,7 +230,10 @@ mod tests {
             .build();
 
         assert!(result.is_err());
-        assert_eq!(result.err(), Some("subject is required"));
+        assert!(matches!(
+            result.err(),
+            Some(ClaimsBuildError::MissingField("subject"))
+        ));
     }
 
     #[test]
@@ -220,7 +244,10 @@ mod tests {
             .build();
 
         assert!(result.is_err());
-        assert_eq!(result.err(), Some("audience is required"));
+        assert!(matches!(
+            result.err(),
+            Some(ClaimsBuildError::MissingField("audience"))
+        ));
     }
 
     #[test]
