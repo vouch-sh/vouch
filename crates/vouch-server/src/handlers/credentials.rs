@@ -583,6 +583,16 @@ fn map_idc_error(e: crate::services::integrations::aws_idc::AwsIdcError) -> Serv
                 "Failed to exchange token with Identity Center",
             )
         }
+        AwsIdcError::NoAccountAssignments => {
+            tracing::warn!("IdC user has no account assignments");
+            ServiceError::api(
+                StatusCode::FORBIDDEN,
+                "idc_no_assignments",
+                "Your user exists in Identity Center but has no AWS account \
+                 assignments. Ask your administrator to assign permission sets \
+                 to your user in Identity Center.",
+            )
+        }
         AwsIdcError::ListAccounts(ref msg) => {
             tracing::error!("IdC ListAccounts error: {msg}");
             ServiceError::api(

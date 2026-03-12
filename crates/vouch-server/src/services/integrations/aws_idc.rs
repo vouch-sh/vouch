@@ -72,6 +72,17 @@ pub enum AwsIdcError {
     #[error("ListAccounts failed: {0}")]
     ListAccounts(String),
 
+    /// User has no account assignments in Identity Center.
+    ///
+    /// Returned when `ListAccounts` gets `UnauthorizedException`, which
+    /// typically means the user exists in Identity Center but has no
+    /// permission set assignments to any AWS accounts.
+    #[error(
+        "No account assignments found. The user exists in Identity Center \
+         but has no permission sets assigned to any AWS accounts."
+    )]
+    NoAccountAssignments,
+
     /// SSO `ListAccountRoles` failed.
     #[error("ListAccountRoles failed: {0}")]
     ListAccountRoles(String),
@@ -332,6 +343,27 @@ fn classify_create_token_error(
     }
 }
 
+/// Classify a `ListAccounts` SDK error into a specific `AwsIdcError`.
+///
+/// `UnauthorizedException` typically means the SSO token is valid but
+/// the user has no permission set assignments to any AWS accounts.
+fn classify_list_accounts_error(
+    err: &aws_sdk_sso::error::SdkError<aws_sdk_sso::operation::list_accounts::ListAccountsError>,
+) -> AwsIdcError {
+    let Some(service_err) = err.as_service_error() else {
+        return AwsIdcError::ListAccounts(format!("{err:#}"));
+    };
+
+    use aws_sdk_sso::operation::list_accounts::ListAccountsError;
+    match service_err {
+        ListAccountsError::UnauthorizedException(e) => {
+            tracing::warn!("ListAccounts UnauthorizedException: {e}");
+            AwsIdcError::NoAccountAssignments
+        }
+        other => AwsIdcError::ListAccounts(format!("{other:?}")),
+    }
+}
+
 /// Discover all accounts and roles available via Identity Center.
 ///
 /// Performs a single token exchange, then lists all accounts and their
@@ -431,7 +463,7 @@ async fn list_accounts_with_client(
         let output = req
             .send()
             .await
-            .map_err(|e| AwsIdcError::ListAccounts(format!("{e}")))?;
+            .map_err(|e| classify_list_accounts_error(&e))?;
 
         accounts.extend_from_slice(output.account_list());
 
