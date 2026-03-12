@@ -12,11 +12,16 @@
 //!   Create a single profile.
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 use crate::client::VouchClient;
+use crate::config::hostname_from_url;
 use crate::integrations::aws::{AwsConfig, AwsProfile};
 use crate::utils::ensure_secure_dir;
+
+/// Cache TTL for IdC discovery data (4 hours — matches session duration).
+const DISCOVERY_CACHE_TTL_HOURS: i64 = 4;
 
 /// Get the AWS config directory (~/.aws).
 fn aws_config_dir() -> Result<PathBuf> {
@@ -28,16 +33,20 @@ fn aws_config_dir() -> Result<PathBuf> {
 ///
 /// When `account_id` and `role_name` are provided, creates a single profile.
 /// When omitted, discovers all available accounts/roles and creates profiles.
+///
+/// Discovery results are cached in `~/.vouch/cache/` for 4 hours.
+/// Pass `refresh = true` to bypass the cache.
 pub async fn run(
     server: &str,
     profile: Option<&str>,
     account_id: Option<&str>,
     role_name: Option<&str>,
     region: Option<&str>,
+    refresh: bool,
 ) -> Result<()> {
     match (account_id, role_name) {
-        (Some(aid), Some(rn)) => run_single(server, profile, aid, rn, region).await,
-        _ => run_discovery(server, region).await,
+        (Some(aid), Some(rn)) => run_single(server, profile, aid, rn, region, refresh).await,
+        _ => run_discovery(server, region, refresh).await,
     }
 }
 
@@ -48,17 +57,10 @@ async fn run_single(
     account_id: &str,
     role_name: &str,
     region: Option<&str>,
+    refresh: bool,
 ) -> Result<()> {
-    // Fetch IdC region from the server (accounts endpoint gives us the region)
-    let client = VouchClient::new(server).await?;
-    let accounts_resp: vouch_common::IdcAccountsResponse = client
-        .get_authenticated("/v1/credentials/aws-idc")
-        .await
-        .context(
-            "failed to get IdC accounts from Vouch server.\n\
-             Ensure AWS Identity Center is configured by your org admin.",
-        )?;
-    let effective_region = region.unwrap_or(&accounts_resp.region);
+    let discovery = fetch_discovery(server, refresh).await?;
+    let effective_region = region.unwrap_or(&discovery.region);
 
     let vouch_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("vouch"));
 
@@ -123,72 +125,106 @@ async fn run_single(
     Ok(())
 }
 
-/// Discover all available accounts/roles and create profiles.
-async fn run_discovery(server: &str, region_override: Option<&str>) -> Result<()> {
+/// Discover all available accounts/roles and let the user select which to configure.
+async fn run_discovery(server: &str, region_override: Option<&str>, refresh: bool) -> Result<()> {
     println!("Discovering accounts and roles from Identity Center...");
     println!();
 
-    let client = VouchClient::new(server).await?;
+    let discovery = fetch_discovery(server, refresh).await?;
+    let effective_region = region_override.unwrap_or(&discovery.region);
 
-    // Fetch accounts (server-side: token exchange + SSO ListAccounts)
-    let accounts_resp: vouch_common::IdcAccountsResponse = client
-        .get_authenticated("/v1/credentials/aws-idc")
-        .await
-        .context(
-            "failed to list IdC accounts from Vouch server.\n\
-             Ensure AWS Identity Center is configured by your org admin.",
-        )?;
-    let effective_region = region_override.unwrap_or(&accounts_resp.region);
-
-    if accounts_resp.accounts.is_empty() {
-        println!("No accounts available from Identity Center.");
-        println!("Check your Identity Center permission set assignments.");
-        return Ok(());
+    // Show warnings for partial failures
+    for err in &discovery.errors {
+        println!(
+            "  Warning: failed to list roles for account {}: {}",
+            err.account_id, err.message
+        );
     }
 
-    // Fetch roles for each account (server-side: token exchange + SSO ListAccountRoles)
+    // Flatten accounts+roles into (account_name, account_id, role_name) triples
     let mut pairs: Vec<(String, String, String)> = Vec::new();
-    for account in &accounts_resp.accounts {
-        let url = format!(
-            "/v1/credentials/aws-idc/{}/roles",
-            urlencoding::encode(&account.account_id),
-        );
-        let roles_resp: vouch_common::IdcRolesResponse = client
-            .get_authenticated(&url)
-            .await
-            .context("failed to list roles for account")?;
-
-        for role in roles_resp.roles {
+    for account in &discovery.accounts {
+        for role in &account.roles {
             pairs.push((
                 account.account_name.clone(),
                 account.account_id.clone(),
-                role.role_name,
+                role.clone(),
             ));
         }
     }
 
     if pairs.is_empty() {
-        println!("No roles available from Identity Center.");
+        println!("No accounts or roles available from Identity Center.");
+        println!("Check your Identity Center permission set assignments.");
         return Ok(());
     }
 
-    // Load AWS config
+    // Load AWS config to check for existing profiles
     let config_path = AwsConfig::default_path()?;
     let aws_dir = aws_config_dir()?;
     ensure_secure_dir(&aws_dir)?;
     let mut config =
         AwsConfig::load_from(config_path.clone()).unwrap_or_else(|_| AwsConfig::empty(config_path));
 
+    // Build display labels and track which are already configured
+    let mut options: Vec<String> = Vec::with_capacity(pairs.len());
+    let mut already_configured: Vec<bool> = Vec::with_capacity(pairs.len());
+    for (account_name, account_id, role_name) in &pairs {
+        let exists = find_idc_profile(&config, account_id, role_name).is_some();
+        already_configured.push(exists);
+
+        let label = if account_name.is_empty() {
+            format!("{account_id} / {role_name}")
+        } else {
+            format!("{account_name} ({account_id}) / {role_name}")
+        };
+        let label = if exists {
+            format!("{label} (exists)")
+        } else {
+            label
+        };
+        options.push(label);
+    }
+
+    // Pre-select items that are NOT already configured
+    let defaults: Vec<usize> = already_configured
+        .iter()
+        .enumerate()
+        .filter(|(_, exists)| !*exists)
+        .map(|(i, _)| i)
+        .collect();
+
+    // If everything is already configured, show summary and exit
+    if defaults.is_empty() {
+        println!(
+            "All {} account/role pairs are already configured in ~/.aws/config",
+            pairs.len()
+        );
+        return Ok(());
+    }
+
+    let selected =
+        match inquire::MultiSelect::new("Select accounts and roles to configure:", options)
+            .with_default(&defaults)
+            .prompt()
+        {
+            Ok(sel) => sel,
+            Err(
+                inquire::InquireError::OperationCanceled
+                | inquire::InquireError::OperationInterrupted,
+            ) => {
+                println!("Setup cancelled.");
+                return Ok(());
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+    if selected.is_empty() {
+        println!("No profiles selected.");
+        return Ok(());
+    }
+
     let vouch_path = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("vouch"));
-
-    let mut added = 0u32;
-    let mut existed = 0u32;
-
-    // Print header
-    println!(
-        "  {:<20} {:<24} {:<36} Status",
-        "Account", "Role", "Profile"
-    );
 
     // Pre-compute profile names and detect collisions
     let mut profile_name_counts: std::collections::HashMap<String, usize> =
@@ -198,8 +234,34 @@ async fn run_discovery(server: &str, region_override: Option<&str>) -> Result<()
         *profile_name_counts.entry(name).or_insert(0) += 1;
     }
 
-    // Create profiles
+    let mut added = 0u32;
+    let mut skipped = 0u32;
+
     for (account_name, account_id, role_name) in &pairs {
+        // Build label to check if this pair was selected
+        let exists = find_idc_profile(&config, account_id, role_name).is_some();
+        let label = if account_name.is_empty() {
+            format!("{account_id} / {role_name}")
+        } else {
+            format!("{account_name} ({account_id}) / {role_name}")
+        };
+        let label = if exists {
+            format!("{label} (exists)")
+        } else {
+            label
+        };
+
+        if !selected.contains(&label) {
+            skipped = skipped.saturating_add(1);
+            continue;
+        }
+
+        // Skip already-configured pairs
+        if exists {
+            skipped = skipped.saturating_add(1);
+            continue;
+        }
+
         // Validate server-provided values before writing to ~/.aws/config
         if let Err(e) = validate_account_id(account_id) {
             tracing::warn!("Skipping invalid account from server: {e}");
@@ -209,31 +271,13 @@ async fn run_discovery(server: &str, region_override: Option<&str>) -> Result<()
             tracing::warn!("Skipping invalid role from server: {e}");
             continue;
         }
+
         let mut profile_name = sanitize_profile_name(account_name, role_name, account_id);
 
         // Disambiguate collisions by appending last 4 digits of account_id
         if profile_name_counts.get(&profile_name).copied().unwrap_or(0) > 1 {
             let suffix = account_id.get(8..).unwrap_or(account_id);
             profile_name = format!("{profile_name}-{suffix}");
-        }
-
-        let account_display = if account_name.is_empty() {
-            account_id.clone()
-        } else {
-            let id_short = account_id.get(..6).unwrap_or(account_id);
-            format!("{account_name} ({id_short}...)")
-        };
-
-        // Check if already configured
-        if find_idc_profile(&config, account_id, role_name).is_some() {
-            println!(
-                "  {:<20} {:<24} {:<36} Exists",
-                truncate(&account_display, 20),
-                truncate(role_name, 24),
-                truncate(&profile_name, 36),
-            );
-            existed = existed.saturating_add(1);
-            continue;
         }
 
         let credential_process = format!(
@@ -248,21 +292,16 @@ async fn run_discovery(server: &str, region_override: Option<&str>) -> Result<()
             output: Some("json".to_string()),
         });
 
-        println!(
-            "  {:<20} {:<24} {:<36} Added",
-            truncate(&account_display, 20),
-            truncate(role_name, 24),
-            truncate(&profile_name, 36),
-        );
         added = added.saturating_add(1);
     }
 
     // Detect stale profiles
     let stale = find_stale_profiles(&config, &pairs);
     for (profile_name, account_id, role_name) in &stale {
-        println!();
-        println!("  Warning: profile [{profile_name}] targets account {account_id}/{role_name}");
-        println!("           which is no longer available from Identity Center");
+        println!(
+            "  Warning: profile [{profile_name}] targets {account_id}/{role_name} \
+             which is no longer available"
+        );
     }
 
     if added > 0 {
@@ -270,14 +309,10 @@ async fn run_discovery(server: &str, region_override: Option<&str>) -> Result<()
     }
 
     println!();
-    if added > 0 {
-        println!(
-            "Added {added} profile{} to ~/.aws/config ({existed} already existed)",
-            if added == 1 { "" } else { "s" }
-        );
-    } else {
-        println!("All {existed} profiles already exist in ~/.aws/config");
-    }
+    println!(
+        "Added {added} profile{} to ~/.aws/config ({skipped} skipped)",
+        if added == 1 { "" } else { "s" }
+    );
 
     if let Some(first_profile) = pairs.first() {
         let name = sanitize_profile_name(&first_profile.0, &first_profile.2, &first_profile.1);
@@ -286,6 +321,97 @@ async fn run_discovery(server: &str, region_override: Option<&str>) -> Result<()
     }
 
     Ok(())
+}
+
+// ============================================================================
+// Discovery cache
+// ============================================================================
+
+/// On-disk representation of a cached IdC discovery response.
+#[derive(Serialize, Deserialize)]
+struct CachedDiscovery {
+    cached_at: String,
+    #[serde(flatten)]
+    data: vouch_common::IdcDiscoveryResponse,
+}
+
+/// Path to the discovery cache file for a given server.
+fn discovery_cache_path(server: &str) -> Result<PathBuf> {
+    let home = dirs::home_dir().context("could not determine home directory")?;
+    let host = hostname_from_url(server)?;
+    // Sanitize hostname for use as a filename
+    let safe_host: String = host
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    Ok(home
+        .join(".vouch")
+        .join("cache")
+        .join(format!("idc-discovery-{safe_host}.json")))
+}
+
+/// Load a cached discovery response if it exists and is not stale.
+fn load_cached_discovery(server: &str) -> Option<vouch_common::IdcDiscoveryResponse> {
+    let path = discovery_cache_path(server).ok()?;
+    let content = std::fs::read_to_string(&path).ok()?;
+    let cached: CachedDiscovery = serde_json::from_str(&content).ok()?;
+
+    let cached_at: jiff::Timestamp = cached.cached_at.parse().ok()?;
+    let expires_at = cached_at
+        .checked_add(jiff::SignedDuration::from_hours(DISCOVERY_CACHE_TTL_HOURS))
+        .ok()?;
+    if jiff::Timestamp::now() > expires_at {
+        return None;
+    }
+
+    Some(cached.data)
+}
+
+/// Save a discovery response to the cache (best-effort).
+fn save_discovery_cache(server: &str, data: &vouch_common::IdcDiscoveryResponse) {
+    let cached = CachedDiscovery {
+        cached_at: jiff::Timestamp::now().to_string(),
+        data: data.clone(),
+    };
+    let Ok(path) = discovery_cache_path(server) else {
+        return;
+    };
+    let Ok(json) = serde_json::to_string_pretty(&cached) else {
+        return;
+    };
+    // Best-effort: don't fail the command if caching fails
+    if let Err(e) = crate::utils::atomic_write(&path, json.as_bytes()) {
+        tracing::debug!("failed to write IdC discovery cache: {e}");
+    }
+}
+
+/// Fetch IdC discovery data, using cache when available.
+async fn fetch_discovery(
+    server: &str,
+    refresh: bool,
+) -> Result<vouch_common::IdcDiscoveryResponse> {
+    if !refresh && let Some(cached) = load_cached_discovery(server) {
+        tracing::debug!("using cached IdC discovery data");
+        return Ok(cached);
+    }
+
+    let client = VouchClient::new(server).await?;
+    let discovery: vouch_common::IdcDiscoveryResponse = client
+        .get_authenticated("/v1/credentials/aws-idc/discover")
+        .await
+        .context(
+            "failed to discover IdC accounts from Vouch server.\n\
+             Ensure AWS Identity Center is configured by your org admin.",
+        )?;
+
+    save_discovery_cache(server, &discovery);
+    Ok(discovery)
 }
 
 /// Find an existing IdC profile that targets the given account/role.
@@ -416,19 +542,6 @@ fn extract_flag(command: &str, flag: &str) -> Option<String> {
     None
 }
 
-/// Truncate a string to a maximum display width, adding "..." if truncated.
-///
-/// Uses char count rather than byte length to handle non-ASCII safely.
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let end = max.saturating_sub(3);
-        let truncated: String = s.chars().take(end).collect();
-        format!("{truncated}...")
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
@@ -519,5 +632,83 @@ credential_process = vouch credential aws-idc --account-id 123456789012 --role-n
         assert!(find_idc_profile(&config, "123", "Admin").is_none());
         // Different role should NOT match
         assert!(find_idc_profile(&config, "123456789012", "ReadOnly").is_none());
+    }
+
+    #[test]
+    fn test_discovery_cache_path_sanitizes_hostname() {
+        let path = discovery_cache_path("https://us.vouch.sh").unwrap();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(filename, "idc-discovery-us.vouch.sh.json");
+    }
+
+    #[test]
+    fn test_discovery_cache_path_with_port() {
+        let path = discovery_cache_path("https://localhost:3000").unwrap();
+        let filename = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(filename, "idc-discovery-localhost_3000.json");
+    }
+
+    #[test]
+    fn test_discovery_cache_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("test-cache.json");
+
+        let discovery = vouch_common::IdcDiscoveryResponse {
+            accounts: vec![vouch_common::IdcAccountWithRoles {
+                account_id: "123456789012".to_string(),
+                account_name: "Production".to_string(),
+                roles: vec!["AdminAccess".to_string()],
+            }],
+            region: "us-east-1".to_string(),
+            errors: vec![],
+        };
+
+        let cached = CachedDiscovery {
+            cached_at: jiff::Timestamp::now().to_string(),
+            data: discovery,
+        };
+        let json = serde_json::to_string_pretty(&cached).unwrap();
+        std::fs::write(&cache_path, &json).unwrap();
+
+        let content = std::fs::read_to_string(&cache_path).unwrap();
+        let loaded: CachedDiscovery = serde_json::from_str(&content).unwrap();
+        assert_eq!(loaded.data.accounts.len(), 1);
+        assert_eq!(loaded.data.accounts[0].account_id, "123456789012");
+        assert_eq!(loaded.data.region, "us-east-1");
+    }
+
+    #[test]
+    fn test_discovery_cache_expired() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache_path = dir.path().join("test-cache.json");
+
+        let expired_at = jiff::Timestamp::now()
+            .checked_sub(jiff::SignedDuration::from_hours(
+                DISCOVERY_CACHE_TTL_HOURS + 1,
+            ))
+            .unwrap();
+
+        let cached = CachedDiscovery {
+            cached_at: expired_at.to_string(),
+            data: vouch_common::IdcDiscoveryResponse {
+                accounts: vec![],
+                region: "us-east-1".to_string(),
+                errors: vec![],
+            },
+        };
+        let json = serde_json::to_string_pretty(&cached).unwrap();
+        std::fs::write(&cache_path, &json).unwrap();
+
+        // Read and check expiry manually (load_cached_discovery needs a server URL)
+        let content = std::fs::read_to_string(&cache_path).unwrap();
+        let loaded: CachedDiscovery = serde_json::from_str(&content).unwrap();
+        let cached_at: jiff::Timestamp = loaded.cached_at.parse().unwrap();
+        let expires_at = cached_at
+            .checked_add(jiff::SignedDuration::from_hours(DISCOVERY_CACHE_TTL_HOURS))
+            .unwrap();
+        assert!(
+            jiff::Timestamp::now() > expires_at,
+            "cache should be expired"
+        );
     }
 }

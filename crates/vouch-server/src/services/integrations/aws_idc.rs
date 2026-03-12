@@ -10,6 +10,8 @@
 //!
 //! The SSO access token never leaves the server.
 
+use std::sync::Arc;
+
 use crate::db::{self, store::DocumentStore};
 use crate::redact_email;
 use crate::services::oidc::OidcSigningKey;
@@ -60,8 +62,7 @@ pub enum AwsIdcError {
 /// Common context for all IdC operations.
 ///
 /// Groups the parameters shared by `exchange_for_idc_token`,
-/// `exchange_for_idc_credentials`, `list_idc_accounts`, and
-/// `list_idc_account_roles`.
+/// `exchange_for_idc_credentials`, and `discover_accounts_and_roles`.
 pub struct IdcContext<'a> {
     pub store: &'a DocumentStore,
     pub base_url: &'a str,
@@ -108,8 +109,7 @@ async fn build_sso_client(region: &str) -> aws_sdk_sso::Client {
 /// Exchange a Vouch session for an SSO access token.
 ///
 /// Chains three operations server-side. Used internally by
-/// [`exchange_for_idc_credentials`], [`list_idc_accounts`],
-/// and [`list_idc_account_roles`].
+/// [`exchange_for_idc_credentials`] and [`discover_accounts_and_roles`].
 pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResult, AwsIdcError> {
     // 1. Read IdC config from DB
     let integration = db::get_cloud_integration(ctx.store, ctx.org_id, "aws")
@@ -306,23 +306,105 @@ pub async fn exchange_for_idc_credentials(
     })
 }
 
-/// List all AWS accounts available to the user via Identity Center.
-///
-/// Performs the IdC token exchange, then calls SSO `ListAccounts`.
-pub async fn list_idc_accounts(
-    ctx: &IdcContext<'_>,
-) -> Result<(Vec<vouch_common::IdcAccount>, String), AwsIdcError> {
-    let token_result = exchange_for_idc_token(ctx).await?;
+/// Result of discovering all accounts and their roles.
+pub struct IdcDiscoveryResult {
+    pub accounts: Vec<IdcAccountWithRolesResult>,
+    pub region: String,
+    pub errors: Vec<IdcDiscoveryErrorResult>,
+}
 
+/// A discovered account with its roles.
+pub struct IdcAccountWithRolesResult {
+    pub account_id: String,
+    pub account_name: String,
+    pub roles: Vec<String>,
+}
+
+/// A partial failure when listing roles for a specific account.
+pub struct IdcDiscoveryErrorResult {
+    pub account_id: String,
+    pub message: String,
+}
+
+/// Discover all accounts and roles available via Identity Center.
+///
+/// Performs a single token exchange, then lists all accounts and their
+/// roles concurrently (up to 5 at a time). Partial failures for
+/// individual accounts are collected in `errors` rather than failing
+/// the entire request.
+pub async fn discover_accounts_and_roles(
+    ctx: &IdcContext<'_>,
+) -> Result<IdcDiscoveryResult, AwsIdcError> {
+    let token_result = exchange_for_idc_token(ctx).await?;
     let sso_client = build_sso_client(&token_result.region).await;
 
+    // List all accounts
+    let accounts = list_accounts_with_client(&sso_client, &token_result.access_token).await?;
+
+    // List roles for each account concurrently (max 5 at a time)
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(5));
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for account in &accounts {
+        let client = sso_client.clone();
+        let token = token_result.access_token.clone();
+        let account_id = account.account_id.clone();
+        let account_name = account.account_name.clone();
+        let sem = semaphore.clone();
+
+        join_set.spawn(async move {
+            let _permit = sem.acquire().await;
+            let result = list_account_roles_with_client(&client, &token, &account_id).await;
+            (account_id, account_name, result)
+        });
+    }
+
+    let mut discovered = Vec::new();
+    let mut errors = Vec::new();
+
+    while let Some(result) = join_set.join_next().await {
+        match result {
+            Ok((account_id, account_name, Ok(roles))) => {
+                discovered.push(IdcAccountWithRolesResult {
+                    account_id,
+                    account_name,
+                    roles,
+                });
+            }
+            Ok((account_id, _, Err(e))) => {
+                errors.push(IdcDiscoveryErrorResult {
+                    account_id,
+                    message: e.to_string(),
+                });
+            }
+            Err(e) => {
+                tracing::warn!("IdC role listing task panicked: {e}");
+            }
+        }
+    }
+
+    // Sort accounts by name for stable output
+    discovered.sort_by(|a, b| a.account_name.cmp(&b.account_name));
+
+    Ok(IdcDiscoveryResult {
+        accounts: discovered,
+        region: token_result.region,
+        errors,
+    })
+}
+
+/// List all accounts available via an existing SSO client and token.
+async fn list_accounts_with_client(
+    client: &aws_sdk_sso::Client,
+    access_token: &SecretString,
+) -> Result<Vec<vouch_common::IdcAccount>, AwsIdcError> {
     let mut accounts = Vec::new();
     let mut next_token: Option<String> = None;
 
     loop {
-        let mut req = sso_client
+        let mut req = client
             .list_accounts()
-            .access_token(token_result.access_token.expose_secret());
+            .access_token(access_token.expose_secret());
         if let Some(ref token) = next_token {
             req = req.next_token(token);
         }
@@ -345,28 +427,23 @@ pub async fn list_idc_accounts(
         }
     }
 
-    Ok((accounts, token_result.region))
+    Ok(accounts)
 }
 
-/// List all roles available for a specific account via Identity Center.
-///
-/// Performs the IdC token exchange, then calls SSO `ListAccountRoles`.
-pub async fn list_idc_account_roles(
-    ctx: &IdcContext<'_>,
+/// List role names for a single account via an existing SSO client.
+async fn list_account_roles_with_client(
+    client: &aws_sdk_sso::Client,
+    access_token: &SecretString,
     account_id: &str,
-) -> Result<Vec<vouch_common::IdcAccountRole>, AwsIdcError> {
-    let token_result = exchange_for_idc_token(ctx).await?;
-
-    let sso_client = build_sso_client(&token_result.region).await;
-
+) -> Result<Vec<String>, AwsIdcError> {
     let mut roles = Vec::new();
     let mut next_token: Option<String> = None;
 
     loop {
-        let mut req = sso_client
+        let mut req = client
             .list_account_roles()
             .account_id(account_id)
-            .access_token(token_result.access_token.expose_secret());
+            .access_token(access_token.expose_secret());
         if let Some(ref token) = next_token {
             req = req.next_token(token);
         }
@@ -377,10 +454,7 @@ pub async fn list_idc_account_roles(
             .map_err(|e| AwsIdcError::ListAccountRoles(format!("{e}")))?;
 
         for role in output.role_list() {
-            roles.push(vouch_common::IdcAccountRole {
-                role_name: role.role_name().unwrap_or_default().to_string(),
-                account_id: role.account_id().unwrap_or_default().to_string(),
-            });
+            roles.push(role.role_name().unwrap_or_default().to_string());
         }
 
         match output.next_token() {

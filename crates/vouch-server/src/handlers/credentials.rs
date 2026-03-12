@@ -337,22 +337,23 @@ pub async fn get_aws_token(
 }
 
 // ============================================================================
-// AWS Identity Center Discovery Endpoints
+// AWS Identity Center Discovery Endpoint
 // ============================================================================
 
-/// List AWS accounts available via Identity Center.
+/// Discover all accounts and roles available via Identity Center.
 ///
-/// GET /v1/credentials/aws-idc
+/// GET /v1/credentials/aws-idc/discover
 ///
-/// Performs the server-side token exchange, then calls SSO `ListAccounts`.
-/// The SSO access token never leaves the server.
-pub async fn list_aws_idc_accounts(
+/// Performs a single server-side token exchange, lists all accounts, then
+/// concurrently lists roles for each account. The SSO access token never
+/// leaves the server.
+pub async fn discover_aws_idc(
     method: Method,
     uri: OriginalUri,
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
-) -> Result<Json<vouch_common::IdcAccountsResponse>, ServiceError> {
+) -> Result<Json<vouch_common::IdcDiscoveryResponse>, ServiceError> {
     let (token, user_email, hd, org_id) =
         extract_idc_context(&state, &headers, &jar, &method, &uri).await?;
 
@@ -367,54 +368,30 @@ pub async fn list_aws_idc_accounts(
         hd,
         org_id: &org_id,
     };
-    let (accounts, region) = crate::services::integrations::aws_idc::list_idc_accounts(&ctx)
+    let result = crate::services::integrations::aws_idc::discover_accounts_and_roles(&ctx)
         .await
         .map_err(map_idc_error)?;
 
-    Ok(Json(vouch_common::IdcAccountsResponse { accounts, region }))
-}
-
-/// Path parameters for the IdC roles endpoint.
-#[derive(serde::Deserialize)]
-pub struct IdcRolesPath {
-    account_id: String,
-}
-
-/// List roles available for an account via Identity Center.
-///
-/// GET /v1/credentials/aws-idc/{account_id}/roles
-///
-/// Performs the server-side token exchange, then calls SSO `ListAccountRoles`.
-pub async fn list_aws_idc_roles(
-    method: Method,
-    uri: OriginalUri,
-    headers: HeaderMap,
-    jar: CookieJar,
-    axum::extract::Path(path): axum::extract::Path<IdcRolesPath>,
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<vouch_common::IdcRolesResponse>, ServiceError> {
-    validate_account_id(&path.account_id)?;
-
-    let (token, user_email, hd, org_id) =
-        extract_idc_context(&state, &headers, &jar, &method, &uri).await?;
-
-    let config = state.config();
-    let ctx = crate::services::integrations::aws_idc::IdcContext {
-        store: &state.store,
-        base_url: &config.base_url,
-        session_hours: config.session_hours,
-        oidc_key: &state.oidc_key,
-        user_email: &user_email,
-        authenticator_id: token.authenticator_id.as_deref(),
-        hd,
-        org_id: &org_id,
-    };
-    let roles =
-        crate::services::integrations::aws_idc::list_idc_account_roles(&ctx, &path.account_id)
-            .await
-            .map_err(map_idc_error)?;
-
-    Ok(Json(vouch_common::IdcRolesResponse { roles }))
+    Ok(Json(vouch_common::IdcDiscoveryResponse {
+        accounts: result
+            .accounts
+            .into_iter()
+            .map(|a| vouch_common::IdcAccountWithRoles {
+                account_id: a.account_id,
+                account_name: a.account_name,
+                roles: a.roles,
+            })
+            .collect(),
+        region: result.region,
+        errors: result
+            .errors
+            .into_iter()
+            .map(|e| vouch_common::IdcDiscoveryError {
+                account_id: e.account_id,
+                message: e.message,
+            })
+            .collect(),
+    }))
 }
 
 // ============================================================================

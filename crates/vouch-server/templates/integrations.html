@@ -101,10 +101,9 @@
             {# AWS Identity Center Integration (Org-wide) #}
             <div class="card{% if idc_config.is_none() && !auth.is_org_admin %} opacity-50{% endif %}"{% if idc_config.is_none() && !auth.is_org_admin %} style="order:99"{% endif %}>
                 <div class="flex items-center gap-2 mb-1">
-                    {# AWS logo #}
-                    <svg class="w-6 h-6 {% if idc_config.is_some() %}text-orange-400{% else %}text-gray-600{% endif %} flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
-                        <path d="M7.164 16.897c-1.121-.376-1.866-.803-2.262-1.027-.396-.224-.5-.355-.5-.495 0-.113.066-.224.19-.224.103 0 .266.052.483.163 1.29.667 2.597 1.004 3.898 1.004 1.914 0 3.633-.51 5.126-1.52.12-.08.237-.127.338-.127.16 0 .247.127.247.288 0 .187-.14.395-.418.592-1.645 1.162-3.553 1.744-5.67 1.744-.542 0-1.06-.049-1.432-.398zM17.145 15.18c-.178 0-.37-.098-.37-.31 0-.237.237-.41.451-.54.95-.573 1.555-1.44 1.555-1.44.08-.126.192-.191.31-.191.178 0 .31.165.31.353 0 .108-.032.224-.098.338-.437.756-1.18 1.39-1.82 1.685-.12.055-.232.105-.338.105z"/>
-                        <path d="M6.207 13.836l.888-1.842-.078-.15L5.28 7.6h1.44l1.12 3.26c.073.215.12.372.14.47h.017c.046-.167.097-.33.155-.486L9.25 7.6h1.34L8.53 13.836H6.207zM13.32 11.4l-.488-2.33h-.016c.03.53.046.908.046 1.135V11.4h-1.196V7.6h1.82l.474 2.24h.016l.554-2.24h1.82V11.4h-1.25V10.16c0-.09.002-.197.006-.32s.016-.454.035-.99h-.016l-.604 2.55H13.32zM16.56 11.4V7.6h1.308V11.4H16.56z"/>
+                    {# Cloud icon for AWS #}
+                    <svg class="w-6 h-6 {% if idc_config.is_some() %}text-orange-400{% else %}text-gray-600{% endif %} flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" d="M2.25 15a4.5 4.5 0 004.5 4.5H18a3.75 3.75 0 001.332-7.257 3 3 0 00-3.758-3.848 5.25 5.25 0 00-10.233 2.33A4.502 4.502 0 002.25 15z" />
                     </svg>
                     <h2 class="text-lg font-semibold text-gray-200">AWS Identity Center</h2>
                     <span class="text-xs bg-vouch-surface text-gray-400 px-2 py-0.5 rounded">Organization-wide</span>
@@ -221,7 +220,7 @@
 
         <p class="mt-6 text-sm text-gray-500">
             Looking for AWS, EKS, Docker, or other integrations? See the
-            <a href="https://vouch.sh/docs/" class="text-vouch-accent hover:text-vouch-accent-hover">setup guide</a>.
+            <a href="https://vouch.sh/docs/" target="_blank" rel="noopener noreferrer" class="text-vouch-accent hover:text-vouch-accent-hover">setup guide</a>.
         </p>
     </div>
 </div>

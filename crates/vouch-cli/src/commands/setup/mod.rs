@@ -49,6 +49,9 @@ pub enum SetupCommands {
         /// AWS region to set in the profile (defaults to IdC region from server).
         #[arg(long)]
         region: Option<String>,
+        /// Bypass the discovery cache and fetch fresh data from the server.
+        #[arg(long)]
+        refresh: bool,
     },
     /// Configure SSH to use Vouch certificates.
     Ssh {

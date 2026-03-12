@@ -490,25 +490,31 @@ pub struct IdcAccount {
     pub account_name: String,
 }
 
-/// Response from `GET /v1/credentials/aws-idc/accounts`.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IdcAccountsResponse {
-    pub accounts: Vec<IdcAccount>,
-    /// IdC region (used by the CLI for the default AWS region in profiles).
-    pub region: String,
-}
-
-/// An IAM role available for an account via Identity Center.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IdcAccountRole {
-    pub role_name: String,
+/// An AWS account with its available roles, from IdC discovery.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdcAccountWithRoles {
     pub account_id: String,
+    pub account_name: String,
+    pub roles: Vec<String>,
 }
 
-/// Response from `GET /v1/credentials/aws-idc/roles?account_id=X`.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct IdcRolesResponse {
-    pub roles: Vec<IdcAccountRole>,
+/// A partial failure when listing roles for a specific account.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdcDiscoveryError {
+    pub account_id: String,
+    pub message: String,
+}
+
+/// Response from `GET /v1/credentials/aws-idc/discover`.
+///
+/// Single-request discovery of all accounts and roles available via
+/// Identity Center. Performs one token exchange server-side.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdcDiscoveryResponse {
+    pub accounts: Vec<IdcAccountWithRoles>,
+    pub region: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<IdcDiscoveryError>,
 }
 
 /// Response from `GET /v1/credentials/aws-idc/credentials`.

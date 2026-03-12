@@ -472,47 +472,68 @@ mod tests {
     }
 
     #[test]
-    fn test_idc_accounts_response_roundtrip() {
-        let response = IdcAccountsResponse {
+    fn test_idc_discovery_response_roundtrip() {
+        let response = IdcDiscoveryResponse {
             accounts: vec![
-                IdcAccount {
+                IdcAccountWithRoles {
                     account_id: "123456789012".to_string(),
                     account_name: "Production".to_string(),
+                    roles: vec![
+                        "AdministratorAccess".to_string(),
+                        "ReadOnlyAccess".to_string(),
+                    ],
                 },
-                IdcAccount {
+                IdcAccountWithRoles {
                     account_id: "234567890123".to_string(),
                     account_name: "Development".to_string(),
+                    roles: vec!["PowerUserAccess".to_string()],
                 },
             ],
             region: "us-east-1".to_string(),
+            errors: vec![],
         };
         let json = serde_json::to_string(&response).unwrap();
-        let decoded: IdcAccountsResponse = serde_json::from_str(&json).unwrap();
+        let decoded: IdcDiscoveryResponse = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded.accounts.len(), 2);
         assert_eq!(decoded.accounts[0].account_id, "123456789012");
+        assert_eq!(decoded.accounts[0].roles.len(), 2);
         assert_eq!(decoded.accounts[1].account_name, "Development");
         assert_eq!(decoded.region, "us-east-1");
+        assert!(decoded.errors.is_empty());
     }
 
     #[test]
-    fn test_idc_roles_response_roundtrip() {
-        let response = IdcRolesResponse {
-            roles: vec![
-                IdcAccountRole {
-                    role_name: "AdministratorAccess".to_string(),
-                    account_id: "123456789012".to_string(),
-                },
-                IdcAccountRole {
-                    role_name: "ReadOnlyAccess".to_string(),
-                    account_id: "123456789012".to_string(),
-                },
-            ],
+    fn test_idc_discovery_response_with_errors() {
+        let response = IdcDiscoveryResponse {
+            accounts: vec![IdcAccountWithRoles {
+                account_id: "123456789012".to_string(),
+                account_name: "Production".to_string(),
+                roles: vec!["AdministratorAccess".to_string()],
+            }],
+            region: "us-east-1".to_string(),
+            errors: vec![IdcDiscoveryError {
+                account_id: "999999999999".to_string(),
+                message: "Access denied".to_string(),
+            }],
         };
         let json = serde_json::to_string(&response).unwrap();
-        let decoded: IdcRolesResponse = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.roles.len(), 2);
-        assert_eq!(decoded.roles[0].role_name, "AdministratorAccess");
-        assert_eq!(decoded.roles[1].role_name, "ReadOnlyAccess");
+        let decoded: IdcDiscoveryResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.accounts.len(), 1);
+        assert_eq!(decoded.errors.len(), 1);
+        assert_eq!(decoded.errors[0].account_id, "999999999999");
+    }
+
+    #[test]
+    fn test_idc_discovery_response_errors_omitted_when_empty() {
+        let response = IdcDiscoveryResponse {
+            accounts: vec![],
+            region: "us-east-1".to_string(),
+            errors: vec![],
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(!json.contains("errors"));
+        let decoded: IdcDiscoveryResponse = serde_json::from_str(&json).unwrap();
+        assert!(decoded.errors.is_empty());
     }
 
     #[test]
