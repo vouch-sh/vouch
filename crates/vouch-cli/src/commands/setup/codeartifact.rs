@@ -13,7 +13,7 @@ use crate::commands::credential::codeartifact::resolve_codeartifact_params;
 use crate::config::{CodeArtifactProfile, Config};
 use crate::integrations::aws::codeartifact::{CodeArtifactRegistry, parse_codeartifact_url};
 use crate::integrations::aws::get_local_aws_role;
-use crate::integrations::aws::sts::Arn;
+use crate::integrations::aws::sts::parse_role_arn;
 use crate::integrations::cargo::CargoConfig;
 
 /// Supported package manager tools for CodeArtifact.
@@ -79,7 +79,7 @@ pub async fn run(
     // to support China, GovCloud, and other partitions.
     let domain_suffix = get_local_aws_role()
         .and_then(|role| {
-            Arn::parse_role_arn(&role)
+            parse_role_arn(&role)
                 .ok()
                 .map(|arn| arn.partition.dns_suffix())
         })

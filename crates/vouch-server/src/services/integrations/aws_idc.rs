@@ -6,7 +6,8 @@
 //! 1. Issue OIDC ID token (reuses [`super::aws::issue_aws_token`])
 //! 2. `AssumeRoleWithWebIdentity` with the bootstrap role (unauthenticated STS call)
 //! 3. `CreateTokenWithIAM` with bootstrap creds → SSO access token
-//! 4. `GetRoleCredentials` via the SSO portal → final AWS credentials
+//! 4. Return SSO access token to CLI for local caching in `~/.aws/sso/cache/`.
+//!    The AWS SDK/CLI calls `GetRoleCredentials` locally using the cached token.
 //!
 //! The SSO access token is returned to the CLI for local caching,
 //! never stored server-side.
@@ -18,7 +19,7 @@ use crate::redact_email;
 use crate::services::oidc::OidcSigningKey;
 use secrecy::{ExposeSecret, SecretString};
 use vouch_common::AwsIntegrationConfig;
-use vouch_common::aws::Partition;
+use vouch_common::aws::Arn;
 
 /// Error types for IdC token exchange.
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +31,10 @@ pub enum AwsIdcError {
     /// Missing required IdC config field.
     #[error("Missing IdC config field: {0}")]
     MissingField(&'static str),
+
+    /// Invalid ARN format.
+    #[error("Invalid ARN: {0}")]
+    InvalidArn(String),
 
     /// Underlying AWS token issuance failed.
     #[error("Failed to issue OIDC token: {0}")]
@@ -112,24 +117,18 @@ pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResu
         return Err(AwsIdcError::NotConfigured);
     }
 
-    let bootstrap_role_arn = config
+    let bootstrap_role_arn_str = config
         .idc_bootstrap_role_arn
         .as_deref()
         .ok_or(AwsIdcError::MissingField("idc_bootstrap_role_arn"))?;
-    if !bootstrap_role_arn.starts_with("arn:") {
-        return Err(AwsIdcError::MissingField(
-            "idc_bootstrap_role_arn must be a valid ARN (starts with 'arn:')",
-        ));
-    }
-    let application_arn = config
+    let bootstrap_arn =
+        Arn::parse(bootstrap_role_arn_str).map_err(|e| AwsIdcError::InvalidArn(e.to_string()))?;
+    let application_arn_str = config
         .idc_application_arn
         .as_deref()
         .ok_or(AwsIdcError::MissingField("idc_application_arn"))?;
-    if !application_arn.starts_with("arn:") {
-        return Err(AwsIdcError::MissingField(
-            "idc_application_arn must be a valid ARN (starts with 'arn:')",
-        ));
-    }
+    let application_arn =
+        Arn::parse(application_arn_str).map_err(|e| AwsIdcError::InvalidArn(e.to_string()))?;
     let idc_region = config
         .idc_region
         .as_deref()
@@ -147,79 +146,18 @@ pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResu
     )
     .await?;
 
-    // Determine region/partition from the bootstrap role ARN
-    let partition = Partition::from_arn(bootstrap_role_arn)
-        .map_err(|e| AwsIdcError::StsAssume(format!("{e}")))?;
-    let sts_region = partition.default_sts_region();
+    // 3. Bootstrap IAM credentials via STS
+    let bootstrap_creds =
+        bootstrap_iam_credentials(&bootstrap_arn, &token_result.id_token, ctx.user_email).await?;
 
-    // 3. STS AssumeRoleWithWebIdentity (no credentials needed)
-    let sts_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_config::Region::new(sts_region.to_string()))
-        .no_credentials()
-        .load()
-        .await;
-    let sts_client = aws_sdk_sts::Client::new(&sts_config);
-
-    let session_name = sanitize_session_name(ctx.user_email);
-
-    let sts_response = sts_client
-        .assume_role_with_web_identity()
-        .role_arn(bootstrap_role_arn)
-        .role_session_name(&session_name)
-        .web_identity_token(token_result.id_token.clone())
-        .send()
-        .await
-        .map_err(|e| AwsIdcError::StsAssume(format!("{e}")))?;
-
-    let sts_creds = sts_response
-        .credentials()
-        .ok_or_else(|| AwsIdcError::StsAssume("No credentials in STS response".to_string()))?;
-
-    // 4. CreateTokenWithIAM with bootstrap creds
-    let access_key = SecretString::from(sts_creds.access_key_id());
-    let secret_key = SecretString::from(sts_creds.secret_access_key());
-    let session_token = SecretString::from(sts_creds.session_token());
-
-    let exp = sts_creds.expiration();
-    let exp_secs = u64::try_from(exp.secs()).map_err(|_| {
-        AwsIdcError::StsAssume("STS returned expired bootstrap credentials".to_string())
-    })?;
-    let exp_duration = std::time::Duration::new(exp_secs, exp.subsec_nanos());
-
-    let bootstrap_creds = aws_credential_types::Credentials::new(
-        access_key.expose_secret(),
-        secret_key.expose_secret(),
-        Some(session_token.expose_secret().to_string()),
-        std::time::SystemTime::UNIX_EPOCH.checked_add(exp_duration),
-        "vouch-idc-bootstrap",
-    );
-
-    let ssooidc_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_config::Region::new(idc_region.to_string()))
-        .credentials_provider(bootstrap_creds)
-        .load()
-        .await;
-    let ssooidc_client = aws_sdk_ssooidc::Client::new(&ssooidc_config);
-
-    let token_response = ssooidc_client
-        .create_token_with_iam()
-        .client_id(application_arn)
-        .grant_type("urn:ietf:params:oauth:grant-type:jwt-bearer")
-        .assertion(token_result.id_token)
-        .send()
-        .await
-        .map_err(|e| AwsIdcError::CreateToken(format!("{e}")))?;
-
-    let sso_access_token = token_response
-        .access_token()
-        .ok_or_else(|| AwsIdcError::CreateToken("No access token in response".to_string()))?;
-
-    let identity_context = token_response
-        .aws_additional_details()
-        .and_then(|d| d.identity_context())
-        .map(|s| s.to_string());
-
-    let sso_expires_in = u64::try_from(token_response.expires_in()).unwrap_or(3600);
+    // 4. Exchange for SSO access token via CreateTokenWithIAM
+    let (sso_access_token, sso_expires_in, identity_context) = create_idc_sso_token(
+        &application_arn,
+        &token_result.id_token,
+        idc_region,
+        bootstrap_creds,
+    )
+    .await?;
 
     tracing::info!(
         "Issued IdC SSO token for {} (org {}, identity_context={})",
@@ -233,11 +171,116 @@ pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResu
     );
 
     Ok(IdcTokenResult {
-        access_token: SecretString::from(sso_access_token.to_string()),
+        access_token: sso_access_token,
         expires_in: sso_expires_in,
         region: idc_region.to_string(),
         identity_context,
     })
+}
+
+/// Bootstrap temporary IAM credentials via STS `AssumeRoleWithWebIdentity`.
+///
+/// Uses the bootstrap role ARN to determine the correct partition and
+/// STS regional endpoint. The returned credentials are short-lived and
+/// scoped to the bootstrap role.
+async fn bootstrap_iam_credentials(
+    bootstrap_arn: &Arn,
+    id_token: &str,
+    user_email: &str,
+) -> Result<aws_credential_types::Credentials, AwsIdcError> {
+    let sts_region = bootstrap_arn.partition.default_sts_region();
+
+    let sts_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new(sts_region.to_string()))
+        .no_credentials()
+        .load()
+        .await;
+    let sts_client = aws_sdk_sts::Client::new(&sts_config);
+
+    let session_name = sanitize_session_name(user_email);
+
+    let bootstrap_role_arn = bootstrap_arn.to_string();
+    let sts_response = sts_client
+        .assume_role_with_web_identity()
+        .role_arn(&bootstrap_role_arn)
+        .role_session_name(&session_name)
+        .web_identity_token(id_token)
+        .send()
+        .await
+        .map_err(|e| AwsIdcError::StsAssume(format!("{e}")))?;
+
+    let sts_creds = sts_response
+        .credentials()
+        .ok_or_else(|| AwsIdcError::StsAssume("No credentials in STS response".to_string()))?;
+
+    let access_key = SecretString::from(sts_creds.access_key_id());
+    let secret_key = SecretString::from(sts_creds.secret_access_key());
+    let session_token = SecretString::from(sts_creds.session_token());
+
+    let exp = sts_creds.expiration();
+    let exp_secs = u64::try_from(exp.secs()).map_err(|_| {
+        AwsIdcError::StsAssume("STS returned expired bootstrap credentials".to_string())
+    })?;
+    let exp_duration = std::time::Duration::new(exp_secs, exp.subsec_nanos());
+
+    Ok(aws_credential_types::Credentials::new(
+        access_key.expose_secret(),
+        secret_key.expose_secret(),
+        Some(session_token.expose_secret().to_string()),
+        std::time::SystemTime::UNIX_EPOCH.checked_add(exp_duration),
+        "vouch-idc-bootstrap",
+    ))
+}
+
+/// Exchange an OIDC token for an SSO access token via `CreateTokenWithIAM`.
+///
+/// Returns `(access_token, expires_in, identity_context)`.
+async fn create_idc_sso_token(
+    application_arn: &Arn,
+    id_token: &str,
+    idc_region: &str,
+    bootstrap_creds: aws_credential_types::Credentials,
+) -> Result<(SecretString, u64, Option<String>), AwsIdcError> {
+    let ssooidc_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new(idc_region.to_string()))
+        .credentials_provider(bootstrap_creds)
+        .load()
+        .await;
+    let ssooidc_client = aws_sdk_ssooidc::Client::new(&ssooidc_config);
+
+    let app_arn_str = application_arn.to_string();
+    let token_response = ssooidc_client
+        .create_token_with_iam()
+        .client_id(&app_arn_str)
+        .grant_type("urn:ietf:params:oauth:grant-type:jwt-bearer")
+        .assertion(id_token)
+        .send()
+        .await
+        .map_err(|e| AwsIdcError::CreateToken(format!("{e}")))?;
+
+    let sso_access_token = token_response
+        .access_token()
+        .ok_or_else(|| AwsIdcError::CreateToken("No access token in response".to_string()))?;
+
+    let identity_context = token_response
+        .aws_additional_details()
+        .and_then(|d| d.identity_context())
+        .map(|s| s.to_string());
+
+    let raw_expires_in = token_response.expires_in();
+    let sso_expires_in = u64::try_from(raw_expires_in).unwrap_or_else(|_| {
+        tracing::warn!(
+            raw_expires_in,
+            "IdC CreateTokenWithIAM returned non-positive expires_in, defaulting to 3600s"
+        );
+        3600
+    });
+
+    Ok((
+        SecretString::from(sso_access_token.to_string()),
+        sso_expires_in,
+        identity_context,
+    ))
 }
 
 /// Discover all accounts and roles available via Identity Center.

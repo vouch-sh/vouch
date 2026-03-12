@@ -8,58 +8,28 @@ use anyhow::{Context, Result};
 use jiff::Timestamp;
 use secrecy::SecretString;
 
-pub use vouch_common::aws::Partition;
+pub use vouch_common::aws::Arn;
 
-/// Parsed AWS IAM role ARN.
-#[derive(Debug)]
-pub struct Arn<'a> {
-    pub partition: Partition,
-    #[allow(dead_code)]
-    pub account: &'a str,
-    #[allow(dead_code)]
-    pub resource: &'a str,
-}
+/// Parse and validate an IAM role ARN.
+///
+/// Format: `arn:{partition}:iam::{account}:role/{name}`
+///
+/// # Errors
+///
+/// Returns an error if the ARN format is invalid, the partition
+/// is unrecognized, or the resource is not an IAM role.
+pub fn parse_role_arn(arn: &str) -> Result<Arn> {
+    let parsed = Arn::parse(arn).map_err(|e| anyhow::anyhow!("{e}"))?;
 
-impl<'a> Arn<'a> {
-    /// Parse an IAM role ARN.
-    ///
-    /// Format: `arn:{partition}:iam::{account}:role/{name}`
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the ARN format is invalid or the partition
-    /// is unrecognized.
-    pub fn parse_role_arn(arn: &'a str) -> Result<Self> {
-        let parts: Vec<&str> = arn.split(':').collect();
-
-        // A valid IAM role ARN has exactly 6 colon-separated parts:
-        // arn : partition : iam : (empty region) : account-id : role/name
-        if parts.len() < 6
-            || parts.first() != Some(&"arn")
-            || parts.get(2) != Some(&"iam")
-            || !parts
-                .get(5)
-                .is_some_and(|s| s.starts_with("role/") && s.len() > 5)
-        {
-            anyhow::bail!(
-                "Invalid role ARN format: {arn}\n\
-                 Expected: arn:<partition>:iam::<account-id>:role/<role-name>\n\
-                 Example:  arn:aws:iam::123456789012:role/MyRole"
-            );
-        }
-
-        let partition_str = parts.get(1).context("missing partition in ARN")?;
-        let partition = Partition::parse(partition_str).map_err(|e| anyhow::anyhow!("{e}"))?;
-
-        let account = parts.get(4).context("missing account in ARN")?;
-        let resource = parts.get(5).context("missing resource in ARN")?;
-
-        Ok(Self {
-            partition,
-            account,
-            resource,
-        })
+    if !parsed.is_iam_role() {
+        anyhow::bail!(
+            "Invalid role ARN format: {arn}\n\
+             Expected: arn:<partition>:iam::<account-id>:role/<role-name>\n\
+             Example:  arn:aws:iam::123456789012:role/MyRole"
+        );
     }
+
+    Ok(parsed)
 }
 
 /// AWS STS temporary credentials.
@@ -196,49 +166,50 @@ fn parse_sts_xml_response(xml: &str) -> Result<StsCredentials> {
 #[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+    use vouch_common::aws::Partition;
 
     // =========================================================================
     // Arn tests
     // =========================================================================
 
     #[test]
-    fn test_arn_parse_role_arn_valid() {
-        let arn = Arn::parse_role_arn("arn:aws:iam::123456789012:role/MyRole").unwrap();
+    fn test_parse_role_arn_valid() {
+        let arn = parse_role_arn("arn:aws:iam::123456789012:role/MyRole").unwrap();
         assert_eq!(arn.partition, Partition::Aws);
-        assert_eq!(arn.account, "123456789012");
+        assert_eq!(arn.account.as_deref(), Some("123456789012"));
         assert_eq!(arn.resource, "role/MyRole");
     }
 
     #[test]
-    fn test_arn_parse_role_arn_china() {
-        let arn = Arn::parse_role_arn("arn:aws-cn:iam::123456789012:role/MyRole").unwrap();
+    fn test_parse_role_arn_china() {
+        let arn = parse_role_arn("arn:aws-cn:iam::123456789012:role/MyRole").unwrap();
         assert_eq!(arn.partition, Partition::AwsCn);
     }
 
     #[test]
-    fn test_arn_parse_role_arn_govcloud() {
-        let arn = Arn::parse_role_arn("arn:aws-us-gov:iam::123456789012:role/MyRole").unwrap();
+    fn test_parse_role_arn_govcloud() {
+        let arn = parse_role_arn("arn:aws-us-gov:iam::123456789012:role/MyRole").unwrap();
         assert_eq!(arn.partition, Partition::AwsUsGov);
     }
 
     #[test]
-    fn test_arn_parse_role_arn_with_path() {
-        let arn = Arn::parse_role_arn("arn:aws:iam::123456789012:role/path/to/MyRole").unwrap();
+    fn test_parse_role_arn_with_path() {
+        let arn = parse_role_arn("arn:aws:iam::123456789012:role/path/to/MyRole").unwrap();
         assert_eq!(arn.resource, "role/path/to/MyRole");
     }
 
     #[test]
-    fn test_arn_parse_role_arn_invalid() {
-        assert!(Arn::parse_role_arn("invalid").is_err());
-        assert!(Arn::parse_role_arn("").is_err());
-        assert!(Arn::parse_role_arn("arn:aws:s3:::my-bucket").is_err());
-        assert!(Arn::parse_role_arn("arn:aws:iam::123456789012:user/MyUser").is_err());
-        assert!(Arn::parse_role_arn("arn:aws:iam::123456789012:role/").is_err());
+    fn test_parse_role_arn_invalid() {
+        assert!(parse_role_arn("invalid").is_err());
+        assert!(parse_role_arn("").is_err());
+        assert!(parse_role_arn("arn:aws:s3:::my-bucket").is_err());
+        assert!(parse_role_arn("arn:aws:iam::123456789012:user/MyUser").is_err());
+        assert!(parse_role_arn("arn:aws:iam::123456789012:role/").is_err());
     }
 
     #[test]
-    fn test_arn_parse_unknown_partition() {
-        assert!(Arn::parse_role_arn("arn:unknown:iam::123456789012:role/MyRole").is_err());
+    fn test_parse_role_arn_unknown_partition() {
+        assert!(parse_role_arn("arn:unknown:iam::123456789012:role/MyRole").is_err());
     }
 
     // =========================================================================

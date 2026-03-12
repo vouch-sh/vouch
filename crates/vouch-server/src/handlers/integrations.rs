@@ -277,6 +277,12 @@ pub async fn save_idc_config_form(
         return Redirect::to("/integrations").into_response();
     }
 
+    // Validate region format
+    if !is_plausible_aws_region(region) {
+        tracing::warn!("Invalid AWS region: {region}");
+        return Redirect::to("/integrations").into_response();
+    }
+
     // Validate ARN syntax before saving
     if vouch_common::aws::Partition::from_arn(bootstrap_arn).is_err() {
         tracing::warn!("Invalid bootstrap role ARN: {bootstrap_arn}");
@@ -287,8 +293,16 @@ pub async fn save_idc_config_form(
         return Redirect::to("/integrations").into_response();
     }
 
+    // Preserve existing default_role_arn from STS federation config
+    let existing_default_role_arn = db::get_cloud_integration(&state.store, &org_id, "aws")
+        .await
+        .ok()
+        .flatten()
+        .and_then(|i| serde_json::from_value::<AwsIntegrationConfig>(i.config).ok())
+        .and_then(|c| c.default_role_arn);
+
     let config = AwsIntegrationConfig {
-        default_role_arn: None,
+        default_role_arn: existing_default_role_arn,
         idc_bootstrap_role_arn: Some(bootstrap_arn.to_string()),
         idc_application_arn: Some(app_arn.to_string()),
         idc_region: Some(region.to_string()),
@@ -341,6 +355,18 @@ pub async fn delete_idc_config_form(
     }
 
     Redirect::to("/integrations").into_response()
+}
+
+/// Check whether a string looks like a plausible AWS region.
+///
+/// Rejects obviously invalid input (too long, wrong characters)
+/// without hard-coding a list of valid regions that varies across
+/// partitions.
+fn is_plausible_aws_region(s: &str) -> bool {
+    s.len() <= 25
+        && s.contains('-')
+        && s.bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
 }
 
 /// Extract an org admin user from the session cookie.

@@ -132,9 +132,9 @@ pub(crate) async fn exchange_for_sts_credentials(
     region: &str,
     fallback_label: &str,
 ) -> Result<StsExchangeResult> {
-    use crate::integrations::aws::sts::{Arn, assume_role_with_web_identity};
+    use crate::integrations::aws::sts::{assume_role_with_web_identity, parse_role_arn};
 
-    let arn = Arn::parse_role_arn(role_arn)?;
+    let arn = parse_role_arn(role_arn)?;
     let domain_suffix = arn.partition.dns_suffix();
 
     let client = VouchClient::new(server).await?;
@@ -206,7 +206,7 @@ pub(crate) async fn fetch_and_assume(
     let region = match aws::resolve_region(None, &profile_name) {
         Ok(r) => r,
         Err(_) => {
-            let arn = crate::integrations::aws::sts::Arn::parse_role_arn(role_arn)?;
+            let arn = crate::integrations::aws::sts::parse_role_arn(role_arn)?;
             let default = arn.partition.default_sts_region();
             tracing::debug!("no region configured, defaulting to {default} for STS");
             default.to_string()

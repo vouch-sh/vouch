@@ -115,17 +115,7 @@ async fn run_discovery(server: &str, refresh: bool) -> Result<()> {
         );
     }
 
-    // Flatten accounts+roles into (account_name, account_id, role_name) triples
-    let mut pairs: Vec<(String, String, String)> = Vec::new();
-    for account in &discovery.accounts {
-        for role in &account.roles {
-            pairs.push((
-                account.account_name.clone(),
-                account.account_id.clone(),
-                role.clone(),
-            ));
-        }
-    }
+    let pairs = flatten_discovery(&discovery);
 
     if pairs.is_empty() {
         println!("No accounts or roles available from Identity Center.");
@@ -143,28 +133,8 @@ async fn run_discovery(server: &str, refresh: bool) -> Result<()> {
     // Migrate old credential_process profiles to native SSO
     let migrated = migrate_old_profiles(&mut config, &session_name, &pairs, effective_region);
 
-    // Build display labels alongside existence flags (single pass)
-    let labeled: Vec<(bool, String)> = pairs
-        .iter()
-        .map(|(account_name, account_id, role_name)| {
-            let exists = find_idc_profile(&config, &session_name, account_id, role_name).is_some();
-            let label = if account_name.is_empty() {
-                format!("{account_id} / {role_name}")
-            } else {
-                format!("{account_name} ({account_id}) / {role_name}")
-            };
-            let label = if exists {
-                format!("{label} (exists)")
-            } else {
-                label
-            };
-            (exists, label)
-        })
-        .collect();
-
+    let labeled = build_labels(&config, &session_name, &pairs);
     let options: Vec<String> = labeled.iter().map(|(_, label)| label.clone()).collect();
-
-    // Pre-select items that are NOT already configured
     let defaults: Vec<usize> = labeled
         .iter()
         .enumerate()
@@ -172,7 +142,6 @@ async fn run_discovery(server: &str, refresh: bool) -> Result<()> {
         .map(|(i, _)| i)
         .collect();
 
-    // If everything is already configured, show summary and exit
     if defaults.is_empty() {
         if migrated > 0 {
             config.save()?;
@@ -212,77 +181,49 @@ async fn run_discovery(server: &str, refresh: bool) -> Result<()> {
     // Ensure SSO session exists
     ensure_sso_session(&mut config, &session_name, server, effective_region);
 
-    // Pre-compute profile names and detect collisions
-    let mut profile_name_counts: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    for (account_name, account_id, role_name) in &pairs {
-        let name = sanitize_profile_name(account_name, role_name, account_id);
-        *profile_name_counts.entry(name).or_insert(0) += 1;
-    }
+    let (added, skipped) = write_selected_profiles(
+        &mut config,
+        &session_name,
+        &pairs,
+        &labeled,
+        &selected,
+        effective_region,
+    );
 
-    let mut added = 0u32;
-    let mut skipped = 0u32;
-
-    for (i, (account_name, account_id, role_name)) in pairs.iter().enumerate() {
-        let Some((exists, label)) = labeled.get(i) else {
-            continue;
-        };
-
-        if !selected.contains(label) {
-            skipped = skipped.saturating_add(1);
-            continue;
-        }
-
-        // Skip already-configured pairs
-        if *exists {
-            skipped = skipped.saturating_add(1);
-            continue;
-        }
-
-        // Validate server-provided values before writing to ~/.aws/config
-        if let Err(e) = validate_account_id(account_id) {
-            tracing::warn!("Skipping invalid account from server: {e}");
-            continue;
-        }
-        if let Err(e) = validate_role_name(role_name) {
-            tracing::warn!("Skipping invalid role from server: {e}");
-            continue;
-        }
-
-        let mut profile_name = sanitize_profile_name(account_name, role_name, account_id);
-
-        // Disambiguate collisions by appending last 4 digits of account_id
-        if profile_name_counts.get(&profile_name).copied().unwrap_or(0) > 1 {
-            let suffix = account_id.get(8..).unwrap_or(account_id);
-            profile_name = format!("{profile_name}-{suffix}");
-        }
-
-        config.set_profile(&AwsProfile {
-            name: profile_name.clone(),
-            credential_process: None,
-            sso_session: Some(session_name.clone()),
-            sso_account_id: Some(account_id.to_string()),
-            sso_role_name: Some(role_name.to_string()),
-            region: Some(effective_region.to_string()),
-            output: None,
-        });
-
-        added = added.saturating_add(1);
-    }
-
-    // Detect stale profiles
-    let stale = find_stale_profiles(&config, &session_name, &pairs);
-    for (profile_name, account_id, role_name) in &stale {
-        println!(
-            "  Warning: profile [{profile_name}] targets {account_id}/{role_name} \
-             which is no longer available"
-        );
-    }
+    print_stale_warnings(&config, &session_name, &pairs);
 
     if added > 0 || migrated > 0 {
         config.save()?;
     }
 
+    print_discovery_summary(added, skipped, migrated);
+
+    if added > 0 {
+        prime_sso_cache(server).await;
+        if let Some(first) = pairs.first() {
+            print_setup_instructions(&sanitize_profile_name(&first.0, &first.2, &first.1));
+        }
+    }
+
+    Ok(())
+}
+
+/// Print warnings for stale profiles no longer in the discovery response.
+fn print_stale_warnings(
+    config: &AwsConfig,
+    session_name: &str,
+    pairs: &[(String, String, String)],
+) {
+    for (profile_name, account_id, role_name) in &find_stale_profiles(config, session_name, pairs) {
+        println!(
+            "  Warning: profile [{profile_name}] targets {account_id}/{role_name} \
+             which is no longer available"
+        );
+    }
+}
+
+/// Print a summary of the discovery setup operation.
+fn print_discovery_summary(added: u32, skipped: u32, migrated: u32) {
     println!();
     if migrated > 0 {
         println!(
@@ -294,18 +235,6 @@ async fn run_discovery(server: &str, refresh: bool) -> Result<()> {
         "Added {added} profile{} to ~/.aws/config ({skipped} skipped)",
         if added == 1 { "" } else { "s" }
     );
-
-    // Prime the SSO cache and show instructions only if profiles were added
-    if added > 0 {
-        prime_sso_cache(server).await;
-
-        if let Some(first_profile) = pairs.first() {
-            let name = sanitize_profile_name(&first_profile.0, &first_profile.2, &first_profile.1);
-            print_setup_instructions(&name);
-        }
-    }
-
-    Ok(())
 }
 
 /// Print post-setup usage instructions.
@@ -327,6 +256,120 @@ fn ensure_sso_session(config: &mut AwsConfig, session_name: &str, server: &str, 
             sso_region: region.to_string(),
         });
     }
+}
+
+/// Flatten discovery response into (account_name, account_id, role_name) triples.
+fn flatten_discovery(
+    discovery: &vouch_common::IdcDiscoveryResponse,
+) -> Vec<(String, String, String)> {
+    let mut pairs = Vec::new();
+    for account in &discovery.accounts {
+        for role in &account.roles {
+            pairs.push((
+                account.account_name.clone(),
+                account.account_id.clone(),
+                role.clone(),
+            ));
+        }
+    }
+    pairs
+}
+
+/// Build display labels for each account/role pair.
+///
+/// Each entry is `(already_exists, label_string)`. The label includes
+/// an `(exists)` suffix when the profile is already configured.
+fn build_labels(
+    config: &AwsConfig,
+    session_name: &str,
+    pairs: &[(String, String, String)],
+) -> Vec<(bool, String)> {
+    pairs
+        .iter()
+        .map(|(account_name, account_id, role_name)| {
+            let exists = find_idc_profile(config, session_name, account_id, role_name).is_some();
+            let label = if account_name.is_empty() {
+                format!("{account_id} / {role_name}")
+            } else {
+                format!("{account_name} ({account_id}) / {role_name}")
+            };
+            let label = if exists {
+                format!("{label} (exists)")
+            } else {
+                label
+            };
+            (exists, label)
+        })
+        .collect()
+}
+
+/// Write selected profiles to the AWS config file.
+///
+/// Validates each entry, disambiguates collisions by appending the
+/// account ID, and returns `(added, skipped)` counts.
+fn write_selected_profiles(
+    config: &mut AwsConfig,
+    session_name: &str,
+    pairs: &[(String, String, String)],
+    labeled: &[(bool, String)],
+    selected: &[String],
+    region: &str,
+) -> (u32, u32) {
+    let mut profile_name_counts: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    for (account_name, account_id, role_name) in pairs {
+        let name = sanitize_profile_name(account_name, role_name, account_id);
+        *profile_name_counts.entry(name).or_insert(0) += 1;
+    }
+
+    let mut added = 0u32;
+    let mut skipped = 0u32;
+
+    for (i, (account_name, account_id, role_name)) in pairs.iter().enumerate() {
+        let Some((exists, label)) = labeled.get(i) else {
+            continue;
+        };
+
+        if !selected.contains(label) {
+            skipped = skipped.saturating_add(1);
+            continue;
+        }
+
+        if *exists {
+            skipped = skipped.saturating_add(1);
+            continue;
+        }
+
+        if let Err(e) = validate_account_id(account_id) {
+            tracing::warn!("Skipping invalid account from server: {e}");
+            continue;
+        }
+        if let Err(e) = validate_role_name(role_name) {
+            tracing::warn!("Skipping invalid role from server: {e}");
+            continue;
+        }
+
+        let mut profile_name = sanitize_profile_name(account_name, role_name, account_id);
+
+        // Disambiguate collisions (same role name across accounts) by appending account ID
+        if profile_name_counts.get(&profile_name).copied().unwrap_or(0) > 1 {
+            profile_name = format!("{profile_name}-{account_id}");
+        }
+
+        config.set_profile(&AwsProfile {
+            name: profile_name.clone(),
+            credential_process: None,
+            sso_session: Some(session_name.to_string()),
+            sso_account_id: Some(account_id.to_string()),
+            sso_role_name: Some(role_name.to_string()),
+            region: Some(region.to_string()),
+            output: None,
+        });
+
+        added = added.saturating_add(1);
+    }
+
+    (added, skipped)
 }
 
 /// Prime the SSO token cache after setup (best-effort).

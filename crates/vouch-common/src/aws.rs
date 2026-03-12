@@ -47,18 +47,15 @@ impl Partition {
 
     /// Extract the partition from an ARN string.
     ///
-    /// ARN format: `arn:{partition}:...`
+    /// Prefer [`Arn::parse`] when you need more than just the partition.
     ///
     /// # Errors
     ///
     /// Returns an error if the ARN is malformed or the partition
     /// is not recognized.
     pub fn from_arn(arn: &str) -> Result<Self, PartitionError> {
-        let partition_str = arn
-            .strip_prefix("arn:")
-            .and_then(|rest| rest.split(':').next())
-            .ok_or_else(|| PartitionError(arn.to_string()))?;
-        Self::parse(partition_str)
+        let parsed = Arn::parse(arn).map_err(|_| PartitionError(arn.to_string()))?;
+        Ok(parsed.partition)
     }
 
     /// Default region for STS API calls in this partition.
@@ -78,6 +75,21 @@ impl Partition {
             Self::AwsIsoB => "us-isob-east-1",
             Self::AwsIsoE => "eu-isoe-west-1",
             Self::AwsIsoF => "us-isof-south-1",
+        }
+    }
+
+    /// String representation of the partition name as used in ARNs.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Aws => "aws",
+            Self::AwsCn => "aws-cn",
+            Self::AwsUsGov => "aws-us-gov",
+            Self::AwsEusc => "aws-eusc",
+            Self::AwsIso => "aws-iso",
+            Self::AwsIsoB => "aws-iso-b",
+            Self::AwsIsoE => "aws-iso-e",
+            Self::AwsIsoF => "aws-iso-f",
         }
     }
 
@@ -104,6 +116,110 @@ impl Partition {
      aws-iso, aws-iso-b, aws-iso-e, aws-iso-f"
 )]
 pub struct PartitionError(String);
+
+/// Parsed AWS ARN (Amazon Resource Name).
+///
+/// Follows the [ARN format specification][arn-ref]:
+/// ```text
+/// arn:partition:service:region:account-id:resource
+/// ```
+///
+/// Region and account may be absent depending on the resource type
+/// (e.g., IAM resources have no region, S3 buckets have no account).
+///
+/// [arn-ref]: https://docs.aws.amazon.com/IAM/latest/UserGuide/reference-arns.html
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Arn {
+    /// The AWS partition.
+    pub partition: Partition,
+    /// The service namespace (e.g., `"iam"`, `"sso"`, `"s3"`).
+    pub service: String,
+    /// The region, if present (e.g., `"us-east-1"`).
+    pub region: Option<String>,
+    /// The account ID, if present (e.g., `"123456789012"`).
+    pub account: Option<String>,
+    /// The resource portion (everything after the 5th colon).
+    pub resource: String,
+}
+
+/// Error returned when an ARN string cannot be parsed.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Invalid ARN: '{0}'\n\
+     Expected format: arn:<partition>:<service>:<region>:<account>:<resource>"
+)]
+pub struct ArnError(String);
+
+impl Arn {
+    /// Parse an ARN string into its components.
+    ///
+    /// Empty region/account fields become `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ArnError`] if the string does not start with `arn:`,
+    /// does not contain at least 6 colon-separated segments, or the
+    /// partition is not recognized.
+    pub fn parse(arn: &str) -> Result<Self, ArnError> {
+        let rest = arn
+            .strip_prefix("arn:")
+            .ok_or_else(|| ArnError(arn.to_string()))?;
+
+        // Split into at most 6 parts (resource may contain colons)
+        let mut parts = rest.splitn(5, ':');
+
+        let partition_str = parts.next().ok_or_else(|| ArnError(arn.to_string()))?;
+        let service = parts.next().ok_or_else(|| ArnError(arn.to_string()))?;
+        let region = parts.next().ok_or_else(|| ArnError(arn.to_string()))?;
+        let account = parts.next().ok_or_else(|| ArnError(arn.to_string()))?;
+        let resource = parts.next().ok_or_else(|| ArnError(arn.to_string()))?;
+
+        if service.is_empty() || resource.is_empty() {
+            return Err(ArnError(arn.to_string()));
+        }
+
+        let partition = Partition::parse(partition_str).map_err(|_| ArnError(arn.to_string()))?;
+
+        Ok(Self {
+            partition,
+            service: service.to_string(),
+            region: (!region.is_empty()).then(|| region.to_string()),
+            account: (!account.is_empty()).then(|| account.to_string()),
+            resource: resource.to_string(),
+        })
+    }
+
+    /// Check whether this ARN refers to an IAM role.
+    #[must_use]
+    pub fn is_iam_role(&self) -> bool {
+        self.service == "iam" && self.resource.starts_with("role/") && self.resource.len() > 5
+    }
+}
+
+impl std::fmt::Display for Arn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "arn:{}:{}:{}:{}:{}",
+            self.partition.as_str(),
+            self.service,
+            self.region.as_deref().unwrap_or(""),
+            self.account.as_deref().unwrap_or(""),
+            self.resource,
+        )
+    }
+}
+
+/// Compute an expiration timestamp from a duration in seconds.
+///
+/// # Errors
+///
+/// Returns an error if the resulting timestamp overflows.
+pub fn expiration_from_secs(expires_in: u64) -> Result<jiff::Timestamp, jiff::Error> {
+    jiff::Timestamp::now().checked_add(jiff::SignedDuration::from_secs(
+        i64::try_from(expires_in).unwrap_or(i64::MAX),
+    ))
+}
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -169,6 +285,121 @@ mod tests {
         assert_eq!(Partition::AwsIsoE.default_sts_region(), "eu-isoe-west-1");
         assert_eq!(Partition::AwsIsoF.default_sts_region(), "us-isof-south-1");
     }
+
+    // =========================================================================
+    // Arn tests
+    // =========================================================================
+
+    #[test]
+    fn test_arn_parse_iam_role() {
+        let arn = Arn::parse("arn:aws:iam::123456789012:role/MyRole").unwrap();
+        assert_eq!(arn.partition, Partition::Aws);
+        assert_eq!(arn.service, "iam");
+        assert_eq!(arn.region, None);
+        assert_eq!(arn.account.as_deref(), Some("123456789012"));
+        assert_eq!(arn.resource, "role/MyRole");
+        assert!(arn.is_iam_role());
+    }
+
+    #[test]
+    fn test_arn_parse_sso_application() {
+        let arn = Arn::parse("arn:aws:sso::123456789012:application/ssoins-abc/apl-xyz").unwrap();
+        assert_eq!(arn.partition, Partition::Aws);
+        assert_eq!(arn.service, "sso");
+        assert_eq!(arn.account.as_deref(), Some("123456789012"));
+        assert_eq!(arn.resource, "application/ssoins-abc/apl-xyz");
+        assert!(!arn.is_iam_role());
+    }
+
+    #[test]
+    fn test_arn_parse_with_region() {
+        let arn = Arn::parse("arn:aws:sns:us-east-1:123456789012:my-topic").unwrap();
+        assert_eq!(arn.service, "sns");
+        assert_eq!(arn.region.as_deref(), Some("us-east-1"));
+        assert_eq!(arn.account.as_deref(), Some("123456789012"));
+        assert_eq!(arn.resource, "my-topic");
+    }
+
+    #[test]
+    fn test_arn_parse_no_region_no_account() {
+        let arn = Arn::parse("arn:aws:s3:::my-bucket").unwrap();
+        assert_eq!(arn.service, "s3");
+        assert_eq!(arn.region, None);
+        assert_eq!(arn.account, None);
+        assert_eq!(arn.resource, "my-bucket");
+    }
+
+    #[test]
+    fn test_arn_parse_china_partition() {
+        let arn = Arn::parse("arn:aws-cn:iam::123456789012:role/MyRole").unwrap();
+        assert_eq!(arn.partition, Partition::AwsCn);
+    }
+
+    #[test]
+    fn test_arn_parse_govcloud_partition() {
+        let arn = Arn::parse("arn:aws-us-gov:iam::123456789012:role/MyRole").unwrap();
+        assert_eq!(arn.partition, Partition::AwsUsGov);
+    }
+
+    #[test]
+    fn test_arn_parse_unknown_partition_rejected() {
+        assert!(Arn::parse("arn:aws-future:iam::123456789012:role/MyRole").is_err());
+    }
+
+    #[test]
+    fn test_arn_parse_with_colons_in_resource() {
+        let arn = Arn::parse("arn:aws:iam::123456789012:role/path:to:thing").unwrap();
+        assert_eq!(arn.resource, "role/path:to:thing");
+    }
+
+    #[test]
+    fn test_arn_parse_invalid() {
+        assert!(Arn::parse("not-an-arn").is_err());
+        assert!(Arn::parse("").is_err());
+        assert!(Arn::parse("arn:aws:iam::123:").is_err());
+        assert!(Arn::parse("arn:aws:iam").is_err());
+        assert!(Arn::parse("arn::iam::123:role/R").is_err());
+        assert!(Arn::parse("arn:aws:::123:role/R").is_err());
+    }
+
+    #[test]
+    fn test_arn_is_not_iam_role() {
+        let arn = Arn::parse("arn:aws:iam::123456789012:user/MyUser").unwrap();
+        assert!(!arn.is_iam_role());
+    }
+
+    #[test]
+    fn test_arn_display_roundtrip() {
+        let inputs = [
+            "arn:aws:iam::123456789012:role/MyRole",
+            "arn:aws:s3:::my-bucket",
+            "arn:aws:sns:us-east-1:123456789012:my-topic",
+            "arn:aws-cn:iam::123456789012:role/MyRole",
+        ];
+        for input in &inputs {
+            let arn = Arn::parse(input).unwrap();
+            assert_eq!(arn.to_string(), *input);
+        }
+    }
+
+    #[test]
+    fn test_partition_as_str_roundtrip() {
+        let partitions = [
+            Partition::Aws,
+            Partition::AwsCn,
+            Partition::AwsUsGov,
+            Partition::AwsEusc,
+            Partition::AwsIso,
+            Partition::AwsIsoB,
+            Partition::AwsIsoE,
+            Partition::AwsIsoF,
+        ];
+        for p in &partitions {
+            assert_eq!(Partition::parse(p.as_str()).unwrap(), *p);
+        }
+    }
+
+    // =========================================================================
 
     #[test]
     fn test_dns_suffix() {

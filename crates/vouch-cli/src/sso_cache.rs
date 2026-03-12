@@ -65,12 +65,7 @@ fn write_sso_token_to_dir(
     let filename = cache_filename(session_name);
     let cache_path = cache_dir.join(format!("{filename}.json"));
 
-    // Saturate to i64::MAX if expires_in exceeds i64 range (practically impossible
-    // since SSO tokens last hours, but avoids a panic path)
-    let expires_at = jiff::Timestamp::now()
-        .checked_add(jiff::SignedDuration::from_secs(
-            i64::try_from(expires_in).unwrap_or(i64::MAX),
-        ))
+    let expires_at = vouch_common::aws::expiration_from_secs(expires_in)
         .context("overflow computing expiration")?;
 
     // Format matches botocore's _serialize_utc_timestamp: "%Y-%m-%dT%H:%M:%SZ"

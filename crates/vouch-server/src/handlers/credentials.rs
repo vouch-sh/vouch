@@ -350,6 +350,7 @@ pub async fn get_aws_token(
 pub async fn discover_aws_idc(
     method: Method,
     uri: OriginalUri,
+    client_info: ClientInfo,
     headers: HeaderMap,
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
@@ -371,6 +372,25 @@ pub async fn discover_aws_idc(
     let result = crate::services::integrations::aws_idc::discover_accounts_and_roles(&ctx)
         .await
         .map_err(map_idc_error)?;
+
+    if let Err(e) = log_idc_credential_event(
+        &state,
+        &token.sub,
+        &user_email,
+        IdcCredentialAuditData {
+            event_type: "account_discovery".to_string(),
+            org_id: Some(org_id),
+            authenticator_id: token.authenticator_id.clone(),
+            success: true,
+            user_agent: client_info.user_agent,
+            ..Default::default()
+        },
+        client_info.client_ip,
+    )
+    .await
+    {
+        tracing::warn!("Failed to log IdC discovery event: {e}");
+    }
 
     Ok(Json(result))
 }
@@ -507,7 +527,7 @@ async fn extract_idc_context(
 fn map_idc_error(e: crate::services::integrations::aws_idc::AwsIdcError) -> ServiceError {
     use crate::services::integrations::aws_idc::AwsIdcError;
     match e {
-        AwsIdcError::NotConfigured | AwsIdcError::MissingField(_) => {
+        AwsIdcError::NotConfigured | AwsIdcError::MissingField(_) | AwsIdcError::InvalidArn(_) => {
             ServiceError::api(StatusCode::NOT_FOUND, "idc_not_configured", e.to_string())
         }
         AwsIdcError::OidcToken(ref aws_err) => {
