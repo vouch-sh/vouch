@@ -9,10 +9,8 @@
 //! 4. Return SSO access token to CLI for local caching in `~/.aws/sso/cache/`.
 //!    The AWS SDK/CLI calls `GetRoleCredentials` locally using the cached token.
 //!
-//! The SSO access token is returned to the CLI for local caching,
-//! never stored server-side.
-
-use std::sync::Arc;
+//! Account/role discovery uses SSO Admin + Identity Store APIs (not SSO
+//! portal APIs, which are incompatible with Trusted Token Issuer tokens).
 
 use crate::db::{self, store::DocumentStore};
 use crate::redact_email;
@@ -68,24 +66,28 @@ pub enum AwsIdcError {
     #[error("Access denied by Identity Center: {0}")]
     AccessDenied(String),
 
-    /// SSO `ListAccounts` failed.
-    #[error("ListAccounts failed: {0}")]
-    ListAccounts(String),
-
     /// User has no account assignments in Identity Center.
-    ///
-    /// Returned when `ListAccounts` gets `UnauthorizedException`, which
-    /// typically means the user exists in Identity Center but has no
-    /// permission set assignments to any AWS accounts.
     #[error(
         "No account assignments found. The user exists in Identity Center \
          but has no permission sets assigned to any AWS accounts."
     )]
     NoAccountAssignments,
 
-    /// SSO `ListAccountRoles` failed.
-    #[error("ListAccountRoles failed: {0}")]
-    ListAccountRoles(String),
+    /// Failed to resolve the Identity Center instance.
+    #[error("Failed to resolve Identity Center instance: {0}")]
+    InstanceResolution(String),
+
+    /// Failed to look up user in Identity Store.
+    #[error("Identity Store user lookup failed: {0}")]
+    IdentityStoreLookup(String),
+
+    /// Failed to list account assignments via SSO Admin API.
+    #[error("ListAccountAssignmentsForPrincipal failed: {0}")]
+    ListAssignments(String),
+
+    /// Failed to describe a permission set.
+    #[error("DescribePermissionSet failed: {0}")]
+    DescribePermissionSet(String),
 
     /// Database error.
     #[error("Database error: {0}")]
@@ -120,24 +122,16 @@ pub struct IdcTokenResult {
     pub identity_context: Option<String>,
 }
 
-/// Build an SSO client configured for the given region with no credentials.
-async fn build_sso_client(region: &str) -> aws_sdk_sso::Client {
-    let sso_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-        .region(aws_config::Region::new(region.to_string()))
-        .no_credentials()
-        .load()
-        .await;
-    aws_sdk_sso::Client::new(&sso_config)
+/// Parsed and validated IdC configuration from the database.
+struct IdcConfig {
+    bootstrap_arn: Arn,
+    application_arn: Arn,
+    idc_region: String,
 }
 
-/// Exchange a Vouch session for an SSO access token.
-///
-/// Chains three operations server-side: OIDC token issuance →
-/// STS bootstrap (`AssumeRoleWithWebIdentity`) → `CreateTokenWithIAM`.
-/// Used by the `/sso-token` handler and [`discover_accounts_and_roles`].
-pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResult, AwsIdcError> {
-    // 1. Read IdC config from DB
-    let integration = db::get_cloud_integration(ctx.store, ctx.org_id, "aws")
+/// Load and validate IdC configuration from the database.
+async fn load_idc_config(store: &DocumentStore, org_id: &str) -> Result<IdcConfig, AwsIdcError> {
+    let integration = db::get_cloud_integration(store, org_id, "aws")
         .await?
         .ok_or(AwsIdcError::NotConfigured)?;
 
@@ -154,18 +148,35 @@ pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResu
         .ok_or(AwsIdcError::MissingField("idc_bootstrap_role_arn"))?;
     let bootstrap_arn =
         Arn::parse(bootstrap_role_arn_str).map_err(|e| AwsIdcError::InvalidArn(e.to_string()))?;
+
     let application_arn_str = config
         .idc_application_arn
         .as_deref()
         .ok_or(AwsIdcError::MissingField("idc_application_arn"))?;
     let application_arn =
         Arn::parse(application_arn_str).map_err(|e| AwsIdcError::InvalidArn(e.to_string()))?;
+
     let idc_region = config
         .idc_region
         .as_deref()
-        .ok_or(AwsIdcError::MissingField("idc_region"))?;
+        .ok_or(AwsIdcError::MissingField("idc_region"))?
+        .to_string();
 
-    // 2. Issue OIDC ID token
+    Ok(IdcConfig {
+        bootstrap_arn,
+        application_arn,
+        idc_region,
+    })
+}
+
+/// Issue an OIDC token and bootstrap IAM credentials.
+///
+/// Returns the bootstrap credentials and the raw OIDC ID token (needed
+/// for `CreateTokenWithIAM`).
+async fn issue_token_and_bootstrap(
+    ctx: &IdcContext<'_>,
+    idc_config: &IdcConfig,
+) -> Result<(aws_credential_types::Credentials, String), AwsIdcError> {
     let token_result = super::aws::issue_aws_token(
         ctx.store,
         ctx.base_url,
@@ -177,15 +188,29 @@ pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResu
     )
     .await?;
 
-    // 3. Bootstrap IAM credentials via STS
-    let bootstrap_creds =
-        bootstrap_iam_credentials(&bootstrap_arn, &token_result.id_token, ctx.user_email).await?;
-
-    // 4. Exchange for SSO access token via CreateTokenWithIAM
-    let (sso_access_token, sso_expires_in, identity_context) = create_idc_sso_token(
-        &application_arn,
+    let creds = bootstrap_iam_credentials(
+        &idc_config.bootstrap_arn,
         &token_result.id_token,
-        idc_region,
+        ctx.user_email,
+    )
+    .await?;
+
+    Ok((creds, token_result.id_token))
+}
+
+/// Exchange a Vouch session for an SSO access token.
+///
+/// Chains three operations server-side: OIDC token issuance →
+/// STS bootstrap (`AssumeRoleWithWebIdentity`) → `CreateTokenWithIAM`.
+/// Used by the `/sso-token` handler.
+pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResult, AwsIdcError> {
+    let idc_config = load_idc_config(ctx.store, ctx.org_id).await?;
+    let (bootstrap_creds, id_token) = issue_token_and_bootstrap(ctx, &idc_config).await?;
+
+    let (sso_access_token, sso_expires_in, identity_context) = create_idc_sso_token(
+        &idc_config.application_arn,
+        &id_token,
+        &idc_config.idc_region,
         bootstrap_creds,
     )
     .await?;
@@ -204,7 +229,7 @@ pub async fn exchange_for_idc_token(ctx: &IdcContext<'_>) -> Result<IdcTokenResu
     Ok(IdcTokenResult {
         access_token: sso_access_token,
         expires_in: sso_expires_in,
-        region: idc_region.to_string(),
+        region: idc_config.idc_region,
         identity_context,
     })
 }
@@ -281,7 +306,7 @@ async fn create_idc_sso_token(
 
     let app_arn_str = application_arn.to_string();
     // Omit scope — Identity Center grants all scopes configured on the
-    // application, including `sso:account:access` (needed for ListAccounts).
+    // application, including `sso:account:access`.
     let token_response = ssooidc_client
         .create_token_with_iam()
         .client_id(&app_arn_str)
@@ -296,10 +321,7 @@ async fn create_idc_sso_token(
         .ok_or_else(|| AwsIdcError::CreateToken("No access token in response".to_string()))?;
 
     let granted_scopes = token_response.scope();
-    tracing::info!(
-        "CreateTokenWithIAM granted scopes: {:?}",
-        granted_scopes,
-    );
+    tracing::info!("CreateTokenWithIAM granted scopes: {:?}", granted_scopes);
 
     let identity_context = token_response
         .aws_additional_details()
@@ -323,12 +345,6 @@ async fn create_idc_sso_token(
 }
 
 /// Classify a `CreateTokenWithIAM` SDK error into a specific `AwsIdcError`.
-///
-/// Maps well-known error codes to actionable variants:
-/// - `InvalidGrantException` → user not found/assigned in Identity Center
-/// - `InvalidClientException` → bad application ARN or trust config
-/// - `AccessDeniedException` → IAM permissions issue
-/// - Everything else → generic `CreateToken` with debug details
 fn classify_create_token_error(
     err: &aws_sdk_ssooidc::error::SdkError<
         aws_sdk_ssooidc::operation::create_token_with_iam::CreateTokenWithIAMError,
@@ -351,119 +367,298 @@ fn classify_create_token_error(
     }
 }
 
-/// Classify a `ListAccounts` SDK error into a specific `AwsIdcError`.
+/// Extract the SSO instance ID from an application ARN.
 ///
-/// `UnauthorizedException` typically means the SSO token is valid but
-/// the user has no permission set assignments to any AWS accounts.
-fn classify_list_accounts_error(
-    err: &aws_sdk_sso::error::SdkError<aws_sdk_sso::operation::list_accounts::ListAccountsError>,
-) -> AwsIdcError {
-    let Some(service_err) = err.as_service_error() else {
-        return AwsIdcError::ListAccounts(format!("{err:#}"));
-    };
+/// Application ARN format: `arn:<partition>:sso::<account>:application/<instance-id>/<app-id>`
+fn extract_instance_id(application_arn: &Arn) -> Result<&str, AwsIdcError> {
+    let rest = application_arn
+        .resource
+        .strip_prefix("application/")
+        .ok_or_else(|| {
+            AwsIdcError::InvalidArn(format!(
+                "Application ARN resource does not start with 'application/': {}",
+                application_arn.resource
+            ))
+        })?;
 
-    use aws_sdk_sso::operation::list_accounts::ListAccountsError;
-    match service_err {
-        ListAccountsError::UnauthorizedException(e) => {
-            tracing::warn!("ListAccounts UnauthorizedException: {e}");
-            AwsIdcError::NoAccountAssignments
+    rest.split('/').next().ok_or_else(|| {
+        AwsIdcError::InvalidArn(format!(
+            "Cannot extract instance ID from application ARN: {}",
+            application_arn
+        ))
+    })
+}
+
+/// Build the SSO instance ARN from the application ARN.
+fn build_instance_arn(application_arn: &Arn) -> Result<String, AwsIdcError> {
+    let instance_id = extract_instance_id(application_arn)?;
+    Ok(format!(
+        "arn:{}:sso:::instance/{}",
+        application_arn.partition.as_str(),
+        instance_id,
+    ))
+}
+
+/// Look up a user's principal ID in Identity Store by email.
+async fn resolve_identity_store_user(
+    identity_store_id: &str,
+    user_email: &str,
+    identity_store_client: &aws_sdk_identitystore::Client,
+) -> Result<String, AwsIdcError> {
+    let unique_attr = aws_sdk_identitystore::types::UniqueAttribute::builder()
+        .attribute_path("emails.value")
+        .attribute_value(aws_smithy_types::Document::String(user_email.to_string()))
+        .build()
+        .map_err(|e| {
+            AwsIdcError::IdentityStoreLookup(format!("Failed to build UniqueAttribute: {e}"))
+        })?;
+
+    let alt_id = aws_sdk_identitystore::types::AlternateIdentifier::UniqueAttribute(unique_attr);
+
+    let response = identity_store_client
+        .get_user_id()
+        .identity_store_id(identity_store_id)
+        .alternate_identifier(alt_id)
+        .send()
+        .await
+        .map_err(|e| {
+            if let Some(service_err) = e.as_service_error() {
+                use aws_sdk_identitystore::operation::get_user_id::GetUserIdError;
+                if let GetUserIdError::ResourceNotFoundException(_) = service_err {
+                    return AwsIdcError::UserNotInIdentityCenter;
+                }
+            }
+            AwsIdcError::IdentityStoreLookup(format!("{e}"))
+        })?;
+
+    Ok(response.user_id().to_string())
+}
+
+/// A (account_id, permission_set_arn) pair from an account assignment.
+struct AccountAssignment {
+    account_id: String,
+    permission_set_arn: String,
+}
+
+/// List all account assignments for a principal via SSO Admin API.
+async fn list_assignments_for_principal(
+    ssoadmin_client: &aws_sdk_ssoadmin::Client,
+    instance_arn: &str,
+    principal_id: &str,
+) -> Result<Vec<AccountAssignment>, AwsIdcError> {
+    let mut assignments = Vec::new();
+    let mut next_token: Option<String> = None;
+
+    loop {
+        let mut req = ssoadmin_client
+            .list_account_assignments_for_principal()
+            .instance_arn(instance_arn)
+            .principal_id(principal_id)
+            .principal_type(aws_sdk_ssoadmin::types::PrincipalType::User);
+        if let Some(ref token) = next_token {
+            req = req.next_token(token);
         }
-        other => AwsIdcError::ListAccounts(format!("{other:?}")),
+
+        let output = req
+            .send()
+            .await
+            .map_err(|e| AwsIdcError::ListAssignments(format!("{e}")))?;
+
+        for assignment in output.account_assignments() {
+            let Some(account_id) = assignment.account_id() else {
+                continue;
+            };
+            let Some(permission_set_arn) = assignment.permission_set_arn() else {
+                continue;
+            };
+            assignments.push(AccountAssignment {
+                account_id: account_id.to_string(),
+                permission_set_arn: permission_set_arn.to_string(),
+            });
+        }
+
+        match output.next_token() {
+            Some(t) if !t.is_empty() => next_token = Some(t.to_string()),
+            _ => break,
+        }
     }
+
+    Ok(assignments)
+}
+
+/// Resolve permission set ARNs to human-readable names.
+///
+/// `ListAccountAssignmentsForPrincipal` only returns permission set ARNs
+/// (e.g., `arn:aws:sso:::permissionSet/ssoins-abc/ps-xyz`), not names.
+/// We need `DescribePermissionSet` to get names like "AdministratorAccess"
+/// for CLI profile generation. Already deduplicated — each unique ARN is
+/// resolved once regardless of how many accounts it's assigned to.
+async fn resolve_permission_set_names(
+    ssoadmin_client: &aws_sdk_ssoadmin::Client,
+    instance_arn: &str,
+    permission_set_arns: &[String],
+) -> std::collections::HashMap<String, String> {
+    let mut names = std::collections::HashMap::new();
+
+    for arn in permission_set_arns {
+        if names.contains_key(arn) {
+            continue;
+        }
+        match ssoadmin_client
+            .describe_permission_set()
+            .instance_arn(instance_arn)
+            .permission_set_arn(arn)
+            .send()
+            .await
+        {
+            Ok(output) => {
+                if let Some(ps) = output.permission_set() {
+                    let name = ps.name().unwrap_or("Unknown").to_string();
+                    names.insert(arn.clone(), name);
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Failed to describe permission set {arn}: {e}");
+                names.insert(arn.clone(), arn.clone());
+            }
+        }
+    }
+
+    names
 }
 
 /// Discover all accounts and roles available via Identity Center.
 ///
-/// Performs a single token exchange, then lists all accounts and their
-/// roles concurrently (up to 5 at a time). Partial failures for
-/// individual accounts are collected in `errors` rather than failing
-/// the entire request.
+/// Reuses a single set of bootstrap IAM credentials for both the SSO
+/// token exchange and the Admin API discovery calls:
+///
+/// 1. Bootstrap IAM creds (1 STS call)
+/// 2. `CreateTokenWithIAM` → SSO token for CLI
+/// 3. `ListInstances` → identity store ID
+/// 4. `GetUserId` → principal ID
+/// 5. `ListAccountAssignmentsForPrincipal` → (account, permission set) pairs
+/// 6. `DescribePermissionSet` × unique permission sets → names
 pub async fn discover_accounts_and_roles(
     ctx: &IdcContext<'_>,
 ) -> Result<vouch_common::IdcDiscoveryResponse, AwsIdcError> {
-    let token_result = exchange_for_idc_token(ctx).await?;
-    let sso_client = build_sso_client(&token_result.region).await;
+    let idc_config = load_idc_config(ctx.store, ctx.org_id).await?;
+    let (bootstrap_creds, id_token) = issue_token_and_bootstrap(ctx, &idc_config).await?;
 
-    // List all accounts
-    let accounts = list_accounts_with_client(&sso_client, &token_result.access_token).await?;
+    // 1. Exchange for SSO token (needed for CLI caching)
+    let (sso_access_token, sso_expires_in, identity_context) = create_idc_sso_token(
+        &idc_config.application_arn,
+        &id_token,
+        &idc_config.idc_region,
+        bootstrap_creds.clone(),
+    )
+    .await?;
 
-    // List roles for each account concurrently (max 5 at a time)
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(5));
-    let mut join_set = tokio::task::JoinSet::new();
+    tracing::info!(
+        "Issued IdC SSO token for {} (org {}, identity_context={})",
+        redact_email(ctx.user_email),
+        ctx.org_id,
+        if identity_context.is_some() {
+            "present"
+        } else {
+            "absent"
+        },
+    );
 
-    for account in &accounts {
-        let Some(account_id) = account.account_id() else {
-            tracing::warn!("ListAccounts returned entry with no account_id, skipping");
-            continue;
-        };
-        let account_name = account.account_name().unwrap_or(account_id).to_string();
-        let account_id = account_id.to_string();
+    let token_result = IdcTokenResult {
+        access_token: sso_access_token,
+        expires_in: sso_expires_in,
+        region: idc_config.idc_region.clone(),
+        identity_context,
+    };
 
-        let client = sso_client.clone();
-        let token = token_result.access_token.clone();
-        let sem = semaphore.clone();
+    // 2. Build SSO Admin + Identity Store clients (reuse same bootstrap creds)
+    let admin_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new(idc_config.idc_region.clone()))
+        .credentials_provider(bootstrap_creds)
+        .load()
+        .await;
+    let ssoadmin_client = aws_sdk_ssoadmin::Client::new(&admin_config);
+    let identity_store_client = aws_sdk_identitystore::Client::new(&admin_config);
 
-        join_set.spawn(async move {
-            let Ok(_permit) = sem.acquire().await else {
-                return (
-                    account_id,
-                    account_name,
-                    Err(AwsIdcError::ListAccountRoles(
-                        "semaphore closed".to_string(),
-                    )),
-                );
-            };
-            let result = list_account_roles_with_client(&client, &token, &account_id).await;
-            (account_id, account_name, result)
-        });
+    // 3. Resolve instance ARN and identity store ID
+    let instance_arn = build_instance_arn(&idc_config.application_arn)?;
+    let identity_store_id = resolve_identity_store_id(&ssoadmin_client, &instance_arn).await?;
+
+    // 4. Look up user's principal ID
+    let principal_id =
+        resolve_identity_store_user(&identity_store_id, ctx.user_email, &identity_store_client)
+            .await?;
+
+    tracing::info!(
+        "Resolved IdC principal for {}: {}",
+        redact_email(ctx.user_email),
+        principal_id,
+    );
+
+    // 5. List all account assignments
+    let assignments =
+        list_assignments_for_principal(&ssoadmin_client, &instance_arn, &principal_id).await?;
+
+    if assignments.is_empty() {
+        return Err(AwsIdcError::NoAccountAssignments);
     }
 
-    let mut discovered = Vec::new();
-    let mut errors = Vec::new();
+    // 6. Resolve permission set names (deduplicated)
+    let unique_ps_arns: Vec<String> = {
+        let mut seen = std::collections::HashSet::new();
+        assignments
+            .iter()
+            .filter(|a| seen.insert(a.permission_set_arn.clone()))
+            .map(|a| a.permission_set_arn.clone())
+            .collect()
+    };
 
-    while let Some(result) = join_set.join_next().await {
-        match result {
-            Ok((account_id, account_name, Ok(roles))) => {
-                discovered.push(vouch_common::IdcAccountWithRoles {
-                    account_id,
-                    account_name,
-                    roles,
-                });
-            }
-            Ok((account_id, _, Err(e))) => {
-                errors.push(vouch_common::IdcDiscoveryError {
-                    account_id,
-                    message: e.to_string(),
-                });
-            }
-            Err(e) => {
-                tracing::warn!("IdC role listing task panicked: {e}");
-            }
-        }
+    let ps_names =
+        resolve_permission_set_names(&ssoadmin_client, &instance_arn, &unique_ps_arns).await;
+
+    // 7. Group by account
+    let mut account_map: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+
+    for assignment in &assignments {
+        let role_name = ps_names
+            .get(&assignment.permission_set_arn)
+            .cloned()
+            .unwrap_or_else(|| assignment.permission_set_arn.clone());
+
+        account_map
+            .entry(assignment.account_id.clone())
+            .or_default()
+            .push(role_name);
     }
 
-    // Sort accounts by name for stable output
+    let mut discovered: Vec<vouch_common::IdcAccountWithRoles> = account_map
+        .into_iter()
+        .map(|(account_id, roles)| vouch_common::IdcAccountWithRoles {
+            account_name: account_id.clone(),
+            account_id,
+            roles,
+        })
+        .collect();
+
     discovered.sort_by(|a, b| a.account_name.cmp(&b.account_name));
 
     Ok(vouch_common::IdcDiscoveryResponse {
         accounts: discovered,
         region: token_result.region,
-        errors,
+        errors: Vec::new(),
     })
 }
 
-/// List all accounts available via an existing SSO client and token.
-async fn list_accounts_with_client(
-    client: &aws_sdk_sso::Client,
-    access_token: &SecretString,
-) -> Result<Vec<aws_sdk_sso::types::AccountInfo>, AwsIdcError> {
-    let mut accounts = Vec::new();
+/// Resolve the identity store ID for an SSO instance.
+async fn resolve_identity_store_id(
+    ssoadmin_client: &aws_sdk_ssoadmin::Client,
+    instance_arn: &str,
+) -> Result<String, AwsIdcError> {
     let mut next_token: Option<String> = None;
 
     loop {
-        let mut req = client
-            .list_accounts()
-            .access_token(access_token.expose_secret());
+        let mut req = ssoadmin_client.list_instances();
         if let Some(ref token) = next_token {
             req = req.next_token(token);
         }
@@ -471,59 +666,32 @@ async fn list_accounts_with_client(
         let output = req
             .send()
             .await
-            .map_err(|e| classify_list_accounts_error(&e))?;
+            .map_err(|e| AwsIdcError::InstanceResolution(format!("ListInstances failed: {e}")))?;
 
-        accounts.extend_from_slice(output.account_list());
+        for instance in output.instances() {
+            if instance.instance_arn() == Some(instance_arn) {
+                return instance
+                    .identity_store_id()
+                    .ok_or_else(|| {
+                        AwsIdcError::InstanceResolution(
+                            "Instance has no identity_store_id".to_string(),
+                        )
+                    })
+                    .map(|s| s.to_string());
+            }
+        }
 
         match output.next_token() {
-            Some(t) if !t.is_empty() => next_token = Some(t.to_string()),
+            Some(t) if !t.is_empty() => {
+                next_token = Some(t.to_string());
+            }
             _ => break,
         }
     }
 
-    Ok(accounts)
-}
-
-/// List role names for a single account via an existing SSO client.
-async fn list_account_roles_with_client(
-    client: &aws_sdk_sso::Client,
-    access_token: &SecretString,
-    account_id: &str,
-) -> Result<Vec<String>, AwsIdcError> {
-    let mut roles = Vec::new();
-    let mut next_token: Option<String> = None;
-
-    loop {
-        let mut req = client
-            .list_account_roles()
-            .account_id(account_id)
-            .access_token(access_token.expose_secret());
-        if let Some(ref token) = next_token {
-            req = req.next_token(token);
-        }
-
-        let output = req
-            .send()
-            .await
-            .map_err(|e| AwsIdcError::ListAccountRoles(format!("{e}")))?;
-
-        for role in output.role_list() {
-            let Some(name) = role.role_name() else {
-                tracing::warn!(
-                    "ListAccountRoles returned entry with no role_name for account {account_id}, skipping"
-                );
-                continue;
-            };
-            roles.push(name.to_string());
-        }
-
-        match output.next_token() {
-            Some(t) if !t.is_empty() => next_token = Some(t.to_string()),
-            _ => break,
-        }
-    }
-
-    Ok(roles)
+    Err(AwsIdcError::InstanceResolution(format!(
+        "No Identity Center instance found matching ARN: {instance_arn}"
+    )))
 }
 
 /// Build a sanitized STS session name from a user email.
@@ -610,5 +778,38 @@ mod tests {
             let twice = sanitize_session_name(&once);
             assert_eq!(once, twice, "not idempotent for input: {input}");
         }
+    }
+
+    #[test]
+    fn test_extract_instance_id() {
+        let arn =
+            Arn::parse("arn:aws:sso::123456789012:application/ssoins-abc123/apl-xyz789").unwrap();
+        assert_eq!(extract_instance_id(&arn).unwrap(), "ssoins-abc123");
+    }
+
+    #[test]
+    fn test_extract_instance_id_invalid() {
+        let arn = Arn::parse("arn:aws:iam::123456789012:role/MyRole").unwrap();
+        assert!(extract_instance_id(&arn).is_err());
+    }
+
+    #[test]
+    fn test_build_instance_arn() {
+        let arn =
+            Arn::parse("arn:aws:sso::123456789012:application/ssoins-abc123/apl-xyz789").unwrap();
+        assert_eq!(
+            build_instance_arn(&arn).unwrap(),
+            "arn:aws:sso:::instance/ssoins-abc123"
+        );
+    }
+
+    #[test]
+    fn test_build_instance_arn_govcloud() {
+        let arn =
+            Arn::parse("arn:aws-us-gov:sso::123456789012:application/ssoins-abc/apl-xyz").unwrap();
+        assert_eq!(
+            build_instance_arn(&arn).unwrap(),
+            "arn:aws-us-gov:sso:::instance/ssoins-abc"
+        );
     }
 }

@@ -61,8 +61,10 @@ aws-credential-types = { version = "=1.2.14", default-features = false }
 aws-lc-rs = { version = "=1.16.1", default-features = false }
 aws-sdk-dsql = { version = "=1.53.0", default-features = false }
 aws-sdk-kms = { version = "=1.103.0", default-features = false }
-aws-sdk-s3 = { version = "=1.125.0", default-features = false }
+aws-sdk-s3 = { version = "=1.126.0", default-features = false }
+aws-sdk-identitystore = { version = "=1.98.0", default-features = false }
 aws-sdk-sso = { version = "=1.96.0", default-features = false }
+aws-sdk-ssoadmin = { version = "=1.98.0", default-features = false }
 aws-sdk-ssooidc = { version = "=1.98.0", default-features = false }
 aws-sdk-sts = { version = "=1.100.0", default-features = false }
 aws-smithy-types = { version = "=1.4.6", default-features = false }
@@ -72,8 +74,8 @@ axum-server = { version = "=0.8.0", default-features = false }
 base64 = { version = "=0.22.1", default-features = false }
 cel = { version = "=0.13.0", default-features = false }
 ciborium = { version = "=0.2.2", default-features = false }
-clap = { version = "=4.5.61", default-features = false }
-clap_complete = { version = "=4.5.67", default-features = false }
+clap = { version = "=4.6.0", default-features = false }
+clap_complete = { version = "=4.6.0", default-features = false }
 ctap-hid-fido2 = { version = "=3.5.8", default-features = false }
 dirs = { version = "=6.0.0", default-features = false }
 dotenvy = { version = "=0.15.7", default-features = false }

@@ -593,20 +593,40 @@ fn map_idc_error(e: crate::services::integrations::aws_idc::AwsIdcError) -> Serv
                  to your user in Identity Center.",
             )
         }
-        AwsIdcError::ListAccounts(ref msg) => {
-            tracing::error!("IdC ListAccounts error: {msg}");
+        AwsIdcError::InstanceResolution(ref msg) => {
+            tracing::error!("IdC instance resolution error: {msg}");
             ServiceError::api(
                 StatusCode::BAD_GATEWAY,
-                "idc_list_accounts_error",
-                "Failed to list accounts from Identity Center",
+                "idc_instance_error",
+                "Failed to resolve Identity Center instance. \
+                 Check the application ARN and bootstrap role permissions.",
             )
         }
-        AwsIdcError::ListAccountRoles(ref msg) => {
-            tracing::error!("IdC ListAccountRoles error: {msg}");
+        AwsIdcError::IdentityStoreLookup(ref msg) => {
+            tracing::error!("IdC Identity Store lookup error: {msg}");
             ServiceError::api(
                 StatusCode::BAD_GATEWAY,
-                "idc_list_roles_error",
-                "Failed to list account roles from Identity Center",
+                "idc_identity_store_error",
+                "Failed to look up user in Identity Store. \
+                 Check that the bootstrap role has identitystore:ListUsers permission.",
+            )
+        }
+        AwsIdcError::ListAssignments(ref msg) => {
+            tracing::error!("IdC ListAccountAssignments error: {msg}");
+            ServiceError::api(
+                StatusCode::BAD_GATEWAY,
+                "idc_list_assignments_error",
+                "Failed to list account assignments from Identity Center. \
+                 Check that the bootstrap role has \
+                 sso:ListAccountAssignmentsForPrincipal permission.",
+            )
+        }
+        AwsIdcError::DescribePermissionSet(ref msg) => {
+            tracing::error!("IdC DescribePermissionSet error: {msg}");
+            ServiceError::api(
+                StatusCode::BAD_GATEWAY,
+                "idc_permission_set_error",
+                "Failed to describe permission set from Identity Center.",
             )
         }
         AwsIdcError::Database(ref err) => {

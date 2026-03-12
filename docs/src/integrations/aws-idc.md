@@ -87,7 +87,7 @@ This role allows the Vouch server to call `CreateTokenWithIAM` on your Identity 
 2. Select **Web identity** as the trusted entity type
 3. Select the OIDC provider created in Step 1
 4. Set **Audience** to `https://your-vouch-server.example.com`
-5. Attach a policy with permission to call `CreateTokenWithIAM`:
+5. Attach a policy with the following permissions:
 
 ```json
 {
@@ -97,10 +97,26 @@ This role allows the Vouch server to call `CreateTokenWithIAM` on your Identity 
       "Effect": "Allow",
       "Action": "sso-oauth:CreateTokenWithIAM",
       "Resource": "<application-arn-from-step-3>"
+    },
+    {
+      "Effect": "Allow",
+      "Action": [
+        "sso:ListInstances",
+        "sso:ListAccountAssignmentsForPrincipal",
+        "sso:DescribePermissionSet"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Effect": "Allow",
+      "Action": "identitystore:GetUserId",
+      "Resource": "*"
     }
   ]
 }
 ```
+
+The `sso:List*` and `sso:Describe*` permissions allow Vouch to discover which AWS accounts and permission sets are available to each user. The `identitystore:GetUserId` permission resolves user emails to Identity Store principal IDs.
 
 6. Name the role (e.g., `vouch-idc-bootstrap`) and create it
 7. Note the **Role ARN**
