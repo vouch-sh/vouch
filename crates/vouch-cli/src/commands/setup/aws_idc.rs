@@ -513,10 +513,7 @@ async fn fetch_discovery(
     let discovery: vouch_common::IdcDiscoveryResponse = client
         .get_authenticated("/v1/credentials/aws-idc/discover")
         .await
-        .context(
-            "failed to discover IdC accounts from Vouch server.\n\
-             Ensure AWS Identity Center is configured by your org admin.",
-        )?;
+        .context("failed to discover Identity Center accounts")?;
 
     save_discovery_cache(server, &discovery);
     Ok(discovery)

@@ -48,6 +48,26 @@ pub enum AwsIdcError {
     #[error("CreateTokenWithIAM failed: {0}")]
     CreateToken(String),
 
+    /// User not found or not assigned in Identity Center.
+    ///
+    /// Returned when `CreateTokenWithIAM` gets `InvalidGrantException`,
+    /// which typically means the user's email doesn't match any Identity
+    /// Center user or the user isn't assigned to the application.
+    #[error(
+        "User not found in Identity Center. Ensure the user is created \
+         in Identity Center and assigned to the Vouch application."
+    )]
+    UserNotInIdentityCenter,
+
+    /// The Identity Center application ARN is invalid or not configured
+    /// as a trusted token issuer application.
+    #[error("Invalid Identity Center application: {0}")]
+    InvalidClient(String),
+
+    /// Access denied by Identity Center.
+    #[error("Access denied by Identity Center: {0}")]
+    AccessDenied(String),
+
     /// SSO `ListAccounts` failed.
     #[error("ListAccounts failed: {0}")]
     ListAccounts(String),
@@ -256,7 +276,7 @@ async fn create_idc_sso_token(
         .assertion(id_token)
         .send()
         .await
-        .map_err(|e| AwsIdcError::CreateToken(format!("{e}")))?;
+        .map_err(|e| classify_create_token_error(&e))?;
 
     let sso_access_token = token_response
         .access_token()
@@ -281,6 +301,35 @@ async fn create_idc_sso_token(
         sso_expires_in,
         identity_context,
     ))
+}
+
+/// Classify a `CreateTokenWithIAM` SDK error into a specific `AwsIdcError`.
+///
+/// Maps well-known error codes to actionable variants:
+/// - `InvalidGrantException` → user not found/assigned in Identity Center
+/// - `InvalidClientException` → bad application ARN or trust config
+/// - `AccessDeniedException` → IAM permissions issue
+/// - Everything else → generic `CreateToken` with debug details
+fn classify_create_token_error(
+    err: &aws_sdk_ssooidc::error::SdkError<
+        aws_sdk_ssooidc::operation::create_token_with_iam::CreateTokenWithIAMError,
+    >,
+) -> AwsIdcError {
+    let Some(service_err) = err.as_service_error() else {
+        return AwsIdcError::CreateToken(format!("{err:#}"));
+    };
+
+    use aws_sdk_ssooidc::operation::create_token_with_iam::CreateTokenWithIAMError;
+    match service_err {
+        CreateTokenWithIAMError::InvalidGrantException(_) => AwsIdcError::UserNotInIdentityCenter,
+        CreateTokenWithIAMError::InvalidClientException(e) => {
+            AwsIdcError::InvalidClient(e.to_string())
+        }
+        CreateTokenWithIAMError::AccessDeniedException(e) => {
+            AwsIdcError::AccessDenied(e.to_string())
+        }
+        other => AwsIdcError::CreateToken(format!("{other:?}")),
+    }
 }
 
 /// Discover all accounts and roles available via Identity Center.

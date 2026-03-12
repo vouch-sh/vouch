@@ -90,8 +90,5 @@ async fn fetch_sso_token(server: &str) -> Result<vouch_common::IdcTokenResponse>
     client
         .post_authenticated("/v1/credentials/aws-idc/sso-token", &())
         .await
-        .context(
-            "failed to get SSO token from Vouch server.\n\
-             Ensure AWS Identity Center is configured by your org admin.",
-        )
+        .context("failed to get SSO token from Identity Center")
 }

@@ -546,6 +546,35 @@ fn map_idc_error(e: crate::services::integrations::aws_idc::AwsIdcError) -> Serv
                 "Failed to bootstrap IAM credentials",
             )
         }
+        AwsIdcError::UserNotInIdentityCenter => {
+            tracing::warn!("IdC user not found in Identity Center");
+            ServiceError::api(
+                StatusCode::FORBIDDEN,
+                "idc_user_not_found",
+                "Your account was not found in Identity Center. \
+                 Ask your administrator to create your user in Identity Center \
+                 and assign it to the Vouch application.",
+            )
+        }
+        AwsIdcError::InvalidClient(ref msg) => {
+            tracing::error!("IdC invalid client: {msg}");
+            ServiceError::api(
+                StatusCode::BAD_GATEWAY,
+                "idc_invalid_client",
+                "The Identity Center application is misconfigured. \
+                 Check the application ARN and trusted token issuer settings.",
+            )
+        }
+        AwsIdcError::AccessDenied(ref msg) => {
+            tracing::error!("IdC access denied: {msg}");
+            ServiceError::api(
+                StatusCode::BAD_GATEWAY,
+                "idc_access_denied",
+                "Access denied by Identity Center. \
+                 Check that the bootstrap role has permission to call \
+                 CreateTokenWithIAM on the application.",
+            )
+        }
         AwsIdcError::CreateToken(ref msg) => {
             tracing::error!("IdC CreateTokenWithIAM error: {msg}");
             ServiceError::api(
