@@ -3,7 +3,7 @@
 //! token exchange, cloud integrations).
 
 use super::document_type::{Document, DocumentType};
-use super::documents::credential::{CloudIntegrationDoc, EnrollmentSessionDoc, SshRevokedCertDoc};
+use super::documents::credential::{EnrollmentSessionDoc, SshRevokedCertDoc};
 use super::documents::oauth::{DelegationPolicyDoc, TokenExchangeDoc};
 use super::store::DocumentStore;
 use anyhow::Result;
@@ -373,97 +373,4 @@ pub async fn revoke_all_ssh_certificates_for_user(
 /// Delete expired SSH certificate revocations.
 pub async fn delete_expired_ssh_revocations(store: &DocumentStore) -> Result<u64> {
     store.delete_expired(SshRevokedCertDoc::DOC_TYPE).await
-}
-
-// ============================================================
-// Cloud Provider Integrations (AWS)
-// ============================================================
-
-/// Cloud provider integration configuration record.
-#[derive(Debug)]
-pub struct CloudIntegration {
-    pub id: String,
-    pub org_id: String,
-    pub provider: String,
-    pub config: serde_json::Value,
-    pub created_at: Timestamp,
-    pub updated_at: Timestamp,
-    pub created_by_user_id: Option<String>,
-}
-
-impl From<Document<CloudIntegrationDoc>> for CloudIntegration {
-    fn from(doc: Document<CloudIntegrationDoc>) -> Self {
-        Self {
-            id: doc.id,
-            org_id: doc.data.org_id,
-            provider: doc.data.provider,
-            config: doc.data.config,
-            created_at: doc.created_at,
-            updated_at: doc.updated_at,
-            created_by_user_id: doc.data.created_by_user_id,
-        }
-    }
-}
-
-/// Get cloud integration config for an organization and provider.
-pub async fn get_cloud_integration(
-    store: &DocumentStore,
-    org_id: &str,
-    provider: &str,
-) -> Result<Option<CloudIntegration>> {
-    let docs = store
-        .find_by_indexes::<CloudIntegrationDoc>(&[("org_id", org_id), ("provider", provider)])
-        .await?;
-    Ok(docs.into_iter().next().map(CloudIntegration::from))
-}
-
-/// Create or update cloud integration config.
-pub async fn upsert_cloud_integration(
-    store: &DocumentStore,
-    org_id: &str,
-    provider: &str,
-    config: &serde_json::Value,
-    user_id: &str,
-) -> Result<CloudIntegration> {
-    // Check if one already exists
-    let existing = store
-        .find_by_indexes::<CloudIntegrationDoc>(&[("org_id", org_id), ("provider", provider)])
-        .await?;
-
-    if let Some(doc) = existing.into_iter().next() {
-        // Update existing
-        let mut data = doc.data;
-        data.config = config.clone();
-        store.update(&doc.id, &data).await?;
-        let updated = store.get::<CloudIntegrationDoc>(&doc.id).await?;
-        return updated
-            .map(CloudIntegration::from)
-            .ok_or_else(|| anyhow::anyhow!("Failed to retrieve updated integration"));
-    }
-
-    // Create new
-    let doc = CloudIntegrationDoc {
-        org_id: org_id.to_string(),
-        provider: provider.to_string(),
-        config: config.clone(),
-        created_by_user_id: Some(user_id.to_string()),
-    };
-    let result = store.insert(&doc).await?;
-    Ok(CloudIntegration::from(result))
-}
-
-/// Delete cloud integration config for an organization.
-pub async fn delete_cloud_integration(
-    store: &DocumentStore,
-    org_id: &str,
-    provider: &str,
-) -> Result<bool> {
-    let docs = store
-        .find_by_indexes::<CloudIntegrationDoc>(&[("org_id", org_id), ("provider", provider)])
-        .await?;
-    if let Some(doc) = docs.into_iter().next() {
-        store.delete(&doc.id).await?;
-        return Ok(true);
-    }
-    Ok(false)
 }

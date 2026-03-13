@@ -1,37 +1,10 @@
 // SPDX-License-Identifier: BUSL-1.1
-//! Credential-related document types (cloud integrations, enrollment,
-//! SSH revocation).
+//! Credential-related document types (enrollment, SSH revocation).
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
 
 use crate::db::document_type::{DocumentType, IndexEntry};
-
-/// A cloud provider integration (e.g., AWS).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CloudIntegrationDoc {
-    pub org_id: String,
-    pub provider: String,
-    pub config: serde_json::Value,
-    pub created_by_user_id: Option<String>,
-}
-
-impl DocumentType for CloudIntegrationDoc {
-    const DOC_TYPE: &'static str = "cloud_integration";
-
-    fn index_entries(&self) -> Vec<IndexEntry> {
-        vec![
-            IndexEntry {
-                field: "org_id",
-                value: self.org_id.clone(),
-            },
-            IndexEntry {
-                field: "provider",
-                value: self.provider.clone(),
-            },
-        ]
-    }
-}
 
 /// An enrollment session for first-time user setup.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -21,7 +21,6 @@
 //! - Vouch is the server, responding to external clients
 
 pub mod aws;
-pub mod aws_idc;
 pub mod github;
 
 pub use aws::{AwsError, AwsResult, AwsTokenResult, issue_aws_token};

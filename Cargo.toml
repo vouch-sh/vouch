@@ -57,16 +57,10 @@ anyhow = { version = "=1.0.102", default-features = false }
 arc-swap = { version = "=1.8.2", default-features = false }
 askama = { version = "=0.15.4", default-features = false }
 aws-config = { version = "=1.8.15", default-features = false }
-aws-credential-types = { version = "=1.2.14", default-features = false }
 aws-lc-rs = { version = "=1.16.1", default-features = false }
 aws-sdk-dsql = { version = "=1.53.0", default-features = false }
 aws-sdk-kms = { version = "=1.103.0", default-features = false }
 aws-sdk-s3 = { version = "=1.126.0", default-features = false }
-aws-sdk-identitystore = { version = "=1.98.0", default-features = false }
-aws-sdk-sso = { version = "=1.96.0", default-features = false }
-aws-sdk-ssoadmin = { version = "=1.98.0", default-features = false }
-aws-sdk-ssooidc = { version = "=1.98.0", default-features = false }
-aws-sdk-sts = { version = "=1.100.0", default-features = false }
 aws-smithy-types = { version = "=1.4.6", default-features = false }
 axum = { version = "=0.8.8", default-features = false }
 axum-extra = { version = "=0.12.5", default-features = false }

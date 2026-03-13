@@ -25,12 +25,6 @@
 
 ---
 
-# Integrations
-
-- [AWS IAM Identity Center](integrations/aws-idc.md)
-
----
-
 # Operations
 
 - [Session Management](operations/sessions.md)

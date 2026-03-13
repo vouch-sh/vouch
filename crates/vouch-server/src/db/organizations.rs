@@ -60,25 +60,18 @@ pub async fn get_organization_domain(
 /// Delete an organization and all associated data.
 ///
 /// Performs application-level cascade deletes:
-/// 1. Delete cloud integrations
-/// 2. Delete GitHub installations
-/// 3. Delete SCIM tokens (with audit log SET NULL)
-/// 4. Unlink OAuth clients (SET NULL org_id, downgrade scope)
-/// 5. Unlink users (SET NULL org_id)
-/// 6. Delete the organization
+/// 1. Delete GitHub installations
+/// 2. Delete SCIM tokens (with audit log SET NULL)
+/// 3. Unlink OAuth clients (SET NULL org_id, downgrade scope)
+/// 4. Unlink users (SET NULL org_id)
+/// 5. Delete the organization
 pub async fn delete_organization(store: &DocumentStore, org_id: &str) -> Result<bool> {
-    use super::documents::credential::CloudIntegrationDoc;
     use super::documents::github::GitHubInstallationDoc;
     use super::documents::oauth::OAuthClientDoc;
     use super::documents::scim::ScimTokenDoc;
     use super::documents::user::UserDoc;
 
-    // 1. Delete cloud integrations
-    store
-        .delete_by_index::<CloudIntegrationDoc>("org_id", org_id)
-        .await?;
-
-    // 2. Delete GitHub installations
+    // 1. Delete GitHub installations
     store
         .delete_by_index::<GitHubInstallationDoc>("org_id", org_id)
         .await?;
