@@ -18,7 +18,13 @@
 //! - [RFC 9068 - JWT Profile for OAuth 2.0 Access Tokens](https://www.rfc-editor.org/rfc/rfc9068)
 //! - [RFC 9101 - JWT-Secured Authorization Request (JAR)](https://www.rfc-editor.org/rfc/rfc9101)
 //! - [RFC 9126 - Pushed Authorization Requests](https://www.rfc-editor.org/rfc/rfc9126)
+//! - [RFC 8176 - Authentication Method Reference Values](https://www.rfc-editor.org/rfc/rfc8176)
+//! - [RFC 8707 - Resource Indicators](https://www.rfc-editor.org/rfc/rfc8707)
+//! - [RFC 9396 - Rich Authorization Requests](https://www.rfc-editor.org/rfc/rfc9396)
 //! - [RFC 9449 - DPoP](https://www.rfc-editor.org/rfc/rfc9449)
+//! - [RFC 9700 - Security Best Current Practice](https://www.rfc-editor.org/rfc/rfc9700)
+//! - [RFC 7591 - Dynamic Client Registration](https://www.rfc-editor.org/rfc/rfc7591)
+//! - [RFC 7592 - Dynamic Client Registration Management](https://www.rfc-editor.org/rfc/rfc7592)
 //! - [FAPI 2.0 Security Profile](https://openid.net/specs/fapi-security-profile-2_0-final.html)
 //!
 //! ## Module Organization
@@ -32,7 +38,15 @@
 //! - [`exchange`] - Token exchange (RFC 8693)
 //! - [`jwt_bearer`] - JWT client authentication and bearer grants (RFC 7523)
 //! - [`jar`] - JWT-Secured Authorization Request validation (RFC 9101)
+//! - [`amr`] - Authentication method references (RFC 8176)
+//! - [`authorization_details`] - Rich authorization requests (RFC 9396)
+//! - [`claims`] - OIDC token claims for cloud identity federation
+//! - [`dpop`] - DPoP proof validation (RFC 9449)
+//! - [`fido2_grant`] - FIDO2 assertion grant (RFC 6749 Section 4.5)
 //! - [`introspection`] - Token introspection and revocation
+//! - [`registration`] - Dynamic client registration (RFC 7591/7592)
+//! - [`resource`] - Resource indicators (RFC 8707)
+//! - [`scope`] - OAuth 2.0 scope types (RFC 6749 Section 3.3)
 
 pub mod amr;
 pub mod authorization;

@@ -272,7 +272,7 @@ pub fn extract_aaguid_from_auth_data(auth_data: &[u8]) -> Option<String> {
         return None;
     }
 
-    // Check AT flag (bit 6) to see if attested credential data is present
+    // Check AT flag (bit 6) — WebAuthn §6.1, Table 1
     let flags = auth_data.get(32)?;
     if flags & 0x40 == 0 {
         // AT flag not set, no attested credential data
@@ -307,7 +307,7 @@ pub fn extract_public_key_from_auth_data(auth_data: &[u8]) -> Option<Vec<u8>> {
         return None;
     }
 
-    // Check AT flag (bit 6) to see if attested credential data is present
+    // Check AT flag (bit 6) — WebAuthn §6.1, Table 1
     let flags = auth_data.get(32)?;
     if flags & 0x40 == 0 {
         // AT flag not set, no attested credential data
