@@ -73,14 +73,14 @@ impl HttpResponse {
     }
 }
 
-/// Extract common response headers from an `http::HeaderMap`.
+/// Extract common response headers from a `HeaderMap`.
 ///
 /// Returns `(www_authenticate, dpop_nonce, retry_after)` extracted from
 /// the headers based on the HTTP status code. Shared by both the
 /// production `ReqwestClient` and the test `TestHttpClient`.
 fn extract_response_headers(
     status: u16,
-    headers: &http::HeaderMap,
+    headers: &reqwest::header::HeaderMap,
 ) -> (Option<String>, Option<String>, Option<u64>) {
     let www_authenticate = if status == 401 {
         headers
