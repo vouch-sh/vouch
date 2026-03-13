@@ -78,8 +78,20 @@ pub async fn insert_auth_event(
     params: &AuthEventParams,
     email: Option<&str>,
 ) -> Result<String> {
-    let data_json = serde_json::to_string(params)
+    let mut value = serde_json::to_value(params)
         .map_err(|e| anyhow::anyhow!("Failed to serialize auth event: {e}"))?;
+    if let (Some(obj), Some(geo)) =
+        (value.as_object_mut(), params.client_ip.and_then(crate::geo::lookup))
+    {
+        obj.insert("country_code".to_string(), serde_json::Value::String(geo.country_code));
+        if let Some(asn) = geo.asn {
+            obj.insert("asn".to_string(), serde_json::json!(asn));
+        }
+        if let Some(org) = geo.org_name {
+            obj.insert("org_name".to_string(), serde_json::Value::String(org));
+        }
+    }
+    let data_json = value.to_string();
     audit
         .insert_event(
             params.event_type.as_str(),

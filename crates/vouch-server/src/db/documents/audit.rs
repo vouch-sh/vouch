@@ -14,7 +14,8 @@ use serde::{Deserialize, Serialize};
 pub struct OAuthUsageData {
     pub oauth_client_id: String,
     pub details: Option<String>,
-    pub ip_address: Option<String>,
+    #[serde(alias = "ip_address")]
+    pub client_ip: Option<String>,
     pub user_agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub country_code: Option<String>,
@@ -42,7 +43,8 @@ pub struct IdcCredentialAuditData {
     pub authenticator_id: Option<String>,
     pub success: bool,
     pub error_code: Option<String>,
-    pub ip_address: Option<String>,
+    #[serde(alias = "ip_address")]
+    pub client_ip: Option<String>,
     pub user_agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub country_code: Option<String>,
@@ -65,7 +67,8 @@ pub struct GitHubCredentialAuditData {
     pub token_expires_at: Option<String>,
     pub success: bool,
     pub error_code: Option<String>,
-    pub ip_address: Option<String>,
+    #[serde(alias = "ip_address")]
+    pub client_ip: Option<String>,
     pub user_agent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub country_code: Option<String>,
@@ -85,7 +88,7 @@ mod tests {
         let json = r#"{
             "oauth_client_id": "c1",
             "details": null,
-            "ip_address": "1.2.3.4",
+            "client_ip": "1.2.3.4",
             "user_agent": null,
             "country_code": "US"
         }"#;
@@ -100,7 +103,7 @@ mod tests {
         let data = OAuthUsageData {
             oauth_client_id: "c1".to_string(),
             details: None,
-            ip_address: Some("8.8.8.8".to_string()),
+            client_ip: Some("8.8.8.8".to_string()),
             user_agent: None,
             country_code: Some("US".to_string()),
             asn: Some(15169),
@@ -117,7 +120,7 @@ mod tests {
         let data = OAuthUsageData {
             oauth_client_id: "c1".to_string(),
             details: None,
-            ip_address: None,
+            client_ip: None,
             user_agent: None,
             country_code: None,
             asn: None,

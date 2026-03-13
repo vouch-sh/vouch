@@ -749,7 +749,7 @@ async fn log_idc_credential_event(
     mut data: IdcCredentialAuditData,
     ip: Option<std::net::IpAddr>,
 ) -> anyhow::Result<String> {
-    data.ip_address = ip.map(|a| a.to_string());
+    data.client_ip = ip.map(|a| a.to_string());
     let geo = ip.and_then(crate::geo::lookup);
     data.country_code = geo.as_ref().map(|g| g.country_code.clone());
     data.asn = geo.as_ref().and_then(|g| g.asn);

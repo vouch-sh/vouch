@@ -445,7 +445,7 @@ pub async fn record_oauth_event(
     let data = OAuthUsageData {
         oauth_client_id: oauth_client_id.to_string(),
         details: details.map(String::from),
-        ip_address: ip_address.map(|ip| ip.to_string()),
+        client_ip: ip_address.map(|ip| ip.to_string()),
         user_agent: user_agent.map(String::from),
         country_code: geo.as_ref().map(|g| g.country_code.clone()),
         asn: geo.as_ref().and_then(|g| g.asn),

@@ -955,7 +955,8 @@ pub async fn admin_audit_page(
 #[derive(Default, Deserialize)]
 struct GeoFields {
     country_code: Option<String>,
-    ip_address: Option<String>,
+    #[serde(alias = "ip_address")]
+    client_ip: Option<String>,
     asn: Option<u32>,
     org_name: Option<String>,
 }
@@ -981,7 +982,7 @@ impl GeoFields {
             .as_deref()
             .and_then(crate::geo::country_flag)
             .unwrap_or_default();
-        let ip = self.ip_address.as_deref().unwrap_or("-");
+        let ip = self.client_ip.as_deref().unwrap_or("-");
 
         if flag.is_empty() {
             ip.to_string()
@@ -2487,20 +2488,20 @@ mod tests {
     #[test]
     fn test_geo_fields_from_json_full_record() {
         let json =
-            r#"{"country_code":"US","ip_address":"8.8.8.8","asn":15169,"org_name":"GOOGLE"}"#;
+            r#"{"country_code":"US","client_ip":"8.8.8.8","asn":15169,"org_name":"GOOGLE"}"#;
         let geo = super::GeoFields::from_json(json);
         assert_eq!(geo.country_code.as_deref(), Some("US"));
-        assert_eq!(geo.ip_address.as_deref(), Some("8.8.8.8"));
+        assert_eq!(geo.client_ip.as_deref(), Some("8.8.8.8"));
         assert_eq!(geo.asn, Some(15169));
         assert_eq!(geo.org_name.as_deref(), Some("GOOGLE"));
     }
 
     #[test]
     fn test_geo_fields_from_json_backwards_compat_no_asn_fields() {
-        let json = r#"{"country_code":"DE","ip_address":"1.2.3.4"}"#;
+        let json = r#"{"country_code":"DE","client_ip":"1.2.3.4"}"#;
         let geo = super::GeoFields::from_json(json);
         assert_eq!(geo.country_code.as_deref(), Some("DE"));
-        assert_eq!(geo.ip_address.as_deref(), Some("1.2.3.4"));
+        assert_eq!(geo.client_ip.as_deref(), Some("1.2.3.4"));
         assert!(geo.asn.is_none());
         assert!(geo.org_name.is_none());
     }
@@ -2509,7 +2510,7 @@ mod tests {
     fn test_geo_fields_from_json_invalid_json_returns_default() {
         let geo = super::GeoFields::from_json("not json");
         assert!(geo.country_code.is_none());
-        assert!(geo.ip_address.is_none());
+        assert!(geo.client_ip.is_none());
         assert!(geo.asn.is_none());
         assert!(geo.org_name.is_none());
     }
@@ -2518,7 +2519,7 @@ mod tests {
     fn test_geo_fields_from_json_empty_object() {
         let geo = super::GeoFields::from_json("{}");
         assert!(geo.country_code.is_none());
-        assert!(geo.ip_address.is_none());
+        assert!(geo.client_ip.is_none());
         assert!(geo.asn.is_none());
         assert!(geo.org_name.is_none());
     }
@@ -2552,7 +2553,7 @@ mod tests {
     fn test_ip_display_with_country_and_ip() {
         let geo = super::GeoFields {
             country_code: Some("US".to_string()),
-            ip_address: Some("8.8.8.8".to_string()),
+            client_ip: Some("8.8.8.8".to_string()),
             ..super::GeoFields::default()
         };
         let display = geo.ip_display();
@@ -2563,7 +2564,7 @@ mod tests {
     #[test]
     fn test_ip_display_no_country_code() {
         let geo = super::GeoFields {
-            ip_address: Some("8.8.8.8".to_string()),
+            client_ip: Some("8.8.8.8".to_string()),
             ..super::GeoFields::default()
         };
         assert_eq!(geo.ip_display(), "8.8.8.8");
