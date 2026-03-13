@@ -1,5 +1,9 @@
 # Vouch
 
+[![CI](https://github.com/vouch-sh/vouch/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/vouch-sh/vouch/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-Apache--2.0%20OR%20MIT-blue)](LICENSE-APACHE)
+[![Rust](https://img.shields.io/badge/rust-1.94%2B-orange)](https://www.rust-lang.org)
+
 **Prove you're here.**
 
 Hardware-backed authentication that issues short-lived credentials only after a human touches a YubiKey. One touch, one PIN, one 8-hour session — then SSH and AWS just work.
@@ -44,17 +48,17 @@ Vouch requires **physical presence** for every credential issuance:
 ┌────────────────────────────────────────────────────────────────────┐
 │                           Your Machine                             │
 │                                                                    │
-│  ┌──────────┐     ┌──────────┐     ┌──────────────────────────┐   │
-│  │ YubiKey  │────▶│  vouch   │────▶│ Short-lived credentials  │   │
-│  │ (touch)  │     │  login   │     │ managed by vouch agent   │   │
-│  └──────────┘     └──────────┘     └──────────────────────────┘   │
+│  ┌──────────┐     ┌──────────┐     ┌──────────────────────────┐    │
+│  │ YubiKey  │────▶│  vouch   │────▶│ Short-lived credentials  │    │
+│  │ (touch)  │     │  login   │     │ managed by vouch agent   │    │
+│  └──────────┘     └──────────┘     └──────────────────────────┘    │
 │                         │                      │                   │
 │                         ▼                      ▼                   │
-│                   ┌──────────┐          ┌──────────────┐          │
-│                   │  vouch   │          │ Native tools │          │
-│                   │  server  │          │ (ssh, aws)   │          │
-│                   │  (OIDC)  │          │              │          │
-│                   └──────────┘          └──────────────┘          │
+│                   ┌──────────┐          ┌──────────────┐           │
+│                   │  vouch   │          │ Native tools │           │
+│                   │  server  │          │ (ssh, aws)   │           │
+│                   │  (OIDC)  │          │              │           │
+│                   └──────────┘          └──────────────┘           │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -95,7 +99,7 @@ sudo apt install vouch
 # See https://packages.vouch.sh for repository setup
 sudo dnf install vouch
 
-# From source
+# From source (requires Rust 1.94+)
 cargo install --git https://github.com/vouch-sh/vouch vouch-cli
 ```
 
@@ -123,6 +127,18 @@ git clone https://github.com/your-org/private-repo.git
 
 # Check session status
 vouch status
+```
+
+### Shell Completions
+```bash
+# Bash
+vouch completions bash >> ~/.bashrc
+
+# Zsh
+vouch completions zsh > "${fpath[1]}/_vouch"
+
+# Fish
+vouch completions fish > ~/.config/fish/completions/vouch.fish
 ```
 
 ## Requirements

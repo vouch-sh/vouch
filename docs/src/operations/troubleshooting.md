@@ -41,4 +41,4 @@ RUST_LOG=vouch_server=debug
 
 - [GitHub Issues](https://github.com/vouch-sh/vouch/issues) — Bug reports
 - [GitHub Discussions](https://github.com/vouch-sh/vouch/discussions) — Questions
-- [Security Issues](../security/vulnerability-disclosure.md) — Security vulnerabilities
+- [Security Issues](https://vouch.sh/docs/) — Security vulnerabilities
