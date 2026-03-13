@@ -22,11 +22,12 @@ pub fn parse_role_arn(arn: &str) -> Result<Arn> {
     let parsed = Arn::parse(arn).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if !parsed.is_iam_role() {
-        anyhow::bail!(
+        return Err(crate::exit_code::CliError::ConfigError(format!(
             "Invalid role ARN format: {arn}\n\
              Expected: arn:<partition>:iam::<account-id>:role/<role-name>\n\
              Example:  arn:aws:iam::123456789012:role/MyRole"
-        );
+        ))
+        .into());
     }
 
     Ok(parsed)
@@ -104,7 +105,10 @@ pub async fn assume_role_with_web_identity(
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("AWS STS returned error {status}: {body}");
+        return Err(crate::exit_code::CliError::NetworkError(format!(
+            "AWS STS returned error {status}: {body}"
+        ))
+        .into());
     }
 
     let body = response

@@ -105,7 +105,8 @@ pub(super) fn sign_data(private_key: &PrivateKey, data: &[u8]) -> Result<Vec<u8>
             let signing_key_bytes = Zeroizing::new(keypair.private.to_bytes());
             let public_key_bytes = keypair.public.0;
 
-            // Combine private + public for ed25519-dalek format (64 bytes)
+            // ed25519-dalek's SigningKey::from_keypair_bytes() expects
+            // the NaCl format: seed (32 bytes) || public_key (32 bytes)
             let mut full_key = Zeroizing::new([0u8; 64]);
             full_key
                 .get_mut(..32)

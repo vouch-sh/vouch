@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! SSH Agent Protocol implementation.
 //!
-//! This module implements the SSH agent protocol (draft-miller-ssh-agent)
+//! This module implements the SSH agent protocol
+//! ([draft-miller-ssh-agent](https://datatracker.ietf.org/doc/html/draft-miller-ssh-agent))
 //! to provide seamless SSH authentication using Vouch-issued certificates.
 //!
 //! The agent listens on `~/.vouch/ssh-agent.sock` and handles:
@@ -23,7 +24,8 @@ pub use credentials::{CertificateMetadata, SshCredentials};
 pub use server::SshAgentServer;
 pub use state::SshAgentState;
 
-// SSH Agent Protocol Constants (draft-miller-ssh-agent)
+// SSH Agent Protocol Constants
+// https://datatracker.ietf.org/doc/html/draft-miller-ssh-agent
 pub(crate) const SSH_AGENT_FAILURE: u8 = 5;
 pub(crate) const SSH_AGENTC_REQUEST_IDENTITIES: u8 = 11;
 pub(crate) const SSH_AGENT_IDENTITIES_ANSWER: u8 = 12;

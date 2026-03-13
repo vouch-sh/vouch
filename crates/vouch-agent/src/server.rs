@@ -4,7 +4,7 @@
 use crate::audit::{self, AuditEvent};
 use crate::error::Result;
 use crate::protocol::{
-    CacheCredentialParams, GetCachedCredentialParams, Method, Request, Response,
+    CacheCredentialParams, GetCachedCredentialParams, JSONRPC_VERSION, Method, Request, Response,
     StoreSessionParams, StoreSshCredentialsParams,
 };
 use crate::socket::{
@@ -185,7 +185,7 @@ async fn handle_connection(
             };
 
         let request = Request {
-            jsonrpc: "2.0".to_string(),
+            jsonrpc: JSONRPC_VERSION.to_string(),
             id: raw.id,
             method,
             params: raw.params,
@@ -197,6 +197,18 @@ async fn handle_connection(
         let response = handle_request(&request, &state, &ssh_state).await;
         send_response(&mut stream, &response).await?;
     }
+}
+
+/// Convert a `Response::success()` result to a `Response`, falling back to
+/// an internal error if serialization fails.
+fn success_or_internal_error(
+    id: u64,
+    result: std::result::Result<Response, serde_json::Error>,
+) -> Response {
+    result.unwrap_or_else(|e| {
+        error!("Failed to serialize response: {e}");
+        Response::error(id, crate::protocol::INTERNAL_ERROR, "serialization failed")
+    })
 }
 
 /// Handle a JSON-RPC request.
@@ -230,7 +242,7 @@ fn extract_params<T: DeserializeOwned>(request: &Request) -> Option<T> {
 
 /// Handle ping request (health check).
 fn handle_ping(request: &Request) -> Response {
-    Response::success(request.id, "pong")
+    success_or_internal_error(request.id, Response::success(request.id, "pong"))
 }
 
 /// Handle `get_session` request.
@@ -244,7 +256,7 @@ async fn handle_get_session(
         Some(session) => {
             let mut info = SessionInfo::from(&session);
             info.server_url = ssh_state.get_server_url().await;
-            Response::success(request.id, info)
+            success_or_internal_error(request.id, Response::success(request.id, info))
         }
         None => Response::not_authenticated(request.id),
     }
@@ -307,7 +319,7 @@ async fn handle_store_session(
     info!("Session stored");
     audit::log_event(AuditEvent::SessionStored { email: user_email });
 
-    Response::success(request.id, true)
+    success_or_internal_error(request.id, Response::success(request.id, true))
 }
 
 /// Handle `clear_session` request.
@@ -320,13 +332,16 @@ async fn handle_clear_session(
     ssh_state.clear_credentials().await;
     info!("Session and SSH credentials cleared");
     audit::log_event(AuditEvent::SessionCleared);
-    Response::success(request.id, true)
+    success_or_internal_error(request.id, Response::success(request.id, true))
 }
 
 /// Handle `get_token` request.
 async fn handle_get_token(request: &Request, state: &Arc<AgentState>) -> Response {
     match state.get_token().await {
-        Some(token) => Response::success(request.id, token.expose_secret()),
+        Some(token) => success_or_internal_error(
+            request.id,
+            Response::success(request.id, token.expose_secret()),
+        ),
         None => Response::not_authenticated(request.id),
     }
 }
@@ -362,7 +377,7 @@ async fn handle_store_ssh_credentials(
                 key_path: params.key_path,
                 cert_path: params.cert_path,
             });
-            Response::success(request.id, true)
+            success_or_internal_error(request.id, Response::success(request.id, true))
         }
         Err(e) => {
             warn!("Failed to load SSH credentials: {e}");
@@ -378,13 +393,13 @@ async fn handle_clear_ssh_credentials(
 ) -> Response {
     ssh_state.clear_credentials().await;
     info!("SSH credentials cleared");
-    Response::success(request.id, true)
+    success_or_internal_error(request.id, Response::success(request.id, true))
 }
 
 /// Handle `has_ssh_credentials` request.
 async fn handle_has_ssh_credentials(request: &Request, ssh_state: &Arc<SshAgentState>) -> Response {
     let has_creds = ssh_state.has_credentials().await;
-    Response::success(request.id, has_creds)
+    success_or_internal_error(request.id, Response::success(request.id, has_creds))
 }
 
 /// Handle `cache_credential` request.
@@ -408,7 +423,7 @@ async fn handle_cache_credential(request: &Request, state: &Arc<AgentState>) -> 
 
     info!("Cached credential: {credential_type}");
     audit::log_event(AuditEvent::CredentialCached { credential_type });
-    Response::success(request.id, true)
+    success_or_internal_error(request.id, Response::success(request.id, true))
 }
 
 /// Handle `get_cached_credential` request.
@@ -418,7 +433,9 @@ async fn handle_get_cached_credential(request: &Request, state: &Arc<AgentState>
     };
 
     match state.get_cached_credential(&params.credential_type).await {
-        Some(credential) => Response::success(request.id, credential),
+        Some(credential) => {
+            success_or_internal_error(request.id, Response::success(request.id, credential))
+        }
         None => Response::cache_miss(request.id),
     }
 }
@@ -428,7 +445,7 @@ async fn handle_clear_credential_cache(request: &Request, state: &Arc<AgentState
     state.clear_credential_cache().await;
     info!("Credential cache cleared");
     audit::log_event(AuditEvent::CredentialCacheCleared);
-    Response::success(request.id, true)
+    success_or_internal_error(request.id, Response::success(request.id, true))
 }
 
 /// Send a response over the stream.

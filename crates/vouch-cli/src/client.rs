@@ -627,11 +627,17 @@ mod tests {
 
     #[test]
     fn test_handle_response_401_step_up_challenge() {
-        let response = HttpResponse::with_www_authenticate(
-            401,
-            b"{}".to_vec(),
-            Some("Bearer error=\"insufficient_user_authentication\", max_age=\"300\"".to_string()),
-        );
+        let response = HttpResponse {
+            status: 401,
+            body: b"{}".to_vec(),
+            www_authenticate: Some(
+                "Bearer error=\"insufficient_user_authentication\", \
+                 max_age=\"300\""
+                    .to_string(),
+            ),
+            dpop_nonce: None,
+            retry_after: None,
+        };
         let result: Result<serde_json::Value> =
             VouchClient::<ReqwestClient>::handle_response(response);
         assert!(result.is_err());

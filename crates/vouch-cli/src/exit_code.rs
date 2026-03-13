@@ -40,8 +40,6 @@ pub const RATE_LIMITED: u8 = 8;
 /// use crate::exit_code::CliError;
 /// Err(CliError::NotAuthenticated { reason: "...".into() })?
 /// ```
-// Variants are adopted incrementally — some are only exercised via tests for now.
-#[allow(dead_code)]
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
     /// User is not authenticated — session missing or expired.
@@ -52,6 +50,7 @@ pub enum CliError {
     },
 
     /// Hardware security key not found or timed out.
+    #[allow(dead_code)]
     #[error("{0}")]
     HardwareNotFound(String),
 

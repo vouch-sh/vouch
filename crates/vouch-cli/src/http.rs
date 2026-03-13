@@ -48,22 +48,6 @@ impl HttpResponse {
         }
     }
 
-    /// Create a new HTTP response with a WWW-Authenticate header.
-    #[must_use]
-    pub fn with_www_authenticate(
-        status: u16,
-        body: Vec<u8>,
-        www_authenticate: Option<String>,
-    ) -> Self {
-        Self {
-            status,
-            body,
-            www_authenticate,
-            dpop_nonce: None,
-            retry_after: None,
-        }
-    }
-
     /// Check if the response indicates success (2xx status).
     #[must_use]
     pub fn is_success(&self) -> bool {
@@ -87,6 +71,41 @@ impl HttpResponse {
     pub fn text(&self) -> Result<String> {
         String::from_utf8(self.body.clone()).context("response body is not valid UTF-8")
     }
+}
+
+/// Extract common response headers from a `HeaderMap`.
+///
+/// Returns `(www_authenticate, dpop_nonce, retry_after)` extracted from
+/// the headers based on the HTTP status code. Shared by both the
+/// production `ReqwestClient` and the test `TestHttpClient`.
+fn extract_response_headers(
+    status: u16,
+    headers: &reqwest::header::HeaderMap,
+) -> (Option<String>, Option<String>, Option<u64>) {
+    let www_authenticate = if status == 401 {
+        headers
+            .get("www-authenticate")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from)
+    } else {
+        None
+    };
+
+    let dpop_nonce = headers
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
+    let retry_after = if status == 429 {
+        headers
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse().ok())
+    } else {
+        None
+    };
+
+    (www_authenticate, dpop_nonce, retry_after)
 }
 
 /// Trait for abstracting HTTP client operations.
@@ -208,35 +227,8 @@ impl HttpClient for ReqwestClient {
         let response = builder.send().await.context("HTTP request failed")?;
 
         let status = response.status().as_u16();
-
-        // Extract WWW-Authenticate header for RFC 9470 step-up detection
-        let www_authenticate = if status == 401 {
-            response
-                .headers()
-                .get("www-authenticate")
-                .and_then(|v| v.to_str().ok())
-                .map(String::from)
-        } else {
-            None
-        };
-
-        // Extract DPoP-Nonce header for RFC 9449 nonce binding
-        let dpop_nonce = response
-            .headers()
-            .get("dpop-nonce")
-            .and_then(|v| v.to_str().ok())
-            .map(String::from);
-
-        // Extract Retry-After header for 429 responses
-        let retry_after = if status == 429 {
-            response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse().ok())
-        } else {
-            None
-        };
+        let (www_authenticate, dpop_nonce, retry_after) =
+            extract_response_headers(status, response.headers());
 
         let body = response
             .bytes()
@@ -536,35 +528,9 @@ mod test_utils {
                 .await
                 .context("router error")?;
 
-            // Extract status and headers
             let status = response.status().as_u16();
-            let www_authenticate = if status == 401 {
-                response
-                    .headers()
-                    .get("www-authenticate")
-                    .and_then(|v| v.to_str().ok())
-                    .map(String::from)
-            } else {
-                None
-            };
-
-            // Extract DPoP-Nonce header
-            let dpop_nonce = response
-                .headers()
-                .get("dpop-nonce")
-                .and_then(|v| v.to_str().ok())
-                .map(String::from);
-
-            // Extract Retry-After header for 429 responses
-            let retry_after = if status == 429 {
-                response
-                    .headers()
-                    .get("retry-after")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.parse().ok())
-            } else {
-                None
-            };
+            let (www_authenticate, dpop_nonce, retry_after) =
+                extract_response_headers(status, response.headers());
 
             let body_bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
                 .await
@@ -644,8 +610,14 @@ mod tests {
     }
 
     #[test]
-    fn test_http_response_with_www_authenticate_dpop_nonce_none() {
-        let response = HttpResponse::with_www_authenticate(401, b"{}".to_vec(), None);
+    fn test_http_response_401_dpop_nonce_none() {
+        let response = HttpResponse {
+            status: 401,
+            body: b"{}".to_vec(),
+            www_authenticate: None,
+            dpop_nonce: None,
+            retry_after: None,
+        };
         assert!(response.dpop_nonce.is_none());
     }
 

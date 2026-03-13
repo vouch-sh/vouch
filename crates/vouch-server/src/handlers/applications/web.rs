@@ -117,24 +117,6 @@ pub async fn create_application_form(
         .into_response();
     }
 
-    // Get user's org_id for org-scoped apps
-    let user_org_id = if auth.has_org {
-        // Fetch user to get org_id
-        match db::get_user_by_id(&state.store, user_id).await {
-            Ok(Some(user)) => user.org_id,
-            _ => None,
-        }
-    } else {
-        None
-    };
-
-    // Set org_id only for organization-scoped apps
-    let org_id = if access_scope == AccessScope::Organization {
-        user_org_id.as_deref()
-    } else {
-        None
-    };
-
     let redirect_uris = parse_redirect_uris(&form.redirect_uris);
 
     // For non-service apps, at least one redirect URI is required
@@ -260,6 +242,22 @@ pub async fn create_application_form(
             }
         }
     }
+
+    // All input validated — now fetch org_id from DB (only needed for org-scoped apps)
+    let user_org_id = if auth.has_org {
+        match db::get_user_by_id(&state.store, user_id).await {
+            Ok(Some(user)) => user.org_id,
+            _ => None,
+        }
+    } else {
+        None
+    };
+
+    let org_id = if access_scope == AccessScope::Organization {
+        user_org_id.as_deref()
+    } else {
+        None
+    };
 
     // Create the application with FAPI settings included at creation time
     let (client, client_id) = match db::create_oauth_client(

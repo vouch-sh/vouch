@@ -1,8 +1,8 @@
 # Vouch Server Operator Guide
 
-This documentation covers deploying, configuring, and operating **Vouch Server** — the authentication server that issues short-lived credentials after FIDO2 verification with a YubiKey.
+This documentation covers deploying, configuring, and operating **Vouch Server** — the authentication server that issues short-lived credentials after FIDO2 verification with a YubiKey. It covers three deployment patterns: **cloud**, **on-premise**, and **air-gapped**.
 
-For CLI installation, enrollment, and integration guides (SSH, AWS, EKS, GitHub, Docker), visit [vouch.sh](https://vouch.sh).
+For CLI installation, enrollment, integration guides (SSH, AWS, EKS, GitHub, Docker), and OIDC provider documentation (endpoints, tokens, grant types), visit [vouch.sh/docs](https://vouch.sh/docs/).
 
 ## What Vouch Server Does
 

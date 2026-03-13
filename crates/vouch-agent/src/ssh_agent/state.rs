@@ -65,12 +65,6 @@ impl SshAgentState {
         }
     }
 
-    /// Store SSH credentials without session info (backwards compatibility).
-    pub async fn store_credentials_simple(&self, creds: SshCredentials) {
-        let mut guard = self.inner.write().await;
-        guard.credentials = Some(creds);
-    }
-
     /// Clear SSH credentials and session linkage.
     pub async fn clear_credentials(&self) {
         let mut guard = self.inner.write().await;

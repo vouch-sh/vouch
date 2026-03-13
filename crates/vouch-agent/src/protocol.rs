@@ -3,7 +3,9 @@
 
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};
-use tracing::warn;
+
+/// JSON-RPC protocol version.
+pub const JSONRPC_VERSION: &str = "2.0";
 
 /// Serialize a `SecretString` by exposing the secret value.
 ///
@@ -52,7 +54,7 @@ impl Request {
     /// Create a new request.
     pub fn new(id: u64, method: Method) -> Self {
         Self {
-            jsonrpc: "2.0".to_string(),
+            jsonrpc: JSONRPC_VERSION.to_string(),
             id,
             method,
             params: None,
@@ -60,20 +62,22 @@ impl Request {
     }
 
     /// Create a new request with parameters.
-    pub fn with_params<T: Serialize>(id: u64, method: Method, params: T) -> Self {
-        let params = match serde_json::to_value(params) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("Failed to serialize request params for '{method:?}': {e}");
-                serde_json::Value::Null
-            }
-        };
-        Self {
-            jsonrpc: "2.0".to_string(),
+    ///
+    /// # Errors
+    ///
+    /// Returns `serde_json::Error` if params cannot be serialized.
+    pub fn with_params<T: Serialize>(
+        id: u64,
+        method: Method,
+        params: T,
+    ) -> Result<Self, serde_json::Error> {
+        let params = serde_json::to_value(params)?;
+        Ok(Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
             id,
             method,
             params: Some(params),
-        }
+        })
     }
 }
 
@@ -94,26 +98,24 @@ pub struct Response {
 
 impl Response {
     /// Create a successful response.
-    pub fn success<T: Serialize>(id: u64, result: T) -> Self {
-        let result = match serde_json::to_value(result) {
-            Ok(v) => v,
-            Err(e) => {
-                warn!("Failed to serialize response result: {e}");
-                serde_json::Value::Null
-            }
-        };
-        Self {
-            jsonrpc: "2.0".to_string(),
+    ///
+    /// # Errors
+    ///
+    /// Returns `serde_json::Error` if the result cannot be serialized.
+    pub fn success<T: Serialize>(id: u64, result: T) -> Result<Self, serde_json::Error> {
+        let result = serde_json::to_value(result)?;
+        Ok(Self {
+            jsonrpc: JSONRPC_VERSION.to_string(),
             id,
             result: Some(result),
             error: None,
-        }
+        })
     }
 
     /// Create an error response.
     pub fn error(id: u64, code: i32, message: &str) -> Self {
         Self {
-            jsonrpc: "2.0".to_string(),
+            jsonrpc: JSONRPC_VERSION.to_string(),
             id,
             result: None,
             error: Some(RpcError {
@@ -266,7 +268,7 @@ mod tests {
             expires_at: "2099-12-31T23:59:59Z".to_string(),
             server_url: None,
         };
-        let req = Request::with_params(2, Method::StoreSession, &params);
+        let req = Request::with_params(2, Method::StoreSession, &params).unwrap();
 
         assert_eq!(req.jsonrpc, "2.0");
         assert_eq!(req.id, 2);
@@ -276,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_response_success() {
-        let resp = Response::success(1, "pong");
+        let resp = Response::success(1, "pong").unwrap();
 
         assert_eq!(resp.jsonrpc, "2.0");
         assert_eq!(resp.id, 1);

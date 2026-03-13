@@ -149,10 +149,10 @@ impl DocumentCrypto for HpkeDocumentCrypto {
         use rustls::crypto::hpke::Hpke;
 
         let Some(enc_bytes) = doc.encapped_key.as_ref() else {
-            tracing::warn!(
+            tracing::debug!(
                 doc_type = %String::from_utf8_lossy(info),
-                "document has no encapped_key; returning data as \
-                 unencrypted plaintext (pre-encryption row)"
+                doc_id = %String::from_utf8_lossy(aad),
+                "no encapped_key found; returning as unencrypted plaintext"
             );
             return Ok(doc.data.as_bytes().to_vec());
         };

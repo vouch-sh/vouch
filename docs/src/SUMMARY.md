@@ -2,8 +2,6 @@
 
 [Introduction](README.md)
 
----
-
 # Server Deployment
 
 - [Deployment Overview](deployment/overview.md)
@@ -16,14 +14,10 @@
   - [Kubernetes (Helm)](deployment/kubernetes.md)
 - [Health Checks and Monitoring](deployment/monitoring.md)
 
----
-
 # Identity Provider Setup
 
 - [Identity Provider Overview](idp/overview.md)
 - [Google Workspace](idp/google-workspace.md)
-
----
 
 # Operations
 
@@ -35,19 +29,6 @@
 - [Software Updates](operations/updates.md)
 - [Troubleshooting](operations/troubleshooting.md)
 - [Incident Response](operations/incident-response.md)
-- [Vulnerability Disclosure](operations/vulnerability-disclosure.md)
-
----
-
-# OIDC Provider
-
-- [OIDC Overview](oidc/overview.md)
-- [Endpoints and Discovery](oidc/endpoints.md)
-- [Grant Types](oidc/grant-types.md)
-- [Token Format and Claims](oidc/tokens.md)
-- [JWT Bearer (RFC 7523)](oidc/jwt-bearer.md)
-
----
 
 # Advanced Topics
 
@@ -56,8 +37,6 @@
   - [Key Ceremony](advanced/airgap-key-ceremony.md)
   - [YubiKey Provisioning](advanced/airgap-yubikey.md)
   - [Operations](advanced/airgap-operations.md)
-
----
 
 # Reference
 

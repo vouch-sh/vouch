@@ -224,28 +224,36 @@ impl CachedCredential {
     }
 }
 
+/// Inner state protected by a single lock to prevent race conditions.
+///
+/// All related fields (session + credential cache) are grouped so that
+/// operations like `clear_session()` can atomically clear both.
+#[derive(Debug, Default)]
+struct AgentStateInner {
+    /// Current session (if authenticated).
+    session: Option<Session>,
+    /// Credential cache keyed by type (e.g., "aws", "github").
+    credential_cache: HashMap<String, CachedCredential>,
+}
+
 /// Agent state (shared across connections).
 #[derive(Debug, Default)]
 pub struct AgentState {
-    /// Current session (if authenticated).
-    session: RwLock<Option<Session>>,
-    /// Credential cache keyed by type (e.g., "aws", "github").
-    credential_cache: RwLock<HashMap<String, CachedCredential>>,
+    inner: RwLock<AgentStateInner>,
 }
 
 impl AgentState {
     /// Create a new agent state.
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            session: RwLock::new(None),
-            credential_cache: RwLock::new(HashMap::new()),
+            inner: RwLock::new(AgentStateInner::default()),
         })
     }
 
     /// Get the current session (if valid).
     pub async fn get_session(&self) -> Option<Session> {
-        let guard = self.session.read().await;
-        match guard.as_ref() {
+        let guard = self.inner.read().await;
+        match guard.session.as_ref() {
             Some(session) if !session.is_expired() => Some(session.clone()),
             _ => None,
         }
@@ -253,17 +261,15 @@ impl AgentState {
 
     /// Store a new session.
     pub async fn store_session(&self, session: Session) {
-        let mut guard = self.session.write().await;
-        *guard = Some(session);
+        let mut guard = self.inner.write().await;
+        guard.session = Some(session);
     }
 
-    /// Clear the current session and credential cache.
+    /// Clear the current session and credential cache atomically.
     pub async fn clear_session(&self) {
-        let mut guard = self.session.write().await;
-        *guard = None;
-        drop(guard);
-
-        self.clear_credential_cache().await;
+        let mut guard = self.inner.write().await;
+        guard.session = None;
+        guard.credential_cache.clear();
     }
 
     /// Store a credential in the cache.
@@ -280,55 +286,58 @@ impl AgentState {
             return;
         }
 
-        let mut guard = self.credential_cache.write().await;
+        let mut guard = self.inner.write().await;
 
         // Evict if at capacity and this is a new key
-        let is_new_key = !guard.contains_key(&credential_type);
-        if is_new_key && guard.len() >= MAX_CACHE_ENTRIES {
+        let is_new_key = !guard.credential_cache.contains_key(&credential_type);
+        if is_new_key && guard.credential_cache.len() >= MAX_CACHE_ENTRIES {
             // Try to evict an expired entry first, then fall back to oldest
             let evict_key = guard
+                .credential_cache
                 .iter()
                 .find(|(_, v)| !v.is_valid())
                 .map(|(k, _)| k.clone());
             let evict_key = evict_key.or_else(|| {
                 guard
+                    .credential_cache
                     .iter()
                     .min_by_key(|(_, v)| v.expires_at())
                     .map(|(k, _)| k.clone())
             });
 
             if let Some(key) = evict_key {
-                guard.remove(&key);
+                guard.credential_cache.remove(&key);
             }
         }
 
-        guard.insert(credential_type, credential);
+        guard.credential_cache.insert(credential_type, credential);
     }
 
     /// Get a cached credential if it is still valid.
     pub async fn get_cached_credential(&self, credential_type: &str) -> Option<CachedCredential> {
-        let guard = self.credential_cache.read().await;
+        let guard = self.inner.read().await;
         guard
+            .credential_cache
             .get(credential_type)
             .and_then(|c| if c.is_valid() { Some(c.clone()) } else { None })
     }
 
     /// Clear all cached credentials.
     pub async fn clear_credential_cache(&self) {
-        let mut guard = self.credential_cache.write().await;
-        guard.clear();
+        let mut guard = self.inner.write().await;
+        guard.credential_cache.clear();
     }
 
     /// Get seconds until session expiry (`None` if no session, `Some(0)` if expired).
     pub async fn expires_in_seconds(&self) -> Option<u64> {
-        let guard = self.session.read().await;
-        guard.as_ref().map(Session::expires_in_seconds)
+        let guard = self.inner.read().await;
+        guard.session.as_ref().map(Session::expires_in_seconds)
     }
 
     /// Get the raw token (if session is valid).
     pub async fn get_token(&self) -> Option<SecretString> {
-        let guard = self.session.read().await;
-        match guard.as_ref() {
+        let guard = self.inner.read().await;
+        match guard.session.as_ref() {
             Some(session) if !session.is_expired() => Some(session.token.clone()),
             _ => None,
         }

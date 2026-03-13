@@ -129,8 +129,19 @@ async fn run_fapi_login(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("challenge request failed (HTTP {status}): {body}");
+        return Err(crate::exit_code::CliError::NetworkError(format!(
+            "challenge request failed (HTTP {status}): {body}"
+        ))
+        .into());
     }
+
+    // RFC 9449 §8.2: Capture DPoP-Nonce from challenge response so we can
+    // include it in the token request, avoiding a use_dpop_nonce rejection.
+    let challenge_dpop_nonce = response
+        .headers()
+        .get("dpop-nonce")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
 
     let challenge_resp: Fido2ChallengeResponse = response
         .json()
@@ -139,7 +150,11 @@ async fn run_fapi_login(
 
     println!("ok");
 
-    // Step 3: FIDO2 assertion on a plain OS thread.
+    // Step 3: Start posture collection early — it runs during the FIDO2 wait
+    // (human touch takes 5-30s, posture takes 100ms-2s).
+    let posture_handle = tokio::task::spawn_blocking(vouch_cli::posture::collect);
+
+    // Step 4: FIDO2 assertion on a plain OS thread.
     let rp_id = challenge_resp.rp_id.clone();
     let challenge_b64 = challenge_resp.challenge.clone();
 
@@ -156,7 +171,7 @@ async fn run_fapi_login(
     })
     .await?;
 
-    // Step 4: Encode the assertion as a base64url JSON blob.
+    // Step 5: Encode the assertion as a base64url JSON blob.
     let payload = AssertionPayload {
         state: challenge_resp.state,
         credential_id: URL_SAFE_NO_PAD.encode(assertion_result.credential_id.as_bytes()),
@@ -170,15 +185,11 @@ async fn run_fapi_login(
         serde_json::to_vec(&payload).context("failed to serialize assertion payload")?;
     let assertion_b64 = URL_SAFE_NO_PAD.encode(&payload_json);
 
-    // Step 5: Collect device posture (RFC 9396 authorization_details).
-    // Posture collection runs subprocesses serially; cap total time to avoid
-    // blocking login if any command hangs (e.g. a stalled systemctl call).
+    // Step 6: Await posture collection (started before FIDO2 wait).
+    // Cap total time to avoid blocking login if any command hangs.
     let authorization_details = {
-        let posture_result = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            tokio::task::spawn_blocking(vouch_cli::posture::collect),
-        )
-        .await;
+        let posture_result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), posture_handle).await;
         match posture_result {
             Ok(Ok(posture)) => {
                 tracing::debug!(
@@ -209,11 +220,15 @@ async fn run_fapi_login(
         }
     };
 
-    // Step 6: Build client_assertion (private_key_jwt) and DPoP proof.
+    // Step 7: Build client_assertion (private_key_jwt) and DPoP proof.
     let client_assertion =
         ClientAssertionBuilder::new(&client_id, &token_endpoint_url).build(fapi_key)?;
 
-    let dpop_proof = DpopProofBuilder::new("POST", &token_endpoint_url)
+    let mut dpop_builder = DpopProofBuilder::new("POST", &token_endpoint_url);
+    if let Some(ref nonce) = challenge_dpop_nonce {
+        dpop_builder = dpop_builder.nonce(nonce);
+    }
+    let dpop_proof = dpop_builder
         .build(fapi_key)
         .context("failed to build DPoP proof for token request")?;
 
@@ -438,6 +453,16 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
                          server {base_url}, re-registering"
                     );
                 } else {
+                    // Check 2b: skip server check if verified recently
+                    // (within 24 hours). Saves one HTTP round-trip.
+                    if recently_verified(config.registration_verified_at()) {
+                        tracing::debug!(
+                            "Registration verified recently, skipping \
+                             server check"
+                        );
+                        return Ok(id.to_string());
+                    }
+
                     // Check 3: is the registration still active?
                     match vouch_cli::fapi::registration::is_client_registered(
                         client.raw_client(),
@@ -446,7 +471,15 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
                     )
                     .await
                     {
-                        Ok(true) => return Ok(id.to_string()),
+                        Ok(true) => {
+                            // Cache the verification timestamp.
+                            let now = jiff::Timestamp::now().to_string();
+                            let _ = Config::modify(|cfg| {
+                                cfg.set_server_url(&base_url);
+                                cfg.set_registration_verified_at(&now);
+                            });
+                            return Ok(id.to_string());
+                        }
                         Ok(false) => {
                             tracing::debug!(
                                 "Client {id} no longer registered, \
@@ -503,6 +536,18 @@ async fn ensure_client_registered(client: &VouchClient, fapi_key: &ClientKey) ->
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// Check if registration was verified within the last 24 hours.
+fn recently_verified(verified_at: Option<&str>) -> bool {
+    let Some(s) = verified_at else {
+        return false;
+    };
+    let Ok(ts) = s.parse::<jiff::Timestamp>() else {
+        return false;
+    };
+    let elapsed = jiff::Timestamp::now().duration_since(ts);
+    elapsed.as_secs() < 86_400
+}
 
 /// Load the FAPI client key, checking sources in order:
 ///

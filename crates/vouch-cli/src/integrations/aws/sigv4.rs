@@ -152,7 +152,10 @@ pub async fn sign_and_send_json_rpc(
         let status = response.status();
         let response_body = response.text().await.unwrap_or_default();
         let truncated = truncate_error_body(&response_body, 500);
-        anyhow::bail!("{service} returned error {status}: {truncated}");
+        return Err(crate::exit_code::CliError::NetworkError(format!(
+            "{service} returned error {status}: {truncated}"
+        ))
+        .into());
     }
 
     response
@@ -254,7 +257,10 @@ pub async fn sign_and_send_rest(
         let status = response.status();
         let response_body = response.text().await.unwrap_or_default();
         let truncated = truncate_error_body(&response_body, 500);
-        anyhow::bail!("{service} returned error {status}: {truncated}");
+        return Err(crate::exit_code::CliError::NetworkError(format!(
+            "{service} returned error {status}: {truncated}"
+        ))
+        .into());
     }
 
     response
@@ -340,7 +346,10 @@ pub async fn sign_and_send_form_post(
         let status = response.status();
         let response_body = response.text().await.unwrap_or_default();
         let truncated = truncate_error_body(&response_body, 500);
-        anyhow::bail!("{service} returned error {status}: {truncated}");
+        return Err(crate::exit_code::CliError::NetworkError(format!(
+            "{service} returned error {status}: {truncated}"
+        ))
+        .into());
     }
 
     response
