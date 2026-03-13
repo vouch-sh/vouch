@@ -303,13 +303,6 @@ pub fn test_router(state: Arc<AppState>) -> Router {
             "/api/v1/applications/{id}/revoke",
             post(handlers::applications::revoke_tokens_api),
         )
-        // Cloud integration config API
-        .route(
-            "/v1/integrations/aws",
-            get(handlers::integrations::get_aws_integration)
-                .put(handlers::integrations::set_aws_integration)
-                .delete(handlers::integrations::delete_aws_integration),
-        )
         // Admin member management UI
         .route("/admin", get(handlers::admin::admin_members_page))
         .route(

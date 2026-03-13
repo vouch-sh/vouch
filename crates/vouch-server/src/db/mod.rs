@@ -144,14 +144,12 @@ pub use dpop::{
 
 // Re-export credentials types and functions
 pub use credentials::{
-    CloudIntegration, DelegationPolicy, EnrollmentSession, RevokedSshCertificate,
-    TokenExchangeRecord, check_delegation_policy, create_enrollment_session,
-    delete_cloud_integration, delete_delegation_policy, delete_expired_enrollment_sessions,
-    delete_expired_ssh_revocations, delete_old_token_exchanges, get_cloud_integration,
+    DelegationPolicy, EnrollmentSession, RevokedSshCertificate, TokenExchangeRecord,
+    check_delegation_policy, create_enrollment_session, delete_delegation_policy,
+    delete_expired_enrollment_sessions, delete_expired_ssh_revocations, delete_old_token_exchanges,
     get_delegation_policies, get_enrollment_session_by_token_hash, get_revoked_ssh_certificates,
     get_token_exchanges_for_user, insert_token_exchange, is_ssh_certificate_revoked,
     revoke_all_ssh_certificates_for_user, revoke_ssh_certificate, set_delegation_policy_enabled,
-    upsert_cloud_integration,
 };
 
 // Re-export GitHub types and functions

@@ -35,25 +35,6 @@ pub struct ScimAuditData {
     pub details: Option<String>,
 }
 
-/// Data payload for AWS IdC credential audit events.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub struct IdcCredentialAuditData {
-    pub event_type: String,
-    pub org_id: Option<String>,
-    pub authenticator_id: Option<String>,
-    pub success: bool,
-    pub error_code: Option<String>,
-    #[serde(alias = "ip_address")]
-    pub client_ip: Option<String>,
-    pub user_agent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub country_code: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub asn: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub org_name: Option<String>,
-}
-
 /// Data payload for GitHub credential audit events.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct GitHubCredentialAuditData {

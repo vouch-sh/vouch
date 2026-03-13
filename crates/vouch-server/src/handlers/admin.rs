@@ -2487,8 +2487,7 @@ mod tests {
 
     #[test]
     fn test_geo_fields_from_json_full_record() {
-        let json =
-            r#"{"country_code":"US","client_ip":"8.8.8.8","asn":15169,"org_name":"GOOGLE"}"#;
+        let json = r#"{"country_code":"US","client_ip":"8.8.8.8","asn":15169,"org_name":"GOOGLE"}"#;
         let geo = super::GeoFields::from_json(json);
         assert_eq!(geo.country_code.as_deref(), Some("US"));
         assert_eq!(geo.client_ip.as_deref(), Some("8.8.8.8"));

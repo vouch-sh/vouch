@@ -8,12 +8,6 @@ use anyhow::{Context, Result};
 use ini::Ini;
 use std::path::PathBuf;
 
-/// Get the AWS config directory (`~/.aws`).
-pub fn aws_config_dir() -> Result<PathBuf> {
-    let home = dirs::home_dir().context("could not determine home directory")?;
-    Ok(home.join(".aws"))
-}
-
 /// Represents an AWS profile configuration.
 #[derive(Debug, Clone, Default)]
 pub struct AwsProfile {
@@ -21,27 +15,10 @@ pub struct AwsProfile {
     pub name: String,
     /// The credential_process command if configured.
     pub credential_process: Option<String>,
-    /// SSO session name (for native SSO profiles).
-    pub sso_session: Option<String>,
-    /// SSO account ID (for native SSO profiles).
-    pub sso_account_id: Option<String>,
-    /// SSO role name (for native SSO profiles).
-    pub sso_role_name: Option<String>,
     /// The AWS region if configured.
     pub region: Option<String>,
     /// The output format if configured (e.g., "json", "text", "table").
     pub output: Option<String>,
-}
-
-/// Represents an AWS SSO session configuration (`[sso-session name]`).
-#[derive(Debug, Clone)]
-pub struct AwsSsoSession {
-    /// SSO session name.
-    pub name: String,
-    /// SSO start URL (Vouch server URL for our use case).
-    pub sso_start_url: String,
-    /// SSO region.
-    pub sso_region: String,
 }
 
 /// AWS config file parser and writer.
@@ -96,9 +73,6 @@ impl AwsConfig {
         Some(AwsProfile {
             name: name.to_string(),
             credential_process: section.get("credential_process").map(|s| s.to_string()),
-            sso_session: section.get("sso_session").map(|s| s.to_string()),
-            sso_account_id: section.get("sso_account_id").map(|s| s.to_string()),
-            sso_role_name: section.get("sso_role_name").map(|s| s.to_string()),
             region: section.get("region").map(|s| s.to_string()),
             output: section.get("output").map(|s| s.to_string()),
         })
@@ -133,35 +107,11 @@ impl AwsConfig {
         profiles
     }
 
-    /// Find all profiles that reference a specific SSO session.
-    #[must_use]
-    pub fn find_profiles_by_sso_session(&self, session_name: &str) -> Vec<AwsProfile> {
-        let mut profiles = Vec::new();
-        for (section_name, props) in &self.ini {
-            let Some(section_str) = section_name else {
-                continue;
-            };
-            let Some(profile_name) = Self::section_to_profile(section_str) else {
-                continue;
-            };
-
-            let matches = props.get("sso_session").is_some_and(|s| s == session_name);
-
-            if matches {
-                profiles.push(Self::props_to_profile(profile_name, props));
-            }
-        }
-        profiles
-    }
-
     /// Build an `AwsProfile` from INI section properties.
     fn props_to_profile(name: String, props: &ini::Properties) -> AwsProfile {
         AwsProfile {
             name,
             credential_process: props.get("credential_process").map(|s| s.to_string()),
-            sso_session: props.get("sso_session").map(|s| s.to_string()),
-            sso_account_id: props.get("sso_account_id").map(|s| s.to_string()),
-            sso_role_name: props.get("sso_role_name").map(|s| s.to_string()),
             region: props.get("region").map(|s| s.to_string()),
             output: props.get("output").map(|s| s.to_string()),
         }
@@ -201,30 +151,13 @@ impl AwsConfig {
     ///
     /// This preserves existing keys in the profile section that are not
     /// explicitly set in the `AwsProfile`. Fields set to `None` are left
-    /// unchanged (not removed), so callers must use
-    /// [`remove_credential_process`] explicitly when migrating away from
-    /// `credential_process`.
+    /// unchanged (not removed).
     pub fn set_profile(&mut self, profile: &AwsProfile) {
         let section = Self::profile_to_section(&profile.name);
         if let Some(ref cp) = profile.credential_process {
             self.ini
                 .with_section(Some(section.clone()))
                 .set("credential_process", cp);
-        }
-        if let Some(ref sso) = profile.sso_session {
-            self.ini
-                .with_section(Some(section.clone()))
-                .set("sso_session", sso);
-        }
-        if let Some(ref aid) = profile.sso_account_id {
-            self.ini
-                .with_section(Some(section.clone()))
-                .set("sso_account_id", aid);
-        }
-        if let Some(ref rn) = profile.sso_role_name {
-            self.ini
-                .with_section(Some(section.clone()))
-                .set("sso_role_name", rn);
         }
         if let Some(ref region) = profile.region {
             self.ini
@@ -233,32 +166,6 @@ impl AwsConfig {
         }
         if let Some(ref output) = profile.output {
             self.ini.with_section(Some(section)).set("output", output);
-        }
-    }
-
-    /// Set or update an SSO session section.
-    pub fn set_sso_session(&mut self, session: &AwsSsoSession) {
-        let section = format!("sso-session {}", session.name);
-        self.ini
-            .with_section(Some(section.clone()))
-            .set("sso_start_url", &session.sso_start_url);
-        self.ini
-            .with_section(Some(section))
-            .set("sso_region", &session.sso_region);
-    }
-
-    /// Check if an SSO session section exists.
-    #[must_use]
-    pub fn sso_session_exists(&self, name: &str) -> bool {
-        let section = format!("sso-session {name}");
-        self.ini.section(Some(section.as_str())).is_some()
-    }
-
-    /// Remove `credential_process` from a profile, leaving other keys intact.
-    pub fn remove_credential_process(&mut self, name: &str) {
-        let section = Self::profile_to_section(name);
-        if let Some(props) = self.ini.section_mut(Some(section.as_str())) {
-            props.remove("credential_process");
         }
     }
 
@@ -507,7 +414,6 @@ region = us-west-2
             ),
             region: Some("us-east-1".to_string()),
             output: Some("json".to_string()),
-            ..Default::default()
         });
         config.save().unwrap();
 
@@ -539,7 +445,8 @@ region = us-west-2
             credential_process: Some(
                 "vouch credential aws --role arn:aws:iam::123:role/Test".to_string(),
             ),
-            ..Default::default()
+            region: None,
+            output: None,
         });
         config.save().unwrap();
 
@@ -587,8 +494,8 @@ output = json
             credential_process: Some(
                 "vouch credential aws --role arn:aws:iam::123:role/Test".to_string(),
             ),
+            region: None,
             output: Some("json".to_string()),
-            ..Default::default()
         });
         config.save().unwrap();
 

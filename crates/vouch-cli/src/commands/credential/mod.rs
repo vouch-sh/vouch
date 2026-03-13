@@ -4,7 +4,6 @@
 use clap::Subcommand;
 
 pub mod aws;
-pub mod aws_idc;
 pub(crate) mod cache;
 pub mod cargo;
 pub mod codeartifact;
@@ -29,14 +28,6 @@ pub enum CredentialCommands {
         #[arg(long)]
         role: String,
     },
-    /// Refresh the AWS SSO token via Identity Center.
-    ///
-    /// Obtains an SSO access token from the Vouch server and writes it
-    /// to `~/.aws/sso/cache/` for native AWS CLI/SDK use. This is
-    /// automatically called during `vouch login` when SSO profiles
-    /// are configured.
-    #[command(name = "aws-idc")]
-    AwsIdc {},
     /// Obtain an SSH certificate.
     Ssh {
         /// Path to SSH private key (default: ~/.ssh/id_ed25519_vouch).
