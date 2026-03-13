@@ -99,7 +99,10 @@ pub async fn run(region: Option<&str>, profile: Option<&str>, configure: bool) -
                 .context("failed to run git config")?;
 
             if !status.success() {
-                anyhow::bail!("failed to configure git credential helper for {pattern}");
+                return Err(crate::exit_code::CliError::ConfigError(format!(
+                    "failed to configure git credential helper for {pattern}"
+                ))
+                .into());
             }
 
             // useHttpPath is critical — git must pass the full path (region + repo)
@@ -109,7 +112,10 @@ pub async fn run(region: Option<&str>, profile: Option<&str>, configure: bool) -
                 .context("failed to run git config")?;
 
             if !status.success() {
-                anyhow::bail!("failed to set useHttpPath for {pattern}");
+                return Err(crate::exit_code::CliError::ConfigError(format!(
+                    "failed to set useHttpPath for {pattern}"
+                ))
+                .into());
             }
         }
 

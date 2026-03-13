@@ -129,7 +129,10 @@ async fn run_fapi_login(
     let status = response.status();
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
-        anyhow::bail!("challenge request failed (HTTP {status}): {body}");
+        return Err(crate::exit_code::CliError::NetworkError(format!(
+            "challenge request failed (HTTP {status}): {body}"
+        ))
+        .into());
     }
 
     let challenge_resp: Fido2ChallengeResponse = response

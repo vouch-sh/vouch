@@ -94,7 +94,10 @@ pub async fn run(host: &str, configure: bool) -> Result<()> {
             .context("failed to run git config")?;
 
         if !status.success() {
-            anyhow::bail!("failed to configure git credential helper");
+            return Err(crate::exit_code::CliError::ConfigError(
+                "failed to configure git credential helper".to_string(),
+            )
+            .into());
         }
 
         println!("Git configured for {}", host);

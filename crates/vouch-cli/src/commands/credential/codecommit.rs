@@ -258,7 +258,10 @@ fn exec_git_remote_http(remote_name: &str, signed_url: &str) -> Result<()> {
         use std::os::unix::process::CommandExt;
         // exec replaces this process — only returns on error
         let err = cmd.exec();
-        anyhow::bail!("failed to exec git remote-http: {err}");
+        Err(crate::exit_code::CliError::ConfigError(format!(
+            "failed to exec git remote-http: {err}"
+        ))
+        .into())
     }
 
     #[cfg(not(unix))]

@@ -26,10 +26,12 @@ pub fn resolve_profile(profile: Option<&str>) -> anyhow::Result<String> {
             tracing::debug!("auto-detected vouch AWS profile: {}", p.name);
             Ok(p.name)
         }
-        None => anyhow::bail!(
+        None => Err(crate::exit_code::CliError::ConfigError(
             "No Vouch AWS profile found.\n\
              Run 'vouch setup aws' first, or specify --profile."
-        ),
+                .to_string(),
+        )
+        .into()),
     }
 }
 
@@ -56,10 +58,12 @@ pub fn resolve_region(region: Option<&str>, profile_name: &str) -> anyhow::Resul
         return Ok(r);
     }
 
-    anyhow::bail!(
+    Err(crate::exit_code::CliError::ConfigError(
         "Could not determine AWS region.\n\
          Specify --region, or set a region in your AWS profile or AWS_DEFAULT_REGION."
-    );
+            .to_string(),
+    )
+    .into())
 }
 
 /// Try to read the AWS role ARN from the local `~/.aws/config` file.

@@ -298,7 +298,10 @@ async fn poll_for_token(
             }
             Err(PollError::Denied) => {
                 println!();
-                anyhow::bail!("Authorization was denied.");
+                return Err(crate::exit_code::CliError::PermissionDenied(
+                    "authorization was denied".to_string(),
+                )
+                .into());
             }
             Err(PollError::Expired) => {
                 println!();

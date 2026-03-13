@@ -76,12 +76,14 @@ async fn check_git_remote_codecommit_invocation(argv0: &str) -> Result<bool> {
         let url = std::env::args().nth(2).unwrap_or_default();
 
         if remote_name.is_empty() || url.is_empty() {
-            anyhow::bail!(
+            return Err(crate::exit_code::CliError::ConfigError(
                 "usage: git-remote-codecommit <remote-name> <url>\n\
                  This is a git remote helper. Use it via:\n  \
                  git clone codecommit://[profile@]repo-name\n  \
                  git clone codecommit::region://[profile@]repo-name"
-            );
+                    .to_string(),
+            )
+            .into());
         }
 
         commands::credential::codecommit::run_remote_helper(&remote_name, &url)

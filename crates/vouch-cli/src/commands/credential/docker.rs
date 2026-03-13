@@ -157,7 +157,9 @@ async fn get_credential() -> Result<()> {
     let server_url = read_server_url()?;
 
     if server_url.is_empty() {
-        anyhow::bail!("no server URL provided");
+        return Err(
+            crate::exit_code::CliError::ConfigError("no server URL provided".to_string()).into(),
+        );
     }
 
     // Detect registry type
@@ -181,7 +183,10 @@ async fn get_credential() -> Result<()> {
         RegistryType::Ghcr => get_ghcr_credential(server, &session.token).await?,
         RegistryType::Unknown => {
             eprintln!("vouch: unknown registry type for URL: {}", server_url);
-            anyhow::bail!("unsupported registry: {}", server_url);
+            return Err(crate::exit_code::CliError::ConfigError(format!(
+                "unsupported registry: {server_url}"
+            ))
+            .into());
         }
     };
 

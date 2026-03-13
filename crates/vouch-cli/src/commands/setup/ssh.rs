@@ -224,7 +224,10 @@ fn add_trusted_ca_to_known_hosts(ca_path: &std::path::Path, host_patterns: &str)
         .collect::<Vec<_>>()
         .join(" ");
     if ca_pub_key.is_empty() {
-        anyhow::bail!("CA public key file does not contain a valid key");
+        return Err(crate::exit_code::CliError::ConfigError(
+            "CA public key file does not contain a valid key".to_string(),
+        )
+        .into());
     }
 
     // Create entry
