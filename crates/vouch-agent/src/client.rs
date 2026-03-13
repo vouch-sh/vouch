@@ -3,8 +3,9 @@
 
 use crate::error::{AgentError, Result};
 use crate::protocol::{
-    CACHE_MISS, CacheCredentialParams, GetCachedCredentialParams, Method, NOT_AUTHENTICATED,
-    Request, Response, SESSION_EXPIRED, StoreSessionParams, StoreSshCredentialsParams,
+    CACHE_MISS, CacheCredentialParams, GetCachedCredentialParams, JSONRPC_VERSION, Method,
+    NOT_AUTHENTICATED, Request, Response, SESSION_EXPIRED, StoreSessionParams,
+    StoreSshCredentialsParams,
 };
 use crate::socket::socket_path;
 use crate::state::CachedCredential;
@@ -62,7 +63,7 @@ impl AgentClient {
         self.next_id += 1;
 
         let request = Request {
-            jsonrpc: "2.0".to_string(),
+            jsonrpc: JSONRPC_VERSION.to_string(),
             id,
             method,
             params,

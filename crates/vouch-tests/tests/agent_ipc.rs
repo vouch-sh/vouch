@@ -262,7 +262,7 @@ mod protocol_types {
             server_url: None,
         };
 
-        let request = Request::with_params(1, Method::StoreSession, &params);
+        let request = Request::with_params(1, Method::StoreSession, &params).unwrap();
 
         assert_eq!(request.method, Method::StoreSession);
         assert!(request.params.is_some());
@@ -275,7 +275,7 @@ mod protocol_types {
     /// JSON-RPC response success.
     #[test]
     fn test_response_success() {
-        let response = Response::success(1, "pong");
+        let response = Response::success(1, "pong").unwrap();
         assert!(response.result.is_some());
         assert!(response.error.is_none());
         assert_eq!(response.id, 1);
@@ -325,7 +325,7 @@ mod protocol_types {
     /// Response serialization round-trip.
     #[test]
     fn test_response_serialization_roundtrip() {
-        let response = Response::success(42, serde_json::json!({"authenticated": true}));
+        let response = Response::success(42, serde_json::json!({"authenticated": true})).unwrap();
 
         let json = serde_json::to_string(&response).unwrap();
         let deserialized: Response = serde_json::from_str(&json).unwrap();
