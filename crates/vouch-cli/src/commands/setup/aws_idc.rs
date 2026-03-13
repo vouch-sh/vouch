@@ -48,6 +48,41 @@ pub async fn run(
     }
 }
 
+/// Test `GetRoleCredentials` with a TTI token (spike).
+///
+/// Calls `POST /v1/credentials/aws-idc/role-credentials` server-side
+/// and prints whether the call succeeded or failed.
+pub async fn test_get_role_credentials(
+    server: &str,
+    account_id: &str,
+    role_name: &str,
+) -> Result<()> {
+    println!("Testing GetRoleCredentials server-side with TTI token...");
+    println!("  account_id: {account_id}");
+    println!("  role_name:  {role_name}");
+    println!();
+
+    let client = VouchClient::new(server).await?;
+    let request = vouch_common::IdcRoleCredentialsRequest {
+        account_id: account_id.to_string(),
+        role_name: role_name.to_string(),
+    };
+
+    let result: vouch_common::IdcRoleCredentialsResponse = client
+        .post_authenticated("/v1/credentials/aws-idc/role-credentials", &request)
+        .await
+        .context(
+            "GetRoleCredentials failed — TTI token not accepted \
+             by the SSO portal API",
+        )?;
+
+    println!("GetRoleCredentials SUCCEEDED with TTI token!");
+    println!("  access_key_id: {}", result.access_key_id);
+    println!("  expiration:    {}", result.expiration);
+
+    Ok(())
+}
+
 /// Create a single profile for a specific account/role.
 async fn run_single(server: &str, account_id: &str, role_name: &str, refresh: bool) -> Result<()> {
     let session_name = sso_session_name(server)?;

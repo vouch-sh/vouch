@@ -46,6 +46,10 @@ pub enum SetupCommands {
         /// Bypass the discovery cache and fetch fresh data from the server.
         #[arg(long)]
         refresh: bool,
+        /// Test `GetRoleCredentials` with TTI token server-side (spike).
+        /// Requires --account-id and --role-name.
+        #[arg(long, requires_all = ["account_id", "role_name"], hide = true)]
+        test_get_role_credentials: bool,
     },
     /// Configure SSH to use Vouch certificates.
     Ssh {

@@ -510,26 +510,49 @@ pub struct IdcDiscoveryResponse {
     pub errors: Vec<IdcDiscoveryError>,
 }
 
+/// Request for `POST /v1/credentials/aws-idc/role-credentials`.
+///
+/// Calls `GetRoleCredentials` server-side with a TTI token to test
+/// whether the SSO portal API accepts Trusted Token Issuer tokens.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IdcRoleCredentialsRequest {
+    pub account_id: String,
+    pub role_name: String,
+}
+
+/// Response from `POST /v1/credentials/aws-idc/role-credentials`.
+#[derive(Serialize, Deserialize)]
+pub struct IdcRoleCredentialsResponse {
+    pub access_key_id: String,
+    #[serde(serialize_with = "serialize_secret_string")]
+    pub secret_access_key: secrecy::SecretString,
+    #[serde(serialize_with = "serialize_secret_string")]
+    pub session_token: secrecy::SecretString,
+    pub expiration: String,
+}
+
+impl std::fmt::Debug for IdcRoleCredentialsResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IdcRoleCredentialsResponse")
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"[REDACTED]")
+            .field("session_token", &"[REDACTED]")
+            .field("expiration", &self.expiration)
+            .finish()
+    }
+}
+
 /// Response from `POST /v1/credentials/aws-idc/sso-token`.
 ///
-/// Returns the SSO access token and OIDC client registration for the
-/// CLI to write into the standard AWS SSO cache (`~/.aws/sso/cache/`).
-/// The CLI computes `expiresAt` from `expires_in` seconds.
+/// Returns the SSO access token for the CLI to write into the standard
+/// AWS SSO cache (`~/.aws/sso/cache/`). The CLI computes `expiresAt`
+/// from `expires_in` seconds.
 #[derive(Serialize, Deserialize)]
 pub struct IdcTokenResponse {
     #[serde(serialize_with = "serialize_secret_string")]
     pub access_token: secrecy::SecretString,
     pub expires_in: u64,
     pub region: String,
-    /// SSO OIDC client ID from `RegisterClient`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_id: Option<String>,
-    /// SSO OIDC client secret from `RegisterClient`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_secret: Option<String>,
-    /// When the client registration expires (epoch seconds, 0 = never).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub client_secret_expires_at: Option<i64>,
 }
 
 impl std::fmt::Debug for IdcTokenResponse {
@@ -538,9 +561,6 @@ impl std::fmt::Debug for IdcTokenResponse {
             .field("access_token", &"[REDACTED]")
             .field("expires_in", &self.expires_in)
             .field("region", &self.region)
-            .field("client_id", &self.client_id)
-            .field("client_secret", &"[REDACTED]")
-            .field("client_secret_expires_at", &self.client_secret_expires_at)
             .finish()
     }
 }
@@ -571,18 +591,6 @@ pub struct AwsIntegrationConfig {
     /// AWS region where IAM Identity Center is deployed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub idc_region: Option<String>,
-
-    /// Cached SSO OIDC client ID from `RegisterClient`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub idc_client_id: Option<String>,
-
-    /// Cached SSO OIDC client secret from `RegisterClient`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub idc_client_secret: Option<String>,
-
-    /// When the cached client registration expires (epoch seconds, 0 = never).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub idc_client_secret_expires_at: Option<i64>,
 }
 
 impl AwsIntegrationConfig {

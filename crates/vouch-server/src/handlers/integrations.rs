@@ -306,10 +306,6 @@ pub async fn save_idc_config_form(
         idc_bootstrap_role_arn: Some(bootstrap_arn.to_string()),
         idc_application_arn: Some(app_arn.to_string()),
         idc_region: Some(region.to_string()),
-        // Client registration is populated lazily on first token exchange
-        idc_client_id: None,
-        idc_client_secret: None,
-        idc_client_secret_expires_at: None,
     };
 
     let config_value = match serde_json::to_value(&config) {

@@ -631,14 +631,24 @@ async fn run() -> Result<()> {
                 account_id,
                 role_name,
                 refresh,
+                test_get_role_credentials,
             } => {
-                commands::setup::aws_idc::run(
-                    server,
-                    account_id.as_deref(),
-                    role_name.as_deref(),
-                    refresh,
-                )
-                .await
+                if test_get_role_credentials {
+                    commands::setup::aws_idc::test_get_role_credentials(
+                        server,
+                        account_id.as_deref().unwrap_or_default(),
+                        role_name.as_deref().unwrap_or_default(),
+                    )
+                    .await
+                } else {
+                    commands::setup::aws_idc::run(
+                        server,
+                        account_id.as_deref(),
+                        role_name.as_deref(),
+                        refresh,
+                    )
+                    .await
+                }
             }
             SetupCommands::Ssh { hosts } => {
                 commands::setup::ssh::run(server, hosts.as_deref()).await

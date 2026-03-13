@@ -5204,6 +5204,7 @@ dependencies = [
  "aws-sdk-identitystore",
  "aws-sdk-kms",
  "aws-sdk-s3",
+ "aws-sdk-sso",
  "aws-sdk-ssoadmin",
  "aws-sdk-ssooidc",
  "aws-sdk-sts",

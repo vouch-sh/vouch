@@ -456,9 +456,99 @@ pub async fn get_aws_idc_sso_token(
         access_token: result.access_token,
         expires_in: result.expires_in,
         region: result.region,
-        client_id: result.client_id,
-        client_secret: result.client_secret,
-        client_secret_expires_at: result.client_secret_expires_at,
+    }))
+}
+
+// ============================================================================
+// AWS Identity Center GetRoleCredentials Spike
+// ============================================================================
+
+/// Get IAM role credentials via Identity Center `GetRoleCredentials`.
+///
+/// POST /v1/credentials/aws-idc/role-credentials
+///
+/// Spike endpoint: tests whether `GetRoleCredentials` accepts Trusted
+/// Token Issuer tokens. Chains `exchange_for_idc_token` →
+/// `GetRoleCredentials` server-side.
+pub async fn get_aws_idc_role_credentials(
+    method: Method,
+    uri: OriginalUri,
+    client_info: ClientInfo,
+    headers: HeaderMap,
+    jar: CookieJar,
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<vouch_common::IdcRoleCredentialsRequest>,
+) -> Result<Json<vouch_common::IdcRoleCredentialsResponse>, ServiceError> {
+    // Validate account_id: exactly 12 ASCII digits
+    if request.account_id.len() != 12 || !request.account_id.chars().all(|c| c.is_ascii_digit()) {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_account_id",
+            "account_id must be exactly 12 digits",
+        ));
+    }
+
+    // Validate role_name: 1-64 chars, AWS-allowed characters
+    if request.role_name.is_empty()
+        || request.role_name.len() > 64
+        || !request
+            .role_name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "+=,.@_-".contains(c))
+    {
+        return Err(ServiceError::api(
+            StatusCode::BAD_REQUEST,
+            "invalid_role_name",
+            "role_name must be 1-64 characters [a-zA-Z0-9+=,.@_-]",
+        ));
+    }
+
+    let (token, user_email, hd, org_id) =
+        extract_idc_context(&state, &headers, &jar, &method, &uri).await?;
+
+    let config = state.config();
+    let ctx = crate::services::integrations::aws_idc::IdcContext {
+        store: &state.store,
+        base_url: &config.base_url,
+        session_hours: config.session_hours,
+        oidc_key: &state.oidc_key,
+        user_email: &user_email,
+        authenticator_id: token.authenticator_id.as_deref(),
+        hd,
+        org_id: &org_id,
+    };
+    let result = crate::services::integrations::aws_idc::get_idc_role_credentials(
+        &ctx,
+        &request.account_id,
+        &request.role_name,
+    )
+    .await
+    .map_err(map_idc_error)?;
+
+    if let Err(e) = log_idc_credential_event(
+        &state,
+        &token.sub,
+        &user_email,
+        IdcCredentialAuditData {
+            event_type: "role_credentials_issued".to_string(),
+            org_id: Some(org_id),
+            authenticator_id: token.authenticator_id.clone(),
+            success: true,
+            user_agent: client_info.user_agent,
+            ..Default::default()
+        },
+        client_info.client_ip,
+    )
+    .await
+    {
+        tracing::warn!("Failed to log IdC role-credentials event: {e}");
+    }
+
+    Ok(Json(vouch_common::IdcRoleCredentialsResponse {
+        access_key_id: result.access_key_id,
+        secret_access_key: result.secret_access_key,
+        session_token: result.session_token,
+        expiration: result.expiration,
     }))
 }
 
@@ -584,6 +674,14 @@ fn map_idc_error(e: crate::services::integrations::aws_idc::AwsIdcError) -> Serv
                 StatusCode::BAD_GATEWAY,
                 "idc_token_error",
                 "Failed to exchange token with Identity Center",
+            )
+        }
+        AwsIdcError::GetRoleCredentials(ref msg) => {
+            tracing::error!("IdC GetRoleCredentials error: {msg}");
+            ServiceError::api(
+                StatusCode::BAD_GATEWAY,
+                "idc_get_role_credentials_error",
+                "GetRoleCredentials failed with TTI token",
             )
         }
         AwsIdcError::NoAccountAssignments => {

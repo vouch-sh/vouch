@@ -139,6 +139,10 @@ fn build_credential_routes() -> Router<Arc<AppState>> {
             post(handlers::credentials::get_aws_idc_sso_token),
         )
         .route(
+            "/v1/credentials/aws-idc/role-credentials",
+            post(handlers::credentials::get_aws_idc_role_credentials),
+        )
+        .route(
             "/v1/credentials/github/token",
             post(handlers::credentials::get_github_token),
         )
