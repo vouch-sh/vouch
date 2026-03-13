@@ -119,7 +119,7 @@ tower = { version = "=0.5.3", default-features = false }
 tower-http = { version = "=0.6.8", default-features = false }
 tower_governor = { version = "=0.8.0", default-features = false }
 tracing = { version = "=0.1.44", default-features = false }
-tracing-subscriber = { version = "=0.3.22", default-features = false }
+tracing-subscriber = { version = "=0.3.23", default-features = false }
 url = { version = "=2.5.8", default-features = false }
 urlencoding = { version = "=2.1.3", default-features = false }
 uuid = { version = "=1.22.0", default-features = false }
