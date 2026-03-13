@@ -203,11 +203,11 @@ pub async fn store_and_finalize(
 
     let (agent_stored, ()) = tokio::join!(agent_future, cookie_future);
 
-    // 3. Auto-provision SSH certificate
-    crate::commands::credential::ssh::auto_provision(server, expires_at_str, fapi_key).await;
-
-    // 4. Auto-refresh npm CodeArtifact tokens (best-effort)
-    crate::commands::setup::codeartifact::auto_refresh_npmrc(server).await;
+    // 3. Auto-provision SSH certificate + refresh CodeArtifact in parallel
+    let (_, ()) = tokio::join!(
+        crate::commands::credential::ssh::auto_provision(server, expires_at_str, fapi_key,),
+        crate::commands::setup::codeartifact::auto_refresh_npmrc(server),
+    );
 
     Ok(agent_stored)
 }

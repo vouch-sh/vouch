@@ -44,6 +44,8 @@ pub struct ServerConfig {
     registration_client_uri: Option<String>,
     /// Key ID of the DPoP keypair stored in ~/.vouch/dpop_key.json.
     dpop_key_id: Option<String>,
+    /// ISO 8601 timestamp of last successful registration verification.
+    registration_verified_at: Option<String>,
 }
 
 /// CodeArtifact configuration with named profiles (similar to AWS CLI profiles).
@@ -118,6 +120,8 @@ struct ServerConfigFile {
     registration_client_uri: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dpop_key_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    registration_verified_at: Option<String>,
 }
 
 // =========================================================================
@@ -159,6 +163,7 @@ impl std::fmt::Debug for ServerConfig {
             )
             .field("registration_client_uri", &self.registration_client_uri)
             .field("dpop_key_id", &self.dpop_key_id)
+            .field("registration_verified_at", &self.registration_verified_at)
             .finish()
     }
 }
@@ -422,6 +427,20 @@ impl Config {
         }
     }
 
+    /// Get the timestamp of last successful registration verification.
+    #[must_use]
+    pub fn registration_verified_at(&self) -> Option<&str> {
+        self.current()
+            .and_then(|s| s.registration_verified_at.as_deref())
+    }
+
+    /// Set the registration verified timestamp.
+    pub fn set_registration_verified_at(&mut self, ts: &str) {
+        if let Some(sc) = self.current_mut() {
+            sc.registration_verified_at = Some(ts.to_string());
+        }
+    }
+
     /// Clear all FAPI 2.0 dynamic registration fields for the
     /// current server.
     pub fn clear_fapi(&mut self) {
@@ -430,6 +449,7 @@ impl Config {
             sc.registration_access_token = None;
             sc.registration_client_uri = None;
             sc.dpop_key_id = None;
+            sc.registration_verified_at = None;
         }
     }
 }
@@ -462,6 +482,7 @@ impl From<ConfigFile> for Config {
                     .map(SecretString::from),
                 registration_client_uri: std::mem::take(&mut file.registration_client_uri),
                 dpop_key_id: std::mem::take(&mut file.dpop_key_id),
+                registration_verified_at: None, // field did not exist in legacy format
             };
             current_server = Some(hostname.clone());
             servers.insert(hostname, sc);
@@ -484,6 +505,7 @@ impl From<ServerConfigFile> for ServerConfig {
             registration_access_token: scf.registration_access_token.take().map(SecretString::from),
             registration_client_uri: scf.registration_client_uri.take(),
             dpop_key_id: scf.dpop_key_id.take(),
+            registration_verified_at: scf.registration_verified_at.take(),
         }
     }
 }
@@ -526,6 +548,7 @@ impl From<&ServerConfig> for ServerConfigFile {
                 .map(|s| s.expose_secret().to_string()),
             registration_client_uri: sc.registration_client_uri.clone(),
             dpop_key_id: sc.dpop_key_id.clone(),
+            registration_verified_at: sc.registration_verified_at.clone(),
         }
     }
 }

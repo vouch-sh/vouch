@@ -11,6 +11,7 @@
 
 use crate::AppState;
 use crate::crypto::jwt::JwtType;
+use crate::db;
 use crate::handlers::generate_challenge;
 use axum::{
     Json,
@@ -99,7 +100,13 @@ pub async fn fido2_challenge(State(state): State<Arc<AppState>>) -> Response {
         }
     };
 
-    (
+    // RFC 9449 §8.2: Pre-generate a DPoP nonce so the CLI can include it
+    // in the token request, avoiding a use_dpop_nonce round-trip in the
+    // common case. If the nonce expires before the token request (e.g.
+    // very slow touch), the existing use_dpop_nonce retry path handles it.
+    let dpop_nonce = db::generate_dpop_nonce(&state.store, 300).await;
+
+    let mut response = (
         StatusCode::OK,
         [
             ("cache-control", "no-cache, no-store, must-revalidate"),
@@ -112,5 +119,13 @@ pub async fn fido2_challenge(State(state): State<Arc<AppState>>) -> Response {
             state: state_token,
         }),
     )
-        .into_response()
+        .into_response();
+
+    if let Ok(ref nonce) = dpop_nonce
+        && let Ok(value) = axum::http::HeaderValue::from_str(nonce)
+    {
+        response.headers_mut().insert("dpop-nonce", value);
+    }
+
+    response
 }

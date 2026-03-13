@@ -137,21 +137,12 @@ pub async fn exchange_fido2_assertion(
             )
         })?;
 
-    // 2b. Enforce single-use: mark the challenge as used atomically
+    // 2b. Prepare single-use challenge check
     let state_hash = crate::crypto::hash_token(&payload.state);
     let expires_at = jiff::Timestamp::from_second(challenge_state.exp)
         .unwrap_or_else(|_| jiff::Timestamp::now());
-    let consumed = db::try_mark_challenge_used(&state.store, &state_hash, expires_at)
-        .await
-        .map_err(|e| ServiceError::Internal(format!("Failed to mark challenge used: {e}")))?;
-    if !consumed {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidGrant,
-            "Challenge state has already been used or expired",
-        ));
-    }
 
-    // 3. Decode assertion fields from base64url
+    // 3. Decode assertion fields from base64url (CPU-only, no I/O)
     let credential_id_bytes = URL_SAFE_NO_PAD
         .decode(&payload.credential_id)
         .map_err(|_| {
@@ -193,19 +184,36 @@ pub async fn exchange_fido2_assertion(
         ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Invalid user_handle format")
     })?;
 
-    // 5. Look up authenticator and verify ownership
-    let lookup_result = lookup_and_verify_authenticator(
-        state,
-        AuthenticatorLookupParams {
-            credential_id: &credential_id_bytes,
-            user_id,
+    // 5. Mark challenge used + look up authenticator in parallel
+    //    (independent DB operations on different tables)
+    let (consumed_result, lookup_result) = tokio::try_join!(
+        async {
+            db::try_mark_challenge_used(&state.store, &state_hash, expires_at)
+                .await
+                .map_err(|e| ServiceError::Internal(format!("Failed to mark challenge used: {e}")))
         },
-    )
-    .await
-    .map_err(|e| {
-        tracing::warn!("FIDO2 assertion grant: authenticator lookup failed: {e}");
-        ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
-    })?;
+        async {
+            lookup_and_verify_authenticator(
+                state,
+                AuthenticatorLookupParams {
+                    credential_id: &credential_id_bytes,
+                    user_id,
+                },
+            )
+            .await
+            .map_err(|e| {
+                tracing::warn!("FIDO2 assertion grant: authenticator lookup failed: {e}");
+                ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Authentication failed")
+            })
+        },
+    )?;
+
+    if !consumed_result {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidGrant,
+            "Challenge state has already been used or expired",
+        ));
+    }
 
     let authenticator = lookup_result.authenticator;
     let user = lookup_result.user;
