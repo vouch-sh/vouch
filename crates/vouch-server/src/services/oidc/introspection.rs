@@ -176,6 +176,7 @@ pub async fn revoke_token(
     state: &Arc<AppState>,
     token: &str,
     _token_type_hint: Option<&str>,
+    client_info: crate::handlers::extractors::ClientInfo,
 ) -> RevocationResult {
     // Try to decode to get email for audit logging
     let config = state.config();
@@ -202,7 +203,8 @@ pub async fn revoke_token(
                         event_type: db::AuthEventType::Logout,
                         success: true,
                         ..Default::default()
-                    };
+                    }
+                    .with_client_info(client_info);
                     let email_for_audit = email.clone();
                     tokio::spawn(async move {
                         if let Err(e) =

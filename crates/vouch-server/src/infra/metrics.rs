@@ -3,15 +3,21 @@
 //!
 //! Exposes a `/metrics` endpoint in Prometheus text format and provides
 //! middleware for automatic HTTP request duration and count tracking.
+//! The endpoint is gated behind a bearer token for security.
 
-use std::time::Instant;
+use std::sync::Arc;
 
-use axum::{
-    extract::MatchedPath,
-    http::{Request, Response},
-    response::IntoResponse,
-};
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::IntoResponse;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use secrecy::{ExposeSecret, SecretString};
+use subtle::ConstantTimeEq;
+
+/// State for the authenticated metrics endpoint.
+pub struct MetricsState {
+    pub handle: PrometheusHandle,
+    pub bearer_token: SecretString,
+}
 
 /// Install the Prometheus metrics recorder and return a handle for rendering.
 ///
@@ -22,51 +28,34 @@ pub fn install_recorder() -> Result<PrometheusHandle, metrics_exporter_prometheu
     PrometheusBuilder::new().install_recorder()
 }
 
-/// Axum handler that renders all metrics in Prometheus text exposition format.
-pub async fn metrics_handler(
-    axum::extract::State(handle): axum::extract::State<PrometheusHandle>,
-) -> impl IntoResponse {
-    handle.render()
+/// Extract the bearer token from an `Authorization` header value.
+fn extract_bearer_token(headers: &HeaderMap) -> Option<&str> {
+    let value = headers.get("authorization")?.to_str().ok()?;
+    let token = value.strip_prefix("Bearer ")?;
+    if token.is_empty() {
+        return None;
+    }
+    Some(token)
 }
 
-/// Tower middleware layer that records HTTP request metrics.
+/// Axum handler that validates a bearer token before rendering metrics.
 ///
-/// Records:
-/// - `http_requests_total{method, path, status}` - Counter
-/// - `http_request_duration_seconds{method, path}` - Histogram
-pub fn track_metrics<B>(req: &Request<B>) -> Option<RequestMetricsContext> {
-    let method = req.method().to_string();
-    let path = req
-        .extensions()
-        .get::<MatchedPath>()
-        .map(|p| p.as_str().to_string())
-        .unwrap_or_else(|| req.uri().path().to_string());
-    Some(RequestMetricsContext {
-        method,
-        path,
-        start: Instant::now(),
-    })
-}
+/// Returns 401 if the token is missing or invalid (constant-time comparison).
+pub async fn authenticated_metrics_handler(
+    axum::extract::State(state): axum::extract::State<Arc<MetricsState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let Some(provided) = extract_bearer_token(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
+    };
 
-/// Context stored per-request for recording metrics after the response.
-pub struct RequestMetricsContext {
-    method: String,
-    path: String,
-    start: Instant,
-}
+    let expected = state.bearer_token.expose_secret().as_bytes();
+    let provided_bytes = provided.as_bytes();
 
-impl RequestMetricsContext {
-    /// Record metrics after a response is produced.
-    pub fn record<B>(self, response: &Response<B>) {
-        let duration = self.start.elapsed().as_secs_f64();
-        let status = response.status().as_u16().to_string();
-        let labels = [
-            ("method", self.method),
-            ("path", self.path),
-            ("status", status),
-        ];
-        metrics::counter!("http_requests_total", &labels).increment(1);
-        metrics::histogram!("http_request_duration_seconds", &labels[..2]).record(duration);
+    if expected.ct_eq(provided_bytes).into() {
+        state.handle.render().into_response()
+    } else {
+        (StatusCode::UNAUTHORIZED, "Unauthorized").into_response()
     }
 }
 

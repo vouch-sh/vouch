@@ -101,6 +101,7 @@ pub fn test_config() -> ServerConfig {
         require_attestation_cert: false,
         log_format: crate::config::LogFormat::Text,
         trusted_proxies: Vec::new(),
+        metrics_bearer_token: None,
     }
 }
 

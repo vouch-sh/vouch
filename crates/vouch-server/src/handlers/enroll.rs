@@ -1206,6 +1206,8 @@ pub async fn browser_register_complete(
         }
     });
 
+    crate::infra::metrics::record_auth_event("enrollment");
+
     tracing::info!(
         "Enrollment complete for: {} with {} (AAGUID: {})",
         redact_email(&reg_state.user_email),

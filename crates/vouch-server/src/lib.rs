@@ -218,6 +218,7 @@ mod redirect_tests {
             require_attestation_cert: false,
             log_format: config::LogFormat::Text,
             trusted_proxies: Vec::new(),
+            metrics_bearer_token: None,
         };
         let webauthn = webauthn_rs::WebauthnBuilder::new(
             rp_id,

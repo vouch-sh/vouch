@@ -443,18 +443,21 @@ async fn handle_authorization_code_grant(
     };
 
     match exchange_authorization_code(&state, exchange_params).await {
-        Ok(result) => token_success_response(TokenResponse {
-            access_token: result.access_token,
-            token_type: result.token_type,
-            expires_in: result.expires_in,
-            id_token: Some(result.id_token),
-            scope: Some(result.scope),
-            email: None,
-            authorization_details: result
-                .authorization_details
-                .as_ref()
-                .map(serde_json::Value::from),
-        }),
+        Ok(result) => {
+            crate::infra::metrics::record_auth_event("authorization_code_success");
+            token_success_response(TokenResponse {
+                access_token: result.access_token,
+                token_type: result.token_type,
+                expires_in: result.expires_in,
+                id_token: Some(result.id_token),
+                scope: Some(result.scope),
+                email: None,
+                authorization_details: result
+                    .authorization_details
+                    .as_ref()
+                    .map(serde_json::Value::from),
+            })
+        }
         Err(e) => e.into_oauth_response().into_response(),
     }
 }
@@ -746,16 +749,22 @@ async fn handle_fido2_assertion_grant(
     match crate::services::oidc::fido2_grant::exchange_fido2_assertion(&state, exchange_params)
         .await
     {
-        Ok(result) => token_success_response(TokenResponse {
-            access_token: result.access_token,
-            token_type: result.token_type,
-            expires_in: result.expires_in,
-            id_token: None,
-            scope: result.scope,
-            email: Some(result.email),
-            authorization_details: result.authorization_details,
-        }),
-        Err(e) => e.into_oauth_response().into_response(),
+        Ok(result) => {
+            crate::infra::metrics::record_auth_event("fido2_login_success");
+            token_success_response(TokenResponse {
+                access_token: result.access_token,
+                token_type: result.token_type,
+                expires_in: result.expires_in,
+                id_token: None,
+                scope: result.scope,
+                email: Some(result.email),
+                authorization_details: result.authorization_details,
+            })
+        }
+        Err(e) => {
+            crate::infra::metrics::record_auth_event("fido2_login_failure");
+            e.into_oauth_response().into_response()
+        }
     }
 }
 

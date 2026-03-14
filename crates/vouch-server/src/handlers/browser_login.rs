@@ -600,6 +600,8 @@ pub async fn browser_login_complete(
         }
     });
 
+    crate::infra::metrics::record_auth_event("browser_login_success");
+
     tracing::info!(
         "Browser login successful for user: {}",
         redact_email(&user.email)

@@ -6,6 +6,7 @@
 //! - RFC 7662 - OAuth 2.0 Token Introspection
 
 use crate::AppState;
+use crate::handlers::extractors::ClientInfo;
 use crate::services::oidc::introspection::{
     IntrospectionResult, introspect_token as svc_introspect, revoke_token as svc_revoke,
 };
@@ -69,6 +70,7 @@ pub struct IntrospectRequest {
 /// Requires client authentication via `Authorization: Basic` header.
 pub async fn revoke(
     State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
     headers: HeaderMap,
     axum::Form(params): axum::Form<RevokeRequest>,
 ) -> Response {
@@ -89,7 +91,13 @@ pub async fn revoke(
         }
     }
 
-    let _result = svc_revoke(&state, &params.token, params.token_type_hint.as_deref()).await;
+    let _result = svc_revoke(
+        &state,
+        &params.token,
+        params.token_type_hint.as_deref(),
+        client_info,
+    )
+    .await;
     // Always return 200 per RFC 7009 Section 2 (for valid clients)
     StatusCode::OK.into_response()
 }

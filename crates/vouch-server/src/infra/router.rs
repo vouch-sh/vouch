@@ -8,8 +8,9 @@ use std::sync::Arc;
 
 use axum::{
     Json, Router,
-    extract::{DefaultBodyLimit, State},
-    http::{HeaderValue, StatusCode, header},
+    extract::{DefaultBodyLimit, MatchedPath, State},
+    http::{HeaderValue, Request, StatusCode, header},
+    middleware::Next,
     response::IntoResponse,
     routing::{delete, get, patch, post},
 };
@@ -79,22 +80,42 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
     let api_routes = build_api_routes(config)?;
     let ui_routes = build_ui_routes(config)?;
 
-    // Install Prometheus metrics recorder and create /metrics endpoint
-    let metrics_route = match metrics::install_recorder() {
-        Ok(handle) => {
-            tracing::info!("Prometheus metrics enabled at /metrics");
-            Router::new().route("/metrics", get(metrics::metrics_handler).with_state(handle))
+    // Install Prometheus metrics recorder and optionally expose /metrics endpoint.
+    // The endpoint is only registered when VOUCH_METRICS_BEARER_TOKEN is set.
+    let metrics_route = if let Some(ref token) = config.metrics_bearer_token {
+        match metrics::install_recorder() {
+            Ok(handle) => {
+                tracing::info!("Prometheus metrics enabled at /metrics (bearer token required)");
+                let metrics_state = Arc::new(metrics::MetricsState {
+                    handle,
+                    bearer_token: token.clone(),
+                });
+                Router::new().route(
+                    "/metrics",
+                    get(metrics::authenticated_metrics_handler).with_state(metrics_state),
+                )
+            }
+            Err(e) => {
+                tracing::warn!("Failed to install metrics recorder: {e}");
+                Router::new()
+            }
         }
-        Err(e) => {
-            tracing::warn!("Failed to install metrics recorder: {e}");
-            Router::new()
+    } else {
+        // Still install the recorder so metrics macros don't no-op
+        if let Err(e) = metrics::install_recorder() {
+            tracing::debug!("Metrics recorder not installed: {e}");
         }
+        tracing::info!(
+            "Prometheus /metrics endpoint disabled (VOUCH_METRICS_BEARER_TOKEN not set)"
+        );
+        Router::new()
     };
 
     Ok(security_headers::apply_security_layers(
         api_routes.merge(ui_routes).merge(metrics_route),
         config,
     )
+    .layer(axum::middleware::from_fn(metrics_middleware))
     // Global request timeout: 30 seconds.
     .layer(TimeoutLayer::with_status_code(
         StatusCode::REQUEST_TIMEOUT,
@@ -543,4 +564,25 @@ fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<A
         // Browsers request /favicon.ico at the root path
         .route("/favicon.ico", get(static_assets::favicon_handler))
         .layer(security_headers::build_ui_cors_layer(config)))
+}
+
+/// Middleware that records HTTP request metrics (counter + duration histogram).
+async fn metrics_middleware(req: Request<axum::body::Body>, next: Next) -> impl IntoResponse {
+    let method = req.method().to_string();
+    let path = req
+        .extensions()
+        .get::<MatchedPath>()
+        .map(|p| p.as_str().to_string())
+        .unwrap_or_else(|| req.uri().path().to_string());
+    let start = std::time::Instant::now();
+
+    let response = next.run(req).await;
+
+    let duration = start.elapsed().as_secs_f64();
+    let status = response.status().as_u16().to_string();
+    let labels = [("method", method), ("path", path), ("status", status)];
+    ::metrics::counter!("http_requests_total", &labels).increment(1);
+    ::metrics::histogram!("http_request_duration_seconds", &labels[..2]).record(duration);
+
+    response
 }

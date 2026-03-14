@@ -271,6 +271,10 @@ pub struct Args {
     /// is used directly (safe for direct exposure without a reverse proxy).
     #[arg(long, env = "VOUCH_TRUSTED_PROXIES", default_value = "")]
     pub trusted_proxies: String,
+
+    /// Bearer token for /metrics endpoint. If unset, /metrics is disabled.
+    #[arg(long, env = "VOUCH_METRICS_BEARER_TOKEN")]
+    pub metrics_bearer_token: Option<String>,
 }
 
 // ============================================================================
@@ -379,6 +383,9 @@ pub struct ServerConfig {
     pub log_format: LogFormat,
     /// Trusted proxy CIDRs for X-Forwarded-For parsing.
     pub trusted_proxies: Vec<IpNet>,
+    /// Bearer token for /metrics endpoint access control.
+    /// If `None`, the /metrics endpoint is not exposed.
+    pub metrics_bearer_token: Option<SecretString>,
 }
 
 /// Log output format.
@@ -487,6 +494,7 @@ impl ServerConfig {
             require_attestation_cert: args.require_attestation_cert,
             log_format,
             trusted_proxies,
+            metrics_bearer_token: args.metrics_bearer_token.map(SecretString::from),
         })
     }
 

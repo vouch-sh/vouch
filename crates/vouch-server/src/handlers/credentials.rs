@@ -94,6 +94,8 @@ pub async fn issue_ssh_certificate(
         )
     })?;
 
+    crate::infra::metrics::record_credential_issuance("ssh");
+
     tracing::info!(
         "Issued SSH certificate for {} with principals {:?}, serial {}",
         redact_email(&user_email),
@@ -333,6 +335,8 @@ pub async fn get_aws_token(
         }
     })?;
 
+    crate::infra::metrics::record_credential_issuance("aws");
+
     Ok(Json(AwsTokenResponse {
         id_token: result.id_token,
         expires_in: result.expires_in,
@@ -446,6 +450,8 @@ pub async fn get_kubernetes_token(
             )
         }
     })?;
+
+    crate::infra::metrics::record_credential_issuance("kubernetes");
 
     tracing::info!(
         "Issued Kubernetes OIDC token for {} (audience: {})",
@@ -729,6 +735,8 @@ pub async fn get_github_token(
     {
         tracing::warn!("Failed to log GitHub credential event: {e}");
     }
+
+    crate::infra::metrics::record_credential_issuance("github");
 
     tracing::info!(
         "Issued GitHub token for {} (org {}, installation {})",
