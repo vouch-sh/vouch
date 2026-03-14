@@ -1042,8 +1042,9 @@ pub async fn browser_register_complete(
     }
 
     // ── Phase 6: Hardware attestation validation ────────────────────────
-    // Reject software passkeys and platform authenticators before DB access.
-    let validated = validate_registration_attestation(&attestation_object)?;
+    // Reject software passkeys, platform authenticators, and disallowed AAGUIDs.
+    let validated =
+        validate_registration_attestation(&attestation_object, &state.config().allowed_aaguids)?;
 
     // ── Phase 7: WebAuthn cryptographic verification ────────────────────
     use webauthn_rs::prelude::Base64UrlSafeData;

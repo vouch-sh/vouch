@@ -213,6 +213,16 @@ pub struct Args {
     /// Maximum lifetime for JWT assertions in seconds (RFC 7523).
     #[arg(long, env = "VOUCH_JWT_ASSERTION_MAX_LIFETIME", default_value = "300")]
     pub jwt_assertion_max_lifetime: i64,
+
+    /// AAGUID allowlist policy for WebAuthn registration.
+    ///
+    /// Controls which authenticator models are accepted:
+    /// - Empty or unset: any hardware key accepted
+    /// - `fips-only`: only FIPS-certified YubiKey models
+    /// - `yubikey-5`: any YubiKey 5 series model
+    /// - Comma-separated UUIDs: explicit allowlist
+    #[arg(long, env = "VOUCH_ALLOWED_AAGUIDS", default_value = "")]
+    pub allowed_aaguids: String,
 }
 
 // ============================================================================
@@ -313,6 +323,8 @@ pub struct ServerConfig {
     pub s3_config_poll_interval: u64,
     /// Maximum lifetime for JWT assertions in seconds (RFC 7523, default: 300).
     pub jwt_assertion_max_lifetime_seconds: i64,
+    /// AAGUID allowlist policy for WebAuthn registration (default: `Any`).
+    pub allowed_aaguids: vouch_common::AaguidPolicy,
 }
 
 impl ServerConfig {
@@ -354,6 +366,10 @@ impl ServerConfig {
         } else {
             Some(args.ssh_ca_key_path)
         };
+
+        // Parse AAGUID policy
+        let allowed_aaguids = vouch_common::AaguidPolicy::parse(&args.allowed_aaguids)
+            .map_err(|e| anyhow::anyhow!("Invalid VOUCH_ALLOWED_AAGUIDS: {}", e))?;
 
         Ok(Self {
             listen_addr: args.listen_addr,
@@ -397,6 +413,7 @@ impl ServerConfig {
             s3_config_region: args.s3_config_region,
             s3_config_poll_interval: args.s3_config_poll_interval,
             jwt_assertion_max_lifetime_seconds: args.jwt_assertion_max_lifetime,
+            allowed_aaguids,
         })
     }
 

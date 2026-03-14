@@ -190,17 +190,22 @@ impl AttestationValidation {
 
     /// Returns the user-facing error message for rejected attestation formats.
     #[must_use]
-    pub fn error_message(&self) -> Option<&'static str> {
+    pub fn error_message(&self) -> Option<String> {
         match self {
             Self::Valid(_) => None,
             Self::SoftwarePasskey => Some(
-                "Software passkeys (1Password, browser sync) are not supported. Please use a hardware security key.",
+                "Software passkeys (1Password, browser sync) are not supported. \
+                 Please use a hardware security key."
+                    .to_string(),
             ),
             Self::PlatformAuthenticator => Some(
-                "Platform authenticators (Touch ID, Windows Hello) are not supported. Please use a hardware security key.",
+                "Platform authenticators (Touch ID, Windows Hello) are not supported. \
+                 Please use a hardware security key."
+                    .to_string(),
             ),
             Self::Unknown(_) => Some(
-                "Unknown authenticator type. Please use a hardware security key like a YubiKey.",
+                "Unknown authenticator type. Please use a hardware security key like a YubiKey."
+                    .to_string(),
             ),
         }
     }

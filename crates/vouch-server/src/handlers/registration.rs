@@ -17,17 +17,20 @@ pub struct ValidatedAttestation {
 ///
 /// This performs common validation for both CLI and browser registration:
 /// 1. Validates the attestation is from a hardware authenticator (not software/platform)
-/// 2. Extracts the AAGUID from the attestation
-/// 3. Determines the device name from the AAGUID
+/// 2. Checks the AAGUID against the configured `AaguidPolicy`
+/// 3. Extracts the AAGUID from the attestation
+/// 4. Determines the device name from the AAGUID
 ///
 /// Duplicate credential prevention is handled by WebAuthn's `excludeCredentials`
 /// mechanism, which checks on the authenticator itself during `navigator.credentials.create()`.
 ///
 /// # Errors
 ///
-/// Returns an error if the attestation is from a software passkey or platform authenticator.
+/// Returns an error if the attestation is from a software passkey or platform
+/// authenticator, or if the AAGUID is not permitted by the policy.
 pub fn validate_registration_attestation(
     attestation_object: &[u8],
+    policy: &vouch_common::AaguidPolicy,
 ) -> Result<ValidatedAttestation, ServiceError> {
     // Validate attestation format - reject software passkeys and platform authenticators
     let validation = validate_hardware_attestation(attestation_object);
@@ -38,6 +41,52 @@ pub fn validate_registration_attestation(
 
     // Extract AAGUID from the attestation object
     let aaguid = extract_aaguid_from_attestation(attestation_object);
+
+    // SECURITY: AAGUID is extracted from the attestation object's authData,
+    // which is NOT cryptographically verified without x5c chain validation.
+    // A sophisticated attacker could forge an AAGUID. The hardware attestation
+    // format check above provides the first gate; this policy check is a
+    // defense-in-depth measure. Full x5c chain validation against the
+    // manufacturer's root CA is needed for cryptographic AAGUID assurance.
+
+    // Check AAGUID against configured policy.
+    // When the policy is not `Any`, a missing AAGUID must be rejected —
+    // otherwise an authenticator with malformed/missing attestation data
+    // would silently bypass the allowlist.
+    if !matches!(policy, vouch_common::AaguidPolicy::Any) {
+        match aaguid {
+            Some(ref aaguid_str) if !policy.is_allowed(aaguid_str) => {
+                tracing::warn!(
+                    aaguid = %aaguid_str,
+                    "Rejected registration: AAGUID not allowed by policy"
+                );
+                return Err(ServiceError::api(
+                    StatusCode::BAD_REQUEST,
+                    "aaguid_not_allowed",
+                    format!(
+                        "Authenticator '{aaguid_str}' is not permitted \
+                         by the server's AAGUID policy. \
+                         Please use an approved hardware security key."
+                    ),
+                ));
+            }
+            None => {
+                tracing::warn!(
+                    "Rejected registration: missing AAGUID \
+                     with non-Any policy"
+                );
+                return Err(ServiceError::api(
+                    StatusCode::BAD_REQUEST,
+                    "aaguid_missing",
+                    "Could not extract authenticator identity \
+                     (AAGUID). Registration requires an \
+                     identifiable hardware security key when an \
+                     AAGUID policy is configured.",
+                ));
+            }
+            _ => {} // AAGUID present and allowed
+        }
+    }
 
     // Determine device name from AAGUID if known
     let device_name = aaguid

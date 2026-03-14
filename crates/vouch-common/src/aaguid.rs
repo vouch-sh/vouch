@@ -7,6 +7,7 @@
 //! Source: https://support.yubico.com/hc/en-us/articles/360016648959-YubiKey-hardware-FIDO2-AAGUIDs
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::LazyLock;
 use uuid::Uuid;
 
@@ -135,6 +136,11 @@ static AAGUID_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new
 
     // YubiKey 5 CSPN Series (FW 5.4)
     // Most share AAGUIDs with standard YubiKey 5 series
+    m.insert("3aa78eb1-ddd8-46a8-a821-8f8ec57a7bd5", "YubiKey 5 CSPN NFC");
+    m.insert(
+        "4fc84f16-2545-4e53-b8fc-7bf4d7282a10",
+        "YubiKey 5 CSPN NFC (Enterprise)",
+    );
 
     // =========================================================================
     // Enterprise Attestation Capable YubiKey AAGUIDs
@@ -216,6 +222,56 @@ static AAGUID_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new
         "Security Key NFC - Enterprise Edition",
     ); // FW 5.7 (second half)
 
+    // Preview (pre-production) AAGUIDs
+    m.insert(
+        "34f5766d-1536-4a24-9033-0e294e510fb0",
+        "YubiKey 5 NFC (Preview)",
+    );
+    m.insert(
+        "3124e301-f14e-4e38-876d-fbeeb090e7bf",
+        "YubiKey 5Ci (Preview)",
+    );
+    m.insert(
+        "62e54e98-c209-4df3-b692-de71bb6a8528",
+        "YubiKey 5 NFC FIPS (Preview)",
+    );
+    m.insert(
+        "5b0e46ba-db02-44ac-b979-ca9b84f5e335",
+        "YubiKey 5Ci FIPS (Preview)",
+    );
+    m.insert(
+        "760eda36-00aa-4d29-855b-4012a182cdeb",
+        "Security Key NFC (Preview)",
+    );
+    m.insert(
+        "2772ce93-eb4b-4090-8b73-330f48477d73",
+        "Security Key NFC - Enterprise (Preview)",
+    );
+
+    // RC Preview (release candidate, FIPS validation in progress) AAGUIDs
+    m.insert(
+        "d2fbd093-ee62-488d-9dad-1e36389f8826",
+        "YubiKey 5 FIPS (RC Preview)",
+    );
+    m.insert(
+        "ce6bf97f-9f69-4ba7-9032-97adc6ca5cf1",
+        "YubiKey 5 NFC FIPS (RC Preview)",
+    );
+    m.insert(
+        "9e66c661-e428-452a-a8fb-51f7ed088acf",
+        "YubiKey 5Ci FIPS (RC Preview)",
+    );
+
+    // Batch/SKU variants
+    m.insert(
+        "9eb7eabc-9db5-49a1-b6c3-555a802093f4",
+        "YubiKey 5 NFC (KVZR57)",
+    );
+    m.insert(
+        "58276709-bb4b-4bb3-baf1-60eea99282a7",
+        "YubiKey Bio - Multi-protocol (1VDJSN)",
+    );
+
     // Custom/Organization-specific Enterprise AAGUIDs
     m.insert(
         "28969c24-0487-4a46-be39-37bc6337a24f",
@@ -224,6 +280,134 @@ static AAGUID_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new
 
     m
 });
+
+/// AAGUIDs for FIPS-certified YubiKey models.
+///
+/// Derived from `AAGUID_MAP` by matching names containing "FIPS".
+/// Includes production, enterprise, preview, and RC preview variants.
+static FIPS_AAGUIDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    AAGUID_MAP
+        .iter()
+        .filter(|(_, name)| name.contains("FIPS"))
+        .map(|(aaguid, _)| *aaguid)
+        .collect()
+});
+
+/// AAGUIDs for any YubiKey 5 series model.
+///
+/// Derived from `AAGUID_MAP` by matching names starting with "YubiKey 5"
+/// or "YubiKey Bio - Multi-protocol". Excludes Security Key series and
+/// Bio FIDO-only edition (not branded "YubiKey 5").
+static YUBIKEY_5_AAGUIDS: LazyLock<HashSet<&'static str>> = LazyLock::new(|| {
+    AAGUID_MAP
+        .iter()
+        .filter(|(_, name)| {
+            name.starts_with("YubiKey 5") || name.starts_with("YubiKey Bio - Multi-protocol")
+        })
+        .map(|(aaguid, _)| *aaguid)
+        .collect()
+});
+
+/// Returns `true` if the AAGUID belongs to a FIPS-certified YubiKey.
+///
+/// Accepts AAGUIDs in both hyphenated and non-hyphenated formats (case-insensitive).
+#[must_use]
+pub fn is_fips(aaguid: &str) -> bool {
+    let normalized = normalize_aaguid(aaguid);
+    FIPS_AAGUIDS.contains(normalized.as_str())
+}
+
+/// Returns `true` if the AAGUID belongs to any YubiKey 5 series model.
+///
+/// This includes FIPS variants, Enterprise attestation variants, and Bio
+/// Multi-protocol models. It excludes Security Key series and Bio FIDO Edition.
+///
+/// Accepts AAGUIDs in both hyphenated and non-hyphenated formats (case-insensitive).
+#[must_use]
+pub fn is_yubikey_5(aaguid: &str) -> bool {
+    let normalized = normalize_aaguid(aaguid);
+    YUBIKEY_5_AAGUIDS.contains(normalized.as_str())
+}
+
+/// Normalize an AAGUID to lowercase hyphenated UUID format.
+///
+/// Returns the normalized string, or the input unchanged (lowercased) if it
+/// cannot be parsed as a UUID.
+fn normalize_aaguid(aaguid: &str) -> String {
+    let lower = aaguid.to_lowercase();
+    if let Ok(uuid) = Uuid::try_parse(&lower) {
+        uuid.as_hyphenated().to_string()
+    } else {
+        lower
+    }
+}
+
+/// Policy controlling which AAGUID (authenticator model) values are accepted
+/// during WebAuthn registration.
+///
+/// Configured via the `VOUCH_ALLOWED_AAGUIDS` environment variable:
+/// - Empty or unset → `Any` (all hardware keys accepted)
+/// - `"fips-only"` → `FipsOnly`
+/// - `"yubikey-5"` → `YubiKey5Only`
+/// - Comma-separated AAGUIDs → `AllowList`
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum AaguidPolicy {
+    /// Accept any AAGUID (default). Hardware attestation format is still required.
+    #[default]
+    Any,
+    /// Only accept FIPS-certified YubiKey models.
+    FipsOnly,
+    /// Only accept YubiKey 5 series models (includes FIPS and Enterprise variants).
+    YubiKey5Only,
+    /// Only accept AAGUIDs from an explicit allowlist.
+    AllowList(std::collections::HashSet<String>),
+}
+
+impl AaguidPolicy {
+    /// Returns `true` if the given AAGUID is permitted by this policy.
+    #[must_use]
+    pub fn is_allowed(&self, aaguid: &str) -> bool {
+        match self {
+            Self::Any => true,
+            Self::FipsOnly => is_fips(aaguid),
+            Self::YubiKey5Only => is_yubikey_5(aaguid),
+            Self::AllowList(set) => {
+                let normalized = normalize_aaguid(aaguid);
+                set.contains(&normalized)
+            }
+        }
+    }
+
+    /// Parse an `AaguidPolicy` from a configuration string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string if any entry in a comma-separated list is not
+    /// a valid UUID.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Ok(Self::Any);
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        match lower.as_str() {
+            "fips-only" => Ok(Self::FipsOnly),
+            "yubikey-5" => Ok(Self::YubiKey5Only),
+            _ => {
+                let entries: Result<std::collections::HashSet<String>, String> = trimmed
+                    .split(',')
+                    .map(|entry| {
+                        let e = entry.trim();
+                        Uuid::try_parse(e)
+                            .map(|u| u.as_hyphenated().to_string())
+                            .map_err(|_| format!("invalid AAGUID: '{e}'"))
+                    })
+                    .collect();
+                Ok(Self::AllowList(entries?))
+            }
+        }
+    }
+}
 
 /// Look up the device model name for an AAGUID.
 ///
@@ -234,22 +418,8 @@ static AAGUID_MAP: LazyLock<HashMap<&'static str, &'static str>> = LazyLock::new
 /// and non-hyphenated (`28969c2404874a46be3937bc6337a24f`) formats.
 #[must_use]
 pub fn lookup_device_model(aaguid: &str) -> Option<&'static str> {
-    // Normalize to lowercase for comparison
-    let normalized = aaguid.to_lowercase();
-
-    // Try direct lookup first
-    if let Some(model) = AAGUID_MAP.get(normalized.as_str()) {
-        return Some(*model);
-    }
-
-    // If no hyphens, try parsing as UUID and formatting with hyphens
-    if let Ok(uuid) = Uuid::try_parse(&normalized) {
-        return AAGUID_MAP
-            .get(uuid.as_hyphenated().to_string().as_str())
-            .copied();
-    }
-
-    None
+    let normalized = normalize_aaguid(aaguid);
+    AAGUID_MAP.get(normalized.as_str()).copied()
 }
 
 /// Extract AAGUID from authenticator data.
@@ -754,5 +924,205 @@ mod tests {
             result,
             Some("ffffffff-ffff-ffff-ffff-ffffffffffff".to_string())
         );
+    }
+
+    // =========================================================================
+    // is_fips / is_yubikey_5 Tests
+    // =========================================================================
+
+    #[test]
+    fn test_fips_aaguids_count() {
+        assert_eq!(FIPS_AAGUIDS.len(), 15);
+    }
+
+    #[test]
+    fn test_yubikey_5_aaguids_count() {
+        assert_eq!(YUBIKEY_5_AAGUIDS.len(), 45);
+    }
+
+    #[test]
+    fn test_cspn_is_yubikey_5_not_fips() {
+        // CSPN (French certification) is YubiKey 5 but not FIPS
+        assert!(is_yubikey_5("3aa78eb1-ddd8-46a8-a821-8f8ec57a7bd5"));
+        assert!(!is_fips("3aa78eb1-ddd8-46a8-a821-8f8ec57a7bd5"));
+    }
+
+    #[test]
+    fn test_is_fips_known_fips_aaguid() {
+        assert!(is_fips("73bb0cd4-e502-49b8-9c6f-b59445bf720b")); // YubiKey 5C Nano FIPS
+        assert!(is_fips("c1f9a0bc-1dd2-404a-b27f-8e29047a43fd")); // YubiKey 5 NFC FIPS
+        assert!(is_fips("85203421-48f9-4355-9bc8-8a53846e5083")); // YubiKey 5Ci FIPS
+        assert!(is_fips("fcc0118f-cd45-435b-8da1-9782b2da0715")); // YubiKey 5 NFC FIPS RC
+        assert!(is_fips("57f7de54-c807-4eab-b1c6-1c9be7984e92")); // YubiKey 5 Nano FIPS RC
+        assert!(is_fips("7b96457d-e3cd-432b-9ceb-c9fdd7ef7432")); // YubiKey 5Ci FIPS RC
+        assert!(is_fips("79f3c8ba-9e35-484b-8f47-53a5a0f5c630")); // YubiKey 5 NFC FIPS (Enterprise)
+        assert!(is_fips("905b4cb4-ed6f-4da9-92fc-45e0d4e9b5c7")); // YubiKey 5 Nano FIPS (Enterprise)
+        assert!(is_fips("3a662962-c6d4-4023-bebb-98ae92e78e20")); // YubiKey 5Ci FIPS (Enterprise)
+        assert!(is_fips("28969c24-0487-4a46-be39-37bc6337a24f")); // YubiKey 5C Nano FIPS (Enterprise)
+    }
+
+    #[test]
+    fn test_is_fips_non_fips_aaguid() {
+        assert!(!is_fips("2fc0579f-8113-47ea-b116-bb5a8db9202a")); // YubiKey 5 NFC (non-FIPS)
+        assert!(!is_fips("ee882879-721c-4913-9775-3dfcce97072a")); // YubiKey 5 (USB-A)
+        assert!(!is_fips("f8a011f3-8c0a-4d15-8006-17111f9edc7d")); // Security Key
+        assert!(!is_fips("00000000-0000-0000-0000-000000000000")); // Unknown
+    }
+
+    #[test]
+    fn test_is_fips_case_insensitive() {
+        assert!(is_fips("73BB0CD4-E502-49B8-9C6F-B59445BF720B"));
+        assert!(is_fips("73bb0cd4e50249b89c6fb59445bf720b")); // No hyphens
+    }
+
+    #[test]
+    fn test_is_yubikey_5_standard_models() {
+        assert!(is_yubikey_5("2fc0579f-8113-47ea-b116-bb5a8db9202a")); // YubiKey 5 NFC
+        assert!(is_yubikey_5("ee882879-721c-4913-9775-3dfcce97072a")); // YubiKey 5 (USB-A)
+        assert!(is_yubikey_5("c5ef55ff-ad9a-4b9f-b580-adebafe026d0")); // YubiKey 5Ci
+        assert!(is_yubikey_5("73bb0cd4-e502-49b8-9c6f-b59445bf720b")); // YubiKey 5C Nano FIPS
+    }
+
+    #[test]
+    fn test_is_yubikey_5_fips_models() {
+        // All FIPS models are also YubiKey 5 series
+        assert!(is_yubikey_5("c1f9a0bc-1dd2-404a-b27f-8e29047a43fd"));
+        assert!(is_yubikey_5("85203421-48f9-4355-9bc8-8a53846e5083"));
+        assert!(is_yubikey_5("79f3c8ba-9e35-484b-8f47-53a5a0f5c630"));
+    }
+
+    #[test]
+    fn test_is_yubikey_5_bio_multiprotocol() {
+        assert!(is_yubikey_5("7d1351a6-e097-4852-b8bf-c9ac5c9ce4a3")); // Bio Multi-protocol FW 5.6
+        assert!(is_yubikey_5("90636e1f-ef82-43bf-bdcf-5255f139d12f")); // Bio Multi-protocol FW 5.7
+    }
+
+    #[test]
+    fn test_is_yubikey_5_excludes_security_key_and_bio_fido() {
+        assert!(!is_yubikey_5("f8a011f3-8c0a-4d15-8006-17111f9edc7d")); // Security Key
+        assert!(!is_yubikey_5("b92c3f9a-c014-4056-887f-140a2501163b")); // Security Key NFC
+        assert!(!is_yubikey_5("d8522d9f-575b-4866-88a9-ba99fa02f35b")); // Bio FIDO Edition
+        assert!(!is_yubikey_5("00000000-0000-0000-0000-000000000000")); // Unknown
+    }
+
+    // =========================================================================
+    // AaguidPolicy Tests
+    // =========================================================================
+
+    #[test]
+    fn test_policy_any_allows_all() {
+        let policy = AaguidPolicy::Any;
+        assert!(policy.is_allowed("2fc0579f-8113-47ea-b116-bb5a8db9202a"));
+        assert!(policy.is_allowed("f8a011f3-8c0a-4d15-8006-17111f9edc7d"));
+        assert!(policy.is_allowed("00000000-0000-0000-0000-000000000000"));
+    }
+
+    #[test]
+    fn test_policy_fips_only() {
+        let policy = AaguidPolicy::FipsOnly;
+        assert!(policy.is_allowed("73bb0cd4-e502-49b8-9c6f-b59445bf720b")); // FIPS
+        assert!(!policy.is_allowed("2fc0579f-8113-47ea-b116-bb5a8db9202a")); // Non-FIPS YK5
+        assert!(!policy.is_allowed("f8a011f3-8c0a-4d15-8006-17111f9edc7d")); // Security Key
+    }
+
+    #[test]
+    fn test_policy_yubikey_5_only() {
+        let policy = AaguidPolicy::YubiKey5Only;
+        assert!(policy.is_allowed("2fc0579f-8113-47ea-b116-bb5a8db9202a")); // YubiKey 5 NFC
+        assert!(policy.is_allowed("73bb0cd4-e502-49b8-9c6f-b59445bf720b")); // FIPS (also YK5)
+        assert!(!policy.is_allowed("f8a011f3-8c0a-4d15-8006-17111f9edc7d")); // Security Key
+        assert!(!policy.is_allowed("d8522d9f-575b-4866-88a9-ba99fa02f35b")); // Bio FIDO Edition
+    }
+
+    #[test]
+    fn test_policy_allowlist() {
+        let policy = AaguidPolicy::AllowList(
+            ["2fc0579f-8113-47ea-b116-bb5a8db9202a".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        assert!(policy.is_allowed("2fc0579f-8113-47ea-b116-bb5a8db9202a"));
+        assert!(!policy.is_allowed("ee882879-721c-4913-9775-3dfcce97072a"));
+    }
+
+    #[test]
+    fn test_policy_allowlist_case_insensitive() {
+        let policy = AaguidPolicy::AllowList(
+            ["2fc0579f-8113-47ea-b116-bb5a8db9202a".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        assert!(policy.is_allowed("2FC0579F-8113-47EA-B116-BB5A8DB9202A"));
+        assert!(policy.is_allowed("2fc0579f811347eab116bb5a8db9202a")); // No hyphens
+    }
+
+    #[test]
+    fn test_policy_parse_empty() {
+        assert_eq!(AaguidPolicy::parse("").unwrap(), AaguidPolicy::Any);
+        assert_eq!(AaguidPolicy::parse("  ").unwrap(), AaguidPolicy::Any);
+    }
+
+    #[test]
+    fn test_policy_parse_fips_only() {
+        assert_eq!(
+            AaguidPolicy::parse("fips-only").unwrap(),
+            AaguidPolicy::FipsOnly
+        );
+    }
+
+    #[test]
+    fn test_policy_parse_yubikey_5() {
+        assert_eq!(
+            AaguidPolicy::parse("yubikey-5").unwrap(),
+            AaguidPolicy::YubiKey5Only
+        );
+    }
+
+    #[test]
+    fn test_policy_parse_allowlist_single() {
+        let policy = AaguidPolicy::parse("2fc0579f-8113-47ea-b116-bb5a8db9202a").unwrap();
+        assert!(matches!(policy, AaguidPolicy::AllowList(ref set) if set.len() == 1));
+        assert!(policy.is_allowed("2fc0579f-8113-47ea-b116-bb5a8db9202a"));
+    }
+
+    #[test]
+    fn test_policy_parse_allowlist_multiple() {
+        let policy = AaguidPolicy::parse(
+            "2fc0579f-8113-47ea-b116-bb5a8db9202a, \
+             73bb0cd4-e502-49b8-9c6f-b59445bf720b",
+        )
+        .unwrap();
+        assert!(matches!(policy, AaguidPolicy::AllowList(ref set) if set.len() == 2));
+        assert!(policy.is_allowed("2fc0579f-8113-47ea-b116-bb5a8db9202a"));
+        assert!(policy.is_allowed("73bb0cd4-e502-49b8-9c6f-b59445bf720b"));
+    }
+
+    #[test]
+    fn test_policy_parse_case_insensitive_keywords() {
+        assert_eq!(
+            AaguidPolicy::parse("FIPS-ONLY").unwrap(),
+            AaguidPolicy::FipsOnly
+        );
+        assert_eq!(
+            AaguidPolicy::parse("Fips-Only").unwrap(),
+            AaguidPolicy::FipsOnly
+        );
+        assert_eq!(
+            AaguidPolicy::parse("YUBIKEY-5").unwrap(),
+            AaguidPolicy::YubiKey5Only
+        );
+    }
+
+    #[test]
+    fn test_policy_parse_invalid_uuid_errors() {
+        let result = AaguidPolicy::parse("not-a-uuid");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.contains("invalid AAGUID"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_policy_default_is_any() {
+        assert_eq!(AaguidPolicy::default(), AaguidPolicy::Any);
     }
 }

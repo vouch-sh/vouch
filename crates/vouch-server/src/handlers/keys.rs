@@ -225,8 +225,9 @@ pub async fn register_complete(
         ));
     }
 
-    // Validate attestation (hardware-only, extract device info)
-    let validated = validate_registration_attestation(&req.attestation_object)?;
+    // Validate attestation (hardware-only, AAGUID policy, extract device info)
+    let validated =
+        validate_registration_attestation(&req.attestation_object, &config.allowed_aaguids)?;
 
     // Use server-verified AAGUID if available, fall back to client-provided
     let aaguid = verified.aaguid.or(validated.aaguid);

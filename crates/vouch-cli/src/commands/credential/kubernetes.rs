@@ -90,8 +90,7 @@ mod tests {
 
     #[test]
     fn test_build_exec_credential_no_extra_fields() {
-        let cred =
-            build_exec_credential("token", "2026-01-01T00:00:00Z").expect("should build");
+        let cred = build_exec_credential("token", "2026-01-01T00:00:00Z").expect("should build");
         let obj = cred.as_object().unwrap();
         assert_eq!(obj.len(), 3); // kind, apiVersion, status
         let status = cred["status"].as_object().unwrap();

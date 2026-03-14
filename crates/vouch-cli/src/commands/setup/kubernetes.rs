@@ -302,7 +302,10 @@ users:
 
         assert_eq!(config.clusters.len(), 1);
         assert_eq!(config.clusters[0].name, "my-cluster");
-        assert_eq!(config.clusters[0].cluster.server, "https://k8s.example.com:6443");
+        assert_eq!(
+            config.clusters[0].cluster.server,
+            "https://k8s.example.com:6443"
+        );
         assert_eq!(config.contexts.len(), 1);
         assert_eq!(config.contexts[0].name, "my-cluster-vouch");
         assert_eq!(config.users.len(), 1);

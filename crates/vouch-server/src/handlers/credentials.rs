@@ -7,7 +7,9 @@ use crate::db::documents::audit::GitHubCredentialAuditData;
 use crate::services::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
-use crate::services::integrations::kubernetes::{K8sError, DEFAULT_K8S_AUDIENCE, issue_kubernetes_token};
+use crate::services::integrations::kubernetes::{
+    DEFAULT_K8S_AUDIENCE, K8sError, issue_kubernetes_token,
+};
 use axum::extract::{OriginalUri, Query};
 use axum::http::Method;
 use axum::{Json, extract::State, http::HeaderMap, http::StatusCode};
@@ -364,8 +366,7 @@ pub async fn get_kubernetes_token(
     State(state): State<Arc<AppState>>,
     Query(query): Query<K8sTokenQuery>,
 ) -> Result<Json<K8sTokenResponse>, ServiceError> {
-    let token =
-        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     let user = db::get_user_by_id(&state.store, &token.sub)
         .await
@@ -382,10 +383,7 @@ pub async fn get_kubernetes_token(
         })?;
 
     let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
-    let audience = query
-        .audience
-        .as_deref()
-        .unwrap_or(DEFAULT_K8S_AUDIENCE);
+    let audience = query.audience.as_deref().unwrap_or(DEFAULT_K8S_AUDIENCE);
 
     // Get authenticator info for AAGUID claim
     let authenticator = if let Some(ref auth_id) = token.authenticator_id {
@@ -422,25 +420,25 @@ pub async fn get_kubernetes_token(
         authenticator.and_then(|a| a.aaguid),
         hd,
     )
-        .await
-        .map_err(|e| match e {
-            K8sError::ClaimsBuild(ref err) => {
-                tracing::error!("Kubernetes token claims build error: {err}");
-                ServiceError::api(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "claims_error",
-                    "Failed to build token claims",
-                )
-            }
-            K8sError::TokenSign(ref err) => {
-                tracing::error!("Kubernetes token signing error: {err}");
-                ServiceError::api(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "token_error",
-                    "Failed to sign token",
-                )
-            }
-        })?;
+    .await
+    .map_err(|e| match e {
+        K8sError::ClaimsBuild(ref err) => {
+            tracing::error!("Kubernetes token claims build error: {err}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "claims_error",
+                "Failed to build token claims",
+            )
+        }
+        K8sError::TokenSign(ref err) => {
+            tracing::error!("Kubernetes token signing error: {err}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "token_error",
+                "Failed to sign token",
+            )
+        }
+    })?;
 
     tracing::info!(
         "Issued Kubernetes OIDC token for {} (audience: {})",
