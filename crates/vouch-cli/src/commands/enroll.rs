@@ -4,10 +4,14 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use std::io::{IsTerminal, Write, stdout};
-use vouch_common::{DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, OAuthError};
+use vouch_common::{
+    DeviceCodeRequest, DeviceCodeResponse, DeviceTokenRequest, OAuthError, RegisterCompleteRequest,
+    RegisterCompleteResponse, RegisterStartRequest, RegisterStartResponse,
+};
 
 use crate::client::VouchClient;
 use crate::config::Config;
+use crate::fido2::{self, YubiKey};
 use crate::session;
 
 /// Response from device token endpoint.
@@ -117,6 +121,13 @@ pub async fn run(server: &str) -> Result<()> {
 
     println!("\nEnrollment successful!");
     println!("Enrolled as: {}", token_response.email);
+
+    // Step 8: Auto-register the inserted YubiKey if not already known.
+    // The enrollment token is a full OAuth access token that can call
+    // the /v1/keys/register/* endpoints (same as `vouch register`).
+    if let Err(e) = register_current_key(server, token_response.access_token.clone()).await {
+        tracing::debug!("Auto-registration skipped: {e}");
+    }
 
     if agent_stored {
         println!("\nYour identity is now available. Check with: vouch status");
@@ -421,4 +432,70 @@ async fn poll_once(
     }
 
     Err(PollError::Other(format!("HTTP {status}: {error_text}")))
+}
+
+/// Register the currently-inserted YubiKey using the enrollment token.
+///
+/// Called after enrollment succeeds. If the YubiKey is already registered
+/// (credential ID is in the exclude list), this is a no-op. If no YubiKey
+/// is inserted, or registration fails, the error is returned but should
+/// not block the enrollment flow.
+async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
+    let client = VouchClient::with_token(server, token)?;
+
+    let start_resp: RegisterStartResponse = client
+        .post_authenticated(
+            "/v1/keys/register/start",
+            &RegisterStartRequest {
+                name: "YubiKey".to_string(),
+            },
+        )
+        .await
+        .context("failed to start key registration")?;
+
+    println!("\nRegistering your YubiKey with the server...");
+
+    let rp_id = start_resp.rp_id.clone();
+    let rp_name = start_resp.rp_name.clone();
+    let challenge = start_resp.challenge.clone();
+    let user_id = start_resp.user_id;
+    let user_name = start_resp.user_name.clone();
+
+    // Short timeout — the key should already be inserted from
+    // the enrollment flow. Don't block the user for long.
+    let result = fido2::spawn_fido2(move || {
+        let key = YubiKey::wait_for_device(10)?;
+        let pin = fido2::ensure_pin_configured(&key)?;
+        println!("Touch your YubiKey...");
+        key.register(
+            &rp_id,
+            &rp_name,
+            &challenge,
+            user_id.as_bytes(),
+            &user_name,
+            pin.expose_secret(),
+        )
+    })
+    .await?;
+
+    let complete_resp: RegisterCompleteResponse = client
+        .post_authenticated(
+            "/v1/keys/register/complete",
+            &RegisterCompleteRequest {
+                state: start_resp.state,
+                credential_id: result.credential_id,
+                public_key: result.public_key,
+                attestation_object: result.attestation_object,
+                client_data_json: result.client_data_json,
+            },
+        )
+        .await
+        .context("failed to complete key registration")?;
+
+    println!(
+        "YubiKey registered! (device ID: {})",
+        complete_resp.device_id
+    );
+
+    Ok(())
 }

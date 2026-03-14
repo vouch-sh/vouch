@@ -542,8 +542,9 @@ async fn test_revoked_token_cannot_access_resources() {
 }
 
 #[tokio::test]
-async fn test_revoke_does_not_affect_other_sessions() {
-    // Revoking one session should not affect unrelated sessions
+async fn test_revoke_kills_all_user_sessions() {
+    // Revoking any token revokes ALL sessions for that user
+    // (human presence attestation: logout = full logout)
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "rev-d2@example.com").await;
@@ -554,7 +555,7 @@ async fn test_revoke_does_not_affect_other_sessions() {
     let (token_a, _) = issue_oauth_access_token(&app, &state, &user, &auth_a, &client).await;
     let token_b = create_test_session(&state, &user.id, &user.email, &auth_b).await;
 
-    // Revoke token_a
+    // Revoke token_a — should kill ALL sessions for the user
     let auth_header = client.basic_auth_header();
     let (status, _) = http_post_form(
         &app,
@@ -578,7 +579,7 @@ async fn test_revoke_does_not_affect_other_sessions() {
         "Revoked token_a should fail"
     );
 
-    // token_b should still work
+    // token_b should also be dead (all user sessions revoked)
     let (status, _) = http_get(
         &app,
         "/v1/keys",
@@ -587,8 +588,8 @@ async fn test_revoke_does_not_affect_other_sessions() {
     .await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "Unrevoked token_b should still work"
+        StatusCode::UNAUTHORIZED,
+        "token_b should also be revoked (full user logout)"
     );
 }
 
@@ -799,9 +800,9 @@ async fn test_full_lifecycle() {
 
 #[tokio::test]
 async fn test_token_revocation_vs_key_deletion() {
-    // Token revocation (RFC 7009) is server-side session deletion.
-    // Key deletion cascades to ALL sessions for that key.
-    // Verify they are independent mechanisms.
+    // Token revocation kills ALL sessions for the user.
+    // Key deletion cascades to sessions for that specific key.
+    // Both mechanisms result in session cleanup but trigger differently.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "cross-e6@example.com").await;
@@ -812,7 +813,7 @@ async fn test_token_revocation_vs_key_deletion() {
     let token_a1 = create_test_session(&state, &user.id, &user.email, &auth_a).await;
     let token_a2 = create_test_session(&state, &user.id, &user.email, &auth_a).await;
 
-    // Revoke token_a1 via RFC 7009 — only this specific token
+    // Revoke token_a1 — kills ALL sessions for the user
     let auth_header = client.basic_auth_header();
     let (status, _) = http_post_form(
         &app,
@@ -823,7 +824,7 @@ async fn test_token_revocation_vs_key_deletion() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    // token_a1 is dead, token_a2 still works
+    // Both token_a1 and token_a2 should be dead (full user logout)
     let (status, _) = http_get(
         &app,
         "/v1/keys",
@@ -844,12 +845,16 @@ async fn test_token_revocation_vs_key_deletion() {
     .await;
     assert_eq!(
         status,
-        StatusCode::OK,
-        "Non-revoked token should still work"
+        StatusCode::UNAUTHORIZED,
+        "All user sessions should be revoked"
     );
 
-    // Now delete Key A via session bound to Key B — cascades to ALL Key A sessions
+    // Key deletion is a separate mechanism — create fresh sessions and
+    // verify key deletion cascades to sessions for that key
     let token_b = create_test_session(&state, &user.id, &user.email, &auth_b).await;
+    let token_a3 = create_test_session(&state, &user.id, &user.email, &auth_a).await;
+
+    // Delete Key A via session bound to Key B
     let (status, _) = http_delete(
         &app,
         &format!("/v1/keys/{auth_a}"),
@@ -858,20 +863,20 @@ async fn test_token_revocation_vs_key_deletion() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    // token_a2 should now also be dead (key deletion cascade)
+    // token_a3 should be dead (key deletion cascade)
     let (status, _) = http_get(
         &app,
         "/v1/keys",
-        &[("Authorization", &format!("Bearer {token_a2}"))],
+        &[("Authorization", &format!("Bearer {token_a3}"))],
     )
     .await;
     assert_eq!(
         status,
         StatusCode::UNAUTHORIZED,
-        "Key deletion should cascade to remaining sessions"
+        "Key deletion should cascade to key's sessions"
     );
 
-    // token_b should still work
+    // token_b should still work (different key)
     let (status, _) = http_get(
         &app,
         "/v1/keys",

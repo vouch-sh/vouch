@@ -670,9 +670,8 @@ fn token_error(body: &str, status: reqwest::StatusCode) -> anyhow::Error {
     if let Ok(oauth_err) = serde_json::from_str::<vouch_common::OAuthError>(body) {
         let hint = match oauth_err.error.as_str() {
             "invalid_grant" => {
-                "\n\nYour authenticator is not registered with this \
-                 server.\nRun 'vouch enroll' to register your YubiKey \
-                 first."
+                "\n\nThis YubiKey is not registered with the server.\n\
+                 Run 'vouch enroll' to register it."
             }
             "invalid_client" => {
                 "\n\nClient registration is invalid or expired.\n\
