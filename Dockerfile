@@ -97,6 +97,7 @@ COPY crates/vouch-common/src crates/vouch-common/src
 COPY crates/vouch-server/src crates/vouch-server/src
 COPY crates/vouch-server/data crates/vouch-server/data
 COPY crates/vouch-server/migrations crates/vouch-server/migrations
+COPY crates/vouch-server/root_certs crates/vouch-server/root_certs
 COPY crates/vouch-server/templates crates/vouch-server/templates
 
 # Copy built static assets (needed at compile time for rust-embed)

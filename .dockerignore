@@ -17,6 +17,7 @@
 !crates/vouch-server/src/
 !crates/vouch-server/data/
 !crates/vouch-server/migrations/
+!crates/vouch-server/root_certs/
 !crates/vouch-server/templates/
 !crates/vouch-server/static/
 !crates/vouch-server/styles/
