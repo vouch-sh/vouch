@@ -837,7 +837,7 @@ pub async fn browser_register_start(
         .collect();
 
     // Use webauthn-rs to generate proper registration options with cryptographic verification
-    let (ccr, webauthn_state) = state
+    let (mut ccr, webauthn_state) = state
         .webauthn
         .start_passkey_registration(user_id, &user_email, &user_email, Some(exclude_credentials))
         .map_err(|e| {
@@ -847,6 +847,11 @@ pub async fn browser_register_start(
                 e.to_string(),
             )
         })?;
+
+    // Request direct attestation so the browser forwards the x5c certificate
+    // chain. This enables attestation chain validation against pinned Yubico
+    // root CAs and AAGUID extraction from the leaf certificate.
+    ccr.public_key.attestation = Some(webauthn_rs_proto::AttestationConveyancePreference::Direct);
 
     // Create registration state with webauthn verification state
     let now = jiff::Timestamp::now();
@@ -1042,8 +1047,15 @@ pub async fn browser_register_complete(
     }
 
     // ── Phase 6: Hardware attestation validation ────────────────────────
-    // Reject software passkeys and platform authenticators before DB access.
-    let validated = validate_registration_attestation(&attestation_object)?;
+    // Reject software passkeys, platform authenticators, and disallowed AAGUIDs.
+    let validated = validate_registration_attestation(
+        &attestation_object,
+        &state.config().allowed_aaguids,
+        state.config().require_attestation_cert,
+    )?;
+
+    // ── Phase 6b: Extract x5c certs before attestation_object is moved ─
+    let x5c_certs = crate::attestation::extract_x5c_from_attestation(&attestation_object);
 
     // ── Phase 7: WebAuthn cryptographic verification ────────────────────
     use webauthn_rs::prelude::Base64UrlSafeData;
@@ -1108,6 +1120,31 @@ pub async fn browser_register_complete(
     // rather than the one from the request, to ensure consistency with what the YubiKey has stored.
     let cred_id_to_store = passkey.cred_id().to_vec();
 
+    // ── Phase 8b: x5c attestation chain validation (browser enrollment) ──
+    // The browser enrollment path uses webauthn-rs for verification, so we
+    // additionally validate the x5c chain here for attestation_verified status.
+    let mut validated = validated;
+    if let Some(x5c_certs) = x5c_certs {
+        match crate::crypto::attestation_chain::validate_attestation_chain(
+            &x5c_certs,
+            validated.aaguid.as_deref(),
+        ) {
+            Ok(_chain_result) => {
+                validated.attestation_verified = true;
+                tracing::info!(
+                    attestation_verified = true,
+                    "Browser enrollment: x5c chain validated"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Browser enrollment: x5c chain validation \
+                     failed (non-fatal): {e}"
+                );
+            }
+        }
+    }
+
     // Store the authenticator with verified credential
     // user_handle is the user_id as bytes (for discoverable credentials)
     let user_handle = reg_state.user_id.as_bytes().to_vec();
@@ -1120,6 +1157,7 @@ pub async fn browser_register_complete(
         &public_key_cbor,
         validated.aaguid.as_deref(),
         Some(&user_handle),
+        validated.attestation_verified,
     )
     .await
     .map_err(|e| ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string()))?;
@@ -1167,6 +1205,8 @@ pub async fn browser_register_complete(
             tracing::warn!("Failed to log enrollment event: {}", e);
         }
     });
+
+    crate::infra::metrics::record_auth_event("enrollment");
 
     tracing::info!(
         "Enrollment complete for: {} with {} (AAGUID: {})",
@@ -1398,4 +1438,187 @@ fn is_valid_user_code_format(code: &str) -> bool {
         .enumerate()
         .filter(|(i, _)| *i != 4)
         .all(|(_, &b)| USER_CODE_CHARS.contains(&b))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
+
+    use super::*;
+    use crate::test_utils::{http_post_json, test_app};
+    use axum::http::StatusCode;
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use uuid::Uuid;
+
+    /// Build a valid `BrowserRegistrationState` JWT using the test signer.
+    ///
+    /// Uses `webauthn.start_passkey_registration` to obtain a real
+    /// `PasskeyRegistration` value — the struct cannot be constructed any
+    /// other way because its fields are private to webauthn-rs.
+    async fn make_valid_state_token(state: &AppState) -> String {
+        let user_id = Uuid::now_v7();
+        let (_ccr, webauthn_state) = state
+            .webauthn
+            .start_passkey_registration(user_id, "test@example.com", "test@example.com", None)
+            .expect("start_passkey_registration");
+
+        let now = jiff::Timestamp::now();
+        let reg_state = BrowserRegistrationState {
+            device_auth_id: String::new(),
+            user_id,
+            user_email: "test@example.com".to_string(),
+            webauthn_state,
+            iat: now.as_second(),
+            exp: now.as_second() + 300,
+        };
+
+        reg_state
+            .encode(&state.state_signer)
+            .await
+            .expect("encode state")
+    }
+
+    /// Build a minimal valid base64url credential_id (16 zero bytes).
+    fn valid_credential_id() -> String {
+        URL_SAFE_NO_PAD.encode([0u8; 16])
+    }
+
+    /// Build a minimal valid base64url attestation_object (1 non-empty byte).
+    fn valid_attestation_object() -> String {
+        URL_SAFE_NO_PAD.encode([0u8; 1])
+    }
+
+    /// Build a minimal valid base64url client_data_json.
+    fn valid_client_data_json() -> String {
+        let json =
+            r#"{"type":"webauthn.create","challenge":"abc","origin":"https://test.example.com"}"#;
+        URL_SAFE_NO_PAD.encode(json.as_bytes())
+    }
+
+    // ── test_enrollment_complete_missing_state ───────────────────────────────
+
+    #[tokio::test]
+    async fn test_enrollment_complete_missing_state() {
+        let (app, _state) = test_app().await;
+
+        // Omit the `state` field entirely — serde will fail to deserialize.
+        let body = serde_json::json!({
+            "credential_id": valid_credential_id(),
+            "attestation_object": valid_attestation_object(),
+            "client_data_json": valid_client_data_json(),
+        })
+        .to_string();
+
+        let (status, _body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+
+        // Missing required JSON field → 422 Unprocessable Entity (axum extractor error)
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // ── test_enrollment_complete_invalid_state_token ─────────────────────────
+
+    #[tokio::test]
+    async fn test_enrollment_complete_invalid_state_token() {
+        let (app, _state) = test_app().await;
+
+        let body = serde_json::json!({
+            "state": "not-a-jwt",
+            "credential_id": valid_credential_id(),
+            "attestation_object": valid_attestation_object(),
+            "client_data_json": valid_client_data_json(),
+        })
+        .to_string();
+
+        let (status, resp_body) =
+            http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            resp_body.contains("invalid_state"),
+            "expected 'invalid_state' in body, got: {resp_body}"
+        );
+    }
+
+    // ── test_enrollment_complete_missing_credential_id ───────────────────────
+
+    #[tokio::test]
+    async fn test_enrollment_complete_missing_credential_id() {
+        let (app, state) = test_app().await;
+
+        let valid_state = make_valid_state_token(&state).await;
+
+        // Omit `credential_id` — serde will fail to deserialize.
+        let body = serde_json::json!({
+            "state": valid_state,
+            "attestation_object": valid_attestation_object(),
+            "client_data_json": valid_client_data_json(),
+        })
+        .to_string();
+
+        let (status, _body) = http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    // ── test_enrollment_complete_oversized_credential_id ─────────────────────
+
+    #[tokio::test]
+    async fn test_enrollment_complete_oversized_credential_id() {
+        let (app, state) = test_app().await;
+
+        let valid_state = make_valid_state_token(&state).await;
+
+        // Build a credential_id that exceeds MAX_CREDENTIAL_ID_LEN (1400 chars).
+        let oversized = "A".repeat(MAX_CREDENTIAL_ID_LEN + 1);
+
+        let body = serde_json::json!({
+            "state": valid_state,
+            "credential_id": oversized,
+            "attestation_object": valid_attestation_object(),
+            "client_data_json": valid_client_data_json(),
+        })
+        .to_string();
+
+        let (status, resp_body) =
+            http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            resp_body.contains("invalid_credential"),
+            "expected 'invalid_credential' in body, got: {resp_body}"
+        );
+    }
+
+    // ── test_enrollment_complete_invalid_base64_credential_id ────────────────
+
+    #[tokio::test]
+    async fn test_enrollment_complete_invalid_base64_credential_id() {
+        let (app, state) = test_app().await;
+
+        let valid_state = make_valid_state_token(&state).await;
+
+        // "!!" is not valid base64url.
+        let body = serde_json::json!({
+            "state": valid_state,
+            "credential_id": "!!not-base64url!!",
+            "attestation_object": valid_attestation_object(),
+            "client_data_json": valid_client_data_json(),
+        })
+        .to_string();
+
+        let (status, resp_body) =
+            http_post_json(&app, "/enroll/webauthn/complete", &body, &[]).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            resp_body.contains("invalid_credential"),
+            "expected 'invalid_credential' in body, got: {resp_body}"
+        );
+    }
 }

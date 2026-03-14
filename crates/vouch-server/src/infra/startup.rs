@@ -40,7 +40,10 @@ pub struct ServerComponents {
 
 impl ServerComponents {
     /// Build the HTTP router with all routes, middleware, and state.
-    pub fn build_app(&self) -> axum::Router {
+    /// # Errors
+    ///
+    /// Returns an error if rate limiter configuration fails.
+    pub fn build_app(&self) -> anyhow::Result<axum::Router> {
         super::router::build_app(self.state.clone(), &self.config)
     }
 }
@@ -94,6 +97,18 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     );
     tracing::info!("Logging: RUST_LOG={}", env_or("RUST_LOG"));
 
+    if !config.trusted_proxies.is_empty() {
+        let cidrs: Vec<String> = config
+            .trusted_proxies
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        tracing::warn!(
+            "Trusted proxies configured: {} -- X-Forwarded-For will be parsed for client IP",
+            cidrs.join(", "),
+        );
+    }
+
     crate::geo::warmup();
     tracing::info!("GeoIP database initialized");
 
@@ -108,6 +123,8 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
         config.device_code_expires_seconds,
         config.device_poll_interval_seconds,
     );
+
+    log_authenticator_policy(&config);
 
     if config.oidc_configured() {
         let enrollment_domains = match &config.allowed_domains {
@@ -526,6 +543,23 @@ async fn build_app_state(
     });
 
     Ok(state)
+}
+
+/// Log authenticator policy settings at startup.
+fn log_authenticator_policy(config: &config::ServerConfig) {
+    let aaguid_policy = match &config.allowed_aaguids {
+        vouch_common::AaguidPolicy::Any => "any".to_string(),
+        vouch_common::AaguidPolicy::FipsOnly => "fips-only".to_string(),
+        vouch_common::AaguidPolicy::YubiKey5Only => "yubikey-5-only".to_string(),
+        vouch_common::AaguidPolicy::AllowList(set) => {
+            format!("allowlist ({} AAGUIDs)", set.len())
+        }
+    };
+    tracing::info!(
+        "Authenticator policy: aaguid={}, require_attestation_cert={}",
+        aaguid_policy,
+        config.require_attestation_cert,
+    );
 }
 
 /// Timeout configuration for AWS KMS API calls.

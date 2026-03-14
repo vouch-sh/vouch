@@ -51,6 +51,17 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
+Pod labels (selectorLabels + Istio-compatible app/version labels)
+*/}}
+{{- define "vouch-server.podLabels" -}}
+{{ include "vouch-server.selectorLabels" . }}
+app: {{ include "vouch-server.name" . }}
+{{- if .Chart.AppVersion }}
+version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+{{- end }}
+
+{{/*
 Create the name of the service account to use
 */}}
 {{- define "vouch-server.serviceAccountName" -}}

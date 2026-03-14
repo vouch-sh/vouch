@@ -221,6 +221,9 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
     tracing::info!("Closing database pool");
     db.close().await;
 
+    // Flush pending OpenTelemetry spans before exit
+    super::telemetry::shutdown_tracing();
+
     tracing::info!("Server shutdown complete");
     Ok(())
 }

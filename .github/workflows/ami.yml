@@ -145,6 +145,12 @@ jobs:
             --output text)
           echo "base_ami=${AMI_ID}" >> "$GITHUB_OUTPUT"
 
+      - name: Clean up previous build artifacts
+        run: |
+          S3_PREFIX="${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}"
+          echo "Removing stale artifacts at s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/"
+          aws s3 rm "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/" --recursive 2>/dev/null || true
+
       - name: Launch build instance
         id: instance
         run: |

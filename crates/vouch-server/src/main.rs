@@ -9,7 +9,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
 use clap::Parser;
-use tracing_subscriber::EnvFilter;
 
 // Prevent test-utils from being enabled in release builds. The feature gates
 // functions that bypass security invariants (e.g. upsert_user without FIDO2,
@@ -20,7 +19,7 @@ compile_error!("test-utils feature must not be enabled in release builds");
 
 use vouch_server::{
     config,
-    infra::{generate_document_key, router, serve, startup},
+    infra::{generate_document_key, router, serve, startup, telemetry},
 };
 
 // ============================================================================
@@ -81,6 +80,7 @@ async fn main() -> Result<()> {
 
 /// Initialize logging to stderr so stdout remains pure JSON for subcommands.
 fn init_stderr_logging() {
+    use tracing_subscriber::EnvFilter;
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_env_filter(
@@ -90,11 +90,13 @@ fn init_stderr_logging() {
 }
 
 async fn run_server(args: config::Args) -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
-        )
-        .init();
+    // Parse log format early (before full config parsing) so logging is
+    // initialized before any other work that might emit log messages.
+    let log_format = match args.log_format.trim().to_lowercase().as_str() {
+        "json" => config::LogFormat::Json,
+        _ => config::LogFormat::Text,
+    };
+    telemetry::init_tracing(log_format)?;
 
     router::print_startup_banner();
 
@@ -102,7 +104,7 @@ async fn run_server(args: config::Args) -> Result<()> {
     let components = startup::initialize(args).await?;
 
     // Build the HTTP router with all routes, middleware, and state
-    let app = components.build_app();
+    let app = components.build_app()?;
 
     // Run the server (TLS or non-TLS) with graceful shutdown
     serve::serve(components, app).await

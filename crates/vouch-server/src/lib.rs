@@ -214,6 +214,11 @@ mod redirect_tests {
             s3_config_region: None,
             s3_config_poll_interval: 60,
             jwt_assertion_max_lifetime_seconds: 300,
+            allowed_aaguids: vouch_common::AaguidPolicy::Any,
+            require_attestation_cert: false,
+            log_format: config::LogFormat::Text,
+            trusted_proxies: Vec::new(),
+            metrics_bearer_token: None,
         };
         let webauthn = webauthn_rs::WebauthnBuilder::new(
             rp_id,

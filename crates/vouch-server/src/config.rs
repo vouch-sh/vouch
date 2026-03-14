@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use ipnet::IpNet;
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
 
@@ -15,6 +16,33 @@ fn parse_comma_list(s: &str) -> Vec<String> {
     s.split(',')
         .map(|item| item.trim().to_lowercase())
         .filter(|item| !item.is_empty())
+        .collect()
+}
+
+/// Parse a log format string.
+fn parse_log_format(s: &str) -> Result<LogFormat> {
+    match s.trim().to_lowercase().as_str() {
+        "text" | "" => Ok(LogFormat::Text),
+        "json" => Ok(LogFormat::Json),
+        other => anyhow::bail!(
+            "Invalid VOUCH_LOG_FORMAT '{}': expected 'text' or 'json'",
+            other
+        ),
+    }
+}
+
+/// Parse a comma-separated list of CIDR networks.
+fn parse_trusted_proxies(s: &str) -> Result<Vec<IpNet>> {
+    if s.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    s.split(',')
+        .map(|cidr| {
+            let trimmed = cidr.trim();
+            trimmed.parse::<IpNet>().map_err(|e| {
+                anyhow::anyhow!("Invalid CIDR in VOUCH_TRUSTED_PROXIES '{}': {}", trimmed, e)
+            })
+        })
         .collect()
 }
 
@@ -213,6 +241,40 @@ pub struct Args {
     /// Maximum lifetime for JWT assertions in seconds (RFC 7523).
     #[arg(long, env = "VOUCH_JWT_ASSERTION_MAX_LIFETIME", default_value = "300")]
     pub jwt_assertion_max_lifetime: i64,
+
+    /// AAGUID allowlist policy for WebAuthn registration.
+    ///
+    /// Controls which authenticator models are accepted:
+    /// - Empty or unset: any hardware key accepted
+    /// - `fips-only`: only FIPS-certified YubiKey models
+    /// - `yubikey-5`: any YubiKey 5 series model
+    /// - Comma-separated UUIDs: explicit allowlist
+    #[arg(long, env = "VOUCH_ALLOWED_AAGUIDS", default_value = "")]
+    pub allowed_aaguids: String,
+
+    /// Require x5c attestation certificates during WebAuthn registration.
+    ///
+    /// When enabled, self-attestation (no certificate chain) is rejected.
+    /// Only authenticators that provide a full attestation certificate chain
+    /// (e.g., YubiKeys with packed attestation) will be accepted.
+    #[arg(long, env = "VOUCH_REQUIRE_ATTESTATION_CERT", default_value = "false")]
+    pub require_attestation_cert: bool,
+
+    /// Log output format: "text" (default, human-readable) or "json" (structured).
+    #[arg(long, env = "VOUCH_LOG_FORMAT", default_value = "text")]
+    pub log_format: String,
+
+    /// Trusted proxy CIDRs for X-Forwarded-For parsing (comma-separated).
+    ///
+    /// When set, the server parses X-Forwarded-For rightmost-first and stops
+    /// at the first IP not in the trusted CIDRs. When unset, the TCP peer IP
+    /// is used directly (safe for direct exposure without a reverse proxy).
+    #[arg(long, env = "VOUCH_TRUSTED_PROXIES", default_value = "")]
+    pub trusted_proxies: String,
+
+    /// Bearer token for /metrics endpoint. If unset, /metrics is disabled.
+    #[arg(long, env = "VOUCH_METRICS_BEARER_TOKEN")]
+    pub metrics_bearer_token: Option<String>,
 }
 
 // ============================================================================
@@ -313,6 +375,27 @@ pub struct ServerConfig {
     pub s3_config_poll_interval: u64,
     /// Maximum lifetime for JWT assertions in seconds (RFC 7523, default: 300).
     pub jwt_assertion_max_lifetime_seconds: i64,
+    /// AAGUID allowlist policy for WebAuthn registration (default: `Any`).
+    pub allowed_aaguids: vouch_common::AaguidPolicy,
+    /// Require x5c attestation certificates during WebAuthn registration.
+    pub require_attestation_cert: bool,
+    /// Log output format: `text` or `json`.
+    pub log_format: LogFormat,
+    /// Trusted proxy CIDRs for X-Forwarded-For parsing.
+    pub trusted_proxies: Vec<IpNet>,
+    /// Bearer token for /metrics endpoint access control.
+    /// If `None`, the /metrics endpoint is not exposed.
+    pub metrics_bearer_token: Option<SecretString>,
+}
+
+/// Log output format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogFormat {
+    /// Human-readable text (default).
+    #[default]
+    Text,
+    /// Structured JSON for machine consumption.
+    Json,
 }
 
 impl ServerConfig {
@@ -354,6 +437,16 @@ impl ServerConfig {
         } else {
             Some(args.ssh_ca_key_path)
         };
+
+        // Parse AAGUID policy
+        let allowed_aaguids = vouch_common::AaguidPolicy::parse(&args.allowed_aaguids)
+            .map_err(|e| anyhow::anyhow!("Invalid VOUCH_ALLOWED_AAGUIDS: {}", e))?;
+
+        // Parse log format
+        let log_format = parse_log_format(&args.log_format)?;
+
+        // Parse trusted proxies
+        let trusted_proxies = parse_trusted_proxies(&args.trusted_proxies)?;
 
         Ok(Self {
             listen_addr: args.listen_addr,
@@ -397,6 +490,11 @@ impl ServerConfig {
             s3_config_region: args.s3_config_region,
             s3_config_poll_interval: args.s3_config_poll_interval,
             jwt_assertion_max_lifetime_seconds: args.jwt_assertion_max_lifetime,
+            allowed_aaguids,
+            require_attestation_cert: args.require_attestation_cert,
+            log_format,
+            trusted_proxies,
+            metrics_bearer_token: args.metrics_bearer_token.map(SecretString::from),
         })
     }
 

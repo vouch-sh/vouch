@@ -190,17 +190,22 @@ impl AttestationValidation {
 
     /// Returns the user-facing error message for rejected attestation formats.
     #[must_use]
-    pub fn error_message(&self) -> Option<&'static str> {
+    pub fn error_message(&self) -> Option<String> {
         match self {
             Self::Valid(_) => None,
             Self::SoftwarePasskey => Some(
-                "Software passkeys (1Password, browser sync) are not supported. Please use a hardware security key.",
+                "Software passkeys (1Password, browser sync) are not supported. \
+                 Please use a hardware security key."
+                    .to_string(),
             ),
             Self::PlatformAuthenticator => Some(
-                "Platform authenticators (Touch ID, Windows Hello) are not supported. Please use a hardware security key.",
+                "Platform authenticators (Touch ID, Windows Hello) are not supported. \
+                 Please use a hardware security key."
+                    .to_string(),
             ),
             Self::Unknown(_) => Some(
-                "Unknown authenticator type. Please use a hardware security key like a YubiKey.",
+                "Unknown authenticator type. Please use a hardware security key like a YubiKey."
+                    .to_string(),
             ),
         }
     }
@@ -234,6 +239,39 @@ pub fn validate_hardware_attestation(attestation: &[u8]) -> AttestationValidatio
     } else {
         AttestationValidation::Unknown(fmt.to_string())
     }
+}
+
+/// Extract x5c DER certificate arrays from a CBOR-encoded attestation object.
+///
+/// Parses the attestation object to find `attStmt.x5c` and returns the
+/// DER-encoded certificates as byte vectors.
+#[must_use]
+pub fn extract_x5c_from_attestation(attestation: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let value: Value = ciborium::from_reader(attestation).ok()?;
+    let map = value.as_map()?;
+
+    let att_stmt = map
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("attStmt"))
+        .and_then(|(_, v)| v.as_map())?;
+
+    let x5c_array = att_stmt
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("x5c"))
+        .and_then(|(_, v)| v.as_array())?;
+
+    let certs: Vec<Vec<u8>> = x5c_array
+        .iter()
+        .filter_map(|item| {
+            if let Value::Bytes(bytes) = item {
+                Some(bytes.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if certs.is_empty() { None } else { Some(certs) }
 }
 
 #[cfg(test)]

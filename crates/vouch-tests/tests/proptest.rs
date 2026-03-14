@@ -11,6 +11,7 @@ use proptest::prelude::*;
 use vouch_common::encoding::{Base64Url, ConvertEncoding, Raw};
 use vouch_common::fido2_types::{Challenge, CoseKey, CredentialId, Signature};
 use vouch_common::{RegisterCompleteRequest, RegisterStartResponse};
+use vouch_server::crypto::ber::{DerParser, MAX_BER_DEPTH};
 
 proptest! {
     // =========================================================================
@@ -815,5 +816,347 @@ proptest! {
         // Must not panic regardless of key/value content
         let _: Result<vouch_server::services::oidc::registration::RegistrationRequest, _> =
             serde_json::from_str(&json_str);
+    }
+}
+
+// =============================================================================
+// BER/DER Parser Property-Based Tests
+// =============================================================================
+//
+// The BER parser (`crates/vouch-server/src/crypto/ber.rs`) is a custom 650-line
+// ASN.1 parser processing untrusted certificate data from attestation chains.
+// Custom binary parsers are the #1 target for fuzz testing.
+
+proptest! {
+    // =========================================================================
+    // BER/DER Parser: Arbitrary Bytes (no-panic)
+    // =========================================================================
+
+    /// Feeding arbitrary bytes to all DerParser methods must never panic.
+    #[test]
+    fn prop_der_parser_arbitrary_bytes_no_panic(data: Vec<u8>) {
+        let mut p = DerParser::new(&data);
+        let _ = p.read_tlv();
+
+        let mut p = DerParser::new(&data);
+        let _ = p.read_tlv_ber();
+
+        let mut p = DerParser::new(&data);
+        let _ = p.expect_octet_string();
+
+        let mut p = DerParser::new(&data);
+        let _ = p.expect_sequence_ber();
+
+        let mut p = DerParser::new(&data);
+        let _ = p.expect_set_ber();
+
+        let mut p = DerParser::new(&data);
+        let _ = p.expect_context_explicit_ber(0);
+
+        let mut p = DerParser::new(&data);
+        let _ = p.skip_tlv();
+
+        let mut p = DerParser::new(&data);
+        let _ = p.skip_tlv_ber();
+
+        let mut p = DerParser::new(&data);
+        let _ = p.read_implicit_octet_string_ber(0);
+    }
+
+    /// Deeply nested indefinite-length SEQUENCEs must error, not stack overflow.
+    #[test]
+    fn prop_der_parser_nested_depth_no_panic(
+        extra_depth in 0usize..10,
+    ) {
+        let depth = MAX_BER_DEPTH + extra_depth;
+        let mut data = Vec::new();
+
+        for _ in 0..depth {
+            data.push(0x30); // SEQUENCE tag
+            data.push(0x80); // indefinite length
+        }
+        // Innermost: a primitive INTEGER
+        data.extend_from_slice(&[0x02, 0x01, 0x42]);
+        for _ in 0..depth {
+            data.push(0x00);
+            data.push(0x00);
+        }
+
+        let mut parser = DerParser::new(&data);
+        // Must not panic — returns Err for excessive depth
+        let _ = parser.expect_sequence_ber();
+    }
+
+    /// Long-form DER length fields at boundary values must not panic or overflow.
+    #[test]
+    fn prop_der_length_field_no_overflow(
+        num_len_bytes in 1u8..6,
+        len_value in any::<u32>(),
+    ) {
+        let mut data = vec![0x04]; // OCTET STRING tag
+
+        if num_len_bytes <= 4 {
+            // Encode long-form length: 0x80 | num_bytes, then BE bytes
+            data.push(0x80 | num_len_bytes);
+            let be = len_value.to_be_bytes();
+            // Take the last `num_len_bytes` bytes
+            let start = 4usize.saturating_sub(num_len_bytes as usize);
+            data.extend_from_slice(&be[start..]);
+        } else {
+            // 5+ length bytes — should be rejected
+            data.push(0x80 | num_len_bytes);
+            data.extend(std::iter::repeat_n(0x01, num_len_bytes as usize));
+        }
+        // Add some payload bytes (won't matter for length validation)
+        data.extend_from_slice(&[0xAA; 16]);
+
+        let mut parser = DerParser::new(&data);
+        // Must not panic
+        let _ = parser.read_tlv();
+    }
+
+    /// BER context-explicit tags with arbitrary tag numbers must not panic.
+    #[test]
+    fn prop_der_context_explicit_arbitrary_tag_no_panic(
+        n in 0u8..16,
+        data in prop::collection::vec(any::<u8>(), 0..50),
+    ) {
+        // Build a TLV with context-specific tag
+        let tag = 0xa0 | (n & 0x0f);
+        let mut buf = vec![tag];
+        let len = data.len();
+        if len < 0x80 {
+            buf.push(len as u8);
+        } else {
+            buf.push(0x81);
+            buf.push(len as u8);
+        }
+        buf.extend_from_slice(&data);
+
+        let mut parser = DerParser::new(&buf);
+        let _ = parser.expect_context_explicit_ber(n);
+    }
+
+    /// Multiple sequential TLV reads from arbitrary data must not panic.
+    #[test]
+    fn prop_der_parser_sequential_reads_no_panic(data: Vec<u8>) {
+        let mut parser = DerParser::new(&data);
+        // Try reading up to 10 TLVs
+        for _ in 0..10 {
+            if parser.read_tlv().is_err() {
+                break;
+            }
+        }
+    }
+
+    /// Constructed OCTET STRING with multiple chunks must not panic.
+    #[test]
+    fn prop_der_implicit_octet_string_chunks_no_panic(
+        n in 0u8..4,
+        chunks in prop::collection::vec(
+            prop::collection::vec(any::<u8>(), 0..20),
+            0..5
+        ),
+    ) {
+        let constructed_tag = 0xa0 | n;
+        let mut inner = Vec::new();
+        for chunk in &chunks {
+            // Each chunk: OCTET STRING (0x04) + length + data
+            inner.push(0x04);
+            let clen = chunk.len();
+            if clen < 0x80 {
+                inner.push(clen as u8);
+            } else {
+                inner.push(0x81);
+                inner.push(clen as u8);
+            }
+            inner.extend_from_slice(chunk);
+        }
+
+        let mut buf = vec![constructed_tag];
+        let ilen = inner.len();
+        if ilen < 0x80 {
+            buf.push(ilen as u8);
+        } else if ilen < 0x100 {
+            buf.push(0x81);
+            buf.push(ilen as u8);
+        } else {
+            buf.push(0x82);
+            buf.push((ilen >> 8) as u8);
+            buf.push((ilen & 0xff) as u8);
+        }
+        buf.extend_from_slice(&inner);
+
+        let mut parser = DerParser::new(&buf);
+        let result = parser.read_implicit_octet_string_ber(n);
+
+        // If successful, the result should be the concatenation of all chunks
+        if let Ok(reassembled) = result {
+            let expected: Vec<u8> = chunks.into_iter().flatten().collect();
+            assert_eq!(reassembled, expected);
+        }
+    }
+}
+
+// =============================================================================
+// Wire Protocol Property-Based Tests
+// =============================================================================
+//
+// Length-prefixed message framing over Unix socket. Tests verify round-trip
+// correctness and panic-freedom on truncated/oversized inputs.
+
+proptest! {
+    // =========================================================================
+    // Wire Protocol: Round-trip Tests
+    // =========================================================================
+
+    /// encode_u32 → read_u32 round-trip for all u32 values.
+    #[test]
+    fn prop_wire_u32_roundtrip(val: u32) {
+        let encoded = vouch_agent::wire::encode_u32(val);
+        let mut offset = 0;
+        let decoded = vouch_agent::wire::read_u32(&encoded, &mut offset).unwrap();
+        prop_assert_eq!(val, decoded);
+        prop_assert_eq!(offset, 4);
+    }
+
+    /// encode_string round-trip preserves data.
+    #[test]
+    fn prop_wire_encode_string_roundtrip(s: String) {
+        let encoded = vouch_agent::wire::encode_string(&s).unwrap();
+
+        // Verify length prefix
+        let mut offset = 0;
+        let len = vouch_agent::wire::read_u32(&encoded, &mut offset).unwrap();
+        prop_assert_eq!(len as usize, s.len());
+
+        // Verify payload
+        let payload = &encoded[offset..];
+        prop_assert_eq!(payload, s.as_bytes());
+    }
+
+    /// encode_bytes round-trip preserves data.
+    #[test]
+    fn prop_wire_encode_bytes_roundtrip(data: Vec<u8>) {
+        let encoded = vouch_agent::wire::encode_bytes(&data).unwrap();
+
+        let mut offset = 0;
+        let len = vouch_agent::wire::read_u32(&encoded, &mut offset).unwrap();
+        prop_assert_eq!(len as usize, data.len());
+
+        let payload = &encoded[offset..];
+        prop_assert_eq!(payload, data.as_slice());
+    }
+
+    /// read_u32 on truncated buffers must error, not panic.
+    #[test]
+    fn prop_wire_read_u32_truncated_no_panic(
+        data in prop::collection::vec(any::<u8>(), 0..3),
+    ) {
+        let mut offset = 0;
+        let result = vouch_agent::wire::read_u32(&data, &mut offset);
+        prop_assert!(result.is_err());
+    }
+
+    /// read_u32 with offset beyond buffer must error, not panic.
+    #[test]
+    fn prop_wire_read_u32_bad_offset_no_panic(
+        data in prop::collection::vec(any::<u8>(), 0..10),
+        offset_add in 0usize..20,
+    ) {
+        let mut offset = data.len().saturating_add(offset_add);
+        if offset + 4 > data.len() {
+            let result = vouch_agent::wire::read_u32(&data, &mut offset);
+            prop_assert!(result.is_err());
+        }
+    }
+}
+
+// Wire protocol async round-trip tests (outside proptest! macro for async)
+
+#[tokio::test]
+async fn test_wire_message_roundtrip_various_sizes() {
+    use std::io::Cursor;
+    use vouch_agent::wire::{read_message, write_message};
+
+    for size in [1, 2, 4, 100, 1000, 10_000] {
+        let data = vec![0xABu8; size];
+        let mut buf = Vec::new();
+        write_message(&mut buf, &data).await.unwrap();
+
+        let mut cursor = Cursor::new(buf);
+        let result = read_message(&mut cursor).await.unwrap().unwrap();
+        assert_eq!(result, data);
+    }
+}
+
+#[tokio::test]
+async fn test_wire_message_truncated_length_prefix() {
+    use std::io::Cursor;
+    use vouch_agent::wire::read_message;
+
+    // Partial length prefix (only 2 of 4 bytes)
+    let mut cursor = Cursor::new(vec![0x00, 0x01]);
+    let result = read_message(&mut cursor).await;
+    // Partial length prefix triggers UnexpectedEof which maps to Ok(None)
+    assert!(
+        result.unwrap().is_none(),
+        "Truncated length prefix should return Ok(None)"
+    );
+}
+
+#[tokio::test]
+async fn test_wire_message_truncated_payload() {
+    use std::io::Cursor;
+    use vouch_agent::wire::read_message;
+
+    // Length says 100 bytes but only 10 follow
+    let mut data = vec![0x00, 0x00, 0x00, 100];
+    data.extend_from_slice(&[0xAA; 10]);
+    let mut cursor = Cursor::new(data);
+    let result = read_message(&mut cursor).await;
+    assert!(result.is_err());
+}
+
+// =============================================================================
+// Attestation Chain Property-Based Tests
+// =============================================================================
+//
+// Processes x5c certificate chains from untrusted WebAuthn responses.
+
+proptest! {
+    /// Arbitrary byte vectors as certificate chain must not panic.
+    #[test]
+    fn prop_validate_attestation_chain_no_panic(
+        certs in prop::collection::vec(
+            prop::collection::vec(any::<u8>(), 0..200),
+            1..5
+        ),
+    ) {
+        use vouch_server::crypto::attestation_chain::validate_attestation_chain;
+
+        // Must not panic — CertParse errors are expected
+        let _ = validate_attestation_chain(&certs, None);
+    }
+
+    /// Arbitrary byte vector as single cert must not panic.
+    #[test]
+    fn prop_validate_attestation_chain_single_cert_no_panic(
+        cert_data in prop::collection::vec(any::<u8>(), 0..500),
+    ) {
+        use vouch_server::crypto::attestation_chain::validate_attestation_chain;
+
+        let _ = validate_attestation_chain(&[cert_data], None);
+    }
+
+    /// Arbitrary AAGUID strings for cross-check must not panic.
+    #[test]
+    fn prop_validate_attestation_chain_aaguid_no_panic(
+        cert_data in prop::collection::vec(any::<u8>(), 50..200),
+        aaguid in "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+    ) {
+        use vouch_server::crypto::attestation_chain::validate_attestation_chain;
+
+        let _ = validate_attestation_chain(&[cert_data], Some(&aaguid));
     }
 }

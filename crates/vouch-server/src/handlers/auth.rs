@@ -16,6 +16,7 @@ use jiff::Timestamp;
 use std::sync::Arc;
 use vouch_common::SessionStatus;
 
+use super::extractors::ClientInfo;
 use super::{clear_session_cookie, hash_token};
 
 /// Get current session status.
@@ -115,7 +116,11 @@ pub async fn status(
 
 /// Handle sign-out (clears session cookie).
 /// POST /logout
-pub async fn logout(State(state): State<Arc<AppState>>, jar: CookieJar) -> Response {
+pub async fn logout(
+    State(state): State<Arc<AppState>>,
+    client_info: ClientInfo,
+    jar: CookieJar,
+) -> Response {
     // Get session from cookie and delete it from database
     if let Some(token) = jar
         .get(vouch_common::SESSION_COOKIE_NAME)
@@ -143,7 +148,8 @@ pub async fn logout(State(state): State<Arc<AppState>>, jar: CookieJar) -> Respo
                             event_type: db::AuthEventType::Logout,
                             success: true,
                             ..Default::default()
-                        };
+                        }
+                        .with_client_info(client_info);
                         tokio::spawn(async move {
                             if let Err(e) =
                                 db::insert_auth_event(&audit, &params, Some(&user_email)).await

@@ -21,54 +21,52 @@ use vouch_cli::FidoDevice;
 use vouch_common::fixtures::Fido2Fixture;
 
 /// Load a fixture from the fixtures directory.
-fn load_fixture(name: &str) -> Option<Fido2Fixture> {
+///
+/// # Panics
+///
+/// Panics if the fixture file is missing or cannot be parsed.
+/// Run tests from the repo root and ensure fixtures are present.
+fn load_fixture(name: &str) -> Fido2Fixture {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures")
         .join(name);
-    if path.exists() {
-        Fido2Fixture::load_from_file(&path).ok()
-    } else {
-        None
-    }
+    Fido2Fixture::load_from_file(&path)
+        .unwrap_or_else(|_| panic!("{name} fixture missing or invalid — run tests from repo root"))
 }
 
 /// Test that we can load and parse a fixture file.
 #[test]
 fn test_fixture_loading() {
-    // This test always passes - it just validates the fixture format
-    // If a fixture exists, it should be parseable
-    if let Some(fixture) = load_fixture("yubikey.json") {
-        assert!(!fixture.metadata.rp_id.is_empty());
-        assert!(!fixture.registration.credential_id_hex.is_empty());
-        assert!(!fixture.authentication.signature_hex.is_empty());
-    }
+    let fixture = load_fixture("yubikey.json");
+    assert!(!fixture.metadata.rp_id.is_empty());
+    assert!(!fixture.registration.credential_id_hex.is_empty());
+    assert!(!fixture.authentication.signature_hex.is_empty());
 }
 
 /// Test that fixture helper methods work correctly.
 #[test]
 fn test_fixture_helpers() {
-    if let Some(fixture) = load_fixture("yubikey.json") {
-        // Test decoding methods
-        let cred_id = fixture.credential_id();
-        assert!(cred_id.is_ok(), "credential_id should decode");
+    let fixture = load_fixture("yubikey.json");
+    // Test decoding methods
+    let cred_id = fixture.credential_id();
+    assert!(cred_id.is_ok(), "credential_id should decode");
 
-        let public_key = fixture.public_key_cose();
-        assert!(public_key.is_ok(), "public_key_cose should decode");
+    let public_key = fixture.public_key_cose();
+    assert!(public_key.is_ok(), "public_key_cose should decode");
 
-        let auth_data = fixture.auth_authenticator_data();
-        assert!(auth_data.is_ok(), "auth_authenticator_data should decode");
+    let auth_data = fixture.auth_authenticator_data();
+    assert!(auth_data.is_ok(), "auth_authenticator_data should decode");
 
-        let signature = fixture.auth_signature();
-        assert!(signature.is_ok(), "auth_signature should decode");
+    let signature = fixture.auth_signature();
+    assert!(signature.is_ok(), "auth_signature should decode");
 
-        let sec1 = fixture.public_key_sec1();
-        assert!(sec1.is_ok(), "public_key_sec1 should decode");
+    let sec1 = fixture.public_key_sec1();
+    assert!(sec1.is_ok(), "public_key_sec1 should decode");
 
-        // SEC1 format should be 65 bytes (0x04 + 32 bytes x + 32 bytes y)
-        if let Ok(sec1_bytes) = sec1 {
-            assert_eq!(sec1_bytes.len(), 65, "SEC1 point should be 65 bytes");
-            assert_eq!(sec1_bytes[0], 0x04, "SEC1 point should start with 0x04");
-        }
+    // SEC1 format should be 65 bytes (0x04 + 32 bytes x + 32 bytes y)
+    if let Ok(sec1_bytes) = sec1 {
+        assert_eq!(sec1_bytes.len(), 65, "SEC1 point should be 65 bytes");
+        assert_eq!(sec1_bytes[0], 0x04, "SEC1 point should start with 0x04");
     }
 }
 
@@ -77,13 +75,7 @@ fn test_fixture_helpers() {
 /// This test is skipped if no fixture file exists.
 #[test]
 fn test_signature_verification_with_fixture() {
-    let Some(fixture) = load_fixture("yubikey.json") else {
-        println!("Skipping test: no yubikey.json fixture found");
-        println!(
-            "Generate one with: cargo run -p vouch-cli -- diag --export-fixture ./crates/vouch-tests/fixtures/yubikey.json"
-        );
-        return;
-    };
+    let fixture = load_fixture("yubikey.json");
 
     // Decode fixture data
     let auth_data = fixture.auth_authenticator_data().unwrap();
@@ -115,10 +107,7 @@ fn test_signature_verification_with_fixture() {
 /// Test COSE key parsing with real YubiKey data.
 #[test]
 fn test_cose_key_parsing_with_fixture() {
-    let Some(fixture) = load_fixture("yubikey.json") else {
-        println!("Skipping test: no yubikey.json fixture found");
-        return;
-    };
+    let fixture = load_fixture("yubikey.json");
 
     let cose_key = fixture.public_key_cose().unwrap();
 
@@ -158,10 +147,7 @@ fn test_cose_key_parsing_with_fixture() {
 /// Test contract validation with real YubiKey data.
 #[test]
 fn test_contract_validation_with_fixture() {
-    let Some(fixture) = load_fixture("yubikey.json") else {
-        println!("Skipping test: no yubikey.json fixture found");
-        return;
-    };
+    let fixture = load_fixture("yubikey.json");
 
     use vouch_tests::contracts::*;
 
@@ -223,10 +209,7 @@ fn test_contract_validation_with_fixture() {
 /// Test that typed encoding works with fixture data.
 #[test]
 fn test_typed_encoding_with_fixture() {
-    let Some(fixture) = load_fixture("yubikey.json") else {
-        println!("Skipping test: no yubikey.json fixture found");
-        return;
-    };
+    let fixture = load_fixture("yubikey.json");
 
     use vouch_common::encoding::Raw;
     use vouch_common::fido2_types::*;

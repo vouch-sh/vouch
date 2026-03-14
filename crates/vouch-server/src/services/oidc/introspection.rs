@@ -176,6 +176,7 @@ pub async fn revoke_token(
     state: &Arc<AppState>,
     token: &str,
     _token_type_hint: Option<&str>,
+    client_info: crate::handlers::extractors::ClientInfo,
 ) -> RevocationResult {
     // Try to decode to get email for audit logging
     let config = state.config();
@@ -184,44 +185,67 @@ pub async fn revoke_token(
     let sub = decoded.as_ref().map(|d| d.sub().to_string());
     let email = decoded.as_ref().and_then(|d| d.email().map(String::from));
 
-    // RFC 7009: Always attempt to delete the session by token hash,
-    // even if JWT decode fails — revocation should be best-effort.
-    let token_hash = hash_token(token);
-    match db::delete_session_by_token_hash(&state.store, &token_hash).await {
-        Ok(deleted) => {
-            if deleted {
-                if let Some(ref email) = email {
-                    tracing::info!("Token revoked for user: {}", redact_email(email));
+    // When we know the user, revoke ALL their sessions (human presence
+    // attestation means logout = full logout). Fall back to single-token
+    // deletion when the token couldn't be decoded.
+    let revoked = if let Some(ref user_id) = sub {
+        match db::delete_sessions_for_user(&state.store, user_id).await {
+            Ok(count) => {
+                if count > 0 {
+                    if let Some(ref email) = email {
+                        tracing::info!(
+                            "Revoked {} session(s) for user: {}",
+                            count,
+                            redact_email(email),
+                        );
+                    }
+                    true
+                } else {
+                    false
                 }
-
-                // Fire-and-forget logout audit event
-                if let Some(ref user_id) = sub {
-                    let audit = state.audit.clone();
-                    let params = db::AuthEventParams {
-                        user_id: user_id.clone(),
-                        event_type: db::AuthEventType::Logout,
-                        success: true,
-                        ..Default::default()
-                    };
-                    let email_for_audit = email.clone();
-                    tokio::spawn(async move {
-                        if let Err(e) =
-                            db::insert_auth_event(&audit, &params, email_for_audit.as_deref()).await
-                        {
-                            tracing::warn!("Failed to log revocation logout event: {}", e,);
-                        }
-                    });
-                }
-
-                return RevocationResult {
-                    revoked: true,
-                    user_email: email,
-                };
+            }
+            Err(e) => {
+                tracing::warn!("Failed to delete sessions during revocation: {}", e,);
+                false
             }
         }
-        Err(e) => {
-            tracing::warn!("Failed to delete session during revocation: {}", e);
+    } else {
+        // Token couldn't be decoded — best-effort delete by hash
+        let token_hash = hash_token(token);
+        match db::delete_session_by_token_hash(&state.store, &token_hash).await {
+            Ok(deleted) => deleted,
+            Err(e) => {
+                tracing::warn!("Failed to delete session during revocation: {}", e,);
+                false
+            }
         }
+    };
+
+    if revoked {
+        // Fire-and-forget logout audit event
+        if let Some(ref user_id) = sub {
+            let audit = state.audit.clone();
+            let params = db::AuthEventParams {
+                user_id: user_id.clone(),
+                event_type: db::AuthEventType::Logout,
+                success: true,
+                ..Default::default()
+            }
+            .with_client_info(client_info);
+            let email_for_audit = email.clone();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    db::insert_auth_event(&audit, &params, email_for_audit.as_deref()).await
+                {
+                    tracing::warn!("Failed to log revocation logout event: {}", e);
+                }
+            });
+        }
+
+        return RevocationResult {
+            revoked: true,
+            user_email: email,
+        };
     }
 
     // Per RFC 7009, always return success even if nothing was revoked

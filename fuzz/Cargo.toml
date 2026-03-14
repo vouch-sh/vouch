@@ -1,0 +1,32 @@
+[package]
+name = "vouch-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4.9"
+vouch-server = { path = "../crates/vouch-server", features = ["test-utils"] }
+vouch-common = { path = "../crates/vouch-common" }
+ciborium = "0.2.2"
+
+# Prevent this from joining the workspace
+[workspace]
+
+[[bin]]
+name = "fuzz_ber_parse"
+path = "fuzz_targets/fuzz_ber_parse.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_attestation_object"
+path = "fuzz_targets/fuzz_attestation_object.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_cose_key"
+path = "fuzz_targets/fuzz_cose_key.rs"
+doc = false

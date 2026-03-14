@@ -7,16 +7,19 @@ use crate::db::documents::audit::GitHubCredentialAuditData;
 use crate::services::error::ServiceError;
 use crate::services::integrations::aws::{AwsError, issue_aws_token};
 use crate::services::integrations::github::{GitHubInstallationId, minimal_git_permissions};
-use axum::extract::OriginalUri;
+use crate::services::integrations::kubernetes::{
+    DEFAULT_K8S_AUDIENCE, K8sError, issue_kubernetes_token,
+};
+use axum::extract::{OriginalUri, Query};
 use axum::http::Method;
 use axum::{Json, extract::State, http::HeaderMap, http::StatusCode};
 use axum_extra::extract::cookie::CookieJar;
 use jiff::Timestamp;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use vouch_common::{
     AwsTokenResponse, GitHubStatusResponse, GitHubTokenRequest, GitHubTokenResponse,
-    SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
+    K8sTokenResponse, SshCaPublicKeyResponse, SshCertificateRequest, SshCertificateResponse,
 };
 
 use super::extractors::ClientInfo;
@@ -90,6 +93,8 @@ pub async fn issue_ssh_certificate(
             "Failed to sign certificate",
         )
     })?;
+
+    crate::infra::metrics::record_credential_issuance("ssh");
 
     tracing::info!(
         "Issued SSH certificate for {} with principals {:?}, serial {}",
@@ -330,7 +335,131 @@ pub async fn get_aws_token(
         }
     })?;
 
+    crate::infra::metrics::record_credential_issuance("aws");
+
     Ok(Json(AwsTokenResponse {
+        id_token: result.id_token,
+        expires_in: result.expires_in,
+    }))
+}
+
+// ============================================================================
+// Kubernetes Token Endpoint
+// ============================================================================
+
+/// Query parameters for the Kubernetes token endpoint.
+#[derive(Debug, Deserialize)]
+pub struct K8sTokenQuery {
+    /// OIDC audience (must match `--oidc-client-id` on the API server).
+    /// Defaults to "kubernetes" if not specified.
+    #[serde(default)]
+    pub audience: Option<String>,
+}
+
+/// Get an OIDC ID token for Kubernetes authentication.
+///
+/// GET /v1/credentials/kubernetes/token?audience=kubernetes
+///
+/// Returns an OIDC ID token that can be used with Kubernetes clusters
+/// configured with the Vouch OIDC provider.
+pub async fn get_kubernetes_token(
+    method: Method,
+    uri: OriginalUri,
+    headers: HeaderMap,
+    jar: CookieJar,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<K8sTokenQuery>,
+) -> Result<Json<K8sTokenResponse>, ServiceError> {
+    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+
+    let user = db::get_user_by_id(&state.store, &token.sub)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get user by ID: {e}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "db_error",
+                "Internal database error",
+            )
+        })?
+        .ok_or_else(|| {
+            ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
+        })?;
+
+    let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
+    let audience = query
+        .audience
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_K8S_AUDIENCE);
+
+    // Get authenticator info for AAGUID claim
+    let authenticator = if let Some(ref auth_id) = token.authenticator_id {
+        match db::get_authenticator_by_id(&state.store, auth_id).await {
+            Ok(auth) => auth,
+            Err(e) => {
+                tracing::warn!("Failed to get authenticator {auth_id}: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Get user's organization domain (hd claim) if they belong to an org
+    let hd = if let Some(ref org_id) = user.org_id {
+        db::get_organization_domain(&state.store, org_id)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to get organization domain: {e}");
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "db_error",
+                    "Internal database error",
+                )
+            })?
+    } else {
+        None
+    };
+
+    let config = state.config();
+    let result = issue_kubernetes_token(
+        &config.base_url,
+        &state.oidc_key,
+        &user_email,
+        audience,
+        authenticator.and_then(|a| a.aaguid),
+        hd,
+    )
+    .await
+    .map_err(|e| match e {
+        K8sError::ClaimsBuild(ref err) => {
+            tracing::error!("Kubernetes token claims build error: {err}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "claims_error",
+                "Failed to build token claims",
+            )
+        }
+        K8sError::TokenSign(ref err) => {
+            tracing::error!("Kubernetes token signing error: {err}");
+            ServiceError::api(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "token_error",
+                "Failed to sign token",
+            )
+        }
+    })?;
+
+    crate::infra::metrics::record_credential_issuance("kubernetes");
+
+    tracing::info!(
+        "Issued Kubernetes OIDC token for {} (audience: {})",
+        crate::redact_email(&user_email),
+        audience,
+    );
+
+    Ok(Json(K8sTokenResponse {
         id_token: result.id_token,
         expires_in: result.expires_in,
     }))
@@ -606,6 +735,8 @@ pub async fn get_github_token(
     {
         tracing::warn!("Failed to log GitHub credential event: {e}");
     }
+
+    crate::infra::metrics::record_credential_issuance("github");
 
     tracing::info!(
         "Issued GitHub token for {} (org {}, installation {})",

@@ -10,8 +10,10 @@
 
 mod helpers;
 
+mod auth_flows;
 mod e2e;
 mod fapi2;
+mod fido2_grant;
 mod migration_step9;
 mod oidc_core;
 mod oidc_discovery;

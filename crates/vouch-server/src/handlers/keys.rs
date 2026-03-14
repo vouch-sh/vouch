@@ -225,8 +225,17 @@ pub async fn register_complete(
         ));
     }
 
-    // Validate attestation (hardware-only, extract device info)
-    let validated = validate_registration_attestation(&req.attestation_object)?;
+    // Validate attestation (hardware-only, AAGUID policy, extract device info)
+    let mut validated = validate_registration_attestation(
+        &req.attestation_object,
+        &config.allowed_aaguids,
+        config.require_attestation_cert,
+    )?;
+
+    // Propagate x5c chain results from webauthn_verify into validated
+    if verified.attestation_verified {
+        validated.attestation_verified = true;
+    }
 
     // Use server-verified AAGUID if available, fall back to client-provided
     let aaguid = verified.aaguid.or(validated.aaguid);
@@ -247,6 +256,7 @@ pub async fn register_complete(
         &verified_public_key,
         aaguid.as_deref(),
         Some(&user_handle),
+        validated.attestation_verified,
     )
     .await
     .map_err(|e| ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string()))?;

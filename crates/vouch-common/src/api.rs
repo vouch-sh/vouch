@@ -483,6 +483,9 @@ pub struct CloudTokenResponse {
 /// Response containing an OIDC ID token for AWS STS.
 pub type AwsTokenResponse = CloudTokenResponse;
 
+/// Response containing an OIDC ID token for Kubernetes authentication.
+pub type K8sTokenResponse = CloudTokenResponse;
+
 // ============================================================================
 // GitHub Credentials
 // ============================================================================

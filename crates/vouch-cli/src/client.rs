@@ -51,6 +51,22 @@ impl VouchClient<ReqwestClient> {
         Ok(client)
     }
 
+    /// Create an authenticated client from an existing token.
+    ///
+    /// Used when a token is already available (e.g. after enrollment)
+    /// without resolving from the agent or config file.
+    pub fn with_token(base_url: &str, token: SecretString) -> Result<Self> {
+        let http = ReqwestClient::new()?;
+        let mut client = Self {
+            http,
+            base_url: base_url.trim_end_matches('/').to_string(),
+            token: Some(token),
+            fapi_key: None,
+        };
+        client.fapi_key = load_fapi_key();
+        Ok(client)
+    }
+
     /// Create a client without authentication.
     ///
     /// Used only during login/enroll flows where the user doesn't have a
@@ -508,7 +524,7 @@ impl ServerErrorKind {
 /// Returns `None` if no key is found. Never generates a new key — that
 /// happens only in the enroll/login flows. This is intentionally non-fatal:
 /// resource requests fall back to `Bearer` auth when no key is available.
-fn load_fapi_key() -> Option<ClientKey> {
+pub(crate) fn load_fapi_key() -> Option<ClientKey> {
     // 1. Try the OS keychain first.
     match vouch_cli::fapi::key_store::load_from_keychain() {
         Ok(Some(key_file)) => match ClientKey::from_key_file(&key_file) {

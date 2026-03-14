@@ -117,6 +117,7 @@ async fn test_session_lifecycle() {
         &[0u8; 32],
         None,
         Some(user_id.as_bytes()),
+        false,
     )
     .await
     .expect("Failed to create authenticator");
@@ -231,6 +232,7 @@ async fn test_device_auth_authorization_flow() {
         &[0u8; 32],
         None,
         Some(user_id.as_bytes()),
+        false,
     )
     .await
     .expect("Failed to create authenticator");
@@ -888,6 +890,7 @@ async fn test_scim_session_invalidation_on_deactivation() {
         &[0u8; 32],
         None,
         Some(user.id.as_bytes()),
+        false,
     )
     .await
     .expect("Failed to create authenticator");
@@ -1026,6 +1029,7 @@ async fn test_authenticator_crud() {
         &public_key,
         Some("2fc0579f-8113-47ea-b116-bb5a8db9202a"),
         Some(&user_handle),
+        false,
     )
     .await
     .expect("Failed to create authenticator");
@@ -1109,6 +1113,7 @@ async fn test_authenticator_count() {
             &[0u8; 32],
             None,
             None,
+            false,
         )
         .await
         .expect("Failed to create authenticator");
@@ -1230,6 +1235,7 @@ async fn test_user_cascade_delete() {
         &[0u8; 32],
         None,
         None,
+        false,
     )
     .await
     .expect("Failed to create authenticator");

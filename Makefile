@@ -13,7 +13,7 @@ KAMAL ?= kamal
 IMAGE_NAME ?= vouch-sh/vouch
 IMAGE_TAG ?= latest
 
-.PHONY: all build test test-integration run run-agent clean help docker-build docker-run deploy deploy-logs css-dev css-build docs-build docs-serve
+.PHONY: all build test test-integration test-fuzz run run-agent clean help docker-build docker-run deploy deploy-logs css-dev css-build docs-build docs-serve
 
 all: build
 
@@ -55,6 +55,11 @@ test: ## Run unit tests
 
 test-integration: ## Run integration tests
 	$(CARGO) test --package vouch-tests
+
+test-fuzz: ## Run fuzz targets (60s each, requires nightly)
+	cargo +nightly fuzz run fuzz_ber_parse -- -max_total_time=60
+	cargo +nightly fuzz run fuzz_attestation_object -- -max_total_time=60
+	cargo +nightly fuzz run fuzz_cose_key -- -max_total_time=60
 
 ##@ Docker
 

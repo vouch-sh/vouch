@@ -329,3 +329,49 @@ async fn test_rfc9068_access_token_recommended_claims() {
         "FIDO2 token should include auth_time (recommended)"
     );
 }
+
+#[tokio::test]
+async fn test_access_token_exp_greater_than_iat() {
+    // RFC 9068 Section 2.2: exp and iat are both REQUIRED; exp must be after iat.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "at-exp-iat@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let claims = decode_jwt_payload(&access_token);
+
+    let exp = claims["exp"].as_i64().expect("exp must be an integer");
+    let iat = claims["iat"].as_i64().expect("iat must be an integer");
+
+    assert!(
+        exp > iat,
+        "RFC 9068 §2.2: exp ({exp}) must be greater than iat ({iat})"
+    );
+}
+
+#[tokio::test]
+async fn test_access_token_scope_claim_present() {
+    // RFC 9068 Section 2.2: scope claim, when present, MUST be a string (space-separated).
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "at-scope@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    let claims = decode_jwt_payload(&access_token);
+
+    assert!(
+        claims.get("scope").is_some(),
+        "Access token must contain a scope claim"
+    );
+    assert!(
+        claims["scope"].is_string(),
+        "RFC 9068 §2.2: scope claim must be a string, got: {:?}",
+        claims["scope"]
+    );
+}

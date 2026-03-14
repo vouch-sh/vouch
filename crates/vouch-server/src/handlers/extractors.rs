@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: BUSL-1.1
 //! HTTP request extractors for authentication context.
 
+use std::net::IpAddr;
+use std::sync::Arc;
+
 use axum::extract::rejection::PathRejection;
 use axum::extract::{FromRequestParts, Path};
 use axum::http::{HeaderMap, StatusCode};
 use http::request::Parts;
+use ipnet::IpNet;
 use serde::Deserialize;
 
-use std::net::IpAddr;
-
+use crate::AppState;
 use crate::services::error::ServiceError;
 
 /// A validated UUID string. Rejects during deserialization if not valid.
@@ -104,14 +107,20 @@ pub struct ClientInfo {
     pub client_version: Option<String>,
 }
 
-impl<S: Send + Sync> FromRequestParts<S> for ClientInfo {
+impl FromRequestParts<Arc<AppState>> for ClientInfo {
     type Rejection = std::convert::Infallible;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let client_ip = parts
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let peer_ip = parts
             .extensions
             .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
             .map(|ci| ci.0.ip().to_canonical());
+
+        let config = state.config.load();
+        let client_ip = resolve_client_ip(peer_ip, &parts.headers, &config.trusted_proxies);
 
         let mut info = Self::from(&parts.headers);
         info.client_ip = client_ip;
@@ -145,6 +154,66 @@ impl From<&HeaderMap> for ClientInfo {
     }
 }
 
+/// Resolve the real client IP address, accounting for trusted reverse proxies.
+///
+/// When `trusted_cidrs` is empty, returns the TCP peer IP directly (safe for
+/// servers exposed without a reverse proxy).
+///
+/// When `trusted_cidrs` is configured, parses `X-Forwarded-For` rightmost-first
+/// and returns the first IP not in the trusted set. If the peer IP itself is not
+/// trusted, `X-Forwarded-For` is ignored entirely (fail closed).
+///
+/// This implements the "rightmost-trusted" algorithm per RFC 7239.
+pub fn resolve_client_ip(
+    peer_ip: Option<IpAddr>,
+    headers: &HeaderMap,
+    trusted_cidrs: &[IpNet],
+) -> Option<IpAddr> {
+    // No trusted proxies configured → use TCP peer directly
+    if trusted_cidrs.is_empty() {
+        return peer_ip;
+    }
+
+    let peer = peer_ip?;
+
+    // If the peer is not in the trusted set, ignore X-Forwarded-For
+    if !is_trusted(peer, trusted_cidrs) {
+        return Some(peer);
+    }
+
+    // Parse X-Forwarded-For header
+    let xff = match headers.get("x-forwarded-for").and_then(|h| h.to_str().ok()) {
+        Some(val) if !val.trim().is_empty() => val,
+        _ => return Some(peer),
+    };
+
+    // Walk addresses right-to-left (closest proxy first)
+    // Stop at the first IP not in the trusted set — that's the real client
+    let addrs: Vec<&str> = xff.split(',').map(str::trim).collect();
+    let mut idx = addrs.len();
+    while idx > 0 {
+        idx -= 1;
+        let addr_str = addrs.get(idx).copied().unwrap_or("");
+        if let Ok(addr) = addr_str.parse::<IpAddr>() {
+            let addr = addr.to_canonical();
+            if !is_trusted(addr, trusted_cidrs) {
+                return Some(addr);
+            }
+        } else {
+            // Unparseable entry — treat as untrusted boundary, stop
+            break;
+        }
+    }
+
+    // All XFF entries are trusted (or empty) — fall back to peer
+    Some(peer)
+}
+
+/// Check if an IP address falls within any of the trusted CIDRs.
+fn is_trusted(addr: IpAddr, trusted_cidrs: &[IpNet]) -> bool {
+    trusted_cidrs.iter().any(|cidr| cidr.contains(&addr))
+}
+
 /// Extract and validate a client metadata header value.
 ///
 /// Returns `None` if the header is missing, empty, exceeds `max_len`,
@@ -166,6 +235,120 @@ fn extract_validated_header(headers: &HeaderMap, name: &str, max_len: usize) -> 
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
+
+    // ========================================================================
+    // resolve_client_ip Tests
+    // ========================================================================
+
+    fn cidrs(strs: &[&str]) -> Vec<IpNet> {
+        strs.iter().map(|s| s.parse().unwrap()).collect()
+    }
+
+    #[test]
+    fn test_resolve_no_trusted_proxies_returns_peer() {
+        let headers = HeaderMap::new();
+        let peer = Some("203.0.113.1".parse().unwrap());
+        assert_eq!(resolve_client_ip(peer, &headers, &[]), peer);
+    }
+
+    #[test]
+    fn test_resolve_untrusted_peer_ignores_xff() {
+        let trusted = cidrs(&["10.0.0.0/8"]);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("1.2.3.4, 10.0.0.5"),
+        );
+        let peer: IpAddr = "203.0.113.1".parse().unwrap();
+        // Peer is not in 10.0.0.0/8, so XFF is ignored
+        assert_eq!(
+            resolve_client_ip(Some(peer), &headers, &trusted),
+            Some(peer)
+        );
+    }
+
+    #[test]
+    fn test_resolve_single_trusted_proxy() {
+        let trusted = cidrs(&["10.0.0.0/8"]);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.1, 10.0.0.5"),
+        );
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let expected: IpAddr = "203.0.113.1".parse().unwrap();
+        assert_eq!(
+            resolve_client_ip(Some(peer), &headers, &trusted),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn test_resolve_multiple_trusted_proxies() {
+        let trusted = cidrs(&["10.0.0.0/8", "172.16.0.0/12"]);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("203.0.113.1, 172.16.0.5, 10.0.0.5"),
+        );
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        let expected: IpAddr = "203.0.113.1".parse().unwrap();
+        assert_eq!(
+            resolve_client_ip(Some(peer), &headers, &trusted),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn test_resolve_empty_xff_returns_peer() {
+        let trusted = cidrs(&["10.0.0.0/8"]);
+        let headers = HeaderMap::new();
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        assert_eq!(
+            resolve_client_ip(Some(peer), &headers, &trusted),
+            Some(peer)
+        );
+    }
+
+    #[test]
+    fn test_resolve_all_xff_trusted_returns_peer() {
+        let trusted = cidrs(&["10.0.0.0/8"]);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("10.0.0.2, 10.0.0.3"),
+        );
+        let peer: IpAddr = "10.0.0.1".parse().unwrap();
+        assert_eq!(
+            resolve_client_ip(Some(peer), &headers, &trusted),
+            Some(peer)
+        );
+    }
+
+    #[test]
+    fn test_resolve_istio_sidecar() {
+        // Istio sidecar uses 127.0.0.6 as source
+        let trusted = cidrs(&["127.0.0.6/32"]);
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.50"));
+        let peer: IpAddr = "127.0.0.6".parse().unwrap();
+        let expected: IpAddr = "203.0.113.50".parse().unwrap();
+        assert_eq!(
+            resolve_client_ip(Some(peer), &headers, &trusted),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn test_resolve_no_peer_returns_none() {
+        let trusted = cidrs(&["10.0.0.0/8"]);
+        let headers = HeaderMap::new();
+        assert_eq!(resolve_client_ip(None, &headers, &trusted), None);
+    }
+
+    // ========================================================================
+    // ClientInfo Header Extraction Tests
+    // ========================================================================
 
     #[test]
     fn test_extract_user_agent() {

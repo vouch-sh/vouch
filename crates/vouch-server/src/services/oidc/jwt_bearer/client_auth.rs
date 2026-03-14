@@ -115,7 +115,9 @@ pub async fn authenticate_client_jwt(
 
     // 7. Validate JWT assertion (signature + claims)
     let algorithm = map_algorithm(&header.alg).map_err(|_| ClientAuthError::InvalidCredentials)?;
-    let token_endpoint_url = format!("{}/oauth/token", state.config().base_url);
+    let base_url = &state.config().base_url;
+    let token_endpoint_url = format!("{base_url}/oauth/token");
+    let revoke_endpoint_url = format!("{base_url}/oauth/revoke");
     let max_lifetime = state.config().jwt_assertion_max_lifetime_seconds;
 
     let validated = validate_jwt_assertion(
@@ -123,7 +125,7 @@ pub async fn authenticate_client_jwt(
         &header,
         &decoding_key,
         algorithm,
-        &[&token_endpoint_url],
+        &[&token_endpoint_url, &revoke_endpoint_url],
         max_lifetime,
     )
     .map_err(|e| {

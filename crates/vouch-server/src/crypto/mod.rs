@@ -5,6 +5,14 @@
 //! JWT signing/verification, SSH certificate authority, WebAuthn COSE verification,
 //! NitroTPM-attested KMS decryption, and encoding utilities.
 
+#[cfg(any(test, feature = "test-utils"))]
+pub mod attestation_chain;
+#[cfg(not(any(test, feature = "test-utils")))]
+pub(crate) mod attestation_chain;
+
+#[cfg(any(test, feature = "test-utils"))]
+pub mod ber;
+#[cfg(not(any(test, feature = "test-utils")))]
 pub(crate) mod ber;
 pub mod cose;
 pub(crate) mod document_crypto;

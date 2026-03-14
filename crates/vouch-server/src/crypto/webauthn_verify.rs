@@ -23,6 +23,7 @@
 
 use aws_lc_rs::digest::{self, SHA256};
 use aws_lc_rs::signature::{self, UnparsedPublicKey};
+use der::Decode;
 use thiserror::Error;
 use vouch_common::encoding::Raw;
 use vouch_common::fido2_types::{AuthData, ClientDataJson, CoseKey, Signature};
@@ -153,6 +154,9 @@ pub enum VerifyError {
 
     #[error("Counter not increasing (possible cloned authenticator)")]
     CounterNotIncreasing,
+
+    #[error("Attestation certificate chain invalid: {0}")]
+    AttestationChainInvalid(String),
 }
 
 /// Result of successful assertion verification.
@@ -433,6 +437,8 @@ pub struct RegistrationVerificationResult {
     pub aaguid: Option<String>,
     /// The counter value from registration (usually 0).
     pub counter: u32,
+    /// Whether the attestation was cryptographically verified via x5c chain.
+    pub attestation_verified: bool,
 }
 
 /// Verify a WebAuthn registration (attestation) response.
@@ -582,7 +588,7 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
     }
 
     // Format AAGUID as hex string (skip all-zero AAGUIDs)
-    let aaguid = if aaguid_bytes.iter().all(|&b| b == 0) {
+    let mut aaguid = if aaguid_bytes.iter().all(|&b| b == 0) {
         None
     } else {
         Some(format!(
@@ -644,6 +650,8 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
     }
 
     // 4. Verify attestation statement based on format
+    let mut attestation_verified = false;
+
     match fmt.as_str() {
         "none" => {
             // No attestation statement — accept the credential
@@ -651,13 +659,21 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         "packed" => {
             // Packed attestation (self-attestation if no x5c certificate chain)
             if let Some(stmt_map) = att_stmt {
-                verify_packed_attestation(
+                let packed_result = verify_packed_attestation(
                     stmt_map,
                     &auth_data_bytes,
                     client_data_json,
                     &cose_key_bytes,
+                    aaguid.as_deref(),
                     verifier,
                 )?;
+                if let Some(result) = packed_result {
+                    attestation_verified = result.attestation_verified;
+                    // If the chain provided a cert AAGUID, prefer it
+                    if aaguid.is_none() {
+                        aaguid = result.cert_aaguid;
+                    }
+                }
             }
             // No attStmt with packed format is invalid, but we're lenient
             // since the COSE key is verified through usage anyway
@@ -674,34 +690,75 @@ pub fn verify_registration_with_verifier<V: CoseVerifier>(
         public_key_cose: cose_key_bytes,
         aaguid,
         counter,
+        attestation_verified,
     })
 }
 
-/// Verify a packed attestation statement (self-attestation).
+/// Result of packed attestation verification with x5c chain.
+#[derive(Debug)]
+pub struct PackedAttestationResult {
+    /// Whether the attestation chain was cryptographically verified.
+    pub attestation_verified: bool,
+    /// AAGUID extracted from the x5c leaf certificate.
+    pub cert_aaguid: Option<String>,
+}
+
+/// Verify a packed attestation statement.
 ///
-/// For self-attestation (no x5c), the signature is over `authData || SHA-256(clientDataJSON)`
-/// and is verified using the credential public key itself.
+/// When x5c is present: validates the certificate chain against pinned roots,
+/// verifies the attestation signature using the leaf certificate's public key,
+/// and extracts AAGUID from the leaf certificate.
+///
+/// When x5c is absent (self-attestation): verifies the signature using the
+/// credential's own public key.
+///
+/// Returns `Some(PackedAttestationResult)` when x5c was validated,
+/// `None` for self-attestation (signature-only).
 fn verify_packed_attestation<V: CoseVerifier>(
     stmt_map: &[(ciborium::Value, ciborium::Value)],
     auth_data_bytes: &[u8],
     client_data_json: &[u8],
     cose_key_bytes: &[u8],
+    auth_data_aaguid: Option<&str>,
     verifier: &V,
-) -> Result<(), VerifyError> {
-    // Check for x5c (certificate chain) — if present, this is full attestation
-    let has_x5c = stmt_map.iter().any(|(k, _)| {
-        if let ciborium::Value::Text(s) = k {
-            s == "x5c"
-        } else {
-            false
-        }
-    });
+) -> Result<Option<PackedAttestationResult>, VerifyError> {
+    // Extract x5c certificate chain if present
+    let x5c_certs = extract_x5c_certs(stmt_map);
 
-    if has_x5c {
-        // Full attestation with certificates — we accept this without certificate
-        // chain validation since we do hardware attestation checks separately.
-        tracing::debug!("Accepting packed attestation with x5c (certificate chain)");
-        return Ok(());
+    if let Some(certs) = x5c_certs {
+        // Full attestation with x5c certificate chain
+
+        // Build signed data: authData || SHA-256(clientDataJSON)
+        let client_data_hash = digest::digest(&SHA256, client_data_json);
+        let mut signed_data = Vec::with_capacity(auth_data_bytes.len() + 32);
+        signed_data.extend_from_slice(auth_data_bytes);
+        signed_data.extend_from_slice(client_data_hash.as_ref());
+
+        // Verify attestation signature using the leaf cert's public key
+        let sig = cbor_map_get_bytes_by_text(stmt_map, "sig")?;
+        verify_attestation_sig_with_leaf_cert(
+            certs.first().ok_or_else(|| {
+                VerifyError::AttestationChainInvalid("x5c array is empty".to_string())
+            })?,
+            &signed_data,
+            &sig,
+        )?;
+
+        // Validate the certificate chain against pinned Yubico roots
+        let chain_result =
+            super::attestation_chain::validate_attestation_chain(&certs, auth_data_aaguid)
+                .map_err(|e| VerifyError::AttestationChainInvalid(e.to_string()))?;
+
+        tracing::info!(
+            attestation_verified = true,
+            cert_aaguid = ?chain_result.cert_aaguid,
+            "x5c attestation chain validated"
+        );
+
+        return Ok(Some(PackedAttestationResult {
+            attestation_verified: true,
+            cert_aaguid: chain_result.cert_aaguid,
+        }));
     }
 
     // Self-attestation: extract sig from attStmt
@@ -714,7 +771,80 @@ fn verify_packed_attestation<V: CoseVerifier>(
     signed_data.extend_from_slice(client_data_hash.as_ref());
 
     // Verify signature using the credential's own public key (self-attestation)
-    verifier.verify(cose_key_bytes, &signed_data, &sig)
+    verifier.verify(cose_key_bytes, &signed_data, &sig)?;
+    Ok(None)
+}
+
+/// Extract x5c DER certificate arrays from a CBOR attStmt map.
+fn extract_x5c_certs(stmt_map: &[(ciborium::Value, ciborium::Value)]) -> Option<Vec<Vec<u8>>> {
+    for (k, v) in stmt_map {
+        if let ciborium::Value::Text(s) = k
+            && s == "x5c"
+            && let ciborium::Value::Array(arr) = v
+        {
+            let certs: Vec<Vec<u8>> = arr
+                .iter()
+                .filter_map(|item| {
+                    if let ciborium::Value::Bytes(bytes) = item {
+                        Some(bytes.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if certs.is_empty() {
+                return None;
+            }
+            return Some(certs);
+        }
+    }
+    None
+}
+
+/// Verify the attestation signature using the leaf certificate's public key.
+///
+/// Parses the DER certificate to extract the public key, determines the
+/// algorithm, and verifies the signature.
+fn verify_attestation_sig_with_leaf_cert(
+    leaf_der: &[u8],
+    message: &[u8],
+    sig: &[u8],
+) -> Result<(), VerifyError> {
+    let cert = x509_cert::Certificate::from_der(leaf_der).map_err(|e| {
+        VerifyError::AttestationChainInvalid(format!("Failed to parse leaf cert: {e}"))
+    })?;
+
+    let spki = &cert.tbs_certificate.subject_public_key_info;
+    let pk_bytes = spki.subject_public_key.raw_bytes();
+
+    // Determine algorithm from the certificate's public key algorithm OID
+    let pk_alg_oid = spki.algorithm.oid;
+
+    // EC public key OID: 1.2.840.10045.2.1
+    const EC_PUBLIC_KEY: const_oid::ObjectIdentifier =
+        const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+    // RSA encryption OID: 1.2.840.113549.1.1.1
+    const RSA_ENCRYPTION: const_oid::ObjectIdentifier =
+        const_oid::ObjectIdentifier::new_unwrap("1.2.840.113549.1.1.1");
+
+    if pk_alg_oid == EC_PUBLIC_KEY {
+        let pk = signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, pk_bytes);
+        pk.verify(message, sig).map_err(|e| {
+            tracing::warn!("Leaf cert ECDSA verification failed: {e}");
+            VerifyError::SignatureInvalid
+        })
+    } else if pk_alg_oid == RSA_ENCRYPTION {
+        let pk =
+            signature::UnparsedPublicKey::new(&signature::RSA_PKCS1_2048_8192_SHA256, pk_bytes);
+        pk.verify(message, sig).map_err(|e| {
+            tracing::warn!("Leaf cert RSA verification failed: {e}");
+            VerifyError::SignatureInvalid
+        })
+    } else {
+        Err(VerifyError::AttestationChainInvalid(format!(
+            "Unsupported leaf cert key algorithm: {pk_alg_oid}"
+        )))
+    }
 }
 
 /// Get a byte string from a CBOR map by text key.

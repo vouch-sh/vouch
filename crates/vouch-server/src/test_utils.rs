@@ -97,6 +97,11 @@ pub fn test_config() -> ServerConfig {
         s3_config_region: None,
         s3_config_poll_interval: 60,
         jwt_assertion_max_lifetime_seconds: 300,
+        allowed_aaguids: vouch_common::AaguidPolicy::Any,
+        require_attestation_cert: false,
+        log_format: crate::config::LogFormat::Text,
+        trusted_proxies: Vec::new(),
+        metrics_bearer_token: None,
     }
 }
 
@@ -161,6 +166,11 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         .route("/oauth/revoke", post(handlers::oidc::revoke))
         .route("/oauth/introspect", post(handlers::oidc::introspect))
         .route("/oauth/token", post(handlers::oidc::token))
+        // FIDO2 assertion grant challenge endpoint
+        .route(
+            "/oauth/fido2/challenge",
+            post(handlers::oidc::fido2_challenge),
+        )
         // Pushed Authorization Request (RFC 9126)
         .route("/oauth/par", post(handlers::oidc::par))
         // Device Authorization Grant (RFC 8628)
@@ -545,6 +555,7 @@ pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> 
         &[0u8; 32],
         None,
         Some(user_id.as_bytes()),
+        false,
     )
     .await
     .expect("Failed to create authenticator")

@@ -1,0 +1,14 @@
+{{- if .Values.istio.enabled }}
+apiVersion: security.istio.io/v1
+kind: PeerAuthentication
+metadata:
+  name: {{ include "vouch-server.fullname" . }}
+  labels:
+    {{- include "vouch-server.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "vouch-server.selectorLabels" . | nindent 6 }}
+  mtls:
+    mode: STRICT
+{{- end }}

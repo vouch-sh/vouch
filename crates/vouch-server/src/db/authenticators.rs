@@ -27,6 +27,8 @@ pub struct Authenticator {
     pub aaguid: Option<String>,
     /// User handle stored in discoverable credentials.
     pub user_handle: Option<Vec<u8>>,
+    /// Whether the attestation was cryptographically verified via x5c chain.
+    pub attestation_verified: bool,
 }
 
 impl From<Document<AuthenticatorDoc>> for Authenticator {
@@ -48,6 +50,7 @@ impl From<Document<AuthenticatorDoc>> for Authenticator {
                 .data
                 .user_handle
                 .and_then(|h| URL_SAFE_NO_PAD.decode(&h).ok()),
+            attestation_verified: doc.data.attestation_verified,
         }
     }
 }
@@ -75,6 +78,7 @@ pub async fn create_authenticator(
     public_key: &[u8],
     aaguid: Option<&str>,
     user_handle: Option<&[u8]>,
+    attestation_verified: bool,
 ) -> Result<String> {
     let doc = AuthenticatorDoc {
         user_id: user_id.to_string(),
@@ -85,6 +89,7 @@ pub async fn create_authenticator(
         counter: 0,
         aaguid: aaguid.map(String::from),
         user_handle: user_handle.map(|h| URL_SAFE_NO_PAD.encode(h)),
+        attestation_verified,
     };
     let result = store.insert(&doc).await?;
     Ok(result.id)
