@@ -10,6 +10,7 @@ pub mod codecommit;
 pub mod docker;
 pub mod eks;
 pub mod github;
+pub mod kubernetes;
 pub mod ssh;
 pub mod ssm;
 
@@ -55,6 +56,25 @@ pub enum SetupCommands {
         /// AWS profile to use (defaults to auto-detected vouch profile).
         #[arg(long)]
         profile: Option<String>,
+        /// Path to kubeconfig file (defaults to ~/.kube/config).
+        #[arg(long)]
+        kubeconfig: Option<String>,
+    },
+    /// Configure kubectl to use Vouch OIDC credentials for generic Kubernetes clusters.
+    K8s {
+        /// Kubernetes cluster name.
+        #[arg(long)]
+        cluster: String,
+        /// Kubernetes API server URL (e.g., https://k8s.example.com:6443).
+        #[arg(long)]
+        server: String,
+        /// Path to the cluster's certificate authority file (PEM format).
+        #[arg(long)]
+        certificate_authority: Option<String>,
+        /// OIDC audience (must match --oidc-client-id on the API server).
+        /// Defaults to "kubernetes".
+        #[arg(long)]
+        audience: Option<String>,
         /// Path to kubeconfig file (defaults to ~/.kube/config).
         #[arg(long)]
         kubeconfig: Option<String>,

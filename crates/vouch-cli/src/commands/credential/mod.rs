@@ -12,6 +12,7 @@ pub mod docker;
 pub mod eks;
 pub mod git_protocol;
 pub mod github;
+pub mod kubernetes;
 pub mod pip;
 pub mod rds;
 pub mod redshift;
@@ -103,6 +104,20 @@ pub enum CredentialCommands {
         /// AWS IAM role ARN to assume (auto-detected from vouch AWS profile if not specified).
         #[arg(long)]
         role: Option<String>,
+    },
+    /// Generate a Kubernetes OIDC token for generic Kubernetes clusters.
+    ///
+    /// Outputs a Kubernetes ExecCredential JSON to stdout. Use as a
+    /// kubeconfig exec-based credential plugin for clusters configured with
+    /// Vouch as the OIDC provider.
+    K8s {
+        /// Kubernetes cluster name (used as cache key).
+        #[arg(long)]
+        cluster: String,
+        /// OIDC audience (must match --oidc-client-id on the API server).
+        /// Defaults to "kubernetes" if not specified.
+        #[arg(long)]
+        audience: Option<String>,
     },
     /// Generate an RDS IAM authentication token.
     ///

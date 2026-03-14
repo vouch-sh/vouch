@@ -4,7 +4,7 @@
 use serde::Serialize;
 
 /// Standard OIDC ID token claims with Vouch extensions.
-/// Used by cloud credential endpoints (AWS).
+/// Used by credential endpoints (AWS, Kubernetes).
 #[derive(Debug, Serialize)]
 pub struct OidcIdTokenClaims {
     /// Issuer (Vouch server URL).
@@ -80,6 +80,19 @@ impl OidcIdTokenClaimsBuilder {
             .issuer(issuer)
             .subject(email)
             .audience(issuer) // AWS uses issuer as audience
+            .email(email)
+    }
+
+    /// Create a builder pre-configured for Kubernetes.
+    ///
+    /// The audience must match the `--oidc-client-id` configured on the Kubernetes
+    /// API server. The subject and email are both set to the user's email.
+    #[must_use]
+    pub fn for_k8s(issuer: &str, email: &str, audience: &str) -> Self {
+        Self::new()
+            .issuer(issuer)
+            .subject(email)
+            .audience(audience)
             .email(email)
     }
 
@@ -291,5 +304,41 @@ mod tests {
                 .build()
                 .unwrap();
         assert_ne!(claims1.jti, claims2.jti);
+    }
+
+    #[test]
+    fn test_for_k8s_uses_provided_audience() {
+        let result = OidcIdTokenClaimsBuilder::for_k8s(
+            "https://vouch.example.com",
+            "user@example.com",
+            "kubernetes",
+        )
+        .build();
+
+        assert!(result.is_ok());
+        if let Ok(claims) = result {
+            assert_eq!(claims.iss, "https://vouch.example.com");
+            assert_eq!(claims.sub, "user@example.com");
+            assert_eq!(claims.aud, "kubernetes");
+            assert_eq!(claims.email, "user@example.com");
+            assert!(claims.email_verified);
+            assert!(claims.hardware_verified);
+            assert!(!claims.jti.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_for_k8s_custom_audience() {
+        let result = OidcIdTokenClaimsBuilder::for_k8s(
+            "https://vouch.example.com",
+            "user@example.com",
+            "my-cluster",
+        )
+        .build();
+
+        assert!(result.is_ok());
+        if let Ok(claims) = result {
+            assert_eq!(claims.aud, "my-cluster");
+        }
     }
 }

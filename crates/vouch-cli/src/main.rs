@@ -565,6 +565,9 @@ async fn run() -> Result<()> {
                 )
                 .await
             }
+            CredentialCommands::K8s { cluster, audience } => {
+                commands::credential::kubernetes::run(server, &cluster, audience.as_deref()).await
+            }
             CredentialCommands::Rds {
                 hostname,
                 port,
@@ -644,6 +647,23 @@ async fn run() -> Result<()> {
                     &cluster,
                     region.as_deref(),
                     profile.as_deref(),
+                    kubeconfig.as_deref(),
+                )
+                .await
+            }
+            SetupCommands::K8s {
+                cluster,
+                server: k8s_server,
+                certificate_authority,
+                audience,
+                kubeconfig,
+            } => {
+                commands::setup::kubernetes::run(
+                    server,
+                    &cluster,
+                    &k8s_server,
+                    certificate_authority.as_deref(),
+                    audience.as_deref(),
                     kubeconfig.as_deref(),
                 )
                 .await

@@ -22,6 +22,7 @@
 
 pub mod aws;
 pub mod github;
+pub mod kubernetes;
 
 pub use aws::{AwsError, AwsResult, AwsTokenResult, issue_aws_token};
 pub use github::GitHubService;
