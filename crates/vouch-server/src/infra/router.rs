@@ -62,12 +62,9 @@ pub fn print_startup_banner() {
 
   Hardware-backed identity server
   https://vouch.sh
-  v{} ({}, {})
+  v{} ({})
 ",
             env!("CARGO_PKG_VERSION"),
-            option_env!("GITHUB_SHA")
-                .and_then(|s| s.get(..7))
-                .unwrap_or("dev"),
             build_date(),
         );
     }
