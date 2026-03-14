@@ -205,10 +205,7 @@ pub async fn revoke_token(
                 }
             }
             Err(e) => {
-                tracing::warn!(
-                    "Failed to delete sessions during revocation: {}",
-                    e,
-                );
+                tracing::warn!("Failed to delete sessions during revocation: {}", e,);
                 false
             }
         }
@@ -218,10 +215,7 @@ pub async fn revoke_token(
         match db::delete_session_by_token_hash(&state.store, &token_hash).await {
             Ok(deleted) => deleted,
             Err(e) => {
-                tracing::warn!(
-                    "Failed to delete session during revocation: {}",
-                    e,
-                );
+                tracing::warn!("Failed to delete session during revocation: {}", e,);
                 false
             }
         }
@@ -241,8 +235,7 @@ pub async fn revoke_token(
             let email_for_audit = email.clone();
             tokio::spawn(async move {
                 if let Err(e) =
-                    db::insert_auth_event(&audit, &params, email_for_audit.as_deref())
-                        .await
+                    db::insert_auth_event(&audit, &params, email_for_audit.as_deref()).await
                 {
                     tracing::warn!("Failed to log revocation logout event: {}", e);
                 }
