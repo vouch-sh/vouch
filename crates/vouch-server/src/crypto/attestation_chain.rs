@@ -5,6 +5,8 @@
 //! against pinned Yubico root CA certificates. Extracts the FIDO AAGUID
 //! from the leaf attestation certificate.
 
+use std::sync::LazyLock;
+
 use aws_lc_rs::signature;
 use const_oid::ObjectIdentifier;
 use der::{Decode, DecodePem};
@@ -100,8 +102,7 @@ pub fn validate_attestation_chain(
         certs.push(cert);
     }
 
-    // Parse pinned root CAs
-    let roots = parse_pinned_roots();
+    let roots = &*PINNED_ROOTS;
 
     // Verify the chain: each cert is signed by the next cert
     // (leaf at index 0, closest-to-root at last index)
@@ -119,7 +120,7 @@ pub fn validate_attestation_chain(
     let last_cert = certs.last().ok_or(AttestationChainError::EmptyChain)?;
     let mut trusted = false;
     let mut trusted_root = String::new();
-    for root in &roots {
+    for root in roots {
         let root_pk_bytes = extract_spki_bytes(root)?;
         if verify_cert_signature(last_cert, &root_pk_bytes).is_ok() {
             trusted_root = root.tbs_certificate.subject.to_string();
@@ -169,20 +170,19 @@ pub fn validate_attestation_chain(
 // Helpers
 // ============================================================================
 
-/// Parse the pinned root CA PEM certificates.
-fn parse_pinned_roots() -> Vec<Certificate> {
-    let mut roots = Vec::with_capacity(3);
-    if let Ok(cert) = Certificate::from_pem(YUBICO_FIDO_CA_1_PEM) {
-        roots.push(cert);
-    }
-    if let Ok(cert) = Certificate::from_pem(YUBICO_FIDO_CA_2_PEM) {
-        roots.push(cert);
-    }
-    if let Ok(cert) = Certificate::from_pem(YUBICO_CA_1_PEM) {
-        roots.push(cert);
-    }
-    roots
-}
+// Pinned root CAs parsed once at first use. These are compile-time-embedded
+// PEM constants — a parse failure means the binary is broken, so expect is
+// the correct response (fail loudly on startup, not silently at runtime).
+#[allow(clippy::expect_used)]
+static PINNED_ROOTS: LazyLock<Vec<Certificate>> = LazyLock::new(|| {
+    vec![
+        Certificate::from_pem(YUBICO_FIDO_CA_1_PEM)
+            .expect("embedded yubico-fido-ca-1.pem is invalid"),
+        Certificate::from_pem(YUBICO_FIDO_CA_2_PEM)
+            .expect("embedded yubico-fido-ca-2.pem is invalid"),
+        Certificate::from_pem(YUBICO_CA_1_PEM).expect("embedded yubico-ca-1.pem is invalid"),
+    ]
+});
 
 /// Extract the raw SubjectPublicKeyInfo bytes from a certificate.
 fn extract_spki_bytes(cert: &Certificate) -> Result<Vec<u8>, AttestationChainError> {
@@ -303,31 +303,11 @@ fn extract_aaguid_from_cert(cert: &Certificate) -> Option<String> {
 
 /// Format 16 raw bytes as a UUID string.
 fn format_aaguid(bytes: &[u8]) -> String {
-    if bytes.len() != 16 {
-        return String::new();
-    }
-    format!(
-        "{:02x}{:02x}{:02x}{:02x}-\
-         {:02x}{:02x}-{:02x}{:02x}-\
-         {:02x}{:02x}-\
-         {:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes.first().copied().unwrap_or(0),
-        bytes.get(1).copied().unwrap_or(0),
-        bytes.get(2).copied().unwrap_or(0),
-        bytes.get(3).copied().unwrap_or(0),
-        bytes.get(4).copied().unwrap_or(0),
-        bytes.get(5).copied().unwrap_or(0),
-        bytes.get(6).copied().unwrap_or(0),
-        bytes.get(7).copied().unwrap_or(0),
-        bytes.get(8).copied().unwrap_or(0),
-        bytes.get(9).copied().unwrap_or(0),
-        bytes.get(10).copied().unwrap_or(0),
-        bytes.get(11).copied().unwrap_or(0),
-        bytes.get(12).copied().unwrap_or(0),
-        bytes.get(13).copied().unwrap_or(0),
-        bytes.get(14).copied().unwrap_or(0),
-        bytes.get(15).copied().unwrap_or(0),
-    )
+    let arr: [u8; 16] = match bytes.try_into() {
+        Ok(a) => a,
+        Err(_) => return String::new(),
+    };
+    uuid::Uuid::from_bytes(arr).as_hyphenated().to_string()
 }
 
 // ============================================================================
@@ -373,8 +353,7 @@ mod tests {
 
     #[test]
     fn test_pinned_roots_parse() {
-        let roots = parse_pinned_roots();
-        assert_eq!(roots.len(), 3, "Should parse all three root CAs");
+        assert_eq!(PINNED_ROOTS.len(), 3, "Should parse all three root CAs");
     }
 
     #[test]

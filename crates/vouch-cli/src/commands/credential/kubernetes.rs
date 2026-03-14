@@ -63,8 +63,7 @@ fn build_exec_credential(token: &str, expiration: &str) -> Result<serde_json::Va
 
 /// Compute the expiration timestamp as RFC 3339 from a TTL in seconds.
 fn expiration_rfc3339(expires_in: u64) -> Result<String> {
-    #[allow(clippy::cast_possible_wrap)]
-    let ttl = expires_in as i64;
+    let ttl = i64::try_from(expires_in).unwrap_or(3600);
     let expires = jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_secs(ttl))
         .context("failed to compute Kubernetes token expiration")?;
@@ -109,5 +108,12 @@ mod tests {
         let ts = expiration_rfc3339(3600).expect("should compute");
         let exp: jiff::Timestamp = ts.parse().unwrap();
         assert!(exp > now);
+    }
+
+    #[test]
+    fn test_expiration_rfc3339_overflow_falls_back() {
+        // u64::MAX exceeds i64::MAX — should fall back to 3600 seconds
+        let ts = expiration_rfc3339(u64::MAX).expect("should fall back");
+        assert!(ts.parse::<jiff::Timestamp>().is_ok());
     }
 }

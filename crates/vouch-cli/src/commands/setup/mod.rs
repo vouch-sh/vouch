@@ -10,6 +10,7 @@ pub mod codecommit;
 pub mod docker;
 pub mod eks;
 pub mod github;
+pub mod kubeconfig;
 pub mod kubernetes;
 pub mod ssh;
 pub mod ssm;

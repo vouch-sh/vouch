@@ -142,3 +142,200 @@ fn has_x5c_in_attestation(attestation: &[u8]) -> bool {
         .iter()
         .any(|(k, v)| k.as_text() == Some("x5c") && v.as_array().is_some_and(|a| !a.is_empty()))
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
+mod tests {
+    use super::*;
+    use ciborium::Value;
+    use std::collections::HashSet;
+
+    /// YubiKey 5 NFC AAGUID bytes.
+    const YUBIKEY_5_NFC_AAGUID: [u8; 16] = [
+        0xcb, 0x69, 0x48, 0x1e, 0x8f, 0xf7, 0x40, 0x39, 0x93, 0xec, 0x0a, 0x27, 0x29, 0xa1, 0x54,
+        0xa8,
+    ];
+
+    /// Build a minimal CBOR attestation object for testing.
+    fn build_attestation(
+        fmt: &str,
+        aaguid: Option<[u8; 16]>,
+        x5c: Option<Vec<Vec<u8>>>,
+    ) -> Vec<u8> {
+        // Build authData: rpIdHash(32) + flags(1) + signCount(4)
+        let mut auth_data = vec![0u8; 37];
+        if let Some(aaguid_bytes) = aaguid {
+            // Set AT flag (bit 6) and UP flag (bit 0)
+            auth_data[32] = 0x41;
+            auth_data.extend_from_slice(&aaguid_bytes);
+            // credIdLen = 0, no credential ID
+            auth_data.extend_from_slice(&[0x00, 0x00]);
+        } else {
+            auth_data[32] = 0x01; // UP flag only
+        }
+
+        let mut stmt_entries = Vec::new();
+        if let Some(certs) = x5c {
+            let x5c_array: Vec<Value> = certs.into_iter().map(Value::Bytes).collect();
+            stmt_entries.push((Value::Text("x5c".to_string()), Value::Array(x5c_array)));
+        }
+
+        let mut cbor = Vec::new();
+        ciborium::into_writer(
+            &Value::Map(vec![
+                (Value::Text("fmt".to_string()), Value::Text(fmt.to_string())),
+                (Value::Text("authData".to_string()), Value::Bytes(auth_data)),
+                (Value::Text("attStmt".to_string()), Value::Map(stmt_entries)),
+            ]),
+            &mut cbor,
+        )
+        .expect("CBOR serialization");
+        cbor
+    }
+
+    // ====================================================================
+    // has_x5c_in_attestation tests
+    // ====================================================================
+
+    #[test]
+    fn test_has_x5c_with_certs() {
+        let att = build_attestation(
+            "packed",
+            Some(YUBIKEY_5_NFC_AAGUID),
+            Some(vec![vec![0xDE, 0xAD]]),
+        );
+        assert!(has_x5c_in_attestation(&att));
+    }
+
+    #[test]
+    fn test_has_x5c_without_certs() {
+        let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), None);
+        assert!(!has_x5c_in_attestation(&att));
+    }
+
+    #[test]
+    fn test_has_x5c_empty_array() {
+        let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), Some(vec![]));
+        assert!(!has_x5c_in_attestation(&att));
+    }
+
+    #[test]
+    fn test_has_x5c_invalid_cbor() {
+        assert!(!has_x5c_in_attestation(&[0xFF, 0xFF]));
+    }
+
+    // ====================================================================
+    // validate_registration_attestation tests
+    // ====================================================================
+
+    #[test]
+    fn test_validate_packed_any_policy() {
+        let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), None);
+        let result =
+            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false);
+        let validated = result.expect("should succeed");
+        assert!(validated.aaguid.is_some());
+        assert!(!validated.attestation_verified);
+    }
+
+    #[test]
+    fn test_validate_rejects_software_passkey() {
+        let att = build_attestation("none", None, None);
+        let result =
+            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_rejects_platform_authenticator() {
+        let att = build_attestation("apple", None, None);
+        let result =
+            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_allowlist_permits_listed_aaguid() {
+        let aaguid_str = "cb69481e-8ff7-4039-93ec-0a2729a154a8";
+        let mut set = HashSet::new();
+        set.insert(aaguid_str.to_string());
+        let policy = vouch_common::AaguidPolicy::AllowList(set);
+
+        let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), None);
+        let result = validate_registration_attestation(&att, &policy, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_allowlist_rejects_unlisted_aaguid() {
+        let mut set = HashSet::new();
+        set.insert("00000000-0000-0000-0000-000000000000".to_string());
+        let policy = vouch_common::AaguidPolicy::AllowList(set);
+
+        let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), None);
+        let result = validate_registration_attestation(&att, &policy, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_missing_aaguid_with_non_any_policy() {
+        let policy = vouch_common::AaguidPolicy::FipsOnly;
+
+        // No AAGUID in authData (UP flag only, no AT flag)
+        let att = build_attestation("packed", None, None);
+        let result = validate_registration_attestation(&att, &policy, false);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_require_cert_rejects_self_attestation() {
+        let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), None);
+        let result =
+            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, true);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_require_cert_accepts_x5c() {
+        let att = build_attestation(
+            "packed",
+            Some(YUBIKEY_5_NFC_AAGUID),
+            Some(vec![vec![0xDE, 0xAD]]),
+        );
+        let result =
+            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_no_require_cert_allows_self_attestation() {
+        let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), None);
+        let result =
+            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_known_aaguid_sets_device_name() {
+        let att = build_attestation("packed", Some(YUBIKEY_5_NFC_AAGUID), None);
+        let result =
+            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false);
+        let validated = result.expect("should succeed");
+        assert_ne!(validated.device_name, "Security Key");
+    }
+
+    #[test]
+    fn test_validate_unknown_aaguid_uses_default_name() {
+        let unknown_aaguid = [0x00; 16];
+        let att = build_attestation("packed", Some(unknown_aaguid), None);
+        let result =
+            validate_registration_attestation(&att, &vouch_common::AaguidPolicy::Any, false);
+        let validated = result.expect("should succeed");
+        assert_eq!(validated.device_name, "Security Key");
+    }
+}

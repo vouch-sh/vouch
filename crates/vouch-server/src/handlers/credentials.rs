@@ -383,14 +383,21 @@ pub async fn get_kubernetes_token(
         })?;
 
     let user_email = token.email.clone().unwrap_or_else(|| user.email.clone());
-    let audience = query.audience.as_deref().unwrap_or(DEFAULT_K8S_AUDIENCE);
+    let audience = query
+        .audience
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_K8S_AUDIENCE);
 
     // Get authenticator info for AAGUID claim
     let authenticator = if let Some(ref auth_id) = token.authenticator_id {
-        db::get_authenticator_by_id(&state.store, auth_id)
-            .await
-            .ok()
-            .flatten()
+        match db::get_authenticator_by_id(&state.store, auth_id).await {
+            Ok(auth) => auth,
+            Err(e) => {
+                tracing::warn!("Failed to get authenticator {auth_id}: {e}");
+                None
+            }
+        }
     } else {
         None
     };
