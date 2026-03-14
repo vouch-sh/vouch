@@ -356,3 +356,42 @@ async fn test_rfc7009_revocation_client_auth_required() {
         "Token should still be active after unauthenticated revocation attempt"
     );
 }
+
+#[tokio::test]
+async fn test_revoke_already_revoked_token_returns_200() {
+    // RFC 7009 Section 2.2: "The authorization server responds with HTTP status code 200
+    // for both the case where the token has been successfully revoked and the case where
+    // the client submitted an invalid token."
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "double-revoke@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let auth_header = client.basic_auth_header();
+
+    let (access_token, _) = issue_oauth_access_token(&app, &state, &user, &auth_id, &client).await;
+
+    // First revocation — should return 200
+    let (status, _) = http_post_form(
+        &app,
+        "/oauth/revoke",
+        &format!("token={access_token}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "First revocation must return 200");
+
+    // Second revocation of the same (now-revoked) token — must also return 200
+    let (status, _) = http_post_form(
+        &app,
+        "/oauth/revoke",
+        &format!("token={access_token}"),
+        &[("Authorization", &auth_header)],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "RFC 7009 §2.2: revoking an already-revoked token must still return 200"
+    );
+}

@@ -604,14 +604,16 @@ mod tests {
     #[test]
     fn test_validate_dpop_claims_method_mismatch() {
         let claims = make_claims("GET", "https://example.com/token", now());
-        let result = validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
+        let result =
+            validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
         assert!(matches!(result, Err(DpopError::MethodMismatch)));
     }
 
     #[test]
     fn test_validate_dpop_claims_uri_mismatch() {
         let claims = make_claims("POST", "https://other.com/token", now());
-        let result = validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
+        let result =
+            validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
         assert!(matches!(result, Err(DpopError::UriMismatch)));
     }
 
@@ -619,7 +621,8 @@ mod tests {
     fn test_validate_dpop_claims_expired() {
         // iat older than max_age_seconds
         let claims = make_claims("POST", "https://example.com/token", now() - 120);
-        let result = validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
+        let result =
+            validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
         assert!(matches!(result, Err(DpopError::Expired)));
     }
 
@@ -627,7 +630,14 @@ mod tests {
     fn test_validate_dpop_claims_future_iat() {
         // iat more than 60 seconds in the future (age < -60)
         let claims = make_claims("POST", "https://example.com/token", now() + 120);
-        let result = validate_dpop_claims(&claims, "POST", "https://example.com/token", 300, None, None);
+        let result = validate_dpop_claims(
+            &claims,
+            "POST",
+            "https://example.com/token",
+            300,
+            None,
+            None,
+        );
         assert!(matches!(result, Err(DpopError::Expired)));
     }
 
@@ -667,14 +677,8 @@ mod tests {
     #[test]
     fn test_validate_dpop_claims_valid_no_ath() {
         let claims = make_claims("POST", "https://example.com/token", now());
-        let result = validate_dpop_claims(
-            &claims,
-            "POST",
-            "https://example.com/token",
-            60,
-            None,
-            None,
-        );
+        let result =
+            validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
         assert!(result.is_ok());
     }
 }

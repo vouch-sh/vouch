@@ -165,6 +165,11 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         .route("/oauth/revoke", post(handlers::oidc::revoke))
         .route("/oauth/introspect", post(handlers::oidc::introspect))
         .route("/oauth/token", post(handlers::oidc::token))
+        // FIDO2 assertion grant challenge endpoint
+        .route(
+            "/oauth/fido2/challenge",
+            post(handlers::oidc::fido2_challenge),
+        )
         // Pushed Authorization Request (RFC 9126)
         .route("/oauth/par", post(handlers::oidc::par))
         // Device Authorization Grant (RFC 8628)

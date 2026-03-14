@@ -1099,7 +1099,10 @@ async fn test_wire_message_truncated_length_prefix() {
     let mut cursor = Cursor::new(vec![0x00, 0x01]);
     let result = read_message(&mut cursor).await;
     // Partial length prefix triggers UnexpectedEof which maps to Ok(None)
-    assert!(result.unwrap().is_none(), "Truncated length prefix should return Ok(None)");
+    assert!(
+        result.unwrap().is_none(),
+        "Truncated length prefix should return Ok(None)"
+    );
 }
 
 #[tokio::test]
