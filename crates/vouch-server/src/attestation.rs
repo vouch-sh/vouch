@@ -241,6 +241,39 @@ pub fn validate_hardware_attestation(attestation: &[u8]) -> AttestationValidatio
     }
 }
 
+/// Extract x5c DER certificate arrays from a CBOR-encoded attestation object.
+///
+/// Parses the attestation object to find `attStmt.x5c` and returns the
+/// DER-encoded certificates as byte vectors.
+#[must_use]
+pub fn extract_x5c_from_attestation(attestation: &[u8]) -> Option<Vec<Vec<u8>>> {
+    let value: Value = ciborium::from_reader(attestation).ok()?;
+    let map = value.as_map()?;
+
+    let att_stmt = map
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("attStmt"))
+        .and_then(|(_, v)| v.as_map())?;
+
+    let x5c_array = att_stmt
+        .iter()
+        .find(|(k, _)| k.as_text() == Some("x5c"))
+        .and_then(|(_, v)| v.as_array())?;
+
+    let certs: Vec<Vec<u8>> = x5c_array
+        .iter()
+        .filter_map(|item| {
+            if let Value::Bytes(bytes) = item {
+                Some(bytes.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if certs.is_empty() { None } else { Some(certs) }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

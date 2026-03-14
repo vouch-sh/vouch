@@ -5,6 +5,7 @@
 //! JWT signing/verification, SSH certificate authority, WebAuthn COSE verification,
 //! NitroTPM-attested KMS decryption, and encoding utilities.
 
+pub(crate) mod attestation_chain;
 pub(crate) mod ber;
 pub mod cose;
 pub(crate) mod document_crypto;

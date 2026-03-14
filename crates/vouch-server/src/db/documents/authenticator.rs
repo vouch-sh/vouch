@@ -22,6 +22,9 @@ pub struct AuthenticatorDoc {
     pub aaguid: Option<String>,
     /// Base64-encoded user handle for discoverable credentials.
     pub user_handle: Option<String>,
+    /// Whether the attestation was cryptographically verified via x5c chain.
+    #[serde(default)]
+    pub attestation_verified: bool,
 }
 
 impl DocumentType for AuthenticatorDoc {

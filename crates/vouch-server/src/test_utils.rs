@@ -98,6 +98,7 @@ pub fn test_config() -> ServerConfig {
         s3_config_poll_interval: 60,
         jwt_assertion_max_lifetime_seconds: 300,
         allowed_aaguids: vouch_common::AaguidPolicy::Any,
+        require_attestation_cert: false,
     }
 }
 
@@ -546,6 +547,7 @@ pub async fn create_test_authenticator(store: &DocumentStore, user_id: &str) -> 
         &[0u8; 32],
         None,
         Some(user_id.as_bytes()),
+        false,
     )
     .await
     .expect("Failed to create authenticator")

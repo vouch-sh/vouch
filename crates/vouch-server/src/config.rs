@@ -223,6 +223,14 @@ pub struct Args {
     /// - Comma-separated UUIDs: explicit allowlist
     #[arg(long, env = "VOUCH_ALLOWED_AAGUIDS", default_value = "")]
     pub allowed_aaguids: String,
+
+    /// Require x5c attestation certificates during WebAuthn registration.
+    ///
+    /// When enabled, self-attestation (no certificate chain) is rejected.
+    /// Only authenticators that provide a full attestation certificate chain
+    /// (e.g., YubiKeys with packed attestation) will be accepted.
+    #[arg(long, env = "VOUCH_REQUIRE_ATTESTATION_CERT", default_value = "false")]
+    pub require_attestation_cert: bool,
 }
 
 // ============================================================================
@@ -325,6 +333,8 @@ pub struct ServerConfig {
     pub jwt_assertion_max_lifetime_seconds: i64,
     /// AAGUID allowlist policy for WebAuthn registration (default: `Any`).
     pub allowed_aaguids: vouch_common::AaguidPolicy,
+    /// Require x5c attestation certificates during WebAuthn registration.
+    pub require_attestation_cert: bool,
 }
 
 impl ServerConfig {
@@ -414,6 +424,7 @@ impl ServerConfig {
             s3_config_poll_interval: args.s3_config_poll_interval,
             jwt_assertion_max_lifetime_seconds: args.jwt_assertion_max_lifetime,
             allowed_aaguids,
+            require_attestation_cert: args.require_attestation_cert,
         })
     }
 

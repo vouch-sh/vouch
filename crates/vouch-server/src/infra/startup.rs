@@ -109,6 +109,8 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
         config.device_poll_interval_seconds,
     );
 
+    log_authenticator_policy(&config);
+
     if config.oidc_configured() {
         let enrollment_domains = match &config.allowed_domains {
             Some(domains) => domains.join(", "),
@@ -526,6 +528,23 @@ async fn build_app_state(
     });
 
     Ok(state)
+}
+
+/// Log authenticator policy settings at startup.
+fn log_authenticator_policy(config: &config::ServerConfig) {
+    let aaguid_policy = match &config.allowed_aaguids {
+        vouch_common::AaguidPolicy::Any => "any".to_string(),
+        vouch_common::AaguidPolicy::FipsOnly => "fips-only".to_string(),
+        vouch_common::AaguidPolicy::YubiKey5Only => "yubikey-5-only".to_string(),
+        vouch_common::AaguidPolicy::AllowList(set) => {
+            format!("allowlist ({} AAGUIDs)", set.len())
+        }
+    };
+    tracing::info!(
+        "Authenticator policy: aaguid={}, require_attestation_cert={}",
+        aaguid_policy,
+        config.require_attestation_cert,
+    );
 }
 
 /// Timeout configuration for AWS KMS API calls.

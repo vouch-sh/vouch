@@ -837,7 +837,7 @@ pub async fn browser_register_start(
         .collect();
 
     // Use webauthn-rs to generate proper registration options with cryptographic verification
-    let (ccr, webauthn_state) = state
+    let (mut ccr, webauthn_state) = state
         .webauthn
         .start_passkey_registration(user_id, &user_email, &user_email, Some(exclude_credentials))
         .map_err(|e| {
@@ -847,6 +847,11 @@ pub async fn browser_register_start(
                 e.to_string(),
             )
         })?;
+
+    // Request direct attestation so the browser forwards the x5c certificate
+    // chain. This enables attestation chain validation against pinned Yubico
+    // root CAs and AAGUID extraction from the leaf certificate.
+    ccr.public_key.attestation = Some(webauthn_rs_proto::AttestationConveyancePreference::Direct);
 
     // Create registration state with webauthn verification state
     let now = jiff::Timestamp::now();
@@ -1043,8 +1048,14 @@ pub async fn browser_register_complete(
 
     // ── Phase 6: Hardware attestation validation ────────────────────────
     // Reject software passkeys, platform authenticators, and disallowed AAGUIDs.
-    let validated =
-        validate_registration_attestation(&attestation_object, &state.config().allowed_aaguids)?;
+    let validated = validate_registration_attestation(
+        &attestation_object,
+        &state.config().allowed_aaguids,
+        state.config().require_attestation_cert,
+    )?;
+
+    // ── Phase 6b: Extract x5c certs before attestation_object is moved ─
+    let x5c_certs = crate::attestation::extract_x5c_from_attestation(&attestation_object);
 
     // ── Phase 7: WebAuthn cryptographic verification ────────────────────
     use webauthn_rs::prelude::Base64UrlSafeData;
@@ -1109,6 +1120,31 @@ pub async fn browser_register_complete(
     // rather than the one from the request, to ensure consistency with what the YubiKey has stored.
     let cred_id_to_store = passkey.cred_id().to_vec();
 
+    // ── Phase 8b: x5c attestation chain validation (browser enrollment) ──
+    // The browser enrollment path uses webauthn-rs for verification, so we
+    // additionally validate the x5c chain here for attestation_verified status.
+    let mut validated = validated;
+    if let Some(x5c_certs) = x5c_certs {
+        match crate::crypto::attestation_chain::validate_attestation_chain(
+            &x5c_certs,
+            validated.aaguid.as_deref(),
+        ) {
+            Ok(_chain_result) => {
+                validated.attestation_verified = true;
+                tracing::info!(
+                    attestation_verified = true,
+                    "Browser enrollment: x5c chain validated"
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Browser enrollment: x5c chain validation \
+                     failed (non-fatal): {e}"
+                );
+            }
+        }
+    }
+
     // Store the authenticator with verified credential
     // user_handle is the user_id as bytes (for discoverable credentials)
     let user_handle = reg_state.user_id.as_bytes().to_vec();
@@ -1121,6 +1157,7 @@ pub async fn browser_register_complete(
         &public_key_cbor,
         validated.aaguid.as_deref(),
         Some(&user_handle),
+        validated.attestation_verified,
     )
     .await
     .map_err(|e| ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string()))?;
