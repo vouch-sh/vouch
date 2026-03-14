@@ -33,24 +33,24 @@ use anyhow::{Context, Result};
 /// Maximum nesting depth for BER indefinite-length scanning.
 /// CMS structures are ~6 levels deep. 32 provides ample headroom
 /// while preventing stack overflow from pathological input.
-const MAX_BER_DEPTH: usize = 32;
+pub const MAX_BER_DEPTH: usize = 32;
 
 /// Lightweight ASN.1 BER/DER parser for extracting fields from CMS structures.
 ///
 /// This is intentionally minimal -- it only handles the subset of BER/DER needed
 /// to parse KMS CMS `CiphertextForRecipient` responses.
-pub(crate) struct DerParser<'a> {
+pub struct DerParser<'a> {
     data: &'a [u8],
     pos: usize,
 }
 
 impl<'a> DerParser<'a> {
-    pub(crate) fn new(data: &'a [u8]) -> Self {
+    pub fn new(data: &'a [u8]) -> Self {
         Self { data, pos: 0 }
     }
 
     /// Read a TLV (tag-length-value) and return (tag, value_bytes).
-    pub(crate) fn read_tlv(&mut self) -> Result<(u8, &'a [u8])> {
+    pub fn read_tlv(&mut self) -> Result<(u8, &'a [u8])> {
         if self.pos >= self.data.len() {
             anyhow::bail!("DER: unexpected end of data at position {}", self.pos);
         }
@@ -84,7 +84,7 @@ impl<'a> DerParser<'a> {
     /// constructed types with indefinite length (`0x80`). For indefinite
     /// length, the content ends at end-of-contents octets (`0x00 0x00`).
     /// We scan for the EOC by walking nested TLVs to avoid false matches.
-    pub(crate) fn read_tlv_ber(&mut self) -> Result<(u8, &'a [u8])> {
+    pub fn read_tlv_ber(&mut self) -> Result<(u8, &'a [u8])> {
         if self.pos >= self.data.len() {
             anyhow::bail!("BER: unexpected end of data at position {}", self.pos);
         }
@@ -227,13 +227,13 @@ impl<'a> DerParser<'a> {
     }
 
     /// Skip one TLV element.
-    pub(crate) fn skip_tlv(&mut self) -> Result<()> {
+    pub fn skip_tlv(&mut self) -> Result<()> {
         let _ = self.read_tlv()?;
         Ok(())
     }
 
     /// Expect an OCTET STRING (tag 0x04) and return its contents.
-    pub(crate) fn expect_octet_string(&mut self) -> Result<&'a [u8]> {
+    pub fn expect_octet_string(&mut self) -> Result<&'a [u8]> {
         let (tag, value) = self.read_tlv()?;
         if tag != 0x04 {
             anyhow::bail!("DER: expected OCTET STRING (0x04), got 0x{tag:02x}");
@@ -244,7 +244,7 @@ impl<'a> DerParser<'a> {
     // BER-aware variants for KMS CMS responses that may use indefinite length.
 
     /// Expect a SEQUENCE, tolerating BER indefinite length.
-    pub(crate) fn expect_sequence_ber(&mut self) -> Result<&'a [u8]> {
+    pub fn expect_sequence_ber(&mut self) -> Result<&'a [u8]> {
         let (tag, value) = self.read_tlv_ber()?;
         if tag != 0x30 {
             anyhow::bail!("BER: expected SEQUENCE (0x30), got 0x{tag:02x}");
@@ -253,7 +253,7 @@ impl<'a> DerParser<'a> {
     }
 
     /// Expect context-specific EXPLICIT [n], tolerating BER indefinite length.
-    pub(crate) fn expect_context_explicit_ber(&mut self, n: u8) -> Result<&'a [u8]> {
+    pub fn expect_context_explicit_ber(&mut self, n: u8) -> Result<&'a [u8]> {
         let expected_tag = 0xa0 | n;
         let (tag, value) = self.read_tlv_ber()?;
         if tag != expected_tag {
@@ -263,7 +263,7 @@ impl<'a> DerParser<'a> {
     }
 
     /// Expect a SET, tolerating BER indefinite length.
-    pub(crate) fn expect_set_ber(&mut self) -> Result<&'a [u8]> {
+    pub fn expect_set_ber(&mut self) -> Result<&'a [u8]> {
         let (tag, value) = self.read_tlv_ber()?;
         if tag != 0x31 {
             anyhow::bail!("BER: expected SET (0x31), got 0x{tag:02x}");
@@ -272,7 +272,7 @@ impl<'a> DerParser<'a> {
     }
 
     /// Skip one TLV element, tolerating BER indefinite length.
-    pub(crate) fn skip_tlv_ber(&mut self) -> Result<()> {
+    pub fn skip_tlv_ber(&mut self) -> Result<()> {
         let _ = self.read_tlv_ber()?;
         Ok(())
     }
@@ -291,7 +291,7 @@ impl<'a> DerParser<'a> {
     ///
     /// Returns the reassembled content as `Vec<u8>` since constructed encoding
     /// requires concatenation of multiple chunks.
-    pub(crate) fn read_implicit_octet_string_ber(&mut self, n: u8) -> Result<Vec<u8>> {
+    pub fn read_implicit_octet_string_ber(&mut self, n: u8) -> Result<Vec<u8>> {
         let primitive_tag = 0x80 | n;
         let constructed_tag = 0xa0 | n;
         let (tag, value) = self.read_tlv_ber()?;

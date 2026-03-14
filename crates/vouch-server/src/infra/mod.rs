@@ -7,6 +7,7 @@
 
 pub mod cleanup;
 pub mod generate_document_key;
+pub mod metrics;
 pub mod rate_limit;
 pub mod request_id;
 pub mod router;
@@ -15,4 +16,5 @@ pub mod security_headers;
 pub mod serve;
 pub mod startup;
 pub mod static_assets;
+pub mod telemetry;
 pub mod tls;

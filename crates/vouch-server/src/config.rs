@@ -3,6 +3,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use ipnet::IpNet;
 use secrecy::{ExposeSecret, SecretString};
 use std::collections::HashMap;
 
@@ -15,6 +16,33 @@ fn parse_comma_list(s: &str) -> Vec<String> {
     s.split(',')
         .map(|item| item.trim().to_lowercase())
         .filter(|item| !item.is_empty())
+        .collect()
+}
+
+/// Parse a log format string.
+fn parse_log_format(s: &str) -> Result<LogFormat> {
+    match s.trim().to_lowercase().as_str() {
+        "text" | "" => Ok(LogFormat::Text),
+        "json" => Ok(LogFormat::Json),
+        other => anyhow::bail!(
+            "Invalid VOUCH_LOG_FORMAT '{}': expected 'text' or 'json'",
+            other
+        ),
+    }
+}
+
+/// Parse a comma-separated list of CIDR networks.
+fn parse_trusted_proxies(s: &str) -> Result<Vec<IpNet>> {
+    if s.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    s.split(',')
+        .map(|cidr| {
+            let trimmed = cidr.trim();
+            trimmed.parse::<IpNet>().map_err(|e| {
+                anyhow::anyhow!("Invalid CIDR in VOUCH_TRUSTED_PROXIES '{}': {}", trimmed, e)
+            })
+        })
         .collect()
 }
 
@@ -231,6 +259,18 @@ pub struct Args {
     /// (e.g., YubiKeys with packed attestation) will be accepted.
     #[arg(long, env = "VOUCH_REQUIRE_ATTESTATION_CERT", default_value = "false")]
     pub require_attestation_cert: bool,
+
+    /// Log output format: "text" (default, human-readable) or "json" (structured).
+    #[arg(long, env = "VOUCH_LOG_FORMAT", default_value = "text")]
+    pub log_format: String,
+
+    /// Trusted proxy CIDRs for X-Forwarded-For parsing (comma-separated).
+    ///
+    /// When set, the server parses X-Forwarded-For rightmost-first and stops
+    /// at the first IP not in the trusted CIDRs. When unset, the TCP peer IP
+    /// is used directly (safe for direct exposure without a reverse proxy).
+    #[arg(long, env = "VOUCH_TRUSTED_PROXIES", default_value = "")]
+    pub trusted_proxies: String,
 }
 
 // ============================================================================
@@ -335,6 +375,20 @@ pub struct ServerConfig {
     pub allowed_aaguids: vouch_common::AaguidPolicy,
     /// Require x5c attestation certificates during WebAuthn registration.
     pub require_attestation_cert: bool,
+    /// Log output format: `text` or `json`.
+    pub log_format: LogFormat,
+    /// Trusted proxy CIDRs for X-Forwarded-For parsing.
+    pub trusted_proxies: Vec<IpNet>,
+}
+
+/// Log output format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LogFormat {
+    /// Human-readable text (default).
+    #[default]
+    Text,
+    /// Structured JSON for machine consumption.
+    Json,
 }
 
 impl ServerConfig {
@@ -381,6 +435,12 @@ impl ServerConfig {
         let allowed_aaguids = vouch_common::AaguidPolicy::parse(&args.allowed_aaguids)
             .map_err(|e| anyhow::anyhow!("Invalid VOUCH_ALLOWED_AAGUIDS: {}", e))?;
 
+        // Parse log format
+        let log_format = parse_log_format(&args.log_format)?;
+
+        // Parse trusted proxies
+        let trusted_proxies = parse_trusted_proxies(&args.trusted_proxies)?;
+
         Ok(Self {
             listen_addr: args.listen_addr,
             database_url: args.database_url,
@@ -425,6 +485,8 @@ impl ServerConfig {
             jwt_assertion_max_lifetime_seconds: args.jwt_assertion_max_lifetime,
             allowed_aaguids,
             require_attestation_cert: args.require_attestation_cert,
+            log_format,
+            trusted_proxies,
         })
     }
 

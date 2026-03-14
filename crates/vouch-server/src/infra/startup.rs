@@ -40,7 +40,10 @@ pub struct ServerComponents {
 
 impl ServerComponents {
     /// Build the HTTP router with all routes, middleware, and state.
-    pub fn build_app(&self) -> axum::Router {
+    /// # Errors
+    ///
+    /// Returns an error if rate limiter configuration fails.
+    pub fn build_app(&self) -> anyhow::Result<axum::Router> {
         super::router::build_app(self.state.clone(), &self.config)
     }
 }
@@ -93,6 +96,18 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
         env_or("AWS_DEFAULTS_MODE"),
     );
     tracing::info!("Logging: RUST_LOG={}", env_or("RUST_LOG"));
+
+    if !config.trusted_proxies.is_empty() {
+        let cidrs: Vec<String> = config
+            .trusted_proxies
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        tracing::warn!(
+            "Trusted proxies configured: {} -- X-Forwarded-For will be parsed for client IP",
+            cidrs.join(", "),
+        );
+    }
 
     crate::geo::warmup();
     tracing::info!("GeoIP database initialized");

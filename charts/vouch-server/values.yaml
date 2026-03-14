@@ -57,13 +57,13 @@ ingress:
   #    hosts:
   #      - vouch.local
 
-resources: {}
-  # limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  # requests:
-  #   cpu: 100m
-  #   memory: 128Mi
+resources:
+  requests:
+    cpu: 50m
+    memory: 256Mi
+  limits:
+    memory: 512Mi
+    # No CPU limit — avoid throttling. Requests are sufficient for scheduling.
 
 persistence:
   enabled: true
@@ -81,16 +81,22 @@ tolerations: []
 
 affinity: {}
 
+topologySpreadConstraints: []
+
 # Environment variables for vouch-server
 # These are set directly in the deployment
 env:
   VOUCH_LISTEN_ADDR: "0.0.0.0:3000"
   VOUCH_DATABASE_URL: "sqlite:/data/vouch.db?mode=rwc"
+  VOUCH_LOG_FORMAT: "json"
   RUST_LOG: "info,vouch_server=debug"
   # Set these for your deployment:
   # VOUCH_RP_ID: "vouch.example.com"
   # VOUCH_RP_NAME: "Vouch"
   # VOUCH_BASE_URL: "https://vouch.example.com"
+  # VOUCH_TRUSTED_PROXIES: "10.0.0.0/8,127.0.0.6/32"
+  # OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector.monitoring:4317"
+  # OTEL_SERVICE_NAME: "vouch-server"
 
 # Secret environment variables
 # Reference an existing secret containing these keys:
@@ -107,10 +113,25 @@ secrets: {}
   # VOUCH_OIDC_CLIENT_ID: ""
   # VOUCH_OIDC_CLIENT_SECRET: ""
 
-# Health check configuration
-healthcheck:
-  path: /health
-  initialDelaySeconds: 5
-  periodSeconds: 10
-  timeoutSeconds: 3
-  failureThreshold: 3
+# PodDisruptionBudget (only created when enabled AND replicaCount > 1)
+podDisruptionBudget:
+  enabled: false
+  maxUnavailable: 1
+
+# NetworkPolicy for pod-level network segmentation
+networkPolicy:
+  enabled: false
+  ingressNamespaceLabels: {}
+  egressTo: []
+  egressPorts:
+    - port: 5432
+      protocol: TCP
+
+# Istio service mesh integration
+istio:
+  enabled: false
+
+# Prometheus ServiceMonitor CRD for auto-discovery
+serviceMonitor:
+  enabled: false
+  interval: 30s

@@ -99,6 +99,8 @@ pub fn test_config() -> ServerConfig {
         jwt_assertion_max_lifetime_seconds: 300,
         allowed_aaguids: vouch_common::AaguidPolicy::Any,
         require_attestation_cert: false,
+        log_format: crate::config::LogFormat::Text,
+        trusted_proxies: Vec::new(),
     }
 }
 

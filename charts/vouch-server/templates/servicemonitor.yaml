@@ -1,0 +1,16 @@
+{{- if .Values.serviceMonitor.enabled }}
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "vouch-server.fullname" . }}
+  labels:
+    {{- include "vouch-server.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "vouch-server.selectorLabels" . | nindent 6 }}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: {{ .Values.serviceMonitor.interval | default "30s" }}
+{{- end }}

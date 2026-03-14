@@ -585,4 +585,96 @@ mod tests {
         // SHA-256 base64url encoded should be 43 chars
         assert_eq!(hash.len(), 43);
     }
+
+    fn make_claims(htm: &str, htu: &str, iat: i64) -> DpopClaims {
+        DpopClaims {
+            jti: "test-jti".to_string(),
+            htm: htm.to_string(),
+            htu: htu.to_string(),
+            iat,
+            nonce: None,
+            ath: None,
+        }
+    }
+
+    fn now() -> i64 {
+        jiff::Timestamp::now().as_second()
+    }
+
+    #[test]
+    fn test_validate_dpop_claims_method_mismatch() {
+        let claims = make_claims("GET", "https://example.com/token", now());
+        let result = validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
+        assert!(matches!(result, Err(DpopError::MethodMismatch)));
+    }
+
+    #[test]
+    fn test_validate_dpop_claims_uri_mismatch() {
+        let claims = make_claims("POST", "https://other.com/token", now());
+        let result = validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
+        assert!(matches!(result, Err(DpopError::UriMismatch)));
+    }
+
+    #[test]
+    fn test_validate_dpop_claims_expired() {
+        // iat older than max_age_seconds
+        let claims = make_claims("POST", "https://example.com/token", now() - 120);
+        let result = validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
+        assert!(matches!(result, Err(DpopError::Expired)));
+    }
+
+    #[test]
+    fn test_validate_dpop_claims_future_iat() {
+        // iat more than 60 seconds in the future (age < -60)
+        let claims = make_claims("POST", "https://example.com/token", now() + 120);
+        let result = validate_dpop_claims(&claims, "POST", "https://example.com/token", 300, None, None);
+        assert!(matches!(result, Err(DpopError::Expired)));
+    }
+
+    #[test]
+    fn test_validate_dpop_claims_wrong_ath() {
+        let mut claims = make_claims("POST", "https://example.com/token", now());
+        claims.ath = Some("wrong_hash_value_here_xxxxxxxxxxxxxxxxxxxxxxx".to_string());
+        let correct_ath = compute_access_token_hash("my-access-token");
+        let result = validate_dpop_claims(
+            &claims,
+            "POST",
+            "https://example.com/token",
+            60,
+            None,
+            Some(&correct_ath),
+        );
+        assert!(matches!(result, Err(DpopError::TokenHashMismatch)));
+    }
+
+    #[test]
+    fn test_validate_dpop_claims_valid_with_ath() {
+        let access_token = "my-access-token";
+        let ath = compute_access_token_hash(access_token);
+        let mut claims = make_claims("POST", "https://example.com/token", now());
+        claims.ath = Some(ath.clone());
+        let result = validate_dpop_claims(
+            &claims,
+            "POST",
+            "https://example.com/token",
+            60,
+            None,
+            Some(&ath),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_dpop_claims_valid_no_ath() {
+        let claims = make_claims("POST", "https://example.com/token", now());
+        let result = validate_dpop_claims(
+            &claims,
+            "POST",
+            "https://example.com/token",
+            60,
+            None,
+            None,
+        );
+        assert!(result.is_ok());
+    }
 }

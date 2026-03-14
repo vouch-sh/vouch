@@ -1,0 +1,13 @@
+{{- if and .Values.podDisruptionBudget.enabled (gt (int .Values.replicaCount) 1) }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "vouch-server.fullname" . }}
+  labels:
+    {{- include "vouch-server.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "vouch-server.selectorLabels" . | nindent 6 }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable | default 1 }}
+{{- end }}

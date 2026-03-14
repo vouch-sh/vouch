@@ -75,3 +75,5 @@ docs/book/
 .mcp.json
 scripts/*
 .local/
+fuzz/corpus/
+fuzz/artifacts/

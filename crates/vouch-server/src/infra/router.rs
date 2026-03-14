@@ -7,9 +7,10 @@
 use std::sync::Arc;
 
 use axum::{
-    Router,
-    extract::DefaultBodyLimit,
+    Json, Router,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderValue, StatusCode, header},
+    response::IntoResponse,
     routing::{delete, get, patch, post},
 };
 use tower_http::set_header::SetResponseHeaderLayer;
@@ -17,7 +18,7 @@ use tower_http::timeout::TimeoutLayer;
 
 use crate::{
     AppState, config, handlers,
-    infra::{rate_limit, request_id, security_headers, static_assets},
+    infra::{metrics, rate_limit, request_id, security_headers, static_assets},
 };
 
 /// Body limit for credential endpoints (SSH public key is ~500 bytes).
@@ -71,27 +72,47 @@ pub fn print_startup_banner() {
 }
 
 /// Build the complete application router with all routes, middleware, and state.
-pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> Router {
-    let api_routes = build_api_routes();
-    let ui_routes = build_ui_routes(config);
+/// # Errors
+///
+/// Returns an error if rate limiter configuration fails.
+pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow::Result<Router> {
+    let api_routes = build_api_routes(config)?;
+    let ui_routes = build_ui_routes(config)?;
 
-    security_headers::apply_security_layers(api_routes.merge(ui_routes), config)
-        // Global request timeout: 30 seconds.
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            std::time::Duration::from_secs(30),
-        ))
-        .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
-        .layer(request_id::propagate_request_id_layer())
-        .layer(request_id::set_request_id_layer())
-        .with_state(state)
+    // Install Prometheus metrics recorder and create /metrics endpoint
+    let metrics_route = match metrics::install_recorder() {
+        Ok(handle) => {
+            tracing::info!("Prometheus metrics enabled at /metrics");
+            Router::new().route("/metrics", get(metrics::metrics_handler).with_state(handle))
+        }
+        Err(e) => {
+            tracing::warn!("Failed to install metrics recorder: {e}");
+            Router::new()
+        }
+    };
+
+    Ok(security_headers::apply_security_layers(
+        api_routes.merge(ui_routes).merge(metrics_route),
+        config,
+    )
+    // Global request timeout: 30 seconds.
+    .layer(TimeoutLayer::with_status_code(
+        StatusCode::REQUEST_TIMEOUT,
+        std::time::Duration::from_secs(30),
+    ))
+    .layer(DefaultBodyLimit::max(GLOBAL_BODY_LIMIT))
+    .layer(request_id::propagate_request_id_layer())
+    .layer(request_id::set_request_id_layer())
+    .with_state(state))
 }
 
 /// Rate-limited auth/token routes.
 ///
 /// These endpoints are brute-force targets so rate limiting is critical.
-fn build_rate_limited_routes() -> Router<Arc<AppState>> {
-    Router::new()
+fn build_rate_limited_routes(
+    config: &config::ServerConfig,
+) -> anyhow::Result<Router<Arc<AppState>>> {
+    Ok(Router::new()
         // Key registration routes (FAPI 2.0)
         .route(
             "/v1/keys/register/start",
@@ -113,12 +134,14 @@ fn build_rate_limited_routes() -> Router<Arc<AppState>> {
             post(handlers::oidc::fido2_challenge),
         )
         .route("/oauth/device", post(handlers::device::device_code))
-        .layer(rate_limit::build_auth_rate_limiter())
+        .layer(rate_limit::build_auth_rate_limiter(
+            &config.trusted_proxies,
+        )?))
 }
 
 /// Rate-limited credential issuance routes.
-fn build_credential_routes() -> Router<Arc<AppState>> {
-    Router::new()
+fn build_credential_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<AppState>>> {
+    Ok(Router::new()
         .route(
             "/v1/credentials/ssh",
             post(handlers::credentials::issue_ssh_certificate),
@@ -135,13 +158,17 @@ fn build_credential_routes() -> Router<Arc<AppState>> {
             "/v1/credentials/github/token",
             post(handlers::credentials::get_github_token),
         )
-        .layer(rate_limit::build_credential_rate_limiter())
-        .layer(DefaultBodyLimit::max(CREDENTIAL_BODY_LIMIT))
+        .layer(rate_limit::build_credential_rate_limiter(
+            &config.trusted_proxies,
+        )?)
+        .layer(DefaultBodyLimit::max(CREDENTIAL_BODY_LIMIT)))
 }
 
 /// Rate-limited general routes (SCIM, admin, authorize).
-fn build_general_limited_routes() -> Router<Arc<AppState>> {
-    Router::new()
+fn build_general_limited_routes(
+    config: &config::ServerConfig,
+) -> anyhow::Result<Router<Arc<AppState>>> {
+    Ok(Router::new()
         .route("/oauth/authorize", get(handlers::oidc::authorize))
         // Org admin API (JSON, JWT Bearer auth)
         .route(
@@ -187,13 +214,15 @@ fn build_general_limited_routes() -> Router<Arc<AppState>> {
                 .patch(handlers::scim::patch_group)
                 .delete(handlers::scim::delete_group),
         )
-        .layer(rate_limit::build_general_rate_limiter())
-        .layer(DefaultBodyLimit::max(SCIM_BODY_LIMIT))
+        .layer(rate_limit::build_general_rate_limiter(
+            &config.trusted_proxies,
+        )?)
+        .layer(DefaultBodyLimit::max(SCIM_BODY_LIMIT)))
 }
 
 /// Build all API routes with CORS and cache headers.
-fn build_api_routes() -> Router<Arc<AppState>> {
-    Router::new()
+fn build_api_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<AppState>>> {
+    Ok(Router::new()
         // OIDC Provider endpoints
         .route(
             "/.well-known/openid-configuration",
@@ -214,11 +243,11 @@ fn build_api_routes() -> Router<Arc<AppState>> {
         // Auth endpoints
         .route("/v1/auth/status", get(handlers::auth::status))
         // Merge rate-limited route groups
-        .merge(build_rate_limited_routes())
-        .merge(build_credential_routes())
-        .merge(build_general_limited_routes())
-        .merge(build_api_management_routes())
-        .merge(build_public_read_routes())
+        .merge(build_rate_limited_routes(config)?)
+        .merge(build_credential_routes(config)?)
+        .merge(build_general_limited_routes(config)?)
+        .merge(build_api_management_routes(config)?)
+        .merge(build_public_read_routes(config)?)
         .layer(security_headers::build_api_cors_layer())
         .layer(SetResponseHeaderLayer::if_not_present(
             header::CACHE_CONTROL,
@@ -231,15 +260,17 @@ fn build_api_routes() -> Router<Arc<AppState>> {
         .layer(SetResponseHeaderLayer::overriding(
             header::EXPIRES,
             HeaderValue::from_static("0"),
-        ))
+        )))
 }
 
 /// Rate-limited public read-only routes.
 ///
 /// SSH CA public key, KRL, and GitHub credential status endpoints are
 /// unauthenticated. Rate limiting prevents abuse and DoS.
-fn build_public_read_routes() -> Router<Arc<AppState>> {
-    Router::new()
+fn build_public_read_routes(
+    config: &config::ServerConfig,
+) -> anyhow::Result<Router<Arc<AppState>>> {
+    Ok(Router::new()
         .route(
             "/v1/credentials/ssh/ca",
             get(handlers::credentials::get_ssh_ca_public_key),
@@ -256,15 +287,19 @@ fn build_public_read_routes() -> Router<Arc<AppState>> {
             "/v1/credentials/github/status",
             get(handlers::credentials::get_github_status),
         )
-        .layer(rate_limit::build_general_rate_limiter())
+        .layer(rate_limit::build_general_rate_limiter(
+            &config.trusted_proxies,
+        )?))
 }
 
 /// Rate-limited API management routes.
 ///
 /// Token operations, key management, integration config, webhook, and
 /// application CRUD endpoints that need protection from abuse.
-fn build_api_management_routes() -> Router<Arc<AppState>> {
-    Router::new()
+fn build_api_management_routes(
+    config: &config::ServerConfig,
+) -> anyhow::Result<Router<Arc<AppState>>> {
+    Ok(Router::new()
         // Token operations
         .route("/oauth/revoke", post(handlers::oidc::revoke))
         .route("/oauth/introspect", post(handlers::oidc::introspect))
@@ -304,15 +339,19 @@ fn build_api_management_routes() -> Router<Arc<AppState>> {
             "/api/v1/applications/{id}/revoke",
             post(handlers::applications::revoke_tokens_api),
         )
-        .layer(rate_limit::build_general_rate_limiter())
+        .layer(rate_limit::build_general_rate_limiter(
+            &config.trusted_proxies,
+        )?))
 }
 
 /// Rate-limited browser WebAuthn routes.
 ///
 /// Login and enrollment WebAuthn endpoints generate server-side state per
 /// challenge, so rate limiting prevents memory/storage exhaustion.
-fn build_browser_auth_routes() -> Router<Arc<AppState>> {
-    Router::new()
+fn build_browser_auth_routes(
+    config: &config::ServerConfig,
+) -> anyhow::Result<Router<Arc<AppState>>> {
+    Ok(Router::new()
         .route(
             "/login/webauthn/start",
             post(handlers::browser_login::browser_login_start),
@@ -331,12 +370,14 @@ fn build_browser_auth_routes() -> Router<Arc<AppState>> {
             post(handlers::enroll::browser_register_complete)
                 .layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT)),
         )
-        .layer(rate_limit::build_auth_rate_limiter())
+        .layer(rate_limit::build_auth_rate_limiter(
+            &config.trusted_proxies,
+        )?))
 }
 
 /// Rate-limited admin member management routes.
-fn build_admin_routes() -> Router<Arc<AppState>> {
-    Router::new()
+fn build_admin_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<AppState>>> {
+    Ok(Router::new()
         .route("/admin", get(handlers::admin::admin_members_page))
         .route(
             "/admin/members/{id}/promote",
@@ -395,16 +436,39 @@ fn build_admin_routes() -> Router<Arc<AppState>> {
             "/admin/scim-tokens/{id}/revoke",
             post(handlers::admin::admin_revoke_scim_token),
         )
-        .layer(rate_limit::build_general_rate_limiter())
+        .layer(rate_limit::build_general_rate_limiter(
+            &config.trusted_proxies,
+        )?))
+}
+
+/// Readiness probe handler.
+///
+/// Checks database connectivity. Returns 200 if ready, 503 if not.
+/// Used by Kubernetes readiness and startup probes.
+async fn readiness_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.db.is_healthy().await {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ready"}))),
+        Err(e) => {
+            tracing::warn!(error = %e, "Readiness check failed");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "status": "not_ready",
+                    "reason": "database"
+                })),
+            )
+        }
+    }
 }
 
 /// Build all UI routes with UI CORS.
-fn build_ui_routes(config: &config::ServerConfig) -> Router<Arc<AppState>> {
-    Router::new()
+fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<AppState>>> {
+    Ok(Router::new()
         // Landing page with smart routing
         .route("/", get(handlers::home::home_page))
         .route("/install", get(handlers::install::install_page))
         .route("/health", get(|| async { "ok" }))
+        .route("/health/ready", get(readiness_handler))
         // Legal pages (redirect to vouch.sh)
         .route("/privacy", get(handlers::legal::privacy_page))
         .route("/terms", get(handlers::legal::terms_page))
@@ -471,12 +535,12 @@ fn build_ui_routes(config: &config::ServerConfig) -> Router<Arc<AppState>> {
             post(handlers::applications::delete_secret_form),
         )
         // Admin member management UI (rate-limited)
-        .merge(build_admin_routes())
+        .merge(build_admin_routes(config)?)
         // Rate-limited browser WebAuthn routes
-        .merge(build_browser_auth_routes())
-        // Static file serving for CSS, JS, and assets (embedded in binary via rust-embed)
+        .merge(build_browser_auth_routes(config)?)
+        // Static file serving for CSS, JS, and assets
         .route("/static/{*path}", get(static_assets::static_handler))
         // Browsers request /favicon.ico at the root path
         .route("/favicon.ico", get(static_assets::favicon_handler))
-        .layer(security_headers::build_ui_cors_layer(config))
+        .layer(security_headers::build_ui_cors_layer(config)))
 }

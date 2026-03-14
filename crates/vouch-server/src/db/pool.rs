@@ -268,6 +268,33 @@ impl Pool {
         }
     }
 
+    /// Check database connectivity by executing a simple query.
+    ///
+    /// Returns `Ok(())` if the database is reachable, or an error if it is not.
+    /// Used by the `/health/ready` endpoint for Kubernetes readiness probes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the query fails (database unreachable, pool exhausted, etc.).
+    pub async fn is_healthy(&self) -> Result<()> {
+        match self {
+            Self::Sqlite(pool) => {
+                sqlx::query_scalar::<_, i32>("SELECT 1")
+                    .fetch_one(pool)
+                    .await
+                    .context("SQLite health check failed")?;
+                Ok(())
+            }
+            Self::Postgres(pool) => {
+                sqlx::query_scalar::<_, i32>("SELECT 1")
+                    .fetch_one(pool)
+                    .await
+                    .context("PostgreSQL health check failed")?;
+                Ok(())
+            }
+        }
+    }
+
     /// Check if the pool has been closed.
     #[must_use]
     pub fn is_closed(&self) -> bool {

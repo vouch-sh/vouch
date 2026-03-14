@@ -216,6 +216,8 @@ mod redirect_tests {
             jwt_assertion_max_lifetime_seconds: 300,
             allowed_aaguids: vouch_common::AaguidPolicy::Any,
             require_attestation_cert: false,
+            log_format: config::LogFormat::Text,
+            trusted_proxies: Vec::new(),
         };
         let webauthn = webauthn_rs::WebauthnBuilder::new(
             rp_id,
