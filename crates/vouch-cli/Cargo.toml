@@ -21,12 +21,11 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow = { workspace = true, features = ["std"] }
-aws-lc-rs = { workspace = true }
 base64 = { workspace = true, features = ["std"] }
 ciborium = { workspace = true }
 clap = { workspace = true, features = ["std", "derive", "env", "help", "usage", "error-context"] }
 clap_complete = { workspace = true }
-ctap-hid-fido2 = { workspace = true, features = ["aws-lc-rs"] }
+ctap-hid-fido2 = { workspace = true }
 dirs = { workspace = true }
 gethostname = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["std"] }
@@ -62,6 +61,14 @@ urlencoding = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 vouch-common = { workspace = true }
 zeroize = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+aws-lc-rs = { workspace = true, features = ["fips"] }
+ctap-hid-fido2 = { workspace = true, features = ["fips"] }
+
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+aws-lc-rs = { workspace = true }
+ctap-hid-fido2 = { workspace = true, features = ["aws-lc-rs"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { workspace = true }
