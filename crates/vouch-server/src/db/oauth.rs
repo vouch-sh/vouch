@@ -416,6 +416,16 @@ pub enum OAuthEventType {
 }
 
 impl OAuthEventType {
+    /// Event variants included in usage stats and retention cleanup.
+    pub const USAGE_EVENTS: [Self; 6] = [
+        Self::TokenIssued,
+        Self::TokenRefreshed,
+        Self::TokenRevoked,
+        Self::AuthSuccess,
+        Self::AuthFailure,
+        Self::ClientRegistered,
+    ];
+
     #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -427,6 +437,21 @@ impl OAuthEventType {
             Self::ClientRegistered => "client_registered",
             Self::SecretAdded => "secret_added",
             Self::SecretRevoked => "secret_revoked",
+        }
+    }
+
+    /// Audit event type stored in `audit_events.event_type`.
+    #[must_use]
+    pub fn audit_event_type(&self) -> &'static str {
+        match self {
+            Self::TokenIssued => "oauth_token_issued",
+            Self::TokenRefreshed => "oauth_token_refreshed",
+            Self::TokenRevoked => "oauth_token_revoked",
+            Self::AuthSuccess => "oauth_auth_success",
+            Self::AuthFailure => "oauth_auth_failure",
+            Self::ClientRegistered => "oauth_client_registered",
+            Self::SecretAdded => "oauth_secret_added",
+            Self::SecretRevoked => "oauth_secret_revoked",
         }
     }
 }
@@ -454,12 +479,7 @@ pub async fn record_oauth_event(
     let data_json = serde_json::to_string(&data)?;
 
     audit
-        .insert_event(
-            &format!("oauth_{}", event_type.as_str()),
-            user_id,
-            None,
-            &data_json,
-        )
+        .insert_event(event_type.audit_event_type(), user_id, None, &data_json)
         .await
 }
 
@@ -481,16 +501,10 @@ pub async fn get_oauth_usage_stats(
 ) -> Result<Vec<OAuthUsageStats>> {
     let mut stats: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
 
-    for event_type in [
-        "oauth_token_issued",
-        "oauth_token_refreshed",
-        "oauth_token_revoked",
-        "oauth_auth_success",
-        "oauth_auth_failure",
-        "oauth_client_registered",
-    ] {
+    for event_type in OAuthEventType::USAGE_EVENTS {
+        let audit_event_type = event_type.audit_event_type();
         let filter = AuditEventFilter {
-            event_types: Some(vec![event_type.to_string()]),
+            event_types: Some(vec![audit_event_type.to_string()]),
             since: since.map(String::from),
             ..AuditEventFilter::default()
         };
@@ -500,7 +514,7 @@ pub async fn get_oauth_usage_stats(
                 continue;
             };
             if data.oauth_client_id == oauth_client_id {
-                *stats.entry(event_type.to_string()).or_default() += 1;
+                *stats.entry(audit_event_type.to_string()).or_default() += 1;
             }
         }
     }
@@ -515,15 +529,10 @@ pub async fn get_oauth_usage_stats(
 pub async fn delete_old_oauth_usage_events(audit: &AuditStore, before: Timestamp) -> Result<u64> {
     let before_str = before.to_string();
     let mut total = 0;
-    for event_type in [
-        "oauth_token_issued",
-        "oauth_token_refreshed",
-        "oauth_token_revoked",
-        "oauth_auth_success",
-        "oauth_auth_failure",
-        "oauth_client_registered",
-    ] {
-        total += audit.delete_old_events(event_type, &before_str).await?;
+    for event_type in OAuthEventType::USAGE_EVENTS {
+        total += audit
+            .delete_old_events(event_type.audit_event_type(), &before_str)
+            .await?;
     }
     Ok(total)
 }
@@ -1122,14 +1131,7 @@ mod tests {
     async fn test_delete_old_oauth_usage_events_covers_usage_event_variants() {
         let store = test_store().await;
         let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
-        let usage_variants = [
-            OAuthEventType::TokenIssued,
-            OAuthEventType::TokenRefreshed,
-            OAuthEventType::TokenRevoked,
-            OAuthEventType::AuthSuccess,
-            OAuthEventType::AuthFailure,
-            OAuthEventType::ClientRegistered,
-        ];
+        let usage_variants = OAuthEventType::USAGE_EVENTS;
 
         for event_type in usage_variants {
             record_oauth_event(
@@ -1161,15 +1163,15 @@ mod tests {
         for event_type in usage_variants {
             let persisted = audit
                 .query_events(&AuditEventFilter {
-                    event_types: Some(vec![format!("oauth_{}", event_type.as_str())]),
+                    event_types: Some(vec![event_type.audit_event_type().to_string()]),
                     ..AuditEventFilter::default()
                 })
                 .await
                 .expect("query oauth audit events");
             assert!(
                 persisted.is_empty(),
-                "event type oauth_{} should be deleted by retention cleanup",
-                event_type.as_str()
+                "event type {} should be deleted by retention cleanup",
+                event_type.audit_event_type()
             );
         }
     }

@@ -29,6 +29,14 @@ pub enum AuthEventType {
 }
 
 impl AuthEventType {
+    /// All authentication event variants used for retention cleanup.
+    pub const ALL: [Self; 4] = [
+        Self::LoginSuccess,
+        Self::LoginFailed,
+        Self::Enrollment,
+        Self::Logout,
+    ];
+
     /// Return the string representation.
     #[must_use]
     pub fn as_str(&self) -> &'static str {
@@ -109,10 +117,12 @@ pub async fn insert_auth_event(
 /// Delete authentication events older than the specified timestamp.
 pub async fn delete_old_auth_events(audit: &AuditStore, before: jiff::Timestamp) -> Result<u64> {
     let before_str = before.to_string();
-    // Delete all auth event types
+    // Delete all auth event types.
     let mut total = 0;
-    for event_type in ["login_success", "login_failed", "enrollment", "logout"] {
-        total += audit.delete_old_events(event_type, &before_str).await?;
+    for event_type in AuthEventType::ALL {
+        total += audit
+            .delete_old_events(event_type.as_str(), &before_str)
+            .await?;
     }
     Ok(total)
 }
@@ -193,12 +203,7 @@ mod tests {
     #[tokio::test]
     async fn test_delete_old_auth_events_covers_all_auth_event_variants() {
         let state = test_app_state().await;
-        let variants = [
-            AuthEventType::LoginSuccess,
-            AuthEventType::LoginFailed,
-            AuthEventType::Enrollment,
-            AuthEventType::Logout,
-        ];
+        let variants = AuthEventType::ALL;
 
         for (idx, event_type) in variants.iter().copied().enumerate() {
             let params = AuthEventParams {

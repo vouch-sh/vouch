@@ -125,17 +125,10 @@ async fn test_oidc_discovery_grant_types_match_token_parser() {
         .map(|v| v.as_str().expect("grant type should be string").to_string())
         .collect();
 
-    let parser_supported = [
-        "authorization_code",
-        "client_credentials",
-        "urn:ietf:params:oauth:grant-type:device_code",
-        "urn:ietf:params:oauth:grant-type:token-exchange",
-        "urn:ietf:params:oauth:grant-type:jwt-bearer",
-        "urn:ietf:params:oauth:grant-type:fido2-assertion",
-    ]
-    .into_iter()
-    .map(String::from)
-    .collect::<BTreeSet<_>>();
+    let parser_supported = crate::handlers::oidc::token::OAuthGrantType::supported_wire_values()
+        .into_iter()
+        .map(String::from)
+        .collect::<BTreeSet<_>>();
 
     assert_eq!(
         discovered, parser_supported,

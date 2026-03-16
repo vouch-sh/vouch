@@ -25,12 +25,6 @@ use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-/// RFC 7523 Section 2.1: Grant type for JWT bearer authorization grants.
-const JWT_BEARER_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:jwt-bearer";
-
-/// Custom FIDO2 assertion grant type.
-const FIDO2_ASSERTION_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:fido2-assertion";
-
 /// OAuth grant types supported by this server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OAuthGrantType {
@@ -48,19 +42,45 @@ pub enum OAuthGrantType {
     Fido2Assertion,
 }
 
+impl OAuthGrantType {
+    const SUPPORTED: [Self; 6] = [
+        Self::AuthorizationCode,
+        Self::ClientCredentials,
+        Self::DeviceCode,
+        Self::TokenExchange,
+        Self::JwtBearer,
+        Self::Fido2Assertion,
+    ];
+
+    /// Wire-format `grant_type` value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthorizationCode => "authorization_code",
+            Self::ClientCredentials => "client_credentials",
+            Self::DeviceCode => "urn:ietf:params:oauth:grant-type:device_code",
+            Self::TokenExchange => "urn:ietf:params:oauth:grant-type:token-exchange",
+            Self::JwtBearer => "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            Self::Fido2Assertion => "urn:ietf:params:oauth:grant-type:fido2-assertion",
+        }
+    }
+
+    /// All supported `grant_type` wire values.
+    #[must_use]
+    pub fn supported_wire_values() -> Vec<&'static str> {
+        Self::SUPPORTED.iter().copied().map(Self::as_str).collect()
+    }
+}
+
 impl std::str::FromStr for OAuthGrantType {
     type Err = String;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "authorization_code" => Ok(Self::AuthorizationCode),
-            "client_credentials" => Ok(Self::ClientCredentials),
-            "urn:ietf:params:oauth:grant-type:device_code" => Ok(Self::DeviceCode),
-            "urn:ietf:params:oauth:grant-type:token-exchange" => Ok(Self::TokenExchange),
-            JWT_BEARER_GRANT_TYPE => Ok(Self::JwtBearer),
-            FIDO2_ASSERTION_GRANT_TYPE => Ok(Self::Fido2Assertion),
-            _ => Err(format!("unsupported grant_type: {s}")),
-        }
+        Self::SUPPORTED
+            .iter()
+            .copied()
+            .find(|grant_type| grant_type.as_str() == s)
+            .ok_or_else(|| format!("unsupported grant_type: {s}"))
     }
 }
 
@@ -310,13 +330,12 @@ pub async fn token(
 
     // RFC 6749 Section 5.2: Return unsupported_grant_type error for unknown grants
     let Ok(grant_type) = params.grant_type.parse::<OAuthGrantType>() else {
+        let supported = OAuthGrantType::supported_wire_values().join(", ");
         return (
             StatusCode::BAD_REQUEST,
             Json(OAuthErrorResponse {
                 error: "unsupported_grant_type".to_string(),
-                error_description: Some(
-                    format!("Supported grant types: authorization_code, client_credentials, urn:ietf:params:oauth:grant-type:device_code, urn:ietf:params:oauth:grant-type:token-exchange, {JWT_BEARER_GRANT_TYPE}, {FIDO2_ASSERTION_GRANT_TYPE}"),
-                ),
+                error_description: Some(format!("Supported grant types: {supported}")),
                 error_uri: None,
             }),
         )
