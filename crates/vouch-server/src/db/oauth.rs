@@ -1146,7 +1146,7 @@ mod tests {
         }
 
         let before = jiff::Timestamp::now()
-            .checked_add(jiff::SignedDuration::from_minutes(5))
+            .checked_add(jiff::SignedDuration::from_mins(5))
             .expect("valid timestamp arithmetic");
 
         let deleted = delete_old_oauth_usage_events(&audit, before)
