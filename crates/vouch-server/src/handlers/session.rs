@@ -108,10 +108,7 @@ pub async fn extract_resource_token(
     // 3. Verify session exists in DB via token_hash
     let token_hash = hash_token(&token);
     let session = db::get_session_by_token_hash(&state.store, &token_hash)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?
+        .await?
         .ok_or_else(|| {
             ServiceError::api(
                 StatusCode::UNAUTHORIZED,
@@ -226,10 +223,7 @@ pub async fn extract_resource_token_with_email(
         email.clone()
     } else {
         let user = db::get_user_by_id(&state.store, &token.sub)
-            .await
-            .map_err(|e| {
-                ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-            })?
+            .await?
             .ok_or_else(|| {
                 ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
             })?;
@@ -319,10 +313,7 @@ pub async fn extract_user_with_org(
     let token = extract_resource_token(state, headers, jar, method, uri).await?;
 
     let user = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?
+        .await?
         .ok_or_else(|| {
             ServiceError::api(StatusCode::UNAUTHORIZED, "unauthorized", "User not found")
         })?;
@@ -341,6 +332,8 @@ pub async fn extract_user_with_org(
 /// Extract and validate an org admin from the access token.
 ///
 /// Returns the user and their org_id if they are an org admin.
+/// Reuses `extract_user_with_org` for token validation and user lookup,
+/// then adds active-status and admin-role checks.
 pub async fn extract_org_admin(
     state: &AppState,
     headers: &axum::http::HeaderMap,
@@ -348,16 +341,7 @@ pub async fn extract_org_admin(
     method: &str,
     uri: &str,
 ) -> Result<(db::User, String), ServiceError> {
-    let token = extract_resource_token(state, headers, jar, method, uri).await?;
-
-    let user = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?
-        .ok_or_else(|| {
-            ServiceError::api(StatusCode::UNAUTHORIZED, "unauthorized", "User not found")
-        })?;
+    let (user, org_id) = extract_user_with_org(state, headers, jar, method, uri).await?;
 
     if !user.active {
         return Err(ServiceError::api(
@@ -374,14 +358,6 @@ pub async fn extract_org_admin(
             "Organization admin access required",
         ));
     }
-
-    let org_id = user.org_id.clone().ok_or_else(|| {
-        ServiceError::api(
-            StatusCode::FORBIDDEN,
-            "forbidden",
-            "User is not associated with an organization",
-        )
-    })?;
 
     Ok((user, org_id))
 }

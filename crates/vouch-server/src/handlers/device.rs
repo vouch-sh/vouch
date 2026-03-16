@@ -118,8 +118,7 @@ pub async fn device_code(
         expires_at,
         interval_seconds,
     )
-    .await
-    .map_err(|e| ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string()))?;
+    .await?;
 
     // Build verification URLs
     let verification_uri = format!("{}/device", state.config().base_url);
