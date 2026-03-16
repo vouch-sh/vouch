@@ -7,9 +7,7 @@ use crate::protocol::{
     CacheCredentialParams, GetCachedCredentialParams, JSONRPC_VERSION, Method, Request, Response,
     StoreSessionParams, StoreSshCredentialsParams,
 };
-use crate::socket::{
-    bind_socket, ensure_vouch_dir, remove_socket, socket_path, validate_vouch_dir_ownership,
-};
+use crate::socket::{bind_socket, ensure_vouch_dir, socket_path, validate_vouch_dir_ownership};
 use crate::ssh_agent::{SshAgentState, SshCredentials};
 use crate::state::{AgentState, CachedCredential, Session, SessionInfo};
 use crate::wire;
@@ -61,9 +59,6 @@ impl AgentServer {
         // Validate directory ownership and symlink safety
         validate_vouch_dir_ownership()?;
 
-        // Remove stale socket if it exists
-        remove_socket()?;
-
         let path = socket_path()?;
         let listener = bind_socket(&path).await?;
 
@@ -112,10 +107,10 @@ impl AgentServer {
                             let state = Arc::clone(&self.state);
                             let ssh_state = Arc::clone(&self.ssh_state);
                             tokio::spawn(async move {
+                                let _permit = permit;
                                 if let Err(e) = handle_connection(stream, state, ssh_state).await {
                                     debug!("Connection error: {e}");
                                 }
-                                drop(permit);
                             });
                         }
                         Err(e) => {
