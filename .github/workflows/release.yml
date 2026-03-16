@@ -249,20 +249,17 @@ jobs:
         shell: bash
         run: cargo install cargo-cyclonedx --version 0.5.6
 
+      - name: Set up Docker Buildx
+        if: runner.os == 'Linux'
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
       - name: Build CLI and Agent (Linux)
         if: runner.os == 'Linux'
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/app" \
-            -w /app \
-            -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
-            rust:1.94.0-alpine sh -c '
-              apk add --no-cache musl-dev pkgconfig cmake make go clang linux-headers eudev-dev
-              find . -name "*.rs" -exec touch -d "@${SOURCE_DATE_EPOCH}" {} +
-              cargo build --release --locked --target ${{ matrix.target }} -p vouch-cli -p vouch-agent
-              cargo install cargo-cyclonedx --version 0.5.6
-              cargo cyclonedx --target ${{ matrix.target }} --format json
-            '
+          TARGET=${{ matrix.target }} \
+          SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
+          GENERATE_SBOM=true \
+          docker buildx bake cli
 
       - name: Build CLI and Agent
         if: runner.os != 'Linux' && matrix.bins == 'vouch vouch-agent'
@@ -495,23 +492,15 @@ jobs:
           chmod +x "${BINARY}"
           cd crates/vouch-server && "../../${BINARY}" -i styles/input.css -o static/css/output.css --minify
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
       - name: Build server and generate SBOM (musl)
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/app" \
-            -w /app \
-            -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
-            rust:1.94.0-alpine sh -c '
-              apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig cmake make go perl clang linux-headers
-              export AWS_LC_FIPS_SYS_CC=clang
-              export AWS_LC_FIPS_SYS_CXX=clang++
-              export OPENSSL_STATIC=1
-              export OPENSSL_LIB_DIR=/usr/lib
-              export OPENSSL_INCLUDE_DIR=/usr/include
-              cargo build --release --locked --package vouch-server
-              cargo install cargo-cyclonedx --version 0.5.6
-              cargo cyclonedx --format json
-            '
+          TARGET=${{ matrix.target }} \
+          SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
+          GENERATE_SBOM=true \
+          docker buildx bake server
 
       - name: Create server archive
         run: |
@@ -520,7 +509,7 @@ jobs:
           SERVER_STAGING="vouch-server-v${VERSION}-${TARGET}"
 
           mkdir -p "${SERVER_STAGING}"
-          cp "target/release/vouch-server" "${SERVER_STAGING}/"
+          cp "target/${TARGET}/release/vouch-server" "${SERVER_STAGING}/"
 
           tar --sort=name \
               --mtime="@${SOURCE_DATE_EPOCH}" \
@@ -717,17 +706,14 @@ jobs:
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
           echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" >> "$GITHUB_ENV"
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
       - name: Rebuild binaries
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/app" \
-            -w /app \
-            -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
-            rust:1.94.0-alpine sh -c '
-              apk add --no-cache musl-dev pkgconfig cmake make go clang linux-headers eudev-dev
-              find . -name "*.rs" -exec touch -d "@${SOURCE_DATE_EPOCH}" {} +
-              cargo build --release --locked --target x86_64-unknown-linux-musl -p vouch-cli -p vouch-agent
-            '
+          TARGET=x86_64-unknown-linux-musl \
+          SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
+          docker buildx bake reproduce
 
       - name: Download original artifacts
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0

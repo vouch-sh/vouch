@@ -1,0 +1,8 @@
+target/
+.git/
+docs/
+packaging/
+charts/
+.github/
+*.md
+.local/

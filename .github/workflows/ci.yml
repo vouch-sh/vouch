@@ -145,22 +145,15 @@ jobs:
         if: matrix.rustflags
         shell: bash
         run: echo "RUSTFLAGS=${{ matrix.rustflags }}" >> "$GITHUB_ENV"
+      - name: Set up Docker Buildx
+        if: runner.os == 'Linux'
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
       - name: Build (Linux)
         if: runner.os == 'Linux'
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/app" \
-            -w /app \
-            rust:1.94.0-alpine sh -c '
-              apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig cmake make go perl clang linux-headers eudev-dev
-              export AWS_LC_FIPS_SYS_CC=clang
-              export AWS_LC_FIPS_SYS_CXX=clang++
-              export OPENSSL_STATIC=1
-              export OPENSSL_LIB_DIR=/usr/lib
-              export OPENSSL_INCLUDE_DIR=/usr/include
-              rustup target add ${{ matrix.target }}
-              cargo build --release --locked --target ${{ matrix.target }} -p vouch-cli -p vouch-agent -p vouch-server
-            '
+          TARGET=${{ matrix.target }} \
+          docker buildx bake ci
       - name: Build
         if: runner.os != 'Linux'
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
