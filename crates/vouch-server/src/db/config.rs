@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_delete_old_auth_events_covers_all_auth_event_variants() {
+    async fn test_delete_old_auth_events_covers_all_auth_event_variants() -> anyhow::Result<()> {
         let state = test_app_state().await;
         let variants = AuthEventType::ALL;
 
@@ -214,22 +214,19 @@ mod tests {
                     .then(|| "invalid assertion".to_string()),
                 ..AuthEventParams::default()
             };
-            insert_auth_event(&state.audit, &params, Some("test@example.com"))
-                .await
-                .expect("insert auth event");
+            insert_auth_event(&state.audit, &params, Some("test@example.com")).await?;
         }
 
         let before = jiff::Timestamp::now()
             .checked_add(SignedDuration::from_mins(5))
-            .expect("valid timestamp arithmetic");
+            .map_err(|e| anyhow::anyhow!("valid timestamp arithmetic failed: {e}"))?;
 
-        let deleted = delete_old_auth_events(&state.audit, before)
-            .await
-            .expect("delete old auth events");
+        let deleted = delete_old_auth_events(&state.audit, before).await?;
         assert_eq!(
             deleted,
             variants.len() as u64,
             "auth cleanup must cover all AuthEventType variants"
         );
+        Ok(())
     }
 }
