@@ -411,3 +411,43 @@ impl DocumentType for DelegationPolicyDoc {
         }]
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::{
+        AccessScope, OAuthClientType, OAuthDocumentParseError, TokenEndpointAuthMethod,
+    };
+    use std::str::FromStr;
+
+    #[test]
+    fn test_access_scope_from_str_case_insensitive() {
+        assert_eq!(
+            AccessScope::from_str("ORGANIZATION"),
+            Ok(AccessScope::Organization)
+        );
+        assert_eq!(AccessScope::from_str("Personal"), Ok(AccessScope::Personal));
+        assert_eq!(AccessScope::from_str("public"), Ok(AccessScope::Public));
+    }
+
+    #[test]
+    fn test_oauth_client_type_from_str_case_insensitive() {
+        assert_eq!(OAuthClientType::from_str("WEB"), Ok(OAuthClientType::Web));
+        assert_eq!(OAuthClientType::from_str("Native"), Ok(OAuthClientType::Native));
+        assert_eq!(OAuthClientType::from_str("spa"), Ok(OAuthClientType::Spa));
+        assert_eq!(
+            OAuthClientType::from_str("Service"),
+            Ok(OAuthClientType::Service)
+        );
+    }
+
+    #[test]
+    fn test_token_endpoint_auth_method_from_str_typed_error() {
+        let err = TokenEndpointAuthMethod::from_str("mtls").expect_err("must reject mtls");
+        assert_eq!(
+            err,
+            OAuthDocumentParseError::TokenEndpointAuthMethod("mtls".to_string())
+        );
+        assert_eq!(err.to_string(), "Unknown token endpoint auth method: mtls");
+    }
+}
