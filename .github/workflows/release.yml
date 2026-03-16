@@ -180,23 +180,19 @@ jobs:
             target: x86_64-unknown-linux-gnu
             bins: "vouch vouch-agent"
             archive-ext: tar.gz
-            install: sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go clang
-            fips-cc: clang
-            fips-cxx: clang++
+            install: sudo apt-get update && sudo apt-get install -y libudev-dev cmake
           - name: linux-arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             bins: "vouch vouch-agent"
             archive-ext: tar.gz
-            install: sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go clang
-            fips-cc: clang
-            fips-cxx: clang++
+            install: sudo apt-get update && sudo apt-get install -y libudev-dev cmake
           - name: macos-arm64
             runner: macos-latest
             target: aarch64-apple-darwin
             bins: "vouch vouch-agent"
             archive-ext: tar.gz
-            install: brew install go
+            install: ""
           - name: windows-amd64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
@@ -209,7 +205,6 @@ jobs:
             bins: "vouch"
             archive-ext: zip
             install: ""
-            cargo-features: "--no-default-features --features aws-lc-rs"
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -253,20 +248,13 @@ jobs:
         shell: bash
         run: cargo install cargo-cyclonedx --version 0.5.6
 
-      - name: Set FIPS compiler
-        if: matrix.fips-cc
-        shell: bash
-        run: |
-          echo "AWS_LC_FIPS_SYS_CC=${{ matrix.fips-cc }}" >> "$GITHUB_ENV"
-          echo "AWS_LC_FIPS_SYS_CXX=${{ matrix.fips-cxx }}" >> "$GITHUB_ENV"
-
       - name: Build CLI and Agent
         if: matrix.bins == 'vouch vouch-agent'
-        run: cargo build --release --target ${{ matrix.target }} -p vouch-cli -p vouch-agent ${{ matrix.cargo-features }}
+        run: cargo build --release --target ${{ matrix.target }} -p vouch-cli -p vouch-agent
 
       - name: Build CLI only
         if: matrix.bins == 'vouch'
-        run: cargo build --release --target ${{ matrix.target }} -p vouch-cli ${{ matrix.cargo-features }}
+        run: cargo build --release --target ${{ matrix.target }} -p vouch-cli
 
       - name: Generate SBOM
         shell: bash
