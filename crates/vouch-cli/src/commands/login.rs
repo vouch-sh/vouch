@@ -44,7 +44,7 @@ pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
     let client = VouchClient::unauthenticated(server)?;
 
     // Load or generate the FAPI client key (required for FAPI 2.0 flow)
-    let fapi_key = load_or_create_fapi_key()?;
+    let fapi_key = vouch_cli::fapi::key_store::load_or_create_client_key()?;
 
     run_fapi_login(&client, server, timeout_secs, &fapi_key).await
 }
@@ -549,79 +549,6 @@ fn recently_verified(verified_at: Option<&str>) -> bool {
     elapsed.as_secs() < 86_400
 }
 
-/// Load the FAPI client key, checking sources in order:
-///
-/// 1. OS keychain (preferred — encrypted at rest)
-/// 2. `~/.vouch/client_key.json` (legacy/fallback — migrated to keychain if possible)
-/// 3. Generate new key → save to keychain (or file if keychain unavailable)
-///
-/// If the key is found on disk but not in the keychain, it is migrated to the
-/// keychain and the file is removed. If the keychain is unavailable (CI, headless),
-/// file storage is used as a fallback.
-fn load_or_create_fapi_key() -> Result<ClientKey> {
-    let home = dirs::home_dir().context("cannot determine home directory")?;
-    let key_path = home.join(".vouch").join("client_key.json");
-
-    // 1. Try the OS keychain first.
-    match vouch_cli::fapi::key_store::load_from_keychain() {
-        Ok(Some(key_file)) => {
-            let key = ClientKey::from_key_file(&key_file)
-                .context("failed to load client key from keychain")?;
-            tracing::debug!("FAPI client key loaded from keychain: kid={}", key.kid());
-            return Ok(key);
-        }
-        Ok(None) => {
-            tracing::debug!("No client key in keychain, checking disk");
-        }
-        Err(e) => {
-            tracing::debug!("Keychain unavailable ({e}), falling back to disk");
-        }
-    }
-
-    // 2. Try loading from disk (legacy location).
-    if key_path.exists() {
-        let key = ClientKey::load(&key_path).context("failed to load FAPI client key from disk")?;
-        tracing::debug!("FAPI client key loaded from disk: kid={}", key.kid());
-
-        // Migrate to keychain if possible, then remove the file.
-        // Verify the write by reading back — some platforms claim
-        // success but don't actually persist the entry.
-        if let Ok(key_file) = key.to_key_file()
-            && vouch_cli::fapi::key_store::save_to_keychain(&key_file).is_ok()
-            && vouch_cli::fapi::key_store::load_from_keychain().is_ok_and(|v| v.is_some())
-        {
-            tracing::debug!("Migrated client key to keychain");
-            if let Err(e) = std::fs::remove_file(&key_path) {
-                tracing::debug!("Could not remove old key file: {e}");
-            }
-        }
-
-        return Ok(key);
-    }
-
-    // 3. Generate a new key.
-    let key = ClientKey::generate().context("failed to generate FAPI client key")?;
-    tracing::debug!("Generated new FAPI client key: kid={}", key.kid());
-
-    // Save to keychain first, verify it persisted, fall back to disk.
-    // Some platforms (notably macOS with unsigned debug builds) report
-    // success on write but the entry doesn't actually persist.
-    if let Ok(key_file) = key.to_key_file()
-        && vouch_cli::fapi::key_store::save_to_keychain(&key_file).is_ok()
-        && vouch_cli::fapi::key_store::load_from_keychain().is_ok_and(|v| v.is_some())
-    {
-        tracing::debug!("Saved new client key to keychain");
-        return Ok(key);
-    }
-
-    // Keychain unavailable or unreliable — save to disk.
-    tracing::debug!("Keychain unreliable, saving client key to disk");
-    key.save(&key_path)
-        .context("failed to save FAPI client key to disk")?;
-    tracing::debug!("Saved new client key to disk");
-
-    Ok(key)
-}
 
 /// Compute `(expires_at_string, expires_at_timestamp)` from the token response.
 ///
