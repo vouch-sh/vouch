@@ -266,7 +266,6 @@ pub struct OAuthClientDoc {
 
 impl DocumentType for OAuthClientDoc {
     const DOC_TYPE: &'static str = "oauth_client";
-    const CURRENT_VERSION: u32 = 2;
 
     fn index_entries(&self) -> Vec<IndexEntry> {
         let mut entries = vec![IndexEntry {
@@ -298,113 +297,6 @@ impl DocumentType for OAuthClientDoc {
             });
         }
         entries
-    }
-
-    /// Migrate from v1 where JSON blobs were stored as JSON-encoded strings.
-    fn migrate(version: u32, mut data: serde_json::Value) -> anyhow::Result<Self> {
-        if version < 2
-            && let Some(obj) = data.as_object_mut()
-        {
-            for field in ["jwks", "jwks_uri_cache", "registration_metadata"] {
-                if let Some(serde_json::Value::String(s)) = obj.get(field) {
-                    let parsed: serde_json::Value = serde_json::from_str(s)?;
-                    obj.insert(field.to_owned(), parsed);
-                }
-            }
-        }
-        serde_json::from_value(data)
-            .map_err(|e| anyhow::anyhow!("OAuthClientDoc migration failed: {e}"))
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn client_v1_json(jwks: serde_json::Value) -> serde_json::Value {
-        json!({
-            "user_id": null,
-            "client_id": "client-1",
-            "name": "Client One",
-            "description": null,
-            "application_type": "web",
-            "redirect_uris": ["https://example.com/callback"],
-            "active": true,
-            "access_scope": "personal",
-            "org_id": null,
-            "resource_uris": [],
-            "jwks": jwks,
-            "jwks_uri": null,
-            "jwks_uri_cached_at": null,
-            "jwks_uri_cache": "{\"keys\":[{\"kty\":\"EC\",\"kid\":\"cache\"}]}",
-            "token_endpoint_auth_method": "private_key_jwt",
-            "request_object_signing_alg": null,
-            "require_signed_request_object": null,
-            "fapi_profile": "none",
-            "dpop_bound_access_tokens": false,
-            "grant_types": null,
-            "response_types": null,
-            "software_id": null,
-            "software_version": null,
-            "registration_source": null,
-            "registration_access_token_hash": null,
-            "registration_metadata": "{\"logo_uri\":\"https://example.com/logo.png\"}"
-        })
-    }
-
-    #[test]
-    fn migrate_v1_json_strings_to_json_values() {
-        let v1 = client_v1_json(json!("{\"keys\":[{\"kty\":\"EC\",\"kid\":\"inline\"}]}"));
-
-        let doc = OAuthClientDoc::migrate(1, v1).expect("migration should succeed");
-
-        assert_eq!(
-            doc.jwks
-                .as_ref()
-                .and_then(|v| v.get("keys"))
-                .and_then(serde_json::Value::as_array)
-                .and_then(|arr| arr.first())
-                .and_then(|v| v.get("kid"))
-                .and_then(serde_json::Value::as_str),
-            Some("inline"),
-        );
-        assert_eq!(
-            doc.jwks_uri_cache
-                .as_ref()
-                .and_then(|v| v.get("keys"))
-                .and_then(serde_json::Value::as_array)
-                .and_then(|arr| arr.first())
-                .and_then(|v| v.get("kid"))
-                .and_then(serde_json::Value::as_str),
-            Some("cache"),
-        );
-        assert_eq!(
-            doc.registration_metadata
-                .as_ref()
-                .and_then(|v| v.get("logo_uri"))
-                .and_then(serde_json::Value::as_str),
-            Some("https://example.com/logo.png"),
-        );
-    }
-
-    #[test]
-    fn migrate_v2_native_values_unchanged() {
-        let v2 = client_v1_json(json!({"keys":[{"kty":"EC","kid":"inline"}]}));
-
-        let doc = OAuthClientDoc::migrate(2, v2).expect("deserialization should succeed");
-
-        assert_eq!(
-            doc.jwks
-                .as_ref()
-                .and_then(|v| v.get("keys"))
-                .and_then(serde_json::Value::as_array)
-                .and_then(|arr| arr.first())
-                .and_then(|v| v.get("kid"))
-                .and_then(serde_json::Value::as_str),
-            Some("inline"),
-        );
     }
 }
 
