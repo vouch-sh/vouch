@@ -313,7 +313,7 @@ async fn create_test_jwt_client(
         "kty": "EC", "crv": "P-256", "x": x, "y": y,
         "use": "sig", "alg": "ES256", "kid": "test-key-1"
     });
-    let jwks_json = serde_json::to_string(&serde_json::json!({ "keys": [jwk] })).unwrap();
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
 
     let client = create_test_oauth_client(store, user_id).await;
     let oauth_client = db::get_oauth_client_by_client_id(store, &client.client_id)
@@ -321,7 +321,7 @@ async fn create_test_jwt_client(
         .expect("DB error")
         .expect("Client not found");
 
-    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_json)
+    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_value)
         .await
         .expect("Failed to set JWKS");
     db::update_oauth_client_auth_method(store, &oauth_client.id, "private_key_jwt")

@@ -74,11 +74,10 @@ async fn create_test_jwt_client(
         .expect("Client not found");
 
     // Set inline JWKS
-    let jwks_json = serde_json::to_string(&serde_json::json!({
+    let jwks_value = serde_json::json!({
         "keys": [jwk]
-    }))
-    .unwrap();
-    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_json)
+    });
+    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_value)
         .await
         .expect("Failed to set JWKS");
 
@@ -742,11 +741,10 @@ async fn test_rfc7523_jwt_bearer_grant_with_trusted_issuer() {
     .expect("Failed to create trusted issuer");
 
     // Pre-populate JWKS cache so we don't need an actual HTTP server
-    let jwks_json = serde_json::to_string(&serde_json::json!({
+    let jwks_value = serde_json::json!({
         "keys": [jwk]
-    }))
-    .unwrap();
-    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_json)
+    });
+    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_value)
         .await
         .expect("Failed to update JWKS cache");
 
@@ -810,8 +808,8 @@ async fn test_rfc7523_jwt_bearer_grant_jti_replay() {
     .await
     .expect("Failed to create issuer");
 
-    let jwks_json = serde_json::to_string(&serde_json::json!({ "keys": [jwk] })).unwrap();
-    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_json)
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_value)
         .await
         .expect("Failed to update cache");
 
@@ -905,8 +903,8 @@ async fn test_rfc7523_jwt_bearer_grant_user_not_found() {
     .await
     .expect("Failed to create issuer");
 
-    let jwks_json = serde_json::to_string(&serde_json::json!({ "keys": [jwk] })).unwrap();
-    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_json)
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_value)
         .await
         .expect("Failed to update cache");
 
@@ -975,8 +973,8 @@ async fn test_rfc7523_jwt_bearer_grant_lifetime_exceeded() {
     .await
     .expect("Failed to create issuer");
 
-    let jwks_json = serde_json::to_string(&serde_json::json!({ "keys": [jwk] })).unwrap();
-    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_json)
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+    db::update_issuer_jwks_cache(&state.store, &issuer.id, &jwks_value)
         .await
         .expect("Failed to update cache");
 

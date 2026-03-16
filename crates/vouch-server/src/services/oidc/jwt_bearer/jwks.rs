@@ -63,15 +63,15 @@ pub struct JwkEntry {
 pub async fn resolve_client_jwks(
     store: &DocumentStore,
     client_id: &str,
-    jwks: Option<&str>,
+    jwks: Option<&serde_json::Value>,
     jwks_uri: Option<&str>,
-    jwks_uri_cache: Option<&str>,
+    jwks_uri_cache: Option<&serde_json::Value>,
     jwks_uri_cached_at: Option<&str>,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
     // Inline JWKS takes priority
-    if let Some(jwks_json) = jwks {
-        return parse_jwks(jwks_json);
+    if let Some(jwks_value) = jwks {
+        return parse_jwks_value(jwks_value);
     }
 
     // JWKS URI with caching
@@ -98,7 +98,7 @@ pub async fn resolve_issuer_jwks(
     store: &DocumentStore,
     issuer_id: &str,
     jwks_uri: &str,
-    jwks_cache: Option<&str>,
+    jwks_cache: Option<&serde_json::Value>,
     jwks_cached_at: Option<&str>,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
@@ -118,7 +118,7 @@ async fn resolve_jwks_uri(
     store: &DocumentStore,
     client_id: &str,
     uri: &str,
-    cached_jwks: Option<&str>,
+    cached_jwks: Option<&serde_json::Value>,
     cached_at: Option<&str>,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
@@ -128,18 +128,18 @@ async fn resolve_jwks_uri(
     {
         let cache_age = Timestamp::now().as_second() - ts.as_second();
         if cache_age < JWKS_CACHE_TTL_SECONDS {
-            return parse_jwks(cache);
+            return parse_jwks_value(cache);
         }
     }
 
     // Cache is stale or missing — attempt fetch
-    match fetch_jwks(uri, http_client).await {
-        Ok(jwks_json) => {
+    match fetch_and_parse_jwks(uri, http_client).await {
+        Ok((jwks_value, jwks_set)) => {
             // Update cache in database
-            if let Err(e) = db::update_client_jwks_cache(store, client_id, &jwks_json).await {
+            if let Err(e) = db::update_client_jwks_cache(store, client_id, &jwks_value).await {
                 tracing::warn!("Failed to update JWKS cache for client {client_id}: {e}");
             }
-            parse_jwks(&jwks_json)
+            Ok(jwks_set)
         }
         Err(e) => {
             // Stale-while-revalidate: use stale cache on fetch failure (with max age cap)
@@ -149,7 +149,7 @@ async fn resolve_jwks_uri(
                 let stale_age = Timestamp::now().as_second() - ts.as_second();
                 if stale_age < JWKS_STALE_MAX_AGE_SECONDS {
                     tracing::warn!("JWKS fetch failed, using stale cache: {e}");
-                    return parse_jwks(cache);
+                    return parse_jwks_value(cache);
                 }
                 tracing::warn!("JWKS fetch failed and stale cache too old ({stale_age}s)");
             }
@@ -163,7 +163,7 @@ async fn resolve_jwks_uri_for_issuer(
     store: &DocumentStore,
     issuer_id: &str,
     uri: &str,
-    cached_jwks: Option<&str>,
+    cached_jwks: Option<&serde_json::Value>,
     cached_at: Option<&str>,
     http_client: &reqwest::Client,
 ) -> ServiceResult<JwkSet> {
@@ -173,17 +173,17 @@ async fn resolve_jwks_uri_for_issuer(
     {
         let cache_age = Timestamp::now().as_second() - ts.as_second();
         if cache_age < JWKS_CACHE_TTL_SECONDS {
-            return parse_jwks(cache);
+            return parse_jwks_value(cache);
         }
     }
 
     // Cache is stale or missing — attempt fetch
-    match fetch_jwks(uri, http_client).await {
-        Ok(jwks_json) => {
-            if let Err(e) = db::update_issuer_jwks_cache(store, issuer_id, &jwks_json).await {
+    match fetch_and_parse_jwks(uri, http_client).await {
+        Ok((jwks_value, jwks_set)) => {
+            if let Err(e) = db::update_issuer_jwks_cache(store, issuer_id, &jwks_value).await {
                 tracing::warn!("Failed to update JWKS cache for issuer {issuer_id}: {e}");
             }
-            parse_jwks(&jwks_json)
+            Ok(jwks_set)
         }
         Err(e) => {
             // Stale-while-revalidate: use stale cache on fetch failure (with max age cap)
@@ -193,7 +193,7 @@ async fn resolve_jwks_uri_for_issuer(
                 let stale_age = Timestamp::now().as_second() - ts.as_second();
                 if stale_age < JWKS_STALE_MAX_AGE_SECONDS {
                     tracing::warn!("JWKS fetch failed, using stale cache: {e}");
-                    return parse_jwks(cache);
+                    return parse_jwks_value(cache);
                 }
                 tracing::warn!("JWKS fetch failed and stale cache too old ({stale_age}s)");
             }
@@ -261,10 +261,33 @@ async fn fetch_jwks(uri: &str, http_client: &reqwest::Client) -> ServiceResult<S
     })
 }
 
+/// Fetch JWKS from a URI and parse into both a `Value` (for caching) and a `JwkSet`.
+async fn fetch_and_parse_jwks(
+    uri: &str,
+    http_client: &reqwest::Client,
+) -> ServiceResult<(serde_json::Value, JwkSet)> {
+    let jwks_json = fetch_jwks(uri, http_client).await?;
+    let jwks_value: serde_json::Value = serde_json::from_str(&jwks_json).map_err(|e| {
+        tracing::debug!("Failed to parse JWKS as JSON value: {e}");
+        ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid JWKS format")
+    })?;
+    let jwks_set = parse_jwks_value(&jwks_value)?;
+    Ok((jwks_value, jwks_set))
+}
+
 /// Parse a JWKS JSON string.
+#[cfg(test)]
 fn parse_jwks(json: &str) -> ServiceResult<JwkSet> {
     serde_json::from_str(json).map_err(|e| {
         tracing::debug!("Failed to parse JWKS: {e}");
+        ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid JWKS format")
+    })
+}
+
+/// Parse a JWKS from a `serde_json::Value`.
+fn parse_jwks_value(value: &serde_json::Value) -> ServiceResult<JwkSet> {
+    serde_json::from_value(value.clone()).map_err(|e| {
+        tracing::debug!("Failed to parse JWKS value: {e}");
         ServiceError::oauth(OAuthErrorCode::InvalidClient, "Invalid JWKS format")
     })
 }

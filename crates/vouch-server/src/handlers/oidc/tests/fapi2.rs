@@ -237,8 +237,8 @@ async fn create_fapi_test_client(
         .expect("DB error looking up client")
         .expect("FAPI test client not found in DB");
 
-    let jwks_json = serde_json::to_string(&serde_json::json!({ "keys": [jwk] })).unwrap();
-    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_json)
+    let jwks_value = serde_json::json!({ "keys": [jwk] });
+    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_value)
         .await
         .expect("Failed to set JWKS on FAPI client");
 

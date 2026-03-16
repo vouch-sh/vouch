@@ -240,10 +240,10 @@ pub struct OAuthClientDoc {
     pub org_id: Option<String>,
     pub resource_uris: Vec<String>,
     /// Inline JWKS JSON (RFC 7523).
-    pub jwks: Option<String>,
+    pub jwks: Option<serde_json::Value>,
     pub jwks_uri: Option<String>,
     pub jwks_uri_cached_at: Option<Timestamp>,
-    pub jwks_uri_cache: Option<String>,
+    pub jwks_uri_cache: Option<serde_json::Value>,
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
     /// RFC 9101 request object signing algorithm.
     pub request_object_signing_alg: Option<String>,
@@ -261,7 +261,7 @@ pub struct OAuthClientDoc {
     /// RFC 7592 registration access token hash.
     pub registration_access_token_hash: Option<String>,
     /// RFC 7591 cosmetic metadata (JSON).
-    pub registration_metadata: Option<String>,
+    pub registration_metadata: Option<serde_json::Value>,
 }
 
 impl DocumentType for OAuthClientDoc {
