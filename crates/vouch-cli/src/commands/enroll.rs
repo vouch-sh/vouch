@@ -100,11 +100,7 @@ pub async fn run(server: &str) -> Result<()> {
     let token_response = poll_for_token(&client, &device_response, fapi_key.as_ref()).await?;
 
     // Step 6: Compute expiration timestamp from expires_in.
-    let expires_at = jiff::Timestamp::now()
-        .checked_add(jiff::SignedDuration::from_secs(
-            i64::try_from(token_response.expires_in).unwrap_or(28800) - 30,
-        ))
-        .unwrap_or_else(|_| jiff::Timestamp::now());
+    let expires_at = compute_session_expires_at(token_response.expires_in);
     let expires_at_str = expires_at.to_string();
 
     // Step 7: Store session, cookie, and auto-provision SSH.
@@ -281,6 +277,24 @@ async fn poll_for_token(
     }
 }
 
+/// Compute seconds to add to now when deriving session expiry from `expires_in`.
+///
+/// Subtracts 30 seconds as a safety margin and saturates at zero for short TTLs.
+fn expiry_offset_seconds(expires_in: u64) -> i64 {
+    i64::try_from(expires_in)
+        .unwrap_or(28800)
+        .saturating_sub(30)
+}
+
+/// Compute absolute session expiry from an `expires_in` TTL.
+fn compute_session_expires_at(expires_in: u64) -> jiff::Timestamp {
+    jiff::Timestamp::now()
+        .checked_add(jiff::SignedDuration::from_secs(expiry_offset_seconds(
+            expires_in,
+        )))
+        .unwrap_or_else(|_| jiff::Timestamp::now())
+}
+
 /// Result of a single poll attempt.
 enum PollError {
     Pending,
@@ -453,4 +467,28 @@ async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
     );
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expiry_offset_seconds;
+
+    #[test]
+    fn test_expiry_offset_seconds_saturates_for_short_ttls() {
+        assert_eq!(expiry_offset_seconds(0), 0);
+        assert_eq!(expiry_offset_seconds(1), 0);
+        assert_eq!(expiry_offset_seconds(29), 0);
+        assert_eq!(expiry_offset_seconds(30), 0);
+    }
+
+    #[test]
+    fn test_expiry_offset_seconds_subtracts_margin_for_normal_ttl() {
+        assert_eq!(expiry_offset_seconds(31), 1);
+        assert_eq!(expiry_offset_seconds(3600), 3570);
+    }
+
+    #[test]
+    fn test_expiry_offset_seconds_uses_default_on_overflow() {
+        assert_eq!(expiry_offset_seconds(u64::MAX), 28_770);
+    }
 }
