@@ -144,48 +144,33 @@ pub fn load_client_key() -> Option<ClientKey> {
 pub fn load_or_create_client_key() -> anyhow::Result<ClientKey> {
     use anyhow::Context;
 
-    let home = dirs::home_dir().context("cannot determine home directory")?;
-    let key_path = home.join(".vouch").join("client_key.json");
-
-    // 1. Try the OS keychain first.
-    match load_from_keychain() {
-        Ok(Some(key_file)) => {
-            let key = ClientKey::from_key_file(&key_file)
-                .context("failed to load client key from keychain")?;
-            tracing::debug!("FAPI client key loaded from keychain: kid={}", key.kid());
-            return Ok(key);
-        }
-        Ok(None) => {
-            tracing::debug!("No client key in keychain, checking disk");
-        }
-        Err(e) => {
-            tracing::debug!("Keychain unavailable ({e}), falling back to disk");
-        }
-    }
-
-    // 2. Try loading from disk (legacy location).
-    if key_path.exists() {
-        let key =
-            ClientKey::load(&key_path).context("failed to load FAPI client key from disk")?;
-        tracing::debug!("FAPI client key loaded from disk: kid={}", key.kid());
-
-        // Migrate to keychain if possible, then remove the file.
-        // Verify the write by reading back — some platforms claim
-        // success but don't actually persist the entry.
-        if let Ok(key_file) = key.to_key_file()
-            && save_to_keychain(&key_file).is_ok()
-            && load_from_keychain().is_ok_and(|v| v.is_some())
-        {
-            tracing::debug!("Migrated client key to keychain");
-            if let Err(e) = std::fs::remove_file(&key_path) {
-                tracing::debug!("Could not remove old key file: {e}");
+    // 1. Try existing key (keychain → disk, read-only).
+    if let Some(key) = load_client_key() {
+        // If the key was loaded from disk (file still exists), migrate to keychain.
+        // Verify the write by reading back — some platforms claim success but
+        // don't actually persist the entry.
+        let home = dirs::home_dir();
+        if let Some(ref home) = home {
+            let key_path = home.join(".vouch").join("client_key.json");
+            if key_path.exists() {
+                if let Ok(key_file) = key.to_key_file()
+                    && save_to_keychain(&key_file).is_ok()
+                    && load_from_keychain().is_ok_and(|v| v.is_some())
+                {
+                    tracing::debug!("Migrated client key to keychain");
+                    if let Err(e) = std::fs::remove_file(&key_path) {
+                        tracing::debug!("Could not remove old key file: {e}");
+                    }
+                }
             }
         }
-
         return Ok(key);
     }
 
-    // 3. Generate a new key.
+    let home = dirs::home_dir().context("cannot determine home directory")?;
+    let key_path = home.join(".vouch").join("client_key.json");
+
+    // 2. Generate a new key.
     let key = ClientKey::generate().context("failed to generate FAPI client key")?;
     tracing::debug!("Generated new FAPI client key: kid={}", key.kid());
 
