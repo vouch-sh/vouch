@@ -39,11 +39,9 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y musl-tools libssl-dev cmake golang-go clang
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev cmake golang-go clang
       - name: Setup Rust toolchain
-        run: |
-          rustup show
-          rustup target add x86_64-unknown-linux-musl
+        run: rustup show
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
@@ -51,10 +49,7 @@ jobs:
           shared-key: "clippy-${{ runner.os }}"
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      - run: cargo clippy --target x86_64-unknown-linux-musl --all-targets --all-features -- -D warnings
-        env:
-          PKG_CONFIG_ALLOW_CROSS: 1
-          OPENSSL_STATIC: 1
+      - run: cargo clippy --all-targets --all-features -- -D warnings
 
   test:
     name: Unit Tests (${{ matrix.name }})
@@ -65,8 +60,8 @@ jobs:
         include:
           - name: linux
             runner: ubuntu-latest
-            install-deps: sudo apt-get update && sudo apt-get install -y musl-tools libssl-dev cmake golang-go clang
-            cargo-args: "--target x86_64-unknown-linux-musl"
+            install-deps: sudo apt-get update && sudo apt-get install -y libssl-dev cmake golang-go clang
+            cargo-args: ""
             fips-cc: clang
             fips-cxx: clang++
           - name: macos
@@ -84,9 +79,6 @@ jobs:
         run: ${{ matrix.install-deps }}
       - name: Setup Rust toolchain
         run: rustup show
-      - name: Add musl target
-        if: runner.os == 'Linux'
-        run: rustup target add x86_64-unknown-linux-musl
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
@@ -99,11 +91,6 @@ jobs:
         run: |
           echo "AWS_LC_FIPS_SYS_CC=${{ matrix.fips-cc }}" >> "$GITHUB_ENV"
           echo "AWS_LC_FIPS_SYS_CXX=${{ matrix.fips-cxx }}" >> "$GITHUB_ENV"
-      - name: Set OpenSSL static linking
-        if: runner.os == 'Linux'
-        run: |
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
-          echo "OPENSSL_STATIC=1" >> "$GITHUB_ENV"
       - name: Run tests
         run: cargo test ${{ matrix.cargo-args }}
 
@@ -117,15 +104,15 @@ jobs:
           - name: linux-amd64
             runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
-            packages: "-p vouch-cli -p vouch-agent -p vouch-server"
-            install: sudo apt-get update && sudo apt-get install -y musl-tools libssl-dev cmake golang-go clang
+            packages: "-p vouch-cli -p vouch-agent"
+            install: sudo apt-get update && sudo apt-get install -y musl-tools cmake golang-go clang
             fips-cc: clang
             fips-cxx: clang++
           - name: linux-arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
-            packages: "-p vouch-cli -p vouch-agent -p vouch-server"
-            install: sudo apt-get update && sudo apt-get install -y musl-tools libssl-dev cmake golang-go clang
+            packages: "-p vouch-cli -p vouch-agent"
+            install: sudo apt-get update && sudo apt-get install -y musl-tools cmake golang-go clang
             fips-cc: clang
             fips-cxx: clang++
           - name: macos-arm64
@@ -165,17 +152,27 @@ jobs:
         run: |
           echo "AWS_LC_FIPS_SYS_CC=${{ matrix.fips-cc }}" >> "$GITHUB_ENV"
           echo "AWS_LC_FIPS_SYS_CXX=${{ matrix.fips-cxx }}" >> "$GITHUB_ENV"
-      - name: Set OpenSSL static linking
-        if: runner.os == 'Linux'
-        run: |
-          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
-          echo "OPENSSL_STATIC=1" >> "$GITHUB_ENV"
       - name: Set RUSTFLAGS
         if: matrix.rustflags
         shell: bash
         run: echo "RUSTFLAGS=${{ matrix.rustflags }}" >> "$GITHUB_ENV"
       - name: Build
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
+      - name: Build server (musl)
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/app" \
+            -w /app \
+            rust:1.94.0-alpine sh -c '
+              apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig cmake make go perl clang linux-headers
+              export AWS_LC_FIPS_SYS_CC=clang
+              export AWS_LC_FIPS_SYS_CXX=clang++
+              export OPENSSL_STATIC=1
+              export OPENSSL_LIB_DIR=/usr/lib
+              export OPENSSL_INCLUDE_DIR=/usr/include
+              cargo build --release --locked --package vouch-server
+            '
 
   dependency-review:
     name: Dependency Review
