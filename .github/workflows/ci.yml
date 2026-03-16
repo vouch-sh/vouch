@@ -39,7 +39,7 @@ jobs:
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y musl-tools cmake golang-go clang
+        run: sudo apt-get update && sudo apt-get install -y musl-tools libssl-dev cmake golang-go clang
       - name: Setup Rust toolchain
         run: |
           rustup show
@@ -52,6 +52,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
       - run: cargo clippy --target x86_64-unknown-linux-musl --all-targets --all-features -- -D warnings
+        env:
+          PKG_CONFIG_ALLOW_CROSS: 1
+          OPENSSL_STATIC: 1
 
   test:
     name: Unit Tests (${{ matrix.name }})
@@ -62,11 +65,10 @@ jobs:
         include:
           - name: linux
             runner: ubuntu-latest
-            install-deps: sudo apt-get update && sudo apt-get install -y musl-tools cmake golang-go clang
+            install-deps: sudo apt-get update && sudo apt-get install -y musl-tools libssl-dev cmake golang-go clang
             cargo-args: "--target x86_64-unknown-linux-musl"
             fips-cc: clang
             fips-cxx: clang++
-            musl-target: x86_64-unknown-linux-musl
           - name: macos
             runner: macos-latest
             install-deps: brew install go
@@ -83,8 +85,8 @@ jobs:
       - name: Setup Rust toolchain
         run: rustup show
       - name: Add musl target
-        if: matrix.musl-target
-        run: rustup target add ${{ matrix.musl-target }}
+        if: runner.os == 'Linux'
+        run: rustup target add x86_64-unknown-linux-musl
       - name: Setup Rust cache
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
@@ -97,6 +99,11 @@ jobs:
         run: |
           echo "AWS_LC_FIPS_SYS_CC=${{ matrix.fips-cc }}" >> "$GITHUB_ENV"
           echo "AWS_LC_FIPS_SYS_CXX=${{ matrix.fips-cxx }}" >> "$GITHUB_ENV"
+      - name: Set OpenSSL static linking
+        if: runner.os == 'Linux'
+        run: |
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          echo "OPENSSL_STATIC=1" >> "$GITHUB_ENV"
       - name: Run tests
         run: cargo test ${{ matrix.cargo-args }}
 
@@ -111,14 +118,14 @@ jobs:
             runner: ubuntu-latest
             target: x86_64-unknown-linux-musl
             packages: "-p vouch-cli -p vouch-agent -p vouch-server"
-            install: sudo apt-get update && sudo apt-get install -y musl-tools cmake golang-go clang
+            install: sudo apt-get update && sudo apt-get install -y musl-tools libssl-dev cmake golang-go clang
             fips-cc: clang
             fips-cxx: clang++
           - name: linux-arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             packages: "-p vouch-cli -p vouch-agent -p vouch-server"
-            install: sudo apt-get update && sudo apt-get install -y musl-tools cmake golang-go clang
+            install: sudo apt-get update && sudo apt-get install -y musl-tools libssl-dev cmake golang-go clang
             fips-cc: clang
             fips-cxx: clang++
           - name: macos-arm64
@@ -158,6 +165,11 @@ jobs:
         run: |
           echo "AWS_LC_FIPS_SYS_CC=${{ matrix.fips-cc }}" >> "$GITHUB_ENV"
           echo "AWS_LC_FIPS_SYS_CXX=${{ matrix.fips-cxx }}" >> "$GITHUB_ENV"
+      - name: Set OpenSSL static linking
+        if: runner.os == 'Linux'
+        run: |
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> "$GITHUB_ENV"
+          echo "OPENSSL_STATIC=1" >> "$GITHUB_ENV"
       - name: Set RUSTFLAGS
         if: matrix.rustflags
         shell: bash
