@@ -546,11 +546,7 @@ pub async fn browser_login_complete(
 
     // Update counter in database (WebAuthn counter is u32, stored as i32)
     let new_counter = verification_result.new_counter as i32;
-    db::update_authenticator_counter(&state.store, &authenticator.id, new_counter)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    db::update_authenticator_counter(&state.store, &authenticator.id, new_counter).await?;
 
     // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
     let client_id = state.config().base_url.clone();

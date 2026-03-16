@@ -138,15 +138,16 @@ pub async fn delete_user(store: &DocumentStore, user_id: &str) -> Result<bool> {
         .await?;
 
     // 3. Clear authenticator_id references in device_auth_requests,
-    //    then delete authenticators
+    //    then delete all authenticators in one batch.
     let authenticators = tx.find_all::<AuthenticatorDoc>("user_id", user_id).await?;
     for auth in &authenticators {
         tx.update_by_index::<DeviceAuthRequestDoc, _>("authenticator_id", &auth.id, |d| {
             d.authenticator_id = None;
         })
         .await?;
-        tx.delete(&auth.id).await?;
     }
+    tx.delete_by_index::<AuthenticatorDoc>("user_id", user_id)
+        .await?;
 
     // 4. Delete SSH revoked certificates
     tx.delete_by_index::<SshRevokedCertDoc>("user_id", user_id)

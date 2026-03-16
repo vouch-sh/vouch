@@ -125,9 +125,16 @@ pub async fn enroll_user_with_org(
     {
         let mut data = org_doc.data;
         data.created_by_user_id = Some(user.id.clone());
-        // Optimistic lock: if another enrollment already set
-        // the admin, this returns false and we skip.
-        let _won = tx.compare_and_update(oid, org_doc.version, &data).await?;
+        // Optimistic lock: if another enrollment already set the admin,
+        // compare_and_update returns false (version mismatch) and we
+        // harmlessly skip — the first enrollee wins the admin role.
+        let won = tx.compare_and_update(oid, org_doc.version, &data).await?;
+        if !won {
+            tracing::debug!(
+                org_id = %oid,
+                "Lost race to set org admin during enrollment — another enrollee won"
+            );
+        }
     }
 
     tx.commit().await?;

@@ -73,11 +73,7 @@ pub async fn status(
 
     // Check session exists in database
     let token_hash = hash_token(token);
-    let session = db::get_session_by_token_hash(&state.store, &token_hash)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    let session = db::get_session_by_token_hash(&state.store, &token_hash).await?;
 
     if session.is_none() {
         return Ok(Json(SessionStatus {

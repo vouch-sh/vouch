@@ -147,11 +147,7 @@ pub async fn promote_member(
         ));
     }
 
-    db::update_user_admin_status(&state.store, &target_id, true)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    db::update_user_admin_status(&state.store, &target_id, true).await?;
 
     let data = serde_json::json!({
         "action": "promote",
@@ -208,11 +204,7 @@ pub async fn demote_member(
         ));
     }
 
-    db::update_user_admin_status(&state.store, &target_id, false)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    db::update_user_admin_status(&state.store, &target_id, false).await?;
 
     let data = serde_json::json!({
         "action": "demote",
@@ -269,18 +261,10 @@ pub async fn deactivate_member(
         ));
     }
 
-    db::update_user_active_status(&state.store, &target_id, false)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    db::update_user_active_status(&state.store, &target_id, false).await?;
 
     // Invalidate all sessions for the deactivated user
-    db::delete_sessions_for_user(&state.store, &target_id)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    db::delete_sessions_for_user(&state.store, &target_id).await?;
 
     let data = serde_json::json!({
         "action": "deactivate",
@@ -324,11 +308,7 @@ pub async fn activate_member(
     )
     .await?;
 
-    db::update_user_active_status(&state.store, &target_id, true)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    db::update_user_active_status(&state.store, &target_id, true).await?;
 
     let data = serde_json::json!({
         "action": "activate",
@@ -382,27 +362,15 @@ pub async fn revoke_member_credentials(
     }
 
     // Delete all authenticators (cascades to sessions)
-    let authenticators = db::get_authenticators_for_user(&state.store, &target_id)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    let authenticators = db::get_authenticators_for_user(&state.store, &target_id).await?;
 
     let key_count = authenticators.len();
     for auth in &authenticators {
-        db::delete_authenticator(&state.store, &auth.id)
-            .await
-            .map_err(|e| {
-                ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-            })?;
+        db::delete_authenticator(&state.store, &auth.id).await?;
     }
 
     // Also kill any remaining sessions
-    db::delete_sessions_for_user(&state.store, &target_id)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    db::delete_sessions_for_user(&state.store, &target_id).await?;
 
     let data = serde_json::json!({
         "action": "revoke_credentials",
@@ -463,11 +431,7 @@ pub async fn remove_member(
 
     let target_email = target.email.clone();
 
-    db::delete_user(&state.store, &target_id)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    db::delete_user(&state.store, &target_id).await?;
 
     let data = serde_json::json!({
         "action": "remove_user",

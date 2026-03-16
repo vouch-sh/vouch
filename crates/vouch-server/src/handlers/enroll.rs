@@ -805,11 +805,7 @@ pub async fn browser_register_start(
     );
 
     // Get any existing credentials for this user to exclude them
-    let existing_auths = db::get_authenticators_for_user(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    let existing_auths = db::get_authenticators_for_user(&state.store, &token.sub).await?;
 
     tracing::info!(
         "browser_register_start: user {} has {} existing credentials",
@@ -1086,11 +1082,7 @@ pub async fn browser_register_complete(
     // ── Phase 8: Database operations ────────────────────────────────────
     // All cheap validation passed — now check for duplicate credentials.
     if let Some(_existing) =
-        db::get_authenticator_by_credential_id(&state.store, &credential_id_bytes)
-            .await
-            .map_err(|e| {
-                ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-            })?
+        db::get_authenticator_by_credential_id(&state.store, &credential_id_bytes).await?
     {
         tracing::warn!(
             "Rejected duplicate credential registration for user: {}",
@@ -1159,8 +1151,7 @@ pub async fn browser_register_complete(
         Some(&user_handle),
         validated.attestation_verified,
     )
-    .await
-    .map_err(|e| ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string()))?;
+    .await?;
 
     // Mark device authorization as complete (only for CLI-initiated flows)
     if reg_state.device_auth_id.is_empty() {
@@ -1177,13 +1168,12 @@ pub async fn browser_register_complete(
             &authenticator_id,
         )
         .await
-        .map_err(|e| {
+        .inspect_err(|e| {
             tracing::error!(
                 "Failed to authorize device auth '{}': {}",
                 reg_state.device_auth_id,
                 e
             );
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
         })?;
     }
 

@@ -7,7 +7,7 @@ use super::documents::device_auth::DeviceAuthRequestDoc;
 use super::documents::session::SessionDoc;
 use super::store::DocumentStore;
 use super::users::User;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use jiff::Timestamp;
@@ -31,27 +31,31 @@ pub struct Authenticator {
     pub attestation_verified: bool,
 }
 
-impl From<Document<AuthenticatorDoc>> for Authenticator {
-    fn from(doc: Document<AuthenticatorDoc>) -> Self {
-        Self {
+impl TryFrom<Document<AuthenticatorDoc>> for Authenticator {
+    type Error = anyhow::Error;
+
+    fn try_from(doc: Document<AuthenticatorDoc>) -> Result<Self> {
+        Ok(Self {
             id: doc.id,
             user_id: doc.data.user_id,
             name: doc.data.name,
             credential_id: URL_SAFE_NO_PAD
                 .decode(&doc.data.credential_id)
-                .unwrap_or_default(),
+                .context("invalid base64 in credential_id")?,
             public_key: URL_SAFE_NO_PAD
                 .decode(&doc.data.public_key)
-                .unwrap_or_default(),
+                .context("invalid base64 in public_key")?,
             counter: doc.data.counter,
             created_at: doc.created_at,
             aaguid: doc.data.aaguid,
             user_handle: doc
                 .data
                 .user_handle
-                .and_then(|h| URL_SAFE_NO_PAD.decode(&h).ok()),
+                .map(|h| URL_SAFE_NO_PAD.decode(&h))
+                .transpose()
+                .context("invalid base64 in user_handle")?,
             attestation_verified: doc.data.attestation_verified,
-        }
+        })
     }
 }
 
@@ -103,7 +107,9 @@ pub async fn get_authenticators_for_user(
     let docs = store
         .find_all::<AuthenticatorDoc>("user_id", user_id)
         .await?;
-    Ok(docs.into_iter().map(Authenticator::from).collect())
+    docs.into_iter()
+        .map(Authenticator::try_from)
+        .collect::<Result<Vec<_>>>()
 }
 
 /// Get an authenticator by credential ID.
@@ -115,7 +121,7 @@ pub async fn get_authenticator_by_credential_id(
     let doc = store
         .find_one::<AuthenticatorDoc>("credential_id", &encoded)
         .await?;
-    Ok(doc.map(Authenticator::from))
+    doc.map(Authenticator::try_from).transpose()
 }
 
 /// Get an authenticator and its owning user by credential ID.
@@ -136,7 +142,7 @@ pub async fn get_authenticator_with_user_by_credential_id(
     };
 
     let user_id = doc.data.user_id.clone();
-    let authenticator = Authenticator::from(doc);
+    let authenticator = Authenticator::try_from(doc)?;
 
     // Look up the full user record
     let user = super::users::get_user_by_id(store, &user_id).await?;
@@ -156,7 +162,7 @@ pub async fn get_authenticator_by_id(
     authenticator_id: &str,
 ) -> Result<Option<Authenticator>> {
     let doc = store.get::<AuthenticatorDoc>(authenticator_id).await?;
-    Ok(doc.map(Authenticator::from))
+    doc.map(Authenticator::try_from).transpose()
 }
 
 /// Update authenticator counter.

@@ -51,6 +51,35 @@ enum DocumentIndexes {
     IndexValue,
 }
 
+/// Build an INSERT statement for a single document index entry.
+///
+/// Used by both `DocumentStore` and `StoreTransaction` write paths to avoid
+/// duplicating the index insertion logic.
+fn build_index_insert(
+    crypto: &dyn DocumentCrypto,
+    doc_id: &str,
+    entry: &super::document_type::IndexEntry,
+) -> Result<sea_query::InsertStatement> {
+    let index_id = uuid::Uuid::now_v7().to_string();
+    let hashed_value = crypto.hmac_index(&entry.value);
+    let stmt = Query::insert()
+        .into_table(DocumentIndexes::Table)
+        .columns([
+            DocumentIndexes::Id,
+            DocumentIndexes::DocumentId,
+            DocumentIndexes::IndexField,
+            DocumentIndexes::IndexValue,
+        ])
+        .values([
+            index_id.as_str().into(),
+            doc_id.into(),
+            entry.field.into(),
+            hashed_value.as_str().into(),
+        ])?
+        .to_owned();
+    Ok(stmt)
+}
+
 // ============================================================================
 // Raw Row Types (for sqlx FromRow)
 // ============================================================================
@@ -705,24 +734,7 @@ impl DocumentStore {
 
             // INSERT new indexes
             for entry in &indexes {
-                let index_id = uuid::Uuid::now_v7().to_string();
-                let hashed_value = self.crypto.hmac_index(&entry.value);
-                let idx_stmt = Query::insert()
-                    .into_table(DocumentIndexes::Table)
-                    .columns([
-                        DocumentIndexes::Id,
-                        DocumentIndexes::DocumentId,
-                        DocumentIndexes::IndexField,
-                        DocumentIndexes::IndexValue,
-                    ])
-                    .values([
-                        index_id.as_str().into(),
-                        id.into(),
-                        entry.field.into(),
-                        hashed_value.as_str().into(),
-                    ])?
-                    .to_owned();
-
+                let idx_stmt = build_index_insert(self.crypto.as_ref(), id, entry)?;
                 crate::tx_execute!(tx, idx_stmt)?;
             }
 
@@ -1099,24 +1111,7 @@ impl<'a> StoreTransaction<'a> {
 
         // INSERT index entries
         for entry in &indexes {
-            let index_id = uuid::Uuid::now_v7().to_string();
-            let hashed_value = self.crypto.hmac_index(&entry.value);
-            let idx_stmt = Query::insert()
-                .into_table(DocumentIndexes::Table)
-                .columns([
-                    DocumentIndexes::Id,
-                    DocumentIndexes::DocumentId,
-                    DocumentIndexes::IndexField,
-                    DocumentIndexes::IndexValue,
-                ])
-                .values([
-                    index_id.as_str().into(),
-                    id.into(),
-                    entry.field.into(),
-                    hashed_value.as_str().into(),
-                ])?
-                .to_owned();
-
+            let idx_stmt = build_index_insert(self.crypto.as_ref(), id, entry)?;
             crate::tx_execute!(self.tx, idx_stmt)?;
         }
 
@@ -1324,24 +1319,7 @@ impl<'a> StoreTransaction<'a> {
 
         // INSERT new indexes
         for entry in &indexes {
-            let index_id = uuid::Uuid::now_v7().to_string();
-            let hashed_value = self.crypto.hmac_index(&entry.value);
-            let idx_stmt = Query::insert()
-                .into_table(DocumentIndexes::Table)
-                .columns([
-                    DocumentIndexes::Id,
-                    DocumentIndexes::DocumentId,
-                    DocumentIndexes::IndexField,
-                    DocumentIndexes::IndexValue,
-                ])
-                .values([
-                    index_id.as_str().into(),
-                    id.into(),
-                    entry.field.into(),
-                    hashed_value.as_str().into(),
-                ])?
-                .to_owned();
-
+            let idx_stmt = build_index_insert(self.crypto.as_ref(), id, entry)?;
             crate::tx_execute!(self.tx, idx_stmt)?;
         }
 
