@@ -42,6 +42,29 @@ pub enum OAuthGrantType {
     Fido2Assertion,
 }
 
+/// Parse error for OAuth `grant_type` values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParseOAuthGrantTypeError {
+    value: String,
+}
+
+impl ParseOAuthGrantTypeError {
+    #[must_use]
+    pub fn new(value: &str) -> Self {
+        Self {
+            value: value.to_string(),
+        }
+    }
+}
+
+impl std::fmt::Display for ParseOAuthGrantTypeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unsupported grant_type: {}", self.value)
+    }
+}
+
+impl std::error::Error for ParseOAuthGrantTypeError {}
+
 impl OAuthGrantType {
     const SUPPORTED: [Self; 6] = [
         Self::AuthorizationCode,
@@ -73,14 +96,14 @@ impl OAuthGrantType {
 }
 
 impl std::str::FromStr for OAuthGrantType {
-    type Err = String;
+    type Err = ParseOAuthGrantTypeError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         Self::SUPPORTED
             .iter()
             .copied()
             .find(|grant_type| grant_type.as_str() == s)
-            .ok_or_else(|| format!("unsupported grant_type: {s}"))
+            .ok_or_else(|| ParseOAuthGrantTypeError::new(s))
     }
 }
 
@@ -208,6 +231,23 @@ impl std::fmt::Debug for TokenRequest {
     }
 }
 
+/// Token request with a typed `grant_type` validated at the request boundary.
+#[derive(Debug)]
+struct ParsedTokenRequest {
+    grant_type: OAuthGrantType,
+    request: TokenRequest,
+}
+
+impl TokenRequest {
+    fn parse(self) -> Result<ParsedTokenRequest, ParseOAuthGrantTypeError> {
+        let grant_type = self.grant_type.parse::<OAuthGrantType>()?;
+        Ok(ParsedTokenRequest {
+            grant_type,
+            request: self,
+        })
+    }
+}
+
 /// Token exchange response (RFC 8693 Section 2.2).
 #[derive(Serialize)]
 pub struct TokenExchangeResponse {
@@ -328,8 +368,13 @@ pub async fn token(
         );
     }
 
-    // RFC 6749 Section 5.2: Return unsupported_grant_type error for unknown grants
-    let Ok(grant_type) = params.grant_type.parse::<OAuthGrantType>() else {
+    // RFC 6749 Section 5.2: Return unsupported_grant_type error for unknown grants.
+    let ParsedTokenRequest {
+        grant_type,
+        request: params,
+    } = match params.parse() {
+        Ok(parsed) => parsed,
+        Err(_) => {
         let supported = OAuthGrantType::supported_wire_values().join(", ");
         return (
             StatusCode::BAD_REQUEST,
@@ -340,6 +385,7 @@ pub async fn token(
             }),
         )
             .into_response();
+        }
     };
 
     match grant_type {
