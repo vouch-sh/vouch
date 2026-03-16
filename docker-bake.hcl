@@ -23,7 +23,6 @@ target "_common" {
 target "ci" {
   inherits = ["_common"]
   args = {
-    DEPS_STAGE        = "full-deps"
     TARGET            = TARGET
     CARGO_PACKAGES    = "-p vouch-cli -p vouch-agent -p vouch-server"
     SOURCE_DATE_EPOCH = "0"
@@ -36,7 +35,6 @@ target "ci" {
 target "cli" {
   inherits = ["_common"]
   args = {
-    DEPS_STAGE        = "cli-deps"
     TARGET            = TARGET
     CARGO_PACKAGES    = "-p vouch-cli -p vouch-agent"
     SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH
@@ -49,7 +47,6 @@ target "cli" {
 target "server" {
   inherits = ["_common"]
   args = {
-    DEPS_STAGE        = "full-deps"
     TARGET            = TARGET
     CARGO_PACKAGES    = "-p vouch-server"
     SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH
@@ -62,7 +59,6 @@ target "server" {
 target "reproduce" {
   inherits = ["_common"]
   args = {
-    DEPS_STAGE        = "cli-deps"
     TARGET            = TARGET
     CARGO_PACKAGES    = "-p vouch-cli -p vouch-agent"
     SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH
