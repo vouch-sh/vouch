@@ -90,17 +90,7 @@ async fn print_codeartifact_env(
     opts: &CodeArtifactOptions<'_>,
     shell: &Shell,
 ) -> Result<()> {
-    let (domain, domain_owner, region) =
-        super::credential::codeartifact::resolve_codeartifact_params(
-            opts.domain,
-            opts.domain_owner,
-            opts.region,
-            opts.profile,
-        )?;
-
-    let token = super::credential::codeartifact::get_token(server, &domain, &domain_owner, &region)
-        .await
-        .context("failed to get CodeArtifact token")?;
+    let token = super::exec::fetch_codeartifact_token(server, opts).await?;
 
     print_export(
         shell,
@@ -118,29 +108,12 @@ async fn print_rds_env(
     opts: &RdsOptions<'_>,
     shell: &Shell,
 ) -> Result<()> {
-    let hostname = opts.hostname.context(
-        "RDS credentials require --rds-hostname. \
-         Usage: vouch env --type rds --rds-hostname <host> --rds-username <user>",
-    )?;
-    let username = opts.username.context(
-        "RDS credentials require --rds-username. \
-         Usage: vouch env --type rds --rds-hostname <host> --rds-username <user>",
-    )?;
+    let rds = super::exec::fetch_rds_with_opts(server, role, opts).await?;
 
-    let token = super::credential::rds::fetch_rds_token(
-        server,
-        hostname,
-        opts.port,
-        username,
-        opts.region,
-        role,
-    )
-    .await?;
-
-    print_export(shell, "PGPASSWORD", token.expose_secret());
-    print_export(shell, "PGHOST", hostname);
-    print_export(shell, "PGPORT", &opts.port.to_string());
-    print_export(shell, "PGUSER", username);
+    print_export(shell, "PGPASSWORD", rds.token.expose_secret());
+    print_export(shell, "PGHOST", &rds.hostname);
+    print_export(shell, "PGPORT", &rds.port.to_string());
+    print_export(shell, "PGUSER", &rds.username);
     print_export(shell, "PGSSLMODE", "require");
 
     Ok(())
@@ -153,23 +126,7 @@ async fn print_redshift_env(
     opts: &RedshiftOptions<'_>,
     shell: &Shell,
 ) -> Result<()> {
-    let target = super::credential::redshift::resolve_target(
-        opts.cluster_id,
-        opts.workgroup,
-        opts.duration,
-    )?;
-
-    let (role_arn, region_name) =
-        crate::integrations::aws::resolve_role_and_region(role, opts.region)?;
-
-    let creds = super::credential::redshift::fetch_redshift_credentials(
-        server,
-        &target,
-        opts.db_name,
-        &region_name,
-        &role_arn,
-    )
-    .await?;
+    let creds = super::exec::fetch_redshift_with_opts(server, role, opts).await?;
 
     print_export(shell, "PGPASSWORD", creds.db_password.expose_secret());
     print_export(shell, "PGUSER", &creds.db_user);

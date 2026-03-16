@@ -47,7 +47,7 @@ impl VouchClient<ReqwestClient> {
         let token = crate::session::resolve_token().await?;
         client.token = Some(token);
         // Load the FAPI key for DPoP on resource endpoints (non-fatal).
-        client.fapi_key = load_fapi_key();
+        client.fapi_key = vouch_cli::fapi::key_store::load_client_key();
         Ok(client)
     }
 
@@ -63,7 +63,7 @@ impl VouchClient<ReqwestClient> {
             token: Some(token),
             fapi_key: None,
         };
-        client.fapi_key = load_fapi_key();
+        client.fapi_key = vouch_cli::fapi::key_store::load_client_key();
         Ok(client)
     }
 
@@ -89,7 +89,7 @@ impl VouchClient<ReqwestClient> {
         let mut client = Self::unauthenticated(&session.server_url)?;
         client.token = Some(session.token.clone());
         // Load the FAPI key for DPoP on resource endpoints (non-fatal).
-        client.fapi_key = load_fapi_key();
+        client.fapi_key = vouch_cli::fapi::key_store::load_client_key();
         Ok(client)
     }
 
@@ -511,56 +511,6 @@ impl ServerErrorKind {
             }
             Self::RateLimited { retry_after } => CliError::RateLimited { retry_after }.into(),
             Self::Other(status) => format_http_error(status, error_text),
-        }
-    }
-}
-
-/// Load the FAPI client key for DPoP proof generation.
-///
-/// Checks sources in order:
-/// 1. OS keychain (preferred — encrypted at rest)
-/// 2. `~/.vouch/client_key.json` (legacy/fallback)
-///
-/// Returns `None` if no key is found. Never generates a new key — that
-/// happens only in the enroll/login flows. This is intentionally non-fatal:
-/// resource requests fall back to `Bearer` auth when no key is available.
-pub(crate) fn load_fapi_key() -> Option<ClientKey> {
-    // 1. Try the OS keychain first.
-    match vouch_cli::fapi::key_store::load_from_keychain() {
-        Ok(Some(key_file)) => match ClientKey::from_key_file(&key_file) {
-            Ok(key) => {
-                tracing::debug!("Loaded FAPI key from keychain: kid={}", key.kid());
-                return Some(key);
-            }
-            Err(e) => {
-                tracing::warn!("Keychain has FAPI key but it failed to parse: {e}");
-            }
-        },
-        Ok(None) => {
-            tracing::debug!("No FAPI key in keychain");
-        }
-        Err(e) => {
-            tracing::warn!("Cannot access keychain for FAPI key: {e}");
-        }
-    }
-
-    // 2. Fall back to disk.
-    let home = dirs::home_dir()?;
-    let key_path = home.join(".vouch").join("client_key.json");
-
-    if !key_path.exists() {
-        tracing::debug!("No FAPI key on disk at {}", key_path.display());
-        return None;
-    }
-
-    match ClientKey::load(&key_path) {
-        Ok(key) => {
-            tracing::debug!("Loaded FAPI key from disk: kid={}", key.kid());
-            Some(key)
-        }
-        Err(e) => {
-            tracing::warn!("FAPI key exists on disk but failed to load: {e}");
-            None
         }
     }
 }
