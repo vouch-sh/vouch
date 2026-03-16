@@ -515,7 +515,6 @@ impl ServerErrorKind {
     }
 }
 
-
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

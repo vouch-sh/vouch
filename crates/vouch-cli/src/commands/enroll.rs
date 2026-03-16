@@ -147,7 +147,6 @@ pub async fn run(server: &str) -> Result<()> {
     Ok(())
 }
 
-
 /// Attempt open (unauthenticated) FAPI client registration.
 ///
 /// This is called before the device code flow so the resulting token will

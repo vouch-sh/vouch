@@ -122,6 +122,11 @@ pub fn load_client_key() -> Option<ClientKey> {
         }
         Err(e) => {
             tracing::warn!("FAPI key exists on disk but failed to load: {e}");
+            eprintln!(
+                "Warning: existing FAPI key at {} could not be loaded \
+                 and will be replaced.",
+                key_path.display()
+            );
             None
         }
     }
@@ -152,15 +157,14 @@ pub fn load_or_create_client_key() -> anyhow::Result<ClientKey> {
         let home = dirs::home_dir();
         if let Some(ref home) = home {
             let key_path = home.join(".vouch").join("client_key.json");
-            if key_path.exists() {
-                if let Ok(key_file) = key.to_key_file()
-                    && save_to_keychain(&key_file).is_ok()
-                    && load_from_keychain().is_ok_and(|v| v.is_some())
-                {
-                    tracing::debug!("Migrated client key to keychain");
-                    if let Err(e) = std::fs::remove_file(&key_path) {
-                        tracing::debug!("Could not remove old key file: {e}");
-                    }
+            if key_path.exists()
+                && let Ok(key_file) = key.to_key_file()
+                && save_to_keychain(&key_file).is_ok()
+                && load_from_keychain().is_ok_and(|v| v.is_some())
+            {
+                tracing::debug!("Migrated client key to keychain");
+                if let Err(e) = std::fs::remove_file(&key_path) {
+                    tracing::debug!("Could not remove old key file: {e}");
                 }
             }
         }

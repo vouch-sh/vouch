@@ -549,7 +549,6 @@ fn recently_verified(verified_at: Option<&str>) -> bool {
     elapsed.as_secs() < 86_400
 }
 
-
 /// Compute `(expires_at_string, expires_at_timestamp)` from the token response.
 ///
 /// Uses the server-provided `expires_at` string when available; otherwise
