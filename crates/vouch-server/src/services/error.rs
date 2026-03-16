@@ -95,6 +95,12 @@ pub enum ServiceError {
     Internal(String),
 }
 
+impl From<anyhow::Error> for ServiceError {
+    fn from(err: anyhow::Error) -> Self {
+        Self::Internal(err.to_string())
+    }
+}
+
 /// OAuth 2.0 error codes (RFC 6749 Section 5.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OAuthErrorCode {

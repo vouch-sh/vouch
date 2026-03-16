@@ -96,10 +96,7 @@ pub async fn register_start(
 
     // Verify user exists (should always exist if they have a valid session)
     let user = db::get_user_by_id(&state.store, &token.sub)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?
+        .await?
         .ok_or_else(|| {
             ServiceError::api(StatusCode::NOT_FOUND, "user_not_found", "User not found")
         })?;
@@ -111,11 +108,7 @@ pub async fn register_start(
     );
 
     // Get existing credentials to exclude
-    let existing_auths = db::get_authenticators_for_user(&state.store, &user.id)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    let existing_auths = db::get_authenticators_for_user(&state.store, &user.id).await?;
 
     let exclude_credential_ids: Vec<vouch_common::CredentialId<vouch_common::Raw>> = existing_auths
         .iter()
@@ -208,11 +201,8 @@ pub async fn register_complete(
         verified.credential_id.into();
 
     // Check for duplicate credential registration
-    if let Some(_existing) = db::get_authenticator_by_credential_id(&state.store, &verified_cred_id)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?
+    if let Some(_existing) =
+        db::get_authenticator_by_credential_id(&state.store, &verified_cred_id).await?
     {
         tracing::warn!(
             "Rejected duplicate credential registration for user: {}",
@@ -258,8 +248,7 @@ pub async fn register_complete(
         Some(&user_handle),
         validated.attestation_verified,
     )
-    .await
-    .map_err(|e| ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string()))?;
+    .await?;
 
     tracing::info!("Registered new authenticator: {}", device_id);
 

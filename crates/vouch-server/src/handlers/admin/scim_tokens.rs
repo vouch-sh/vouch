@@ -91,11 +91,7 @@ pub async fn create_scim_token(
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Enforce 2-token limit
-    let existing = db::list_scim_tokens(&state.store, Some(&org_id))
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    let existing = db::list_scim_tokens(&state.store, Some(&org_id)).await?;
 
     if existing.len() >= MAX_SCIM_TOKENS {
         return Err(ServiceError::api(
@@ -117,8 +113,7 @@ pub async fn create_scim_token(
         Some(&org_id),
         None, // Default scope: full access
     )
-    .await
-    .map_err(|e| ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string()))?;
+    .await?;
 
     let data = serde_json::json!({
         "action": "create_scim_token",
@@ -157,11 +152,7 @@ pub async fn list_scim_tokens(
     let (_user, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    let tokens = db::list_scim_tokens(&state.store, Some(&org_id))
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    let tokens = db::list_scim_tokens(&state.store, Some(&org_id)).await?;
 
     let tokens: Vec<ScimTokenInfo> = tokens
         .into_iter()
@@ -190,11 +181,7 @@ pub async fn delete_scim_token(
     let (user, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    let deleted = db::delete_scim_token(&state.store, &token_id, &org_id)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    let deleted = db::delete_scim_token(&state.store, &token_id, &org_id).await?;
 
     if !deleted {
         return Err(ServiceError::api(
@@ -350,11 +337,7 @@ pub async fn admin_create_scim_token(
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
     // Enforce 2-token limit
-    let existing = db::list_scim_tokens(&state.store, Some(&org_id))
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    let existing = db::list_scim_tokens(&state.store, Some(&org_id)).await?;
 
     if existing.len() >= MAX_SCIM_TOKENS {
         return Ok(Redirect::to(
@@ -382,8 +365,7 @@ pub async fn admin_create_scim_token(
         Some(&org_id),
         None,
     )
-    .await
-    .map_err(|e| ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string()))?;
+    .await?;
 
     let data = serde_json::json!({
         "action": "create_scim_token",
@@ -408,11 +390,7 @@ pub async fn admin_create_scim_token(
     );
 
     // Re-fetch tokens and render the page directly (avoids leaking token in URL)
-    let db_tokens = db::list_scim_tokens(&state.store, Some(&org_id))
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    let db_tokens = db::list_scim_tokens(&state.store, Some(&org_id)).await?;
 
     let tokens: Vec<ScimTokenRow> = db_tokens
         .into_iter()
@@ -450,11 +428,7 @@ pub async fn admin_revoke_scim_token(
     let (admin, org_id) =
         extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
 
-    let deleted = db::delete_scim_token(&state.store, &token_id, &org_id)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?;
+    let deleted = db::delete_scim_token(&state.store, &token_id, &org_id).await?;
 
     if !deleted {
         return Ok(Redirect::to("/admin/scim-tokens?error=SCIM token not found").into_response());

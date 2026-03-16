@@ -102,10 +102,7 @@ pub(crate) async fn extract_admin_and_target(
     let (admin, org_id) = extract_org_admin(state, headers, jar, method, uri).await?;
 
     let target = db::get_user_by_id(&state.store, target_user_id)
-        .await
-        .map_err(|e| {
-            ServiceError::api(StatusCode::INTERNAL_SERVER_ERROR, "db_error", e.to_string())
-        })?
+        .await?
         .ok_or_else(|| ServiceError::api(StatusCode::NOT_FOUND, "not_found", "User not found"))?;
 
     // Verify target belongs to the same org
