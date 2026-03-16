@@ -89,9 +89,9 @@ pub async fn authenticate_client_jwt(
     let jwks = resolve_client_jwks(
         &state.store,
         &client.id,
-        client.jwks.as_deref(),
+        client.jwks.as_ref(),
         client.jwks_uri.as_deref(),
-        client.jwks_uri_cache.as_deref(),
+        client.jwks_uri_cache.as_ref(),
         client
             .jwks_uri_cached_at
             .map(|ts| ts.to_string())

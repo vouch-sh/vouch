@@ -34,10 +34,10 @@ pub struct OAuthClient {
     pub access_scope: AccessScope,
     pub org_id: Option<String>,
     pub resource_uris: Vec<String>,
-    pub jwks: Option<String>,
+    pub jwks: Option<serde_json::Value>,
     pub jwks_uri: Option<String>,
     pub jwks_uri_cached_at: Option<Timestamp>,
-    pub jwks_uri_cache: Option<String>,
+    pub jwks_uri_cache: Option<serde_json::Value>,
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
     pub request_object_signing_alg: Option<String>,
     pub require_signed_request_object: Option<bool>,
@@ -49,7 +49,7 @@ pub struct OAuthClient {
     pub software_version: Option<String>,
     pub registration_source: Option<RegistrationSource>,
     pub registration_access_token_hash: Option<String>,
-    pub registration_metadata: Option<String>,
+    pub registration_metadata: Option<serde_json::Value>,
 }
 
 impl From<Document<OAuthClientDoc>> for OAuthClient {
@@ -120,7 +120,7 @@ pub struct CreateOAuthClientParams<'a> {
     pub org_id: Option<&'a str>,
     pub resource_uris: &'a [String],
     pub token_endpoint_auth_method: Option<TokenEndpointAuthMethod>,
-    pub jwks: Option<&'a str>,
+    pub jwks: Option<&'a serde_json::Value>,
     pub jwks_uri: Option<&'a str>,
     pub fapi_profile: Option<FapiProfile>,
     pub dpop_bound_access_tokens: Option<bool>,
@@ -130,7 +130,7 @@ pub struct CreateOAuthClientParams<'a> {
     pub software_version: Option<&'a str>,
     pub registration_source: RegistrationSource,
     pub registration_access_token_hash: Option<&'a str>,
-    pub registration_metadata: Option<&'a str>,
+    pub registration_metadata: Option<&'a serde_json::Value>,
 }
 
 /// Create a new OAuth client application.
@@ -151,7 +151,7 @@ pub async fn create_oauth_client(
         access_scope: params.access_scope,
         org_id: params.org_id.map(String::from),
         resource_uris: params.resource_uris.to_vec(),
-        jwks: params.jwks.map(String::from),
+        jwks: params.jwks.cloned(),
         jwks_uri: params.jwks_uri.map(String::from),
         jwks_uri_cached_at: None,
         jwks_uri_cache: None,
@@ -166,7 +166,7 @@ pub async fn create_oauth_client(
         software_version: params.software_version.map(String::from),
         registration_source: Some(params.registration_source),
         registration_access_token_hash: params.registration_access_token_hash.map(String::from),
-        registration_metadata: params.registration_metadata.map(String::from),
+        registration_metadata: params.registration_metadata.cloned(),
     };
 
     let result = store.insert(&doc).await?;
@@ -214,7 +214,7 @@ pub struct UpdateOAuthClientParams<'a> {
     pub org_id: Option<&'a str>,
     pub resource_uris: &'a [String],
     pub token_endpoint_auth_method: TokenEndpointAuthMethod,
-    pub jwks: Option<&'a str>,
+    pub jwks: Option<&'a serde_json::Value>,
     pub jwks_uri: Option<&'a str>,
     pub fapi_profile: FapiProfile,
     pub dpop_bound_access_tokens: bool,
@@ -235,7 +235,7 @@ pub async fn update_oauth_client(
             data.redirect_uris = params.redirect_uris.to_vec();
             data.resource_uris = params.resource_uris.to_vec();
             data.token_endpoint_auth_method = params.token_endpoint_auth_method;
-            data.jwks = params.jwks.map(String::from);
+            data.jwks = params.jwks.cloned();
             data.jwks_uri = params.jwks_uri.map(String::from);
             data.fapi_profile = params.fapi_profile;
             data.dpop_bound_access_tokens = params.dpop_bound_access_tokens;
@@ -534,8 +534,8 @@ pub async fn delete_old_oauth_usage_events(audit: &AuditStore, before: Timestamp
 
 /// Get the effective JWKS for a client.
 #[must_use]
-pub fn get_client_jwks(client: &OAuthClient) -> Option<&str> {
-    client.jwks.as_deref().or(client.jwks_uri_cache.as_deref())
+pub fn get_client_jwks(client: &OAuthClient) -> Option<&serde_json::Value> {
+    client.jwks.as_ref().or(client.jwks_uri_cache.as_ref())
 }
 
 /// Update the cached JWKS fetched from a client's `jwks_uri`.
@@ -546,9 +546,9 @@ pub fn get_client_jwks(client: &OAuthClient) -> Option<&str> {
 pub async fn update_client_jwks_cache(
     store: &DocumentStore,
     id: &str,
-    jwks_json: &str,
+    jwks_value: &serde_json::Value,
 ) -> Result<()> {
-    let jwks_owned = jwks_json.to_string();
+    let jwks_owned = jwks_value.clone();
     store
         .modify::<OAuthClientDoc, _>(id, |data| {
             data.jwks_uri_cache = Some(jwks_owned.clone());
@@ -566,11 +566,11 @@ pub mod test_helpers {
     pub async fn update_oauth_client_jwks(
         store: &DocumentStore,
         id: &str,
-        jwks_json: &str,
+        jwks_value: &serde_json::Value,
     ) -> Result<()> {
         if let Some(doc) = store.get::<OAuthClientDoc>(id).await? {
             let mut data = doc.data;
-            data.jwks = Some(jwks_json.to_string());
+            data.jwks = Some(jwks_value.clone());
             store.update(id, &data).await?;
         }
         Ok(())

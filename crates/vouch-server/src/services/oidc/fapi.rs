@@ -267,7 +267,7 @@ mod tests {
             access_scope: AccessScope::Organization,
             org_id: None,
             resource_uris: vec![],
-            jwks: Some(r#"{"keys":[]}"#.to_string()),
+            jwks: Some(serde_json::json!({"keys":[]})),
             jwks_uri: None,
             jwks_uri_cached_at: None,
             jwks_uri_cache: None,

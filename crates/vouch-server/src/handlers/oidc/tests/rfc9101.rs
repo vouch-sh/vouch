@@ -71,11 +71,10 @@ async fn create_test_jar_client(
         .expect("Client not found");
 
     // Set inline JWKS
-    let jwks_json = serde_json::to_string(&serde_json::json!({
+    let jwks_value = serde_json::json!({
         "keys": [jwk]
-    }))
-    .unwrap();
-    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_json)
+    });
+    db::update_oauth_client_jwks(store, &oauth_client.id, &jwks_value)
         .await
         .expect("Failed to set JWKS");
 

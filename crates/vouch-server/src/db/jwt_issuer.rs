@@ -21,7 +21,7 @@ pub struct TrustedJwtIssuer {
     pub name: String,
     pub description: Option<String>,
     pub jwks_uri: String,
-    pub jwks_cache: Option<String>,
+    pub jwks_cache: Option<serde_json::Value>,
     pub jwks_cached_at: Option<String>,
     pub subject_claim_mapping: String,
     pub allowed_scopes: Option<String>,
@@ -136,11 +136,11 @@ pub async fn delete_trusted_jwt_issuer(store: &DocumentStore, id: &str) -> Resul
 pub async fn update_issuer_jwks_cache(
     store: &DocumentStore,
     id: &str,
-    jwks_json: &str,
+    jwks_value: &serde_json::Value,
 ) -> Result<()> {
     if let Some(doc) = store.get::<TrustedJwtIssuerDoc>(id).await? {
         let mut data = doc.data;
-        data.jwks_cache = Some(jwks_json.to_string());
+        data.jwks_cache = Some(jwks_value.clone());
         data.jwks_cached_at = Some(jiff::Timestamp::now());
         store.update(id, &data).await?;
     }

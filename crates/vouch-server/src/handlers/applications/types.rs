@@ -59,7 +59,7 @@ impl From<OAuthClient> for ApplicationInfo {
     fn from(client: OAuthClient) -> Self {
         let token_endpoint_auth_method = client.token_endpoint_auth_method.as_str().to_string();
         let fapi_profile = client.fapi_profile.as_str().to_string();
-        let jwks = client.jwks.clone();
+        let jwks = client.jwks.map(|v| v.to_string());
         let jwks_uri = client.jwks_uri.clone();
         Self {
             id: client.id,

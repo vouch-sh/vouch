@@ -141,14 +141,14 @@ pub async fn create_application_api(
     }
 
     // FAPI validation: require JWKS or JWKS URI
-    let jwks_trimmed = req.jwks.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let jwks_trimmed_str = req.jwks.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let jwks_uri_trimmed = req
         .jwks_uri
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    if is_fapi && jwks_trimmed.is_none() && jwks_uri_trimmed.is_none() {
+    if is_fapi && jwks_trimmed_str.is_none() && jwks_uri_trimmed.is_none() {
         return Err(ServiceError::api(
             StatusCode::BAD_REQUEST,
             "missing_jwks",
@@ -156,8 +156,8 @@ pub async fn create_application_api(
         ));
     }
 
-    // Validate JWKS JSON if provided
-    if let Some(jwks_json) = jwks_trimmed {
+    // Validate and parse JWKS JSON if provided
+    let jwks_value = if let Some(jwks_json) = jwks_trimmed_str {
         match serde_json::from_str::<serde_json::Value>(jwks_json) {
             Ok(val) => {
                 if !val
@@ -170,6 +170,7 @@ pub async fn create_application_api(
                         "JWKS must be a JSON object with a non-empty \"keys\" array",
                     ));
                 }
+                Some(val)
             }
             Err(_) => {
                 return Err(ServiceError::api(
@@ -179,7 +180,9 @@ pub async fn create_application_api(
                 ));
             }
         }
-    }
+    } else {
+        None
+    };
 
     // Validate JWKS URI if provided
     if let Some(jwks_uri_val) = jwks_uri_trimmed {
@@ -251,7 +254,7 @@ pub async fn create_application_api(
             } else {
                 None
             },
-            jwks: if is_fapi { jwks_trimmed } else { None },
+            jwks: if is_fapi { jwks_value.as_ref() } else { None },
             jwks_uri: if is_fapi { jwks_uri_trimmed } else { None },
             fapi_profile: if is_fapi {
                 Some(FapiProfile::Fapi2Security)
@@ -402,15 +405,15 @@ pub async fn update_application_api(
         }
     }
 
-    // Validate JWKS JSON format if provided
-    let jwks_trimmed = req.jwks.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    // Validate and parse JWKS JSON format if provided
+    let jwks_trimmed_str = req.jwks.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let jwks_uri_trimmed = req
         .jwks_uri
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    if let Some(jwks_json) = jwks_trimmed {
+    let jwks_value = if let Some(jwks_json) = jwks_trimmed_str {
         match serde_json::from_str::<serde_json::Value>(jwks_json) {
             Ok(val) => {
                 if !val
@@ -423,6 +426,7 @@ pub async fn update_application_api(
                         "JWKS must be a JSON object with a non-empty \"keys\" array",
                     ));
                 }
+                Some(val)
             }
             Err(_) => {
                 return Err(ServiceError::api(
@@ -432,7 +436,9 @@ pub async fn update_application_api(
                 ));
             }
         }
-    }
+    } else {
+        None
+    };
 
     // Validate JWKS URI format if provided
     if let Some(jwks_uri_val) = jwks_uri_trimmed {
@@ -557,7 +563,7 @@ pub async fn update_application_api(
 
     // FAPI validation: require JWKS or JWKS URI (request or existing)
     if is_fapi
-        && jwks_trimmed.is_none()
+        && jwks_value.is_none()
         && jwks_uri_trimmed.is_none()
         && client.jwks.is_none()
         && client.jwks_uri.is_none()
@@ -588,10 +594,10 @@ pub async fn update_application_api(
         client.token_endpoint_auth_method
     };
 
-    let effective_jwks = if jwks_trimmed.is_some() {
-        jwks_trimmed
+    let effective_jwks = if jwks_value.is_some() {
+        jwks_value.as_ref()
     } else if fapi_profile == FapiProfile::Fapi2Security {
-        client.jwks.as_deref()
+        client.jwks.as_ref()
     } else {
         None
     };
