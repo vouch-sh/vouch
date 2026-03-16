@@ -157,6 +157,8 @@ jobs:
         shell: bash
         run: echo "RUSTFLAGS=${{ matrix.rustflags }}" >> "$GITHUB_ENV"
       - name: Build
+        env:
+          PKG_CONFIG_ALLOW_CROSS: 1
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
       - name: Build server (musl)
         if: runner.os == 'Linux'
