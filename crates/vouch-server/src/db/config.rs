@@ -122,6 +122,8 @@ pub async fn delete_old_auth_events(audit: &AuditStore, before: jiff::Timestamp)
 mod tests {
     use super::*;
     use crate::handlers::extractors::ClientInfo;
+    use crate::test_utils::test_app_state;
+    use jiff::SignedDuration;
 
     #[test]
     fn test_with_client_info_populates_all_fields() {
@@ -186,5 +188,43 @@ mod tests {
         assert_eq!(params.client_os, None);
         assert_eq!(params.client_arch, None);
         assert_eq!(params.client_version, None);
+    }
+
+    #[tokio::test]
+    async fn test_delete_old_auth_events_covers_all_auth_event_variants() {
+        let state = test_app_state().await;
+        let variants = [
+            AuthEventType::LoginSuccess,
+            AuthEventType::LoginFailed,
+            AuthEventType::Enrollment,
+            AuthEventType::Logout,
+        ];
+
+        for (idx, event_type) in variants.iter().copied().enumerate() {
+            let params = AuthEventParams {
+                user_id: format!("user-{idx}"),
+                event_type,
+                success: !matches!(event_type, AuthEventType::LoginFailed),
+                failure_reason: matches!(event_type, AuthEventType::LoginFailed)
+                    .then(|| "invalid assertion".to_string()),
+                ..AuthEventParams::default()
+            };
+            insert_auth_event(&state.audit, &params, Some("test@example.com"))
+                .await
+                .expect("insert auth event");
+        }
+
+        let before = jiff::Timestamp::now()
+            .checked_add(SignedDuration::from_minutes(5))
+            .expect("valid timestamp arithmetic");
+
+        let deleted = delete_old_auth_events(&state.audit, before)
+            .await
+            .expect("delete old auth events");
+        assert_eq!(
+            deleted,
+            variants.len() as u64,
+            "auth cleanup must cover all AuthEventType variants"
+        );
     }
 }

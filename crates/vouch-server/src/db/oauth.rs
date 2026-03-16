@@ -1117,4 +1117,60 @@ mod tests {
 
         assert!(result.is_none());
     }
+
+    #[tokio::test]
+    async fn test_delete_old_oauth_usage_events_covers_usage_event_variants() {
+        let store = test_store().await;
+        let audit = AuditStore::new(store.pool().clone(), store.crypto().clone());
+        let usage_variants = [
+            OAuthEventType::TokenIssued,
+            OAuthEventType::TokenRefreshed,
+            OAuthEventType::TokenRevoked,
+            OAuthEventType::AuthSuccess,
+            OAuthEventType::AuthFailure,
+            OAuthEventType::ClientRegistered,
+        ];
+
+        for event_type in usage_variants {
+            record_oauth_event(
+                &audit,
+                "oauth-client-1",
+                event_type,
+                Some("user-1"),
+                None,
+                None,
+                Some("coverage test"),
+            )
+            .await
+            .expect("insert oauth usage event");
+        }
+
+        let before = jiff::Timestamp::now()
+            .checked_add(jiff::SignedDuration::from_minutes(5))
+            .expect("valid timestamp arithmetic");
+
+        let deleted = delete_old_oauth_usage_events(&audit, before)
+            .await
+            .expect("delete old oauth usage events");
+        assert_eq!(
+            deleted,
+            usage_variants.len() as u64,
+            "oauth usage cleanup must cover all usage event variants"
+        );
+
+        for event_type in usage_variants {
+            let persisted = audit
+                .query_events(&AuditEventFilter {
+                    event_types: Some(vec![format!("oauth_{}", event_type.as_str())]),
+                    ..AuditEventFilter::default()
+                })
+                .await
+                .expect("query oauth audit events");
+            assert!(
+                persisted.is_empty(),
+                "event type oauth_{} should be deleted by retention cleanup",
+                event_type.as_str()
+            );
+        }
+    }
 }
