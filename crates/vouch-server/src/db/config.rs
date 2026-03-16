@@ -222,11 +222,12 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("valid timestamp arithmetic failed: {e}"))?;
 
         let deleted = delete_old_auth_events(&state.audit, before).await?;
-        assert_eq!(
-            deleted,
-            variants.len() as u64,
-            "auth cleanup must cover all AuthEventType variants"
-        );
+        if deleted != variants.len() as u64 {
+            return Err(anyhow::anyhow!(
+                "auth cleanup must cover all AuthEventType variants: deleted={deleted}, expected={}",
+                variants.len()
+            ));
+        }
         Ok(())
     }
 }
