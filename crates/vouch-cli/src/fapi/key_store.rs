@@ -123,8 +123,7 @@ pub fn load_client_key() -> Option<ClientKey> {
         Err(e) => {
             tracing::warn!("FAPI key exists on disk but failed to load: {e}");
             eprintln!(
-                "Warning: existing FAPI key at {} could not be loaded \
-                 and will be replaced.",
+                "Warning: existing FAPI key at {} could not be loaded.",
                 key_path.display()
             );
             None
