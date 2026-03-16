@@ -39,6 +39,7 @@ keyring = { workspace = true, features = [
     "windows-native", # Windows Credential Store
     "linux-native",   # Linux keyutils
 ] }
+mimalloc = { workspace = true, features = ["secure"] }
 open = { workspace = true }
 reqwest = { workspace = true, features = ["json", "rustls", "form", "query"] }
 roxmltree = { workspace = true, features = ["std"] }

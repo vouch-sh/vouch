@@ -26,6 +26,7 @@ clap = { workspace = true, features = ["std", "derive", "env", "help", "usage", 
 dirs = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["std"] }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
+mimalloc = { workspace = true, features = ["secure"] }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }

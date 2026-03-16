@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Vouch agent daemon binary.
 
+// Avoid musl's default allocator due to lackluster performance
+// https://nickb.dev/blog/default-musl-allocator-considered-harmful-to-performance
+#[cfg(target_env = "musl")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use clap::Parser;
 use std::process::ExitCode;
 use std::sync::Arc;
