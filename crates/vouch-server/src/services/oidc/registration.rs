@@ -285,22 +285,16 @@ pub async fn register_client(
     }
 
     // Validate JWKS JSON structure if provided
-    let jwks_string = if let Some(ref jwks) = jwks_value {
-        if !jwks
+    if let Some(ref jwks) = jwks_value
+        && !jwks
             .get("keys")
             .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
-        {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                "jwks must be a JSON object with a non-empty \"keys\" array",
-            ));
-        }
-        Some(serde_json::to_string(jwks).map_err(|_| {
-            ServiceError::oauth(OAuthErrorCode::InvalidClientMetadata, "Invalid JWKS JSON")
-        })?)
-    } else {
-        None
-    };
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "jwks must be a JSON object with a non-empty \"keys\" array",
+        ));
+    }
 
     // Validate JWKS URI is HTTPS
     if let Some(ref uri) = jwks_uri {
@@ -406,7 +400,6 @@ pub async fn register_client(
 
     // Build registration metadata JSON (cosmetic fields)
     let registration_metadata = build_registration_metadata(&request);
-    let registration_metadata_str = serde_json::to_string(&registration_metadata).ok();
 
     // 14. Generate registration access token
     let reg_token = generate_registration_token()?;
@@ -425,7 +418,7 @@ pub async fn register_client(
             org_id: None,
             resource_uris: &[],
             token_endpoint_auth_method: Some(auth_method),
-            jwks: jwks_string.as_deref(),
+            jwks: jwks_value.as_ref(),
             jwks_uri: jwks_uri.as_deref(),
             fapi_profile: Some(fapi_profile),
             dpop_bound_access_tokens: Some(dpop_bound),
@@ -435,7 +428,7 @@ pub async fn register_client(
             software_version: request.software_version.as_deref(),
             registration_source: RegistrationSource::Dynamic,
             registration_access_token_hash: Some(&reg_token_hash),
-            registration_metadata: registration_metadata_str.as_deref(),
+            registration_metadata: Some(&registration_metadata),
         },
     )
     .await
@@ -607,7 +600,10 @@ async fn lookup_and_verify_registration_token(
 fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationResponse {
     let grant_types = client.grant_types.clone().unwrap_or_default();
     let response_types = client.response_types.clone().unwrap_or_default();
-    let metadata = parse_registration_metadata(client.registration_metadata.as_deref());
+    let metadata = client
+        .registration_metadata
+        .clone()
+        .unwrap_or(serde_json::Value::Null);
 
     let client_id_issued_at = client.created_at.as_second();
 
@@ -633,10 +629,7 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
         policy_uri: metadata_string(&metadata, "policy_uri"),
         scope: metadata_string(&metadata, "scope"),
         contacts: metadata_string_array(&metadata, "contacts"),
-        jwks: client
-            .jwks
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok()),
+        jwks: client.jwks.clone(),
         jwks_uri: client.jwks_uri.clone(),
         software_id: client.software_id.clone(),
         software_version: client.software_version.clone(),
@@ -646,12 +639,6 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
             None
         },
     }
-}
-
-/// Parse the `registration_metadata` JSON blob.
-fn parse_registration_metadata(json: Option<&str>) -> serde_json::Value {
-    json.and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or(serde_json::Value::Null)
 }
 
 /// Extract a string field from the registration metadata JSON object.
@@ -851,17 +838,14 @@ async fn apply_software_statement(
     }
 
     // Get the JWKS for this issuer (cached or from URI)
-    let jwks_json = issuer.jwks_cache.as_deref().ok_or_else(|| {
+    let jwks = issuer.jwks_cache.as_ref().ok_or_else(|| {
         ServiceError::oauth(
             OAuthErrorCode::UnapprovedSoftwareStatement,
             "No JWKS available for software statement issuer",
         )
     })?;
 
-    // Parse JWKS and find the right key
-    let jwks: serde_json::Value = serde_json::from_str(jwks_json)
-        .map_err(|_| ServiceError::Internal("Invalid JWKS cache for trusted issuer".to_string()))?;
-
+    // Find the right key in the JWKS
     let keys = jwks.get("keys").and_then(|k| k.as_array()).ok_or_else(|| {
         ServiceError::Internal("Trusted issuer JWKS has no keys array".to_string())
     })?;

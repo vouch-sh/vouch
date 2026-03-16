@@ -36,6 +36,7 @@ env:
     VOUCH_BASE_URL: "https://dev.vouch.sh"
     VOUCH_DATABASE_URL: "sqlite:/data/vouch.db?mode=rwc"
     VOUCH_SSH_CA_KEY_PATH: "/data/ssh_ca_key"
+    VOUCH_REQUIRE_ATTESTATION_CERT: "true"
     RUST_LOG: "info,vouch_server=debug"
   secret:
     - VOUCH_JWT_SECRET

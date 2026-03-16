@@ -13,7 +13,7 @@ pub struct TrustedJwtIssuerDoc {
     pub name: String,
     pub description: Option<String>,
     pub jwks_uri: String,
-    pub jwks_cache: Option<String>,
+    pub jwks_cache: Option<serde_json::Value>,
     pub jwks_cached_at: Option<Timestamp>,
     pub subject_claim_mapping: String,
     /// JSON array of allowed scopes.

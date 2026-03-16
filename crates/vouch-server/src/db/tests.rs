@@ -449,7 +449,7 @@ async fn test_oauth_client_crud() {
             org_id: None,
             resource_uris: &[],
             token_endpoint_auth_method: client.token_endpoint_auth_method,
-            jwks: client.jwks.as_deref(),
+            jwks: client.jwks.as_ref(),
             jwks_uri: client.jwks_uri.as_deref(),
             fapi_profile: client.fapi_profile,
             dpop_bound_access_tokens: client.dpop_bound_access_tokens,

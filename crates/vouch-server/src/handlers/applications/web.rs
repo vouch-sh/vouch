@@ -178,7 +178,7 @@ pub async fn create_application_form(
     }
 
     // FAPI validation: require JWKS or JWKS URI
-    let jwks_trimmed = form
+    let jwks_trimmed_str = form
         .jwks
         .as_deref()
         .map(str::trim)
@@ -189,7 +189,7 @@ pub async fn create_application_form(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    if is_fapi && jwks_trimmed.is_none() && jwks_uri_trimmed.is_none() {
+    if is_fapi && jwks_trimmed_str.is_none() && jwks_uri_trimmed.is_none() {
         return ApplicationErrorTemplate {
             title: "Invalid Input".to_string(),
             message: "FAPI 2.0 requires a JWKS (inline JSON) or JWKS URI for \
@@ -200,8 +200,8 @@ pub async fn create_application_form(
         .into_response();
     }
 
-    // Validate JWKS JSON if provided
-    if let Some(jwks_json) = jwks_trimmed {
+    // Validate and parse JWKS JSON if provided
+    let jwks_value = if let Some(jwks_json) = jwks_trimmed_str {
         match serde_json::from_str::<serde_json::Value>(jwks_json) {
             Ok(val) => {
                 if !val
@@ -216,6 +216,7 @@ pub async fn create_application_form(
                     }
                     .into_response();
                 }
+                Some(val)
             }
             Err(_) => {
                 return ApplicationErrorTemplate {
@@ -226,7 +227,9 @@ pub async fn create_application_form(
                 .into_response();
             }
         }
-    }
+    } else {
+        None
+    };
 
     // Validate JWKS URI if provided
     if let Some(uri) = jwks_uri_trimmed {
@@ -276,7 +279,7 @@ pub async fn create_application_form(
             } else {
                 None
             },
-            jwks: if is_fapi { jwks_trimmed } else { None },
+            jwks: if is_fapi { jwks_value.as_ref() } else { None },
             jwks_uri: if is_fapi { jwks_uri_trimmed } else { None },
             fapi_profile: if is_fapi {
                 Some(FapiProfile::Fapi2Security)
@@ -563,7 +566,7 @@ pub async fn update_application_form(
     }
 
     // FAPI validation: require JWKS or JWKS URI
-    let jwks_trimmed = form
+    let jwks_trimmed_str = form
         .jwks
         .as_deref()
         .map(str::trim)
@@ -574,7 +577,7 @@ pub async fn update_application_form(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    if is_fapi && jwks_trimmed.is_none() && jwks_uri_trimmed.is_none() {
+    if is_fapi && jwks_trimmed_str.is_none() && jwks_uri_trimmed.is_none() {
         // If transitioning to FAPI, check if client already has JWKS configured
         if client.jwks.is_none() && client.jwks_uri.is_none() {
             return ApplicationErrorTemplate {
@@ -588,8 +591,8 @@ pub async fn update_application_form(
         }
     }
 
-    // Validate JWKS JSON if provided
-    if let Some(jwks_json) = jwks_trimmed {
+    // Validate and parse JWKS JSON if provided
+    let jwks_value = if let Some(jwks_json) = jwks_trimmed_str {
         match serde_json::from_str::<serde_json::Value>(jwks_json) {
             Ok(val) => {
                 if !val
@@ -604,6 +607,7 @@ pub async fn update_application_form(
                     }
                     .into_response();
                 }
+                Some(val)
             }
             Err(_) => {
                 return ApplicationErrorTemplate {
@@ -614,7 +618,9 @@ pub async fn update_application_form(
                 .into_response();
             }
         }
-    }
+    } else {
+        None
+    };
 
     // Validate JWKS URI if provided
     if let Some(uri) = jwks_uri_trimmed {
@@ -648,10 +654,10 @@ pub async fn update_application_form(
     };
 
     // Resolve final JWKS values: use form values if provided, otherwise keep existing
-    let effective_jwks = if jwks_trimmed.is_some() {
-        jwks_trimmed
+    let effective_jwks = if jwks_value.is_some() {
+        jwks_value.as_ref()
     } else if is_fapi {
-        client.jwks.as_deref()
+        client.jwks.as_ref()
     } else {
         None
     };
