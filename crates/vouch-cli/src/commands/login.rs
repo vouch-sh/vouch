@@ -565,7 +565,8 @@ fn resolve_expiry(expires_at: Option<&str>, expires_in: u64) -> (String, jiff::T
             // Subtract 30 s to avoid serving an already-expired token.
             i64::try_from(expires_in)
                 .unwrap_or(28800)
-                .saturating_sub(30),
+                .saturating_sub(30)
+                .max(0),
         ))
         .unwrap_or_else(|_| jiff::Timestamp::now());
 
@@ -696,5 +697,21 @@ mod tests {
             .expect("should fall back to valid timestamp");
         let diff = ts.duration_since(jiff::Timestamp::now()).as_secs();
         assert!(diff > 3500 && diff <= 3570);
+    }
+
+    #[test]
+    fn test_resolve_expiry_short_ttl_does_not_set_past_expiry() {
+        let (str_result, ts_result) = resolve_expiry(None, 0);
+        let ts: jiff::Timestamp = str_result.parse().unwrap();
+        let diff = ts.duration_since(jiff::Timestamp::now()).as_secs();
+        assert!(
+            diff >= -2 && diff <= 1,
+            "expected near-now expiry, got {diff}"
+        );
+        let diff2 = ts_result.duration_since(jiff::Timestamp::now()).as_secs();
+        assert!(
+            diff2 >= -2 && diff2 <= 1,
+            "expected near-now expiry, got {diff2}"
+        );
     }
 }
