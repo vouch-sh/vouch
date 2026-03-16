@@ -280,7 +280,7 @@ async fn poll_for_token(
 /// Compute seconds to add to now when deriving session expiry from `expires_in`.
 ///
 /// Subtracts 30 seconds as a safety margin and saturates at zero for short TTLs.
-fn expiry_offset_seconds(expires_in: u64) -> i64 {
+pub(super) fn expiry_offset_seconds(expires_in: u64) -> i64 {
     i64::try_from(expires_in)
         .unwrap_or(28_800)
         .saturating_sub(30)
