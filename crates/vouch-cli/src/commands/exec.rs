@@ -257,12 +257,11 @@ pub(crate) async fn fetch_github_token(server: &str) -> Result<serde_json::Value
         .context("failed to get GitHub token from Vouch server")
 }
 
-/// Fetch a CodeArtifact token and inject it into the environment.
-async fn inject_codeartifact_credentials(
-    cmd: &mut Command,
+/// Resolve CodeArtifact parameters and fetch a token.
+pub(super) async fn fetch_codeartifact_token(
     server: &str,
     opts: &CodeArtifactOptions<'_>,
-) -> Result<()> {
+) -> Result<crate::integrations::aws::codeartifact::CodeArtifactToken> {
     let (domain, domain_owner, region) =
         super::credential::codeartifact::resolve_codeartifact_params(
             opts.domain,
@@ -271,9 +270,84 @@ async fn inject_codeartifact_credentials(
             opts.profile,
         )?;
 
-    let token = super::credential::codeartifact::get_token(server, &domain, &domain_owner, &region)
+    super::credential::codeartifact::get_token(server, &domain, &domain_owner, &region)
         .await
-        .context("failed to get CodeArtifact token")?;
+        .context("failed to get CodeArtifact token")
+}
+
+/// Validated RDS credentials ready for environment injection.
+pub(super) struct RdsEnvCredentials {
+    pub token: SecretString,
+    pub hostname: String,
+    pub port: u16,
+    pub username: String,
+}
+
+/// Validate RDS options and fetch an IAM auth token.
+pub(super) async fn fetch_rds_with_opts(
+    server: &str,
+    role: Option<&str>,
+    opts: &RdsOptions<'_>,
+) -> Result<RdsEnvCredentials> {
+    let hostname = opts.hostname.context(
+        "RDS credentials require --rds-hostname. \
+         Usage: vouch {exec|env} --type rds --rds-hostname <host> --rds-username <user>",
+    )?;
+    let username = opts.username.context(
+        "RDS credentials require --rds-username. \
+         Usage: vouch {exec|env} --type rds --rds-hostname <host> --rds-username <user>",
+    )?;
+
+    let token = super::credential::rds::fetch_rds_token(
+        server,
+        hostname,
+        opts.port,
+        username,
+        opts.region,
+        role,
+    )
+    .await?;
+
+    Ok(RdsEnvCredentials {
+        token,
+        hostname: hostname.to_string(),
+        port: opts.port,
+        username: username.to_string(),
+    })
+}
+
+/// Resolve Redshift target, role, and region, then fetch credentials.
+pub(super) async fn fetch_redshift_with_opts(
+    server: &str,
+    role: Option<&str>,
+    opts: &RedshiftOptions<'_>,
+) -> Result<crate::integrations::aws::redshift::RedshiftCredentials> {
+    let target = super::credential::redshift::resolve_target(
+        opts.cluster_id,
+        opts.workgroup,
+        opts.duration,
+    )?;
+
+    let (role_arn, region_name) =
+        crate::integrations::aws::resolve_role_and_region(role, opts.region)?;
+
+    super::credential::redshift::fetch_redshift_credentials(
+        server,
+        &target,
+        opts.db_name,
+        &region_name,
+        &role_arn,
+    )
+    .await
+}
+
+/// Fetch a CodeArtifact token and inject it into the environment.
+async fn inject_codeartifact_credentials(
+    cmd: &mut Command,
+    server: &str,
+    opts: &CodeArtifactOptions<'_>,
+) -> Result<()> {
+    let token = fetch_codeartifact_token(server, opts).await?;
 
     cmd.env(
         "CODEARTIFACT_AUTH_TOKEN",
@@ -290,29 +364,12 @@ async fn inject_rds_credentials(
     role: Option<&str>,
     opts: &RdsOptions<'_>,
 ) -> Result<()> {
-    let hostname = opts.hostname.context(
-        "RDS credentials require --rds-hostname. \
-         Usage: vouch exec --type rds --rds-hostname <host> --rds-username <user> -- <command>",
-    )?;
-    let username = opts.username.context(
-        "RDS credentials require --rds-username. \
-         Usage: vouch exec --type rds --rds-hostname <host> --rds-username <user> -- <command>",
-    )?;
+    let rds = fetch_rds_with_opts(server, role, opts).await?;
 
-    let token = super::credential::rds::fetch_rds_token(
-        server,
-        hostname,
-        opts.port,
-        username,
-        opts.region,
-        role,
-    )
-    .await?;
-
-    cmd.env("PGPASSWORD", token.expose_secret());
-    cmd.env("PGHOST", hostname);
-    cmd.env("PGPORT", opts.port.to_string());
-    cmd.env("PGUSER", username);
+    cmd.env("PGPASSWORD", rds.token.expose_secret());
+    cmd.env("PGHOST", &rds.hostname);
+    cmd.env("PGPORT", rds.port.to_string());
+    cmd.env("PGUSER", &rds.username);
     cmd.env("PGSSLMODE", "require");
 
     Ok(())
@@ -325,23 +382,7 @@ async fn inject_redshift_credentials(
     role: Option<&str>,
     opts: &RedshiftOptions<'_>,
 ) -> Result<()> {
-    let target = super::credential::redshift::resolve_target(
-        opts.cluster_id,
-        opts.workgroup,
-        opts.duration,
-    )?;
-
-    let (role_arn, region_name) =
-        crate::integrations::aws::resolve_role_and_region(role, opts.region)?;
-
-    let creds = super::credential::redshift::fetch_redshift_credentials(
-        server,
-        &target,
-        opts.db_name,
-        &region_name,
-        &role_arn,
-    )
-    .await?;
+    let creds = fetch_redshift_with_opts(server, role, opts).await?;
 
     cmd.env("PGPASSWORD", creds.db_password.expose_secret());
     cmd.env("PGUSER", &creds.db_user);

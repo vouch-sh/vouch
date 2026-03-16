@@ -65,7 +65,7 @@ async fn revoke_on_server(config: &Config) {
         return;
     };
 
-    let fapi_key = match crate::client::load_fapi_key() {
+    let fapi_key = match vouch_cli::fapi::key_store::load_client_key() {
         Some(key) => key,
         None => {
             tracing::debug!("Skipping server revocation: no FAPI key available");
