@@ -13,7 +13,7 @@ KAMAL ?= kamal
 IMAGE_NAME ?= vouch-sh/vouch
 IMAGE_TAG ?= latest
 
-.PHONY: all build test test-integration test-fuzz run run-agent clean help docker-build docker-run deploy deploy-logs css-dev css-build docs-build docs-serve
+.PHONY: all build test test-integration test-fuzz run run-agent clean help docker-build docker-run deploy deploy-logs css-dev css-build docs-build docs-serve bake-cli bake-server bake-all
 
 all: build
 
@@ -100,6 +100,17 @@ clean: ## Clean build artifacts
 docker-clean: ## Remove Docker images
 	$(DOCKER) rmi $(IMAGE_NAME):$(IMAGE_TAG) || true
 	$(DOCKER) volume rm vouch-data || true
+
+##@ Docker Bake (musl builds)
+
+bake-cli: ## Build CLI+Agent musl binaries via Docker Bake
+	$(DOCKER) buildx bake cli
+
+bake-server: ## Build Server musl binary via Docker Bake
+	$(DOCKER) buildx bake server
+
+bake-all: ## Build all musl binaries via Docker Bake
+	$(DOCKER) buildx bake ci
 
 ##@ Help
 

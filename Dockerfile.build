@@ -1,0 +1,56 @@
+# syntax=docker/dockerfile:1
+#
+# Multi-stage Dockerfile for producing static musl binaries.
+# Used by docker-bake.hcl targets (ci, cli, server, reproduce).
+# The existing Dockerfile (server Docker image) is NOT replaced by this file.
+
+FROM rust:1.94.0-alpine AS base
+RUN apk add --no-cache musl-dev pkgconfig cmake make go clang linux-headers \
+    openssl-dev openssl-libs-static perl eudev-dev
+ENV AWS_LC_FIPS_SYS_CC=clang
+ENV AWS_LC_FIPS_SYS_CXX=clang++
+ENV OPENSSL_STATIC=1
+ENV OPENSSL_LIB_DIR=/usr/lib
+ENV OPENSSL_INCLUDE_DIR=/usr/include
+
+FROM base AS builder
+
+ARG TARGET
+ARG SOURCE_DATE_EPOCH=0
+ARG GENERATE_SBOM=false
+ARG CARGO_PACKAGES="-p vouch-cli -p vouch-agent -p vouch-server"
+
+WORKDIR /app
+COPY . .
+
+RUN rustup target add "${TARGET}"
+
+# Touch entry-point files for reproducible builds
+RUN touch -d "@${SOURCE_DATE_EPOCH}" \
+      crates/vouch-common/src/lib.rs \
+      crates/vouch-cli/src/main.rs \
+      crates/vouch-agent/src/main.rs \
+      crates/vouch-server/src/main.rs
+
+RUN cargo build --release --locked --target "${TARGET}" ${CARGO_PACKAGES}
+
+# Generate SBOM if requested
+RUN if [ "${GENERATE_SBOM}" = "true" ]; then \
+      cargo install cargo-cyclonedx --version 0.5.6 \
+      && cargo cyclonedx --target "${TARGET}" --format json; \
+    fi
+
+# Collect only release binaries and SBOMs
+RUN mkdir -p "/out/target/${TARGET}/release" \
+    && for bin in vouch vouch-agent vouch-server; do \
+         if [ -f "target/${TARGET}/release/${bin}" ]; then \
+           cp "target/${TARGET}/release/${bin}" "/out/target/${TARGET}/release/"; \
+         fi; \
+       done \
+    && find crates/ -name "*cdx.json" 2>/dev/null | while read -r f; do \
+         mkdir -p "/out/$(dirname "$f")"; \
+         cp "$f" "/out/$f"; \
+       done
+
+FROM scratch AS output
+COPY --from=builder /out/ /

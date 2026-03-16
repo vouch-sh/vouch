@@ -177,34 +177,31 @@ jobs:
         include:
           - name: linux-amd64
             runner: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             bins: "vouch vouch-agent"
             archive-ext: tar.gz
-            install: sudo apt-get update && sudo apt-get install -y libudev-dev cmake
           - name: linux-arm64
             runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             bins: "vouch vouch-agent"
             archive-ext: tar.gz
-            install: sudo apt-get update && sudo apt-get install -y libudev-dev cmake
           - name: macos-arm64
             runner: macos-latest
             target: aarch64-apple-darwin
             bins: "vouch vouch-agent"
             archive-ext: tar.gz
-            install: ""
           - name: windows-amd64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
             bins: "vouch"
             archive-ext: zip
-            install: ""
+            rustflags: "-C target-feature=+crt-static"
           - name: windows-arm64
             runner: windows-latest
             target: aarch64-pc-windows-msvc
             bins: "vouch"
             archive-ext: zip
-            install: ""
+            rustflags: "-C target-feature=+crt-static"
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -215,26 +212,30 @@ jobs:
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
           echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" >> "$GITHUB_ENV"
 
-      - name: Install system dependencies
-        if: matrix.install != ''
-        run: ${{ matrix.install }}
-
       - name: Install GNU tar (macOS)
         if: runner.os == 'macOS'
         run: brew list gnu-tar &>/dev/null || brew install gnu-tar
 
       - name: Setup Rust toolchain
+        if: runner.os != 'Linux'
         run: |
           rustup show
           rustup target add ${{ matrix.target }}
 
       - name: Setup Rust cache
+        if: runner.os != 'Linux'
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
           prefix-key: "v2"
           shared-key: "release-${{ matrix.target }}"
 
+      - name: Set RUSTFLAGS
+        if: matrix.rustflags
+        shell: bash
+        run: echo "RUSTFLAGS=${{ matrix.rustflags }}" >> "$GITHUB_ENV"
+
       - name: Cache cargo binaries
+        if: runner.os != 'Linux'
         id: cache-cargo-bin
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
@@ -244,12 +245,24 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-cargo-bin-cyclonedx-v0.5.6
 
       - name: Install cargo-cyclonedx
-        if: steps.cache-cargo-bin.outputs.cache-hit != 'true'
+        if: runner.os != 'Linux' && steps.cache-cargo-bin.outputs.cache-hit != 'true'
         shell: bash
         run: cargo install cargo-cyclonedx --version 0.5.6
 
+      - name: Set up Docker Buildx
+        if: runner.os == 'Linux'
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build CLI and Agent (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          TARGET=${{ matrix.target }} \
+          SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
+          GENERATE_SBOM=true \
+          docker buildx bake cli
+
       - name: Build CLI and Agent
-        if: matrix.bins == 'vouch vouch-agent'
+        if: runner.os != 'Linux' && matrix.bins == 'vouch vouch-agent'
         run: cargo build --release --target ${{ matrix.target }} -p vouch-cli -p vouch-agent
 
       - name: Build CLI only
@@ -257,6 +270,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p vouch-cli
 
       - name: Generate SBOM
+        if: runner.os != 'Linux'
         shell: bash
         run: cargo cyclonedx --target ${{ matrix.target }} --format json
 
@@ -478,23 +492,15 @@ jobs:
           chmod +x "${BINARY}"
           cd crates/vouch-server && "../../${BINARY}" -i styles/input.css -o static/css/output.css --minify
 
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
       - name: Build server and generate SBOM (musl)
         run: |
-          docker run --rm \
-            -v "${{ github.workspace }}:/app" \
-            -w /app \
-            -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
-            rust:1.94.0-alpine sh -c '
-              apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconfig cmake make go perl clang linux-headers
-              export AWS_LC_FIPS_SYS_CC=clang
-              export AWS_LC_FIPS_SYS_CXX=clang++
-              export OPENSSL_STATIC=1
-              export OPENSSL_LIB_DIR=/usr/lib
-              export OPENSSL_INCLUDE_DIR=/usr/include
-              cargo build --release --locked --package vouch-server
-              cargo install cargo-cyclonedx --version 0.5.6
-              cargo cyclonedx --format json
-            '
+          TARGET=${{ matrix.target }} \
+          SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
+          GENERATE_SBOM=true \
+          docker buildx bake server
 
       - name: Create server archive
         run: |
@@ -503,7 +509,7 @@ jobs:
           SERVER_STAGING="vouch-server-v${VERSION}-${TARGET}"
 
           mkdir -p "${SERVER_STAGING}"
-          cp "target/release/vouch-server" "${SERVER_STAGING}/"
+          cp "target/${TARGET}/release/vouch-server" "${SERVER_STAGING}/"
 
           tar --sort=name \
               --mtime="@${SOURCE_DATE_EPOCH}" \
@@ -563,13 +569,13 @@ jobs:
         include:
           - arch: amd64
             cli_artifact: binaries-linux-amd64
-            cli_target: x86_64-unknown-linux-gnu
+            cli_target: x86_64-unknown-linux-musl
             server_artifact: binaries-linux-amd64-server
             server_target: x86_64-unknown-linux-musl
             nfpm_arch: amd64
           - arch: arm64
             cli_artifact: binaries-linux-arm64
-            cli_target: aarch64-unknown-linux-gnu
+            cli_target: aarch64-unknown-linux-musl
             server_artifact: binaries-linux-arm64-server
             server_target: aarch64-unknown-linux-musl
             nfpm_arch: arm64
@@ -605,7 +611,7 @@ jobs:
           CLI_TARGET="${{ matrix.cli_target }}"
           SERVER_TARGET="${{ matrix.server_target }}"
           mkdir -p artifacts
-          # Extract CLI and agent from GNU build
+          # Extract CLI and agent from musl build
           cd artifacts-cli
           tar xzf "vouch-v${VERSION}-${CLI_TARGET}.tar.gz"
           cp "vouch-v${VERSION}-${CLI_TARGET}/vouch" ../artifacts/
@@ -700,25 +706,14 @@ jobs:
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
           echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" >> "$GITHUB_ENV"
 
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev cmake golang-go clang
-
-      - name: Setup Rust toolchain
-        run: |
-          rustup show
-          rustup target add x86_64-unknown-linux-gnu
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-        with:
-          prefix-key: "v2"
-          shared-key: "verify-x86_64-unknown-linux-gnu"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Rebuild binaries
-        env:
-          AWS_LC_FIPS_SYS_CC: clang
-          AWS_LC_FIPS_SYS_CXX: clang++
-        run: cargo build --release --locked --target x86_64-unknown-linux-gnu -p vouch-cli -p vouch-agent
+        run: |
+          TARGET=x86_64-unknown-linux-musl \
+          SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
+          docker buildx bake reproduce
 
       - name: Download original artifacts
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
@@ -737,12 +732,12 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           cd original
-          tar xzf "vouch-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          tar xzf "vouch-v${VERSION}-x86_64-unknown-linux-musl.tar.gz"
 
       - name: Create deterministic archive from rebuilt binaries
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          TARGET="x86_64-unknown-linux-gnu"
+          TARGET="x86_64-unknown-linux-musl"
           STAGING="vouch-v${VERSION}-${TARGET}"
 
           mkdir -p "rebuild/${STAGING}"
@@ -759,7 +754,7 @@ jobs:
       - name: Compare binaries and archives
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          TARGET="x86_64-unknown-linux-gnu"
+          TARGET="x86_64-unknown-linux-musl"
           ARCHIVE="vouch-v${VERSION}-${TARGET}.tar.gz"
 
           echo "=== Verifying against published SHA256 checksum ==="
@@ -813,7 +808,7 @@ jobs:
       - name: Summary
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          TARGET="x86_64-unknown-linux-gnu"
+          TARGET="x86_64-unknown-linux-musl"
 
           echo "## Reproducibility Verification" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
@@ -1256,8 +1251,8 @@ jobs:
 
             | Platform | Architecture | Archive |
             |----------|-------------|---------|
-            | Linux | x86_64 | `vouch-${{ steps.version.outputs.tag }}-x86_64-unknown-linux-gnu.tar.gz` |
-            | Linux | aarch64 | `vouch-${{ steps.version.outputs.tag }}-aarch64-unknown-linux-gnu.tar.gz` |
+            | Linux | x86_64 | `vouch-${{ steps.version.outputs.tag }}-x86_64-unknown-linux-musl.tar.gz` |
+            | Linux | aarch64 | `vouch-${{ steps.version.outputs.tag }}-aarch64-unknown-linux-musl.tar.gz` |
             | macOS | Apple Silicon | `vouch-${{ steps.version.outputs.tag }}-aarch64-apple-darwin.tar.gz` |
             | Windows | x86_64 | `vouch-${{ steps.version.outputs.tag }}-x86_64-pc-windows-msvc.zip` |
             | Windows | ARM64 | `vouch-${{ steps.version.outputs.tag }}-aarch64-pc-windows-msvc.zip` |
