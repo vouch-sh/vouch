@@ -107,6 +107,7 @@ impl AgentServer {
                             let state = Arc::clone(&self.state);
                             let ssh_state = Arc::clone(&self.ssh_state);
                             tokio::spawn(async move {
+                                // Hold the permit for the full connection task; it auto-releases on drop.
                                 let _permit = permit;
                                 if let Err(e) = handle_connection(stream, state, ssh_state).await {
                                     debug!("Connection error: {e}");
