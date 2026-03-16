@@ -10,7 +10,7 @@ RUN apk add --no-cache musl-dev pkgconfig cmake make go clang linux-headers
 FROM base AS cli-deps
 RUN apk add --no-cache eudev-dev
 
-FROM base AS server-deps
+FROM base AS full-deps
 RUN apk add --no-cache openssl-dev openssl-libs-static perl eudev-dev
 ENV AWS_LC_FIPS_SYS_CC=clang
 ENV AWS_LC_FIPS_SYS_CXX=clang++
@@ -18,15 +18,7 @@ ENV OPENSSL_STATIC=1
 ENV OPENSSL_LIB_DIR=/usr/lib
 ENV OPENSSL_INCLUDE_DIR=/usr/include
 
-FROM base AS all-deps
-RUN apk add --no-cache openssl-dev openssl-libs-static perl eudev-dev
-ENV AWS_LC_FIPS_SYS_CC=clang
-ENV AWS_LC_FIPS_SYS_CXX=clang++
-ENV OPENSSL_STATIC=1
-ENV OPENSSL_LIB_DIR=/usr/lib
-ENV OPENSSL_INCLUDE_DIR=/usr/include
-
-ARG DEPS_STAGE=all-deps
+ARG DEPS_STAGE=full-deps
 # hadolint ignore=DL3006
 FROM ${DEPS_STAGE} AS builder
 

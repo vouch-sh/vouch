@@ -23,12 +23,13 @@ target "_common" {
 target "ci" {
   inherits = ["_common"]
   args = {
-    DEPS_STAGE        = "all-deps"
+    DEPS_STAGE        = "full-deps"
     TARGET            = TARGET
     CARGO_PACKAGES    = "-p vouch-cli -p vouch-agent -p vouch-server"
     SOURCE_DATE_EPOCH = "0"
     GENERATE_SBOM     = "false"
   }
+  cache-from = ["type=gha,scope=bake-ci-${TARGET}"]
   cache-to   = ["type=gha,mode=max,ignore-error=true,scope=bake-ci-${TARGET}"]
 }
 
@@ -48,7 +49,7 @@ target "cli" {
 target "server" {
   inherits = ["_common"]
   args = {
-    DEPS_STAGE        = "server-deps"
+    DEPS_STAGE        = "full-deps"
     TARGET            = TARGET
     CARGO_PACKAGES    = "-p vouch-server"
     SOURCE_DATE_EPOCH = SOURCE_DATE_EPOCH
