@@ -180,32 +180,27 @@ jobs:
             target: x86_64-unknown-linux-musl
             bins: "vouch vouch-agent"
             archive-ext: tar.gz
-            install: sudo apt-get update && sudo apt-get install -y musl-tools libudev-dev cmake
           - name: linux-arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             bins: "vouch vouch-agent"
             archive-ext: tar.gz
-            install: sudo apt-get update && sudo apt-get install -y musl-tools libudev-dev cmake
           - name: macos-arm64
             runner: macos-latest
             target: aarch64-apple-darwin
             bins: "vouch vouch-agent"
             archive-ext: tar.gz
-            install: ""
           - name: windows-amd64
             runner: windows-latest
             target: x86_64-pc-windows-msvc
             bins: "vouch"
             archive-ext: zip
-            install: ""
             rustflags: "-C target-feature=+crt-static"
           - name: windows-arm64
             runner: windows-latest
             target: aarch64-pc-windows-msvc
             bins: "vouch"
             archive-ext: zip
-            install: ""
             rustflags: "-C target-feature=+crt-static"
     steps:
       - name: Checkout
@@ -217,20 +212,18 @@ jobs:
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
           echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" >> "$GITHUB_ENV"
 
-      - name: Install system dependencies
-        if: matrix.install != ''
-        run: ${{ matrix.install }}
-
       - name: Install GNU tar (macOS)
         if: runner.os == 'macOS'
         run: brew list gnu-tar &>/dev/null || brew install gnu-tar
 
       - name: Setup Rust toolchain
+        if: runner.os != 'Linux'
         run: |
           rustup show
           rustup target add ${{ matrix.target }}
 
       - name: Setup Rust cache
+        if: runner.os != 'Linux'
         uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
         with:
           prefix-key: "v2"
@@ -242,6 +235,7 @@ jobs:
         run: echo "RUSTFLAGS=${{ matrix.rustflags }}" >> "$GITHUB_ENV"
 
       - name: Cache cargo binaries
+        if: runner.os != 'Linux'
         id: cache-cargo-bin
         uses: actions/cache@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
         with:
@@ -251,15 +245,27 @@ jobs:
           key: ${{ runner.os }}-${{ runner.arch }}-cargo-bin-cyclonedx-v0.5.6
 
       - name: Install cargo-cyclonedx
-        if: steps.cache-cargo-bin.outputs.cache-hit != 'true'
+        if: runner.os != 'Linux' && steps.cache-cargo-bin.outputs.cache-hit != 'true'
         shell: bash
         run: cargo install cargo-cyclonedx --version 0.5.6
 
+      - name: Build CLI and Agent (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/app" \
+            -w /app \
+            -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
+            rust:1.94.0-alpine sh -c '
+              apk add --no-cache musl-dev pkgconfig cmake make go clang linux-headers eudev-dev
+              find . -name "*.rs" -exec touch -d "@${SOURCE_DATE_EPOCH}" {} +
+              cargo build --release --locked --target ${{ matrix.target }} -p vouch-cli -p vouch-agent
+              cargo install cargo-cyclonedx --version 0.5.6
+              cargo cyclonedx --target ${{ matrix.target }} --format json
+            '
+
       - name: Build CLI and Agent
-        if: matrix.bins == 'vouch vouch-agent'
-        env:
-          PKG_CONFIG_ALLOW_CROSS: 1
-          C_INCLUDE_PATH: /usr/include
+        if: runner.os != 'Linux' && matrix.bins == 'vouch vouch-agent'
         run: cargo build --release --target ${{ matrix.target }} -p vouch-cli -p vouch-agent
 
       - name: Build CLI only
@@ -267,6 +273,7 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} -p vouch-cli
 
       - name: Generate SBOM
+        if: runner.os != 'Linux'
         shell: bash
         run: cargo cyclonedx --target ${{ matrix.target }} --format json
 
@@ -710,27 +717,17 @@ jobs:
           SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
           echo "SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH}" >> "$GITHUB_ENV"
 
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y musl-tools libudev-dev cmake golang-go clang
-
-      - name: Setup Rust toolchain
-        run: |
-          rustup show
-          rustup target add x86_64-unknown-linux-musl
-
-      - name: Setup Rust cache
-        uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-        with:
-          prefix-key: "v2"
-          shared-key: "verify-x86_64-unknown-linux-musl"
-
       - name: Rebuild binaries
-        env:
-          AWS_LC_FIPS_SYS_CC: clang
-          AWS_LC_FIPS_SYS_CXX: clang++
-          PKG_CONFIG_ALLOW_CROSS: 1
-          C_INCLUDE_PATH: /usr/include
-        run: cargo build --release --locked --target x86_64-unknown-linux-musl -p vouch-cli -p vouch-agent
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}:/app" \
+            -w /app \
+            -e SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
+            rust:1.94.0-alpine sh -c '
+              apk add --no-cache musl-dev pkgconfig cmake make go clang linux-headers eudev-dev
+              find . -name "*.rs" -exec touch -d "@${SOURCE_DATE_EPOCH}" {} +
+              cargo build --release --locked --target x86_64-unknown-linux-musl -p vouch-cli -p vouch-agent
+            '
 
       - name: Download original artifacts
         uses: actions/download-artifact@70fc10c6e5e1ce46ad2ea6f2b72d43f7d47b13c3 # v8.0.0
