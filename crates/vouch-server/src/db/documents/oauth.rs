@@ -443,7 +443,10 @@ mod tests {
 
     #[test]
     fn test_token_endpoint_auth_method_from_str_typed_error() {
-        let err = TokenEndpointAuthMethod::from_str("mtls").expect_err("must reject mtls");
+        let err = match TokenEndpointAuthMethod::from_str("mtls") {
+            Ok(value) => panic!("must reject mtls, got {value:?}"),
+            Err(err) => err,
+        };
         assert_eq!(
             err,
             OAuthDocumentParseError::TokenEndpointAuthMethod("mtls".to_string())
