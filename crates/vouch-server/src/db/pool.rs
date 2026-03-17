@@ -60,7 +60,7 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
-            max_connections: Some(25),
+            max_connections: None,
             min_connections: 2,
             idle_timeout_secs: 300,
             acquire_timeout_secs: 5,
@@ -69,10 +69,11 @@ impl Default for PoolConfig {
 }
 
 impl PoolConfig {
-    /// Resolve `max_connections`, applying the default (25) when the
+    /// Resolve `max_connections`, applying backend-specific defaults when the
     /// caller hasn't set an explicit value.
-    fn resolved_max_connections(&self) -> u32 {
-        self.max_connections.unwrap_or(25)
+    fn resolved_max_connections(&self, is_dsql: bool) -> u32 {
+        self.max_connections
+            .unwrap_or(if is_dsql { 50 } else { 25 })
     }
 }
 
@@ -173,7 +174,7 @@ impl Pool {
                     let parsed = url::Url::parse(url).context("failed to parse PostgreSQL URL")?;
                     Self::connect_dsql(&dsql, parsed.username(), pool_cfg).await
                 } else {
-                    let max_connections = pool_cfg.resolved_max_connections();
+                    let max_connections = pool_cfg.resolved_max_connections(false);
                     tracing::info!(
                         max_connections,
                         min_connections = pool_cfg.min_connections,
@@ -253,7 +254,7 @@ impl Pool {
         // - acquire_timeout: configurable, default 30 sec
         // - min_connections: configurable, default 2
         // - before_acquire: only ping connections idle >30s (avoids round-trip on active conns)
-        let max_connections = pool_cfg.resolved_max_connections();
+        let max_connections = pool_cfg.resolved_max_connections(true);
         tracing::info!(
             max_connections,
             min_connections = pool_cfg.min_connections,
@@ -840,6 +841,23 @@ mod tests {
         assert!(DatabaseType::from_url("mysql://localhost/db").is_err());
         assert!(DatabaseType::from_url("invalid").is_err());
         assert!(DatabaseType::from_url("").is_err());
+    }
+
+    #[test]
+    fn test_resolved_max_connections_backend_defaults() {
+        let cfg = PoolConfig {
+            max_connections: None,
+            ..PoolConfig::default()
+        };
+        assert_eq!(cfg.resolved_max_connections(false), 25);
+        assert_eq!(cfg.resolved_max_connections(true), 50);
+
+        let overridden = PoolConfig {
+            max_connections: Some(42),
+            ..PoolConfig::default()
+        };
+        assert_eq!(overridden.resolved_max_connections(false), 42);
+        assert_eq!(overridden.resolved_max_connections(true), 42);
     }
 
     #[tokio::test]

@@ -1041,7 +1041,12 @@ impl DocumentStore {
 
         let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
 
-        let total_count = rows.first().and_then(|r| r.total_count).unwrap_or_default();
+        let total_count = if let Some(total) = rows.first().and_then(|r| r.total_count) {
+            total
+        } else {
+            // OFFSET can produce an empty page even when matching rows exist.
+            self.count_all::<T>().await?
+        };
 
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
@@ -2071,6 +2076,26 @@ mod tests {
             .unwrap();
         assert_eq!(page3.len(), 1);
         assert!(!has_more3);
+    }
+
+    #[tokio::test]
+    async fn list_all_paginated_with_count_preserves_total_past_end() {
+        let store = test_store().await;
+
+        for i in 0..3 {
+            let doc = TestDoc {
+                name: format!("offset-count-{i}"),
+                value: i,
+            };
+            store.insert(&doc).await.unwrap();
+        }
+
+        let (page, total_count) = store
+            .list_all_paginated_with_count::<TestDoc>(10, 2)
+            .await
+            .unwrap();
+        assert!(page.is_empty());
+        assert_eq!(total_count, 3);
     }
 
     #[tokio::test]
