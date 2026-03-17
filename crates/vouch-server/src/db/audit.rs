@@ -317,7 +317,9 @@ mod tests {
     use crate::crypto::document_crypto::PlaintextDocumentCrypto;
 
     async fn test_audit() -> AuditStore {
-        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
+            .await
+            .unwrap();
 
         // Tests always use SQLite — execute raw DDL directly
         let Pool::Sqlite(ref p) = pool else {

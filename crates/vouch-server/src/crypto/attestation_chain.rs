@@ -14,7 +14,7 @@ use thiserror::Error;
 use x509_cert::Certificate;
 
 // ============================================================================
-// Pinned Root CA Certificates (DER, embedded at compile time)
+// Pinned Root CA Certificates (PEM, embedded at compile time)
 // ============================================================================
 
 /// Yubico U2F Root CA Serial 457200631.

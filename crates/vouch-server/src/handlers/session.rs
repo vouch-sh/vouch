@@ -107,7 +107,9 @@ pub async fn extract_resource_token(
 
     // 3. Verify session exists in DB via token_hash
     let token_hash = hash_token(&token);
-    let session = db::get_session_by_token_hash(&state.store, &token_hash)
+    let session = state
+        .session_cache
+        .get_session_by_token_hash(&state.store, &token_hash)
         .await?
         .ok_or_else(|| {
             ServiceError::api(
@@ -413,7 +415,10 @@ pub async fn get_resource_auth_context(state: &AppState, jar: &CookieJar) -> Aut
     // Verify session exists in DB
     let token_hash = hash_token(token);
     let session_exists = matches!(
-        db::get_session_by_token_hash(&state.store, &token_hash).await,
+        state
+            .session_cache
+            .get_session_by_token_hash(&state.store, &token_hash)
+            .await,
         Ok(Some(_))
     );
 

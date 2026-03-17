@@ -43,20 +43,30 @@ pub async fn list_groups(
         return (status, json).into_response();
     }
 
-    // Get groups from database
-    let groups =
+    // Get groups from database (returns page + total count in one call)
+    let (groups, total) =
         match db::list_scim_groups(&state.store, query.filter.as_deref(), start_index, count).await
         {
-            Ok(groups) => groups,
+            Ok(result) => result,
             Err(e) => {
-                if e.downcast_ref::<ScimFilterError>().is_some() {
-                    tracing::debug!("SCIM filter parse error: {e}");
+                if let Some(filter_err) = e.downcast_ref::<ScimFilterError>() {
+                    let (detail, error_type) = match filter_err {
+                        ScimFilterError::UnsupportedOperator(_) => {
+                            tracing::debug!("SCIM filter parse error: {e}");
+                            ("Invalid filter expression", "invalidFilter")
+                        }
+                        ScimFilterError::FilterTooBroad => (
+                            "Filter is too broad; add a more specific filter",
+                            "invalidFilter",
+                        ),
+                        ScimFilterError::OffsetTooLarge => (
+                            "startIndex is too large; maximum supported offset is 10000",
+                            "invalidValue",
+                        ),
+                    };
                     return (
                         StatusCode::BAD_REQUEST,
-                        Json(
-                            ScimError::new(400, "Invalid filter expression")
-                                .with_type("invalidFilter"),
-                        ),
+                        Json(ScimError::new(400, detail).with_type(error_type)),
                     )
                         .into_response();
                 }
@@ -68,11 +78,6 @@ pub async fn list_groups(
                     .into_response();
             }
         };
-
-    let total = match db::count_scim_groups(&state.store, query.filter.as_deref()).await {
-        Ok(count) => count,
-        Err(_) => groups.len(),
-    };
 
     let base_url = &state.config().base_url;
     let mut resources = Vec::new();

@@ -298,23 +298,38 @@ impl From<Document<UserDoc>> for ScimUserRecord {
 }
 
 /// List users for SCIM with optional filter.
+///
+/// Returns `(records, total_count)` where `total_count` is the total number of
+/// matching users (before pagination).
+///
+/// # Errors
+///
+/// Returns [`ScimFilterError::FilterTooBroad`] for non-indexed filters on
+/// tables with >10 000 rows. Returns [`ScimFilterError::OffsetTooLarge`]
+/// when the computed offset exceeds 10 000.
 pub async fn list_scim_users(
     store: &DocumentStore,
     filter: Option<&str>,
     start_index: usize,
     count: usize,
-) -> Result<Vec<ScimUserRecord>> {
+) -> Result<(Vec<ScimUserRecord>, usize)> {
     let offset = start_index.saturating_sub(1); // SCIM 1-indexed
 
     // Try indexed eq lookup first for efficiency
     if let Some(f) = filter
         && let Some(result) = try_indexed_user_lookup(store, f).await?
     {
-        return Ok(result.into_iter().skip(offset).take(count).collect());
+        let total = result.len();
+        let page = result.into_iter().skip(offset).take(count).collect();
+        return Ok((page, total));
     }
 
     // Non-indexed filter: must load all and filter in app
     if filter.is_some() {
+        let table_count = store.count_all::<UserDoc>().await?;
+        if table_count > 10_000 {
+            return Err(ScimFilterError::FilterTooBroad.into());
+        }
         let all_docs = store.list_all::<UserDoc>().await?;
         let mut records: Vec<ScimUserRecord> =
             all_docs.into_iter().map(ScimUserRecord::from).collect();
@@ -322,35 +337,22 @@ pub async fn list_scim_users(
             records = apply_scim_user_filter(records, f)?;
         }
         records.sort_by(|a, b| a.email.cmp(&b.email));
-        return Ok(records.into_iter().skip(offset).take(count).collect());
+        let total = records.len();
+        let page = records.into_iter().skip(offset).take(count).collect();
+        return Ok((page, total));
     }
 
-    // No filter: use DB-level pagination
-    let docs = store
-        .list_all_paginated::<UserDoc>(offset as u64, count as u64)
+    // No filter: use DB-level pagination with count
+    if offset > 10_000 {
+        return Err(ScimFilterError::OffsetTooLarge.into());
+    }
+    let (docs, total_count) = store
+        .list_all_paginated_with_count::<UserDoc>(offset as u64, count as u64)
         .await?;
-    Ok(docs.into_iter().map(ScimUserRecord::from).collect())
-}
-
-/// Count users for SCIM pagination.
-pub async fn count_scim_users(store: &DocumentStore, filter: Option<&str>) -> Result<usize> {
-    if let Some(f) = filter
-        && let Some(result) = try_indexed_user_lookup(store, f).await?
-    {
-        return Ok(result.len());
-    }
-
-    // Non-indexed filter: load all and count after filtering
-    if let Some(f) = filter {
-        let all_docs = store.list_all::<UserDoc>().await?;
-        let records: Vec<ScimUserRecord> = all_docs.into_iter().map(ScimUserRecord::from).collect();
-        let filtered = apply_scim_user_filter(records, f)?;
-        return Ok(filtered.len());
-    }
-
-    // No filter: use SQL COUNT
-    let count = store.count_all::<UserDoc>().await?;
-    Ok(count as usize)
+    Ok((
+        docs.into_iter().map(ScimUserRecord::from).collect(),
+        total_count as usize,
+    ))
 }
 
 /// Try indexed eq lookups for SCIM user filters.
@@ -504,11 +506,15 @@ pub(crate) struct ScimFilter {
     pub value: String,
 }
 
-/// Error from parsing a SCIM filter expression.
+/// Error from SCIM filter or pagination operations.
 #[derive(Debug)]
 pub enum ScimFilterError {
     /// The filter uses an operator we don't support.
     UnsupportedOperator(String),
+    /// Non-indexed filter against a table with >10 000 rows.
+    FilterTooBroad,
+    /// Requested offset exceeds the 10 000-row cap.
+    OffsetTooLarge,
 }
 
 impl std::fmt::Display for ScimFilterError {
@@ -516,6 +522,12 @@ impl std::fmt::Display for ScimFilterError {
         match self {
             Self::UnsupportedOperator(op) => {
                 write!(f, "unsupported filter operator '{op}'")
+            }
+            Self::FilterTooBroad => {
+                write!(f, "filter is too broad for the current dataset size")
+            }
+            Self::OffsetTooLarge => {
+                write!(f, "startIndex exceeds maximum supported offset")
             }
         }
     }
@@ -670,23 +682,38 @@ pub async fn get_scim_group_by_name(
 }
 
 /// List SCIM groups with pagination.
+///
+/// Returns `(records, total_count)` where `total_count` is the total number of
+/// matching groups (before pagination).
+///
+/// # Errors
+///
+/// Returns [`ScimFilterError::FilterTooBroad`] for non-indexed filters on
+/// tables with >10 000 rows. Returns [`ScimFilterError::OffsetTooLarge`]
+/// when the computed offset exceeds 10 000.
 pub async fn list_scim_groups(
     store: &DocumentStore,
     filter: Option<&str>,
     start_index: usize,
     count: usize,
-) -> Result<Vec<ScimGroupRecord>> {
-    let offset = if start_index > 0 { start_index - 1 } else { 0 };
+) -> Result<(Vec<ScimGroupRecord>, usize)> {
+    let offset = start_index.saturating_sub(1); // SCIM 1-indexed
 
     // Try indexed eq lookup first
     if let Some(f) = filter
         && let Some(result) = try_indexed_group_lookup(store, f).await?
     {
-        return Ok(result.into_iter().skip(offset).take(count).collect());
+        let total = result.len();
+        let page = result.into_iter().skip(offset).take(count).collect();
+        return Ok((page, total));
     }
 
     // Non-indexed filter: must load all and filter in app
     if filter.is_some() {
+        let table_count = store.count_all::<ScimGroupDoc>().await?;
+        if table_count > 10_000 {
+            return Err(ScimFilterError::FilterTooBroad.into());
+        }
         let all_docs = store.list_all::<ScimGroupDoc>().await?;
         let mut records: Vec<ScimGroupRecord> =
             all_docs.into_iter().map(ScimGroupRecord::from).collect();
@@ -694,36 +721,22 @@ pub async fn list_scim_groups(
             records = apply_scim_group_filter(records, f)?;
         }
         records.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        return Ok(records.into_iter().skip(offset).take(count).collect());
+        let total = records.len();
+        let page = records.into_iter().skip(offset).take(count).collect();
+        return Ok((page, total));
     }
 
-    // No filter: use DB-level pagination
-    let docs = store
-        .list_all_paginated::<ScimGroupDoc>(offset as u64, count as u64)
+    // No filter: use DB-level pagination with count
+    if offset > 10_000 {
+        return Err(ScimFilterError::OffsetTooLarge.into());
+    }
+    let (docs, total_count) = store
+        .list_all_paginated_with_count::<ScimGroupDoc>(offset as u64, count as u64)
         .await?;
-    Ok(docs.into_iter().map(ScimGroupRecord::from).collect())
-}
-
-/// Count SCIM groups (for pagination).
-pub async fn count_scim_groups(store: &DocumentStore, filter: Option<&str>) -> Result<usize> {
-    if let Some(f) = filter
-        && let Some(result) = try_indexed_group_lookup(store, f).await?
-    {
-        return Ok(result.len());
-    }
-
-    // Non-indexed filter: load all and count after filtering
-    if let Some(f) = filter {
-        let all_docs = store.list_all::<ScimGroupDoc>().await?;
-        let records: Vec<ScimGroupRecord> =
-            all_docs.into_iter().map(ScimGroupRecord::from).collect();
-        let filtered = apply_scim_group_filter(records, f)?;
-        return Ok(filtered.len());
-    }
-
-    // No filter: use SQL COUNT
-    let count = store.count_all::<ScimGroupDoc>().await?;
-    Ok(count as usize)
+    Ok((
+        docs.into_iter().map(ScimGroupRecord::from).collect(),
+        total_count as usize,
+    ))
 }
 
 /// Try indexed eq lookups for SCIM group filters.

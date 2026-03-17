@@ -113,10 +113,20 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     tracing::info!("GeoIP database initialized");
 
     // Feature status summary — one log per feature for searchable CloudWatch events
+    let pool_cfg = &config.pool_config;
     tracing::info!(
-        "Sessions: duration={}h, dpop_max_age={}s",
+        "Database pool: max_connections={}, min_connections={}, idle_timeout={}s, acquire_timeout={}s",
+        pool_cfg.max_connections.unwrap_or(25),
+        pool_cfg.min_connections,
+        pool_cfg.idle_timeout_secs,
+        pool_cfg.acquire_timeout_secs,
+    );
+    tracing::info!(
+        "Sessions: duration={}h, dpop_max_age={}s, cache_max_capacity={}, cache_ttl={}s",
         config.session_hours,
         config.dpop_max_age_seconds,
+        config.session_cache_max_capacity,
+        config.session_cache_ttl_secs,
     );
     tracing::info!(
         "Device flow: code_expires={}s, poll_interval={}s",
@@ -298,7 +308,7 @@ async fn load_s3_config(
 
 /// Connect to the database and run migrations.
 async fn connect_and_migrate(config: &config::ServerConfig) -> Result<Pool> {
-    let db = Pool::connect(&config.database_url).await?;
+    let db = Pool::connect(&config.database_url, &config.pool_config).await?;
     tracing::info!(
         "Connected to {:?} database: {}",
         db.db_type(),
@@ -540,6 +550,10 @@ async fn build_app_state(
         state_signer,
         github_app,
         http_client,
+        session_cache: crate::db::SessionCache::new(
+            config.session_cache_max_capacity,
+            config.session_cache_ttl_secs,
+        ),
     });
 
     Ok(state)

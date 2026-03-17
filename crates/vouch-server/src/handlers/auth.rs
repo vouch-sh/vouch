@@ -73,7 +73,10 @@ pub async fn status(
 
     // Check session exists in database
     let token_hash = hash_token(token);
-    let session = db::get_session_by_token_hash(&state.store, &token_hash).await?;
+    let session = state
+        .session_cache
+        .get_session_by_token_hash(&state.store, &token_hash)
+        .await?;
 
     if session.is_none() {
         return Ok(Json(SessionStatus {
@@ -125,7 +128,9 @@ pub async fn logout(
         let token_hash = hash_token(token);
 
         // Look up session before deletion to capture user info for audit
-        let session_info = db::get_session_by_token_hash(&state.store, &token_hash)
+        let session_info = state
+            .session_cache
+            .get_session_by_token_hash(&state.store, &token_hash)
             .await
             .ok()
             .flatten();
@@ -133,6 +138,7 @@ pub async fn logout(
         match db::delete_session_by_token_hash(&state.store, &token_hash).await {
             Ok(deleted) => {
                 if deleted {
+                    state.session_cache.invalidate(&token_hash);
                     tracing::info!("Session deleted during logout");
 
                     // Fire-and-forget logout audit event

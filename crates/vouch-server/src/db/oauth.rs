@@ -891,7 +891,7 @@ mod tests {
     use crate::db::Pool;
 
     async fn test_store() -> DocumentStore {
-        let pool = Pool::connect("sqlite::memory:")
+        let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
             .await
             .expect("Failed to create test database");
 

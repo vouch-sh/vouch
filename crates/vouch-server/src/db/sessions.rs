@@ -6,12 +6,15 @@ use super::documents::session::SessionDoc;
 use super::store::DocumentStore;
 use anyhow::Result;
 use jiff::Timestamp;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 // Re-export SessionPurpose from documents module
 pub use super::documents::session::SessionPurpose;
 
 /// Session record.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Session {
     pub id: String,
     pub user_id: String,
@@ -122,4 +125,97 @@ pub async fn delete_sessions_for_user(store: &DocumentStore, user_id: &str) -> R
     store
         .delete_by_index::<SessionDoc>("user_id", user_id)
         .await
+}
+
+/// In-memory cache for session lookups by token hash.
+///
+/// Reduces DB load on the auth hot path. Entries expire after a
+/// configurable TTL (default 30s). Eviction is inline: expired entries
+/// are removed on `get` (per-key) and on `insert` (sweep when at
+/// capacity). No background threads.
+pub struct SessionCache {
+    entries: Mutex<HashMap<String, CacheEntry>>,
+    ttl: Duration,
+    max_capacity: u64,
+}
+
+struct CacheEntry {
+    value: Option<Session>,
+    inserted_at: Instant,
+}
+
+impl SessionCache {
+    /// Create a new session cache.
+    ///
+    /// * `max_capacity` — maximum entries (e.g. 10 000)
+    /// * `ttl_secs` — time-to-live per entry in seconds (e.g. 30)
+    #[must_use]
+    pub fn new(max_capacity: u64, ttl_secs: u64) -> Self {
+        #[allow(clippy::cast_possible_truncation)]
+        let cap = max_capacity.min(u32::MAX as u64) as usize;
+        Self {
+            entries: Mutex::new(HashMap::with_capacity(cap)),
+            ttl: Duration::from_secs(ttl_secs),
+            max_capacity,
+        }
+    }
+
+    /// Get a cached session by token hash, or fetch from DB on miss.
+    pub async fn get_session_by_token_hash(
+        &self,
+        store: &DocumentStore,
+        token_hash: &str,
+    ) -> Result<Option<Session>> {
+        if let Some(cached) = self.get(token_hash) {
+            return Ok(cached);
+        }
+        let result = get_session_by_token_hash(store, token_hash).await?;
+        self.insert(token_hash.to_string(), result.clone());
+        Ok(result)
+    }
+
+    /// Invalidate a cached session by token hash.
+    pub fn invalidate(&self, token_hash: &str) {
+        let Ok(mut map) = self.entries.lock() else {
+            return;
+        };
+        map.remove(token_hash);
+    }
+
+    /// Invalidate all cached sessions (used when bulk-deleting).
+    pub fn invalidate_all(&self) {
+        let Ok(mut map) = self.entries.lock() else {
+            return;
+        };
+        map.clear();
+    }
+
+    fn get(&self, key: &str) -> Option<Option<Session>> {
+        let Ok(mut map) = self.entries.lock() else {
+            return None;
+        };
+        let entry = map.get(key)?;
+        if entry.inserted_at.elapsed() >= self.ttl {
+            map.remove(key);
+            return None;
+        }
+        Some(entry.value.clone())
+    }
+
+    fn insert(&self, key: String, value: Option<Session>) {
+        let Ok(mut map) = self.entries.lock() else {
+            return;
+        };
+        if map.len() as u64 >= self.max_capacity {
+            let ttl = self.ttl;
+            map.retain(|_, e| e.inserted_at.elapsed() < ttl);
+        }
+        map.insert(
+            key,
+            CacheEntry {
+                value,
+                inserted_at: Instant::now(),
+            },
+        );
+    }
 }
