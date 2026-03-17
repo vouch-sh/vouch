@@ -43,12 +43,10 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 /// Connection pool configuration.
 ///
 /// Populated from CLI args / environment via clap in `config::Args`.
-/// `max_connections` is `None` to use the shared default (25) when the user
-/// doesn't override it.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
-    /// Maximum pool connections (`None` = backend default).
-    pub max_connections: Option<u32>,
+    /// Maximum pool connections.
+    pub max_connections: u32,
     /// Minimum idle connections.
     pub min_connections: u32,
     /// Idle timeout in seconds.
@@ -60,18 +58,11 @@ pub struct PoolConfig {
 impl Default for PoolConfig {
     fn default() -> Self {
         Self {
-            max_connections: None,
+            max_connections: 25,
             min_connections: 2,
             idle_timeout_secs: 300,
-            acquire_timeout_secs: 30,
+            acquire_timeout_secs: 5,
         }
-    }
-}
-
-impl PoolConfig {
-    /// Resolve `max_connections` when the caller hasn't set an explicit value.
-    fn resolved_max_connections(&self) -> u32 {
-        self.max_connections.unwrap_or(25)
     }
 }
 
@@ -172,7 +163,7 @@ impl Pool {
                     let parsed = url::Url::parse(url).context("failed to parse PostgreSQL URL")?;
                     Self::connect_dsql(&dsql, parsed.username(), pool_cfg).await
                 } else {
-                    let max_connections = pool_cfg.resolved_max_connections();
+                    let max_connections = pool_cfg.max_connections;
                     tracing::info!(
                         max_connections,
                         min_connections = pool_cfg.min_connections,
@@ -246,13 +237,9 @@ impl Pool {
             connect_options = connect_options.options([opt]);
         }
 
-        // Create pool with appropriate lifetime settings for DSQL:
-        // - max_lifetime: 55 min (DSQL terminates connections after 60 min)
-        // - idle_timeout: configurable, default 5 min
-        // - acquire_timeout: configurable, default 30 sec
-        // - min_connections: configurable, default 2
-        // - before_acquire: only ping connections idle >30s (avoids round-trip on active conns)
-        let max_connections = pool_cfg.resolved_max_connections();
+        // DSQL-specific: max_lifetime 55 min (DSQL terminates at 60 min),
+        // before_acquire pings only connections idle >30s.
+        let max_connections = pool_cfg.max_connections;
         tracing::info!(
             max_connections,
             min_connections = pool_cfg.min_connections,
@@ -839,21 +826,6 @@ mod tests {
         assert!(DatabaseType::from_url("mysql://localhost/db").is_err());
         assert!(DatabaseType::from_url("invalid").is_err());
         assert!(DatabaseType::from_url("").is_err());
-    }
-
-    #[test]
-    fn test_resolved_max_connections_default() {
-        let cfg = PoolConfig {
-            max_connections: None,
-            ..PoolConfig::default()
-        };
-        assert_eq!(cfg.resolved_max_connections(), 25);
-
-        let overridden = PoolConfig {
-            max_connections: Some(42),
-            ..PoolConfig::default()
-        };
-        assert_eq!(overridden.resolved_max_connections(), 42);
     }
 
     #[tokio::test]

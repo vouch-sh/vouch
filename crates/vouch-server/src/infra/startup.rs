@@ -116,7 +116,7 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
     let pool_cfg = &config.pool_config;
     tracing::info!(
         "Database pool: max_connections={}, min_connections={}, idle_timeout={}s, acquire_timeout={}s",
-        pool_cfg.max_connections.unwrap_or(25),
+        pool_cfg.max_connections,
         pool_cfg.min_connections,
         pool_cfg.idle_timeout_secs,
         pool_cfg.acquire_timeout_secs,

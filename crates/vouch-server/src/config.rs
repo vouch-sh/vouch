@@ -66,7 +66,7 @@ pub struct Args {
     #[arg(long, env = "VOUCH_LISTEN_ADDR", default_value = "[::]:3000")]
     pub listen_addr: String,
 
-    /// SQLite database URL (e.g., "sqlite:vouch.db").
+    /// Database URL (sqlite, postgres, or DSQL).
     #[arg(
         long,
         env = "VOUCH_DATABASE_URL",
@@ -277,9 +277,8 @@ pub struct Args {
     pub metrics_bearer_token: Option<String>,
 
     /// Maximum number of database connections in the pool.
-    /// Defaults to 25.
-    #[arg(long, env = "VOUCH_DB_MAX_CONNECTIONS")]
-    pub db_max_connections: Option<u32>,
+    #[arg(long, env = "VOUCH_DB_MAX_CONNECTIONS", default_value = "25")]
+    pub db_max_connections: u32,
 
     /// Minimum number of idle database connections in the pool.
     #[arg(long, env = "VOUCH_DB_MIN_CONNECTIONS", default_value = "2")]
@@ -290,7 +289,7 @@ pub struct Args {
     pub db_idle_timeout_secs: u64,
 
     /// Connection acquire timeout in seconds.
-    #[arg(long, env = "VOUCH_DB_ACQUIRE_TIMEOUT_SECS", default_value = "30")]
+    #[arg(long, env = "VOUCH_DB_ACQUIRE_TIMEOUT_SECS", default_value = "5")]
     pub db_acquire_timeout_secs: u64,
 
     /// Maximum number of entries in the session lookup cache.
@@ -315,7 +314,7 @@ pub struct Args {
 pub struct ServerConfig {
     /// Address to listen on (e.g., "[::]:3000").
     pub listen_addr: String,
-    /// `SQLite` database URL (e.g., "sqlite:vouch.db").
+    /// Database URL (sqlite, postgres, or DSQL).
     pub database_url: String,
     /// Relying Party ID (domain, e.g., "vouch.sh").
     pub rp_id: String,
