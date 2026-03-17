@@ -182,6 +182,19 @@ impl SessionCache {
         map.remove(token_hash);
     }
 
+    /// Invalidate cached sessions for a specific user.
+    pub fn invalidate_for_user(&self, user_id: &str) {
+        let Ok(mut map) = self.entries.lock() else {
+            return;
+        };
+        map.retain(|_, entry| {
+            let Some(session) = entry.value.as_ref() else {
+                return true;
+            };
+            session.user_id != user_id
+        });
+    }
+
     /// Invalidate all cached sessions (used when bulk-deleting).
     pub fn invalidate_all(&self) {
         let Ok(mut map) = self.entries.lock() else {
