@@ -347,8 +347,8 @@ pub async fn delete_key(
     let (key_name, sessions_revoked) =
         key_svc::delete_key(&state.store, &token.sub, &key_id).await?;
 
-    // Invalidate session cache — authenticator deletion cascades to sessions
-    state.session_cache.invalidate_all();
+    // Invalidate session cache for this user — authenticator deletion cascades to their sessions
+    state.session_cache.invalidate_for_user(&token.sub);
 
     Ok(Json(DeleteKeyResponse {
         message: format!("Key '{}' has been deleted", key_name),

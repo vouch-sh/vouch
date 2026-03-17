@@ -409,7 +409,7 @@ pub async fn patch_user(
         if let Err(e) = db::delete_sessions_for_user(&state.store, &id).await {
             tracing::error!("Failed to delete sessions for deactivated user: {e}");
         } else {
-            state.session_cache.invalidate_all();
+            state.session_cache.invalidate_for_user(&id);
         }
         // Revoke all SSH certificates for this user
         if let Err(e) = db::revoke_all_ssh_certificates_for_user(
@@ -510,7 +510,7 @@ pub async fn delete_user(
     if let Err(e) = db::delete_sessions_for_user(&state.store, &id).await {
         tracing::error!("Failed to delete sessions: {e}");
     } else {
-        state.session_cache.invalidate_all();
+        state.session_cache.invalidate_for_user(&id);
     }
 
     // Revoke all SSH certificates for this user
