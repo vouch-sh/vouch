@@ -84,6 +84,8 @@ pub struct AppState {
     pub github_app: Option<std::sync::Arc<services::integrations::github::GitHubApp>>,
     /// Shared HTTP client for outbound server-side API calls (no redirects).
     pub http_client: reqwest::Client,
+    /// Session lookup cache (30s TTL).
+    pub session_cache: db::SessionCache,
 }
 
 impl AppState {
@@ -219,6 +221,9 @@ mod redirect_tests {
             log_format: config::LogFormat::Text,
             trusted_proxies: Vec::new(),
             metrics_bearer_token: None,
+            pool_config: crate::db::pool::PoolConfig::default(),
+            session_cache_max_capacity: 10_000,
+            session_cache_ttl_secs: 30,
         };
         let webauthn = webauthn_rs::WebauthnBuilder::new(
             rp_id,
@@ -247,6 +252,7 @@ mod redirect_tests {
             ),
             github_app: None,
             http_client: reqwest::Client::new(),
+            session_cache: db::SessionCache::new(10_000, 30),
         }
     }
 

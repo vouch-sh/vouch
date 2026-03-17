@@ -220,6 +220,7 @@ pub async fn exchange_authorization_code(
                 // already granted based on the compromised authorization code."
                 match db::delete_oauth_sessions_for_user(&state.store, &user_id).await {
                     Ok(count) if count > 0 => {
+                        state.session_cache.invalidate_for_user(&user_id);
                         tracing::warn!(
                             target: "security",
                             user_id = %user_id,
@@ -778,7 +779,9 @@ pub async fn validate_session_token(
 
     // Verify session exists in database
     let token_hash = hash_token(token);
-    let session = match db::get_session_by_token_hash(&state.store, &token_hash)
+    let session = match state
+        .session_cache
+        .get_session_by_token_hash(&state.store, &token_hash)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
     {

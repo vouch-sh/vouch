@@ -61,7 +61,7 @@ aws-lc-rs = { version = "=1.16.1", default-features = false }
 aws-sdk-dsql = { version = "=1.53.0", default-features = false }
 aws-sdk-kms = { version = "=1.103.0", default-features = false }
 aws-sdk-s3 = { version = "=1.126.0", default-features = false }
-aws-smithy-types = { version = "=1.4.6", default-features = false }
+aws-smithy-types = { version = "=1.4.7", default-features = false }
 axum = { version = "=0.8.8", default-features = false }
 axum-extra = { version = "=0.12.5", default-features = false }
 axum-server = { version = "=0.8.0", default-features = false }

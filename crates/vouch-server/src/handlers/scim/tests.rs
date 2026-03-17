@@ -1006,10 +1006,10 @@ async fn test_validation_start_index_at_boundary_succeeds() {
     let token = create_test_scim_token(&state.store, "test-boundary-start-index").await;
     let auth_header = format!("Bearer {}", token);
 
-    // startIndex = 1000000 is exactly at the boundary (should pass)
+    // startIndex = 10001 is exactly at the boundary (should pass)
     let (status, _body) = http_get(
         &app,
-        "/scim/v2/Users?startIndex=1000000",
+        "/scim/v2/Users?startIndex=10001",
         &[("Authorization", &auth_header)],
     )
     .await;

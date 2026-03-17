@@ -118,7 +118,11 @@ pub async fn introspect_token(
 
     // Verify session exists in database and retrieve it for authorization_details.
     let token_hash = hash_token(token);
-    let session = match db::get_session_by_token_hash(&state.store, &token_hash).await {
+    let session = match state
+        .session_cache
+        .get_session_by_token_hash(&state.store, &token_hash)
+        .await
+    {
         Ok(Some(s)) => s,
         _ => return Ok(IntrospectionResult::inactive()),
     };
@@ -192,6 +196,7 @@ pub async fn revoke_token(
         match db::delete_sessions_for_user(&state.store, user_id).await {
             Ok(count) => {
                 if count > 0 {
+                    state.session_cache.invalidate_for_user(user_id);
                     if let Some(ref email) = email {
                         tracing::info!(
                             "Revoked {} session(s) for user: {}",
@@ -213,7 +218,12 @@ pub async fn revoke_token(
         // Token couldn't be decoded — best-effort delete by hash
         let token_hash = hash_token(token);
         match db::delete_session_by_token_hash(&state.store, &token_hash).await {
-            Ok(deleted) => deleted,
+            Ok(deleted) => {
+                if deleted {
+                    state.session_cache.invalidate(&token_hash);
+                }
+                deleted
+            }
             Err(e) => {
                 tracing::warn!("Failed to delete session during revocation: {}", e,);
                 false

@@ -41,7 +41,11 @@ pub use users::{create_user, delete_user, get_user, list_users, patch_user};
 const MAX_FILTER_LEN: usize = 1024;
 
 /// Maximum value for `startIndex` pagination parameter.
-const MAX_START_INDEX: usize = 1_000_000;
+///
+/// SCIM `startIndex` is 1-indexed, so 10,001 corresponds to offset
+/// 10,000 — the maximum the document store accepts. Deeper pagination
+/// is rejected up-front to avoid expensive OFFSET scans.
+const MAX_START_INDEX: usize = 10_001;
 
 /// Validate a SCIM resource ID path parameter.
 /// All resource IDs are UUID v7; reject anything that doesn't parse.

@@ -34,7 +34,7 @@ use crate::services::oidc::OidcSigningKey;
 
 /// Create an in-memory SQLite database with migrations for testing.
 pub async fn test_db() -> Pool {
-    let pool = Pool::connect("sqlite::memory:")
+    let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
         .await
         .expect("Failed to create test database");
 
@@ -102,6 +102,9 @@ pub fn test_config() -> ServerConfig {
         log_format: crate::config::LogFormat::Text,
         trusted_proxies: Vec::new(),
         metrics_bearer_token: None,
+        pool_config: crate::db::pool::PoolConfig::default(),
+        session_cache_max_capacity: 10_000,
+        session_cache_ttl_secs: 30,
     }
 }
 
@@ -138,6 +141,7 @@ pub async fn test_app_state() -> Arc<AppState> {
         ),
         github_app: None,
         http_client: reqwest::Client::new(),
+        session_cache: crate::db::SessionCache::new(10_000, 30),
     })
 }
 

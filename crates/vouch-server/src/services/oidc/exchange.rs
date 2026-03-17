@@ -125,7 +125,9 @@ pub async fn exchange_token(
 
     // Verify the subject token's session exists
     let subject_token_hash = hash_token(params.subject_token);
-    let subject_session = db::get_session_by_token_hash(&state.store, &subject_token_hash)
+    let subject_session = state
+        .session_cache
+        .get_session_by_token_hash(&state.store, &subject_token_hash)
         .await
         .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?
         .ok_or_else(|| {
@@ -176,7 +178,10 @@ pub async fn exchange_token(
         // Verify the actor token's session exists in the database
         let actor_token_hash = hash_token(actor_token);
         if !matches!(
-            db::get_session_by_token_hash(&state.store, &actor_token_hash).await,
+            state
+                .session_cache
+                .get_session_by_token_hash(&state.store, &actor_token_hash)
+                .await,
             Ok(Some(_))
         ) {
             return Err(ServiceError::oauth(

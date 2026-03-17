@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use jiff::Timestamp;
-use sea_query::{Expr, Iden, Order, Query};
+use sea_query::{Cond, Expr, Iden, Order, Query};
 
 use super::document_type::{Document, DocumentType};
 use super::pool::Pool;
@@ -41,6 +41,36 @@ enum Documents {
     Version,
     LastUsedAt,
 }
+
+/// All document columns (unqualified) for `SELECT` statements on a
+/// single table.
+const DOC_COLUMNS: [Documents; 10] = [
+    Documents::Id,
+    Documents::DocType,
+    Documents::SchemaVersion,
+    Documents::EncappedKey,
+    Documents::Data,
+    Documents::ExpiresAt,
+    Documents::CreatedAt,
+    Documents::UpdatedAt,
+    Documents::Version,
+    Documents::LastUsedAt,
+];
+
+/// All document columns qualified with the table name, for `SELECT`
+/// statements involving joins.
+const DOC_TABLE_COLUMNS: [(Documents, Documents); 10] = [
+    (Documents::Table, Documents::Id),
+    (Documents::Table, Documents::DocType),
+    (Documents::Table, Documents::SchemaVersion),
+    (Documents::Table, Documents::EncappedKey),
+    (Documents::Table, Documents::Data),
+    (Documents::Table, Documents::ExpiresAt),
+    (Documents::Table, Documents::CreatedAt),
+    (Documents::Table, Documents::UpdatedAt),
+    (Documents::Table, Documents::Version),
+    (Documents::Table, Documents::LastUsedAt),
+];
 
 #[derive(Iden)]
 enum DocumentIndexes {
@@ -98,6 +128,9 @@ struct RawDocumentRow {
     updated_at: String,
     version: i32,
     last_used_at: Option<String>,
+    /// Window-function total count, present only in paginated queries.
+    #[sqlx(default)]
+    total_count: Option<i64>,
 }
 
 /// Raw row with just an id column (for expired doc lookups).
@@ -227,6 +260,25 @@ fn index_value_condition(crypto: &dyn DocumentCrypto, value: &str) -> sea_query:
     }
 }
 
+/// Like [`index_value_condition`] but references `index_value` through a
+/// join alias instead of the canonical `DocumentIndexes` table name.
+///
+/// Used by `find_by_indexes` to build self-join conditions for each
+/// additional criterion without aliasing conflicts.
+fn index_value_condition_aliased(
+    crypto: &dyn DocumentCrypto,
+    value: &str,
+    alias: &sea_query::Alias,
+) -> sea_query::SimpleExpr {
+    let hashed = crypto.hmac_index(value);
+    let col = Expr::col((alias.clone(), DocumentIndexes::IndexValue));
+    if hashed == value {
+        col.eq(value.to_string())
+    } else {
+        col.is_in([hashed, value.to_string()])
+    }
+}
+
 // ============================================================================
 // DocumentStore
 // ============================================================================
@@ -328,18 +380,7 @@ impl DocumentStore {
     /// Returns an error if decryption or deserialization fails.
     pub async fn get<T: DocumentType>(&self, id: &str) -> Result<Option<Document<T>>> {
         let stmt = Query::select()
-            .columns([
-                Documents::Id,
-                Documents::DocType,
-                Documents::SchemaVersion,
-                Documents::EncappedKey,
-                Documents::Data,
-                Documents::ExpiresAt,
-                Documents::CreatedAt,
-                Documents::UpdatedAt,
-                Documents::Version,
-                Documents::LastUsedAt,
-            ])
+            .columns(DOC_COLUMNS)
             .from(Documents::Table)
             .and_where(Expr::col(Documents::Id).eq(id))
             .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
@@ -365,18 +406,7 @@ impl DocumentStore {
         }
 
         let stmt = Query::select()
-            .columns([
-                Documents::Id,
-                Documents::DocType,
-                Documents::SchemaVersion,
-                Documents::EncappedKey,
-                Documents::Data,
-                Documents::ExpiresAt,
-                Documents::CreatedAt,
-                Documents::UpdatedAt,
-                Documents::Version,
-                Documents::LastUsedAt,
-            ])
+            .columns(DOC_COLUMNS)
             .from(Documents::Table)
             .and_where(Expr::col(Documents::Id).is_in(ids.iter().copied()))
             .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
@@ -410,18 +440,7 @@ impl DocumentStore {
         let index_cond = index_value_condition(&*self.crypto, value);
 
         let stmt = Query::select()
-            .columns([
-                (Documents::Table, Documents::Id),
-                (Documents::Table, Documents::DocType),
-                (Documents::Table, Documents::SchemaVersion),
-                (Documents::Table, Documents::EncappedKey),
-                (Documents::Table, Documents::Data),
-                (Documents::Table, Documents::ExpiresAt),
-                (Documents::Table, Documents::CreatedAt),
-                (Documents::Table, Documents::UpdatedAt),
-                (Documents::Table, Documents::Version),
-                (Documents::Table, Documents::LastUsedAt),
-            ])
+            .columns(DOC_TABLE_COLUMNS)
             .from(Documents::Table)
             .inner_join(
                 DocumentIndexes::Table,
@@ -455,18 +474,7 @@ impl DocumentStore {
         let index_cond = index_value_condition(&*self.crypto, value);
 
         let stmt = Query::select()
-            .columns([
-                (Documents::Table, Documents::Id),
-                (Documents::Table, Documents::DocType),
-                (Documents::Table, Documents::SchemaVersion),
-                (Documents::Table, Documents::EncappedKey),
-                (Documents::Table, Documents::Data),
-                (Documents::Table, Documents::ExpiresAt),
-                (Documents::Table, Documents::CreatedAt),
-                (Documents::Table, Documents::UpdatedAt),
-                (Documents::Table, Documents::Version),
-                (Documents::Table, Documents::LastUsedAt),
-            ])
+            .columns(DOC_TABLE_COLUMNS)
             .from(Documents::Table)
             .inner_join(
                 DocumentIndexes::Table,
@@ -507,18 +515,7 @@ impl DocumentStore {
 
         let mut query = Query::select();
         query
-            .columns([
-                (Documents::Table, Documents::Id),
-                (Documents::Table, Documents::DocType),
-                (Documents::Table, Documents::SchemaVersion),
-                (Documents::Table, Documents::EncappedKey),
-                (Documents::Table, Documents::Data),
-                (Documents::Table, Documents::ExpiresAt),
-                (Documents::Table, Documents::CreatedAt),
-                (Documents::Table, Documents::UpdatedAt),
-                (Documents::Table, Documents::Version),
-                (Documents::Table, Documents::LastUsedAt),
-            ])
+            .columns(DOC_TABLE_COLUMNS)
             .from(Documents::Table)
             .inner_join(
                 DocumentIndexes::Table,
@@ -553,6 +550,10 @@ impl DocumentStore {
 
     /// Find documents matching multiple index criteria (AND).
     ///
+    /// Each criterion is pushed into SQL as an INNER JOIN on `document_indexes`,
+    /// one join per criterion. This avoids loading all candidates for the first
+    /// criterion into memory when many rows match.
+    ///
     /// # Errors
     ///
     /// Returns an error if decryption or deserialization fails.
@@ -564,29 +565,37 @@ impl DocumentStore {
             return Ok(Vec::new());
         }
 
-        // Strategy: find by first criterion, then filter in-memory
-        let (first_field, first_value) = criteria.first().copied().context("empty criteria")?;
-        let candidates = self.find_all::<T>(first_field, first_value).await?;
+        let mut query = Query::select();
+        query
+            .columns(DOC_TABLE_COLUMNS)
+            .from(Documents::Table)
+            .and_where(Expr::col((Documents::Table, Documents::DocType)).eq(T::DOC_TYPE));
 
-        if criteria.len() == 1 {
-            return Ok(candidates);
+        for (i, (field, value)) in criteria.iter().enumerate() {
+            let alias = sea_query::Alias::new(format!("i{i}"));
+            let join_cond = Cond::all()
+                .add(
+                    Expr::col((Documents::Table, Documents::Id))
+                        .equals((alias.clone(), DocumentIndexes::DocumentId)),
+                )
+                .add(Expr::col((alias.clone(), DocumentIndexes::IndexField)).eq(*field))
+                .add(index_value_condition_aliased(&*self.crypto, value, &alias));
+            query.join_as(
+                sea_query::JoinType::InnerJoin,
+                DocumentIndexes::Table,
+                alias,
+                join_cond,
+            );
         }
 
-        // For additional criteria, re-compute indexes and filter
-        let mut filtered = Vec::new();
-        for doc in candidates {
-            let entries = doc.data.index_entries();
-            let matches_all = criteria.iter().skip(1).all(|(f, v)| {
-                let target_hash = self.crypto.hmac_index(v);
-                entries
-                    .iter()
-                    .any(|e| e.field == *f && self.crypto.hmac_index(&e.value) == target_hash)
-            });
-            if matches_all {
-                filtered.push(doc);
-            }
+        let stmt = query.to_owned();
+        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
+
+        let mut results = Vec::with_capacity(rows.len());
+        for row in rows {
+            results.push(raw_to_document::<T>(&self.crypto, row)?);
         }
-        Ok(filtered)
+        Ok(results)
     }
 
     // ========================================================================
@@ -936,18 +945,7 @@ impl DocumentStore {
     /// Returns an error if decryption or deserialization fails.
     pub async fn list_all<T: DocumentType>(&self) -> Result<Vec<Document<T>>> {
         let stmt = Query::select()
-            .columns([
-                Documents::Id,
-                Documents::DocType,
-                Documents::SchemaVersion,
-                Documents::EncappedKey,
-                Documents::Data,
-                Documents::ExpiresAt,
-                Documents::CreatedAt,
-                Documents::UpdatedAt,
-                Documents::Version,
-                Documents::LastUsedAt,
-            ])
+            .columns(DOC_COLUMNS)
             .from(Documents::Table)
             .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
             .order_by(Documents::CreatedAt, Order::Desc)
@@ -962,46 +960,99 @@ impl DocumentStore {
         Ok(results)
     }
 
-    /// List documents of a given type with DB-level pagination.
+    /// List documents of a given type with cursor-based pagination.
     ///
-    /// `offset` is 0-based. Results are ordered by `created_at` ascending
-    /// (oldest first) for stable pagination.
+    /// Document IDs are UUIDv7s, so they are time-ordered and monotonically
+    /// increasing. The cursor is simply the last `id` from the previous page;
+    /// `WHERE id > $cursor` with `ORDER BY id ASC` gives stable pagination
+    /// without needing a composite key.
+    ///
+    /// Fetches `limit + 1` rows; the extra row detects whether more pages
+    /// exist without a separate COUNT query.
     ///
     /// # Errors
     ///
     /// Returns an error if decryption or deserialization fails.
     pub async fn list_all_paginated<T: DocumentType>(
         &self,
+        after_id: Option<&str>,
+        limit: u64,
+    ) -> Result<(Vec<Document<T>>, bool)> {
+        let mut query = Query::select();
+        query
+            .columns(DOC_COLUMNS)
+            .from(Documents::Table)
+            .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE));
+
+        if let Some(cursor) = after_id {
+            query.and_where(Expr::col(Documents::Id).gt(cursor));
+        }
+
+        let stmt = query
+            .order_by(Documents::Id, Order::Asc)
+            .limit(limit + 1)
+            .to_owned();
+
+        let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
+
+        let has_more = rows.len() as u64 > limit;
+        let take = if has_more { limit as usize } else { rows.len() };
+
+        let mut results = Vec::with_capacity(take);
+        for row in rows.into_iter().take(take) {
+            results.push(raw_to_document::<T>(&self.crypto, row)?);
+        }
+        Ok((results, has_more))
+    }
+
+    /// List documents with OFFSET pagination and a total count in one query.
+    ///
+    /// Uses `COUNT(*) OVER()` window function to return the total matching row
+    /// count alongside the page results. Offset is capped at 10,000; requests
+    /// beyond that return an error.
+    ///
+    /// Results are ordered by `id ASC` (UUIDv7 = insertion order).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if decryption or deserialization fails.
+    ///
+    /// # Panics safety
+    ///
+    /// Callers must validate `offset` before calling; large offsets
+    /// will degrade performance on big tables.
+    pub async fn list_all_paginated_with_count<T: DocumentType>(
+        &self,
         offset: u64,
         limit: u64,
-    ) -> Result<Vec<Document<T>>> {
+    ) -> Result<(Vec<Document<T>>, i64)> {
         let stmt = Query::select()
-            .columns([
-                Documents::Id,
-                Documents::DocType,
-                Documents::SchemaVersion,
-                Documents::EncappedKey,
-                Documents::Data,
-                Documents::ExpiresAt,
-                Documents::CreatedAt,
-                Documents::UpdatedAt,
-                Documents::Version,
-                Documents::LastUsedAt,
-            ])
+            .columns(DOC_COLUMNS)
+            .expr_as(
+                Expr::cust("COUNT(*) OVER()"),
+                sea_query::Alias::new("total_count"),
+            )
             .from(Documents::Table)
             .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
-            .order_by(Documents::CreatedAt, Order::Asc)
+            .order_by(Documents::Id, Order::Asc)
             .offset(offset)
             .limit(limit)
             .to_owned();
 
         let rows: Vec<RawDocumentRow> = crate::db_fetch_all!(&self.pool, stmt, RawDocumentRow)?;
 
+        let total_count = if let Some(total) = rows.first().and_then(|r| r.total_count) {
+            total
+        } else {
+            // OFFSET can produce an empty page even when matching rows exist.
+            self.count_all::<T>().await?
+        };
+
         let mut results = Vec::with_capacity(rows.len());
         for row in rows {
             results.push(raw_to_document::<T>(&self.crypto, row)?);
         }
-        Ok(results)
+        Ok((results, total_count))
     }
 }
 
@@ -1081,18 +1132,7 @@ impl<'a> StoreTransaction<'a> {
         // INSERT document
         let insert_stmt = Query::insert()
             .into_table(Documents::Table)
-            .columns([
-                Documents::Id,
-                Documents::DocType,
-                Documents::SchemaVersion,
-                Documents::EncappedKey,
-                Documents::Data,
-                Documents::ExpiresAt,
-                Documents::CreatedAt,
-                Documents::UpdatedAt,
-                Documents::Version,
-                Documents::LastUsedAt,
-            ])
+            .columns(DOC_COLUMNS)
             .values([
                 id.into(),
                 T::DOC_TYPE.into(),
@@ -1145,18 +1185,7 @@ impl<'a> StoreTransaction<'a> {
     /// Returns an error if decryption or deserialization fails.
     pub async fn get<T: DocumentType>(&mut self, id: &str) -> Result<Option<Document<T>>> {
         let stmt = Query::select()
-            .columns([
-                Documents::Id,
-                Documents::DocType,
-                Documents::SchemaVersion,
-                Documents::EncappedKey,
-                Documents::Data,
-                Documents::ExpiresAt,
-                Documents::CreatedAt,
-                Documents::UpdatedAt,
-                Documents::Version,
-                Documents::LastUsedAt,
-            ])
+            .columns(DOC_COLUMNS)
             .from(Documents::Table)
             .and_where(Expr::col(Documents::Id).eq(id))
             .and_where(Expr::col(Documents::DocType).eq(T::DOC_TYPE))
@@ -1189,18 +1218,7 @@ impl<'a> StoreTransaction<'a> {
         let index_cond = index_value_condition(&**self.crypto, value);
 
         let stmt = Query::select()
-            .columns([
-                (Documents::Table, Documents::Id),
-                (Documents::Table, Documents::DocType),
-                (Documents::Table, Documents::SchemaVersion),
-                (Documents::Table, Documents::EncappedKey),
-                (Documents::Table, Documents::Data),
-                (Documents::Table, Documents::ExpiresAt),
-                (Documents::Table, Documents::CreatedAt),
-                (Documents::Table, Documents::UpdatedAt),
-                (Documents::Table, Documents::Version),
-                (Documents::Table, Documents::LastUsedAt),
-            ])
+            .columns(DOC_TABLE_COLUMNS)
             .from(Documents::Table)
             .inner_join(
                 DocumentIndexes::Table,
@@ -1233,18 +1251,7 @@ impl<'a> StoreTransaction<'a> {
         let index_cond = index_value_condition(&**self.crypto, value);
 
         let stmt = Query::select()
-            .columns([
-                (Documents::Table, Documents::Id),
-                (Documents::Table, Documents::DocType),
-                (Documents::Table, Documents::SchemaVersion),
-                (Documents::Table, Documents::EncappedKey),
-                (Documents::Table, Documents::Data),
-                (Documents::Table, Documents::ExpiresAt),
-                (Documents::Table, Documents::CreatedAt),
-                (Documents::Table, Documents::UpdatedAt),
-                (Documents::Table, Documents::Version),
-                (Documents::Table, Documents::LastUsedAt),
-            ])
+            .columns(DOC_TABLE_COLUMNS)
             .from(Documents::Table)
             .inner_join(
                 DocumentIndexes::Table,
@@ -1616,7 +1623,9 @@ mod tests {
     }
 
     async fn test_store() -> DocumentStore {
-        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let pool = Pool::connect("sqlite::memory:", &crate::db::pool::PoolConfig::default())
+            .await
+            .unwrap();
 
         // Tests always use SQLite — execute raw DDL directly
         let Pool::Sqlite(ref p) = pool else {
@@ -2045,17 +2054,48 @@ mod tests {
             store.insert(&doc).await.unwrap();
         }
 
-        // First page
-        let page1 = store.list_all_paginated::<TestDoc>(0, 2).await.unwrap();
+        // First page — no cursor
+        let (page1, has_more1) = store.list_all_paginated::<TestDoc>(None, 2).await.unwrap();
         assert_eq!(page1.len(), 2);
+        assert!(has_more1);
 
-        // Second page
-        let page2 = store.list_all_paginated::<TestDoc>(2, 2).await.unwrap();
+        // Second page — cursor is the last id from page 1
+        let cursor1 = page1.last().unwrap().id.clone();
+        let (page2, has_more2) = store
+            .list_all_paginated::<TestDoc>(Some(cursor1.as_str()), 2)
+            .await
+            .unwrap();
         assert_eq!(page2.len(), 2);
+        assert!(has_more2);
 
-        // Third page (only 1 left)
-        let page3 = store.list_all_paginated::<TestDoc>(4, 2).await.unwrap();
+        // Third page — cursor is the last id from page 2
+        let cursor2 = page2.last().unwrap().id.clone();
+        let (page3, has_more3) = store
+            .list_all_paginated::<TestDoc>(Some(cursor2.as_str()), 2)
+            .await
+            .unwrap();
         assert_eq!(page3.len(), 1);
+        assert!(!has_more3);
+    }
+
+    #[tokio::test]
+    async fn list_all_paginated_with_count_preserves_total_past_end() {
+        let store = test_store().await;
+
+        for i in 0..3 {
+            let doc = TestDoc {
+                name: format!("offset-count-{i}"),
+                value: i,
+            };
+            store.insert(&doc).await.unwrap();
+        }
+
+        let (page, total_count) = store
+            .list_all_paginated_with_count::<TestDoc>(10, 2)
+            .await
+            .unwrap();
+        assert!(page.is_empty());
+        assert_eq!(total_count, 3);
     }
 
     #[tokio::test]

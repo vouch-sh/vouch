@@ -40,6 +40,32 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
+/// Connection pool configuration.
+///
+/// Populated from CLI args / environment via clap in `config::Args`.
+#[derive(Debug, Clone)]
+pub struct PoolConfig {
+    /// Maximum pool connections.
+    pub max_connections: u32,
+    /// Minimum idle connections.
+    pub min_connections: u32,
+    /// Idle timeout in seconds.
+    pub idle_timeout_secs: u64,
+    /// Acquire timeout in seconds.
+    pub acquire_timeout_secs: u64,
+}
+
+impl Default for PoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 25,
+            min_connections: 2,
+            idle_timeout_secs: 300,
+            acquire_timeout_secs: 5,
+        }
+    }
+}
+
 use super::dsql::{DsqlEndpoint, generate_dsql_token, load_sdk_config};
 
 /// Database type enum for runtime SQL dialect selection.
@@ -124,7 +150,7 @@ impl Pool {
     /// - The URL scheme is not supported
     /// - The connection fails
     /// - For DSQL: AWS credentials cannot be loaded or token generation fails
-    pub async fn connect(url: &str) -> Result<Self> {
+    pub async fn connect(url: &str, pool_cfg: &PoolConfig) -> Result<Self> {
         let db_type = DatabaseType::from_url(url)?;
 
         match db_type {
@@ -135,9 +161,23 @@ impl Pool {
             DatabaseType::Postgres => {
                 if let Some(dsql) = DsqlEndpoint::from_url(url)? {
                     let parsed = url::Url::parse(url).context("failed to parse PostgreSQL URL")?;
-                    Self::connect_dsql(&dsql, parsed.username()).await
+                    Self::connect_dsql(&dsql, parsed.username(), pool_cfg).await
                 } else {
-                    let pool = sqlx::PgPool::connect(url).await?;
+                    let max_connections = pool_cfg.max_connections;
+                    tracing::info!(
+                        max_connections,
+                        min_connections = pool_cfg.min_connections,
+                        idle_timeout_secs = pool_cfg.idle_timeout_secs,
+                        acquire_timeout_secs = pool_cfg.acquire_timeout_secs,
+                        "creating PostgreSQL connection pool"
+                    );
+                    let pool = PgPoolOptions::new()
+                        .max_connections(max_connections)
+                        .min_connections(pool_cfg.min_connections)
+                        .idle_timeout(Duration::from_secs(pool_cfg.idle_timeout_secs))
+                        .acquire_timeout(Duration::from_secs(pool_cfg.acquire_timeout_secs))
+                        .connect(url)
+                        .await?;
                     Ok(Self::Postgres(pool))
                 }
             }
@@ -156,7 +196,7 @@ impl Pool {
     ///
     /// * `dsql` - Parsed DSQL endpoint (direct or VPC)
     /// * `user` - Database username (typically "admin" for admin access)
-    async fn connect_dsql(dsql: &DsqlEndpoint, user: &str) -> Result<Self> {
+    async fn connect_dsql(dsql: &DsqlEndpoint, user: &str, pool_cfg: &PoolConfig) -> Result<Self> {
         let region = dsql.region().to_string();
 
         // Use provided user or default to "admin"
@@ -197,18 +237,22 @@ impl Pool {
             connect_options = connect_options.options([opt]);
         }
 
-        // Create pool with appropriate lifetime settings for DSQL:
-        // - max_lifetime: 55 min (DSQL terminates connections after 60 min)
-        // - idle_timeout: 5 min (close idle connections sooner to avoid stale connections)
-        // - acquire_timeout: 30 sec (prevent indefinite waits)
-        // - min_connections: 2 (keep warm connections for lower latency after idle)
-        // - before_acquire: only ping connections idle >30s (avoids round-trip on active conns)
+        // DSQL-specific: max_lifetime 55 min (DSQL terminates at 60 min),
+        // before_acquire pings only connections idle >30s.
+        let max_connections = pool_cfg.max_connections;
+        tracing::info!(
+            max_connections,
+            min_connections = pool_cfg.min_connections,
+            idle_timeout_secs = pool_cfg.idle_timeout_secs,
+            acquire_timeout_secs = pool_cfg.acquire_timeout_secs,
+            "creating Aurora DSQL connection pool"
+        );
         let pool = PgPoolOptions::new()
-            .max_connections(10)
-            .min_connections(2)
+            .max_connections(max_connections)
+            .min_connections(pool_cfg.min_connections)
             .max_lifetime(Duration::from_secs(55 * 60))
-            .idle_timeout(Duration::from_secs(5 * 60))
-            .acquire_timeout(Duration::from_secs(30))
+            .idle_timeout(Duration::from_secs(pool_cfg.idle_timeout_secs))
+            .acquire_timeout(Duration::from_secs(pool_cfg.acquire_timeout_secs))
             .test_before_acquire(false)
             .before_acquire(|conn, meta| {
                 Box::pin(async move {
@@ -786,7 +830,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_pool_connect_sqlite() {
-        let pool = Pool::connect("sqlite::memory:").await.unwrap();
+        let pool = Pool::connect("sqlite::memory:", &PoolConfig::default())
+            .await
+            .unwrap();
         assert_eq!(pool.db_type(), DatabaseType::Sqlite);
     }
 

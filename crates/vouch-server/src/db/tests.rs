@@ -15,7 +15,7 @@ use crate::db::store::DocumentStore;
 /// Returns a `(DocumentStore, AuditStore)` pair backed by the same
 /// in-memory pool with migrations applied.
 async fn test_db() -> (DocumentStore, AuditStore) {
-    let pool = Pool::connect("sqlite::memory:")
+    let pool = Pool::connect("sqlite::memory:", &pool::PoolConfig::default())
         .await
         .expect("Failed to create test database");
 
@@ -841,31 +841,26 @@ async fn test_scim_user_list_and_filter() {
     }
 
     // List all users
-    let users = list_scim_users(&store, None, 1, 100)
+    let (users, total) = list_scim_users(&store, None, 1, 100)
         .await
         .expect("Failed to list users");
     assert_eq!(users.len(), 5);
-
-    // Count users
-    let count = count_scim_users(&store, None)
-        .await
-        .expect("Failed to count users");
-    assert_eq!(count, 5);
+    assert_eq!(total, 5);
 
     // Filter by userName (email)
-    let users = list_scim_users(&store, Some("userName eq \"user2@example.com\""), 1, 100)
+    let (users, _) = list_scim_users(&store, Some("userName eq \"user2@example.com\""), 1, 100)
         .await
         .expect("Failed to filter users");
     assert_eq!(users.len(), 1);
     assert_eq!(users[0].email, "user2@example.com");
 
     // Pagination
-    let page1 = list_scim_users(&store, None, 1, 2)
+    let (page1, _) = list_scim_users(&store, None, 1, 2)
         .await
         .expect("Failed to paginate");
     assert_eq!(page1.len(), 2);
 
-    let page2 = list_scim_users(&store, None, 3, 2)
+    let (page2, _) = list_scim_users(&store, None, 3, 2)
         .await
         .expect("Failed to paginate");
     assert_eq!(page2.len(), 2);
@@ -1596,15 +1591,11 @@ async fn test_scim_group_lifecycle() {
     assert_eq!(updated.external_id.as_deref(), Some("ext-grp-2"));
 
     // List
-    let groups = list_scim_groups(&store, None, 1, 100)
+    let (groups, total) = list_scim_groups(&store, None, 1, 100)
         .await
         .expect("list_scim_groups failed");
     assert_eq!(groups.len(), 1);
-
-    let count = count_scim_groups(&store, None)
-        .await
-        .expect("count_scim_groups failed");
-    assert_eq!(count, 1);
+    assert_eq!(total, 1);
 
     // Delete
     let deleted = delete_scim_group(&store, &group.id)
@@ -1999,7 +1990,7 @@ async fn test_scim_user_list_filter_co_operator() {
         .expect("create alicia");
 
     // "userName co \"alic\"" should match alice and alicia
-    let results = list_scim_users(&store, Some(r#"userName co "alic""#), 1, 100)
+    let (results, _) = list_scim_users(&store, Some(r#"userName co "alic""#), 1, 100)
         .await
         .expect("list_scim_users failed");
     assert_eq!(
@@ -2028,7 +2019,7 @@ async fn test_scim_user_list_filter_sw_operator() {
         .expect("create anna");
 
     // "userName sw \"ze\"" should match zara? no — "ze" prefix: zebra matches, zara does not.
-    let results = list_scim_users(&store, Some(r#"userName sw "ze""#), 1, 100)
+    let (results, _) = list_scim_users(&store, Some(r#"userName sw "ze""#), 1, 100)
         .await
         .expect("list_scim_users failed");
     assert_eq!(results.len(), 1, "sw filter should match zebra only");

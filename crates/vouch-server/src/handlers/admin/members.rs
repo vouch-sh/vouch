@@ -265,6 +265,7 @@ pub async fn deactivate_member(
 
     // Invalidate all sessions for the deactivated user
     db::delete_sessions_for_user(&state.store, &target_id).await?;
+    state.session_cache.invalidate_for_user(&target_id);
 
     let data = serde_json::json!({
         "action": "deactivate",
@@ -371,6 +372,7 @@ pub async fn revoke_member_credentials(
 
     // Also kill any remaining sessions
     db::delete_sessions_for_user(&state.store, &target_id).await?;
+    state.session_cache.invalidate_for_user(&target_id);
 
     let data = serde_json::json!({
         "action": "revoke_credentials",

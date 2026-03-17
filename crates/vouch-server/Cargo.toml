@@ -41,17 +41,20 @@ der = { workspace = true, features = ["std", "oid"] }
 dotenvy = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["std"] }
 governor = { workspace = true, features = ["std"] }
-ipnet = { workspace = true, features = ["std"] }
 headers = { workspace = true }
 hex = { workspace = true, features = ["std"] }
 http = { workspace = true }
+ipnet = { workspace = true, features = ["std"] }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
+jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 maxminddb = { workspace = true }
 metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-jsonwebtoken = { workspace = true, features = ["aws_lc_rs"] }
 mime_guess = { workspace = true }
 mimalloc = { workspace = true, features = ["secure"] }
+opentelemetry = { workspace = true, features = ["trace"] }
+opentelemetry-otlp = { workspace = true, features = ["trace", "grpc-tonic"] }
+opentelemetry_sdk = { workspace = true, features = ["rt-tokio", "trace"] }
 p256 = { workspace = true, features = ["ecdsa"] }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
 rust-embed = { workspace = true, features = ["axum-ex", "deterministic-timestamps", "mime-guess"] }
@@ -62,9 +65,9 @@ sea-query-binder = { workspace = true, features = ["sqlx-sqlite", "sqlx-postgres
 secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
-sqlx = { workspace = true, features = ["runtime-tokio", "migrate", "derive", "macros", "sqlite", "postgres", "tls-rustls-aws-lc-rs"] }
 signature = { workspace = true }
 spki = { workspace = true, features = ["std"] }
+sqlx = { workspace = true, features = ["runtime-tokio", "migrate", "derive", "macros", "sqlite", "postgres", "tls-rustls-aws-lc-rs"] }
 ssh-key = { workspace = true, features = ["std", "ed25519", "encryption", "rand_core", "getrandom"] }
 subtle = { workspace = true }
 tempfile = { workspace = true }
@@ -75,9 +78,6 @@ tokio-util = { workspace = true }
 tower = { workspace = true, features = ["util"], optional = true }
 tower-http = { workspace = true, features = ["cors", "request-id", "set-header", "timeout"] }
 tower_governor = { workspace = true, features = ["axum", "tracing"] }
-opentelemetry = { workspace = true, features = ["trace"] }
-opentelemetry_sdk = { workspace = true, features = ["rt-tokio", "trace"] }
-opentelemetry-otlp = { workspace = true, features = ["trace", "grpc-tonic"] }
 tracing = { workspace = true, features = ["std"] }
 tracing-opentelemetry = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["std", "fmt", "env-filter", "json"] }
@@ -86,8 +86,8 @@ urlencoding = { workspace = true }
 uuid = { workspace = true, features = ["v7", "serde", "std"] }
 vouch-common = { workspace = true }
 webauthn-rs = { workspace = true, features = ["danger-allow-state-serialisation"] }
-x509-cert = { workspace = true, features = ["std", "pem"] }
 webauthn-rs-proto = { workspace = true }
+x509-cert = { workspace = true, features = ["std", "pem"] }
 zeroize = { workspace = true }
 
 [dev-dependencies]

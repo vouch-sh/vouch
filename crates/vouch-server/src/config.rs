@@ -66,7 +66,7 @@ pub struct Args {
     #[arg(long, env = "VOUCH_LISTEN_ADDR", default_value = "[::]:3000")]
     pub listen_addr: String,
 
-    /// SQLite database URL (e.g., "sqlite:vouch.db").
+    /// Database URL (sqlite, postgres, or DSQL).
     #[arg(
         long,
         env = "VOUCH_DATABASE_URL",
@@ -275,6 +275,34 @@ pub struct Args {
     /// Bearer token for /metrics endpoint. If unset, /metrics is disabled.
     #[arg(long, env = "VOUCH_METRICS_BEARER_TOKEN")]
     pub metrics_bearer_token: Option<String>,
+
+    /// Maximum number of database connections in the pool.
+    #[arg(long, env = "VOUCH_DB_MAX_CONNECTIONS", default_value = "25")]
+    pub db_max_connections: u32,
+
+    /// Minimum number of idle database connections in the pool.
+    #[arg(long, env = "VOUCH_DB_MIN_CONNECTIONS", default_value = "2")]
+    pub db_min_connections: u32,
+
+    /// Idle connection timeout in seconds.
+    #[arg(long, env = "VOUCH_DB_IDLE_TIMEOUT_SECS", default_value = "300")]
+    pub db_idle_timeout_secs: u64,
+
+    /// Connection acquire timeout in seconds.
+    #[arg(long, env = "VOUCH_DB_ACQUIRE_TIMEOUT_SECS", default_value = "5")]
+    pub db_acquire_timeout_secs: u64,
+
+    /// Maximum number of entries in the session lookup cache.
+    #[arg(
+        long,
+        env = "VOUCH_SESSION_CACHE_MAX_CAPACITY",
+        default_value = "10000"
+    )]
+    pub session_cache_max_capacity: u64,
+
+    /// Time-to-live for session cache entries in seconds.
+    #[arg(long, env = "VOUCH_SESSION_CACHE_TTL_SECS", default_value = "30")]
+    pub session_cache_ttl_secs: u64,
 }
 
 // ============================================================================
@@ -286,7 +314,7 @@ pub struct Args {
 pub struct ServerConfig {
     /// Address to listen on (e.g., "[::]:3000").
     pub listen_addr: String,
-    /// `SQLite` database URL (e.g., "sqlite:vouch.db").
+    /// Database URL (sqlite, postgres, or DSQL).
     pub database_url: String,
     /// Relying Party ID (domain, e.g., "vouch.sh").
     pub rp_id: String,
@@ -386,6 +414,12 @@ pub struct ServerConfig {
     /// Bearer token for /metrics endpoint access control.
     /// If `None`, the /metrics endpoint is not exposed.
     pub metrics_bearer_token: Option<SecretString>,
+    /// Database pool configuration.
+    pub pool_config: crate::db::pool::PoolConfig,
+    /// Maximum entries in the session lookup cache.
+    pub session_cache_max_capacity: u64,
+    /// TTL for session cache entries in seconds.
+    pub session_cache_ttl_secs: u64,
 }
 
 /// Log output format.
@@ -495,6 +529,14 @@ impl ServerConfig {
             log_format,
             trusted_proxies,
             metrics_bearer_token: args.metrics_bearer_token.map(SecretString::from),
+            pool_config: crate::db::pool::PoolConfig {
+                max_connections: args.db_max_connections,
+                min_connections: args.db_min_connections,
+                idle_timeout_secs: args.db_idle_timeout_secs,
+                acquire_timeout_secs: args.db_acquire_timeout_secs,
+            },
+            session_cache_max_capacity: args.session_cache_max_capacity,
+            session_cache_ttl_secs: args.session_cache_ttl_secs,
         })
     }
 
