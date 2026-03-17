@@ -375,16 +375,16 @@ pub async fn token(
     } = match params.parse() {
         Ok(parsed) => parsed,
         Err(_) => {
-        let supported = OAuthGrantType::supported_wire_values().join(", ");
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(OAuthErrorResponse {
-                error: "unsupported_grant_type".to_string(),
-                error_description: Some(format!("Supported grant types: {supported}")),
-                error_uri: None,
-            }),
-        )
-            .into_response();
+            let supported = OAuthGrantType::supported_wire_values().join(", ");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(OAuthErrorResponse {
+                    error: "unsupported_grant_type".to_string(),
+                    error_description: Some(format!("Supported grant types: {supported}")),
+                    error_uri: None,
+                }),
+            )
+                .into_response();
         }
     };
 

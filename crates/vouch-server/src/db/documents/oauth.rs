@@ -415,9 +415,7 @@ impl DocumentType for DelegationPolicyDoc {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
-    use super::{
-        AccessScope, OAuthClientType, OAuthDocumentParseError, TokenEndpointAuthMethod,
-    };
+    use super::{AccessScope, OAuthClientType, OAuthDocumentParseError, TokenEndpointAuthMethod};
     use std::str::FromStr;
 
     #[test]
@@ -433,7 +431,10 @@ mod tests {
     #[test]
     fn test_oauth_client_type_from_str_case_insensitive() {
         assert_eq!(OAuthClientType::from_str("WEB"), Ok(OAuthClientType::Web));
-        assert_eq!(OAuthClientType::from_str("Native"), Ok(OAuthClientType::Native));
+        assert_eq!(
+            OAuthClientType::from_str("Native"),
+            Ok(OAuthClientType::Native)
+        );
         assert_eq!(OAuthClientType::from_str("spa"), Ok(OAuthClientType::Spa));
         assert_eq!(
             OAuthClientType::from_str("Service"),
