@@ -255,11 +255,13 @@ jobs:
 
       - name: Build CLI and Agent (Linux)
         if: runner.os == 'Linux'
-        run: |
-          TARGET=${{ matrix.target }} \
-          SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
-          GENERATE_SBOM=true \
-          docker buildx bake cli
+        uses: docker/bake-action@82490499d2e5613fcead7e128237ef0b0ea210f7 # v7.0.0
+        with:
+          targets: cli
+        env:
+          TARGET: ${{ matrix.target }}
+          SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
+          GENERATE_SBOM: "true"
 
       - name: Build CLI and Agent
         if: runner.os != 'Linux' && matrix.bins == 'vouch vouch-agent'
@@ -496,11 +498,13 @@ jobs:
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Build server and generate SBOM (musl)
-        run: |
-          TARGET=${{ matrix.target }} \
-          SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
-          GENERATE_SBOM=true \
-          docker buildx bake server
+        uses: docker/bake-action@82490499d2e5613fcead7e128237ef0b0ea210f7 # v7.0.0
+        with:
+          targets: server
+        env:
+          TARGET: ${{ matrix.target }}
+          SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
+          GENERATE_SBOM: "true"
 
       - name: Create server archive
         run: |
@@ -710,10 +714,12 @@ jobs:
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - name: Rebuild binaries
-        run: |
-          TARGET=x86_64-unknown-linux-musl \
-          SOURCE_DATE_EPOCH=${{ env.SOURCE_DATE_EPOCH }} \
-          docker buildx bake reproduce
+        uses: docker/bake-action@82490499d2e5613fcead7e128237ef0b0ea210f7 # v7.0.0
+        with:
+          targets: reproduce
+        env:
+          TARGET: x86_64-unknown-linux-musl
+          SOURCE_DATE_EPOCH: ${{ env.SOURCE_DATE_EPOCH }}
 
       - name: Download original artifacts
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
