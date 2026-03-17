@@ -151,9 +151,11 @@ jobs:
 
       - name: Build (Linux)
         if: runner.os == 'Linux'
-        run: |
-          TARGET=${{ matrix.target }} \
-          docker buildx bake ci
+        uses: docker/bake-action@82490499d2e5613fcead7e128237ef0b0ea210f7 # v7.0.0
+        with:
+          targets: ci
+        env:
+          TARGET: ${{ matrix.target }}
       - name: Build
         if: runner.os != 'Linux'
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}

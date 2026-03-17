@@ -2,6 +2,7 @@
 //! OIDC Core 1.0 Section 4 — Discovery + JWKS tests.
 
 use super::helpers::*;
+use std::collections::BTreeSet;
 
 #[tokio::test]
 async fn test_oidc_discovery_required_fields() {
@@ -107,6 +108,40 @@ async fn test_oidc_discovery_supported_grant_types() {
         grant_types.contains(&"urn:ietf:params:oauth:grant-type:device_code"),
         "device_code grant type should be supported"
     );
+}
+
+#[tokio::test]
+async fn test_oidc_discovery_grant_types_match_token_parser() {
+    // Regression guard: discovery metadata and token parser must stay in sync.
+    let (app, _state) = test_app().await;
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let discovery: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let discovered: BTreeSet<String> = discovery["grant_types_supported"]
+        .as_array()
+        .expect("grant_types_supported is an array")
+        .iter()
+        .map(|v| v.as_str().expect("grant type should be string").to_string())
+        .collect();
+
+    let parser_supported = crate::handlers::oidc::token::OAuthGrantType::supported_wire_values()
+        .into_iter()
+        .map(String::from)
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        discovered, parser_supported,
+        "discovery grant_types_supported must exactly match token endpoint parser support"
+    );
+
+    for grant in &discovered {
+        let parsed = grant.parse::<crate::handlers::oidc::token::OAuthGrantType>();
+        assert!(
+            parsed.is_ok(),
+            "discovery advertises unsupported grant type in parser: {grant}"
+        );
+    }
 }
 
 #[tokio::test]

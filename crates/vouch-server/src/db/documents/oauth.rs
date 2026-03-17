@@ -3,6 +3,7 @@
 
 use jiff::Timestamp;
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 
 use crate::db::document_type::{DocumentType, IndexEntry};
 
@@ -22,6 +23,17 @@ pub enum AccessScope {
     Personal,
     #[serde(rename = "public")]
     Public,
+}
+
+/// Parse errors for OAuth document enums.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum OAuthDocumentParseError {
+    #[error("Unknown access scope: {0}")]
+    AccessScope(String),
+    #[error("Unknown OAuth client type: {0}")]
+    ClientType(String),
+    #[error("Unknown token endpoint auth method: {0}")]
+    TokenEndpointAuthMethod(String),
 }
 
 impl AccessScope {
@@ -57,14 +69,17 @@ impl AccessScope {
 }
 
 impl std::str::FromStr for AccessScope {
-    type Err = String;
+    type Err = OAuthDocumentParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "organization" => Ok(Self::Organization),
-            "personal" => Ok(Self::Personal),
-            "public" => Ok(Self::Public),
-            _ => Err(format!("Unknown access scope: {s}")),
+        if s.eq_ignore_ascii_case("organization") {
+            Ok(Self::Organization)
+        } else if s.eq_ignore_ascii_case("personal") {
+            Ok(Self::Personal)
+        } else if s.eq_ignore_ascii_case("public") {
+            Ok(Self::Public)
+        } else {
+            Err(OAuthDocumentParseError::AccessScope(s.to_string()))
         }
     }
 }
@@ -114,15 +129,19 @@ impl OAuthClientType {
 }
 
 impl std::str::FromStr for OAuthClientType {
-    type Err = String;
+    type Err = OAuthDocumentParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "web" => Ok(Self::Web),
-            "native" => Ok(Self::Native),
-            "spa" => Ok(Self::Spa),
-            "service" => Ok(Self::Service),
-            _ => Err(format!("Unknown OAuth client type: {s}")),
+        if s.eq_ignore_ascii_case("web") {
+            Ok(Self::Web)
+        } else if s.eq_ignore_ascii_case("native") {
+            Ok(Self::Native)
+        } else if s.eq_ignore_ascii_case("spa") {
+            Ok(Self::Spa)
+        } else if s.eq_ignore_ascii_case("service") {
+            Ok(Self::Service)
+        } else {
+            Err(OAuthDocumentParseError::ClientType(s.to_string()))
         }
     }
 }
@@ -161,15 +180,21 @@ impl TokenEndpointAuthMethod {
 }
 
 impl std::str::FromStr for TokenEndpointAuthMethod {
-    type Err = String;
+    type Err = OAuthDocumentParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.to_lowercase().as_str() {
-            "client_secret_basic" => Ok(Self::ClientSecretBasic),
-            "client_secret_post" => Ok(Self::ClientSecretPost),
-            "private_key_jwt" => Ok(Self::PrivateKeyJwt),
-            "none" => Ok(Self::None),
-            _ => Err(format!("Unknown token endpoint auth method: {s}")),
+        if s.eq_ignore_ascii_case("client_secret_basic") {
+            Ok(Self::ClientSecretBasic)
+        } else if s.eq_ignore_ascii_case("client_secret_post") {
+            Ok(Self::ClientSecretPost)
+        } else if s.eq_ignore_ascii_case("private_key_jwt") {
+            Ok(Self::PrivateKeyJwt)
+        } else if s.eq_ignore_ascii_case("none") {
+            Ok(Self::None)
+        } else {
+            Err(OAuthDocumentParseError::TokenEndpointAuthMethod(
+                s.to_string(),
+            ))
         }
     }
 }
@@ -384,5 +409,49 @@ impl DocumentType for DelegationPolicyDoc {
             field: "enabled",
             value: self.enabled.to_string(),
         }]
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::panic)]
+mod tests {
+    use super::{AccessScope, OAuthClientType, OAuthDocumentParseError, TokenEndpointAuthMethod};
+    use std::str::FromStr;
+
+    #[test]
+    fn test_access_scope_from_str_case_insensitive() {
+        assert_eq!(
+            AccessScope::from_str("ORGANIZATION"),
+            Ok(AccessScope::Organization)
+        );
+        assert_eq!(AccessScope::from_str("Personal"), Ok(AccessScope::Personal));
+        assert_eq!(AccessScope::from_str("public"), Ok(AccessScope::Public));
+    }
+
+    #[test]
+    fn test_oauth_client_type_from_str_case_insensitive() {
+        assert_eq!(OAuthClientType::from_str("WEB"), Ok(OAuthClientType::Web));
+        assert_eq!(
+            OAuthClientType::from_str("Native"),
+            Ok(OAuthClientType::Native)
+        );
+        assert_eq!(OAuthClientType::from_str("spa"), Ok(OAuthClientType::Spa));
+        assert_eq!(
+            OAuthClientType::from_str("Service"),
+            Ok(OAuthClientType::Service)
+        );
+    }
+
+    #[test]
+    fn test_token_endpoint_auth_method_from_str_typed_error() {
+        let err = match TokenEndpointAuthMethod::from_str("mtls") {
+            Ok(value) => panic!("must reject mtls, got {value:?}"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err,
+            OAuthDocumentParseError::TokenEndpointAuthMethod("mtls".to_string())
+        );
+        assert_eq!(err.to_string(), "Unknown token endpoint auth method: mtls");
     }
 }
