@@ -296,9 +296,7 @@ mod tests {
             Some(fake_session("hash-a")),
             generation,
         );
-        let result = cache.get("hash-a");
-        assert!(result.is_some());
-        assert!(result.unwrap().is_some());
+        assert!(matches!(cache.get("hash-a"), Some(Some(_))));
     }
 
     #[test]
@@ -312,9 +310,10 @@ mod tests {
         let cache = SessionCache::new(100, 30);
         let generation = cache.generation();
         cache.insert_if_valid("hash-b".to_string(), None, generation);
-        let result = cache.get("hash-b");
-        assert!(result.is_some(), "cache entry should exist");
-        assert!(result.unwrap().is_none(), "cached value should be None");
+        assert!(
+            matches!(cache.get("hash-b"), Some(None)),
+            "cache entry should exist with None value"
+        );
     }
 
     #[test]
@@ -417,9 +416,7 @@ mod tests {
             fresh_gen,
         );
 
-        let result = cache.get("hash-h");
-        assert!(result.is_some());
-        assert!(result.unwrap().is_some());
+        assert!(matches!(cache.get("hash-h"), Some(Some(_))));
     }
 
     #[test]
