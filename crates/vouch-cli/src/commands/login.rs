@@ -702,12 +702,12 @@ mod tests {
         let ts: jiff::Timestamp = str_result.parse().unwrap();
         let diff = ts.duration_since(jiff::Timestamp::now()).as_secs();
         assert!(
-            diff >= -2 && diff <= 1,
+            (-2..=1).contains(&diff),
             "expected near-now expiry, got {diff}"
         );
         let diff2 = ts_result.duration_since(jiff::Timestamp::now()).as_secs();
         assert!(
-            diff2 >= -2 && diff2 <= 1,
+            (-2..=1).contains(&diff2),
             "expected near-now expiry, got {diff2}"
         );
     }
