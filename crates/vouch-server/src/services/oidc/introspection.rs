@@ -196,7 +196,7 @@ pub async fn revoke_token(
         match db::delete_sessions_for_user(&state.store, user_id).await {
             Ok(count) => {
                 if count > 0 {
-                    state.session_cache.invalidate_all();
+                    state.session_cache.invalidate_for_user(user_id);
                     if let Some(ref email) = email {
                         tracing::info!(
                             "Revoked {} session(s) for user: {}",

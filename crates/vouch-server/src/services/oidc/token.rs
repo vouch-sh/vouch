@@ -220,7 +220,7 @@ pub async fn exchange_authorization_code(
                 // already granted based on the compromised authorization code."
                 match db::delete_oauth_sessions_for_user(&state.store, &user_id).await {
                     Ok(count) if count > 0 => {
-                        state.session_cache.invalidate_all();
+                        state.session_cache.invalidate_for_user(&user_id);
                         tracing::warn!(
                             target: "security",
                             user_id = %user_id,

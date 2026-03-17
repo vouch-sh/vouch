@@ -193,6 +193,7 @@ impl SessionCache {
 
     /// Invalidate cached sessions for a specific user.
     pub fn invalidate_for_user(&self, user_id: &str) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         let Ok(mut map) = self.entries.lock() else {
             return;
         };
@@ -417,6 +418,26 @@ mod tests {
         );
 
         assert!(matches!(cache.get("hash-h"), Some(Some(_))));
+    }
+
+    /// Same TOCTOU regression case for user-scoped invalidation.
+    #[test]
+    fn insert_after_invalidate_for_user_is_rejected() {
+        let cache = SessionCache::new(100, 30);
+        let gen_before = cache.generation();
+
+        cache.invalidate_for_user("user-1");
+
+        cache.insert_if_valid(
+            "hash-user".to_string(),
+            Some(fake_session("hash-user")),
+            gen_before,
+        );
+
+        assert!(
+            cache.get("hash-user").is_none(),
+            "revoked session must not be cached after invalidate_for_user"
+        );
     }
 
     #[test]
