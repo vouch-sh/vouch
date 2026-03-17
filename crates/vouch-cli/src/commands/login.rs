@@ -24,6 +24,7 @@ use serde::Serialize;
 use vouch_cli::fapi::{ClientAssertionBuilder, ClientKey, DpopProofBuilder, FapiInteraction};
 use vouch_common::Fido2ChallengeResponse;
 
+use super::enroll::expiry_offset_seconds;
 use crate::client::VouchClient;
 use crate::config::Config;
 use crate::fido2::{self, YubiKey};
@@ -561,12 +562,9 @@ fn resolve_expiry(expires_at: Option<&str>, expires_in: u64) -> (String, jiff::T
     }
 
     let ts = jiff::Timestamp::now()
-        .checked_add(jiff::SignedDuration::from_secs(
-            // Subtract 30 s to avoid serving an already-expired token.
-            i64::try_from(expires_in)
-                .unwrap_or(28800)
-                .saturating_sub(30),
-        ))
+        .checked_add(jiff::SignedDuration::from_secs(expiry_offset_seconds(
+            expires_in,
+        )))
         .unwrap_or_else(|_| jiff::Timestamp::now());
 
     (ts.to_string(), ts)
@@ -696,5 +694,21 @@ mod tests {
             .expect("should fall back to valid timestamp");
         let diff = ts.duration_since(jiff::Timestamp::now()).as_secs();
         assert!(diff > 3500 && diff <= 3570);
+    }
+
+    #[test]
+    fn test_resolve_expiry_short_ttl_does_not_set_past_expiry() {
+        let (str_result, ts_result) = resolve_expiry(None, 0);
+        let ts: jiff::Timestamp = str_result.parse().unwrap();
+        let diff = ts.duration_since(jiff::Timestamp::now()).as_secs();
+        assert!(
+            (-2..=1).contains(&diff),
+            "expected near-now expiry, got {diff}"
+        );
+        let diff2 = ts_result.duration_since(jiff::Timestamp::now()).as_secs();
+        assert!(
+            (-2..=1).contains(&diff2),
+            "expected near-now expiry, got {diff2}"
+        );
     }
 }

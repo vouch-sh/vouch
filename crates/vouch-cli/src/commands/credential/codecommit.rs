@@ -70,7 +70,7 @@ async fn get_credential() -> Result<()> {
         format!("/{path}")
     };
 
-    let creds = get_sts_credentials(region).await?;
+    let creds = get_sts_credentials().await?;
     let signed = sign_request(&creds, host, &canonical_path, region);
 
     let stdout = std::io::stdout();
@@ -111,7 +111,7 @@ pub async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()> {
     let hostname = hostname_for_region(&region);
     let path = format!("/v1/repos/{}", parsed.repository);
 
-    let creds = get_sts_credentials(&region).await?;
+    let creds = get_sts_credentials().await?;
     let signed = sign_request(&creds, &hostname, &path, &region);
 
     // Percent-encode credentials for URL embedding
@@ -128,7 +128,7 @@ pub async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()> {
 ///
 /// Reuses the shared `fetch_and_assume` from the AWS credential module to avoid
 /// duplicating the OIDC → STS logic, and wraps it with the agent credential cache.
-async fn get_sts_credentials(_region: &str) -> Result<StsCredentials> {
+async fn get_sts_credentials() -> Result<StsCredentials> {
     let session = crate::session::resolve_session()
         .await
         .context("not configured - run 'vouch enroll' first")?;

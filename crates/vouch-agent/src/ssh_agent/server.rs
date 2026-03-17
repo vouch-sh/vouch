@@ -77,10 +77,10 @@ impl SshAgentServer {
                             let state = Arc::clone(&self.state);
                             let agent_state = self.agent_state.clone();
                             tokio::spawn(async move {
+                                let _permit = permit;
                                 if let Err(e) = handle_ssh_connection(stream, state, agent_state).await {
                                     debug!("SSH agent connection error: {e}");
                                 }
-                                drop(permit);
                             });
                         }
                         Err(e) => {
