@@ -8,6 +8,7 @@ use anyhow::Result;
 use jiff::Timestamp;
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 // Re-export SessionPurpose from documents module
@@ -137,6 +138,9 @@ pub struct SessionCache {
     entries: Mutex<HashMap<String, CacheEntry>>,
     ttl: Duration,
     max_capacity: u64,
+    /// Bumped on every invalidation; prevents stale DB results from
+    /// being inserted after a concurrent revocation.
+    generation: AtomicU64,
 }
 
 struct CacheEntry {
@@ -157,6 +161,7 @@ impl SessionCache {
             entries: Mutex::new(HashMap::with_capacity(cap)),
             ttl: Duration::from_secs(ttl_secs),
             max_capacity,
+            generation: AtomicU64::new(0),
         }
     }
 
@@ -169,13 +174,17 @@ impl SessionCache {
         if let Some(cached) = self.get(token_hash) {
             return Ok(cached);
         }
+        // Snapshot generation before the async DB fetch so we can
+        // detect invalidations that occurred during the await.
+        let gen_before = self.generation.load(Ordering::SeqCst);
         let result = get_session_by_token_hash(store, token_hash).await?;
-        self.insert(token_hash.to_string(), result.clone());
+        self.insert_if_valid(token_hash.to_string(), result.clone(), gen_before);
         Ok(result)
     }
 
     /// Invalidate a cached session by token hash.
     pub fn invalidate(&self, token_hash: &str) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         let Ok(mut map) = self.entries.lock() else {
             return;
         };
@@ -197,6 +206,7 @@ impl SessionCache {
 
     /// Invalidate all cached sessions (used when bulk-deleting).
     pub fn invalidate_all(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         let Ok(mut map) = self.entries.lock() else {
             return;
         };
@@ -215,25 +225,38 @@ impl SessionCache {
         Some(entry.value.clone())
     }
 
-    fn insert(&self, key: String, value: Option<Session>) {
+    /// Expose generation for testing the TOCTOU guard.
+    #[cfg(test)]
+    fn generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    /// Insert a value only if no invalidation has occurred since
+    /// `expected_gen` was captured. The generation is re-checked under
+    /// the lock so no invalidation can race between the check and the
+    /// actual map write.
+    fn insert_if_valid(&self, key: String, value: Option<Session>, expected_gen: u64) {
         let Ok(mut map) = self.entries.lock() else {
             return;
         };
+        // Relaxed is safe: Mutex::lock() provides the acquire barrier.
+        if self.generation.load(Ordering::Relaxed) != expected_gen {
+            return;
+        }
         if self.max_capacity == 0 {
             return;
         }
         if map.len() as u64 >= self.max_capacity {
             let ttl = self.ttl;
             map.retain(|_, e| e.inserted_at.elapsed() < ttl);
-            while map.len() as u64 >= self.max_capacity {
+            if map.len() as u64 >= self.max_capacity {
                 let oldest_key = map
                     .iter()
                     .min_by_key(|(_, entry)| entry.inserted_at)
                     .map(|(k, _)| k.clone());
-                let Some(oldest_key) = oldest_key else {
-                    break;
-                };
-                map.remove(&oldest_key);
+                if let Some(oldest_key) = oldest_key {
+                    map.remove(&oldest_key);
+                }
             }
         }
         map.insert(
@@ -243,5 +266,200 @@ impl SessionCache {
                 inserted_at: Instant::now(),
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_session(token_hash: &str) -> Session {
+        Session {
+            id: "sess-1".to_string(),
+            user_id: "user-1".to_string(),
+            user_email: "test@example.com".to_string(),
+            token_hash: token_hash.to_string(),
+            authenticator_id: None,
+            expires_at: Timestamp::now(),
+            created_at: Timestamp::now(),
+            session_type: SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+        }
+    }
+
+    #[test]
+    fn cache_hit_returns_cached_value() {
+        let cache = SessionCache::new(100, 30);
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-a".to_string(),
+            Some(fake_session("hash-a")),
+            generation,
+        );
+        let result = cache.get("hash-a");
+        assert!(result.is_some());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn cache_miss_returns_none() {
+        let cache = SessionCache::new(100, 30);
+        assert!(cache.get("nonexistent").is_none());
+    }
+
+    #[test]
+    fn negative_cache_entry_returns_none_session() {
+        let cache = SessionCache::new(100, 30);
+        let generation = cache.generation();
+        cache.insert_if_valid("hash-b".to_string(), None, generation);
+        let result = cache.get("hash-b");
+        assert!(result.is_some(), "cache entry should exist");
+        assert!(result.unwrap().is_none(), "cached value should be None");
+    }
+
+    #[test]
+    fn invalidate_removes_entry() {
+        let cache = SessionCache::new(100, 30);
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-c".to_string(),
+            Some(fake_session("hash-c")),
+            generation,
+        );
+        cache.invalidate("hash-c");
+        assert!(cache.get("hash-c").is_none());
+    }
+
+    #[test]
+    fn invalidate_all_clears_cache() {
+        let cache = SessionCache::new(100, 30);
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-d".to_string(),
+            Some(fake_session("hash-d")),
+            generation,
+        );
+        cache.insert_if_valid(
+            "hash-e".to_string(),
+            Some(fake_session("hash-e")),
+            generation,
+        );
+        cache.invalidate_all();
+        assert!(cache.get("hash-d").is_none());
+        assert!(cache.get("hash-e").is_none());
+    }
+
+    /// Regression test: simulates the TOCTOU race where an invalidation
+    /// occurs between the generation snapshot and the insert. The stale
+    /// session must NOT be written to the cache.
+    #[test]
+    fn insert_after_invalidate_is_rejected() {
+        let cache = SessionCache::new(100, 30);
+        let gen_before = cache.generation();
+
+        // Simulate: invalidation happens while DB fetch is in flight
+        cache.invalidate("hash-f");
+
+        // Attempt to insert with the stale generation
+        cache.insert_if_valid(
+            "hash-f".to_string(),
+            Some(fake_session("hash-f")),
+            gen_before,
+        );
+
+        assert!(
+            cache.get("hash-f").is_none(),
+            "revoked session must not be cached"
+        );
+    }
+
+    /// Same as above but with `invalidate_all`.
+    #[test]
+    fn insert_after_invalidate_all_is_rejected() {
+        let cache = SessionCache::new(100, 30);
+
+        // Populate a valid entry first
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-g".to_string(),
+            Some(fake_session("hash-g")),
+            generation,
+        );
+
+        // Snapshot generation, then invalidate_all
+        let gen_before = cache.generation();
+        cache.invalidate_all();
+
+        // Attempt to insert with the stale generation
+        cache.insert_if_valid(
+            "hash-g".to_string(),
+            Some(fake_session("hash-g")),
+            gen_before,
+        );
+
+        assert!(
+            cache.get("hash-g").is_none(),
+            "revoked session must not be cached after invalidate_all"
+        );
+    }
+
+    /// Insertions with a current (valid) generation after invalidation
+    /// should succeed — only stale generations are blocked.
+    #[test]
+    fn insert_with_fresh_generation_after_invalidate_succeeds() {
+        let cache = SessionCache::new(100, 30);
+        cache.invalidate("hash-h");
+
+        let fresh_gen = cache.generation();
+        cache.insert_if_valid(
+            "hash-h".to_string(),
+            Some(fake_session("hash-h")),
+            fresh_gen,
+        );
+
+        let result = cache.get("hash-h");
+        assert!(result.is_some());
+        assert!(result.unwrap().is_some());
+    }
+
+    #[test]
+    fn ttl_expiry_evicts_entry() {
+        let cache = SessionCache::new(100, 0); // 0-second TTL
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-i".to_string(),
+            Some(fake_session("hash-i")),
+            generation,
+        );
+        // With a 0s TTL the entry is immediately expired
+        assert!(cache.get("hash-i").is_none());
+    }
+
+    #[test]
+    fn zero_capacity_cache_is_noop() {
+        let cache = SessionCache::new(0, 30);
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "hash-j".to_string(),
+            Some(fake_session("hash-j")),
+            generation,
+        );
+        assert!(cache.get("hash-j").is_none());
+    }
+
+    #[test]
+    fn eviction_at_capacity() {
+        let cache = SessionCache::new(1, 30);
+        let generation = cache.generation();
+        cache.insert_if_valid("first".to_string(), Some(fake_session("first")), generation);
+        let generation = cache.generation();
+        cache.insert_if_valid(
+            "second".to_string(),
+            Some(fake_session("second")),
+            generation,
+        );
+        // "first" should have been evicted to make room for "second"
+        assert!(cache.get("first").is_none());
+        assert!(cache.get("second").is_some());
     }
 }
