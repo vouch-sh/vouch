@@ -206,9 +206,22 @@ impl SessionCache {
         let Ok(mut map) = self.entries.lock() else {
             return;
         };
+        if self.max_capacity == 0 {
+            return;
+        }
         if map.len() as u64 >= self.max_capacity {
             let ttl = self.ttl;
             map.retain(|_, e| e.inserted_at.elapsed() < ttl);
+            while map.len() as u64 >= self.max_capacity {
+                let oldest_key = map
+                    .iter()
+                    .min_by_key(|(_, entry)| entry.inserted_at)
+                    .map(|(k, _)| k.clone());
+                let Some(oldest_key) = oldest_key else {
+                    break;
+                };
+                map.remove(&oldest_key);
+            }
         }
         map.insert(
             key,

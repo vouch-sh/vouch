@@ -43,8 +43,8 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 /// Connection pool configuration.
 ///
 /// Populated from CLI args / environment via clap in `config::Args`.
-/// `max_connections` is `None` to allow per-backend defaults (50 DSQL,
-/// 25 PostgreSQL) when the user doesn't override.
+/// `max_connections` is `None` to use the shared default (25) when the user
+/// doesn't override it.
 #[derive(Debug, Clone)]
 pub struct PoolConfig {
     /// Maximum pool connections (`None` = backend default).
@@ -63,17 +63,15 @@ impl Default for PoolConfig {
             max_connections: None,
             min_connections: 2,
             idle_timeout_secs: 300,
-            acquire_timeout_secs: 5,
+            acquire_timeout_secs: 30,
         }
     }
 }
 
 impl PoolConfig {
-    /// Resolve `max_connections`, applying backend-specific defaults when the
-    /// caller hasn't set an explicit value.
-    fn resolved_max_connections(&self, is_dsql: bool) -> u32 {
-        self.max_connections
-            .unwrap_or(if is_dsql { 50 } else { 25 })
+    /// Resolve `max_connections` when the caller hasn't set an explicit value.
+    fn resolved_max_connections(&self) -> u32 {
+        self.max_connections.unwrap_or(25)
     }
 }
 
@@ -174,7 +172,7 @@ impl Pool {
                     let parsed = url::Url::parse(url).context("failed to parse PostgreSQL URL")?;
                     Self::connect_dsql(&dsql, parsed.username(), pool_cfg).await
                 } else {
-                    let max_connections = pool_cfg.resolved_max_connections(false);
+                    let max_connections = pool_cfg.resolved_max_connections();
                     tracing::info!(
                         max_connections,
                         min_connections = pool_cfg.min_connections,
@@ -254,7 +252,7 @@ impl Pool {
         // - acquire_timeout: configurable, default 30 sec
         // - min_connections: configurable, default 2
         // - before_acquire: only ping connections idle >30s (avoids round-trip on active conns)
-        let max_connections = pool_cfg.resolved_max_connections(true);
+        let max_connections = pool_cfg.resolved_max_connections();
         tracing::info!(
             max_connections,
             min_connections = pool_cfg.min_connections,
@@ -844,20 +842,18 @@ mod tests {
     }
 
     #[test]
-    fn test_resolved_max_connections_backend_defaults() {
+    fn test_resolved_max_connections_default() {
         let cfg = PoolConfig {
             max_connections: None,
             ..PoolConfig::default()
         };
-        assert_eq!(cfg.resolved_max_connections(false), 25);
-        assert_eq!(cfg.resolved_max_connections(true), 50);
+        assert_eq!(cfg.resolved_max_connections(), 25);
 
         let overridden = PoolConfig {
             max_connections: Some(42),
             ..PoolConfig::default()
         };
-        assert_eq!(overridden.resolved_max_connections(false), 42);
-        assert_eq!(overridden.resolved_max_connections(true), 42);
+        assert_eq!(overridden.resolved_max_connections(), 42);
     }
 
     #[tokio::test]

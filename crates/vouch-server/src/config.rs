@@ -277,7 +277,7 @@ pub struct Args {
     pub metrics_bearer_token: Option<String>,
 
     /// Maximum number of database connections in the pool.
-    /// Defaults to 50 for Aurora DSQL, 25 for PostgreSQL.
+    /// Defaults to 25.
     #[arg(long, env = "VOUCH_DB_MAX_CONNECTIONS")]
     pub db_max_connections: Option<u32>,
 
@@ -290,7 +290,7 @@ pub struct Args {
     pub db_idle_timeout_secs: u64,
 
     /// Connection acquire timeout in seconds.
-    #[arg(long, env = "VOUCH_DB_ACQUIRE_TIMEOUT_SECS", default_value = "5")]
+    #[arg(long, env = "VOUCH_DB_ACQUIRE_TIMEOUT_SECS", default_value = "30")]
     pub db_acquire_timeout_secs: u64,
 
     /// Maximum number of entries in the session lookup cache.
