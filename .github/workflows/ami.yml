@@ -64,7 +64,6 @@ jobs:
         env:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
-
           # Verify this is actually a tag in the repository
           if ! git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
             echo "ERROR: '${TAG}' is not a valid tag in this repository"
@@ -92,22 +91,29 @@ jobs:
 
       - name: Set S3 paths
         id: s3
+        env:
+          RUN_ID: ${{ github.run_id }}
         run: |
-          echo "s3_prefix=ami-builds/${{ github.run_id }}" >> "$GITHUB_OUTPUT"
+          echo "s3_prefix=ami-builds/${RUN_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Upload AMI files to S3
+        env:
+          S3_BUCKET: ${{ vars.AMI_BUILD_BUCKET }}
+          S3_PREFIX: ${{ steps.s3.outputs.s3_prefix }}
         run: |
           tar -czf /tmp/ami-files.tar.gz -C packaging/ami .
-          aws s3 cp /tmp/ami-files.tar.gz "s3://${{ vars.AMI_BUILD_BUCKET }}/${{ steps.s3.outputs.s3_prefix }}/ami-files.tar.gz"
+          aws s3 cp /tmp/ami-files.tar.gz "s3://${S3_BUCKET}/${S3_PREFIX}/ami-files.tar.gz"
 
       - name: Upload Secure Boot DB key to S3
         env:
           SECUREBOOT_DB_KEY: ${{ secrets.SECUREBOOT_DB_KEY }}
+          S3_BUCKET: ${{ vars.AMI_BUILD_BUCKET }}
+          S3_PREFIX: ${{ steps.s3.outputs.s3_prefix }}
         run: |
-          SB_PREFIX="${{ steps.s3.outputs.s3_prefix }}/secureboot"
+          SB_PREFIX="${S3_PREFIX}/secureboot"
           printf '%s' "$SECUREBOOT_DB_KEY" > /tmp/DB.key
-          aws s3 cp /tmp/DB.key "s3://${{ vars.AMI_BUILD_BUCKET }}/${SB_PREFIX}/DB.key"
-          aws s3 cp packaging/ami/secureboot/DB.crt "s3://${{ vars.AMI_BUILD_BUCKET }}/${SB_PREFIX}/DB.crt"
+          aws s3 cp /tmp/DB.key "s3://${S3_BUCKET}/${SB_PREFIX}/DB.key"
+          aws s3 cp packaging/ami/secureboot/DB.crt "s3://${S3_BUCKET}/${SB_PREFIX}/DB.crt"
           shred -u /tmp/DB.key 2>/dev/null || rm -f /tmp/DB.key
 
   build-ami:
@@ -143,41 +149,49 @@ jobs:
 
       - name: Get latest AL2023 AMI
         id: ami
+        env:
+          ARCH: ${{ matrix.arch }}
         run: |
           AMI_ID=$(aws ssm get-parameter \
-            --name "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-${{ matrix.arch }}" \
+            --name "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.18-${ARCH}" \
             --query 'Parameter.Value' \
             --output text)
           echo "base_ami=${AMI_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Clean up previous build artifacts
+        env:
+          S3_BUCKET: ${{ vars.AMI_BUILD_BUCKET }}
+          S3_PREFIX: ${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}
         run: |
-          S3_PREFIX="${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}"
-          echo "Removing stale artifacts at s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/"
-          aws s3 rm "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/" --recursive 2>/dev/null || true
+          echo "Removing stale artifacts at s3://${S3_BUCKET}/${S3_PREFIX}/"
+          aws s3 rm "s3://${S3_BUCKET}/${S3_PREFIX}/" --recursive 2>/dev/null || true
 
       - name: Launch build instance
         id: instance
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          S3_BUCKET: ${{ vars.AMI_BUILD_BUCKET }}
+          S3_PREFIX: ${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}
+          S3_PARENT_PREFIX: ${{ needs.prepare.outputs.s3_prefix }}
+          SB_KEY_S3_PATH: s3://${{ vars.AMI_BUILD_BUCKET }}/${{ needs.prepare.outputs.s3_prefix }}/secureboot
+          BASE_AMI: ${{ steps.ami.outputs.base_ami }}
+          INSTANCE_TYPE: ${{ matrix.instance_type }}
+          SUBNET_ID: ${{ vars.AMI_BUILD_SUBNET_ID }}
+          ARCH: ${{ matrix.arch }}
         run: |
           # Generate user-data from template
-          export VERSION="${{ needs.prepare.outputs.version }}"
-          export AWS_REGION="${{ env.AWS_REGION }}"
-          export S3_BUCKET="${{ vars.AMI_BUILD_BUCKET }}"
-          export S3_PREFIX="${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}"
-          export S3_PARENT_PREFIX="${{ needs.prepare.outputs.s3_prefix }}"
-          export SB_KEY_S3_PATH="s3://${{ vars.AMI_BUILD_BUCKET }}/${{ needs.prepare.outputs.s3_prefix }}/secureboot"
           # envsubst needs literal $VAR names, not shell expansion
           # shellcheck disable=SC2016
           envsubst '$VERSION $AWS_REGION $S3_BUCKET $S3_PREFIX $S3_PARENT_PREFIX $SB_KEY_S3_PATH' < packaging/ami/user-data.sh.tpl > /tmp/user-data.sh
 
           # Launch AL2023 instance with user-data
           INSTANCE_ID=$(aws ec2 run-instances \
-            --image-id "${{ steps.ami.outputs.base_ami }}" \
-            --instance-type "${{ matrix.instance_type }}" \
-            --subnet-id "${{ vars.AMI_BUILD_SUBNET_ID }}" \
+            --image-id "${BASE_AMI}" \
+            --instance-type "${INSTANCE_TYPE}" \
+            --subnet-id "${SUBNET_ID}" \
             --iam-instance-profile Name=VouchAMIBuilder \
             --block-device-mappings '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":30,"VolumeType":"gp3","DeleteOnTermination":true}}]' \
-            --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=vouch-ami-builder-${{ matrix.arch }}}]' \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=vouch-ami-builder-${ARCH}}]" \
             --user-data file:///tmp/user-data.sh \
             --query 'Instances[0].InstanceId' \
             --output text)
@@ -191,14 +205,15 @@ jobs:
 
       - name: Wait for build to complete
         id: build
+        env:
+          S3_BUCKET: ${{ vars.AMI_BUILD_BUCKET }}
+          S3_PREFIX: ${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}
         run: |
-          S3_PREFIX="${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}"
-
           echo "Waiting for build to complete (polling S3 for status)..."
 
           # Poll for build-status.txt (max 1 hour)
           for attempt in {1..120}; do
-            if aws s3 ls "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/build-status.txt" >/dev/null 2>&1; then
+            if aws s3 ls "s3://${S3_BUCKET}/${S3_PREFIX}/build-status.txt" >/dev/null 2>&1; then
               echo "Build status file found"
               break
             fi
@@ -206,7 +221,7 @@ jobs:
             if [ "$attempt" -eq 120 ]; then
               echo "Build timed out after 1 hour"
               # Try to get logs anyway
-              aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/build.log" /tmp/build.log 2>/dev/null && cat /tmp/build.log || true
+              aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/build.log" /tmp/build.log 2>/dev/null && cat /tmp/build.log || true
               exit 1
             fi
 
@@ -215,13 +230,13 @@ jobs:
           done
 
           # Download and check status
-          aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/build-status.txt" /tmp/build-status.txt
+          aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/build-status.txt" /tmp/build-status.txt
           STATUS=$(cat /tmp/build-status.txt)
           echo "Build status: ${STATUS}"
 
           # Always download and show the build log
           echo "=== Build Log ==="
-          aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/build.log" /tmp/build.log 2>/dev/null && cat /tmp/build.log || echo "No build log found"
+          aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/build.log" /tmp/build.log 2>/dev/null && cat /tmp/build.log || echo "No build log found"
 
           if [ "$STATUS" != "SUCCESS" ]; then
             echo "Build failed"
@@ -231,14 +246,16 @@ jobs:
           echo "Build completed successfully"
 
           # Download snapshot ID
-          aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/snapshot-id.txt" /tmp/snapshot-id.txt
+          aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/snapshot-id.txt" /tmp/snapshot-id.txt
           SNAPSHOT_ID=$(cat /tmp/snapshot-id.txt)
           echo "snapshot_id=${SNAPSHOT_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Check for existing AMI (immutability)
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          AMI_NAME="vouch-server-${VERSION}-${{ matrix.arch }}"
+          AMI_NAME="vouch-server-${VERSION}-${ARCH}"
 
           # Check if an AMI with this name already exists
           EXISTING_AMI=$(aws ec2 describe-images \
@@ -256,10 +273,13 @@ jobs:
 
       - name: Register AMI
         id: register
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SNAPSHOT_ID: ${{ steps.build.outputs.snapshot_id }}
+          ARCH: ${{ matrix.arch }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          SNAPSHOT_ID="${{ steps.build.outputs.snapshot_id }}"
-
           # Wait for snapshot to be available
           echo "Waiting for snapshot ${SNAPSHOT_ID} to be available..."
           aws ec2 wait snapshot-completed --snapshot-ids "${SNAPSHOT_ID}"
@@ -276,11 +296,11 @@ jobs:
 
           # Build register-image command
           REGISTER_ARGS=(
-            --name "vouch-server-${VERSION}-${{ matrix.arch }}"
+            --name "vouch-server-${VERSION}-${ARCH}"
             --description "Vouch Server ${VERSION} - Attestable AMI with dm-verity and Secure Boot"
             --virtualization-type hvm
             --boot-mode uefi
-            --architecture "${{ matrix.arch }}"
+            --architecture "${ARCH}"
             --root-device-name /dev/xvda
             --block-device-mappings "DeviceName=/dev/xvda,Ebs={SnapshotId=${SNAPSHOT_ID},VolumeType=gp3,DeleteOnTermination=true}"
             --tpm-support v2.0
@@ -297,30 +317,31 @@ jobs:
           AMI_ID=$(aws ec2 register-image "${REGISTER_ARGS[@]}")
 
           echo "ami_id=${AMI_ID}" >> "$GITHUB_OUTPUT"
-          echo "ami_id_${{ matrix.arch }}=${AMI_ID}" >> "$GITHUB_OUTPUT"
+          echo "ami_id_${ARCH}=${AMI_ID}" >> "$GITHUB_OUTPUT"
           echo "Registered AMI: ${AMI_ID}"
 
           # Tag the AMI
           aws ec2 create-tags --resources "${AMI_ID}" --tags \
             "Key=Name,Value=vouch-server-${VERSION}" \
             "Key=Version,Value=${VERSION}" \
-            "Key=Architecture,Value=${{ matrix.arch }}" \
+            "Key=Architecture,Value=${ARCH}" \
             "Key=BuildDate,Value=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            "Key=Repository,Value=${{ github.repository }}" \
-            "Key=Commit,Value=${{ github.sha }}"
+            "Key=Repository,Value=${REPOSITORY}" \
+            "Key=Commit,Value=${COMMIT_SHA}"
 
           # Tag the snapshot
           aws ec2 create-tags --resources "${SNAPSHOT_ID}" --tags \
-            "Key=Name,Value=vouch-server-${VERSION}-${{ matrix.arch }}" \
+            "Key=Name,Value=vouch-server-${VERSION}-${ARCH}" \
             "Key=Version,Value=${VERSION}"
 
       - name: Tag AMI with PCR measurements
+        env:
+          S3_BUCKET: ${{ vars.AMI_BUILD_BUCKET }}
+          S3_PREFIX: ${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}
+          AMI_ID: ${{ steps.register.outputs.ami_id }}
         run: |
-          S3_PREFIX="${{ needs.prepare.outputs.s3_prefix }}/${{ matrix.arch }}"
-          AMI_ID="${{ steps.register.outputs.ami_id }}"
-
           # Download PCR measurements
-          if aws s3 cp "s3://${{ vars.AMI_BUILD_BUCKET }}/${S3_PREFIX}/pcr_measurements.json" /tmp/pcr_measurements.json 2>/dev/null; then
+          if aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/pcr_measurements.json" /tmp/pcr_measurements.json 2>/dev/null; then
             echo "PCR measurements downloaded"
             cat /tmp/pcr_measurements.json
 
@@ -355,11 +376,13 @@ jobs:
 
       - name: Cleanup
         if: always()
+        env:
+          INSTANCE_ID: ${{ steps.instance.outputs.instance_id }}
         run: |
           # Terminate build instance (S3 artifacts cleaned by lifecycle policy)
-          if [ -n "${{ steps.instance.outputs.instance_id }}" ]; then
+          if [ -n "${INSTANCE_ID}" ]; then
             aws ec2 terminate-instances \
-              --instance-ids "${{ steps.instance.outputs.instance_id }}" || true
+              --instance-ids "${INSTANCE_ID}" || true
           fi
 
   copy-ami:
@@ -382,58 +405,65 @@ jobs:
           mask-aws-account-id: true
 
       - name: Check for existing AMI in ${{ matrix.region }} (immutability)
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ARCH: ${{ matrix.arch }}
+          REGION: ${{ matrix.region }}
         run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          AMI_NAME="vouch-server-${VERSION}-${{ matrix.arch }}"
+          AMI_NAME="vouch-server-${VERSION}-${ARCH}"
 
           # Check if an AMI with this name already exists in target region
           EXISTING_AMI=$(aws ec2 describe-images \
-            --region ${{ matrix.region }} \
+            --region "${REGION}" \
             --filters "Name=name,Values=${AMI_NAME}" \
             --query 'Images[0].ImageId' \
             --output text 2>/dev/null || echo "None")
 
           if [ "$EXISTING_AMI" != "None" ] && [ -n "$EXISTING_AMI" ]; then
-            echo "ERROR: AMI '${AMI_NAME}' already exists in ${{ matrix.region }} (${EXISTING_AMI})"
+            echo "ERROR: AMI '${AMI_NAME}' already exists in ${REGION} (${EXISTING_AMI})"
             echo "AMI builds are immutable. To rebuild, first deregister the existing AMI."
             exit 1
           fi
 
-          echo "No existing AMI found with name '${AMI_NAME}' in ${{ matrix.region }}, proceeding with copy"
+          echo "No existing AMI found with name '${AMI_NAME}' in ${REGION}, proceeding with copy"
 
       - name: Get source AMI ID
         id: source
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
           AMI_ID=$(aws ec2 describe-images \
             --region us-east-1 \
-            --filters "Name=name,Values=vouch-server-${VERSION}-${{ matrix.arch }}" \
+            --filters "Name=name,Values=vouch-server-${VERSION}-${ARCH}" \
             --query 'Images[0].ImageId' \
             --output text)
           echo "ami_id=${AMI_ID}" >> "$GITHUB_OUTPUT"
 
       - name: Copy AMI to ${{ matrix.region }}
         id: copy
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          SOURCE_AMI: ${{ steps.source.outputs.ami_id }}
+          REGION: ${{ matrix.region }}
+          ARCH: ${{ matrix.arch }}
         run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-          SOURCE_AMI="${{ steps.source.outputs.ami_id }}"
-
           # Copy the AMI (--copy-image-tags propagates all source tags)
           COPIED_AMI=$(aws ec2 copy-image \
-            --region ${{ matrix.region }} \
+            --region "${REGION}" \
             --source-region us-east-1 \
             --source-image-id "${SOURCE_AMI}" \
-            --name "vouch-server-${VERSION}-${{ matrix.arch }}" \
+            --name "vouch-server-${VERSION}-${ARCH}" \
             --description "Vouch Server ${VERSION} - Attestable AMI with dm-verity" \
             --copy-image-tags \
             --query 'ImageId' \
             --output text)
 
           echo "ami_id=${COPIED_AMI}" >> "$GITHUB_OUTPUT"
-          echo "Copied AMI to ${{ matrix.region }}: ${COPIED_AMI}"
+          echo "Copied AMI to ${REGION}: ${COPIED_AMI}"
 
           # Wait for the copy to complete
-          aws ec2 wait image-available --region ${{ matrix.region }} --image-ids "${COPIED_AMI}"
+          aws ec2 wait image-available --region "${REGION}" --image-ids "${COPIED_AMI}"
 
   update-ssm-parameters:
     name: Update SSM (${{ matrix.arch }} in ${{ matrix.region }})
@@ -456,29 +486,34 @@ jobs:
           mask-aws-account-id: true
 
       - name: Update SSM parameter for latest AMI ID
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          REGION: ${{ matrix.region }}
+          ARCH: ${{ matrix.arch }}
+          REPOSITORY: ${{ github.repository }}
+          COMMIT_SHA: ${{ github.sha }}
         run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
           BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
           # Get the AMI ID for this region/arch
           AMI_ID=$(aws ec2 describe-images \
-            --region "${{ matrix.region }}" \
-            --filters "Name=name,Values=vouch-server-${VERSION}-${{ matrix.arch }}" \
+            --region "${REGION}" \
+            --filters "Name=name,Values=vouch-server-${VERSION}-${ARCH}" \
             --query 'Images[0].ImageId' \
             --output text)
 
           if [ -z "$AMI_ID" ] || [ "$AMI_ID" = "None" ]; then
-            echo "::error::Could not find AMI for ${{ matrix.region }}/${{ matrix.arch }}"
+            echo "::error::Could not find AMI for ${REGION}/${ARCH}"
             exit 1
           fi
 
-          PARAM_NAME="/vouch-server/ami/${{ matrix.arch }}/latest"
-          DESCRIPTION="Vouch Server ${VERSION} AMI for ${{ matrix.arch }} (built ${BUILD_DATE})"
+          PARAM_NAME="/vouch-server/ami/${ARCH}/latest"
+          DESCRIPTION="Vouch Server ${VERSION} AMI for ${ARCH} (built ${BUILD_DATE})"
 
-          echo "Updating ${PARAM_NAME} in ${{ matrix.region }} = ${AMI_ID}"
+          echo "Updating ${PARAM_NAME} in ${REGION} = ${AMI_ID}"
 
           aws ssm put-parameter \
-            --region "${{ matrix.region }}" \
+            --region "${REGION}" \
             --name "${PARAM_NAME}" \
             --value "${AMI_ID}" \
             --type String \
@@ -488,16 +523,16 @@ jobs:
 
           # Tag the parameter with metadata
           aws ssm add-tags-to-resource \
-            --region "${{ matrix.region }}" \
+            --region "${REGION}" \
             --resource-type Parameter \
             --resource-id "${PARAM_NAME}" \
             --tags \
               "Key=Version,Value=${VERSION}" \
               "Key=BuildDate,Value=${BUILD_DATE}" \
-              "Key=Repository,Value=${{ github.repository }}" \
-              "Key=Commit,Value=${{ github.sha }}"
+              "Key=Repository,Value=${REPOSITORY}" \
+              "Key=Commit,Value=${COMMIT_SHA}"
 
-          echo "Updated ${PARAM_NAME} in ${{ matrix.region }} to ${AMI_ID}"
+          echo "Updated ${PARAM_NAME} in ${REGION} to ${AMI_ID}"
 
   summary:
     name: Build Summary
@@ -514,9 +549,10 @@ jobs:
           role-session-name: ami-summary
 
       - name: Generate summary
+        env:
+          VERSION: ${{ needs.prepare.outputs.version }}
+          ALL_REGIONS: ${{ needs.prepare.outputs.all_regions }}
         run: |
-          VERSION="${{ needs.prepare.outputs.version }}"
-
           cat >> "$GITHUB_STEP_SUMMARY" << EOF
           ## Vouch Server AMI Build Summary
 
@@ -528,7 +564,7 @@ jobs:
           |--------|--------------|--------|
           EOF
 
-          for region in $(echo '${{ needs.prepare.outputs.all_regions }}' | jq -r '.[]'); do
+          for region in $(echo "$ALL_REGIONS" | jq -r '.[]'); do
             for arch in x86_64 arm64; do
               AMI_ID=$(aws ec2 describe-images \
                 --region "${region}" \
