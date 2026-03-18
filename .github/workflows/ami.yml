@@ -1,7 +1,7 @@
 name: Build AMI
 
 on:
-  workflow_run:
+  workflow_run: # zizmor: ignore[dangerous-triggers]
     workflows: ["Release"]
     types: [completed]
   workflow_dispatch:

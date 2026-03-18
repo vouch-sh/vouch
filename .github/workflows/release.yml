@@ -11,6 +11,8 @@ on:
         required: true
         type: string
 
+permissions: {}
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
@@ -245,6 +247,7 @@ jobs:
         with:
           prefix-key: "v2"
           shared-key: "release-${{ matrix.target }}"
+          save-if: "false"
 
       - name: Set RUSTFLAGS
         if: matrix.rustflags
@@ -1079,7 +1082,7 @@ jobs:
 
       - name: Checkout Homebrew tap
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
+        with: # zizmor: ignore[artipacked] — credentials required for git push
           repository: vouch-sh/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
@@ -1171,7 +1174,7 @@ jobs:
 
       - name: Checkout packages repo
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
+        with: # zizmor: ignore[artipacked] — credentials required for git push
           repository: vouch-sh/packages
           token: ${{ secrets.PACKAGES_REPO_TOKEN }}
           path: packages-repo
