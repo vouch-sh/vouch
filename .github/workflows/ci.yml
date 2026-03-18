@@ -90,10 +90,7 @@ jobs:
           persist-credentials: false
       - name: Install system dependencies
         if: matrix.install-deps != ''
-        env:
-          INSTALL_DEPS: ${{ matrix.install-deps }}
-        shell: bash
-        run: ${INSTALL_DEPS}
+        run: ${{ matrix.install-deps }} # zizmor: ignore[template-injection] — static matrix value
       - name: Setup Rust toolchain
         run: rustup show
       - name: Setup Rust cache
@@ -103,19 +100,13 @@ jobs:
           shared-key: "debug-${{ runner.os }}"
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      - name: Set FIPS compiler
+      - name: Set FIPS compiler # zizmor: ignore[template-injection] — static matrix values
         if: matrix.fips-cc
-        env:
-          FIPS_CC: ${{ matrix.fips-cc }}
-          FIPS_CXX: ${{ matrix.fips-cxx }}
         run: |
-          echo "AWS_LC_FIPS_SYS_CC=${FIPS_CC}" >> "$GITHUB_ENV"
-          echo "AWS_LC_FIPS_SYS_CXX=${FIPS_CXX}" >> "$GITHUB_ENV"
+          echo "AWS_LC_FIPS_SYS_CC=${{ matrix.fips-cc }}" >> "$GITHUB_ENV"
+          echo "AWS_LC_FIPS_SYS_CXX=${{ matrix.fips-cxx }}" >> "$GITHUB_ENV"
       - name: Run tests
-        env:
-          CARGO_ARGS: ${{ matrix.cargo-args }}
-        shell: bash
-        run: cargo test ${CARGO_ARGS}
+        run: cargo test ${{ matrix.cargo-args }} # zizmor: ignore[template-injection] — static matrix value
 
   build:
     name: Build (${{ matrix.name }})
@@ -155,18 +146,12 @@ jobs:
           persist-credentials: false
       - name: Install system dependencies
         if: matrix.install != ''
-        env:
-          INSTALL_CMD: ${{ matrix.install }}
-        shell: bash
-        run: ${INSTALL_CMD}
+        run: ${{ matrix.install }} # zizmor: ignore[template-injection] — static matrix value
       - name: Setup Rust toolchain
         if: runner.os != 'Linux'
-        env:
-          TARGET: ${{ matrix.target }}
-        shell: bash
         run: |
           rustup show
-          rustup target add "${TARGET}"
+          rustup target add ${{ matrix.target }}
       - name: Setup Rust cache
         if: runner.os != 'Linux'
         uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
@@ -174,12 +159,10 @@ jobs:
           prefix-key: "v2"
           shared-key: "release-${{ matrix.target }}"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Set RUSTFLAGS
+      - name: Set RUSTFLAGS # zizmor: ignore[template-injection] — static matrix value
         if: matrix.rustflags
         shell: bash
-        env:
-          RUSTFLAGS_VALUE: ${{ matrix.rustflags }}
-        run: echo "RUSTFLAGS=${RUSTFLAGS_VALUE}" >> "$GITHUB_ENV"
+        run: echo "RUSTFLAGS=${{ matrix.rustflags }}" >> "$GITHUB_ENV"
       - name: Set up Docker Buildx
         if: runner.os == 'Linux'
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
@@ -191,13 +174,9 @@ jobs:
           targets: ci
         env:
           TARGET: ${{ matrix.target }}
-      - name: Build
+      - name: Build # zizmor: ignore[template-injection] — static matrix values
         if: runner.os != 'Linux'
-        env:
-          TARGET: ${{ matrix.target }}
-          PACKAGES: ${{ matrix.packages }}
-        shell: bash
-        run: cargo build --release --target "${TARGET}" ${PACKAGES}
+        run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
 
   dependency-review:
     name: Dependency Review
