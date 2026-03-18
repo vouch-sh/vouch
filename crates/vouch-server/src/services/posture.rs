@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Device posture policy evaluation using CEL (Common Expression Language).
 //!
 //! Provides preconfigured policies defined in code (updatable via deploy)

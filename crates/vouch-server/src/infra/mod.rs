@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Server infrastructure: TLS, background cleanup, S3 config polling,
 //! route construction, security headers, static assets, and server lifecycle.
 //!

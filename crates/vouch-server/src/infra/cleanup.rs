@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Background cleanup tasks for expired data.
 //!
 //! This module handles periodic cleanup of:

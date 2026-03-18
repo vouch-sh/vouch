@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Trusted JWT issuer database operations (RFC 7523).
 
 use super::document_type::Document;

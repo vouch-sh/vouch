@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Client-side document encryption using HPKE (RFC 9180).
 //!
 //! Provides two implementations of the [`DocumentCrypto`] trait:

@@ -13,7 +13,7 @@ vouch/
 ├── crates/
 │   ├── vouch-cli/        # User-facing CLI binary (Apache-2.0/MIT)
 │   ├── vouch-agent/      # Background daemon for session/cert management (Apache-2.0/MIT)
-│   ├── vouch-server/     # Auth server with OIDC provider, SSH CA (BUSL-1.1)
+│   ├── vouch-server/     # Auth server with OIDC provider, SSH CA (Apache-2.0/MIT)
 │   ├── vouch-common/     # Shared types, FIDO2 helpers, API client (Apache-2.0/MIT)
 │   └── vouch-tests/      # Integration + property-based tests
 ├── docs/                 # mdBook documentation (build with `make docs-build`)

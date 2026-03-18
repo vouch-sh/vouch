@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Server lifecycle management.
 //!
 //! Handles TLS vs non-TLS server binding, HTTP->HTTPS redirect, SIGHUP

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Telemetry initialization: log format selection and OpenTelemetry tracing.
 //!
 //! Supports two log formats controlled by `VOUCH_LOG_FORMAT`:

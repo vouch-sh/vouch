@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Authorization endpoint handler.
 //!
 //! Implements RFC 6749 Section 4.1 (Authorization Code Grant) with extensions:

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! x5c attestation certificate chain validation.
 //!
 //! Validates the certificate chain in WebAuthn packed attestation statements

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Shared PEM decoding utilities.
 //!
 //! Supports both raw PEM content and base64-encoded PEM, which is useful for

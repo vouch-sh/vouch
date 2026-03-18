@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! SSH Certificate Authority for signing user SSH certificates.
 //!
 //! This module provides functionality to:

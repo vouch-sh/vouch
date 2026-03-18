@@ -159,9 +159,9 @@ Vouch consists of:
 | `vouch` CLI | User-facing commands, credential helpers | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
 | `vouch-agent` | Background daemon, session management | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
 | `vouch-common` | Shared types, FIDO2 helpers, API client | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
-| Vouch Server | OIDC provider, certificate authority | [BSL 1.1](crates/vouch-server/LICENSE) (converts to Apache-2.0) |
+| Vouch Server | OIDC provider, certificate authority | [Apache-2.0 OR MIT](LICENSE-APACHE) |
 
-The CLI is fully open source for security auditing. The server source is available under the Business Source License 1.1, which converts to Apache-2.0 after two years.
+All components are open source under Apache-2.0 OR MIT for security auditing.
 
 ## Security
 
@@ -202,8 +202,7 @@ The CLI is open source under Apache-2.0 OR MIT. We believe security tools should
 
 ## License
 
-- CLI, agent, and shared libraries: [Apache-2.0](LICENSE-APACHE) OR [MIT](LICENSE-MIT)
-- Server: [BSL 1.1](crates/vouch-server/LICENSE) (converts to Apache-2.0 after 2 years)
+- All crates: [Apache-2.0](LICENSE-APACHE) OR [MIT](LICENSE-MIT)
 - Documentation: [CC-BY-4.0](https://creativecommons.org/licenses/by/4.0/)
 
 ---

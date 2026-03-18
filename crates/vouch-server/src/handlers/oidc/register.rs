@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! RFC 7591/7592 — Dynamic Client Registration endpoint handlers.
 //!
 //! - `POST /oauth/register` — Creates a new OAuth client (RFC 7591).

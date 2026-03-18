@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! IP geolocation using MaxMind GeoLite2 databases.
 //!
 //! Two databases are embedded at compile time:

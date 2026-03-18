@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Browser-based WebAuthn login handlers.
 //!
 //! Implements the browser login flow for OAuth authorization (RFC 6749, RFC 9700).

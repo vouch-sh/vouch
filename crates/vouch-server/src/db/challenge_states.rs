@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! FIDO2 challenge state single-use enforcement.
 
 use super::document_type::DocumentType;

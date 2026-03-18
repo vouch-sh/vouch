@@ -2,7 +2,7 @@
 name = "vouch-server"
 version.workspace = true
 edition.workspace = true
-license = "BUSL-1.1"
+license.workspace = true
 description = "Vouch identity server"
 
 [lints]

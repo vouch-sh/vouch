@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! AWS KMS-backed signers for SSH CA (Ed25519) and OIDC JWT (P-256 ECDSA).
 //!
 //! These signers call `kms:Sign` for every signing operation, keeping private

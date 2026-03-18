@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! WebAuthn registration attestation validation.
 
 use crate::attestation::{extract_aaguid_from_attestation, validate_hardware_attestation};

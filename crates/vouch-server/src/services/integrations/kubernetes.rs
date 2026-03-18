@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Kubernetes OIDC integration service.
 //!
 //! This module provides OIDC token issuance for generic Kubernetes clusters

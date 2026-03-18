@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Document type trait and generic document wrapper.
 //!
 //! Every domain-specific document type (users, sessions, authenticators, etc.)

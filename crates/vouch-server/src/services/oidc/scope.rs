@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! OAuth 2.0 scope types.
 //!
 //! Provides type-safe representations of OAuth scopes used throughout the OIDC

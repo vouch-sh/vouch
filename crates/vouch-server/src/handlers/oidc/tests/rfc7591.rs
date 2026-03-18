@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! RFC 7591 — OAuth 2.0 Dynamic Client Registration tests.
 //!
 //! Tests for the `POST /oauth/register` endpoint, including authentication

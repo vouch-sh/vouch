@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! OpenID Connect Core 1.0 — ID Token claims, scope filtering, nonce tests.
 
 use super::helpers::*;

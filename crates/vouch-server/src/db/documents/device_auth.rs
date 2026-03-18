@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Device authorization grant document types (RFC 8628).
 
 use jiff::Timestamp;

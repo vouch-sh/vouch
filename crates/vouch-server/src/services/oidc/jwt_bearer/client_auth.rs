@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! JWT client authentication (RFC 7523 Section 2.2).
 //!
 //! Clients authenticate at the token endpoint using a signed JWT assertion

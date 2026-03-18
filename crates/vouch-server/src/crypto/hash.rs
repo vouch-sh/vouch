@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Cryptographic hashing and random byte generation utilities.
 
 use aws_lc_rs::rand as aws_rand;

@@ -31,15 +31,7 @@ allow = [
     "Unlicense",
     "Zlib",
 ]
-# vouch-server uses BUSL-1.1 intentionally (see crates/vouch-server/LICENSE)
-exceptions = [
-    { allow = ["BUSL-1.1"], crate = "vouch-server" },
-]
-
-[[licenses.clarify]]
-crate = "vouch-server"
-expression = "BUSL-1.1"
-license-files = [{ path = "LICENSE", hash = 0xca620b74 }]
+exceptions = []
 
 [bans]
 multiple-versions = "warn"

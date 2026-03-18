@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! SCIM 2.0 discovery endpoints (RFC 7644 Section 4).
 
 use axum::{Json, extract::State, response::IntoResponse};

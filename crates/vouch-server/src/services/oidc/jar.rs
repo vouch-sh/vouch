@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! JWT-Secured Authorization Request (JAR) validation (RFC 9101).
 //!
 //! Validates Request Object JWTs submitted via the `request` parameter

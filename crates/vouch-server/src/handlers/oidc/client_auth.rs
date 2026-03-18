@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Shared client authentication extraction for OAuth endpoints.
 //!
 //! Provides client authentication logic used by both the token endpoint

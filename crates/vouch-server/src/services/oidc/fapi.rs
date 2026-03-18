@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! FAPI 2.0 Security Profile validation.
 //!
 //! Centralized validation logic for Financial-grade API (FAPI) 2.0 Security Profile

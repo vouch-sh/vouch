@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! JWKS resolution and caching for RFC 7523.
 //!
 //! Handles resolving client public keys from inline JWKS or remote JWKS URIs,

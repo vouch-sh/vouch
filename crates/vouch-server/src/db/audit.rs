@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Audit event store for write-once security events.
 //!
 //! [`AuditStore`] manages the `audit_events` table — a separate, unencrypted

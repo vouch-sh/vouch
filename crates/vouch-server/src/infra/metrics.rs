@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Prometheus metrics endpoint and HTTP request instrumentation.
 //!
 //! Exposes a `/metrics` endpoint in Prometheus text format and provides

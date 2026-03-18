@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Encrypted document store backed by 3 tables.
 //!
 //! [`DocumentStore`] provides typed CRUD operations over the `documents` and

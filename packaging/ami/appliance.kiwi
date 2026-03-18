@@ -4,7 +4,7 @@
         <author>Vouch</author>
         <contact>hello@vouch.sh</contact>
         <specification>Vouch Server Attestable AMI (Amazon Linux 2023)</specification>
-        <license>BUSL-1.1</license>
+        <license>Apache-2.0 OR MIT</license>
     </description>
     <preferences>
         <version>1.0.0</version>

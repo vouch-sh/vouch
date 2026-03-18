@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! FAPI 2.0 Security Profile integration tests.
 //!
 //! Tests for Financial-grade API Security Profile 2.0 compliance, covering:

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Core JWT assertion validation for RFC 7523.
 //!
 //! Provides shared validation logic used by both JWT client authentication

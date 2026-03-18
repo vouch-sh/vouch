@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! RFC 9126 — OAuth 2.0 Pushed Authorization Requests (PAR) tests.
 //!
 //! Tests for the PAR endpoint (`POST /oauth/par`), `request_uri` resolution

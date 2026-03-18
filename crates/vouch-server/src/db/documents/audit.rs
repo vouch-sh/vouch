@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Audit event data payloads for the `audit_events.data` JSON column.
 //!
 //! These are serialized to JSON and stored in the unencrypted audit table.

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! RFC 9068 — JWT Profile for Access Tokens tests.
 
 use super::helpers::*;
