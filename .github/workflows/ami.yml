@@ -32,13 +32,17 @@ jobs:
     steps:
       - name: Determine tag
         id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          WR_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ github.event.inputs.tag }}"
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            TAG="$INPUT_TAG"
           else
             # For workflow_run, get the tag from the release workflow's ref
             # The Release workflow only runs on tag pushes, so head_branch is the tag
-            TAG="${{ github.event.workflow_run.head_branch }}"
+            TAG="$WR_HEAD_BRANCH"
           fi
 
           # Validate tag format (must be vX.Y.Z or vX.Y.Z-suffix)
