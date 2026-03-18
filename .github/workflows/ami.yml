@@ -11,9 +11,7 @@ on:
         required: true
         type: string
 
-permissions:
-  id-token: write
-  contents: read
+permissions: {}
 
 env:
   AWS_REGION: us-east-1
@@ -22,6 +20,9 @@ jobs:
   prepare:
     name: Prepare build files
     runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
     if: github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch'
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -58,6 +59,7 @@ jobs:
         with:
           ref: refs/tags/${{ steps.tag.outputs.tag }}
           fetch-depth: 1
+          persist-credentials: false
 
       - name: Verify tag exists
         id: version
@@ -120,6 +122,9 @@ jobs:
     name: Build AMI (${{ matrix.arch }})
     runs-on: ubuntu-latest
     needs: prepare
+    permissions:
+      id-token: write
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -138,6 +143,7 @@ jobs:
         with:
           sparse-checkout: packaging/ami
           sparse-checkout-cone-mode: false
+          persist-credentials: false
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@8df5847569e6427dd6c4fb1cf565c83acfa8afa7 # v6.0.0
@@ -389,6 +395,8 @@ jobs:
     name: Copy AMI (${{ matrix.arch }} to ${{ matrix.region }})
     runs-on: ubuntu-latest
     needs: [prepare, build-ami]
+    permissions:
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -469,6 +477,8 @@ jobs:
     name: Update SSM (${{ matrix.arch }} in ${{ matrix.region }})
     runs-on: ubuntu-latest
     needs: [prepare, copy-ami]
+    permissions:
+      id-token: write
     if: always() && needs.copy-ami.result == 'success'
     strategy:
       fail-fast: false
@@ -538,6 +548,8 @@ jobs:
     name: Build Summary
     runs-on: ubuntu-latest
     needs: [prepare, build-ami, copy-ami, update-ssm-parameters]
+    permissions:
+      id-token: write
     if: always()
 
     steps:
