@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! GitHub OAuth user account linking.
 //!
 //! This module handles linking a Vouch user's account to their GitHub identity:

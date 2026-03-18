@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! RFC 9449 — DPoP (Demonstration of Proof of Possession) tests.
 
 use super::helpers::*;

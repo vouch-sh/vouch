@@ -21,7 +21,7 @@ Vouch Server is the backend that makes hardware-backed authentication work:
 | `vouch` CLI | User-facing commands, credential helpers | Apache-2.0 OR MIT |
 | `vouch-agent` | Background daemon, session management | Apache-2.0 OR MIT |
 | `vouch-common` | Shared types, FIDO2 helpers, API client | Apache-2.0 OR MIT |
-| Vouch Server | OIDC provider, certificate authority | BSL 1.1 (converts to Apache-2.0) |
+| Vouch Server | OIDC provider, certificate authority | Apache-2.0 OR MIT |
 
 ## Security
 

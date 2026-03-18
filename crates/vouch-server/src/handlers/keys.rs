@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Key management handlers for listing, renaming, removing, and registering security keys.
 
 use crate::AppState;

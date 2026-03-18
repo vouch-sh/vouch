@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Request correlation ID middleware.
 //!
 //! Propagates or generates `x-fapi-interaction-id` headers for request tracking

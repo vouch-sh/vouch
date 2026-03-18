@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! FIDO2 assertion grant flow tests.
 //!
 //! Tests cover the challenge endpoint and the token endpoint error paths for the

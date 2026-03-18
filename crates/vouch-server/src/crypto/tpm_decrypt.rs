@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! NitroTPM-attested KMS decryption.
 //!
 //! This module provides optional AWS KMS decryption with NitroTPM attestation.

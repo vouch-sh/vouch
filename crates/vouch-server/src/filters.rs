@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Custom Askama template filters shared across all templates.
 //!
 //! To use these filters in a template, add `use crate::filters;` to the

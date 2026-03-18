@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! TLS configuration for optional HTTPS support with hot reloading.
 //!
 //! Enforces TLS 1.3 only — TLS 1.2 is compiled out via rustls feature flags

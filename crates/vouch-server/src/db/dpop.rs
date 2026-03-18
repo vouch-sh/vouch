@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! DPoP nonce and JTI database operations (RFC 9449).
 
 use super::document_type::DocumentType;

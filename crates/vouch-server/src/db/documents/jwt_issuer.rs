@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Trusted JWT issuer document type (RFC 7523).
 
 use jiff::Timestamp;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! HTTP router construction.
 //!
 //! Assembles API and UI route groups with appropriate CORS policies,

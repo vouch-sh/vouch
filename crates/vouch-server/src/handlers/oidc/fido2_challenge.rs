@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! FIDO2 challenge endpoint for the FIDO2 assertion grant.
 //!
 //! `POST /oauth/fido2/challenge` — Issues a short-lived challenge for CTAP2

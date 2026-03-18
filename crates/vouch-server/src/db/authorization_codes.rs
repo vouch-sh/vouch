@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Authorization code single-use enforcement (RFC 6749 Section 10.5).
 
 use super::document_type::DocumentType;

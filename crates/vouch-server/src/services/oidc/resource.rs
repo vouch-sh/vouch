@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Resource Indicators for OAuth 2.0 (RFC 8707).
 //!
 //! Provides a validated `ResourceUri` newtype that enforces RFC 8707 Section 2

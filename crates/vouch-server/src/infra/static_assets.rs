@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Static asset serving via rust-embed.
 //!
 //! Embeds the `static/` directory into the binary and serves assets with

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Key management service for listing, renaming, and deleting registered security keys.
 //!
 //! This module contains the shared business logic for key management operations.

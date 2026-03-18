@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! UserInfo endpoint handler (OIDC Core Section 5.3).
 //!
 //! Implements:

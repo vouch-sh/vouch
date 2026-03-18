@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Types for OAuth Application Registration handlers.
 //!
 //! Contains all structs, enums, templates, and their implementations used by

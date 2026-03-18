@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! FIDO2 assertion grant type — `urn:ietf:params:oauth:grant-type:fido2-assertion`.
 //!
 //! A custom extension grant per RFC 6749 Section 4.5 / RFC 7521. The CLI

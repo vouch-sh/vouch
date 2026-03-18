@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! OIDC token claims for cloud provider identity federation.
 
 use serde::Serialize;

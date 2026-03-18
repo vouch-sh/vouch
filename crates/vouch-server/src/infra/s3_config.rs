@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! S3-based configuration for dynamic config updates.
 //!
 //! This module provides functionality to:

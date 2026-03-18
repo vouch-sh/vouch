@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! OIDC Provider endpoints for application integration.
 //!
 //! This module implements a standard OpenID Connect 1.0 provider, allowing

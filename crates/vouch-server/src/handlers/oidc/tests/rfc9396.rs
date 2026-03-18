@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! RFC 9396 — OAuth 2.0 Rich Authorization Requests tests.
 
 use super::helpers::*;

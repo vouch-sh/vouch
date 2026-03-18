@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! SCIM 2.0 API handlers (RFC 7643/7644).
 //!
 //! Implements user provisioning for enterprise identity providers.

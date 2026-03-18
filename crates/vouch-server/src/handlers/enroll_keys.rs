@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Key management handlers during enrollment (using cookie-based authentication).
 //!
 //! These endpoints allow users to manage their security keys via browser UI.

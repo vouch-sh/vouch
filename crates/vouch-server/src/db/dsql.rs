@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Aurora DSQL authentication token generation.
 //!
 //! This module provides functions for connecting to Aurora DSQL clusters

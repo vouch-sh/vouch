@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Authentication method reference (AMR) and assurance level (ACR) types.
 //!
 //! Provides type-safe representations of authentication methods and assurance

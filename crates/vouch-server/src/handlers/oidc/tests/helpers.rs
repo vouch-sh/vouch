@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Shared test helpers and re-exported imports for OIDC test modules.
 
 pub(super) use crate::db;

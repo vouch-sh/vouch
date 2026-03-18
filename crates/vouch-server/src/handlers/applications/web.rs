@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Web UI handlers for OAuth Application Registration.
 //!
 //! These handlers return HTML responses via Askama templates for the

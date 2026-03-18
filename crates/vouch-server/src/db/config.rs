@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Server configuration and authentication event database operations.
 //!
 //! Auth events are now stored via `AuditStore`. This module provides the

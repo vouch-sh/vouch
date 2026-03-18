@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Service layer error types with RFC-compliant conversions.
 //!
 //! This module provides error types for the service layer that can be

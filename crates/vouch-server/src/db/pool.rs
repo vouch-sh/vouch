@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Database pool type abstraction for multi-database support.
 //!
 //! This module provides a `Pool` enum that wraps both SQLite and PostgreSQL

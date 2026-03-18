@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Install page handler.
 
 use crate::handlers::session::{AuthContext, get_auth_context};

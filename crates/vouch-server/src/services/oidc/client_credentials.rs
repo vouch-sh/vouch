@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! OAuth 2.0 Client Credentials Grant (RFC 6749 Section 4.4).
 //!
 //! Allows confidential clients to obtain access tokens using only their

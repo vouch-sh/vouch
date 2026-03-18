@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Document type definitions for the encrypted document store.
 //!
 //! Each module defines serializable document types that implement

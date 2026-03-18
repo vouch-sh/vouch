@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Test utilities for RFC compliance testing.
 //!
 //! This module provides shared test infrastructure for handler tests.

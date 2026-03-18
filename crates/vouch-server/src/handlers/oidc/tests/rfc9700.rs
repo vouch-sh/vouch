@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! RFC 9700 — OAuth 2.0 Security Best Current Practice tests.
 
 use super::helpers::*;

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! JWT bearer authorization grant (RFC 7523 Section 2.1).
 //!
 //! A JWT from a trusted external issuer is exchanged directly for a Vouch

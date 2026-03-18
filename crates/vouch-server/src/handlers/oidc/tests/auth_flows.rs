@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Authentication flow tests — session-key binding, key lifecycle, and cross-flow interactions.
 //!
 //! These tests verify the relationship between sessions and authenticators:

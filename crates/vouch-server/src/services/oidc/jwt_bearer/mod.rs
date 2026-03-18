@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! RFC 7523: JWT Profile for OAuth 2.0 Client Authentication and Authorization Grants.
 //!
 //! This module implements:

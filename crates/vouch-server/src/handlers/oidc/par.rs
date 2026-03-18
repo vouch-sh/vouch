@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Pushed Authorization Request (PAR) endpoint handler (RFC 9126).
 
 use super::client_auth::{ClientAuthFields, authenticate_client_any, extract_client_auth};

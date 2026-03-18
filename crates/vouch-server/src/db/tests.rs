@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Database module tests.
 
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]

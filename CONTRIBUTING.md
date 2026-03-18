@@ -13,7 +13,7 @@ Be respectful and constructive. We're building security software — thoughtful 
 | vouch-cli | Apache-2.0 OR MIT | ✅ Yes |
 | vouch-agent | Apache-2.0 OR MIT | ✅ Yes |
 | vouch-common | Apache-2.0 OR MIT | ✅ Yes |
-| vouch-server | BUSL-1.1 | ✅ Yes (CLA required) |
+| vouch-server | Apache-2.0 OR MIT | ✅ Yes |
 | Documentation | CC-BY-4.0 | ✅ Yes |
 
 ## Development Setup
@@ -57,7 +57,7 @@ vouch/
 │   │       ├── api.rs      # API types (Credential, Session, etc.)
 │   │       ├── fido2_types.rs # FIDO2 type definitions
 │   │       └── contracts.rs   # Shared contracts
-│   ├── vouch-server/       # Auth server (BUSL-1.1)
+│   ├── vouch-server/       # Auth server (Apache-2.0 OR MIT)
 │   │   ├── src/handlers/   # HTTP route handlers
 │   │   ├── src/db/         # Database layer (sqlx)
 │   │   ├── migrations/     # sqlite/ and postgres/
@@ -326,7 +326,7 @@ Documentation lives in `/docs`. When updating:
 
 ## License
 
-By contributing to open source components (vouch-cli, vouch-agent, vouch-common), you agree that your contributions will be dual-licensed under Apache-2.0 OR MIT, at the choice of the user. By contributing to vouch-server, you agree that your contributions will be licensed under the Business Source License 1.1.
+By contributing to this project, you agree that your contributions will be dual-licensed under Apache-2.0 OR MIT, at the choice of the user.
 
 ---
 

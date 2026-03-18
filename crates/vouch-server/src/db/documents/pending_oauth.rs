@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Pending OAuth authorization document type (RFC 6749, RFC 9700).
 
 use jiff::Timestamp;

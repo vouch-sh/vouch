@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! OAuth Client Application database operations.
 
 use super::audit::{AuditEventFilter, AuditStore};

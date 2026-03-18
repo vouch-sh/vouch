@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! RFC 8414 — Authorization Server Metadata tests.
 
 use super::helpers::*;

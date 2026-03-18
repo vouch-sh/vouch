@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Generate a P-384 document encryption key pair via KMS.
 //!
 //! Uses `kms:GenerateDataKeyPairWithoutPlaintext` with `ECC_NIST_P384` to

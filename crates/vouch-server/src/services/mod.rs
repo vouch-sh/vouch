@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Service layer for business logic.
 //!
 //! This module contains business logic services that are called by HTTP handlers.

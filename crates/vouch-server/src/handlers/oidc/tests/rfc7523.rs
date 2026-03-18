@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! RFC 7523/7521 — JWT client authentication and bearer grant tests.
 
 use super::helpers::*;

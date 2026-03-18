@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! CORS and security response header middleware.
 //!
 //! Provides CORS policies for API and UI route groups, plus global security

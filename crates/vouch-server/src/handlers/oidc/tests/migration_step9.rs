@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: BUSL-1.1
+// SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Step 9 Migration Tests — Removal of Fido2Session + Legacy Endpoints.
 //!
 //! This module validates the correctness of the Step 9 FAPI 2.0 migration:
