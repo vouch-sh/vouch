@@ -118,9 +118,11 @@ pub fn verify_xml_signature(
     doc: &roxmltree::Document,
     signing_certificates: &[Vec<u8>],
 ) -> Result<SignedElementId, SignatureError> {
-    // Step 1: Locate <ds:Signature>
-    let sig_node =
-        find_element_by_tag(doc, NS_DS, "Signature").ok_or(SignatureError::NoSignature)?;
+    // Step 1: Locate <ds:Signature> as a direct child of a SAML element.
+    // Only consider Signature elements that are direct children of the
+    // Response or Assertion root elements, not arbitrary descendants.
+    // This prevents an attacker from injecting a Signature elsewhere in the tree.
+    let sig_node = find_saml_signature(doc).ok_or(SignatureError::NoSignature)?;
 
     // Step 2: Extract <ds:Reference URI>
     let signed_info = find_child_element(sig_node, NS_DS, "SignedInfo")
@@ -262,15 +264,39 @@ pub fn verify_xml_signature(
 // Internal helpers
 // ============================================================================
 
-/// Find the first element in the document matching the given namespace+local-name.
-fn find_element_by_tag<'a, 'input>(
+/// SAML 2.0 protocol namespace.
+const NS_SAMLP: &str = "urn:oasis:names:tc:SAML:2.0:protocol";
+
+/// SAML 2.0 assertion namespace.
+const NS_SAML: &str = "urn:oasis:names:tc:SAML:2.0:assertion";
+
+/// Find a `<ds:Signature>` that is a direct child of a SAML Response or Assertion.
+///
+/// Scoping the search prevents an attacker from injecting a valid Signature
+/// elsewhere in the document tree (e.g., inside an unsigned extension element).
+fn find_saml_signature<'a, 'input>(
     doc: &'a roxmltree::Document<'input>,
-    namespace: &str,
-    local_name: &str,
 ) -> Option<roxmltree::Node<'a, 'input>> {
-    doc.root()
-        .descendants()
-        .find(|n| n.has_tag_name((namespace, local_name)))
+    // Check direct children of the document root element (Response)
+    let root_element = doc.root().children().find(|n| n.is_element())?;
+    if let Some(sig) = root_element
+        .children()
+        .find(|n| n.has_tag_name((NS_DS, "Signature")))
+    {
+        return Some(sig);
+    }
+    // Check direct children of Assertion elements (Response-child Assertions)
+    for child in root_element.children() {
+        if (child.has_tag_name((NS_SAML, "Assertion"))
+            || child.has_tag_name((NS_SAMLP, "Response")))
+            && let Some(sig) = child
+                .children()
+                .find(|n| n.has_tag_name((NS_DS, "Signature")))
+        {
+            return Some(sig);
+        }
+    }
+    None
 }
 
 /// Find a direct child element matching the given namespace+local-name.
@@ -870,5 +896,41 @@ mod tests {
         }
         out.extend_from_slice(content);
         out
+    }
+
+    // =========================================================================
+    // Scoped signature search tests
+    // =========================================================================
+
+    #[test]
+    fn deeply_nested_signature_not_found() {
+        // Signature inside a nested element (not direct child of Response/Assertion)
+        // should NOT be found by find_saml_signature
+        let xml = r##"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+                         xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+                         xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"
+                         ID="_response1">
+  <saml:Assertion ID="_assertion1">
+    <saml:Subject>
+      <ds:Signature>
+        <ds:SignedInfo>
+          <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+          <ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>
+          <ds:Reference URI="#_assertion1">
+            <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+            <ds:DigestValue>abc=</ds:DigestValue>
+          </ds:Reference>
+        </ds:SignedInfo>
+        <ds:SignatureValue>sig=</ds:SignatureValue>
+      </ds:Signature>
+    </saml:Subject>
+  </saml:Assertion>
+</samlp:Response>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let err = verify_xml_signature(&doc, &[]).unwrap_err();
+        assert!(
+            matches!(err, SignatureError::NoSignature),
+            "Expected NoSignature for deeply nested sig, got: {err}"
+        );
     }
 }

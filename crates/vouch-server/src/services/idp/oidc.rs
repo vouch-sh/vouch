@@ -193,9 +193,20 @@ pub async fn verify_id_token(
         anyhow::bail!("Email address is not verified by the identity provider");
     }
 
+    // Domain extraction:
+    // - Google with `hd` claim: use it (Workspace hosted domain).
+    // - Google without `hd`: None (consumer account, don't group).
+    // - Non-Google: extract domain from the email address.
+    let is_google = provider.issuer.contains("accounts.google.com");
+    let domain = if is_google {
+        claims.hd
+    } else {
+        claims.email.split('@').nth(1).map(str::to_string)
+    };
+
     Ok(IdentityResult {
         email: claims.email,
-        domain: claims.hd,
+        domain,
     })
 }
 
@@ -750,19 +761,21 @@ mod tests {
         use wiremock::MockServer;
 
         let server = MockServer::start().await;
-        let issuer = server.uri();
+        // Google Workspace: hd claim is used for domain
+        let google_issuer = "https://accounts.google.com";
         let client_id = "test-client";
         let nonce = "test-nonce";
 
         let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
         mount_jwks(&server, &key).await;
 
-        let mut claims = base_claims(&issuer, client_id);
+        let mut claims = base_claims(google_issuer, client_id);
         claims["nonce"] = serde_json::json!(nonce);
         claims["hd"] = serde_json::json!("acme.com");
 
         let token = sign_test_jwt(&key, claims).await;
-        let provider = make_test_provider(&issuer);
+        let mut provider = make_test_provider(google_issuer);
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
         let client = reqwest::Client::new();
 
         let result = verify_id_token(&client, &provider, &token, client_id, nonce)
@@ -772,17 +785,17 @@ mod tests {
         assert_eq!(
             result.domain,
             Some("acme.com".to_string()),
-            "domain should come from hd claim"
+            "Google Workspace domain should come from hd claim"
         );
     }
 
     /// No hd claim: when `hd` is absent, `IdentityResult.domain` is `None`.
     #[tokio::test]
-    async fn verify_id_token_no_hd_claim() {
+    async fn verify_id_token_no_hd_claim_non_google_falls_back_to_email() {
         use wiremock::MockServer;
 
         let server = MockServer::start().await;
-        let issuer = server.uri();
+        let issuer = server.uri(); // non-Google issuer
         let client_id = "test-client";
         let nonce = "test-nonce";
 
@@ -801,9 +814,45 @@ mod tests {
             .await
             .unwrap();
 
+        // Non-Google issuers fall back to email domain when hd is absent
+        assert_eq!(
+            result.domain.as_deref(),
+            Some("example.com"),
+            "non-Google issuer should fall back to email domain"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_id_token_google_consumer_no_hd_returns_none() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        // Use Google issuer — consumer accounts have no hd claim
+        let google_issuer = "https://accounts.google.com";
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(google_issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        // No "hd" claim — Google consumer account
+
+        let token = sign_test_jwt(&key, claims).await;
+        let mut provider = make_test_provider(google_issuer);
+        // Point jwks_uri to our mock server
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+        let client = reqwest::Client::new();
+
+        let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap();
+
+        // Google consumer accounts: no hd → domain should be None
         assert!(
             result.domain.is_none(),
-            "domain should be None when hd claim is absent, got: {:?}",
+            "Google consumer should have domain=None, got: {:?}",
             result.domain
         );
     }

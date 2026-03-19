@@ -214,14 +214,14 @@ impl UpstreamIdp {
                 // nonce = AuthnRequest ID (for InResponseTo validation)
                 let state_key = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
                 // Validate SSO URL scheme (reject javascript:, data:, etc.)
-                if let Ok(parsed) = url::Url::parse(&authn.sso_url) {
-                    let scheme = parsed.scheme();
-                    if scheme != "https" && scheme != "http" {
-                        anyhow::bail!(
-                            "SAML SSO URL has disallowed scheme '{scheme}': {}",
-                            authn.sso_url
-                        );
-                    }
+                let parsed_sso = url::Url::parse(&authn.sso_url)
+                    .map_err(|e| anyhow::anyhow!("Invalid SAML SSO URL: {e}"))?;
+                let scheme = parsed_sso.scheme();
+                if scheme != "https" && scheme != "http" {
+                    anyhow::bail!(
+                        "SAML SSO URL has disallowed scheme '{scheme}': {}",
+                        authn.sso_url
+                    );
                 }
                 if authn.is_post_binding {
                     Ok(AuthRequest {
@@ -515,6 +515,123 @@ mod tests {
         assert!(
             url.contains("RelayState="),
             "Redirect URL must contain RelayState: {url}"
+        );
+    }
+
+    // =========================================================================
+    // PKCE tests (RFC 7636)
+    // =========================================================================
+
+    #[test]
+    fn initiate_auth_oidc_includes_pkce_params() {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let provider = make_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
+        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let config = test_config();
+
+        let auth = idp.initiate_auth(&config).unwrap();
+
+        let AuthAction::Redirect { url } = auth.action else {
+            panic!("Expected AuthAction::Redirect");
+        };
+        assert!(
+            url.contains("code_challenge="),
+            "Missing code_challenge: {url}"
+        );
+        assert!(
+            url.contains("code_challenge_method=S256"),
+            "Missing code_challenge_method=S256: {url}"
+        );
+        assert!(
+            !auth.code_verifier.is_empty(),
+            "code_verifier must not be empty for OIDC"
+        );
+
+        // Verify code_challenge = BASE64URL(SHA256(code_verifier))
+        let expected_digest =
+            aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, auth.code_verifier.as_bytes());
+        let expected_challenge = URL_SAFE_NO_PAD.encode(expected_digest.as_ref());
+        assert!(
+            url.contains(&format!("code_challenge={expected_challenge}")),
+            "code_challenge does not match SHA256(code_verifier): {url}"
+        );
+    }
+
+    #[test]
+    fn initiate_auth_saml_code_verifier_is_empty() {
+        let saml_provider = saml::SamlProvider {
+            idp_metadata: saml::IdpMetadata {
+                entity_id: "https://idp.example.com/saml".to_string(),
+                sso_post_url: Some("https://idp.example.com/sso".to_string()),
+                sso_redirect_url: None,
+                signing_certificates: vec![],
+            },
+            sp_entity_id: "https://vouch.example.com".to_string(),
+            acs_url: "https://vouch.example.com/saml/acs".to_string(),
+            email_attribute: None,
+            domain_attribute: None,
+        };
+        let idp = UpstreamIdp::Saml(saml_provider);
+        let config = test_config();
+
+        let auth = idp.initiate_auth(&config).unwrap();
+        assert!(
+            auth.code_verifier.is_empty(),
+            "SAML should have empty code_verifier"
+        );
+    }
+
+    // =========================================================================
+    // SSO URL scheme validation tests
+    // =========================================================================
+
+    #[test]
+    fn initiate_auth_saml_javascript_scheme_rejected() {
+        let saml_provider = saml::SamlProvider {
+            idp_metadata: saml::IdpMetadata {
+                entity_id: "https://idp.example.com/saml".to_string(),
+                sso_post_url: Some("javascript:alert(1)".to_string()),
+                sso_redirect_url: None,
+                signing_certificates: vec![],
+            },
+            sp_entity_id: "https://vouch.example.com".to_string(),
+            acs_url: "https://vouch.example.com/saml/acs".to_string(),
+            email_attribute: None,
+            domain_attribute: None,
+        };
+        let idp = UpstreamIdp::Saml(saml_provider);
+        let config = test_config();
+
+        let err = idp.initiate_auth(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("disallowed scheme"),
+            "Expected disallowed scheme error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn initiate_auth_saml_data_scheme_rejected() {
+        let saml_provider = saml::SamlProvider {
+            idp_metadata: saml::IdpMetadata {
+                entity_id: "https://idp.example.com/saml".to_string(),
+                sso_post_url: Some("data:text/html,<h1>hi</h1>".to_string()),
+                sso_redirect_url: None,
+                signing_certificates: vec![],
+            },
+            sp_entity_id: "https://vouch.example.com".to_string(),
+            acs_url: "https://vouch.example.com/saml/acs".to_string(),
+            email_attribute: None,
+            domain_attribute: None,
+        };
+        let idp = UpstreamIdp::Saml(saml_provider);
+        let config = test_config();
+
+        let err = idp.initiate_auth(&config).unwrap_err();
+        assert!(
+            err.to_string().contains("disallowed scheme"),
+            "Expected disallowed scheme error, got: {err}"
         );
     }
 

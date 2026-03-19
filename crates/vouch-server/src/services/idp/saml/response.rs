@@ -33,6 +33,9 @@ const STATUS_SUCCESS: &str = "urn:oasis:names:tc:SAML:2.0:status:Success";
 /// Maximum clock skew tolerance in seconds.
 const CLOCK_SKEW_SECS: i64 = 120;
 
+/// Maximum decoded SAML response size (1 MiB). Prevents DoS via oversized XML.
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
+
 // ============================================================================
 // Public types
 // ============================================================================
@@ -151,6 +154,14 @@ pub fn validate_saml_response(
         .decode(base64_response.trim())
         .map_err(|e| ResponseError::DecodeFailed(e.to_string()))?;
 
+    // Size check: prevent DoS via oversized XML before DOM parsing
+    if xml_bytes.len() > MAX_RESPONSE_BYTES {
+        return Err(ResponseError::DecodeFailed(format!(
+            "decoded response exceeds maximum size ({} bytes > {MAX_RESPONSE_BYTES})",
+            xml_bytes.len()
+        )));
+    }
+
     let xml = std::str::from_utf8(&xml_bytes)
         .map_err(|e| ResponseError::DecodeFailed(format!("invalid UTF-8: {e}")))?;
 
@@ -177,6 +188,24 @@ pub fn validate_saml_response(
         .children()
         .find(|n| n.has_tag_name((NS_SAMLP, "Response")))
         .ok_or_else(|| ResponseError::Other("missing Response element".to_string()))?;
+
+    // XSW mitigation: the signed element must be either the Response itself
+    // or an Assertion that is a direct child of the Response. Reject documents
+    // where the signed element lives elsewhere in the tree.
+    if !signed_element.has_tag_name((NS_SAMLP, "Response"))
+        && !signed_element.has_tag_name((NS_SAML, "Assertion"))
+    {
+        return Err(ResponseError::Other(
+            "signed element is neither Response nor Assertion".to_string(),
+        ));
+    }
+    if signed_element.has_tag_name((NS_SAMLP, "Response"))
+        && signed_element.id() != response_root.id()
+    {
+        return Err(ResponseError::Other(
+            "signed Response element does not match document root Response (XSW)".to_string(),
+        ));
+    }
 
     let destination = response_root
         .attribute("Destination")
@@ -324,23 +353,22 @@ fn validate_audience_restriction(
     assertion: roxmltree::Node<'_, '_>,
     sp_entity_id: &str,
 ) -> Result<(), ResponseError> {
+    // Conditions must exist (enforced by validate_conditions called before us).
     let conditions = assertion
         .children()
-        .find(|n| n.has_tag_name((NS_SAML, "Conditions")));
+        .find(|n| n.has_tag_name((NS_SAML, "Conditions")))
+        .ok_or_else(|| {
+            ResponseError::Other("missing Conditions element for audience check".to_string())
+        })?;
 
-    let Some(conditions) = conditions else {
-        // No Conditions element — no audience restriction to check
-        return Ok(());
-    };
-
+    // SAML Profiles 4.1.4.3: AudienceRestriction MUST be present and MUST
+    // include the SP entity ID. Reject assertions without AudienceRestriction.
     let audience_restriction = conditions
         .children()
-        .find(|n| n.has_tag_name((NS_SAML, "AudienceRestriction")));
-
-    let Some(audience_restriction) = audience_restriction else {
-        // Conditions exists but no AudienceRestriction — pass
-        return Ok(());
-    };
+        .find(|n| n.has_tag_name((NS_SAML, "AudienceRestriction")))
+        .ok_or(ResponseError::AudienceRestrictionViolation {
+            sp_entity_id: sp_entity_id.to_string(),
+        })?;
 
     // Check if any <saml:Audience> element matches the SP entity ID
     let has_match = audience_restriction
@@ -362,14 +390,16 @@ fn validate_conditions(
     assertion: roxmltree::Node<'_, '_>,
     now: Timestamp,
 ) -> Result<(), ResponseError> {
+    // SAML Profiles 4.1.4.3: Conditions with AudienceRestriction MUST be present.
+    // Reject assertions without Conditions to prevent infinite-lifetime assertions.
     let conditions = assertion
         .children()
-        .find(|n| n.has_tag_name((NS_SAML, "Conditions")));
-
-    let Some(conditions) = conditions else {
-        // No Conditions element — no time constraints to check
-        return Ok(());
-    };
+        .find(|n| n.has_tag_name((NS_SAML, "Conditions")))
+        .ok_or_else(|| {
+            ResponseError::Other(
+                "missing Conditions element (required for Web Browser SSO)".to_string(),
+            )
+        })?;
 
     if let Some(not_before_str) = conditions.attribute("NotBefore") {
         let not_before = parse_saml_timestamp(not_before_str)?;
@@ -411,13 +441,15 @@ fn validate_subject_confirmation(
     acs_url: &str,
     now: Timestamp,
 ) -> Result<(), ResponseError> {
+    // SAML Profiles 4.1.4.3: Subject MUST be present for Web Browser SSO.
     let subject = assertion
         .children()
-        .find(|n| n.has_tag_name((NS_SAML, "Subject")));
-
-    let Some(subject) = subject else {
-        return Ok(()); // No Subject — skip SubjectConfirmation validation
-    };
+        .find(|n| n.has_tag_name((NS_SAML, "Subject")))
+        .ok_or_else(|| {
+            ResponseError::Other(
+                "missing Subject element (required for Web Browser SSO)".to_string(),
+            )
+        })?;
 
     for confirmation in subject
         .children()
@@ -1058,23 +1090,33 @@ mod tests {
     }
 
     #[test]
-    fn audience_restriction_absent_passes() {
-        // No Conditions element at all — no restriction to enforce
+    fn audience_restriction_absent_conditions_returns_error() {
+        // No Conditions element — now required per SAML Profiles 4.1.4.3
         let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"/>"##;
         let doc = roxmltree::Document::parse(xml).unwrap();
         let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-        assert!(validate_audience_restriction(assertion, "https://vouch.example.com").is_ok());
+        let err =
+            validate_audience_restriction(assertion, "https://vouch.example.com").unwrap_err();
+        assert!(
+            matches!(err, ResponseError::Other(_)),
+            "Expected error for missing Conditions, got: {err}"
+        );
     }
 
     #[test]
-    fn audience_restriction_conditions_without_restriction_passes() {
-        // Conditions exists but no AudienceRestriction child
+    fn audience_restriction_conditions_without_restriction_returns_error() {
+        // Conditions exists but no AudienceRestriction — now required
         let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
   <saml:Conditions NotBefore="2026-01-01T00:00:00Z"/>
 </saml:Assertion>"##;
         let doc = roxmltree::Document::parse(xml).unwrap();
         let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
-        assert!(validate_audience_restriction(assertion, "https://vouch.example.com").is_ok());
+        let err =
+            validate_audience_restriction(assertion, "https://vouch.example.com").unwrap_err();
+        assert!(
+            matches!(err, ResponseError::AudienceRestrictionViolation { .. }),
+            "Expected AudienceRestrictionViolation, got: {err}"
+        );
     }
 
     // =========================================================================
@@ -1516,6 +1558,73 @@ mod tests {
                 )
             ),
             "Expected DigestMismatch for tampered assertion, got: {err}"
+        );
+    }
+
+    // =========================================================================
+    // Gap tests: Conditions required, Subject required, size limit, etc.
+    // =========================================================================
+
+    #[test]
+    fn conditions_missing_element_returns_error() {
+        let now = Timestamp::now();
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+</saml:Assertion>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        let err = validate_conditions(assertion, now).unwrap_err();
+        assert!(
+            matches!(err, ResponseError::Other(ref msg) if msg.contains("Conditions")),
+            "Expected error for missing Conditions, got: {err}"
+        );
+    }
+
+    #[test]
+    fn subject_confirmation_missing_subject_returns_error() {
+        let now = Timestamp::now();
+        // Assertion with no Subject element at all
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+</saml:Assertion>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        let err = validate_subject_confirmation(
+            assertion,
+            "_req123",
+            "https://vouch.example.com/saml/acs",
+            now,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ResponseError::Other(ref msg) if msg.contains("Subject")),
+            "Expected error for missing Subject, got: {err}"
+        );
+    }
+
+    #[test]
+    fn oversized_response_returns_decode_error() {
+        use crate::services::idp::saml::IdpMetadata;
+        use crate::services::idp::saml::SamlProvider;
+
+        let provider = SamlProvider {
+            idp_metadata: IdpMetadata {
+                entity_id: "https://idp.example.com".to_string(),
+                sso_post_url: Some("https://idp.example.com/sso".to_string()),
+                sso_redirect_url: None,
+                signing_certificates: vec![],
+            },
+            sp_entity_id: "https://vouch.example.com".to_string(),
+            acs_url: "https://vouch.example.com/saml/acs".to_string(),
+            email_attribute: None,
+            domain_attribute: None,
+        };
+
+        // Create a payload that exceeds MAX_RESPONSE_BYTES when decoded
+        let oversized = vec![b'A'; MAX_RESPONSE_BYTES + 1];
+        let encoded = BASE64_STANDARD.encode(&oversized);
+        let err = validate_saml_response(&encoded, "_req", &provider).unwrap_err();
+        assert!(
+            matches!(err, ResponseError::DecodeFailed(ref msg) if msg.contains("maximum size")),
+            "Expected DecodeFailed for oversized response, got: {err}"
         );
     }
 }
