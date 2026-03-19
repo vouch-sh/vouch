@@ -506,7 +506,9 @@ pub async fn oidc_callback(
         }
     };
 
-    // Check domain restriction
+    // Check domain restriction.
+    // For Google consumers (no `hd` claim), `identity.domain` is `None`,
+    // so `email_domain` becomes "" and will never match an allowed domain.
     if let Some(domains) = state
         .config()
         .allowed_domains

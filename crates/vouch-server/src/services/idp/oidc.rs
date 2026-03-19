@@ -174,6 +174,7 @@ pub async fn verify_id_token(
 
     // OIDC Core Section 3.1.3.7: Verify nonce matches the value sent
     // in the authentication request to prevent replay attacks.
+    // Empty nonce is only valid for device-code flow where no nonce is sent.
     if !expected_nonce.is_empty() {
         match &claims.nonce {
             Some(nonce) if nonce == expected_nonce => {}
@@ -231,7 +232,8 @@ fn find_decoding_key(
         }
     }
 
-    // Last resort: try the first key
+    // Last resort: try the first key (no kid/algorithm matched)
+    tracing::warn!("No JWK matched by kid or algorithm, falling back to first key in JWKS");
     jwks.keys.first().map_or_else(
         || Err(anyhow::anyhow!("Upstream JWKS is empty")),
         |jwk| {
