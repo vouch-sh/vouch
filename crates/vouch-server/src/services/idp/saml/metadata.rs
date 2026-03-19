@@ -424,10 +424,7 @@ mod tests {
         );
         assert_eq!(meta.signing_certificates.len(), 1);
         // Verify the certificate DER has reasonable size (not empty/truncated)
-        let cert_len = meta
-            .signing_certificates
-            .first()
-            .map_or(0, Vec::len);
+        let cert_len = meta.signing_certificates.first().map_or(0, Vec::len);
         assert!(
             cert_len > 100,
             "Certificate DER should be substantial, got {cert_len} bytes",
