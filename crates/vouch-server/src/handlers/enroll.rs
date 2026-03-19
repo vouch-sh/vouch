@@ -608,7 +608,10 @@ pub(crate) async fn complete_enrollment_after_identity(
         .unwrap_or_default();
     let authenticator_id = existing_auths.first().map(|a| a.id.clone());
 
-    // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
+    // Issue an OAuth access token for the enrollment session.
+    // This session is created after upstream IdP auth (OIDC/SAML) but BEFORE
+    // FIDO2 WebAuthn registration — do NOT claim AAL3 or FIDO2 amr here.
+    // The proper FIDO2 claims are set later in browser_register_complete.
     let client_id_for_token = state.config().base_url.clone();
     let session_result = match create_oauth_access_token(
         state,
@@ -622,9 +625,9 @@ pub(crate) async fn complete_enrollment_after_identity(
             act: None,
             audience: None,
             auth_time: Some(now.as_second()),
-            amr: Some(AuthMethod::all_fido2().to_vec()),
-            acr: Some(ACR_AAL3.to_string()),
-            hardware_verified: true,
+            amr: None,
+            acr: None,
+            hardware_verified: false,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
         },
