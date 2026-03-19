@@ -54,10 +54,27 @@ jobs:
 
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve checkout ref
+        id: ref
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          TAG: ${{ steps.tag.outputs.tag }}
+          WR_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # Tag format already validated above; use tag ref directly
+            echo "sha=" >> "$GITHUB_OUTPUT"
+            echo "ref=refs/tags/${TAG}" >> "$GITHUB_OUTPUT"
+          else
+            # workflow_run: use the triggering workflow's commit SHA
+            echo "sha=${WR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+            echo "ref=${WR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+          ref: ${{ steps.ref.outputs.ref }}
           fetch-depth: 1
           fetch-tags: true
           persist-credentials: false
@@ -66,7 +83,7 @@ jobs:
         id: version
         env:
           TAG: ${{ steps.tag.outputs.tag }}
-          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+          EXPECTED_SHA: ${{ steps.ref.outputs.sha }}
         run: |
           if ! git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
             echo "ERROR: '${TAG}' is not a valid tag in this repository"
@@ -74,7 +91,9 @@ jobs:
           fi
 
           TAG_SHA=$(git rev-list -n 1 "refs/tags/${TAG}")
-          if [ "$TAG_SHA" != "$EXPECTED_SHA" ]; then
+          # For workflow_run, verify the tag points to the expected commit
+          # For workflow_dispatch, we checked out the tag directly so just extract the version
+          if [ -n "$EXPECTED_SHA" ] && [ "$TAG_SHA" != "$EXPECTED_SHA" ]; then
             echo "ERROR: Tag '${TAG}' points to ${TAG_SHA}, expected ${EXPECTED_SHA}"
             exit 1
           fi
