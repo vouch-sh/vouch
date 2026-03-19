@@ -163,13 +163,12 @@ impl UpstreamIdp {
         use base64::Engine;
         use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 
-        let state_bytes = crate::crypto::generate_random_bytes(32)?;
-        let nonce_bytes = crate::crypto::generate_random_bytes(32)?;
-        let state_key = URL_SAFE_NO_PAD.encode(state_bytes);
-        let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
-
         match self {
             Self::Oidc(p) => {
+                let state_bytes = crate::crypto::generate_random_bytes(32)?;
+                let nonce_bytes = crate::crypto::generate_random_bytes(32)?;
+                let state_key = URL_SAFE_NO_PAD.encode(state_bytes);
+                let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
                 let client_id = config
                     .oidc_client_id
                     .as_deref()

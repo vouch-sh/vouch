@@ -26,7 +26,6 @@ use crate::handlers::{create_session_cookie, hash_token};
 use crate::redact_email;
 use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
 use crate::services::idp::IdentityResult;
-use crate::services::oidc::amr::{ACR_AAL3, AuthMethod};
 use crate::services::oidc::scope::ScopeSet;
 
 // ============================================================================
@@ -178,7 +177,9 @@ pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsFor
         .as_ref()
         .filter(|d| !d.is_empty())
     {
-        let email_domain = identity.domain.as_deref().unwrap_or("");
+        let email_domain =
+            crate::services::idp::extract_email_domain(identity.domain.as_deref(), &identity.email)
+                .unwrap_or("");
         if !domains.iter().any(|d| d.eq_ignore_ascii_case(email_domain)) {
             let allowed_list = domains.join(", ");
             return ErrorTemplate {
@@ -250,9 +251,9 @@ pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsFor
             act: None,
             audience: None,
             auth_time: Some(now.as_second()),
-            amr: Some(AuthMethod::all_fido2().to_vec()),
-            acr: Some(ACR_AAL3.to_string()),
-            hardware_verified: true,
+            amr: None,
+            acr: None,
+            hardware_verified: false,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
         },
