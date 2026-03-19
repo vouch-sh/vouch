@@ -57,18 +57,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
-          ref: refs/tags/${{ steps.tag.outputs.tag }}
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Verify tag exists
+      - name: Verify tag matches checkout
         id: version
         env:
           TAG: ${{ steps.tag.outputs.tag }}
+          EXPECTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
         run: |
-          # Verify this is actually a tag in the repository
           if ! git rev-parse "refs/tags/${TAG}" >/dev/null 2>&1; then
             echo "ERROR: '${TAG}' is not a valid tag in this repository"
+            exit 1
+          fi
+
+          TAG_SHA=$(git rev-list -n 1 "refs/tags/${TAG}")
+          if [ "$TAG_SHA" != "$EXPECTED_SHA" ]; then
+            echo "ERROR: Tag '${TAG}' points to ${TAG_SHA}, expected ${EXPECTED_SHA}"
             exit 1
           fi
 
