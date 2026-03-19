@@ -154,14 +154,14 @@ vouch completions fish > ~/.config/fish/completions/vouch.fish
 
 Vouch consists of:
 
-| Component | Description | Source |
-|-----------|-------------|--------|
-| `vouch` CLI | User-facing commands, credential helpers | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
-| `vouch-agent` | Background daemon, session management | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
-| `vouch-common` | Shared types, FIDO2 helpers, API client | Open source ([Apache-2.0 OR MIT](LICENSE-APACHE)) |
-| Vouch Server | OIDC provider, certificate authority | [Apache-2.0 OR MIT](LICENSE-APACHE) |
+| Component | Description |
+|-----------|-------------|
+| `vouch` CLI | User-facing commands, credential helpers |
+| `vouch-agent` | Background daemon, session management |
+| `vouch-common` | Shared types, FIDO2 helpers, API client |
+| `vouch-server` | OIDC provider, certificate authority |
 
-All components are open source under Apache-2.0 OR MIT for security auditing.
+All components are [Apache-2.0 OR MIT](LICENSE-APACHE) licensed.
 
 ## Security
 
@@ -198,7 +198,7 @@ Key sections:
 
 We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
-The CLI is open source under Apache-2.0 OR MIT. We believe security tools should be auditable.
+We believe security tools should be auditable.
 
 ## License
 
