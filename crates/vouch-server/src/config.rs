@@ -102,6 +102,22 @@ pub struct Args {
     #[arg(long, env = "VOUCH_OIDC_CLIENT_SECRET")]
     pub oidc_client_secret: Option<String>,
 
+    /// SAML IdP metadata URL.
+    #[arg(long, env = "VOUCH_SAML_IDP_METADATA_URL")]
+    pub saml_idp_metadata_url: Option<String>,
+
+    /// SAML SP entity ID (defaults to base_url if not set).
+    #[arg(long, env = "VOUCH_SAML_SP_ENTITY_ID")]
+    pub saml_sp_entity_id: Option<String>,
+
+    /// SAML attribute name for email extraction.
+    #[arg(long, env = "VOUCH_SAML_EMAIL_ATTRIBUTE")]
+    pub saml_email_attribute: Option<String>,
+
+    /// SAML attribute name for domain extraction.
+    #[arg(long, env = "VOUCH_SAML_DOMAIN_ATTRIBUTE")]
+    pub saml_domain_attribute: Option<String>,
+
     /// Base URL for this server (defaults to https://{rp_id}).
     #[arg(long, env = "VOUCH_BASE_URL")]
     pub base_url: Option<String>,
@@ -330,6 +346,14 @@ pub struct ServerConfig {
     pub oidc_client_id: Option<String>,
     /// OIDC client secret.
     pub oidc_client_secret: Option<SecretString>,
+    /// SAML IdP metadata URL.
+    pub saml_idp_metadata_url: Option<String>,
+    /// SAML SP entity ID (defaults to base_url if not set).
+    pub saml_sp_entity_id: Option<String>,
+    /// SAML attribute name for email extraction.
+    pub saml_email_attribute: Option<String>,
+    /// SAML attribute name for domain extraction.
+    pub saml_domain_attribute: Option<String>,
     /// Base URL for this server (defaults to `https://{rp_id}`, or `http://localhost:port` for local dev).
     pub base_url: String,
     /// Device code expiration in seconds (default: 600).
@@ -492,6 +516,10 @@ impl ServerConfig {
             oidc_issuer_url: args.oidc_issuer,
             oidc_client_id: args.oidc_client_id,
             oidc_client_secret: args.oidc_client_secret.map(SecretString::from),
+            saml_idp_metadata_url: args.saml_idp_metadata_url,
+            saml_sp_entity_id: args.saml_sp_entity_id,
+            saml_email_attribute: args.saml_email_attribute,
+            saml_domain_attribute: args.saml_domain_attribute,
             base_url,
             device_code_expires_seconds: args.device_code_expires,
             device_poll_interval_seconds: args.device_poll_interval,
@@ -546,6 +574,12 @@ impl ServerConfig {
         self.oidc_issuer_url.is_some()
             && self.oidc_client_id.is_some()
             && self.oidc_client_secret.is_some()
+    }
+
+    /// Check if SAML is configured.
+    #[must_use]
+    pub fn saml_configured(&self) -> bool {
+        self.saml_idp_metadata_url.is_some()
     }
 
     /// Get the organization display name.
@@ -610,6 +644,14 @@ impl ServerConfig {
     /// Validate that all required configuration is present.
     /// Call this after all config sources (env, S3) have been merged.
     pub fn validate(&self) -> Result<()> {
+        // OIDC and SAML are mutually exclusive.
+        if self.oidc_configured() && self.saml_configured() {
+            anyhow::bail!(
+                "OIDC and SAML cannot both be configured. \
+                 Set either VOUCH_OIDC_* or VOUCH_SAML_* env vars, not both."
+            );
+        }
+
         // Skip jwt_secret validation when KMS HMAC signing is configured.
         if self.jwt_hmac_kms_key_id.is_none() {
             let secret = self.jwt_secret.expose_secret();
@@ -691,6 +733,63 @@ pub fn resolve_dsql_endpoints(endpoints: &HashMap<String, String>) -> Result<Str
 mod tests {
     use crate::test_utils::test_config;
     use secrecy::SecretString;
+
+    #[test]
+    fn test_saml_configured_returns_true_when_metadata_url_set() {
+        let mut config = test_config();
+        config.saml_idp_metadata_url = Some("https://idp.example.com/saml/metadata".to_string());
+
+        assert!(config.saml_configured());
+    }
+
+    #[test]
+    fn test_saml_configured_returns_false_when_none() {
+        let mut config = test_config();
+        config.saml_idp_metadata_url = None;
+
+        assert!(!config.saml_configured());
+    }
+
+    #[test]
+    fn test_validate_mutual_exclusivity_oidc_and_saml() {
+        let mut config = test_config();
+        // test_config already sets OIDC fields; add SAML too
+        config.saml_idp_metadata_url = Some("https://idp.example.com/saml/metadata".to_string());
+
+        let err = config.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("cannot both be configured"),
+            "Error should mention mutual exclusivity: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_saml_only_passes() {
+        let mut config = test_config();
+        // Remove OIDC fields, keep only SAML
+        config.oidc_issuer_url = None;
+        config.oidc_client_id = None;
+        config.oidc_client_secret = None;
+        config.saml_idp_metadata_url = Some("https://idp.example.com/saml/metadata".to_string());
+
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_saml_configured_implies_oidc_not_configured() {
+        // Covers CC-2: when only SAML is set, oidc_configured() must be false.
+        let mut config = test_config();
+        config.oidc_issuer_url = None;
+        config.oidc_client_id = None;
+        config.oidc_client_secret = None;
+        config.saml_idp_metadata_url = Some("https://idp.example.com/saml/metadata".to_string());
+
+        assert!(
+            !config.oidc_configured(),
+            "oidc_configured should be false when only SAML set"
+        );
+        assert!(config.saml_configured(), "saml_configured should be true");
+    }
 
     #[test]
     fn test_validate_kms_key_id_bypasses_secret_check() {

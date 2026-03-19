@@ -155,6 +155,19 @@ impl std::fmt::Debug for S3OidcConfig {
     }
 }
 
+/// Nested SAML configuration from S3.
+#[derive(Debug, Deserialize, Default)]
+pub struct S3SamlConfig {
+    /// SAML IdP metadata URL.
+    pub idp_metadata_url: Option<String>,
+    /// SAML SP entity ID (defaults to base_url if not set).
+    pub sp_entity_id: Option<String>,
+    /// SAML attribute name for email extraction.
+    pub email_attribute: Option<String>,
+    /// SAML attribute name for domain extraction.
+    pub domain_attribute: Option<String>,
+}
+
 /// Nested DPoP configuration from S3.
 #[derive(Debug, Deserialize, Default)]
 pub struct S3DpopConfig {
@@ -224,6 +237,10 @@ pub struct S3Config {
     // OIDC configuration
     /// Nested OIDC config.
     pub oidc: Option<S3OidcConfig>,
+
+    // SAML configuration
+    /// Nested SAML config.
+    pub saml: Option<S3SamlConfig>,
 
     // TLS configuration
     /// Nested TLS config.
@@ -312,6 +329,7 @@ impl std::fmt::Debug for S3Config {
             .field("jwt_secret", &"[REDACTED]")
             .field("session_hours", &self.session_hours)
             .field("oidc", &self.oidc)
+            .field("saml", &self.saml)
             .field("tls", &self.tls)
             .field("acme", &self.acme)
             .field("allowed_domains", &self.allowed_domains)
@@ -680,6 +698,22 @@ impl ServerConfig {
             }
             if let Some(v) = &oidc.client_secret {
                 self.oidc_client_secret = Some(SecretString::from(v.clone()));
+            }
+        }
+
+        // SAML configuration
+        if let Some(saml) = &s3.saml {
+            if let Some(v) = &saml.idp_metadata_url {
+                self.saml_idp_metadata_url = Some(v.clone());
+            }
+            if let Some(v) = &saml.sp_entity_id {
+                self.saml_sp_entity_id = Some(v.clone());
+            }
+            if let Some(v) = &saml.email_attribute {
+                self.saml_email_attribute = Some(v.clone());
+            }
+            if let Some(v) = &saml.domain_attribute {
+                self.saml_domain_attribute = Some(v.clone());
             }
         }
 
@@ -1163,5 +1197,68 @@ mod tests {
             endpoints.get("us-west-2"),
             Some(&"postgres://vouch@xyz789.dsql.us-west-2.on.aws/postgres".to_string())
         );
+    }
+
+    #[test]
+    fn test_merge_s3_config_nested_saml() {
+        let mut config = crate::test_utils::test_config();
+        assert!(config.saml_idp_metadata_url.is_none());
+        assert!(config.saml_sp_entity_id.is_none());
+
+        let s3 = S3Config {
+            saml: Some(S3SamlConfig {
+                idp_metadata_url: Some("https://idp.example.com/saml/metadata".to_string()),
+                sp_entity_id: Some("https://vouch.example.com".to_string()),
+                email_attribute: Some(
+                    "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress"
+                        .to_string(),
+                ),
+                domain_attribute: Some("department".to_string()),
+            }),
+            ..Default::default()
+        };
+
+        config.merge_s3_config(&s3, false);
+
+        assert_eq!(
+            config.saml_idp_metadata_url,
+            Some("https://idp.example.com/saml/metadata".to_string())
+        );
+        assert_eq!(
+            config.saml_sp_entity_id,
+            Some("https://vouch.example.com".to_string())
+        );
+        assert_eq!(
+            config.saml_email_attribute,
+            Some("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress".to_string())
+        );
+        assert_eq!(config.saml_domain_attribute, Some("department".to_string()));
+    }
+
+    #[test]
+    fn test_s3_config_deserialization_with_saml() {
+        let json = r#"{
+            "version": 1,
+            "rp_id": "vouch.example.com",
+            "saml": {
+                "idp_metadata_url": "https://idp.example.com/saml/metadata",
+                "sp_entity_id": "https://vouch.example.com"
+            }
+        }"#;
+
+        let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
+
+        assert!(config.saml.is_some());
+        let saml = config.saml.unwrap();
+        assert_eq!(
+            saml.idp_metadata_url,
+            Some("https://idp.example.com/saml/metadata".to_string())
+        );
+        assert_eq!(
+            saml.sp_entity_id,
+            Some("https://vouch.example.com".to_string())
+        );
+        assert!(saml.email_attribute.is_none());
+        assert!(saml.domain_attribute.is_none());
     }
 }

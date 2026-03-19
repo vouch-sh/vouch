@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Upstream identity provider abstraction.
 //!
-//! Supports OIDC discovery and provider-specific UI branding.
-//! Structured to support adding SAML in the future.
+//! Supports OIDC and SAML (stub) upstream identity providers with
+//! protocol-agnostic auth initiation and provider-specific UI branding.
 
 pub mod icons;
 pub mod oidc;
+pub mod saml;
 
 /// Known identity provider for UI branding.
 #[derive(Debug)]
@@ -31,6 +32,30 @@ impl IdpBrand {
         } else if issuer.contains("keycloak") {
             Self::Keycloak
         } else if issuer.contains("auth0.com") {
+            Self::Auth0
+        } else {
+            Self::Generic
+        }
+    }
+
+    /// Detect provider from SAML entity ID.
+    ///
+    /// Auth0 SAML entity IDs typically contain `auth0.com` in the path but
+    /// not necessarily the hostname. We check both for consistency with
+    /// `from_issuer()`.
+    #[must_use]
+    pub fn from_entity_id(entity_id: &str) -> Self {
+        if entity_id.contains(".okta.com") {
+            Self::Okta
+        } else if entity_id.contains("sts.windows.net")
+            || entity_id.contains("login.microsoftonline.com")
+        {
+            Self::Entra
+        } else if entity_id.contains("accounts.google.com") {
+            Self::Google
+        } else if entity_id.contains("keycloak") {
+            Self::Keycloak
+        } else if entity_id.contains("auth0.com") {
             Self::Auth0
         } else {
             Self::Generic
@@ -76,47 +101,100 @@ pub struct IdentityResult {
     pub domain: Option<String>,
 }
 
+/// How to send the user to the upstream IdP.
+#[derive(Debug)]
+pub enum AuthAction {
+    /// HTTP 303 redirect (OIDC, SAML Redirect binding).
+    Redirect { url: String },
+    /// Auto-submitting HTML form (SAML POST binding).
+    PostForm {
+        action_url: String,
+        saml_request: String,
+        relay_state: String,
+    },
+}
+
+/// Protocol-agnostic result of initiating upstream auth.
+#[derive(Debug)]
+pub struct AuthRequest {
+    /// How to send the user to the IdP.
+    pub action: AuthAction,
+    /// Opaque state token (stored as `state` in oidc_state table).
+    /// OIDC: random base64url token. SAML: RelayState token.
+    pub state_key: String,
+    /// Protocol-specific request identifier (stored as `nonce` in DB).
+    /// OIDC: nonce for ID token binding. SAML: AuthnRequest ID.
+    pub nonce: String,
+}
+
 /// Configured upstream identity provider.
 #[derive(Debug)]
 pub enum UpstreamIdp {
-    Oidc(oidc::OidcProvider),
-    // Saml(SamlProvider),  // Phase 2
+    Oidc(Box<oidc::OidcProvider>),
+    Saml(saml::SamlProvider),
 }
 
 impl UpstreamIdp {
-    /// Build the full authorization URL for redirecting the user.
+    /// Initiate authentication with the upstream IdP.
     ///
-    /// Uses `url::Url::query_pairs_mut()` to safely handle endpoints
-    /// that may already contain query parameters (RFC 6749 Section 3.1).
-    #[must_use]
-    pub fn authorization_url(
+    /// Generates state and nonce internally, builds the appropriate auth
+    /// action (redirect URL for OIDC, POST form for SAML), and returns
+    /// the full `AuthRequest` to store state and redirect/render.
+    ///
+    /// # Note
+    /// `initiate_auth` takes the full `ServerConfig` for simplicity in Phase 1.
+    /// Only `oidc_client_id` and `base_url` are used. This coupling can be
+    /// narrowed in Phase 2 if needed.
+    ///
+    /// # Invariant
+    /// When `Self::Oidc` is active, `config.oidc_client_id` must be `Some`.
+    /// Startup validates `oidc_configured()` before constructing `UpstreamIdp::Oidc`,
+    /// so the error path below should be unreachable in practice.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if random byte generation fails, or if required OIDC
+    /// config fields are missing (should be unreachable -- see invariant above).
+    /// Returns an error for the SAML variant (not yet implemented in Phase 1).
+    pub fn initiate_auth(
         &self,
-        client_id: &str,
-        redirect_uri: &str,
-        state: &str,
-        nonce: &str,
-    ) -> String {
+        config: &crate::config::ServerConfig,
+    ) -> Result<AuthRequest, anyhow::Error> {
+        use base64::Engine;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let state_bytes = crate::crypto::generate_random_bytes(32)?;
+        let nonce_bytes = crate::crypto::generate_random_bytes(32)?;
+        let state_key = URL_SAFE_NO_PAD.encode(state_bytes);
+        let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
+
         match self {
             Self::Oidc(p) => {
+                let client_id = config
+                    .oidc_client_id
+                    .as_deref()
+                    .ok_or_else(|| anyhow::anyhow!("OIDC client_id not configured"))?;
+                let redirect_uri = format!("{}/oauth/callback", config.base_url);
                 let mut url = p.authorization_endpoint.clone();
                 url.query_pairs_mut()
                     .append_pair("client_id", client_id)
-                    .append_pair("redirect_uri", redirect_uri)
+                    .append_pair("redirect_uri", &redirect_uri)
                     .append_pair("response_type", "code")
                     .append_pair("scope", "openid email")
-                    .append_pair("state", state)
-                    .append_pair("nonce", nonce)
+                    .append_pair("state", &state_key)
+                    .append_pair("nonce", &nonce)
                     .append_pair("prompt", "login");
-                url.to_string()
+                Ok(AuthRequest {
+                    action: AuthAction::Redirect {
+                        url: url.to_string(),
+                    },
+                    state_key,
+                    nonce,
+                })
             }
-        }
-    }
-
-    /// Get the token endpoint URL.
-    #[must_use]
-    pub fn token_endpoint(&self) -> &url::Url {
-        match self {
-            Self::Oidc(p) => &p.token_endpoint,
+            Self::Saml(_) => {
+                anyhow::bail!("SAML initiate_auth not yet implemented (Phase 2)")
+            }
         }
     }
 
@@ -125,6 +203,7 @@ impl UpstreamIdp {
     pub fn brand(&self) -> IdpBrand {
         match self {
             Self::Oidc(p) => IdpBrand::from_issuer(&p.issuer),
+            Self::Saml(s) => IdpBrand::from_entity_id(&s.entity_id),
         }
     }
 }
@@ -149,9 +228,14 @@ pub fn extract_email_domain<'a>(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used)]
+    #![allow(clippy::unwrap_used, clippy::panic)]
 
     use super::*;
+    use crate::test_utils::test_config;
+
+    // =========================================================================
+    // IdpBrand::from_issuer tests
+    // =========================================================================
 
     #[test]
     fn detect_google() {
@@ -189,6 +273,158 @@ mod tests {
         assert_eq!(brand.display_name(), "SSO");
     }
 
+    // =========================================================================
+    // IdpBrand::from_entity_id tests
+    // =========================================================================
+
+    #[test]
+    fn from_entity_id_okta() {
+        let brand = IdpBrand::from_entity_id("https://dev-123.okta.com/app/example/sso/saml");
+        assert_eq!(brand.display_name(), "Okta");
+    }
+
+    #[test]
+    fn from_entity_id_entra_sts() {
+        let brand = IdpBrand::from_entity_id("https://sts.windows.net/tenant-id/");
+        assert_eq!(brand.display_name(), "Microsoft");
+    }
+
+    #[test]
+    fn from_entity_id_entra_login() {
+        let brand = IdpBrand::from_entity_id("https://login.microsoftonline.com/tenant-id/v2.0");
+        assert_eq!(brand.display_name(), "Microsoft");
+    }
+
+    #[test]
+    fn from_entity_id_google() {
+        let brand = IdpBrand::from_entity_id("https://accounts.google.com");
+        assert_eq!(brand.display_name(), "Google");
+    }
+
+    #[test]
+    fn from_entity_id_auth0() {
+        let brand = IdpBrand::from_entity_id("https://myapp.auth0.com/samlp/client-id");
+        assert_eq!(brand.display_name(), "Auth0");
+    }
+
+    #[test]
+    fn from_entity_id_keycloak() {
+        let brand = IdpBrand::from_entity_id("https://keycloak.example.com/realms/myrealm");
+        assert_eq!(brand.display_name(), "Keycloak");
+    }
+
+    #[test]
+    fn from_entity_id_generic() {
+        let brand = IdpBrand::from_entity_id("https://idp.example.com/saml/metadata");
+        assert_eq!(brand.display_name(), "SSO");
+    }
+
+    // =========================================================================
+    // UpstreamIdp::initiate_auth tests
+    // =========================================================================
+
+    fn make_oidc_provider(auth_endpoint: &str) -> oidc::OidcProvider {
+        oidc::OidcProvider {
+            issuer: "https://accounts.google.com".to_string(),
+            authorization_endpoint: url::Url::parse(auth_endpoint).unwrap(),
+            token_endpoint: url::Url::parse("https://oauth2.googleapis.com/token").unwrap(),
+            jwks_uri: url::Url::parse("https://www.googleapis.com/oauth2/v3/certs").unwrap(),
+        }
+    }
+
+    #[test]
+    fn initiate_auth_oidc_returns_redirect() {
+        let provider = make_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
+        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let config = test_config();
+
+        let auth = idp.initiate_auth(&config).unwrap();
+
+        let AuthAction::Redirect { url } = auth.action else {
+            panic!("Expected AuthAction::Redirect");
+        };
+        assert!(
+            url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"),
+            "URL should start with auth endpoint: {url}"
+        );
+        assert!(
+            url.contains("client_id=test-client-id"),
+            "Missing client_id: {url}"
+        );
+        assert!(url.contains("redirect_uri="), "Missing redirect_uri: {url}");
+        assert!(
+            url.contains("response_type=code"),
+            "Missing response_type: {url}"
+        );
+        assert!(url.contains("scope=openid"), "Missing scope: {url}");
+        assert!(url.contains("prompt=login"), "Missing prompt: {url}");
+        assert!(
+            url.contains(&format!("state={}", auth.state_key)),
+            "URL should contain state: {url}"
+        );
+        assert!(
+            url.contains(&format!("nonce={}", auth.nonce)),
+            "URL should contain nonce: {url}"
+        );
+    }
+
+    #[test]
+    fn initiate_auth_oidc_handles_existing_query_params() {
+        // Covers SO-1: endpoints with pre-existing query parameters
+        let provider = make_oidc_provider("https://example.com/auth?existing=param");
+        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let config = test_config();
+
+        let auth = idp.initiate_auth(&config).unwrap();
+
+        let AuthAction::Redirect { url } = auth.action else {
+            panic!("Expected AuthAction::Redirect");
+        };
+        assert!(
+            url.contains("existing=param"),
+            "Should preserve existing params: {url}"
+        );
+        assert!(
+            url.contains("client_id=test-client-id"),
+            "Should append new params: {url}"
+        );
+    }
+
+    #[test]
+    fn initiate_auth_generates_unique_state_and_nonce() {
+        let provider = make_oidc_provider("https://accounts.google.com/o/oauth2/v2/auth");
+        let idp = UpstreamIdp::Oidc(Box::new(provider));
+        let config = test_config();
+
+        let auth1 = idp.initiate_auth(&config).unwrap();
+        let auth2 = idp.initiate_auth(&config).unwrap();
+
+        assert_ne!(
+            auth1.state_key, auth2.state_key,
+            "State keys should be unique"
+        );
+        assert_ne!(auth1.nonce, auth2.nonce, "Nonces should be unique");
+    }
+
+    #[test]
+    fn initiate_auth_saml_returns_error() {
+        let saml_provider = saml::SamlProvider {
+            entity_id: "https://idp.example.com/saml".to_string(),
+        };
+        let idp = UpstreamIdp::Saml(saml_provider);
+        let config = test_config();
+
+        let result = idp.initiate_auth(&config);
+        assert!(
+            result.is_err(),
+            "SAML initiate_auth should return error in Phase 1"
+        );
+    }
+
+    // =========================================================================
+    // SVG icon tests
+    // =========================================================================
+
     #[test]
     fn svg_icons_are_distinct() {
         let brands = [
@@ -214,51 +450,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn authorization_url_encodes_params() {
-        let provider = oidc::OidcProvider {
-            issuer: "https://accounts.google.com".to_string(),
-            authorization_endpoint: url::Url::parse("https://accounts.google.com/o/oauth2/v2/auth")
-                .unwrap(),
-            token_endpoint: url::Url::parse("https://oauth2.googleapis.com/token").unwrap(),
-            jwks_uri: url::Url::parse("https://www.googleapis.com/oauth2/v3/certs").unwrap(),
-        };
-        let idp = UpstreamIdp::Oidc(provider);
-
-        let url = idp.authorization_url(
-            "my-client",
-            "https://example.com/callback",
-            "state123",
-            "nonce456",
-        );
-
-        assert!(url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"));
-        assert!(url.contains("client_id=my-client"));
-        assert!(url.contains("redirect_uri=https%3A%2F%2Fexample.com%2Fcallback"));
-        assert!(url.contains("response_type=code"));
-        assert!(url.contains("scope=openid+email"));
-        assert!(url.contains("state=state123"));
-        assert!(url.contains("nonce=nonce456"));
-        assert!(url.contains("prompt=login"));
-    }
-
-    #[test]
-    fn authorization_url_handles_existing_query_params() {
-        let provider = oidc::OidcProvider {
-            issuer: "https://example.com".to_string(),
-            authorization_endpoint: url::Url::parse("https://example.com/auth?existing=param")
-                .unwrap(),
-            token_endpoint: url::Url::parse("https://example.com/token").unwrap(),
-            jwks_uri: url::Url::parse("https://example.com/jwks").unwrap(),
-        };
-        let idp = UpstreamIdp::Oidc(provider);
-
-        let url = idp.authorization_url("c", "r", "s", "n");
-
-        // Should preserve existing params and append new ones
-        assert!(url.contains("existing=param"));
-        assert!(url.contains("client_id=c"));
-    }
+    // =========================================================================
+    // extract_email_domain tests
+    // =========================================================================
 
     #[test]
     fn extract_domain_from_hd() {

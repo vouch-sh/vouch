@@ -136,10 +136,10 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 
     log_authenticator_policy(&config);
 
-    if !config.oidc_configured() {
+    if !config.oidc_configured() && !config.saml_configured() {
         tracing::warn!(
-            "OIDC not configured -- enrollment (vouch enroll) will not work. \
-             Set VOUCH_OIDC_ISSUER, VOUCH_OIDC_CLIENT_ID, and VOUCH_OIDC_CLIENT_SECRET"
+            "No upstream IdP configured -- enrollment (vouch enroll) will not work. \
+             Set VOUCH_OIDC_* for OIDC or VOUCH_SAML_* for SAML."
         );
     }
 
@@ -502,7 +502,7 @@ async fn build_app_state(
             provider.jwks_uri,
             enrollment_domains,
         );
-        Some(crate::services::idp::UpstreamIdp::Oidc(provider))
+        Some(crate::services::idp::UpstreamIdp::Oidc(Box::new(provider)))
     } else {
         None
     };
