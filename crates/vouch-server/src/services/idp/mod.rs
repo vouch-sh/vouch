@@ -125,6 +125,9 @@ pub struct AuthRequest {
     /// Protocol-specific request identifier (stored as `nonce` in DB).
     /// OIDC: nonce for ID token binding. SAML: AuthnRequest ID.
     pub nonce: String,
+    /// PKCE code_verifier (RFC 7636). Only set for OIDC flows.
+    /// Empty for SAML. Stored in DB and sent during token exchange.
+    pub code_verifier: String,
 }
 
 /// Configured upstream identity provider.
@@ -169,6 +172,16 @@ impl UpstreamIdp {
                 let nonce_bytes = crate::crypto::generate_random_bytes(32)?;
                 let state_key = URL_SAFE_NO_PAD.encode(state_bytes);
                 let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
+
+                // RFC 7636 (PKCE): Generate code_verifier (43-128 chars, base64url)
+                // and derive code_challenge = BASE64URL(SHA256(code_verifier)).
+                // RFC 9700 mandates PKCE for all OAuth clients.
+                let verifier_bytes = crate::crypto::generate_random_bytes(32)?;
+                let code_verifier = URL_SAFE_NO_PAD.encode(verifier_bytes);
+                let challenge_digest =
+                    aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, code_verifier.as_bytes());
+                let code_challenge = URL_SAFE_NO_PAD.encode(challenge_digest.as_ref());
+
                 let client_id = config
                     .oidc_client_id
                     .as_deref()
@@ -182,6 +195,8 @@ impl UpstreamIdp {
                     .append_pair("scope", "openid email")
                     .append_pair("state", &state_key)
                     .append_pair("nonce", &nonce)
+                    .append_pair("code_challenge", &code_challenge)
+                    .append_pair("code_challenge_method", "S256")
                     .append_pair("prompt", "login");
                 Ok(AuthRequest {
                     action: AuthAction::Redirect {
@@ -189,6 +204,7 @@ impl UpstreamIdp {
                     },
                     state_key,
                     nonce,
+                    code_verifier,
                 })
             }
             Self::Saml(saml) => {
@@ -197,6 +213,16 @@ impl UpstreamIdp {
                 // state_key = RelayState token (browser-carried through IdP)
                 // nonce = AuthnRequest ID (for InResponseTo validation)
                 let state_key = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
+                // Validate SSO URL scheme (reject javascript:, data:, etc.)
+                if let Ok(parsed) = url::Url::parse(&authn.sso_url) {
+                    let scheme = parsed.scheme();
+                    if scheme != "https" && scheme != "http" {
+                        anyhow::bail!(
+                            "SAML SSO URL has disallowed scheme '{scheme}': {}",
+                            authn.sso_url
+                        );
+                    }
+                }
                 if authn.is_post_binding {
                     Ok(AuthRequest {
                         action: AuthAction::PostForm {
@@ -206,6 +232,7 @@ impl UpstreamIdp {
                         },
                         state_key,
                         nonce: authn.request_id,
+                        code_verifier: String::new(),
                     })
                 } else {
                     // Redirect binding: append SAMLRequest and RelayState to URL
@@ -220,6 +247,7 @@ impl UpstreamIdp {
                         },
                         state_key,
                         nonce: authn.request_id,
+                        code_verifier: String::new(),
                     })
                 }
             }
@@ -236,30 +264,29 @@ impl UpstreamIdp {
     }
 }
 
-/// Extract the email domain from an ID token.
-///
-/// For Google issuers, only the Workspace `hd` claim is used so consumer
-/// accounts do not get grouped into a shared public-email organization.
-/// For non-Google issuers, falls back to extracting the domain from email.
-#[must_use]
-pub fn extract_email_domain<'a>(
-    issuer: &str,
-    hd: Option<&'a str>,
-    email: &'a str,
-) -> Option<&'a str> {
-    if matches!(IdpBrand::from_issuer(issuer), IdpBrand::Google) {
-        hd
-    } else {
-        hd.or_else(|| email.split('@').nth(1))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::panic)]
 
     use super::*;
     use crate::test_utils::test_config;
+
+    /// Extract the email domain from an ID token.
+    ///
+    /// For Google issuers, only the Workspace `hd` claim is used so consumer
+    /// accounts do not get grouped into a shared public-email organization.
+    /// For non-Google issuers, falls back to extracting the domain from email.
+    fn extract_email_domain<'a>(
+        issuer: &str,
+        hd: Option<&'a str>,
+        email: &'a str,
+    ) -> Option<&'a str> {
+        if matches!(IdpBrand::from_issuer(issuer), IdpBrand::Google) {
+            hd
+        } else {
+            hd.or_else(|| email.split('@').nth(1))
+        }
+    }
 
     // =========================================================================
     // IdpBrand::from_issuer tests

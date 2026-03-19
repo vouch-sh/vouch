@@ -52,6 +52,10 @@ pub struct SamlAssertion {
     pub session_not_on_or_after: Option<Timestamp>,
 }
 
+/// SAML 2.0 bearer subject confirmation method URI.
+/// SAML Core Section 2.4.1.2.
+const SUBJECT_BEARER: &str = "urn:oasis:names:tc:SAML:2.0:cm:bearer";
+
 /// Errors during SAML response validation.
 #[derive(Debug, thiserror::Error)]
 pub enum ResponseError {
@@ -67,9 +71,17 @@ pub enum ResponseError {
     /// The `Destination` attribute does not match the ACS URL.
     #[error("destination mismatch: expected {expected}, got {actual}")]
     DestinationMismatch { expected: String, actual: String },
+    /// The `Destination` attribute is missing (required per SAML Bindings
+    /// Section 3.5.5.2 for POST binding).
+    #[error("missing Destination attribute (required for POST binding)")]
+    MissingDestination,
     /// The `InResponseTo` attribute does not match the stored request ID.
     #[error("InResponseTo mismatch: expected {expected}, got {actual}")]
     InResponseToMismatch { expected: String, actual: String },
+    /// The `InResponseTo` attribute is missing (required for SP-initiated SSO
+    /// per SAML Profiles Section 4.1.4.3).
+    #[error("missing InResponseTo attribute (required for SP-initiated SSO)")]
+    MissingInResponseTo,
     /// The SAML Status is not `urn:oasis:names:tc:SAML:2.0:status:Success`.
     #[error("SAML status is not Success: {0}")]
     StatusNotSuccess(String),
@@ -82,6 +94,18 @@ pub enum ResponseError {
     /// No `<saml:Assertion>` was found in the response.
     #[error("no assertion found in response")]
     NoAssertion,
+    /// The `<saml:Issuer>` does not match the IdP entity ID
+    /// (SAML Core Section 2.3.3).
+    #[error("issuer mismatch: expected {expected}, got {actual}")]
+    IssuerMismatch { expected: String, actual: String },
+    /// The `<saml:AudienceRestriction>` does not include the SP entity ID
+    /// (SAML Core Section 2.5.1.4).
+    #[error("audience restriction violated: SP entity ID '{sp_entity_id}' not in audience list")]
+    AudienceRestrictionViolation { sp_entity_id: String },
+    /// `<SubjectConfirmation>` does not use the bearer method
+    /// (SAML Core Section 2.4.1.2).
+    #[error("invalid SubjectConfirmation Method: expected bearer, got {0}")]
+    InvalidSubjectConfirmationMethod(String),
     /// The email could not be extracted from the assertion.
     #[error("could not extract email from assertion")]
     NoEmail,
@@ -96,18 +120,22 @@ pub enum ResponseError {
 
 /// Validate a base64-encoded SAML Response and extract the identity assertion.
 ///
-/// Validation steps:
+/// Validation steps (per SAML Core 2.0, Bindings 2.0, Profiles 2.0):
+///
 /// 1. Base64-decode the response
 /// 2. Parse the XML
-/// 3. Verify XML signature
-/// 4. Check `Destination` matches the ACS URL
-/// 5. Check `InResponseTo` matches the expected request ID
-/// 6. Check SAML Status is Success
+/// 3. Verify XML signature (XML-DSig Core)
+/// 4. Require `Destination` matches the ACS URL (Bindings 3.5.5.2)
+/// 5. Require `InResponseTo` matches the expected request ID (Profiles 4.1.4.3)
+/// 6. Check SAML Status is Success (Core 3.2.2.2)
 /// 7. Find exactly one `<saml:Assertion>` (reject multiple — XSW)
-/// 8. Validate `NotBefore` / `NotOnOrAfter` with clock skew tolerance
-/// 9. Validate `SubjectConfirmationData`
-/// 10. Extract email from NameID or configured attribute
-/// 11. Extract domain from email or configured attribute
+/// 8. Validate `<saml:Issuer>` matches IdP entity ID (Core 2.3.3)
+/// 9. Validate `<saml:AudienceRestriction>` includes SP entity ID (Core 2.5.1.4)
+/// 10. Validate `NotBefore` / `NotOnOrAfter` with clock skew tolerance (Core 2.5.1)
+/// 11. Validate `SubjectConfirmation` Method is bearer (Core 2.4.1.2)
+/// 12. Validate `SubjectConfirmationData` Recipient and time (Profiles 4.1.4.3)
+/// 13. Extract email from NameID or configured attribute
+/// 14. Extract domain from email or configured attribute
 ///
 /// # Errors
 ///
@@ -142,33 +170,37 @@ pub fn validate_saml_response(
         ))
     })?;
 
-    // Step 4: Check Destination
+    // Step 4: Require Destination matches ACS URL
+    // SAML Bindings Section 3.5.5.2: Destination is REQUIRED for POST binding.
     let response_root = doc
         .root()
         .children()
         .find(|n| n.has_tag_name((NS_SAMLP, "Response")))
         .ok_or_else(|| ResponseError::Other("missing Response element".to_string()))?;
 
-    if let Some(destination) = response_root.attribute("Destination")
-        && destination != provider.acs_url
-    {
+    let destination = response_root
+        .attribute("Destination")
+        .ok_or(ResponseError::MissingDestination)?;
+    if destination != provider.acs_url {
         return Err(ResponseError::DestinationMismatch {
             expected: provider.acs_url.clone(),
             actual: destination.to_string(),
         });
     }
 
-    // Step 5: Check InResponseTo
-    if let Some(in_response_to) = response_root.attribute("InResponseTo")
-        && in_response_to != expected_request_id
-    {
+    // Step 5: Require InResponseTo matches expected request ID
+    // SAML Profiles Section 4.1.4.3: MUST be present for SP-initiated SSO.
+    let in_response_to = response_root
+        .attribute("InResponseTo")
+        .ok_or(ResponseError::MissingInResponseTo)?;
+    if in_response_to != expected_request_id {
         return Err(ResponseError::InResponseToMismatch {
             expected: expected_request_id.to_string(),
             actual: in_response_to.to_string(),
         });
     }
 
-    // Step 6: Check Status
+    // Step 6: Check Status (Core 3.2.2.2)
     validate_status(response_root)?;
 
     // Step 7: Find exactly one Assertion (XSW protection)
@@ -199,11 +231,18 @@ pub fn validate_saml_response(
         ));
     };
 
-    // Step 8: Validate time conditions
+    // Step 8: Validate Issuer matches IdP entity ID (Core 2.3.3)
+    validate_issuer(assertion, &provider.idp_metadata.entity_id)?;
+
+    // Step 9: Validate AudienceRestriction includes SP entity ID (Core 2.5.1.4)
+    validate_audience_restriction(assertion, &provider.sp_entity_id)?;
+
+    // Step 10: Validate time conditions (Core 2.5.1)
     let now = Timestamp::now();
     validate_conditions(assertion, now)?;
 
-    // Step 9: Validate SubjectConfirmationData
+    // Step 11: Validate SubjectConfirmation Method is bearer (Core 2.4.1.2)
+    // Step 12: Validate SubjectConfirmationData (Profiles 4.1.4.3)
     validate_subject_confirmation(assertion, expected_request_id, &provider.acs_url, now)?;
 
     // Step 10: Extract session expiry
@@ -252,6 +291,72 @@ fn validate_status(response: roxmltree::Node<'_, '_>) -> Result<(), ResponseErro
     Ok(())
 }
 
+/// Validate `<saml:Issuer>` matches the configured IdP entity ID.
+///
+/// SAML Core Section 2.3.3: The `<saml:Issuer>` identifies the entity that
+/// generated the assertion. It MUST match the IdP entity ID from metadata.
+fn validate_issuer(
+    assertion: roxmltree::Node<'_, '_>,
+    expected_entity_id: &str,
+) -> Result<(), ResponseError> {
+    let issuer = assertion
+        .children()
+        .find(|n| n.has_tag_name((NS_SAML, "Issuer")))
+        .and_then(|n| n.text())
+        .map(str::trim)
+        .ok_or_else(|| ResponseError::Other("missing Issuer element in assertion".to_string()))?;
+
+    if issuer != expected_entity_id {
+        return Err(ResponseError::IssuerMismatch {
+            expected: expected_entity_id.to_string(),
+            actual: issuer.to_string(),
+        });
+    }
+    Ok(())
+}
+
+/// Validate `<saml:AudienceRestriction>` includes the SP entity ID.
+///
+/// SAML Core Section 2.5.1.4: If `<AudienceRestriction>` is present, the
+/// relying party MUST be a member of the specified audience(s). An assertion
+/// intended for a different SP at the same IdP must be rejected.
+fn validate_audience_restriction(
+    assertion: roxmltree::Node<'_, '_>,
+    sp_entity_id: &str,
+) -> Result<(), ResponseError> {
+    let conditions = assertion
+        .children()
+        .find(|n| n.has_tag_name((NS_SAML, "Conditions")));
+
+    let Some(conditions) = conditions else {
+        // No Conditions element — no audience restriction to check
+        return Ok(());
+    };
+
+    let audience_restriction = conditions
+        .children()
+        .find(|n| n.has_tag_name((NS_SAML, "AudienceRestriction")));
+
+    let Some(audience_restriction) = audience_restriction else {
+        // Conditions exists but no AudienceRestriction — pass
+        return Ok(());
+    };
+
+    // Check if any <saml:Audience> element matches the SP entity ID
+    let has_match = audience_restriction
+        .children()
+        .filter(|n| n.has_tag_name((NS_SAML, "Audience")))
+        .filter_map(|n| n.text())
+        .any(|text| text.trim() == sp_entity_id);
+
+    if !has_match {
+        return Err(ResponseError::AudienceRestrictionViolation {
+            sp_entity_id: sp_entity_id.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// Validate `<saml:Conditions>` `NotBefore` and `NotOnOrAfter` with clock skew tolerance.
 fn validate_conditions(
     assertion: roxmltree::Node<'_, '_>,
@@ -295,7 +400,11 @@ fn validate_conditions(
     Ok(())
 }
 
-/// Validate `<saml:SubjectConfirmationData>` Recipient and time constraints.
+/// Validate `<saml:SubjectConfirmation>` Method and `SubjectConfirmationData`.
+///
+/// SAML Core Section 2.4.1.2: The Method MUST be bearer for Web Browser SSO.
+/// SAML Profiles Section 4.1.4.3: SubjectConfirmationData Recipient and
+/// NotOnOrAfter MUST be validated.
 fn validate_subject_confirmation(
     assertion: roxmltree::Node<'_, '_>,
     expected_request_id: &str,
@@ -314,6 +423,14 @@ fn validate_subject_confirmation(
         .children()
         .filter(|n| n.has_tag_name((NS_SAML, "SubjectConfirmation")))
     {
+        // SAML Core 2.4.1.2: Verify Method is bearer
+        let method = confirmation.attribute("Method").unwrap_or("");
+        if method != SUBJECT_BEARER {
+            return Err(ResponseError::InvalidSubjectConfirmationMethod(
+                method.to_string(),
+            ));
+        }
+
         let conf_data = confirmation
             .children()
             .find(|n| n.has_tag_name((NS_SAML, "SubjectConfirmationData")));
@@ -489,7 +606,7 @@ fn parse_saml_timestamp(s: &str) -> Result<Timestamp, ResponseError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::panic)]
+    #![allow(clippy::unwrap_used, clippy::panic, clippy::too_many_lines)]
     use super::*;
 
     // =========================================================================
@@ -844,6 +961,561 @@ mod tests {
         assert!(
             matches!(err, ResponseError::XmlParse(_)),
             "Expected XmlParse for invalid XML, got: {err}"
+        );
+    }
+
+    // =========================================================================
+    // Issuer validation tests (SAML Core 2.3.3)
+    // =========================================================================
+
+    #[test]
+    fn issuer_matching_passes() {
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Issuer>https://idp.example.com</saml:Issuer>
+</saml:Assertion>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        assert!(validate_issuer(assertion, "https://idp.example.com").is_ok());
+    }
+
+    #[test]
+    fn issuer_mismatch_returns_error() {
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Issuer>https://evil.example.com</saml:Issuer>
+</saml:Assertion>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        let err = validate_issuer(assertion, "https://idp.example.com").unwrap_err();
+        assert!(
+            matches!(err, ResponseError::IssuerMismatch { .. }),
+            "Expected IssuerMismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn missing_issuer_returns_error() {
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+</saml:Assertion>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        let err = validate_issuer(assertion, "https://idp.example.com").unwrap_err();
+        assert!(
+            matches!(err, ResponseError::Other(_)),
+            "Expected Other (missing Issuer), got: {err}"
+        );
+    }
+
+    // =========================================================================
+    // AudienceRestriction validation tests (SAML Core 2.5.1.4)
+    // =========================================================================
+
+    #[test]
+    fn audience_restriction_matching_passes() {
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Conditions>
+    <saml:AudienceRestriction>
+      <saml:Audience>https://vouch.example.com</saml:Audience>
+    </saml:AudienceRestriction>
+  </saml:Conditions>
+</saml:Assertion>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        assert!(validate_audience_restriction(assertion, "https://vouch.example.com").is_ok());
+    }
+
+    #[test]
+    fn audience_restriction_wrong_sp_returns_error() {
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Conditions>
+    <saml:AudienceRestriction>
+      <saml:Audience>https://other-sp.example.com</saml:Audience>
+    </saml:AudienceRestriction>
+  </saml:Conditions>
+</saml:Assertion>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        let err =
+            validate_audience_restriction(assertion, "https://vouch.example.com").unwrap_err();
+        assert!(
+            matches!(err, ResponseError::AudienceRestrictionViolation { .. }),
+            "Expected AudienceRestrictionViolation, got: {err}"
+        );
+    }
+
+    #[test]
+    fn audience_restriction_multiple_audiences_one_matching() {
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Conditions>
+    <saml:AudienceRestriction>
+      <saml:Audience>https://other-sp.example.com</saml:Audience>
+      <saml:Audience>https://vouch.example.com</saml:Audience>
+    </saml:AudienceRestriction>
+  </saml:Conditions>
+</saml:Assertion>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        assert!(validate_audience_restriction(assertion, "https://vouch.example.com").is_ok());
+    }
+
+    #[test]
+    fn audience_restriction_absent_passes() {
+        // No Conditions element at all — no restriction to enforce
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion"/>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        assert!(validate_audience_restriction(assertion, "https://vouch.example.com").is_ok());
+    }
+
+    #[test]
+    fn audience_restriction_conditions_without_restriction_passes() {
+        // Conditions exists but no AudienceRestriction child
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Conditions NotBefore="2026-01-01T00:00:00Z"/>
+</saml:Assertion>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        assert!(validate_audience_restriction(assertion, "https://vouch.example.com").is_ok());
+    }
+
+    // =========================================================================
+    // SubjectConfirmation Method validation tests (SAML Core 2.4.1.2)
+    // =========================================================================
+
+    #[test]
+    fn subject_confirmation_bearer_method_passes() {
+        let now = Timestamp::now();
+        let future = now
+            .checked_add(jiff::Span::new().hours(1))
+            .unwrap()
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let xml = format!(
+            r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Subject>
+    <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+      <saml:SubjectConfirmationData
+        Recipient="https://vouch.example.com/saml/acs"
+        InResponseTo="_req123"
+        NotOnOrAfter="{future}"/>
+    </saml:SubjectConfirmation>
+  </saml:Subject>
+</saml:Assertion>"##
+        );
+        let doc = roxmltree::Document::parse(&xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        assert!(
+            validate_subject_confirmation(
+                assertion,
+                "_req123",
+                "https://vouch.example.com/saml/acs",
+                now
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn subject_confirmation_non_bearer_method_returns_error() {
+        let now = Timestamp::now();
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Subject>
+    <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:holder-of-key">
+      <saml:SubjectConfirmationData Recipient="https://vouch.example.com/saml/acs"/>
+    </saml:SubjectConfirmation>
+  </saml:Subject>
+</saml:Assertion>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        let err = validate_subject_confirmation(
+            assertion,
+            "_req123",
+            "https://vouch.example.com/saml/acs",
+            now,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ResponseError::InvalidSubjectConfirmationMethod(_)),
+            "Expected InvalidSubjectConfirmationMethod, got: {err}"
+        );
+    }
+
+    #[test]
+    fn subject_confirmation_missing_method_returns_error() {
+        let now = Timestamp::now();
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Subject>
+    <saml:SubjectConfirmation>
+      <saml:SubjectConfirmationData Recipient="https://vouch.example.com/saml/acs"/>
+    </saml:SubjectConfirmation>
+  </saml:Subject>
+</saml:Assertion>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        let err = validate_subject_confirmation(
+            assertion,
+            "_req123",
+            "https://vouch.example.com/saml/acs",
+            now,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ResponseError::InvalidSubjectConfirmationMethod(_)),
+            "Expected InvalidSubjectConfirmationMethod for missing Method, got: {err}"
+        );
+    }
+
+    // =========================================================================
+    // New error variant display tests
+    // =========================================================================
+
+    #[test]
+    fn missing_destination_error_displays_correctly() {
+        let err = ResponseError::MissingDestination;
+        assert!(err.to_string().contains("Destination"));
+    }
+
+    #[test]
+    fn missing_in_response_to_error_displays_correctly() {
+        let err = ResponseError::MissingInResponseTo;
+        assert!(err.to_string().contains("InResponseTo"));
+    }
+
+    #[test]
+    fn issuer_mismatch_error_displays_correctly() {
+        let err = ResponseError::IssuerMismatch {
+            expected: "https://idp.example.com".to_string(),
+            actual: "https://evil.example.com".to_string(),
+        };
+        assert!(err.to_string().contains("issuer mismatch"));
+    }
+
+    #[test]
+    fn audience_restriction_error_displays_correctly() {
+        let err = ResponseError::AudienceRestrictionViolation {
+            sp_entity_id: "https://sp.example.com".to_string(),
+        };
+        assert!(err.to_string().contains("audience restriction"));
+    }
+
+    // =========================================================================
+    // End-to-end signature pipeline tests
+    // =========================================================================
+
+    /// Build a real RSA key pair and a self-signed X.509 DER certificate.
+    /// Reuses the same helpers from signature.rs tests.
+    fn generate_test_key_and_cert() -> (aws_lc_rs::rsa::KeyPair, Vec<u8>) {
+        let key_pair = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048).unwrap();
+        let cert_der = build_self_signed_der(&key_pair);
+        (key_pair, cert_der)
+    }
+
+    /// Build a minimal (parseable) self-signed X.509 DER certificate for the key pair.
+    fn build_self_signed_der(key_pair: &aws_lc_rs::rsa::KeyPair) -> Vec<u8> {
+        use aws_lc_rs::signature::KeyPair as _;
+        let alg_oid = &[
+            0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x0b,
+        ];
+        let alg_params = &[0x05, 0x00];
+        let alg_id = der_sequence(&[alg_oid, alg_params]);
+        let version = &[0xa0, 0x03, 0x02, 0x01, 0x02];
+        let serial = der_integer(&[0x01]);
+        let cn_oid = &[0x06, 0x03, 0x55, 0x04, 0x03];
+        let cn_value = &[0x0c, 0x04, b'T', b'e', b's', b't'];
+        let attr_type_and_value = der_sequence(&[cn_oid, cn_value]);
+        let rdn_set = der_set(&[&attr_type_and_value]);
+        let name = der_sequence(&[&rdn_set]);
+        let not_before: &[u8] = b"\x17\x0d240101000000Z";
+        let not_after: &[u8] = b"\x17\x0d490101000000Z";
+        let validity = der_sequence(&[not_before, not_after]);
+        let pk_der = key_pair.public_key().as_ref();
+        let spki = der_sequence(&[&alg_id, &der_bit_string(pk_der)]);
+        let tbs = der_sequence(&[version, &serial, &alg_id, &name, &validity, &name, &spki]);
+        let mut sig_buf = vec![0u8; key_pair.public_modulus_len()];
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        key_pair
+            .sign(
+                &aws_lc_rs::signature::RSA_PKCS1_SHA256,
+                &rng,
+                &tbs,
+                &mut sig_buf,
+            )
+            .unwrap();
+        let sig_bit_string = der_bit_string(&sig_buf);
+        der_sequence(&[&tbs, &alg_id, &sig_bit_string])
+    }
+
+    fn der_sequence(items: &[&[u8]]) -> Vec<u8> {
+        let content: Vec<u8> = items.iter().flat_map(|s| s.iter().copied()).collect();
+        der_wrap(0x30, &content)
+    }
+    fn der_set(items: &[&[u8]]) -> Vec<u8> {
+        let content: Vec<u8> = items.iter().flat_map(|s| s.iter().copied()).collect();
+        der_wrap(0x31, &content)
+    }
+    fn der_integer(value: &[u8]) -> Vec<u8> {
+        der_wrap(0x02, value)
+    }
+    fn der_bit_string(value: &[u8]) -> Vec<u8> {
+        let mut content = vec![0x00];
+        content.extend_from_slice(value);
+        der_wrap(0x03, &content)
+    }
+    fn der_wrap(tag: u8, content: &[u8]) -> Vec<u8> {
+        let len = content.len();
+        let mut out = vec![tag];
+        if len < 0x80 {
+            out.push(len as u8);
+        } else if len < 0x100 {
+            out.push(0x81);
+            out.push(len as u8);
+        } else {
+            out.push(0x82);
+            out.push((len >> 8) as u8);
+            out.push((len & 0xff) as u8);
+        }
+        out.extend_from_slice(content);
+        out
+    }
+
+    /// Construct a complete, fully-signed SAML Response XML string.
+    ///
+    /// The assertion is signed using an enveloped RSA-SHA256 signature with exc-c14n.
+    /// Returns the XML string (not yet base64-encoded).
+    ///
+    /// # Whitespace design
+    ///
+    /// The Signature element is inserted immediately after `</saml:Issuer>` with no
+    /// leading whitespace text node between them. This means the canonical form of
+    /// the assertion after enveloped-signature exclusion exactly matches the canonical
+    /// form computed before the Signature was inserted, because:
+    ///
+    /// - Before insertion: text(`\n  `) + Issuer + text(`\n  `) + Subject
+    /// - After insertion: text(`\n  `) + Issuer + Signature(excluded) + text(`\n  `) + Subject
+    ///
+    /// Both produce the same canonical bytes.
+    #[allow(clippy::too_many_arguments)]
+    fn build_signed_saml_response(
+        key_pair: &aws_lc_rs::rsa::KeyPair,
+        email: &str,
+        response_id: &str,
+        assertion_id: &str,
+        in_response_to: &str,
+        destination: &str,
+        issuer: &str,
+        sp_entity_id: &str,
+        not_before: &str,
+        not_on_or_after: &str,
+    ) -> String {
+        use aws_lc_rs::digest;
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as B64;
+
+        // Step 1: Build the assertion XML *without* the Signature element.
+        // The Signature will be inserted immediately after </saml:Issuer> without
+        // adding any extra whitespace text nodes around it (see whitespace design note).
+        let assertion_body = format!(
+            r#"
+  <saml:Issuer>{issuer}</saml:Issuer>
+  <saml:Subject>
+    <saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:emailAddress">{email}</saml:NameID>
+    <saml:SubjectConfirmation Method="urn:oasis:names:tc:SAML:2.0:cm:bearer">
+      <saml:SubjectConfirmationData Recipient="{destination}" InResponseTo="{in_response_to}" NotOnOrAfter="{not_on_or_after}"/>
+    </saml:SubjectConfirmation>
+  </saml:Subject>
+  <saml:Conditions NotBefore="{not_before}" NotOnOrAfter="{not_on_or_after}">
+    <saml:AudienceRestriction>
+      <saml:Audience>{sp_entity_id}</saml:Audience>
+    </saml:AudienceRestriction>
+  </saml:Conditions>
+  <saml:AuthnStatement AuthnInstant="{not_before}" SessionNotOnOrAfter="{not_on_or_after}">
+    <saml:AuthnContext>
+      <saml:AuthnContextClassRef>urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport</saml:AuthnContextClassRef>
+    </saml:AuthnContext>
+  </saml:AuthnStatement>
+"#
+        );
+        let assertion_open = format!(
+            r#"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{assertion_id}" Version="2.0" IssueInstant="{not_before}">"#
+        );
+        let assertion_without_sig = format!("{assertion_open}{assertion_body}</saml:Assertion>");
+
+        // Step 2: Canonicalize the assertion (exc-c14n, no inclusive prefixes).
+        let doc_no_sig = roxmltree::Document::parse(&assertion_without_sig).unwrap();
+        let assertion_node = doc_no_sig
+            .root()
+            .children()
+            .find(|n| n.is_element())
+            .unwrap();
+        let canonical_assertion = super::super::c14n::exclusive_c14n(assertion_node, &[]);
+
+        // Step 3: Compute SHA-256 digest over canonicalized assertion.
+        let digest_bytes = digest::digest(&digest::SHA256, canonical_assertion.as_bytes());
+        let digest_b64 = B64.encode(digest_bytes.as_ref());
+
+        // Step 4: Build SignedInfo with the computed digest.
+        let ref_uri = format!("#{assertion_id}");
+        let signed_info_xml = format!(
+            r#"<ds:SignedInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#"><ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:CanonicalizationMethod><ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"></ds:SignatureMethod><ds:Reference URI="{ref_uri}"><ds:Transforms><ds:Transform Algorithm="http://www.w3.org/2000/09/xmldsig#enveloped-signature"></ds:Transform><ds:Transform Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"></ds:Transform></ds:Transforms><ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"></ds:DigestMethod><ds:DigestValue>{digest_b64}</ds:DigestValue></ds:Reference></ds:SignedInfo>"#
+        );
+
+        // Step 5: The canonical form of SignedInfo IS the SignedInfo XML itself
+        // (already canonical: no whitespace, empty elements expanded, etc.).
+        // Parse and re-canonicalize to be safe.
+        let doc_si = roxmltree::Document::parse(&signed_info_xml).unwrap();
+        let signed_info_node = doc_si.root().children().find(|n| n.is_element()).unwrap();
+        let canonical_signed_info = super::super::c14n::exclusive_c14n(signed_info_node, &[]);
+
+        // Step 6: Sign the canonical SignedInfo with RSA-PKCS1-SHA256.
+        let rng = aws_lc_rs::rand::SystemRandom::new();
+        let mut sig_buf = vec![0u8; key_pair.public_modulus_len()];
+        key_pair
+            .sign(
+                &aws_lc_rs::signature::RSA_PKCS1_SHA256,
+                &rng,
+                canonical_signed_info.as_bytes(),
+                &mut sig_buf,
+            )
+            .unwrap();
+        let sig_b64 = B64.encode(&sig_buf);
+
+        // Step 7: Build the Signature element. Inserted immediately after
+        // </saml:Issuer> with no leading whitespace (see whitespace design note).
+        let signature_xml = format!(
+            r#"<ds:Signature xmlns:ds="http://www.w3.org/2000/09/xmldsig#">{signed_info_xml}<ds:SignatureValue>{sig_b64}</ds:SignatureValue></ds:Signature>"#
+        );
+
+        // Step 8: Build the complete assertion.
+        // The Signature is inserted immediately after </saml:Issuer> — no extra
+        // whitespace text node is added before or after the Signature element.
+        let issuer_close = format!("<saml:Issuer>{issuer}</saml:Issuer>");
+        let assertion_with_sig = assertion_without_sig.replacen(
+            &issuer_close,
+            &format!("{issuer_close}{signature_xml}"),
+            1,
+        );
+
+        // Step 9: Wrap in a <samlp:Response>.
+        format!(
+            r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion" ID="{response_id}" Version="2.0" IssueInstant="{not_before}" Destination="{destination}" InResponseTo="{in_response_to}">
+  <saml:Issuer>{issuer}</saml:Issuer>
+  <samlp:Status>
+    <samlp:StatusCode Value="urn:oasis:names:tc:SAML:2.0:status:Success"/>
+  </samlp:Status>
+  {assertion_with_sig}
+</samlp:Response>"#
+        )
+    }
+
+    /// Build a `SamlProvider` for the test IdP/SP configuration.
+    fn test_provider(cert_der: Vec<u8>) -> super::super::SamlProvider {
+        use crate::services::idp::saml::IdpMetadata;
+        super::super::SamlProvider {
+            idp_metadata: IdpMetadata {
+                entity_id: "https://idp.example.com".to_string(),
+                sso_post_url: Some("https://idp.example.com/sso".to_string()),
+                sso_redirect_url: None,
+                signing_certificates: vec![cert_der],
+            },
+            sp_entity_id: "https://vouch.example.com".to_string(),
+            acs_url: "https://vouch.example.com/saml/acs".to_string(),
+            email_attribute: None,
+            domain_attribute: None,
+        }
+    }
+
+    /// Returns (not_before, not_on_or_after) strings suitable for a currently-valid assertion.
+    fn valid_time_window() -> (String, String) {
+        let now = Timestamp::now();
+        let not_before = now
+            .checked_sub(jiff::Span::new().minutes(5))
+            .unwrap()
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        let not_on_or_after = now
+            .checked_add(jiff::Span::new().hours(1))
+            .unwrap()
+            .strftime("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        (not_before, not_on_or_after)
+    }
+
+    /// Happy-path: a fully-signed SAML Response must pass validation and return
+    /// the correct email and domain.
+    #[test]
+    fn validate_saml_response_rsa_signed_happy_path() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as B64;
+
+        let (key_pair, cert_der) = generate_test_key_and_cert();
+        let provider = test_provider(cert_der);
+        let (not_before, not_on_or_after) = valid_time_window();
+
+        let xml = build_signed_saml_response(
+            &key_pair,
+            "alice@example.com",
+            "_response001",
+            "_assertion001",
+            "_request001",
+            "https://vouch.example.com/saml/acs",
+            "https://idp.example.com",
+            "https://vouch.example.com",
+            &not_before,
+            &not_on_or_after,
+        );
+
+        let base64_response = B64.encode(xml.as_bytes());
+        let result = validate_saml_response(&base64_response, "_request001", &provider);
+        let assertion = result.unwrap_or_else(|e| panic!("Expected Ok but got Err: {e}"));
+
+        assert_eq!(assertion.email, "alice@example.com");
+        assert_eq!(assertion.domain, Some("example.com".to_string()));
+    }
+
+    /// Tamper-detection: modifying the email in the assertion after signing must
+    /// cause digest mismatch during validation.
+    #[test]
+    fn validate_saml_response_tampered_email_fails_digest_check() {
+        use base64::Engine as _;
+        use base64::engine::general_purpose::STANDARD as B64;
+
+        let (key_pair, cert_der) = generate_test_key_and_cert();
+        let provider = test_provider(cert_der);
+        let (not_before, not_on_or_after) = valid_time_window();
+
+        let xml = build_signed_saml_response(
+            &key_pair,
+            "alice@example.com",
+            "_response002",
+            "_assertion002",
+            "_request002",
+            "https://vouch.example.com/saml/acs",
+            "https://idp.example.com",
+            "https://vouch.example.com",
+            &not_before,
+            &not_on_or_after,
+        );
+
+        // Tamper: replace the NameID email after signing.
+        let tampered_xml = xml.replace("alice@example.com", "mallory@evil.com");
+        assert_ne!(xml, tampered_xml, "Tamper must actually change the XML");
+
+        let base64_response = B64.encode(tampered_xml.as_bytes());
+        let result = validate_saml_response(&base64_response, "_request002", &provider);
+
+        assert!(
+            result.is_err(),
+            "Expected Err for tampered assertion, got Ok"
+        );
+        let err = result.unwrap_err();
+        // The digest of the canonicalized assertion will not match what was signed.
+        assert!(
+            matches!(
+                err,
+                ResponseError::SignatureInvalid(
+                    super::super::signature::SignatureError::DigestMismatch
+                )
+            ),
+            "Expected DigestMismatch for tampered assertion, got: {err}"
         );
     }
 }

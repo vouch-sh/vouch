@@ -123,8 +123,23 @@ pub fn verify_xml_signature(
         find_element_by_tag(doc, NS_DS, "Signature").ok_or(SignatureError::NoSignature)?;
 
     // Step 2: Extract <ds:Reference URI>
-    let reference_node = find_child_element(sig_node, NS_DS, "SignedInfo")
-        .and_then(|si| find_child_element(si, NS_DS, "Reference"))
+    let signed_info = find_child_element(sig_node, NS_DS, "SignedInfo")
+        .ok_or_else(|| SignatureError::Other("missing SignedInfo element".to_string()))?;
+
+    // Reject multiple <ds:Reference> elements. SAML 2.0 expects exactly one
+    // Reference in SignedInfo; multiple References produce undefined behavior.
+    let references: Vec<_> = signed_info
+        .children()
+        .filter(|n| n.has_tag_name((NS_DS, "Reference")))
+        .collect();
+    if references.len() > 1 {
+        return Err(SignatureError::Other(
+            "multiple Reference elements in SignedInfo (expected exactly one)".to_string(),
+        ));
+    }
+    let reference_node = references
+        .into_iter()
+        .next()
         .ok_or_else(|| SignatureError::Other("missing Reference element".to_string()))?;
 
     let ref_uri = reference_node
@@ -632,6 +647,35 @@ mod tests {
         assert!(
             matches!(err, SignatureError::ReferencedElementNotFound(_)),
             "Expected ReferencedElementNotFound, got: {err}"
+        );
+    }
+
+    #[test]
+    fn multiple_references_rejected() {
+        let xml = r##"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol"
+                         xmlns:ds="http://www.w3.org/2000/09/xmldsig#"
+                         ID="_response1">
+  <ds:Signature>
+    <ds:SignedInfo>
+      <ds:CanonicalizationMethod Algorithm="http://www.w3.org/2001/10/xml-exc-c14n#"/>
+      <ds:SignatureMethod Algorithm="http://www.w3.org/2001/04/xmldsig-more#rsa-sha256"/>
+      <ds:Reference URI="#_response1">
+        <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+        <ds:DigestValue>abc=</ds:DigestValue>
+      </ds:Reference>
+      <ds:Reference URI="#_assertion1">
+        <ds:DigestMethod Algorithm="http://www.w3.org/2001/04/xmlenc#sha256"/>
+        <ds:DigestValue>def=</ds:DigestValue>
+      </ds:Reference>
+    </ds:SignedInfo>
+    <ds:SignatureValue>sig=</ds:SignatureValue>
+  </ds:Signature>
+</samlp:Response>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let err = verify_xml_signature(&doc, &[]).unwrap_err();
+        assert!(
+            matches!(err, SignatureError::Other(ref msg) if msg.contains("multiple Reference")),
+            "Expected rejection of multiple References, got: {err}"
         );
     }
 

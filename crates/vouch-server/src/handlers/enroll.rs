@@ -270,6 +270,7 @@ pub async fn device_verify_submit(
             &oidc_state,
             &request.id,
             "", // No nonce for non-IdP flow
+            "", // No PKCE for non-IdP flow
             state_expires,
         )
         .await
@@ -311,6 +312,7 @@ pub async fn device_verify_submit(
         &auth_request.state_key,
         &request.id,
         &auth_request.nonce,
+        &auth_request.code_verifier,
         state_expires,
     )
     .await
@@ -444,16 +446,23 @@ pub async fn oidc_callback(
 
     let token_url = oidc_provider.token_endpoint.as_str();
 
+    // RFC 7636: Include code_verifier in token exchange (PKCE).
+    // Build form params dynamically to only include code_verifier when present.
+    let mut form_params = vec![
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+        ("code", code.as_str()),
+        ("grant_type", "authorization_code"),
+        ("redirect_uri", redirect_uri.as_str()),
+    ];
+    if !stored_state.code_verifier.is_empty() {
+        form_params.push(("code_verifier", stored_state.code_verifier.as_str()));
+    }
+
     let token_response = match state
         .http_client
         .post(token_url)
-        .form(&[
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-            ("code", &code),
-            ("grant_type", "authorization_code"),
-            ("redirect_uri", &redirect_uri),
-        ])
+        .form(&form_params)
         .send()
         .await
     {
@@ -1358,6 +1367,7 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
         &auth_request.state_key,
         &device_auth_id,
         &auth_request.nonce,
+        &auth_request.code_verifier,
         state_expires,
     )
     .await

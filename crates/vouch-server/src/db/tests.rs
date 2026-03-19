@@ -344,7 +344,7 @@ async fn test_oidc_state_lifecycle() {
     let nonce = "nonce_67890";
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
 
-    let id = create_oidc_state(&store, state, &device_auth_id, nonce, expires_at)
+    let id = create_oidc_state(&store, state, &device_auth_id, nonce, "", expires_at)
         .await
         .expect("Failed to create OIDC state");
     assert!(!id.is_empty());

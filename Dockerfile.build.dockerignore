@@ -1,8 +1,17 @@
 target/
 .git/
+.claude/
+.kamal/
+.local/
+config/
+fuzz/
+scripts/
 docs/
 packaging/
 charts/
 .github/
 *.md
 .local/
+.env
+*.db
+ssh_ca_key*
