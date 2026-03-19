@@ -476,9 +476,7 @@ async fn build_app_state(
         vouch_common::http::server_client(&format!("vouch-server/{}", env!("CARGO_PKG_VERSION")))
             .context("Failed to create shared HTTP client")?;
 
-    // Fetch upstream OIDC discovery document if configured.
-    // SAML enrollment flow is not implemented yet; fail closed to avoid
-    // bypassing upstream identity verification.
+    // Fetch upstream IdP configuration if configured (OIDC or SAML, mutually exclusive).
     let upstream_idp = if config.oidc_configured() {
         let issuer = config
             .oidc_issuer_url
@@ -506,10 +504,53 @@ async fn build_app_state(
         );
         Some(crate::services::idp::UpstreamIdp::Oidc(Box::new(provider)))
     } else if config.saml_configured() {
-        anyhow::bail!(
-            "SAML upstream IdP is configured but not yet supported for enrollment. \
-             Configure VOUCH_OIDC_* until SAML enrollment is implemented."
+        let metadata_url = config
+            .saml_idp_metadata_url
+            .as_deref()
+            .context("SAML metadata URL missing")?;
+        let metadata_xml = http_client
+            .get(metadata_url)
+            .send()
+            .await
+            .context("Failed to fetch SAML IdP metadata")?
+            .error_for_status()
+            .context("SAML IdP metadata request returned error status")?
+            .text()
+            .await
+            .context("Failed to read SAML IdP metadata body")?;
+        let idp_metadata = crate::services::idp::saml::metadata::parse_idp_metadata(&metadata_xml)
+            .context("Failed to parse SAML IdP metadata")?;
+        let brand = crate::services::idp::IdpBrand::from_entity_id(&idp_metadata.entity_id);
+        let sp_entity_id = config
+            .saml_sp_entity_id
+            .clone()
+            .unwrap_or_else(|| config.base_url.clone());
+        let acs_url = format!("{}/saml/acs", config.base_url);
+        let sso_url = idp_metadata
+            .sso_post_url
+            .as_deref()
+            .or(idp_metadata.sso_redirect_url.as_deref())
+            .unwrap_or("(none)");
+        tracing::info!(
+            "Upstream IdP: {} (SAML), entity_id={}, sso_url={}, binding={}, certs={}",
+            brand.display_name(),
+            idp_metadata.entity_id,
+            sso_url,
+            if idp_metadata.sso_post_url.is_some() {
+                "HTTP-POST"
+            } else {
+                "HTTP-Redirect"
+            },
+            idp_metadata.signing_certificates.len(),
         );
+        let provider = crate::services::idp::saml::SamlProvider {
+            idp_metadata,
+            sp_entity_id,
+            acs_url,
+            email_attribute: config.saml_email_attribute.clone(),
+            domain_attribute: config.saml_domain_attribute.clone(),
+        };
+        Some(crate::services::idp::UpstreamIdp::Saml(provider))
     } else {
         None
     };

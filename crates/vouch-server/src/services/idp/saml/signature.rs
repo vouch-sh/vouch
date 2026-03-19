@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-// Phase 3 SAML implementation -- callers not yet wired up.
-#![allow(dead_code)]
 //! XML-DSig signature verification for SAML 2.0 responses.
 //!
 //! Implements enveloped XML Digital Signature verification per
@@ -39,7 +37,7 @@ const TRANSFORM_ENVELOPED: &str = "http://www.w3.org/2000/09/xmldsig#enveloped-s
 const TRANSFORM_EXC_C14N: &str = "http://www.w3.org/2001/10/xml-exc-c14n#";
 
 /// SHA-256 digest algorithm URI.
-const DIGEST_SHA256: &str = "http://www.w3.org/2001/04/xmlenc#sha256";
+const _DIGEST_SHA256: &str = "http://www.w3.org/2001/04/xmlenc#sha256";
 
 /// RSA-SHA256 signature algorithm URI.
 const SIG_RSA_SHA256: &str = "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256";

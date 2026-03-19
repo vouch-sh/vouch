@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-// Phase 2 SAML implementation -- callers not yet wired up.
-#![allow(dead_code)]
 //! Exclusive XML Canonicalization (exc-c14n).
 //!
 //! Implements W3C Exclusive XML Canonicalization 1.0:

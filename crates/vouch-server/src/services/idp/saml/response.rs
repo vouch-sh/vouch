@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-// Phase 3 SAML implementation -- callers not yet wired up.
-#![allow(dead_code)]
 //! SAML 2.0 Response parsing and validation.
 //!
 //! Validates base64-encoded SAML Response XML, verifying the XML signature,
@@ -47,8 +45,10 @@ pub struct SamlAssertion {
     /// Domain extracted from email or configured domain attribute.
     pub domain: Option<String>,
     /// Display name extracted from configured name attribute, if available.
+    #[allow(dead_code)]
     pub name: Option<String>,
     /// Session expiry time from `<AuthnStatement SessionNotOnOrAfter>`.
+    #[allow(dead_code)]
     pub session_not_on_or_after: Option<Timestamp>,
 }
 

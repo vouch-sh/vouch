@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-// Phase 2 SAML implementation -- callers not yet wired up.
-#![allow(dead_code)]
 //! SAML IdP metadata parsing and SP metadata generation.
 //!
 //! Parses IdP metadata XML (fetched at startup) using `roxmltree`. Extracts

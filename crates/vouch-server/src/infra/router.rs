@@ -37,6 +37,9 @@ const ENROLL_BODY_LIMIT: usize = 32 * 1024;
 /// Body limit for WebAuthn login payloads (assertions are smaller than attestations).
 const LOGIN_BODY_LIMIT: usize = 32 * 1024;
 
+/// Body limit for SAML ACS responses (base64-encoded XML, typically 8–32 KB).
+const SAML_ACS_BODY_LIMIT: usize = 64 * 1024;
+
 /// Global body size limit (per-route overrides above are more restrictive).
 const GLOBAL_BODY_LIMIT: usize = 256 * 1024;
 
@@ -555,6 +558,12 @@ fn build_ui_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<A
             "/applications/{id}/secrets/{secret_id}/delete",
             post(handlers::applications::delete_secret_form),
         )
+        // SAML 2.0 SP endpoints
+        .route(
+            "/saml/acs",
+            post(handlers::saml::acs).layer(DefaultBodyLimit::max(SAML_ACS_BODY_LIMIT)),
+        )
+        .route("/saml/metadata", get(handlers::saml::metadata))
         // Admin member management UI (rate-limited)
         .merge(build_admin_routes(config)?)
         // Rate-limited browser WebAuthn routes

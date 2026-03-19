@@ -192,8 +192,37 @@ impl UpstreamIdp {
                     nonce,
                 })
             }
-            Self::Saml(_) => {
-                anyhow::bail!("SAML initiate_auth not yet implemented (Phase 2)")
+            Self::Saml(saml) => {
+                let authn = saml::authn_request::build_authn_request(saml)
+                    .map_err(|e| anyhow::anyhow!("Failed to build SAML AuthnRequest: {e}"))?;
+                // state_key = RelayState token (browser-carried through IdP)
+                // nonce = AuthnRequest ID (for InResponseTo validation)
+                let state_key = URL_SAFE_NO_PAD.encode(crate::crypto::generate_random_bytes(32)?);
+                if authn.is_post_binding {
+                    Ok(AuthRequest {
+                        action: AuthAction::PostForm {
+                            action_url: authn.sso_url,
+                            saml_request: authn.encoded_request,
+                            relay_state: state_key.clone(),
+                        },
+                        state_key,
+                        nonce: authn.request_id,
+                    })
+                } else {
+                    // Redirect binding: append SAMLRequest and RelayState to URL
+                    let mut url = url::Url::parse(&authn.sso_url)
+                        .map_err(|e| anyhow::anyhow!("Invalid SAML SSO URL: {e}"))?;
+                    url.query_pairs_mut()
+                        .append_pair("SAMLRequest", &authn.encoded_request)
+                        .append_pair("RelayState", &state_key);
+                    Ok(AuthRequest {
+                        action: AuthAction::Redirect {
+                            url: url.to_string(),
+                        },
+                        state_key,
+                        nonce: authn.request_id,
+                    })
+                }
             }
         }
     }
@@ -407,7 +436,7 @@ mod tests {
     }
 
     #[test]
-    fn initiate_auth_saml_returns_error() {
+    fn initiate_auth_saml_post_binding_returns_post_form() {
         let saml_provider = saml::SamlProvider {
             idp_metadata: saml::IdpMetadata {
                 entity_id: "https://idp.example.com/saml".to_string(),
@@ -423,10 +452,43 @@ mod tests {
         let idp = UpstreamIdp::Saml(saml_provider);
         let config = test_config();
 
-        let result = idp.initiate_auth(&config);
+        let result = idp.initiate_auth(&config).unwrap();
         assert!(
-            result.is_err(),
-            "SAML initiate_auth should return error in Phase 1"
+            matches!(result.action, AuthAction::PostForm { .. }),
+            "SAML with POST binding should return PostForm action"
+        );
+        assert!(!result.state_key.is_empty(), "state_key must not be empty");
+        assert!(!result.nonce.is_empty(), "nonce must not be empty");
+    }
+
+    #[test]
+    fn initiate_auth_saml_redirect_binding_returns_redirect() {
+        let saml_provider = saml::SamlProvider {
+            idp_metadata: saml::IdpMetadata {
+                entity_id: "https://idp.example.com/saml".to_string(),
+                sso_post_url: None,
+                sso_redirect_url: Some("https://idp.example.com/sso/redirect".to_string()),
+                signing_certificates: vec![],
+            },
+            sp_entity_id: "https://vouch.example.com".to_string(),
+            acs_url: "https://vouch.example.com/saml/acs".to_string(),
+            email_attribute: None,
+            domain_attribute: None,
+        };
+        let idp = UpstreamIdp::Saml(saml_provider);
+        let config = test_config();
+
+        let result = idp.initiate_auth(&config).unwrap();
+        let AuthAction::Redirect { url } = result.action else {
+            panic!("Expected AuthAction::Redirect for SAML redirect binding");
+        };
+        assert!(
+            url.contains("SAMLRequest="),
+            "Redirect URL must contain SAMLRequest: {url}"
+        );
+        assert!(
+            url.contains("RelayState="),
+            "Redirect URL must contain RelayState: {url}"
         );
     }
 

@@ -202,6 +202,9 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         .route("/device", get(handlers::enroll::device_verify_page))
         .route("/device", post(handlers::enroll::device_verify_submit))
         .route("/oauth/callback", get(handlers::enroll::oidc_callback))
+        // SAML 2.0 SP endpoints
+        .route("/saml/acs", post(handlers::saml::acs))
+        .route("/saml/metadata", get(handlers::saml::metadata))
         .route("/logout", post(handlers::auth::logout))
         .route(
             "/enroll/webauthn/start",

@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-// Phase 3 SAML implementation -- callers not yet wired up.
-#![allow(dead_code)]
 //! SAML 2.0 AuthnRequest generation.
 //!
 //! Generates AuthnRequest XML for SP-initiated SSO and encodes it for the
