@@ -59,6 +59,7 @@ jobs:
         with:
           ref: ${{ github.event.workflow_run.head_sha || github.sha }}
           fetch-depth: 1
+          fetch-tags: true
           persist-credentials: false
 
       - name: Verify tag matches checkout
