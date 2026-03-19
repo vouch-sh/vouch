@@ -106,7 +106,7 @@ pub async fn fetch_discovery(
         .map_err(|e| anyhow::anyhow!("Invalid jwks_uri '{}': {e}", doc.jwks_uri))?;
 
     Ok(OidcProvider {
-        issuer: issuer.to_string(),
+        issuer: doc.issuer,
         authorization_endpoint,
         token_endpoint,
         jwks_uri,
@@ -118,8 +118,8 @@ pub async fn fetch_discovery(
 ///
 /// Fetches the JWKS from the provider's `jwks_uri`, verifies the JWT
 /// signature, validates `iss`/`aud`/`exp`/`nonce` claims, checks
-/// `email_verified`, and extracts the domain from the `hd` claim
-/// (or email address).
+/// `email_verified`, and extracts the domain using provider-specific
+/// rules (`hd` only for Google, email fallback for other issuers).
 ///
 /// # Errors
 ///
@@ -193,8 +193,8 @@ pub async fn verify_id_token(
         anyhow::bail!("Email address is not verified by the identity provider");
     }
 
-    let domain =
-        super::extract_email_domain(claims.hd.as_deref(), &claims.email).map(str::to_string);
+    let domain = super::extract_email_domain(&provider.issuer, claims.hd.as_deref(), &claims.email)
+        .map(str::to_string);
 
     Ok(IdentityResult {
         email: claims.email,
@@ -398,6 +398,35 @@ mod tests {
         );
         assert_eq!(provider.token_endpoint.as_str(), format!("{issuer}/token"),);
         assert_eq!(provider.jwks_uri.as_str(), format!("{issuer}/jwks"),);
+    }
+
+    #[tokio::test]
+    async fn fetch_discovery_preserves_discovered_issuer_format() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let discovered_issuer = format!("{issuer}/");
+
+        let body = serde_json::json!({
+            "issuer": discovered_issuer.clone(),
+            "authorization_endpoint": format!("{issuer}/authorize"),
+            "token_endpoint": format!("{issuer}/token"),
+            "jwks_uri": format!("{issuer}/jwks"),
+        })
+        .to_string();
+
+        Mock::given(method("GET"))
+            .and(path("/.well-known/openid-configuration"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .mount(&server)
+            .await;
+
+        let client = reqwest::Client::new();
+        let provider = fetch_discovery(&client, &issuer).await.unwrap();
+
+        assert_eq!(provider.issuer, discovered_issuer);
     }
 
     #[tokio::test]

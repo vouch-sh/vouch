@@ -120,14 +120,6 @@ impl UpstreamIdp {
         }
     }
 
-    /// Get the JWKS endpoint URL.
-    #[must_use]
-    pub fn jwks_uri(&self) -> &url::Url {
-        match self {
-            Self::Oidc(p) => &p.jwks_uri,
-        }
-    }
-
     /// Detect the IdP brand for UI display.
     #[must_use]
     pub fn brand(&self) -> IdpBrand {
@@ -139,12 +131,20 @@ impl UpstreamIdp {
 
 /// Extract the email domain from an ID token.
 ///
-/// Uses the Google Workspace `hd` claim if present (more reliable for
-/// Workspace accounts), otherwise falls back to extracting the domain
-/// from the email address.
+/// For Google issuers, only the Workspace `hd` claim is used so consumer
+/// accounts do not get grouped into a shared public-email organization.
+/// For non-Google issuers, falls back to extracting the domain from email.
 #[must_use]
-pub fn extract_email_domain<'a>(hd: Option<&'a str>, email: &'a str) -> Option<&'a str> {
-    hd.or_else(|| email.split('@').nth(1))
+pub fn extract_email_domain<'a>(
+    issuer: &str,
+    hd: Option<&'a str>,
+    email: &'a str,
+) -> Option<&'a str> {
+    if matches!(IdpBrand::from_issuer(issuer), IdpBrand::Google) {
+        hd
+    } else {
+        hd.or_else(|| email.split('@').nth(1))
+    }
 }
 
 #[cfg(test)]
@@ -263,7 +263,11 @@ mod tests {
     #[test]
     fn extract_domain_from_hd() {
         assert_eq!(
-            extract_email_domain(Some("acme.com"), "user@acme.com"),
+            extract_email_domain(
+                "https://accounts.google.com",
+                Some("acme.com"),
+                "user@acme.com"
+            ),
             Some("acme.com"),
         );
     }
@@ -271,7 +275,7 @@ mod tests {
     #[test]
     fn extract_domain_from_email() {
         assert_eq!(
-            extract_email_domain(None, "user@example.org"),
+            extract_email_domain("https://idp.example.com", None, "user@example.org"),
             Some("example.org"),
         );
     }
@@ -279,13 +283,28 @@ mod tests {
     #[test]
     fn extract_domain_hd_takes_precedence() {
         assert_eq!(
-            extract_email_domain(Some("corp.com"), "user@gmail.com"),
+            extract_email_domain(
+                "https://idp.example.com",
+                Some("corp.com"),
+                "user@gmail.com"
+            ),
             Some("corp.com"),
         );
     }
 
     #[test]
     fn extract_domain_no_at_sign() {
-        assert_eq!(extract_email_domain(None, "invalid"), None);
+        assert_eq!(
+            extract_email_domain("https://idp.example.com", None, "invalid"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_domain_google_consumer_without_hd() {
+        assert_eq!(
+            extract_email_domain("https://accounts.google.com", None, "user@gmail.com"),
+            None,
+        );
     }
 }
