@@ -142,6 +142,7 @@ pub async fn test_app_state() -> Arc<AppState> {
         github_app: None,
         http_client: reqwest::Client::new(),
         session_cache: crate::db::SessionCache::new(10_000, 30),
+        upstream_idp: None,
     })
 }
 

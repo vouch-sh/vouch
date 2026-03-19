@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 
 [workspace.package]
-version = "2026.3.18"
+version = "2026.3.19"
 edition = "2024"
 license = "Apache-2.0 OR MIT"
 rust-version = "1.94.0"
@@ -136,6 +136,7 @@ vouch-agent = { path = "crates/vouch-agent" }
 vouch-common = { path = "crates/vouch-common" }
 webauthn-rs = { version = "=0.5.4", default-features = false }
 webauthn-rs-proto = { version = "=0.5.4", default-features = false }
+wiremock = { version = "=0.6.5" }
 x509-cert = { version = "=0.2.5", default-features = false }
 zeroize = { version = "=1.8.2", default-features = false }
 

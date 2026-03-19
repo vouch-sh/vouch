@@ -114,19 +114,6 @@ struct OidcTokenResponse {
     access_token: String,
 }
 
-/// OIDC ID token claims (minimal).
-#[derive(Debug, Deserialize)]
-struct IdTokenClaims {
-    email: String,
-    #[serde(default)]
-    email_verified: bool,
-    #[allow(dead_code)]
-    nonce: Option<String>,
-    /// Google Workspace hosted domain (e.g., "acme.com").
-    /// Only present for Workspace accounts, not consumer Gmail.
-    hd: Option<String>,
-}
-
 /// Client data JSON structure from `WebAuthn` response.
 #[derive(Deserialize)]
 #[allow(dead_code)]
@@ -245,8 +232,8 @@ pub async fn device_verify_submit(
         .into_response();
     }
 
-    // Check if OIDC is configured
-    if !state.config().oidc_configured() {
+    // Check if upstream IdP is configured
+    if state.upstream_idp.is_none() {
         // No OIDC configured - go directly to WebAuthn registration
         // Generate state token for WebAuthn
         let random_bytes = match generate_random_bytes(32) {
@@ -293,8 +280,15 @@ pub async fn device_verify_submit(
     }
 
     // OIDC configured - redirect to OIDC provider
+    let Some(upstream) = state.upstream_idp.as_ref() else {
+        return ErrorTemplate {
+            title: "Not Configured".to_string(),
+            message: "Identity provider is not configured.".to_string(),
+            back_url: None,
+        }
+        .into_response();
+    };
     let config = state.config();
-    let oidc_issuer = config.oidc_issuer_url.as_ref().map_or("", String::as_str);
     let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
 
     // Generate state and nonce
@@ -333,21 +327,17 @@ pub async fn device_verify_submit(
         .into_response();
     }
 
-    // Build redirect URL
+    // Build redirect URL using discovered authorization endpoint
     let redirect_uri = format!("{}/oauth/callback", state.config().base_url);
-    let auth_url = format!(
-        "{}/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email&state={}&nonce={}&prompt=login",
-        oidc_issuer,
-        urlencoding::encode(client_id),
-        urlencoding::encode(&redirect_uri),
-        urlencoding::encode(&oidc_state),
-        urlencoding::encode(&nonce)
+    let auth_url = upstream.authorization_url(client_id, &redirect_uri, &oidc_state, &nonce);
+
+    tracing::info!(
+        "Redirecting to OIDC authorization endpoint: {}",
+        upstream.token_endpoint().host_str().unwrap_or("unknown"),
     );
 
-    tracing::info!("Redirecting to OIDC authorization URL: {}", auth_url);
-
     // Use 303 See Other (not 307) to ensure browser converts POST to GET
-    // A 307 would preserve the POST method and body, sending user_code to Google
+    // A 307 would preserve the POST method and body, sending user_code to the IdP
     Redirect::to(&auth_url).into_response()
 }
 
@@ -434,21 +424,25 @@ pub async fn oidc_callback(
         .into_response();
     }
 
-    // Exchange code for tokens
+    // Exchange code for tokens using discovered token endpoint
+    let Some(upstream) = state.upstream_idp.as_ref() else {
+        return ErrorTemplate {
+            title: "Error".to_string(),
+            message: "Identity provider is not configured.".to_string(),
+            back_url: None,
+        }
+        .into_response();
+    };
     let config = state.config();
-    let oidc_issuer = config.oidc_issuer_url.as_ref().map_or("", String::as_str);
     let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
     let client_secret = config.oidc_client_secret_exposed().unwrap_or("");
     let redirect_uri = format!("{}/oauth/callback", config.base_url);
 
-    let token_url = format!(
-        "{}/token",
-        oidc_issuer.replace("accounts.google.com", "oauth2.googleapis.com")
-    );
+    let token_url = upstream.token_endpoint().as_str();
 
     let token_response = match state
         .http_client
-        .post(&token_url)
+        .post(token_url)
         .form(&[
             ("client_id", client_id),
             ("client_secret", client_secret),
@@ -495,46 +489,30 @@ pub async fn oidc_callback(
         }
     };
 
-    // Decode ID token (just extract claims, skip signature verification for now as we trust the token endpoint)
-    let id_token_parts: Vec<&str> = tokens.id_token.split('.').collect();
-    if id_token_parts.len() != 3 {
-        return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "Invalid ID token".to_string(),
-            back_url: None,
-        }
-        .into_response();
-    }
-
-    let Ok(claims_json) = URL_SAFE_NO_PAD.decode(id_token_parts.get(1).unwrap_or(&"")) else {
-        return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "Invalid ID token".to_string(),
-            back_url: None,
-        }
-        .into_response();
-    };
-
-    let claims: IdTokenClaims = match serde_json::from_slice(&claims_json) {
-        Ok(c) => c,
-        Err(_) => {
+    // Verify ID token: signature, issuer, audience, nonce, email_verified,
+    // and extract domain (OIDC Core Section 3.1.3.7).
+    let identity = match crate::services::idp::oidc::verify_id_token(
+        &state.http_client,
+        match upstream {
+            crate::services::idp::UpstreamIdp::Oidc(p) => p,
+        },
+        &tokens.id_token,
+        client_id,
+        &stored_state.nonce,
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => {
+            tracing::error!("ID token verification failed: {e:#}");
             return ErrorTemplate {
                 title: "Error".to_string(),
-                message: "Invalid ID token claims".to_string(),
+                message: "Failed to verify identity token".to_string(),
                 back_url: None,
             }
             .into_response();
         }
     };
-
-    if !claims.email_verified {
-        return ErrorTemplate {
-            title: "Error".to_string(),
-            message: "Email not verified".to_string(),
-            back_url: None,
-        }
-        .into_response();
-    }
 
     // Check domain restriction
     if let Some(domains) = state
@@ -543,7 +521,7 @@ pub async fn oidc_callback(
         .as_ref()
         .filter(|d| !d.is_empty())
     {
-        let email_domain = claims.email.split('@').nth(1).unwrap_or("");
+        let email_domain = identity.domain.as_deref().unwrap_or("");
         if !domains.iter().any(|d| d.eq_ignore_ascii_case(email_domain)) {
             let allowed_list = domains.join(", ");
             return ErrorTemplate {
@@ -551,7 +529,7 @@ pub async fn oidc_callback(
                 message: format!(
                     "Only users from the following domains can enroll: {}. Your email ({}) is not from an allowed domain.",
                     allowed_list,
-                    claims.email
+                    identity.email
                 ),
                 back_url: None,
             }
@@ -562,21 +540,25 @@ pub async fn oidc_callback(
     // Enroll user with organization in a single atomic transaction.
     // This ensures that if org creation succeeds but user creation fails,
     // the entire operation is rolled back to prevent orphaned state.
-    let enrollment =
-        match db::enroll_user_with_org(&state.store, &claims.email, None, claims.hd.as_deref())
-            .await
-        {
-            Ok(e) => e,
-            Err(e) => {
-                tracing::error!("Failed to enroll user: {}", e);
-                return ErrorTemplate {
-                    title: "Error".to_string(),
-                    message: "Failed to create user".to_string(),
-                    back_url: None,
-                }
-                .into_response();
+    let enrollment = match db::enroll_user_with_org(
+        &state.store,
+        &identity.email,
+        None,
+        identity.domain.as_deref(),
+    )
+    .await
+    {
+        Ok(e) => e,
+        Err(e) => {
+            tracing::error!("Failed to enroll user: {}", e);
+            return ErrorTemplate {
+                title: "Error".to_string(),
+                message: "Failed to create user".to_string(),
+                back_url: None,
             }
-        };
+            .into_response();
+        }
+    };
 
     let user = enrollment.user;
 
@@ -652,7 +634,7 @@ pub async fn oidc_callback(
                 &state.store,
                 &stored_state.device_auth_id,
                 &user.id,
-                &claims.email,
+                &identity.email,
                 auth_id,
             )
             .await
@@ -665,7 +647,7 @@ pub async fn oidc_callback(
             if let Err(e) = db::create_enrollment_session(
                 &state.store,
                 &user.id,
-                &claims.email,
+                &identity.email,
                 &token_hash,
                 Some(&stored_state.device_auth_id),
                 expires,
@@ -682,7 +664,10 @@ pub async fn oidc_callback(
         tracing::warn!("Failed to delete OIDC state: {e}");
     }
 
-    tracing::info!("Session created for user: {}", redact_email(&claims.email));
+    tracing::info!(
+        "Session created for user: {}",
+        redact_email(&identity.email)
+    );
     tracing::debug!("Setting session cookie and redirecting to /enroll/keys");
 
     // Create session cookie and redirect to keys page
@@ -1280,8 +1265,8 @@ const DIRECT_ENROLL_PREFIX: &str = "DIRECT-";
 /// without requiring the CLI to create a device authorization request.
 /// After successful enrollment, the user can download the CLI and login.
 pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response {
-    // Check if OIDC is configured
-    if !state.config().oidc_configured() {
+    // Check if upstream IdP is configured
+    if state.upstream_idp.is_none() {
         return ErrorTemplate {
             title: "Not Configured".to_string(),
             message: "Identity provider is not configured. Please contact your administrator."
@@ -1339,9 +1324,16 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
         }
     };
 
-    // Build OIDC authorization URL
+    // Build OIDC authorization URL using discovered endpoint
+    let Some(upstream) = state.upstream_idp.as_ref() else {
+        return ErrorTemplate {
+            title: "Not Configured".to_string(),
+            message: "Identity provider is not configured.".to_string(),
+            back_url: None,
+        }
+        .into_response();
+    };
     let config = state.config();
-    let oidc_issuer = config.oidc_issuer_url.as_ref().map_or("", String::as_str);
     let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
 
     // Generate state and nonce
@@ -1380,21 +1372,13 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
         .into_response();
     }
 
-    // Build authorization URL
-    // Google's OIDC authorization endpoint is /o/oauth2/v2/auth (not /authorize)
+    // Build authorization URL using discovered endpoint
     let redirect_uri = format!("{}/oauth/callback", state.config().base_url);
-    let auth_url = format!(
-        "{}/o/oauth2/v2/auth?client_id={}&redirect_uri={}&response_type=code&scope=openid%20email&state={}&nonce={}&prompt=login",
-        oidc_issuer,
-        urlencoding::encode(client_id),
-        urlencoding::encode(&redirect_uri),
-        urlencoding::encode(&oidc_state),
-        urlencoding::encode(&nonce)
-    );
+    let auth_url = upstream.authorization_url(client_id, &redirect_uri, &oidc_state, &nonce);
 
     tracing::info!(
-        "Direct enrollment: redirecting to OIDC authorization URL: {}",
-        auth_url
+        "Direct enrollment: redirecting to OIDC authorization endpoint: {}",
+        upstream.token_endpoint().host_str().unwrap_or("unknown"),
     );
 
     Redirect::to(&auth_url).into_response()

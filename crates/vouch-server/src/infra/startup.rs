@@ -136,17 +136,7 @@ pub async fn initialize(args: config::Args) -> Result<ServerComponents> {
 
     log_authenticator_policy(&config);
 
-    if config.oidc_configured() {
-        let enrollment_domains = match &config.allowed_domains {
-            Some(domains) => domains.join(", "),
-            None => "(open enrollment)".to_string(),
-        };
-        tracing::info!(
-            "OIDC: configured, issuer={}, enrollment_domains={}",
-            config.oidc_issuer_url.as_deref().unwrap_or("unknown"),
-            enrollment_domains,
-        );
-    } else {
+    if !config.oidc_configured() {
         tracing::warn!(
             "OIDC not configured -- enrollment (vouch enroll) will not work. \
              Set VOUCH_OIDC_ISSUER, VOUCH_OIDC_CLIENT_ID, and VOUCH_OIDC_CLIENT_SECRET"
@@ -486,6 +476,37 @@ async fn build_app_state(
         vouch_common::http::server_client(&format!("vouch-server/{}", env!("CARGO_PKG_VERSION")))
             .context("Failed to create shared HTTP client")?;
 
+    // Fetch upstream OIDC discovery document if configured
+    let upstream_idp = if config.oidc_configured() {
+        let issuer = config
+            .oidc_issuer_url
+            .as_deref()
+            .context("OIDC issuer URL missing")?;
+        let provider = crate::services::idp::oidc::fetch_discovery(&http_client, issuer)
+            .await
+            .context(
+                "Failed to fetch upstream OIDC discovery document. \
+                     Check that VOUCH_OIDC_ISSUER is reachable.",
+            )?;
+        let brand = crate::services::idp::IdpBrand::from_issuer(&provider.issuer);
+        let enrollment_domains = match &config.allowed_domains {
+            Some(domains) => domains.join(", "),
+            None => "(open enrollment)".to_string(),
+        };
+        tracing::info!(
+            "Upstream IdP: {} (OIDC), issuer={}, auth={}, token={}, jwks={}, enrollment_domains={}",
+            brand.display_name(),
+            provider.issuer,
+            provider.authorization_endpoint,
+            provider.token_endpoint,
+            provider.jwks_uri,
+            enrollment_domains,
+        );
+        Some(crate::services::idp::UpstreamIdp::Oidc(provider))
+    } else {
+        None
+    };
+
     // Initialize GitHub App if configured
     let github_app = match GitHubApp::load(config, http_client.clone()) {
         Ok(Some(app)) => {
@@ -554,6 +575,7 @@ async fn build_app_state(
             config.session_cache_max_capacity,
             config.session_cache_ttl_secs,
         ),
+        upstream_idp,
     });
 
     Ok(state)
