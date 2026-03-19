@@ -232,8 +232,7 @@ pub async fn device_verify_submit(
         .into_response();
     }
 
-    // Check if upstream IdP is configured
-    if state.upstream_idp.is_none() {
+    let Some(upstream) = state.upstream_idp.as_ref() else {
         // No OIDC configured - go directly to WebAuthn registration
         // Generate state token for WebAuthn
         let random_bytes = match generate_random_bytes(32) {
@@ -277,17 +276,9 @@ pub async fn device_verify_submit(
             rp_id: state.config().rp_id.clone(),
         }
         .into_response();
-    }
+    };
 
     // OIDC configured - redirect to OIDC provider
-    let Some(upstream) = state.upstream_idp.as_ref() else {
-        return ErrorTemplate {
-            title: "Not Configured".to_string(),
-            message: "Identity provider is not configured.".to_string(),
-            back_url: None,
-        }
-        .into_response();
-    };
     let config = state.config();
     let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
 
@@ -330,11 +321,12 @@ pub async fn device_verify_submit(
     // Build redirect URL using discovered authorization endpoint
     let redirect_uri = format!("{}/oauth/callback", state.config().base_url);
     let auth_url = upstream.authorization_url(client_id, &redirect_uri, &oidc_state, &nonce);
+    let auth_host = url::Url::parse(&auth_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
 
-    tracing::info!(
-        "Redirecting to OIDC authorization endpoint: {}",
-        upstream.token_endpoint().host_str().unwrap_or("unknown"),
-    );
+    tracing::info!("Redirecting to OIDC authorization endpoint: {}", auth_host,);
 
     // Use 303 See Other (not 307) to ensure browser converts POST to GET
     // A 307 would preserve the POST method and body, sending user_code to the IdP
@@ -1265,8 +1257,7 @@ const DIRECT_ENROLL_PREFIX: &str = "DIRECT-";
 /// without requiring the CLI to create a device authorization request.
 /// After successful enrollment, the user can download the CLI and login.
 pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response {
-    // Check if upstream IdP is configured
-    if state.upstream_idp.is_none() {
+    let Some(upstream) = state.upstream_idp.as_ref() else {
         return ErrorTemplate {
             title: "Not Configured".to_string(),
             message: "Identity provider is not configured. Please contact your administrator."
@@ -1274,7 +1265,7 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
             back_url: Some("/".to_string()),
         }
         .into_response();
-    }
+    };
 
     let now = Timestamp::now();
 
@@ -1325,14 +1316,6 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
     };
 
     // Build OIDC authorization URL using discovered endpoint
-    let Some(upstream) = state.upstream_idp.as_ref() else {
-        return ErrorTemplate {
-            title: "Not Configured".to_string(),
-            message: "Identity provider is not configured.".to_string(),
-            back_url: None,
-        }
-        .into_response();
-    };
     let config = state.config();
     let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
 
@@ -1375,10 +1358,14 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
     // Build authorization URL using discovered endpoint
     let redirect_uri = format!("{}/oauth/callback", state.config().base_url);
     let auth_url = upstream.authorization_url(client_id, &redirect_uri, &oidc_state, &nonce);
+    let auth_host = url::Url::parse(&auth_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
 
     tracing::info!(
         "Direct enrollment: redirecting to OIDC authorization endpoint: {}",
-        upstream.token_endpoint().host_str().unwrap_or("unknown"),
+        auth_host,
     );
 
     Redirect::to(&auth_url).into_response()
