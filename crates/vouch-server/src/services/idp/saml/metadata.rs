@@ -392,6 +392,84 @@ mod tests {
         assert_eq!(meta.signing_certificates.len(), 1);
     }
 
+    /// MockSAML (https://mocksaml.com/) metadata — a real public SAML 2.0 test IdP.
+    /// This validates that our parser handles real-world metadata from a live service.
+    #[test]
+    fn mocksaml_public_idp_metadata() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<md:EntityDescriptor xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata" entityID="https://saml.example.com/entityid" validUntil="2036-03-19T22:20:14.943Z">
+  <md:IDPSSODescriptor WantAuthnRequestsSigned="true" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <md:KeyDescriptor use="signing">
+      <ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+        <ds:X509Data>
+          <ds:X509Certificate>MIIC4jCCAcoCCQC33wnybT5QZDANBgkqhkiG9w0BAQsFADAyMQswCQYDVQQGEwJVSzEPMA0GA1UECgwGQm94eUhRMRIwEAYDVQQDDAlNb2NrIFNBTUwwIBcNMjIwMjI4MjE0NjM4WhgPMzAyMTA3MDEyMTQ2MzhaMDIxCzAJBgNVBAYTAlVLMQ8wDQYDVQQKDAZCb3h5SFExEjAQBgNVBAMMCU1vY2sgU0FNTDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBALGfYettMsct1T6tVUwTudNJH5Pnb9GGnkXi9Zw/e6x45DD0RuRONbFlJ2T4RjAE/uG+AjXxXQ8o2SZfb9+GgmCHuTJFNgHoZ1nFVXCmb/Hg8Hpd4vOAGXndixaReOiq3EH5XvpMjMkJ3+8+9VYMzMZOjkgQtAqO36eAFFfNKX7dTj3VpwLkvz6/KFCq8OAwY+AUi4eZm5J57D31GzjHwfjH9WTeX0MyndmnNB1qV75qQR3b2/W5sGHRv+9AarggJkF+ptUkXoLtVA51wcfYm6hILptpde5FQC8RWY1YrswBWAEZNfyrR4JeSweElNHg4NVOs4TwGjOPwWGqzTfgTlECAwEAATANBgkqhkiG9w0BAQsFAAOCAQEAAYRlYflSXAWoZpFfwNiCQVE5d9zZ0DPzNdWhAybXcTyMf0z5mDf6FWBW5Gyoi9u3EMEDnzLcJNkwJAAc39Apa4I2/tml+Jy29dk8bTyX6m93ngmCgdLh5Za4khuU3AM3L63g7VexCuO7kwkjh/+LqdcIXsVGO6XDfu2QOs1Xpe9zIzLpwm/RNYeXUjbSj5ce/jekpAw7qyVVL4xOyh8AtUW1ek3wIw1MJvEgEPt0d16oshWJpoS1OT8Lr/22SvYEo3EmSGdTVGgk3x3s+A0qWAqTcyjr7Q4s/GKYRFfomGwz0TZ4Iw1ZN99Mm0eo2USlSRTVl7QHRTuiuSThHpLKQQ==</ds:X509Certificate>
+        </ds:X509Data>
+      </ds:KeyInfo>
+    </md:KeyDescriptor>
+    <md:NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</md:NameIDFormat>
+    <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://mocksaml.com/api/saml/sso"/>
+    <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://mocksaml.com/api/saml/sso"/>
+  </md:IDPSSODescriptor>
+</md:EntityDescriptor>"#;
+
+        let meta = parse_idp_metadata(xml).unwrap();
+        assert_eq!(meta.entity_id, "https://saml.example.com/entityid");
+        assert_eq!(
+            meta.sso_post_url.as_deref(),
+            Some("https://mocksaml.com/api/saml/sso")
+        );
+        assert_eq!(
+            meta.sso_redirect_url.as_deref(),
+            Some("https://mocksaml.com/api/saml/sso")
+        );
+        assert_eq!(meta.signing_certificates.len(), 1);
+        // Verify the certificate DER-decodes to a valid X.509
+        let cert_der = meta.signing_certificates.first().unwrap();
+        assert!(
+            cert_der.len() > 100,
+            "Certificate DER should be substantial, got {} bytes",
+            cert_der.len()
+        );
+    }
+
+    /// SAMLtest.dev (https://www.samltest.dev/) metadata — a free test IdP service.
+    /// Notable: POST and Redirect bindings use different URLs, and
+    /// WantAuthnRequestsSigned is false (unlike MockSAML which requires it).
+    #[test]
+    fn samltest_dev_metadata() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<md:EntityDescriptor entityID="https://www.samltest.dev/apps/app_01km431zdf0fzkrx0qzkg9c4d0" xmlns:md="urn:oasis:names:tc:SAML:2.0:metadata">
+  <md:IDPSSODescriptor WantAuthnRequestsSigned="false" protocolSupportEnumeration="urn:oasis:names:tc:SAML:2.0:protocol">
+    <md:KeyDescriptor use="signing">
+      <ds:KeyInfo xmlns:ds="http://www.w3.org/2000/09/xmldsig#">
+        <ds:X509Data>
+          <ds:X509Certificate>MIIDBzCCAe+gAwIBAgIUCLBK4f75EXEe4gyroYnVaqLoSp4wDQYJKoZIhvcNAQELBQAwEzERMA8GA1UEAwwIZHVtbXlpZHAwHhcNMjQwNTEzMjE1NDE2WhcNMzQwNTExMjE1NDE2WjATMREwDwYDVQQDDAhkdW1teWlkcDCCASIwDQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKhmgQmWb8NvGhz952XY4SlJlpWIK72RilhOZS9frDYhqWVJHsGH9Z7sSzrM/0+YvCyEWuZV9gpMeIaHZxEPDqW3RJ7KG51fn/s/qFvwctf+CZDjyfGDzYs+XIgf7p56U48EmYeWpB/aUW64gSbnPqrtWmVFBisOfIx5aY3NubtTsn+g0XbdX0L57+NgSvPQHXh/GPXA7xCIWm54G5kqjozxbKEFA0DS3yb6oHRQWHqIAM/7mJMdUVZNIV1q7c2JIgAl23uDWq+2KTE2R5liP/KjvjwKonVKtTqGqX6ei25rsTHOaDpBH/LdQK2txgsm7R7+IThWNvUI0TttrmwBqyMCAwEAAaNTMFEwHQYDVR0OBBYEFD142gxIAJMhpgMkgpzmRNoW9XbEMB8GA1UdIwQYMBaAFD142gxIAJMhpgMkgpzmRNoW9XbEMA8GA1UdEwEB/wQFMAMBAf8wDQYJKoZIhvcNAQELBQADggEBADQd6k6zFIc20GfGHY5C2MFwyGOmP5/UG/JiTq7Zky28G6D0NA0je+GztzXx7VYDfCfHxLcm2k5t9nYhb9kVawiLUUDVF6s+yZUXA4gUA3KoTWh1/oRxR3ggW7dKYm9fsNOdQAbxUUkzp7HLZ45ZlpKUS0hO7es+fPyF5KVw0g0SrtQWwWucnQMAQE9m+B0aOf+92y7JQkdgdR8Gd/XZ4NZfoOnKV7A1utT4rWxYCgICeRTHx9tly5OhPW4hQr5qOpngcsJ9vhr86IjznQXhfj3hql5lA3VbHW04ro37ROIkh2bShDq5dwJJHpYCGrF3MQv8S3m+jzGhYL6m9gFTm/8=</ds:X509Certificate>
+        </ds:X509Data>
+      </ds:KeyInfo>
+    </md:KeyDescriptor>
+    <md:NameIDFormat>urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress</md:NameIDFormat>
+    <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" Location="https://www.samltest.dev/apps/app_01km431zdf0fzkrx0qzkg9c4d0/sso"/>
+    <md:SingleSignOnService Binding="urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect" Location="https://www.samltest.dev/apps/app_01km431zdf0fzkrx0qzkg9c4d0/login"/>
+  </md:IDPSSODescriptor>
+</md:EntityDescriptor>"#;
+
+        let meta = parse_idp_metadata(xml).unwrap();
+        assert_eq!(
+            meta.entity_id,
+            "https://www.samltest.dev/apps/app_01km431zdf0fzkrx0qzkg9c4d0"
+        );
+        // POST and Redirect bindings have DIFFERENT URLs (unlike MockSAML)
+        assert_eq!(
+            meta.sso_post_url.as_deref(),
+            Some("https://www.samltest.dev/apps/app_01km431zdf0fzkrx0qzkg9c4d0/sso")
+        );
+        assert_eq!(
+            meta.sso_redirect_url.as_deref(),
+            Some("https://www.samltest.dev/apps/app_01km431zdf0fzkrx0qzkg9c4d0/login")
+        );
+        assert_eq!(meta.signing_certificates.len(), 1);
+    }
+
     #[test]
     fn missing_sso_url_returns_error() {
         let xml = r#"<?xml version="1.0" encoding="UTF-8"?>

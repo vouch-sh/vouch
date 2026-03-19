@@ -451,10 +451,21 @@ fn validate_subject_confirmation(
             )
         })?;
 
-    for confirmation in subject
+    // SAML Profiles 4.1.4.3: At least one SubjectConfirmation with bearer
+    // Method MUST be present. Without it, there's no proof the bearer is the
+    // intended subject.
+    let confirmations: Vec<_> = subject
         .children()
         .filter(|n| n.has_tag_name((NS_SAML, "SubjectConfirmation")))
-    {
+        .collect();
+
+    if confirmations.is_empty() {
+        return Err(ResponseError::Other(
+            "missing SubjectConfirmation element (required for Web Browser SSO)".to_string(),
+        ));
+    }
+
+    for confirmation in confirmations {
         // SAML Core 2.4.1.2: Verify Method is bearer
         let method = confirmation.attribute("Method").unwrap_or("");
         if method != SUBJECT_BEARER {
@@ -465,16 +476,20 @@ fn validate_subject_confirmation(
 
         let conf_data = confirmation
             .children()
-            .find(|n| n.has_tag_name((NS_SAML, "SubjectConfirmationData")));
+            .find(|n| n.has_tag_name((NS_SAML, "SubjectConfirmationData")))
+            .ok_or_else(|| {
+                ResponseError::Other(
+                    "missing SubjectConfirmationData (required for bearer)".to_string(),
+                )
+            })?;
 
-        let Some(conf_data) = conf_data else {
-            continue;
-        };
-
-        // Check Recipient matches ACS URL
-        if let Some(recipient) = conf_data.attribute("Recipient")
-            && recipient != acs_url
-        {
+        // SAML Profiles 4.1.4.3: Recipient MUST match ACS URL.
+        let recipient = conf_data.attribute("Recipient").ok_or_else(|| {
+            ResponseError::Other(
+                "missing Recipient in SubjectConfirmationData (required)".to_string(),
+            )
+        })?;
+        if recipient != acs_url {
             return Err(ResponseError::DestinationMismatch {
                 expected: acs_url.to_string(),
                 actual: recipient.to_string(),
@@ -1597,6 +1612,30 @@ mod tests {
         assert!(
             matches!(err, ResponseError::Other(ref msg) if msg.contains("Subject")),
             "Expected error for missing Subject, got: {err}"
+        );
+    }
+
+    #[test]
+    fn subject_confirmation_empty_children_returns_error() {
+        let now = Timestamp::now();
+        // Subject exists but has no SubjectConfirmation children
+        let xml = r##"<saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Subject>
+    <saml:NameID>user@example.com</saml:NameID>
+  </saml:Subject>
+</saml:Assertion>"##;
+        let doc = roxmltree::Document::parse(xml).unwrap();
+        let assertion = doc.root().children().find(|n| n.is_element()).unwrap();
+        let err = validate_subject_confirmation(
+            assertion,
+            "_req123",
+            "https://vouch.example.com/saml/acs",
+            now,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, ResponseError::Other(ref msg) if msg.contains("SubjectConfirmation")),
+            "Expected error for zero SubjectConfirmation children, got: {err}"
         );
     }
 

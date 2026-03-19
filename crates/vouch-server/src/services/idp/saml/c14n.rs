@@ -653,9 +653,11 @@ mod tests {
         );
     }
 
-    /// W3C exc-c14n spec section 3.4 example.
+    /// W3C exc-c14n spec Section 2.2 example (same input, partial assertions).
+    /// See `w3c_section_2_2_context_independent_output` above for the full
+    /// spec-conformant version with both contexts.
     #[test]
-    fn w3c_example_3_4() {
+    fn w3c_example_section_2_2_partial() {
         let xml = r#"<n0:local xmlns:n0="foo:bar" xmlns:n3="ftp://example.org">
   <n1:elem2 xmlns:n1="http://example.net" xml:lang="en">
     <n3:stuff xmlns:n3="ftp://example.org"/>
@@ -685,6 +687,146 @@ mod tests {
         assert!(
             result.ends_with("</n1:elem2>"),
             "Should end with closing tag: {result}"
+        );
+    }
+
+    // =========================================================================
+    // W3C Exclusive XML Canonicalization 1.0 spec examples
+    // https://www.w3.org/TR/xml-exc-c14n/
+    // =========================================================================
+
+    /// W3C exc-c14n Section 2.1: Simple re-enveloping.
+    ///
+    /// Inclusive c14n of n1:elem1 includes ancestor namespace n0 (undesirable).
+    /// Exclusive c14n omits n0 since it's not visibly utilized.
+    #[test]
+    fn w3c_section_2_1_simple_enveloping() {
+        let xml = r#"<n0:pdu xmlns:n0="http://a.example">
+   <n1:elem1 xmlns:n1="http://b.example">
+       content
+   </n1:elem1>
+</n0:pdu>"#;
+        let result = c14n(xml, "elem1", &[]);
+        // Exclusive c14n: n0 is NOT visibly utilized by elem1, so omitted.
+        // Only n1 (used as element prefix) is emitted.
+        assert!(
+            !result.contains("http://a.example"),
+            "n0 should be excluded (not visibly utilized): {result}"
+        );
+        assert!(
+            result.contains(r#"xmlns:n1="http://b.example""#),
+            "n1 should be present (visibly utilized): {result}"
+        );
+        assert!(
+            result.contains("content"),
+            "Text content preserved: {result}"
+        );
+    }
+
+    /// W3C exc-c14n Section 2.2: Complex re-enveloping (primary spec example).
+    ///
+    /// The spec states that exclusive c14n of n1:elem2 from BOTH the original
+    /// document and a different enveloping context must produce identical output:
+    ///
+    /// ```xml
+    /// <n1:elem2 xmlns:n1="http://example.net" xml:lang="en">
+    ///     <n3:stuff xmlns:n3="ftp://example.org"></n3:stuff>
+    /// </n1:elem2>
+    /// ```
+    ///
+    /// This is the definitive test for context-independent canonicalization.
+    #[test]
+    fn w3c_section_2_2_context_independent_output() {
+        // Original document context
+        let original = r#"<n0:local xmlns:n0="foo:bar"
+          xmlns:n3="ftp://example.org">
+   <n1:elem2 xmlns:n1="http://example.net"
+             xml:lang="en">
+       <n3:stuff xmlns:n3="ftp://example.org"/>
+   </n1:elem2>
+</n0:local>"#;
+
+        // Different enveloping context (from spec Section 2.2)
+        let re_enveloped = r#"<n2:pdu xmlns:n1="http://example.com"
+        xmlns:n2="http://foo.example"
+        xml:lang="fr"
+        xml:space="retain">
+   <n1:elem2 xmlns:n1="http://example.net"
+             xml:lang="en">
+       <n3:stuff xmlns:n3="ftp://example.org"/>
+   </n1:elem2>
+</n2:pdu>"#;
+
+        let result_original = c14n(original, "elem2", &[]);
+        let result_re_enveloped = c14n(re_enveloped, "elem2", &[]);
+
+        // Both contexts MUST produce identical output (the whole point of exc-c14n).
+        assert_eq!(
+            result_original, result_re_enveloped,
+            "Exclusive c14n must be context-independent"
+        );
+
+        // Verify the output matches the spec's expected canonical form.
+        // n1: visibly utilized (element prefix) → included
+        assert!(
+            result_original
+                .starts_with(r#"<n1:elem2 xmlns:n1="http://example.net" xml:lang="en">"#),
+            "Opening tag must have n1 and xml:lang: {result_original}"
+        );
+        // n0: NOT visibly utilized → excluded
+        assert!(
+            !result_original.contains("foo:bar"),
+            "n0 (foo:bar) must be excluded: {result_original}"
+        );
+        // n2: NOT visibly utilized → excluded
+        assert!(
+            !result_original.contains("http://foo.example"),
+            "n2 must be excluded: {result_original}"
+        );
+        // n3: visibly utilized by n3:stuff → included on n3:stuff only
+        assert!(
+            result_original.contains(r#"<n3:stuff xmlns:n3="ftp://example.org"></n3:stuff>"#),
+            "n3:stuff must declare n3: {result_original}"
+        );
+        // xml:space from re-enveloped context must NOT leak in
+        assert!(
+            !result_original.contains("xml:space"),
+            "xml:space must not appear: {result_original}"
+        );
+        // xml:lang is an attribute on elem2, not a namespace → preserved
+        assert!(
+            result_original.contains(r#"xml:lang="en""#),
+            "xml:lang attribute preserved: {result_original}"
+        );
+    }
+
+    /// W3C exc-c14n Section 2.2 with InclusiveNamespaces PrefixList.
+    ///
+    /// When n0 is in the PrefixList, it should be included in the output
+    /// even though it's not visibly utilized — this is how
+    /// InclusiveNamespaces forces namespace inheritance.
+    #[test]
+    fn w3c_section_2_2_with_inclusive_prefixes() {
+        let xml = r#"<n0:local xmlns:n0="foo:bar"
+          xmlns:n3="ftp://example.org">
+   <n1:elem2 xmlns:n1="http://example.net"
+             xml:lang="en">
+       <n3:stuff xmlns:n3="ftp://example.org"/>
+   </n1:elem2>
+</n0:local>"#;
+
+        // Force n0 to be included via PrefixList
+        let result = c14n(xml, "elem2", &["n0"]);
+
+        // n0 should now appear on elem2 (forced by PrefixList)
+        assert!(
+            result.contains(r#"xmlns:n0="foo:bar""#),
+            "n0 should be included when in PrefixList: {result}"
+        );
+        // n1 still present (visibly utilized)
+        assert!(
+            result.contains(r#"xmlns:n1="http://example.net""#),
+            "n1 should still be present: {result}"
         );
     }
 
