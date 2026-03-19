@@ -423,12 +423,14 @@ mod tests {
             Some("https://mocksaml.com/api/saml/sso")
         );
         assert_eq!(meta.signing_certificates.len(), 1);
-        // Verify the certificate DER-decodes to a valid X.509
-        let cert_der = meta.signing_certificates.first().unwrap();
+        // Verify the certificate DER has reasonable size (not empty/truncated)
+        let cert_len = meta
+            .signing_certificates
+            .first()
+            .map_or(0, Vec::len);
         assert!(
-            cert_der.len() > 100,
-            "Certificate DER should be substantial, got {} bytes",
-            cert_der.len()
+            cert_len > 100,
+            "Certificate DER should be substantial, got {cert_len} bytes",
         );
     }
 
