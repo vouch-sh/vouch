@@ -6,10 +6,10 @@
 //!
 //! Per SAML Bindings spec:
 //! - HTTP-POST: base64-encode the raw XML into a form field
-//! - HTTP-Redirect: DEFLATE-compress (raw, no zlib header), then base64url-encode
+//! - HTTP-Redirect: DEFLATE-compress (raw, no zlib header), then base64-encode
 
 use base64::Engine as _;
-use base64::engine::general_purpose::{STANDARD as BASE64_STANDARD, URL_SAFE_NO_PAD};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use flate2::Compression;
 use flate2::write::DeflateEncoder;
 use std::io::Write as _;
@@ -41,7 +41,7 @@ const NAMEID_FORMAT_EMAIL: &str = "urn:oasis:names:tc:SAML:2.0:nameid-format:ema
 pub struct AuthnRequestResult {
     /// The SAML AuthnRequest ID (`_` + 32 hex chars). Used for `InResponseTo` validation.
     pub request_id: String,
-    /// Encoded AuthnRequest XML: base64 for POST, DEFLATE+base64url for Redirect.
+    /// Encoded AuthnRequest XML: base64 for POST, DEFLATE+base64 for Redirect.
     pub encoded_request: String,
     /// IdP SSO endpoint URL.
     pub sso_url: String,
@@ -106,9 +106,9 @@ pub fn build_authn_request(
             is_post_binding: true,
         })
     } else if let Some(sso_url) = &provider.idp_metadata.sso_redirect_url {
-        // HTTP-Redirect binding: raw DEFLATE (no zlib header) then base64url
+        // HTTP-Redirect binding: raw DEFLATE (no zlib header) then base64
         let deflated = deflate_raw(&xml)?;
-        let encoded = URL_SAFE_NO_PAD.encode(&deflated);
+        let encoded = BASE64_STANDARD.encode(&deflated);
         Ok(AuthnRequestResult {
             request_id,
             encoded_request: encoded,
@@ -218,7 +218,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::services::idp::saml::{IdpMetadata, SamlProvider};
-    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
     use flate2::read::DeflateDecoder;
     use std::io::Read as _;
 
@@ -314,15 +313,15 @@ mod tests {
     }
 
     #[test]
-    fn redirect_binding_produces_deflate_base64url() {
+    fn redirect_binding_produces_deflate_base64() {
         let provider = make_provider(None, Some("https://idp.example.com/sso"));
         let result = build_authn_request(&provider).unwrap();
         assert!(!result.is_post_binding, "Should use Redirect binding");
 
-        // Decode base64url
-        let deflated = URL_SAFE_NO_PAD
+        // Decode standard base64
+        let deflated = BASE64_STANDARD
             .decode(&result.encoded_request)
-            .expect("Must be valid base64url");
+            .expect("Must be valid base64");
 
         // Decompress raw DEFLATE
         let mut decoder = DeflateDecoder::new(deflated.as_slice());
