@@ -118,8 +118,7 @@ pub async fn fetch_discovery(
 ///
 /// Fetches the JWKS from the provider's `jwks_uri`, verifies the JWT
 /// signature, validates `iss`/`aud`/`exp`/`nonce` claims, checks
-/// `email_verified`, and extracts the domain using provider-specific
-/// rules (`hd` only for Google, email fallback for other issuers).
+/// `email_verified`, and extracts the hosted domain (`hd`) claim.
 ///
 /// # Errors
 ///
@@ -194,12 +193,9 @@ pub async fn verify_id_token(
         anyhow::bail!("Email address is not verified by the identity provider");
     }
 
-    let domain = super::extract_email_domain(&provider.issuer, claims.hd.as_deref(), &claims.email)
-        .map(str::to_string);
-
     Ok(IdentityResult {
         email: claims.email,
-        domain,
+        domain: claims.hd,
     })
 }
 
