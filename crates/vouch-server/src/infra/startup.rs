@@ -476,7 +476,9 @@ async fn build_app_state(
         vouch_common::http::server_client(&format!("vouch-server/{}", env!("CARGO_PKG_VERSION")))
             .context("Failed to create shared HTTP client")?;
 
-    // Fetch upstream OIDC discovery document if configured
+    // Fetch upstream OIDC discovery document if configured.
+    // SAML enrollment flow is not implemented yet; fail closed to avoid
+    // bypassing upstream identity verification.
     let upstream_idp = if config.oidc_configured() {
         let issuer = config
             .oidc_issuer_url
@@ -503,6 +505,11 @@ async fn build_app_state(
             enrollment_domains,
         );
         Some(crate::services::idp::UpstreamIdp::Oidc(Box::new(provider)))
+    } else if config.saml_configured() {
+        anyhow::bail!(
+            "SAML upstream IdP is configured but not yet supported for enrollment. \
+             Configure VOUCH_OIDC_* until SAML enrollment is implemented."
+        );
     } else {
         None
     };

@@ -403,32 +403,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_discovery_preserves_discovered_issuer_format() {
+    async fn fetch_discovery_preserves_canonical_issuer_from_document() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        let issuer = server.uri();
-        let discovered_issuer = format!("{issuer}/");
-
-        let body = serde_json::json!({
-            "issuer": discovered_issuer.clone(),
-            "authorization_endpoint": format!("{issuer}/authorize"),
-            "token_endpoint": format!("{issuer}/token"),
-            "jwks_uri": format!("{issuer}/jwks"),
-        })
-        .to_string();
+        let configured_issuer = server.uri();
+        let canonical_issuer = format!("{configured_issuer}/");
 
         Mock::given(method("GET"))
             .and(path("/.well-known/openid-configuration"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(discovery_json(&canonical_issuer)),
+            )
             .mount(&server)
             .await;
 
         let client = reqwest::Client::new();
-        let provider = fetch_discovery(&client, &issuer).await.unwrap();
+        let provider = fetch_discovery(&client, &configured_issuer).await.unwrap();
 
-        assert_eq!(provider.issuer, discovered_issuer);
+        assert_eq!(provider.issuer, canonical_issuer);
     }
 
     #[tokio::test]
