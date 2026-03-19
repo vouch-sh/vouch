@@ -10,6 +10,8 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
+permissions: {}
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -17,8 +19,12 @@ jobs:
   fmt:
     name: Format
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Setup Rust toolchain
         run: rustup show
       - name: Setup Rust cache
@@ -33,11 +39,15 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     env:
       AWS_LC_FIPS_SYS_CC: clang
       AWS_LC_FIPS_SYS_CXX: clang++
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libssl-dev libudev-dev cmake golang-go clang
       - name: Setup Rust toolchain
@@ -54,6 +64,8 @@ jobs:
   test:
     name: Unit Tests (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -74,9 +86,11 @@ jobs:
             cargo-args: "--workspace --exclude vouch-server --exclude vouch-agent --exclude vouch-tests"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Install system dependencies
         if: matrix.install-deps != ''
-        run: ${{ matrix.install-deps }}
+        run: ${{ matrix.install-deps }} # zizmor: ignore[template-injection] — static matrix value
       - name: Setup Rust toolchain
         run: rustup show
       - name: Setup Rust cache
@@ -86,17 +100,19 @@ jobs:
           shared-key: "debug-${{ runner.os }}"
           save-if: ${{ github.ref == 'refs/heads/main' }}
           cache-on-failure: true
-      - name: Set FIPS compiler
+      - name: Set FIPS compiler # zizmor: ignore[template-injection] — static matrix values
         if: matrix.fips-cc
         run: |
           echo "AWS_LC_FIPS_SYS_CC=${{ matrix.fips-cc }}" >> "$GITHUB_ENV"
           echo "AWS_LC_FIPS_SYS_CXX=${{ matrix.fips-cxx }}" >> "$GITHUB_ENV"
       - name: Run tests
-        run: cargo test ${{ matrix.cargo-args }}
+        run: cargo test ${{ matrix.cargo-args }} # zizmor: ignore[template-injection] — static matrix value
 
   build:
     name: Build (${{ matrix.name }})
     runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
     strategy:
       fail-fast: false
       matrix:
@@ -126,9 +142,11 @@ jobs:
             rustflags: "-C target-feature=+crt-static"
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - name: Install system dependencies
         if: matrix.install != ''
-        run: ${{ matrix.install }}
+        run: ${{ matrix.install }} # zizmor: ignore[template-injection] — static matrix value
       - name: Setup Rust toolchain
         if: runner.os != 'Linux'
         run: |
@@ -141,7 +159,7 @@ jobs:
           prefix-key: "v2"
           shared-key: "release-${{ matrix.target }}"
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - name: Set RUSTFLAGS
+      - name: Set RUSTFLAGS # zizmor: ignore[template-injection] — static matrix value
         if: matrix.rustflags
         shell: bash
         run: echo "RUSTFLAGS=${{ matrix.rustflags }}" >> "$GITHUB_ENV"
@@ -156,7 +174,7 @@ jobs:
           targets: ci
         env:
           TARGET: ${{ matrix.target }}
-      - name: Build
+      - name: Build # zizmor: ignore[template-injection] — static matrix values
         if: runner.os != 'Linux'
         run: cargo build --release --target ${{ matrix.target }} ${{ matrix.packages }}
 
@@ -168,6 +186,8 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4.9.0
         with:
           vulnerability-check: true
@@ -176,8 +196,12 @@ jobs:
   license-check:
     name: License & Advisory Check
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@3fd3802e88374d3fe9159b834c7714ec57d6c979 # v2.0.15
         with:
           command: check licenses advisories sources
@@ -193,6 +217,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
