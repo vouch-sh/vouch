@@ -92,3 +92,4 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 tower = { workspace = true, features = ["util"] }
+wiremock = { workspace = true }

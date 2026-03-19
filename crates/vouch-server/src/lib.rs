@@ -86,6 +86,8 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Session lookup cache (30s TTL).
     pub session_cache: db::SessionCache,
+    /// Upstream identity provider (discovered at startup, None if not configured).
+    pub upstream_idp: Option<services::idp::UpstreamIdp>,
 }
 
 impl AppState {
@@ -253,6 +255,7 @@ mod redirect_tests {
             github_app: None,
             http_client: reqwest::Client::new(),
             session_cache: db::SessionCache::new(10_000, 30),
+            upstream_idp: None,
         }
     }
 

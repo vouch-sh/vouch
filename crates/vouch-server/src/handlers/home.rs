@@ -2,7 +2,7 @@
 //! Home page handler.
 //!
 //! The home page shows the landing/enrollment page with
-//! "Sign in with Google", CLI instructions, and download links.
+//! "Sign in with identity provider", CLI instructions, and download links.
 //! If the user is already authenticated, it shows a "Manage Security Keys"
 //! button instead.
 
@@ -25,6 +25,10 @@ pub struct HomeTemplate {
     pub download_windows: Option<String>,
     /// Authentication context for header display.
     pub auth: AuthContext,
+    /// Identity provider display name (e.g., "Google", "Okta").
+    pub idp_name: Option<String>,
+    /// Identity provider SVG icon markup.
+    pub idp_svg_icon: Option<String>,
 }
 
 impl_template_response!(HomeTemplate);
@@ -38,6 +42,17 @@ pub async fn home_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> im
         || state.config().cli_download_linux.is_some()
         || state.config().cli_download_windows.is_some();
 
+    let (idp_name, idp_svg_icon) = match state.upstream_idp.as_ref() {
+        Some(idp) => {
+            let brand = idp.brand();
+            (
+                Some(brand.display_name().to_string()),
+                Some(brand.svg_icon().to_string()),
+            )
+        }
+        None => (None, None),
+    };
+
     HomeTemplate {
         server_url: state.config().base_url.clone(),
         org_name: state.config().get_org_display_name().to_string(),
@@ -46,5 +61,7 @@ pub async fn home_page(State(state): State<Arc<AppState>>, jar: CookieJar) -> im
         download_linux: state.config().cli_download_linux.clone(),
         download_windows: state.config().cli_download_windows.clone(),
         auth,
+        idp_name,
+        idp_svg_icon,
     }
 }
