@@ -57,6 +57,7 @@ opentelemetry-otlp = { workspace = true, features = ["trace", "grpc-tonic"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio", "trace"] }
 p256 = { workspace = true, features = ["ecdsa"] }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
+roxmltree = { workspace = true }
 rust-embed = { workspace = true, features = ["axum-ex", "deterministic-timestamps", "mime-guess"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum"] }
 rustls-pemfile = { workspace = true, features = ["std"] }

@@ -203,7 +203,7 @@ impl UpstreamIdp {
     pub fn brand(&self) -> IdpBrand {
         match self {
             Self::Oidc(p) => IdpBrand::from_issuer(&p.issuer),
-            Self::Saml(s) => IdpBrand::from_entity_id(&s.entity_id),
+            Self::Saml(s) => IdpBrand::from_entity_id(s.entity_id()),
         }
     }
 }
@@ -409,7 +409,16 @@ mod tests {
     #[test]
     fn initiate_auth_saml_returns_error() {
         let saml_provider = saml::SamlProvider {
-            entity_id: "https://idp.example.com/saml".to_string(),
+            idp_metadata: saml::IdpMetadata {
+                entity_id: "https://idp.example.com/saml".to_string(),
+                sso_post_url: Some("https://idp.example.com/sso".to_string()),
+                sso_redirect_url: None,
+                signing_certificates: vec![],
+            },
+            sp_entity_id: "https://vouch.example.com".to_string(),
+            acs_url: "https://vouch.example.com/saml/acs".to_string(),
+            email_attribute: None,
+            domain_attribute: None,
         };
         let idp = UpstreamIdp::Saml(saml_provider);
         let config = test_config();
