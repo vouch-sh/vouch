@@ -32,6 +32,7 @@ use super::{
 use crate::redact_email;
 use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
 use crate::services::error::ServiceError;
+use crate::services::idp::IdentityResult;
 use crate::services::oidc::amr::{ACR_AAL3, AuthMethod};
 use crate::services::oidc::scope::ScopeSet;
 
@@ -515,6 +516,16 @@ pub async fn oidc_callback(
         }
     };
 
+    complete_enrollment_after_identity(&state, &stored_state, &oidc_state, identity).await
+}
+
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn complete_enrollment_after_identity(
+    state: &Arc<AppState>,
+    stored_state: &db::OidcState,
+    state_key: &str,
+    identity: IdentityResult,
+) -> Response {
     // Check domain restriction.
     // For Google consumers (no `hd` claim), `identity.domain` is `None`,
     // so `email_domain` becomes "" and will never match an allowed domain.
@@ -591,7 +602,7 @@ pub async fn oidc_callback(
     // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
     let client_id_for_token = state.config().base_url.clone();
     let session_result = match create_oauth_access_token(
-        &state,
+        state,
         CreateOAuthTokenParams {
             user_id: &user.id,
             email: &user.email,
@@ -662,9 +673,9 @@ pub async fn oidc_callback(
         }
     }
 
-    // Delete the OIDC state (it's been consumed)
-    if let Err(e) = db::delete_oidc_state(&state.store, &oidc_state).await {
-        tracing::warn!("Failed to delete OIDC state: {e}");
+    // Delete state only after enrollment/session creation succeeds.
+    if let Err(e) = db::delete_oidc_state(&state.store, state_key).await {
+        tracing::warn!("Failed to delete state: {e}");
     }
 
     tracing::info!(

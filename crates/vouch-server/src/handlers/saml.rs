@@ -10,23 +10,17 @@ use std::sync::Arc;
 
 use axum::{
     Form,
-    body::Body,
     extract::State,
-    http::{StatusCode, header},
+    http::header,
     response::{IntoResponse, Response},
 };
 use jiff::Timestamp;
-use secrecy::ExposeSecret;
 use serde::Deserialize;
 
 use crate::AppState;
 use crate::db;
-use crate::handlers::enroll::ErrorTemplate;
-use crate::handlers::{create_session_cookie, hash_token};
-use crate::redact_email;
-use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+use crate::handlers::enroll::{ErrorTemplate, complete_enrollment_after_identity};
 use crate::services::idp::IdentityResult;
-use crate::services::oidc::scope::ScopeSet;
 
 // ============================================================================
 // Request types
@@ -163,163 +157,7 @@ pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsFor
         domain: assertion.domain,
     };
 
-    // Step 8: Delete consumed state record (replay prevention).
-    if let Err(e) = db::delete_oidc_state(&state.store, &relay_state).await {
-        tracing::warn!("Failed to delete SAML state: {e}");
-    }
-
-    // ── From here, identical to oidc_callback() ────────────────────────────
-
-    // Check domain restriction.
-    if let Some(domains) = state
-        .config()
-        .allowed_domains
-        .as_ref()
-        .filter(|d| !d.is_empty())
-    {
-        let email_domain =
-            crate::services::idp::extract_email_domain(identity.domain.as_deref(), &identity.email)
-                .unwrap_or("");
-        if !domains.iter().any(|d| d.eq_ignore_ascii_case(email_domain)) {
-            let allowed_list = domains.join(", ");
-            return ErrorTemplate {
-                title: "Domain Not Allowed".to_string(),
-                message: format!(
-                    "Only users from the following domains can enroll: {}. \
-                     Your email ({}) is not from an allowed domain.",
-                    allowed_list, identity.email
-                ),
-                back_url: None,
-            }
-            .into_response();
-        }
-    }
-
-    // Enroll user with organization.
-    let enrollment = match db::enroll_user_with_org(
-        &state.store,
-        &identity.email,
-        None,
-        identity.domain.as_deref(),
-    )
-    .await
-    {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::error!("Failed to enroll user: {e}");
-            return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to create user".to_string(),
-                back_url: None,
-            }
-            .into_response();
-        }
-    };
-
-    let user = enrollment.user;
-
-    let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
-    let duration = jiff::Span::new().hours(session_hours);
-    let expires = match now.checked_add(duration) {
-        Ok(e) => e,
-        Err(e) => {
-            tracing::error!("Failed to calculate session expiration: {e}");
-            return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to create session".to_string(),
-                back_url: None,
-            }
-            .into_response();
-        }
-    };
-
-    let existing_auths = db::get_authenticators_for_user(&state.store, &user.id)
-        .await
-        .unwrap_or_default();
-    let authenticator_id = existing_auths.first().map(|a| a.id.clone());
-
-    let client_id_for_token = state.config().base_url.clone();
-    let session_result = match create_oauth_access_token(
-        &state,
-        CreateOAuthTokenParams {
-            user_id: &user.id,
-            email: &user.email,
-            authenticator_id: authenticator_id.as_deref(),
-            client_id: &client_id_for_token,
-            scope: Some(ScopeSet::all()),
-            dpop_jkt: None,
-            act: None,
-            audience: None,
-            auth_time: Some(now.as_second()),
-            amr: None,
-            acr: None,
-            hardware_verified: false,
-            session_purpose: db::SessionPurpose::OAuthAccessToken,
-            authorization_details: None,
-        },
-    )
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!("Failed to create session: {e}");
-            return ErrorTemplate {
-                title: "Error".to_string(),
-                message: "Failed to create session".to_string(),
-                back_url: None,
-            }
-            .into_response();
-        }
-    };
-    let token = session_result.token;
-    let token_hash = hash_token(token.expose_secret());
-
-    // Handle CLI-initiated device auth flow (device_auth_id comes from stored state).
-    let is_cli_flow = !stored_state.device_auth_id.is_empty()
-        && !stored_state.device_auth_id.starts_with("DIRECT-");
-
-    if is_cli_flow {
-        if let Some(ref auth_id) = authenticator_id {
-            if let Err(e) = db::authorize_device_auth(
-                &state.store,
-                &stored_state.device_auth_id,
-                &user.id,
-                &identity.email,
-                auth_id,
-            )
-            .await
-            {
-                tracing::warn!("Failed to authorize device auth: {e}");
-            }
-        } else {
-            if let Err(e) = db::create_enrollment_session(
-                &state.store,
-                &user.id,
-                &identity.email,
-                &token_hash,
-                Some(&stored_state.device_auth_id),
-                expires,
-            )
-            .await
-            {
-                tracing::warn!("Failed to create enrollment session for CLI: {e}");
-            }
-        }
-    }
-
-    tracing::info!(
-        "SAML session created for user: {}",
-        redact_email(&identity.email)
-    );
-    tracing::debug!("Setting session cookie and redirecting to /enroll/keys");
-
-    let cookie = create_session_cookie(token.expose_secret(), session_hours * 3600);
-    Response::builder()
-        .status(StatusCode::SEE_OTHER)
-        .header(header::LOCATION, "/enroll/keys")
-        .header(header::SET_COOKIE, cookie.to_string())
-        .body(Body::empty())
-        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+    complete_enrollment_after_identity(&state, &stored_state, &relay_state, identity).await
 }
 
 // ============================================================================
