@@ -40,6 +40,7 @@ const-oid = { workspace = true }
 der = { workspace = true, features = ["std", "oid"] }
 dotenvy = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["std"] }
+flate2 = { workspace = true }
 governor = { workspace = true, features = ["std"] }
 headers = { workspace = true }
 hex = { workspace = true, features = ["std"] }
