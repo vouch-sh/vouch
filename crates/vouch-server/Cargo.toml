@@ -54,7 +54,7 @@ metrics-exporter-prometheus = { workspace = true }
 mime_guess = { workspace = true }
 mimalloc = { workspace = true, features = ["secure"] }
 opentelemetry = { workspace = true, features = ["trace"] }
-opentelemetry-otlp = { workspace = true, features = ["trace", "grpc-tonic"] }
+opentelemetry-otlp = { workspace = true, features = ["trace", "http-proto", "reqwest-client", "tls-aws-lc"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio", "trace"] }
 p256 = { workspace = true, features = ["ecdsa"] }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
