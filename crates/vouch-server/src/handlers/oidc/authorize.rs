@@ -18,6 +18,7 @@ use crate::services::oidc::authorization::{
 use crate::services::oidc::jar::{QueryParamHints, validate_request_object};
 use askama::Template;
 use axum::{
+    Form,
     extract::{Query, State},
     response::{IntoResponse, Redirect, Response},
 };
@@ -106,6 +107,11 @@ pub async fn authorize(
     Query(params): Query<AuthorizeQuery>,
     jar: CookieJar,
 ) -> Response {
+    authorize_inner(state, params, jar).await
+}
+
+/// Shared authorization logic for both GET and POST.
+async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: CookieJar) -> Response {
     // Check if we're returning from login with a pending auth
     if let Some(pending_id) = &params.pending_auth {
         return handle_pending_auth(&state, pending_id, &jar).await;
@@ -469,6 +475,19 @@ pub async fn authorize(
             store_pending_and_redirect(&state, validated, None).await
         }
     }
+}
+
+/// POST /oauth/authorize
+///
+/// RFC 6749 Section 3.1: The authorization endpoint MAY support POST.
+/// Accepts `application/x-www-form-urlencoded` parameters and delegates
+/// to the same logic as the GET handler.
+pub async fn authorize_post(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Form(params): Form<AuthorizeQuery>,
+) -> Response {
+    authorize_inner(state, params, jar).await
 }
 
 /// Store OAuth params in the database and redirect to login.

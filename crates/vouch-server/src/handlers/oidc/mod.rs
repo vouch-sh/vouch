@@ -8,7 +8,7 @@
 //!
 //! - `GET /.well-known/openid-configuration` — OIDC Discovery 1.0 Section 4
 //! - `GET /oauth/jwks` — RFC 7517 Section 5 (JWK Set)
-//! - `GET /oauth/authorize` — RFC 6749 Section 3.1 (Authorization Endpoint)
+//! - `GET|POST /oauth/authorize` — RFC 6749 Section 3.1 (Authorization Endpoint)
 //! - `POST /oauth/token` — RFC 6749 Section 3.2 (Token Endpoint)
 //! - `GET /oauth/userinfo` — OIDC Core 1.0 Section 5.3 (UserInfo Endpoint)
 //! - `POST /oauth/revoke` — RFC 7009 Section 2 (Token Revocation)
@@ -32,7 +32,7 @@ mod token;
 mod userinfo;
 
 // Re-export handler functions
-pub use authorize::authorize;
+pub use authorize::{authorize, authorize_post};
 pub use discovery::{discovery, jwks};
 pub use fido2_challenge::fido2_challenge;
 pub use introspect::{introspect, revoke};

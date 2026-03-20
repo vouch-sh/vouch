@@ -166,7 +166,10 @@ pub fn test_router(state: Arc<AppState>) -> Router {
             get(handlers::oidc::discovery),
         )
         .route("/oauth/jwks", get(handlers::oidc::jwks))
-        .route("/oauth/authorize", get(handlers::oidc::authorize))
+        .route(
+            "/oauth/authorize",
+            get(handlers::oidc::authorize).post(handlers::oidc::authorize_post),
+        )
         // OIDC Core Section 5.3.1: UserInfo MUST support GET and POST
         .route(
             "/oauth/userinfo",

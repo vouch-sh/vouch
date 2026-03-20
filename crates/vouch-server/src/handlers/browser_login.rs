@@ -187,12 +187,13 @@ pub async fn login_page(
     };
 
     // OIDC Core Section 3.1.2.1: prompt=login requires re-authentication
-    // even if the user has a valid session. Only skip the login form when
-    // the pending auth does NOT require forced re-auth.
+    // even if the user has a valid session. RFC 9470: max_age also forces
+    // re-authentication when the session age exceeds the requested value.
+    // Only skip the login form when the pending auth does NOT require
+    // forced re-auth.
     let requires_reauth = pending
         .as_ref()
-        .and_then(|p| p.prompt.as_deref())
-        .is_some_and(|p| p == "login");
+        .is_some_and(|p| p.prompt.as_deref() == Some("login") || p.max_age.is_some());
 
     if auth.authenticated && !requires_reauth {
         if let Some(ref pending_id) = query.pending_auth {

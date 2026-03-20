@@ -193,7 +193,10 @@ fn build_general_limited_routes(
     config: &config::ServerConfig,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
     Ok(Router::new()
-        .route("/oauth/authorize", get(handlers::oidc::authorize))
+        .route(
+            "/oauth/authorize",
+            get(handlers::oidc::authorize).post(handlers::oidc::authorize_post),
+        )
         // Org admin API (JSON, JWT Bearer auth)
         .route(
             "/api/v1/org/scim-tokens",
