@@ -861,6 +861,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
+            auth_time: None,
         };
 
         let result = validate_pkce(&auth_code, Some(code_verifier));
@@ -887,6 +888,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
+            auth_time: None,
         };
 
         let result = validate_pkce(&auth_code, Some("wrong_verifier"));
@@ -913,6 +915,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
+            auth_time: None,
         };
 
         let result = validate_pkce(&auth_code, None);
@@ -940,6 +943,7 @@ mod tests {
             dpop_jkt: None,
             iat: 0,
             exp: i64::MAX,
+            auth_time: None,
         };
 
         let result = validate_pkce(&auth_code, None);

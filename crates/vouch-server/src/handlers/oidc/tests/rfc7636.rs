@@ -63,6 +63,7 @@ async fn test_rfc7636_code_verifier_too_short() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -166,6 +167,7 @@ async fn test_rfc7636_end_to_end_pkce_flow() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -232,6 +234,7 @@ async fn test_rfc7636_wrong_verifier_rejected() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -297,6 +300,7 @@ async fn test_rfc7636_code_verifier_length_too_short() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -358,6 +362,7 @@ async fn test_rfc7636_code_verifier_too_long() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -418,6 +423,7 @@ async fn test_rfc7636_complete_pkce_s256_flow() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -478,6 +484,7 @@ async fn issue_pkce_code(
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await

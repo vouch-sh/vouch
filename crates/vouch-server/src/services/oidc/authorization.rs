@@ -142,6 +142,12 @@ pub struct AuthorizationCodeParams<'a> {
     pub auth_code_lifetime_seconds: i64,
     /// RFC 9396: Rich authorization details (JSON value for server-side storage).
     pub authorization_details: Option<&'a serde_json::Value>,
+    /// OIDC Core Section 2: Time when the End-User authentication occurred.
+    ///
+    /// This should be the session's `created_at` timestamp so that `auth_time`
+    /// in the id_token reflects the actual authentication event, not code issuance.
+    /// When `None`, falls back to the code's `iat`.
+    pub auth_time: Option<i64>,
 }
 
 /// Authorization request parameters (from query string).
@@ -337,6 +343,9 @@ pub struct AuthorizationCode {
     pub dpop_jkt: Option<String>,
     pub iat: i64,
     pub exp: i64,
+    /// OIDC Core Section 2: Time when the End-User authentication occurred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_time: Option<i64>,
 }
 
 impl AuthorizationCode {
@@ -654,6 +663,7 @@ pub async fn issue_authorization_code(
         dpop_jkt: params.dpop_jkt.map(String::from),
         iat: now.as_second(),
         exp,
+        auth_time: params.auth_time,
     };
 
     let code = auth_code.encode(&state.state_signer).await.map_err(|e| {
@@ -939,6 +949,7 @@ mod tests {
             dpop_jkt: None,
             iat: 1_000_000_000,
             exp: 9_999_999_999,
+            auth_time: None,
         }
     }
 

@@ -176,8 +176,25 @@ pub async fn login_page(
         return axum::response::Redirect::to("/login").into_response();
     }
 
-    // If already authenticated and have pending_auth, redirect back to authorize
-    if auth.authenticated {
+    // Look up pending auth to check prompt and get client name.
+    let pending = if let Some(ref pending_id) = query.pending_auth {
+        db::get_pending_oauth_authorization(&state.store, pending_id)
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
+    // OIDC Core Section 3.1.2.1: prompt=login requires re-authentication
+    // even if the user has a valid session. Only skip the login form when
+    // the pending auth does NOT require forced re-auth.
+    let requires_reauth = pending
+        .as_ref()
+        .and_then(|p| p.prompt.as_deref())
+        .is_some_and(|p| p == "login");
+
+    if auth.authenticated && !requires_reauth {
         if let Some(ref pending_id) = query.pending_auth {
             return axum::response::Redirect::to(&format!(
                 "/oauth/authorize?pending_auth={}",
@@ -185,23 +202,15 @@ pub async fn login_page(
             ))
             .into_response();
         }
-        // If authenticated without pending_auth, redirect to home
         return axum::response::Redirect::to("/").into_response();
     }
 
-    // Get client name if we have a pending auth
-    let client_name = if let Some(ref pending_id) = query.pending_auth {
-        match db::get_pending_oauth_authorization(&state.store, pending_id).await {
-            Ok(Some(pending)) => {
-                match db::get_oauth_client_by_client_id(&state.store, &pending.client_id).await {
-                    Ok(Some(client)) => Some(client.name),
-                    _ => None,
-                }
-            }
+    let client_name = match &pending {
+        Some(p) => match db::get_oauth_client_by_client_id(&state.store, &p.client_id).await {
+            Ok(Some(client)) => Some(client.name),
             _ => None,
-        }
-    } else {
-        None
+        },
+        None => None,
     };
 
     LoginTemplate {
@@ -740,6 +749,122 @@ mod tests {
         let resp = crate::test_utils::http_get_full(&app, "/login", &[]).await;
 
         assert_eq!(resp.status, axum::http::StatusCode::OK);
+    }
+
+    // ========================================================================
+    // prompt=login Re-authentication Tests (OIDC Core Section 3.1.2.1)
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_login_page_prompt_login_forces_reauth() {
+        // OIDC Core Section 3.1.2.1: prompt=login must show the login page
+        // even when the user already has a valid session.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        let user = crate::test_utils::create_test_user(&state.store, "reauth@example.com").await;
+        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let session_token =
+            crate::test_utils::create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        // Create a pending auth with prompt=login
+        let pending_id = crate::db::create_pending_oauth_authorization(
+            &state.store,
+            crate::db::CreatePendingOAuthParams {
+                client_id: &client.client_id,
+                redirect_uri: "https://example.com/callback",
+                response_type: "code",
+                state: None,
+                scope: Some("openid"),
+                nonce: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                resource: None,
+                acr_values: None,
+                max_age: None,
+                prompt: Some("login"),
+                dpop_jkt: None,
+                authorization_details: None,
+            },
+        )
+        .await
+        .expect("Failed to create pending auth");
+
+        // Visit /login with session cookie and prompt=login pending auth
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            &format!("/login?pending_auth={pending_id}"),
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        // Must show the login page (200), NOT redirect to /oauth/authorize
+        assert_eq!(
+            resp.status,
+            axum::http::StatusCode::OK,
+            "prompt=login must show login page even with valid session"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_login_page_no_prompt_redirects_with_session() {
+        // Without prompt=login, an authenticated user with pending_auth
+        // should be redirected back to /oauth/authorize.
+        let (app, state) = crate::test_utils::test_app().await;
+
+        let user = crate::test_utils::create_test_user(&state.store, "no-reauth@example.com").await;
+        let auth_id = crate::test_utils::create_test_authenticator(&state.store, &user.id).await;
+        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let session_token =
+            crate::test_utils::create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+        // Create a pending auth WITHOUT prompt=login
+        let pending_id = crate::db::create_pending_oauth_authorization(
+            &state.store,
+            crate::db::CreatePendingOAuthParams {
+                client_id: &client.client_id,
+                redirect_uri: "https://example.com/callback",
+                response_type: "code",
+                state: None,
+                scope: Some("openid"),
+                nonce: None,
+                code_challenge: None,
+                code_challenge_method: None,
+                resource: None,
+                acr_values: None,
+                max_age: None,
+                prompt: None,
+                dpop_jkt: None,
+                authorization_details: None,
+            },
+        )
+        .await
+        .expect("Failed to create pending auth");
+
+        let resp = crate::test_utils::http_get_full(
+            &app,
+            &format!("/login?pending_auth={pending_id}"),
+            &[("Cookie", &format!("__Host-vouch_session={session_token}"))],
+        )
+        .await;
+
+        // Should redirect to /oauth/authorize (not show login page)
+        assert!(
+            resp.status == axum::http::StatusCode::FOUND
+                || resp.status == axum::http::StatusCode::SEE_OTHER,
+            "Without prompt=login, should redirect with session: {}",
+            resp.status
+        );
+        let location = resp
+            .headers
+            .get("location")
+            .expect("redirect should have location header")
+            .to_str()
+            .expect("valid string");
+        assert!(
+            location.contains("/oauth/authorize"),
+            "Should redirect to /oauth/authorize: {location}"
+        );
     }
 
     // ========================================================================

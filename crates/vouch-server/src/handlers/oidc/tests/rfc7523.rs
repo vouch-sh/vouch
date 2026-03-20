@@ -280,6 +280,7 @@ async fn test_rfc7523_private_key_jwt_client_auth_full_flow() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -345,6 +346,7 @@ async fn test_rfc7523_private_key_jwt_jti_replay_rejected() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -424,6 +426,7 @@ async fn test_rfc7523_private_key_jwt_expired_assertion_rejected() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -491,6 +494,7 @@ async fn test_rfc7523_private_key_jwt_wrong_audience() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -552,6 +556,7 @@ async fn test_rfc7523_private_key_jwt_wrong_key() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -605,6 +610,7 @@ async fn test_rfc7523_private_key_jwt_iss_sub_mismatch() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -673,6 +679,7 @@ async fn test_rfc7521_mutual_exclusion_secret_and_assertion() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await

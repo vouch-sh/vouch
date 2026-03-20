@@ -58,6 +58,7 @@ pub(super) async fn issue_oauth_access_token_with_scope(
         auth_code_lifetime_seconds:
             crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
         authorization_details: None,
+        auth_time: None,
     };
 
     let code = issue_authorization_code(state, code_params)

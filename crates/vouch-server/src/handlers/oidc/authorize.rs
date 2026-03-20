@@ -442,6 +442,7 @@ pub async fn authorize(
                 dpop_jkt: None,
                 auth_code_lifetime_seconds: auth_code_lifetime,
                 authorization_details: ad_value.as_ref(),
+                auth_time: Some(auth_session.created_at.as_second()),
             };
 
             issue_code_and_redirect(
@@ -586,7 +587,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
     match check_session_for_authorization(state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
             user,
-            session: _,
+            session: ref auth_session,
             authenticator,
         }) => {
             // Check access
@@ -625,6 +626,7 @@ async fn handle_pending_auth(state: &Arc<AppState>, pending_id: &str, jar: &Cook
                 dpop_jkt: pending.dpop_jkt.as_deref(),
                 auth_code_lifetime_seconds: auth_code_lifetime,
                 authorization_details: pending.authorization_details.as_ref(),
+                auth_time: Some(auth_session.created_at.as_second()),
             };
 
             issue_code_and_redirect(
@@ -877,6 +879,7 @@ async fn handle_jar_request(
                 dpop_jkt: None,
                 auth_code_lifetime_seconds: auth_code_lifetime,
                 authorization_details: ad_value.as_ref(),
+                auth_time: Some(auth_session.created_at.as_second()),
             };
 
             issue_code_and_redirect(
@@ -1138,6 +1141,7 @@ async fn handle_par_request(
                 dpop_jkt: par.dpop_jkt.as_deref(),
                 auth_code_lifetime_seconds: auth_code_lifetime,
                 authorization_details: par.authorization_details.as_ref(),
+                auth_time: Some(auth_session.created_at.as_second()),
             };
 
             issue_code_and_redirect(

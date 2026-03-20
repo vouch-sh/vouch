@@ -73,6 +73,7 @@ async fn test_rfc8707_resource_passthrough_authorize_to_token() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await

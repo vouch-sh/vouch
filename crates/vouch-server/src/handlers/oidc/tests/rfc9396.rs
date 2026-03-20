@@ -39,6 +39,7 @@ async fn test_authorization_details_in_token_response() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: Some(&ad_value),
+            auth_time: None,
         },
     )
     .await
@@ -99,6 +100,7 @@ async fn test_no_authorization_details_omitted_from_response() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -160,6 +162,7 @@ async fn test_token_request_downscoping_subset_accepted() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: Some(&granted),
+            auth_time: None,
         },
     )
     .await
@@ -221,6 +224,7 @@ async fn test_token_request_downscoping_non_subset_rejected() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: Some(&granted),
+            auth_time: None,
         },
     )
     .await
@@ -278,6 +282,7 @@ async fn test_token_request_ad_when_none_granted_rejected() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: None,
+            auth_time: None,
         },
     )
     .await
@@ -338,6 +343,7 @@ async fn test_invalid_authorization_details_json() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: Some(&ad_value),
+            auth_time: None,
         },
     )
     .await
@@ -394,6 +400,7 @@ async fn test_authorization_details_must_be_array() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: Some(&ad_value),
+            auth_time: None,
         },
     )
     .await
@@ -457,6 +464,7 @@ async fn test_introspection_includes_authorization_details() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: Some(&ad_value),
+            auth_time: None,
         },
     )
     .await
@@ -563,6 +571,7 @@ async fn test_token_exchange_inherits_authorization_details() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: Some(&ad_value),
+            auth_time: None,
         },
     )
     .await
@@ -641,6 +650,7 @@ async fn test_token_exchange_narrows_authorization_details() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: Some(&ad_value),
+            auth_time: None,
         },
     )
     .await
@@ -718,6 +728,7 @@ async fn test_token_exchange_narrow_non_subset_rejected() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: Some(&ad_value),
+            auth_time: None,
         },
     )
     .await
@@ -796,6 +807,7 @@ async fn test_multiple_authorization_detail_entries() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: Some(&ad_value),
+            auth_time: None,
         },
     )
     .await
@@ -851,6 +863,7 @@ async fn test_scope_and_authorization_details_coexist() {
             auth_code_lifetime_seconds:
                 crate::services::oidc::fapi::STANDARD_AUTH_CODE_LIFETIME_SECONDS,
             authorization_details: Some(&ad_value),
+            auth_time: None,
         },
     )
     .await
