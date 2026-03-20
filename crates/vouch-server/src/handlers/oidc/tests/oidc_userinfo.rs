@@ -160,3 +160,78 @@ async fn test_userinfo_unsupported_scheme_includes_www_authenticate() {
         "WWW-Authenticate should use Bearer scheme"
     );
 }
+
+// ========================================================================
+// POST Body Access Token Tests (RFC 6750 Section 2.2)
+// ========================================================================
+
+#[tokio::test]
+async fn test_userinfo_post_body_access_token() {
+    // RFC 6750 Section 2.2: Access token in POST body (Bearer only)
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "postbody@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/userinfo",
+        &format!("access_token={token}"),
+        &[],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let userinfo: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert!(userinfo.get("sub").is_some(), "Must contain 'sub' claim");
+    assert_eq!(userinfo["email"].as_str(), Some("postbody@example.com"));
+}
+
+#[tokio::test]
+async fn test_userinfo_post_body_without_token() {
+    // RFC 6750 Section 2.2: POST with empty body and no Authorization header → 401
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_post_form(&app, "/oauth/userinfo", "", &[]).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_token");
+}
+
+#[tokio::test]
+async fn test_userinfo_get_body_ignored() {
+    // RFC 6750 Section 2.2: Only POST body is accepted, not GET
+    let (app, _state) = test_app().await;
+
+    // GET with no Authorization header should fail even if query has access_token
+    let (status, body) = http_get(&app, "/oauth/userinfo?access_token=sometoken", &[]).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(error["error"], "invalid_token");
+}
+
+#[tokio::test]
+async fn test_userinfo_post_body_with_auth_header() {
+    // RFC 6750 Section 2.3: When Authorization header is present, body token is ignored
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "authheader@example.com").await;
+    let auth_id = create_test_authenticator(&state.store, &user.id).await;
+    let token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
+
+    // Authorization header takes precedence; body token is ignored
+    let (status, body) = http_post_form(
+        &app,
+        "/oauth/userinfo",
+        "access_token=bogus_body_token",
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let userinfo: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(userinfo["email"].as_str(), Some("authheader@example.com"));
+}

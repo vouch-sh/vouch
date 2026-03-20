@@ -15,11 +15,12 @@ use crate::services::oidc::scope::OAuthScope;
 use crate::services::oidc::token::validate_session_token;
 use axum::{
     Json,
+    body::Bytes,
     extract::State,
     http::{HeaderMap, Method, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
@@ -44,39 +45,59 @@ pub struct UserInfoResponse {
     hardware_aaguid: Option<String>,
 }
 
-/// GET /oauth/userinfo
+/// Form body for POST access token delivery (RFC 6750 Section 2.2).
+#[derive(Deserialize)]
+struct UserInfoForm {
+    access_token: Option<String>,
+}
+
+/// GET/POST /oauth/userinfo
 ///
 /// Returns information about the authenticated user.
-/// Supports both `Bearer` and `DPoP` authorization schemes (RFC 9449 Section 7.1).
+/// Supports `Bearer` and `DPoP` authorization schemes (RFC 9449 Section 7.1),
+/// and access token in POST body (RFC 6750 Section 2.2, Bearer only).
 pub async fn userinfo(
     State(state): State<Arc<AppState>>,
     method: Method,
     headers: HeaderMap,
+    body: Bytes,
 ) -> Response {
-    // Extract token and scheme from Authorization header
-    let auth_header = match headers
+    // Extract token and scheme from Authorization header or POST body
+    let auth_header_value = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
-    {
-        Some(h) => h,
-        None => {
+        .map(String::from);
+
+    // Parse form body for POST requests (used as fallback per RFC 6750 Section 2.2)
+    let form_token = if method == Method::POST && auth_header_value.is_none() {
+        serde_urlencoded::from_bytes::<UserInfoForm>(&body)
+            .ok()
+            .and_then(|f| f.access_token)
+    } else {
+        None
+    };
+
+    let (token, is_dpop_scheme) = if let Some(ref auth_header) = auth_header_value {
+        // RFC 6750 Section 2.1: Authorization header takes precedence
+        if let Some(t) = auth_header.strip_prefix("DPoP ") {
+            (t.to_string(), true)
+        } else if let Some(t) = auth_header.strip_prefix("Bearer ") {
+            (t.to_string(), false)
+        } else {
             return oauth_error(
                 StatusCode::UNAUTHORIZED,
                 "invalid_token",
-                "Missing authorization header",
+                "Unsupported authorization scheme. Use Bearer or DPoP",
             );
         }
-    };
-
-    let (token, is_dpop_scheme) = if let Some(t) = auth_header.strip_prefix("DPoP ") {
-        (t, true)
-    } else if let Some(t) = auth_header.strip_prefix("Bearer ") {
-        (t, false)
+    } else if let Some(ref ft) = form_token {
+        // RFC 6750 Section 2.2: POST body access_token (Bearer only, no DPoP)
+        (ft.clone(), false)
     } else {
         return oauth_error(
             StatusCode::UNAUTHORIZED,
             "invalid_token",
-            "Unsupported authorization scheme. Use Bearer or DPoP",
+            "Missing authorization header",
         );
     };
 
@@ -95,7 +116,7 @@ pub async fn userinfo(
 
         let full_uri = format!("{}/oauth/userinfo", state.config().base_url);
         match dpop::validate_dpop_at_resource(
-            token,
+            &token,
             dpop_header,
             method.as_str(),
             &full_uri,
@@ -119,7 +140,7 @@ pub async fn userinfo(
                 // Note: audience is NOT validated here because the userinfo endpoint
                 // receives tokens from any client (aud = client_id per RFC 9068).
                 let config = state.config();
-                if let Some(decoded) = decode_token(token, &state.oidc_key, &config.base_url) {
+                if let Some(decoded) = decode_token(&token, &state.oidc_key, &config.base_url) {
                     match decoded.cnf() {
                         Some(cnf) => {
                             let is_valid: bool =
@@ -168,7 +189,7 @@ pub async fn userinfo(
     }
 
     // Validate the session token
-    let result = match validate_session_token(&state, token).await {
+    let result = match validate_session_token(&state, &token).await {
         Ok(Some(r)) => r,
         Ok(None) => {
             return oauth_error(

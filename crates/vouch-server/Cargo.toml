@@ -67,6 +67,7 @@ sea-query-binder = { workspace = true, features = ["sqlx-sqlite", "sqlx-postgres
 secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
+serde_urlencoded = { workspace = true }
 signature = { workspace = true }
 spki = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "migrate", "derive", "macros", "sqlite", "postgres", "tls-rustls-aws-lc-rs"] }
