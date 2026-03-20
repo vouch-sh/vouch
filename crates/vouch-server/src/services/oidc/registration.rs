@@ -552,6 +552,53 @@ pub async fn read_client_configuration(
     Ok(build_client_response(&client, base_url))
 }
 
+/// Delete a dynamically registered client (RFC 7592 Section 2.3).
+///
+/// Authenticates the caller using the registration access token, deletes
+/// the client (cascade-deletes secrets), and records an audit event.
+///
+/// # Errors
+///
+/// - `ServiceError::Unauthorized` if the Bearer token is missing or invalid.
+/// - `ServiceError::NotFound` if the `client_id` does not exist.
+pub async fn delete_client_configuration(
+    state: &Arc<AppState>,
+    client_id: &str,
+    registration_access_token: &str,
+) -> Result<(), ServiceError> {
+    let client =
+        lookup_and_verify_registration_token(state, client_id, registration_access_token).await?;
+
+    db::delete_oauth_client(&state.store, &client.id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to delete dynamically registered client {client_id}: {e}");
+            ServiceError::Internal("Failed to delete client".to_string())
+        })?;
+
+    if let Err(e) = db::record_oauth_event(
+        &state.audit,
+        &client.id,
+        OAuthEventType::ClientDeleted,
+        client.user_id.as_deref(),
+        None,
+        None,
+        Some("RFC 7592 client configuration DELETE"),
+    )
+    .await
+    {
+        tracing::warn!("Failed to record client deletion event: {e}");
+    }
+
+    tracing::info!(
+        "Dynamic client deleted: client_id={}, user={}",
+        client_id,
+        client.user_id.as_deref().unwrap_or("(none)"),
+    );
+
+    Ok(())
+}
+
 /// Look up a client by `client_id` and verify the registration access token.
 async fn lookup_and_verify_registration_token(
     state: &Arc<AppState>,

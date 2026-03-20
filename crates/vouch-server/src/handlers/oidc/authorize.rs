@@ -13,7 +13,7 @@ use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization::{
     AuthorizationCodeParams, AuthorizationSessionState, AuthorizeRequestParams,
     CodeChallengeMethod, Prompt, check_client_access, check_session_for_authorization,
-    issue_authorization_code, validate_authorize_request,
+    issue_authorization_code, require_pkce_for_client, validate_authorize_request,
 };
 use crate::services::oidc::jar::{QueryParamHints, validate_request_object};
 use askama::Template;
@@ -264,6 +264,21 @@ pub async fn authorize(
                 .into_response();
             }
         };
+
+    // RFC 9700: PKCE required for public clients and Native/SPA types.
+    if let Err(e) = require_pkce_for_client(&validated, &oauth_client) {
+        let description = match &e {
+            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+            _ => e.to_string(),
+        };
+        return oauth_error_redirect(
+            validated.redirect_uri(),
+            "invalid_request",
+            &description,
+            validated.state(),
+            &state.config().base_url,
+        );
+    }
 
     // FAPI 2.0: Require PAR for FAPI clients.
     //
@@ -734,6 +749,21 @@ async fn handle_jar_request(
         }
     };
 
+    // RFC 9700: PKCE required for public clients and Native/SPA types.
+    if let Err(e) = require_pkce_for_client(&validated, &oauth_client) {
+        let description = match &e {
+            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+            _ => e.to_string(),
+        };
+        return oauth_error_redirect(
+            &redirect_uri,
+            "invalid_request",
+            &description,
+            query.state.as_deref(),
+            &state.config().base_url,
+        );
+    }
+
     // Validate redirect_uri against registered URIs
     if !oauth_client.is_valid_redirect_uri(validated.redirect_uri()) {
         return AuthorizeDeniedTemplate {
@@ -980,6 +1010,21 @@ async fn handle_par_request(
                 .into_response();
             }
         };
+
+    // RFC 9700: PKCE required for public clients and Native/SPA types.
+    if let Err(e) = require_pkce_for_client(&validated, &oauth_client) {
+        let description = match &e {
+            crate::services::ServiceError::OAuth { description, .. } => description.clone(),
+            _ => e.to_string(),
+        };
+        return oauth_error_redirect(
+            validated.redirect_uri(),
+            "invalid_request",
+            &description,
+            par.state.as_deref(),
+            &state.config().base_url,
+        );
+    }
 
     // Validate redirect_uri against registered URIs
     if !oauth_client.is_valid_redirect_uri(validated.redirect_uri()) {

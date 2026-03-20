@@ -7,7 +7,7 @@
 
 use crate::AppState;
 use crate::crypto::jwt::JwtType;
-use crate::db::{AccessScope, Authenticator, OAuthClient, Session, User};
+use crate::db::{AccessScope, Authenticator, OAuthClient, Session, TokenEndpointAuthMethod, User};
 use crate::services::oidc::scope::ScopeSet;
 use crate::services::{OAuthErrorCode, ServiceError, ServiceResult};
 use jiff::{Span, Timestamp};
@@ -496,11 +496,9 @@ pub fn validate_authorize_request(
         // code_challenge without method defaults to S256
         Some(CodeChallengeMethod::S256)
     } else {
-        // RFC 9700: PKCE is required for all clients
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRequest,
-            "PKCE is required: code_challenge and code_challenge_method=S256 must be provided",
-        ));
+        // PKCE not provided — allowed for confidential clients.
+        // Public clients are checked after client lookup in the handler.
+        None
     };
 
     // RFC 9396: Parse and validate authorization_details if present
@@ -539,6 +537,32 @@ pub fn validate_authorize_request(
         prompt: params.prompt,
         authorization_details: parsed_authorization_details,
     })
+}
+
+/// Enforce PKCE for public clients and application types that require it.
+///
+/// Confidential clients (e.g., `client_secret_basic`, `private_key_jwt`) using
+/// the `Web` application type are exempt from the PKCE requirement per the OIDF
+/// conformance expectations. Public clients and Native/SPA types always require PKCE.
+///
+/// Call this after `validate_authorize_request` and client lookup.
+///
+/// # Errors
+///
+/// Returns `ServiceError::OAuth` with `InvalidRequest` if PKCE is required but missing.
+pub fn require_pkce_for_client(
+    validated: &ValidatedAuthRequest,
+    client: &OAuthClient,
+) -> ServiceResult<()> {
+    let is_public = client.token_endpoint_auth_method == TokenEndpointAuthMethod::None;
+    let pkce_required = is_public || client.application_type.requires_pkce();
+    if pkce_required && validated.code_challenge().is_none() {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidRequest,
+            "PKCE is required: code_challenge and code_challenge_method=S256 must be provided",
+        ));
+    }
+    Ok(())
 }
 
 /// Validate that a parameter does not exceed the maximum allowed length.
@@ -817,6 +841,65 @@ mod tests {
         }
     }
 
+    fn make_validated_request(
+        code_challenge: Option<String>,
+        code_challenge_method: Option<CodeChallengeMethod>,
+    ) -> ValidatedAuthRequest {
+        ValidatedAuthRequest {
+            client_id: "test-client".to_string(),
+            redirect_uri: "https://example.com/callback".to_string(),
+            scope: ScopeSet::parse("openid"),
+            state: None,
+            nonce: None,
+            code_challenge,
+            code_challenge_method,
+            resource: None,
+            acr_values: None,
+            max_age: None,
+            prompt: None,
+            authorization_details: None,
+        }
+    }
+
+    fn make_test_oauth_client(
+        auth_method: TokenEndpointAuthMethod,
+        app_type: OAuthClientType,
+    ) -> OAuthClient {
+        let now = jiff::Timestamp::now();
+        OAuthClient {
+            id: "client-1".to_string(),
+            user_id: None,
+            client_id: "test-client".to_string(),
+            name: "Test App".to_string(),
+            description: None,
+            application_type: app_type,
+            redirect_uris: vec!["https://example.com/callback".to_string()],
+            active: true,
+            created_at: now,
+            updated_at: now,
+            last_used_at: None,
+            access_scope: AccessScope::Personal,
+            org_id: None,
+            resource_uris: vec![],
+            jwks: None,
+            jwks_uri: None,
+            jwks_uri_cached_at: None,
+            jwks_uri_cache: None,
+            token_endpoint_auth_method: auth_method,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            fapi_profile: FapiProfile::None,
+            dpop_bound_access_tokens: false,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: None,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+        }
+    }
+
     // Helper to create a test User
     fn test_user(id: &str, org_id: Option<&str>) -> User {
         User {
@@ -1046,8 +1129,9 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_authorize_request_rejects_missing_pkce() {
-        // RFC 9700: PKCE is required for all clients
+    fn test_validate_authorize_request_allows_missing_pkce() {
+        // PKCE enforcement is deferred to handler after client lookup.
+        // validate_authorize_request should accept missing PKCE.
         let params = AuthorizeRequestParams {
             response_type: "code".to_string(),
             client_id: "test-client".to_string(),
@@ -1065,6 +1149,20 @@ mod tests {
         };
 
         let result = validate_authorize_request(params);
+        assert!(result.is_ok());
+        let validated = result.unwrap();
+        assert!(validated.code_challenge().is_none());
+        assert!(validated.code_challenge_method().is_none());
+    }
+
+    #[test]
+    fn test_require_pkce_for_public_client() {
+        use crate::db::{OAuthClientType, TokenEndpointAuthMethod};
+
+        let validated = make_validated_request(None, None);
+        let client = make_test_oauth_client(TokenEndpointAuthMethod::None, OAuthClientType::Spa);
+
+        let result = require_pkce_for_client(&validated, &client);
         assert!(result.is_err());
         match result.unwrap_err() {
             ServiceError::OAuth { code, .. } => {
@@ -1072,6 +1170,48 @@ mod tests {
             }
             _ => panic!("Expected OAuth InvalidRequest error"),
         }
+    }
+
+    #[test]
+    fn test_require_pkce_for_native_client() {
+        use crate::db::{OAuthClientType, TokenEndpointAuthMethod};
+
+        let validated = make_validated_request(None, None);
+        let client = make_test_oauth_client(
+            TokenEndpointAuthMethod::ClientSecretBasic,
+            OAuthClientType::Native,
+        );
+
+        let result = require_pkce_for_client(&validated, &client);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_require_pkce_not_required_for_confidential_web_client() {
+        use crate::db::{OAuthClientType, TokenEndpointAuthMethod};
+
+        let validated = make_validated_request(None, None);
+        let client = make_test_oauth_client(
+            TokenEndpointAuthMethod::ClientSecretBasic,
+            OAuthClientType::Web,
+        );
+
+        let result = require_pkce_for_client(&validated, &client);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_require_pkce_confidential_with_pkce_succeeds() {
+        use crate::db::{OAuthClientType, TokenEndpointAuthMethod};
+
+        let validated = make_validated_request(
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".to_string()),
+            Some(CodeChallengeMethod::S256),
+        );
+        let client = make_test_oauth_client(TokenEndpointAuthMethod::None, OAuthClientType::Spa);
+
+        let result = require_pkce_for_client(&validated, &client);
+        assert!(result.is_ok());
     }
 
     #[test]

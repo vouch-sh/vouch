@@ -9,9 +9,9 @@ async fn test_rfc9207_iss_in_error_redirect() {
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "iss-error@example.com").await;
-    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let client = create_test_public_oauth_client(&state.store, &user.id).await;
 
-    // Trigger an error redirect (missing PKCE)
+    // Trigger an error redirect (missing PKCE for public client)
     let response = http_get_full(
         &app,
         &format!(

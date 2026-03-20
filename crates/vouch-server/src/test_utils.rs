@@ -186,6 +186,11 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         .route("/oauth/device", post(handlers::device::device_code))
         // RFC 7591 Dynamic Client Registration
         .route("/oauth/register", post(handlers::oidc::register))
+        // RFC 7592 Client Configuration (read + delete)
+        .route(
+            "/oauth/register/{client_id}",
+            get(handlers::oidc::read_client).delete(handlers::oidc::delete_client),
+        )
         // Key registration routes (FAPI 2.0)
         .route(
             "/v1/keys/register/start",
@@ -881,6 +886,46 @@ pub async fn create_test_oauth_client_with_options(
         app_id: client.id,
         client_id,
         client_secret: secret,
+    }
+}
+
+/// Create a public OAuth client (no client secret, `token_endpoint_auth_method=none`).
+pub async fn create_test_public_oauth_client(
+    store: &DocumentStore,
+    user_id: &str,
+) -> TestOAuthClient {
+    let (client, client_id) = crate::db::create_oauth_client(
+        store,
+        &CreateOAuthClientParams {
+            user_id: Some(user_id),
+            name: "Public Test App",
+            description: None,
+            application_type: crate::db::OAuthClientType::Spa,
+            redirect_uris: &["https://example.com/callback".to_string()],
+            access_scope: crate::db::AccessScope::Public,
+            org_id: None,
+            resource_uris: &[],
+            token_endpoint_auth_method: Some(crate::db::TokenEndpointAuthMethod::None),
+            jwks: None,
+            jwks_uri: None,
+            fapi_profile: None,
+            dpop_bound_access_tokens: None,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: RegistrationSource::Manual,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+        },
+    )
+    .await
+    .expect("Failed to create test public OAuth client");
+
+    TestOAuthClient {
+        app_id: client.id,
+        client_id,
+        client_secret: String::new(),
     }
 }
 

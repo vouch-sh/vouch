@@ -8,7 +8,7 @@ use crate::db::{self, CreateParParams};
 use crate::services::ServiceError;
 use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::authorization::{
-    AuthorizeRequestParams, Prompt, validate_authorize_request,
+    AuthorizeRequestParams, Prompt, require_pkce_for_client, validate_authorize_request,
 };
 use crate::services::oidc::dpop::DpopError;
 use crate::services::oidc::jar::validate_request_object;
@@ -256,6 +256,15 @@ pub async fn par(
             }
         };
 
+        // RFC 9700: PKCE required for public clients and Native/SPA types.
+        if let Err(e) = require_pkce_for_client(&validated, &authenticated_client.client) {
+            let description = match &e {
+                ServiceError::OAuth { description, .. } => description.clone(),
+                _ => e.to_string(),
+            };
+            return par_error_response(StatusCode::BAD_REQUEST, "invalid_request", &description);
+        }
+
         // Validate redirect_uri against registered URIs
         if !authenticated_client
             .client
@@ -362,6 +371,15 @@ pub async fn par(
             return par_error_response(StatusCode::BAD_REQUEST, error_code, &description);
         }
     };
+
+    // RFC 9700: PKCE required for public clients and Native/SPA types.
+    if let Err(e) = require_pkce_for_client(&validated, &authenticated_client.client) {
+        let description = match &e {
+            ServiceError::OAuth { description, .. } => description.clone(),
+            _ => e.to_string(),
+        };
+        return par_error_response(StatusCode::BAD_REQUEST, "invalid_request", &description);
+    }
 
     // Validate redirect_uri against registered URIs
     if !authenticated_client
