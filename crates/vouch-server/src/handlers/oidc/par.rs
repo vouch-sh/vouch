@@ -215,21 +215,24 @@ pub async fn par(
     };
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.as_str());
 
+    // Helper: convert ServiceError to PAR error response fields.
+    let service_error_codes = |e: &ServiceError| -> (&str, String) {
+        match e {
+            ServiceError::OAuth { code, description } => (code.as_str(), description.clone()),
+            _ => ("server_error", e.to_string()),
+        }
+    };
+
     // RFC 9101: If request parameter is present, validate the Request Object JWT
     // and extract parameters from it instead of using the form fields.
-    if let Some(ref request_jwt) = params.request {
+    let validated = if let Some(ref request_jwt) = params.request {
         let request_params =
             match validate_request_object(&state, request_jwt, &authenticated_client.client, None)
                 .await
             {
                 Ok(params) => params,
                 Err(e) => {
-                    let (error_code, description) = match &e {
-                        ServiceError::OAuth { code, description } => {
-                            (code.as_str(), description.clone())
-                        }
-                        _ => ("server_error", e.to_string()),
-                    };
+                    let (error_code, description) = service_error_codes(&e);
                     return par_error_response(StatusCode::BAD_REQUEST, error_code, &description);
                 }
             };
@@ -243,132 +246,51 @@ pub async fn par(
             );
         }
 
-        let validated = match validate_authorize_request(request_params) {
+        match validate_authorize_request(request_params) {
             Ok(v) => v,
             Err(e) => {
-                let (error_code, description) = match &e {
-                    ServiceError::OAuth { code, description } => {
-                        (code.as_str(), description.clone())
-                    }
-                    _ => ("server_error", e.to_string()),
-                };
+                let (error_code, description) = service_error_codes(&e);
                 return par_error_response(StatusCode::BAD_REQUEST, error_code, &description);
             }
+        }
+    } else {
+        // Validate prompt before constructing params
+        let parsed_prompt = match params.prompt.as_deref() {
+            Some(p) => match Prompt::parse(p) {
+                Some(prompt) => Some(prompt),
+                None => {
+                    return par_error_response(
+                        StatusCode::BAD_REQUEST,
+                        "invalid_request",
+                        "Unsupported prompt value. Only 'login' and 'none' are supported",
+                    );
+                }
+            },
+            None => None,
         };
 
-        // RFC 9700: PKCE required for public clients and Native/SPA types.
-        if let Err(e) = require_pkce_for_client(&validated, &authenticated_client.client) {
-            let description = match &e {
-                ServiceError::OAuth { description, .. } => description.clone(),
-                _ => e.to_string(),
-            };
-            return par_error_response(StatusCode::BAD_REQUEST, "invalid_request", &description);
-        }
-
-        // Validate redirect_uri against registered URIs
-        if !authenticated_client
-            .client
-            .is_valid_redirect_uri(validated.redirect_uri())
-        {
-            return par_error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_request",
-                "redirect_uri is not registered for this client",
-            );
-        }
-
-        // RFC 8707: Validate resource parameter against registered URIs
-        if let Some(resource) = validated.resource()
-            && !authenticated_client.client.is_valid_resource_uri(resource)
-        {
-            return par_error_response(
-                StatusCode::BAD_REQUEST,
-                "invalid_target",
-                "The requested resource is not registered for this client",
-            );
-        }
-
-        // Store the pushed authorization request
-        let scope_str = validated.scope().to_space_separated();
-        let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
-        let ad_value = validated.authorization_details_value();
-        let create_params = CreateParParams {
-            client_id: validated.client_id(),
-            response_type: "code",
-            redirect_uri: validated.redirect_uri(),
-            scope: Some(&scope_str),
-            state: validated.state(),
-            nonce: validated.nonce(),
-            code_challenge: validated.code_challenge(),
-            code_challenge_method: validated.code_challenge_method().map(|m| m.as_str()),
-            resource: validated.resource(),
-            acr_values: validated.acr_values(),
-            max_age: max_age_i64,
-            prompt: validated.prompt().map(|p| p.as_str()),
-            dpop_jkt,
-            authorization_details: ad_value.as_ref(),
+        let request_params = AuthorizeRequestParams {
+            response_type: params.response_type.unwrap_or_default(),
+            client_id: authenticated_client.client.client_id.clone(),
+            redirect_uri: params.redirect_uri.clone().unwrap_or_default(),
+            scope: params.scope.clone(),
+            state: params.state.clone(),
+            nonce: params.nonce.clone(),
+            code_challenge: params.code_challenge.clone(),
+            code_challenge_method: params.code_challenge_method.clone(),
+            resource: params.resource.clone(),
+            acr_values: params.acr_values.clone(),
+            max_age: params.max_age,
+            prompt: parsed_prompt,
+            authorization_details: params.authorization_details.clone(),
         };
 
-        return match db::create_pushed_authorization_request(&state.store, create_params).await {
-            Ok((_id, request_uri)) => (
-                StatusCode::CREATED,
-                Json(ParResponse {
-                    request_uri,
-                    expires_in: PAR_EXPIRES_IN,
-                }),
-            )
-                .into_response(),
+        match validate_authorize_request(request_params) {
+            Ok(v) => v,
             Err(e) => {
-                tracing::error!("Failed to create pushed authorization request: {}", e);
-                par_error_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "server_error",
-                    "Failed to store pushed authorization request",
-                )
+                let (error_code, description) = service_error_codes(&e);
+                return par_error_response(StatusCode::BAD_REQUEST, error_code, &description);
             }
-        };
-    }
-
-    // Validate prompt before constructing params
-    let parsed_prompt = match params.prompt.as_deref() {
-        Some(p) => match Prompt::parse(p) {
-            Some(prompt) => Some(prompt),
-            None => {
-                return par_error_response(
-                    StatusCode::BAD_REQUEST,
-                    "invalid_request",
-                    "Unsupported prompt value. Only 'login' and 'none' are supported",
-                );
-            }
-        },
-        None => None,
-    };
-
-    // Validate the authorization request parameters
-    let request_params = AuthorizeRequestParams {
-        response_type: params.response_type.unwrap_or_default(),
-        client_id: authenticated_client.client.client_id.clone(),
-        redirect_uri: params.redirect_uri.clone().unwrap_or_default(),
-        scope: params.scope.clone(),
-        state: params.state.clone(),
-        nonce: params.nonce.clone(),
-        code_challenge: params.code_challenge.clone(),
-        code_challenge_method: params.code_challenge_method.clone(),
-        resource: params.resource.clone(),
-        acr_values: params.acr_values.clone(),
-        max_age: params.max_age,
-        prompt: parsed_prompt,
-        authorization_details: params.authorization_details.clone(),
-    };
-
-    let validated = match validate_authorize_request(request_params) {
-        Ok(v) => v,
-        Err(e) => {
-            let (error_code, description) = match &e {
-                ServiceError::OAuth { code, description } => (code.as_str(), description.clone()),
-                _ => ("server_error", e.to_string()),
-            };
-            return par_error_response(StatusCode::BAD_REQUEST, error_code, &description);
         }
     };
 
@@ -425,18 +347,16 @@ pub async fn par(
         authorization_details: ad_value.as_ref(),
     };
 
+    // RFC 9126 Section 2.2: Return 201 Created
     match db::create_pushed_authorization_request(&state.store, create_params).await {
-        Ok((_id, request_uri)) => {
-            // RFC 9126 Section 2.2: Return 201 Created
-            (
-                StatusCode::CREATED,
-                Json(ParResponse {
-                    request_uri,
-                    expires_in: PAR_EXPIRES_IN,
-                }),
-            )
-                .into_response()
-        }
+        Ok((_id, request_uri)) => (
+            StatusCode::CREATED,
+            Json(ParResponse {
+                request_uri,
+                expires_in: PAR_EXPIRES_IN,
+            }),
+        )
+            .into_response(),
         Err(e) => {
             tracing::error!("Failed to create pushed authorization request: {}", e);
             par_error_response(
