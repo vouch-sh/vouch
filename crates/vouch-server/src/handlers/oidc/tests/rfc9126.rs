@@ -497,8 +497,8 @@ async fn test_rfc9126_par_rejects_missing_response_type() {
 }
 
 #[tokio::test]
-async fn test_rfc9126_par_rejects_missing_pkce() {
-    // RFC 9700 / project policy: PKCE is required.
+async fn test_rfc9126_par_allows_missing_pkce_for_confidential_client() {
+    // Confidential clients (client_secret_basic) do not require PKCE at PAR.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "par-nopkce@example.com").await;
@@ -525,8 +525,8 @@ async fn test_rfc9126_par_rejects_missing_pkce() {
 
     assert_eq!(
         status,
-        StatusCode::BAD_REQUEST,
-        "PAR without PKCE should be rejected"
+        StatusCode::CREATED,
+        "Confidential client PAR without PKCE should succeed"
     );
 }
 

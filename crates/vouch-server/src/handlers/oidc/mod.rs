@@ -37,7 +37,7 @@ pub use discovery::{discovery, jwks};
 pub use fido2_challenge::fido2_challenge;
 pub use introspect::{introspect, revoke};
 pub use par::par;
-pub use register::{read_client, register};
+pub use register::{delete_client, read_client, register};
 pub use token::token;
 pub use userinfo::userinfo;
 

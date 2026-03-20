@@ -14,7 +14,7 @@
 
 use crate::AppState;
 use crate::services::oidc::registration::{
-    RegistrationRequest, read_client_configuration, register_client,
+    RegistrationRequest, delete_client_configuration, read_client_configuration, register_client,
 };
 use axum::extract::OriginalUri;
 use axum::{
@@ -126,6 +126,37 @@ pub async fn read_client(
             Json(response),
         )
             .into_response(),
+        Err(e) => e.into_oauth_response().into_response(),
+    }
+}
+
+/// DELETE /oauth/register/:client_id — RFC 7592 Client Configuration Delete.
+///
+/// Authenticates via Bearer token (the `registration_access_token` issued
+/// during dynamic registration). Returns 204 No Content on success,
+/// 401 if the token is invalid, 404 if the client does not exist.
+pub async fn delete_client(
+    State(state): State<Arc<AppState>>,
+    Path(client_id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [("www-authenticate", "Bearer")],
+                Json(serde_json::json!({
+                    "error": "invalid_client",
+                    "error_description": "Bearer token required"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    match delete_client_configuration(&state, &client_id, token).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => e.into_oauth_response().into_response(),
     }
 }

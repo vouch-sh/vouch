@@ -776,11 +776,11 @@ async fn test_rfc6749_state_parameter_passthrough() {
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "state-passthrough@example.com").await;
-    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let client = create_test_public_oauth_client(&state.store, &user.id).await;
 
     let unique_state = "unique-state-value-12345";
 
-    // This will fail validation (no code_challenge) and redirect with error + state
+    // This will fail validation (no code_challenge for public client) and redirect with error + state
     let response = http_get_full(
         &app,
         &format!(

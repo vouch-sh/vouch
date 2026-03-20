@@ -411,6 +411,7 @@ pub enum OAuthEventType {
     AuthSuccess,
     AuthFailure,
     ClientRegistered,
+    ClientDeleted,
     SecretAdded,
     SecretRevoked,
 }
@@ -435,6 +436,7 @@ impl OAuthEventType {
             Self::AuthSuccess => "auth_success",
             Self::AuthFailure => "auth_failure",
             Self::ClientRegistered => "client_registered",
+            Self::ClientDeleted => "client_deleted",
             Self::SecretAdded => "secret_added",
             Self::SecretRevoked => "secret_revoked",
         }
@@ -450,6 +452,7 @@ impl OAuthEventType {
             Self::AuthSuccess => "oauth_auth_success",
             Self::AuthFailure => "oauth_auth_failure",
             Self::ClientRegistered => "oauth_client_registered",
+            Self::ClientDeleted => "oauth_client_deleted",
             Self::SecretAdded => "oauth_secret_added",
             Self::SecretRevoked => "oauth_secret_revoked",
         }

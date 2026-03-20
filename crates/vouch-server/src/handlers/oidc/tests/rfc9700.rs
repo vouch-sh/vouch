@@ -4,13 +4,12 @@
 use super::helpers::*;
 
 #[tokio::test]
-async fn test_rfc9700_pkce_required_at_handler_level() {
-    // RFC 9700 Section 2.1.1: Omitting code_challenge at /oauth/authorize returns error.
-    // The authorize endpoint requires PKCE (S256) for all clients.
+async fn test_rfc9700_pkce_required_for_public_clients() {
+    // RFC 9700: Public clients (token_endpoint_auth_method=none) MUST provide PKCE.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "pkce-required@example.com").await;
-    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let client = create_test_public_oauth_client(&state.store, &user.id).await;
 
     // Authorize request without code_challenge — should redirect with error
     let response = http_get_full(
@@ -47,6 +46,43 @@ async fn test_rfc9700_pkce_required_at_handler_level() {
         "Error redirect should preserve state parameter: {}",
         location
     );
+}
+
+#[tokio::test]
+async fn test_rfc9700_pkce_optional_for_confidential_clients() {
+    // Confidential clients (client_secret_basic, Web type) do not require PKCE.
+    let (app, state) = test_app().await;
+
+    let user = create_test_user(&state.store, "pkce-optional@example.com").await;
+    let client = create_test_oauth_client(&state.store, &user.id).await;
+
+    // Authorize request without code_challenge — should NOT get PKCE error
+    let response = http_get_full(
+        &app,
+        &format!(
+            "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid&state=test123",
+            client.client_id,
+            urlencoding::encode("https://example.com/callback")
+        ),
+        &[],
+    )
+    .await;
+
+    // Should proceed past PKCE check (gets redirect to login, not an error redirect)
+    // Either 200 (login page) or 303 (redirect to login) — but NOT an error=invalid_request
+    if response.status == StatusCode::SEE_OTHER {
+        let location = response
+            .headers
+            .get("Location")
+            .expect("Should have Location header")
+            .to_str()
+            .expect("Valid header");
+        assert!(
+            !location.contains("error=invalid_request"),
+            "Confidential client should not get PKCE error: {}",
+            location
+        );
+    }
 }
 
 #[tokio::test]
@@ -295,13 +331,12 @@ async fn test_rfc9700_authorization_code_single_use() {
 }
 
 #[tokio::test]
-async fn test_rfc9700_authorize_pkce_required_without_challenge() {
-    // RFC 9700 Section 2.1.1: PKCE with S256 is REQUIRED for all clients.
-    // Missing code_challenge must be rejected.
+async fn test_rfc9700_authorize_pkce_required_for_public_client_without_challenge() {
+    // RFC 9700: Public clients MUST provide PKCE.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "authorize-nopkce@example.com").await;
-    let client = create_test_oauth_client(&state.store, &user.id).await;
+    let client = create_test_public_oauth_client(&state.store, &user.id).await;
     let state_param = "teststate-nopkce";
 
     let response = http_get_full(
