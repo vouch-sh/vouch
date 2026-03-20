@@ -414,7 +414,11 @@ pub async fn register_client(
             description: None,
             application_type: app_type,
             redirect_uris: &redirect_uris,
-            access_scope: db::AccessScope::Personal,
+            access_scope: if authenticated_user_id.is_some() {
+                db::AccessScope::Personal
+            } else {
+                db::AccessScope::Public
+            },
             org_id: None,
             resource_uris: &[],
             token_endpoint_auth_method: Some(auth_method),
