@@ -30,9 +30,6 @@ RUN cargo chef prepare --recipe-path recipe.json
 FROM base AS builder
 
 ARG TARGET
-ARG SOURCE_DATE_EPOCH=0
-ARG GENERATE_SBOM=false
-ARG CARGO_PACKAGES="-p vouch-cli -p vouch-agent -p vouch-server"
 
 WORKDIR /app
 RUN rustup target add "${TARGET}"
@@ -43,6 +40,11 @@ RUN cargo chef cook --release --locked --target "${TARGET}" --recipe-path recipe
 
 # Copy source and build workspace crates (only these recompile)
 COPY . .
+
+# Declare build-time ARGs after the cook layer so changes don't bust the cache
+ARG SOURCE_DATE_EPOCH=0
+ARG GENERATE_SBOM=false
+ARG CARGO_PACKAGES="-p vouch-cli -p vouch-agent -p vouch-server"
 
 # Touch entry-point files for reproducible builds
 RUN touch -d "@${SOURCE_DATE_EPOCH}" \
