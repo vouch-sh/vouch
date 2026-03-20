@@ -65,6 +65,10 @@ pub struct OidcStateDoc {
     pub state: String,
     pub device_auth_id: String,
     pub nonce: String,
+    /// PKCE code_verifier (RFC 7636). Stored during authorization, sent during
+    /// token exchange. Empty for non-OIDC flows (SAML).
+    #[serde(default)]
+    pub code_verifier: String,
     pub expires_at: Timestamp,
 }
 

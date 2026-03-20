@@ -118,8 +118,7 @@ pub async fn fetch_discovery(
 ///
 /// Fetches the JWKS from the provider's `jwks_uri`, verifies the JWT
 /// signature, validates `iss`/`aud`/`exp`/`nonce` claims, checks
-/// `email_verified`, and extracts the domain using provider-specific
-/// rules (`hd` only for Google, email fallback for other issuers).
+/// `email_verified`, and extracts the hosted domain (`hd`) claim.
 ///
 /// # Errors
 ///
@@ -194,8 +193,16 @@ pub async fn verify_id_token(
         anyhow::bail!("Email address is not verified by the identity provider");
     }
 
-    let domain = super::extract_email_domain(&provider.issuer, claims.hd.as_deref(), &claims.email)
-        .map(str::to_string);
+    // Domain extraction:
+    // - Google with `hd` claim: use it (Workspace hosted domain).
+    // - Google without `hd`: None (consumer account, don't group).
+    // - Non-Google: extract domain from the email address.
+    let is_google = provider.issuer.contains("accounts.google.com");
+    let domain = if is_google {
+        claims.hd
+    } else {
+        claims.email.split('@').nth(1).map(str::to_string)
+    };
 
     Ok(IdentityResult {
         email: claims.email,
@@ -275,9 +282,98 @@ fn is_localhost(url: &Url) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic
+    )]
 
     use super::*;
+
+    // ── Test helpers for verify_id_token ────────────────────────────────────
+
+    /// Build an `OidcProvider` that points all endpoints at the given mock server.
+    fn make_test_provider(base_url: &str) -> OidcProvider {
+        OidcProvider {
+            issuer: base_url.to_string(),
+            authorization_endpoint: Url::parse(&format!("{base_url}/authorize")).unwrap(),
+            token_endpoint: Url::parse(&format!("{base_url}/token")).unwrap(),
+            jwks_uri: Url::parse(&format!("{base_url}/jwks")).unwrap(),
+        }
+    }
+
+    /// Build a JWKS JSON payload from an EC P-256 signing key.
+    ///
+    /// Constructs a `{"keys": [...]}` object compatible with the
+    /// `jsonwebtoken::jwk::JwkSet` deserializer. The EC key coordinates
+    /// (x, y) and kid are taken directly from the signing key so that
+    /// the JWKS matches the signature on JWTs the same key produces.
+    fn make_ec_jwks_json(signing_key: &crate::services::oidc::OidcSigningKey) -> String {
+        let jwk = signing_key
+            .public_key_jwk()
+            .expect("public_key_jwk should succeed");
+
+        serde_json::json!({
+            "keys": [{
+                "kty": jwk.kty,
+                "crv": jwk.crv,
+                "alg": jwk.alg,
+                "kid": jwk.kid,
+                "use": jwk.key_use,
+                "x": jwk.x,
+                "y": jwk.y,
+            }]
+        })
+        .to_string()
+    }
+
+    /// Sign a JWT with the given custom claims using ES256.
+    ///
+    /// Claims must include the standard registered claims `iss`, `aud`, `exp`,
+    /// and `iat`; the caller also sets `email`, `email_verified`, `nonce`, and
+    /// `hd` as required by `verify_id_token`.
+    async fn sign_test_jwt(
+        key: &crate::services::oidc::OidcSigningKey,
+        claims: serde_json::Value,
+    ) -> String {
+        key.sign_jwt(&claims)
+            .await
+            .expect("sign_jwt should succeed")
+    }
+
+    /// Mount a JWKS endpoint on the mock server and return the signing key.
+    async fn mount_jwks(
+        server: &wiremock::MockServer,
+        key: &crate::services::oidc::OidcSigningKey,
+    ) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let jwks_json = make_ec_jwks_json(key);
+        Mock::given(method("GET"))
+            .and(path("/jwks"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(jwks_json))
+            .mount(server)
+            .await;
+    }
+
+    /// Build a minimal valid claims object for verify_id_token.
+    ///
+    /// `iss` is set to `issuer`, `aud` to `client_id`, `exp` far in the
+    /// future, `email_verified` to `true`, and nonce/hd are left to the
+    /// caller.
+    fn base_claims(issuer: &str, client_id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "iss": issuer,
+            "aud": client_id,
+            "sub": "user-123",
+            "exp": 9_999_999_999_i64,
+            "iat": 1_000_000_000_i64,
+            "email": "alice@example.com",
+            "email_verified": true,
+        })
+    }
 
     fn parse_discovery_json(json: &str) -> DiscoveryDocument {
         serde_json::from_str(json).expect("valid JSON")
@@ -403,32 +499,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fetch_discovery_preserves_discovered_issuer_format() {
+    async fn fetch_discovery_preserves_canonical_issuer_from_document() {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
 
         let server = MockServer::start().await;
-        let issuer = server.uri();
-        let discovered_issuer = format!("{issuer}/");
-
-        let body = serde_json::json!({
-            "issuer": discovered_issuer.clone(),
-            "authorization_endpoint": format!("{issuer}/authorize"),
-            "token_endpoint": format!("{issuer}/token"),
-            "jwks_uri": format!("{issuer}/jwks"),
-        })
-        .to_string();
+        let configured_issuer = server.uri();
+        let canonical_issuer = format!("{configured_issuer}/");
 
         Mock::given(method("GET"))
             .and(path("/.well-known/openid-configuration"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(body))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(discovery_json(&canonical_issuer)),
+            )
             .mount(&server)
             .await;
 
         let client = reqwest::Client::new();
-        let provider = fetch_discovery(&client, &issuer).await.unwrap();
+        let provider = fetch_discovery(&client, &configured_issuer).await.unwrap();
 
-        assert_eq!(provider.issuer, discovered_issuer);
+        assert_eq!(provider.issuer, canonical_issuer);
     }
 
     #[tokio::test]
@@ -512,6 +602,258 @@ mod tests {
         assert!(
             err.to_string().contains("HTTPS"),
             "expected HTTPS error, got: {err}",
+        );
+    }
+
+    // ── verify_id_token tests ───────────────────────────────────────────────
+
+    /// Happy path: valid ES256 JWT with all required claims returns correct
+    /// `IdentityResult`.
+    #[tokio::test]
+    async fn verify_id_token_happy_path() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let client_id = "test-client";
+        let nonce = "test-nonce-abc";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        claims["hd"] = serde_json::json!("example.com");
+
+        let token = sign_test_jwt(&key, claims).await;
+        let provider = make_test_provider(&issuer);
+        let client = reqwest::Client::new();
+
+        let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap();
+
+        assert_eq!(result.email, "alice@example.com");
+        assert_eq!(result.domain, Some("example.com".to_string()));
+    }
+
+    /// Nonce mismatch: JWT has a nonce that differs from expected → error
+    /// message must contain "nonce mismatch".
+    #[tokio::test]
+    async fn verify_id_token_nonce_mismatch() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let client_id = "test-client";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&issuer, client_id);
+        claims["nonce"] = serde_json::json!("actual-nonce");
+
+        let token = sign_test_jwt(&key, claims).await;
+        let provider = make_test_provider(&issuer);
+        let client = reqwest::Client::new();
+
+        let err = verify_id_token(&client, &provider, &token, client_id, "expected-nonce")
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("nonce mismatch"),
+            "expected 'nonce mismatch' in error, got: {err}",
+        );
+    }
+
+    /// Missing nonce: JWT has no nonce claim but caller expects one → error
+    /// message must contain "missing nonce".
+    #[tokio::test]
+    async fn verify_id_token_missing_nonce() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let client_id = "test-client";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        // No nonce claim in the token
+        let claims = base_claims(&issuer, client_id);
+        let token = sign_test_jwt(&key, claims).await;
+        let provider = make_test_provider(&issuer);
+        let client = reqwest::Client::new();
+
+        let err = verify_id_token(&client, &provider, &token, client_id, "expected-nonce")
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("missing nonce"),
+            "expected 'missing nonce' in error, got: {err}",
+        );
+    }
+
+    /// Empty nonce bypass: device-code flow sends expected_nonce="" and the
+    /// token has no nonce claim → should succeed (nonce check is skipped).
+    #[tokio::test]
+    async fn verify_id_token_empty_nonce_bypass() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let client_id = "test-client";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        // No nonce in token; empty expected_nonce signals device-code flow
+        let claims = base_claims(&issuer, client_id);
+        let token = sign_test_jwt(&key, claims).await;
+        let provider = make_test_provider(&issuer);
+        let client = reqwest::Client::new();
+
+        let result = verify_id_token(&client, &provider, &token, client_id, "")
+            .await
+            .unwrap();
+
+        assert_eq!(result.email, "alice@example.com");
+    }
+
+    /// Email not verified: JWT has email_verified=false → error message must
+    /// contain "not verified".
+    #[tokio::test]
+    async fn verify_id_token_email_not_verified() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let issuer = server.uri();
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&issuer, client_id);
+        claims["email_verified"] = serde_json::json!(false);
+        claims["nonce"] = serde_json::json!(nonce);
+
+        let token = sign_test_jwt(&key, claims).await;
+        let provider = make_test_provider(&issuer);
+        let client = reqwest::Client::new();
+
+        let err = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains("not verified"),
+            "expected 'not verified' in error, got: {err}",
+        );
+    }
+
+    /// Domain from hd claim: when `hd` is present, `IdentityResult.domain`
+    /// reflects that value.
+    #[tokio::test]
+    async fn verify_id_token_domain_from_hd_claim() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        // Google Workspace: hd claim is used for domain
+        let google_issuer = "https://accounts.google.com";
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(google_issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        claims["hd"] = serde_json::json!("acme.com");
+
+        let token = sign_test_jwt(&key, claims).await;
+        let mut provider = make_test_provider(google_issuer);
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+        let client = reqwest::Client::new();
+
+        let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.domain,
+            Some("acme.com".to_string()),
+            "Google Workspace domain should come from hd claim"
+        );
+    }
+
+    /// No hd claim: when `hd` is absent, `IdentityResult.domain` is `None`.
+    #[tokio::test]
+    async fn verify_id_token_no_hd_claim_non_google_falls_back_to_email() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        let issuer = server.uri(); // non-Google issuer
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(&issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        // Intentionally no "hd" claim
+
+        let token = sign_test_jwt(&key, claims).await;
+        let provider = make_test_provider(&issuer);
+        let client = reqwest::Client::new();
+
+        let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap();
+
+        // Non-Google issuers fall back to email domain when hd is absent
+        assert_eq!(
+            result.domain.as_deref(),
+            Some("example.com"),
+            "non-Google issuer should fall back to email domain"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_id_token_google_consumer_no_hd_returns_none() {
+        use wiremock::MockServer;
+
+        let server = MockServer::start().await;
+        // Use Google issuer — consumer accounts have no hd claim
+        let google_issuer = "https://accounts.google.com";
+        let client_id = "test-client";
+        let nonce = "test-nonce";
+
+        let key = crate::services::oidc::OidcSigningKey::generate().unwrap();
+        mount_jwks(&server, &key).await;
+
+        let mut claims = base_claims(google_issuer, client_id);
+        claims["nonce"] = serde_json::json!(nonce);
+        // No "hd" claim — Google consumer account
+
+        let token = sign_test_jwt(&key, claims).await;
+        let mut provider = make_test_provider(google_issuer);
+        // Point jwks_uri to our mock server
+        provider.jwks_uri = url::Url::parse(&format!("{}/jwks", server.uri())).unwrap();
+        let client = reqwest::Client::new();
+
+        let result = verify_id_token(&client, &provider, &token, client_id, nonce)
+            .await
+            .unwrap();
+
+        // Google consumer accounts: no hd → domain should be None
+        assert!(
+            result.domain.is_none(),
+            "Google consumer should have domain=None, got: {:?}",
+            result.domain
         );
     }
 }

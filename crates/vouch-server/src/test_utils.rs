@@ -65,6 +65,10 @@ pub fn test_config() -> ServerConfig {
         oidc_issuer_url: Some("https://accounts.google.com".to_string()),
         oidc_client_id: Some("test-client-id".to_string()),
         oidc_client_secret: Some(SecretString::from("test-client-secret")),
+        saml_idp_metadata_url: None,
+        saml_sp_entity_id: None,
+        saml_email_attribute: None,
+        saml_domain_attribute: None,
         base_url: "https://test.example.com".to_string(),
         device_code_expires_seconds: 600,
         device_poll_interval_seconds: 5,
@@ -198,6 +202,9 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         .route("/device", get(handlers::enroll::device_verify_page))
         .route("/device", post(handlers::enroll::device_verify_submit))
         .route("/oauth/callback", get(handlers::enroll::oidc_callback))
+        // SAML 2.0 SP endpoints
+        .route("/saml/acs", post(handlers::saml::acs))
+        .route("/saml/metadata", get(handlers::saml::metadata))
         .route("/logout", post(handlers::auth::logout))
         .route(
             "/enroll/webauthn/start",

@@ -40,6 +40,7 @@ const-oid = { workspace = true }
 der = { workspace = true, features = ["std", "oid"] }
 dotenvy = { workspace = true }
 ed25519-dalek = { workspace = true, features = ["std"] }
+flate2 = { workspace = true }
 governor = { workspace = true, features = ["std"] }
 headers = { workspace = true }
 hex = { workspace = true, features = ["std"] }
@@ -57,6 +58,7 @@ opentelemetry-otlp = { workspace = true, features = ["trace", "grpc-tonic"] }
 opentelemetry_sdk = { workspace = true, features = ["rt-tokio", "trace"] }
 p256 = { workspace = true, features = ["ecdsa"] }
 reqwest = { workspace = true, features = ["json", "rustls", "form"] }
+roxmltree = { workspace = true }
 rust-embed = { workspace = true, features = ["axum-ex", "deterministic-timestamps", "mime-guess"] }
 rustls = { workspace = true, features = ["aws-lc-rs", "std", "prefer-post-quantum"] }
 rustls-pemfile = { workspace = true, features = ["std"] }

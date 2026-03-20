@@ -27,12 +27,20 @@
             </a>
             {% else %}
             <!-- Not authenticated -->
-            {% if let Some(icon) = idp_svg_icon %}
+            {% if let Some(name) = idp_name %}
             <a href="/enroll/start" class="w-full flex items-center justify-center gap-3 bg-vouch-surface border border-vouch-border text-gray-300 font-medium py-3 px-6 rounded-lg hover:bg-vouch-raised transition-colors">
+                {% if let Some(icon) = idp_svg_icon %}
                 {{ icon|safe }}
-                Sign in with {{ idp_name.as_deref().unwrap_or("SSO") }}
+                {% endif %}
+                Sign in with {{ name }}
             </a>
-            <p class="text-center text-gray-500 text-sm mt-3">Register your security key using your work email</p>
+            <p class="text-center text-gray-500 text-sm mt-3">
+                Register your security key using your work email
+            </p>
+            {% else %}
+            <p class="text-center text-gray-500 text-sm">
+                Browser sign-in is not configured. Use the CLI enrollment command below.
+            </p>
             {% endif %}
             {% endif %}
         </div>

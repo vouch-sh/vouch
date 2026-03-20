@@ -32,6 +32,7 @@ use super::{
 use crate::redact_email;
 use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
 use crate::services::error::ServiceError;
+use crate::services::idp::IdentityResult;
 use crate::services::oidc::amr::{ACR_AAL3, AuthMethod};
 use crate::services::oidc::scope::ScopeSet;
 
@@ -79,12 +80,26 @@ pub struct ErrorTemplate {
     pub back_url: Option<String>,
 }
 
+/// SAML POST binding auto-submit form template.
+///
+/// Rendered when the upstream IdP uses SAML POST binding. The page
+/// auto-submits via `onload` JavaScript; the `<noscript>` fallback
+/// handles browsers without JavaScript.
+#[derive(Template)]
+#[template(path = "saml_post_form.html")]
+pub struct SamlPostFormTemplate {
+    pub action_url: String,
+    pub saml_request: String,
+    pub relay_state: String,
+}
+
 impl_template_response!(
     DeviceVerifyTemplate,
     EnrollWebauthnTemplate,
     EnrollKeysTemplate,
     SuccessTemplate,
     ErrorTemplate,
+    SamlPostFormTemplate,
 );
 
 // ============================================================================
@@ -232,9 +247,9 @@ pub async fn device_verify_submit(
         .into_response();
     }
 
+    // No upstream IdP → go directly to WebAuthn; otherwise → initiate auth
     let Some(upstream) = state.upstream_idp.as_ref() else {
-        // No OIDC configured - go directly to WebAuthn registration
-        // Generate state token for WebAuthn
+        // No IdP configured - go directly to WebAuthn registration
         let random_bytes = match generate_random_bytes(32) {
             Ok(bytes) => bytes,
             Err(_) => {
@@ -248,14 +263,14 @@ pub async fn device_verify_submit(
         };
         let oidc_state = URL_SAFE_NO_PAD.encode(random_bytes);
 
-        // Store state
         let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
 
         if let Err(e) = db::create_oidc_state(
             &state.store,
             &oidc_state,
             &request.id,
-            "", // No nonce for non-OIDC flow
+            "", // No nonce for non-IdP flow
+            "", // No PKCE for non-IdP flow
             state_expires,
         )
         .await
@@ -269,7 +284,6 @@ pub async fn device_verify_submit(
             .into_response();
         }
 
-        // Show WebAuthn registration page without email (will prompt for it)
         return EnrollWebauthnTemplate {
             email: "new user".to_string(),
             state: oidc_state,
@@ -278,38 +292,32 @@ pub async fn device_verify_submit(
         .into_response();
     };
 
-    // OIDC configured - redirect to OIDC provider
-    let config = state.config();
-    let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
-
-    // Generate state and nonce
-    let (state_bytes, nonce_bytes) = match (generate_random_bytes(32), generate_random_bytes(32)) {
-        (Ok(s), Ok(n)) => (s, n),
-        _ => {
+    let auth_request = match upstream.initiate_auth(state.config().as_ref()) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to initiate auth: {e:#}");
             return ErrorTemplate {
                 title: "Error".to_string(),
-                message: "Failed to generate secure random state".to_string(),
+                message: "Failed to start authentication".to_string(),
                 back_url: None,
             }
             .into_response();
         }
     };
-    let oidc_state = URL_SAFE_NO_PAD.encode(state_bytes);
-    let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
 
-    // Store state
     let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
 
     if let Err(e) = db::create_oidc_state(
         &state.store,
-        &oidc_state,
+        &auth_request.state_key,
         &request.id,
-        &nonce,
+        &auth_request.nonce,
+        &auth_request.code_verifier,
         state_expires,
     )
     .await
     {
-        tracing::error!("Failed to create OIDC state: {}", e);
+        tracing::error!("Failed to create auth state: {}", e);
         return ErrorTemplate {
             title: "Error".to_string(),
             message: "Failed to create session state".to_string(),
@@ -318,19 +326,21 @@ pub async fn device_verify_submit(
         .into_response();
     }
 
-    // Build redirect URL using discovered authorization endpoint
-    let redirect_uri = format!("{}/oauth/callback", state.config().base_url);
-    let auth_url = upstream.authorization_url(client_id, &redirect_uri, &oidc_state, &nonce);
-    let auth_host = url::Url::parse(&auth_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string());
-
-    tracing::info!("Redirecting to OIDC authorization endpoint: {}", auth_host,);
-
     // Use 303 See Other (not 307) to ensure browser converts POST to GET
     // A 307 would preserve the POST method and body, sending user_code to the IdP
-    Redirect::to(&auth_url).into_response()
+    match auth_request.action {
+        crate::services::idp::AuthAction::Redirect { url } => Redirect::to(&url).into_response(),
+        crate::services::idp::AuthAction::PostForm {
+            action_url,
+            saml_request,
+            relay_state,
+        } => SamlPostFormTemplate {
+            action_url,
+            saml_request,
+            relay_state,
+        }
+        .into_response(),
+    }
 }
 
 /// Handle OIDC callback.
@@ -416,11 +426,15 @@ pub async fn oidc_callback(
         .into_response();
     }
 
-    // Exchange code for tokens using discovered token endpoint
-    let Some(upstream) = state.upstream_idp.as_ref() else {
+    // Exchange code for tokens using discovered OIDC token endpoint.
+    // This handler is OIDC-specific: SAML responses go to POST /saml/acs (Phase 2).
+    let Some(crate::services::idp::UpstreamIdp::Oidc(oidc_provider)) = state.upstream_idp.as_ref()
+    else {
         return ErrorTemplate {
             title: "Error".to_string(),
-            message: "Identity provider is not configured.".to_string(),
+            message: "OIDC not configured. If using SAML, responses should be \
+                      sent to /saml/acs, not /oauth/callback."
+                .to_string(),
             back_url: None,
         }
         .into_response();
@@ -430,18 +444,25 @@ pub async fn oidc_callback(
     let client_secret = config.oidc_client_secret_exposed().unwrap_or("");
     let redirect_uri = format!("{}/oauth/callback", config.base_url);
 
-    let token_url = upstream.token_endpoint().as_str();
+    let token_url = oidc_provider.token_endpoint.as_str();
+
+    // RFC 7636: Include code_verifier in token exchange (PKCE).
+    // Build form params dynamically to only include code_verifier when present.
+    let mut form_params = vec![
+        ("client_id", client_id),
+        ("client_secret", client_secret),
+        ("code", code.as_str()),
+        ("grant_type", "authorization_code"),
+        ("redirect_uri", redirect_uri.as_str()),
+    ];
+    if !stored_state.code_verifier.is_empty() {
+        form_params.push(("code_verifier", stored_state.code_verifier.as_str()));
+    }
 
     let token_response = match state
         .http_client
         .post(token_url)
-        .form(&[
-            ("client_id", client_id),
-            ("client_secret", client_secret),
-            ("code", &code),
-            ("grant_type", "authorization_code"),
-            ("redirect_uri", &redirect_uri),
-        ])
+        .form(&form_params)
         .send()
         .await
     {
@@ -485,9 +506,7 @@ pub async fn oidc_callback(
     // and extract domain (OIDC Core Section 3.1.3.7).
     let identity = match crate::services::idp::oidc::verify_id_token(
         &state.http_client,
-        match upstream {
-            crate::services::idp::UpstreamIdp::Oidc(p) => p,
-        },
+        oidc_provider,
         &tokens.id_token,
         client_id,
         &stored_state.nonce,
@@ -506,6 +525,16 @@ pub async fn oidc_callback(
         }
     };
 
+    complete_enrollment_after_identity(&state, &stored_state, &oidc_state, identity).await
+}
+
+#[allow(clippy::too_many_lines)]
+pub(crate) async fn complete_enrollment_after_identity(
+    state: &Arc<AppState>,
+    stored_state: &db::OidcState,
+    state_key: &str,
+    identity: IdentityResult,
+) -> Response {
     // Check domain restriction.
     // For Google consumers (no `hd` claim), `identity.domain` is `None`,
     // so `email_domain` becomes "" and will never match an allowed domain.
@@ -579,10 +608,13 @@ pub async fn oidc_callback(
         .unwrap_or_default();
     let authenticator_id = existing_auths.first().map(|a| a.id.clone());
 
-    // Issue an OAuth access token (RFC 9068) — the server acts as both issuer and audience
+    // Issue an OAuth access token for the enrollment session.
+    // This session is created after upstream IdP auth (OIDC/SAML) but BEFORE
+    // FIDO2 WebAuthn registration — do NOT claim AAL3 or FIDO2 amr here.
+    // The proper FIDO2 claims are set later in browser_register_complete.
     let client_id_for_token = state.config().base_url.clone();
     let session_result = match create_oauth_access_token(
-        &state,
+        state,
         CreateOAuthTokenParams {
             user_id: &user.id,
             email: &user.email,
@@ -593,9 +625,9 @@ pub async fn oidc_callback(
             act: None,
             audience: None,
             auth_time: Some(now.as_second()),
-            amr: Some(AuthMethod::all_fido2().to_vec()),
-            acr: Some(ACR_AAL3.to_string()),
-            hardware_verified: true,
+            amr: None,
+            acr: None,
+            hardware_verified: false,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
             authorization_details: None,
         },
@@ -653,9 +685,9 @@ pub async fn oidc_callback(
         }
     }
 
-    // Delete the OIDC state (it's been consumed)
-    if let Err(e) = db::delete_oidc_state(&state.store, &oidc_state).await {
-        tracing::warn!("Failed to delete OIDC state: {e}");
+    // Delete state only after enrollment/session creation succeeds.
+    if let Err(e) = db::delete_oidc_state(&state.store, state_key).await {
+        tracing::warn!("Failed to delete state: {e}");
     }
 
     tracing::info!(
@@ -1317,38 +1349,33 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
         }
     };
 
-    // Build OIDC authorization URL using discovered endpoint
-    let config = state.config();
-    let client_id = config.oidc_client_id.as_ref().map_or("", String::as_str);
-
-    // Generate state and nonce
-    let (state_bytes, nonce_bytes) = match (generate_random_bytes(32), generate_random_bytes(32)) {
-        (Ok(s), Ok(n)) => (s, n),
-        _ => {
+    // Initiate upstream IdP authentication (upstream is guaranteed Some from guard above)
+    let auth_request = match upstream.initiate_auth(state.config().as_ref()) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to initiate auth for direct enrollment: {e:#}");
             return ErrorTemplate {
                 title: "Error".to_string(),
-                message: "Failed to generate secure random state".to_string(),
-                back_url: None,
+                message: "Failed to start enrollment. Please try again.".to_string(),
+                back_url: Some("/".to_string()),
             }
             .into_response();
         }
     };
-    let oidc_state = URL_SAFE_NO_PAD.encode(state_bytes);
-    let nonce = URL_SAFE_NO_PAD.encode(nonce_bytes);
 
-    // Store state
     let state_expires = now.checked_add(Span::new().minutes(10)).unwrap_or(now);
 
     if let Err(e) = db::create_oidc_state(
         &state.store,
-        &oidc_state,
+        &auth_request.state_key,
         &device_auth_id,
-        &nonce,
+        &auth_request.nonce,
+        &auth_request.code_verifier,
         state_expires,
     )
     .await
     {
-        tracing::error!("Failed to create OIDC state: {}", e);
+        tracing::error!("Failed to create auth state: {}", e);
         return ErrorTemplate {
             title: "Error".to_string(),
             message: "Failed to start enrollment. Please try again.".to_string(),
@@ -1357,20 +1384,19 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
         .into_response();
     }
 
-    // Build authorization URL using discovered endpoint
-    let redirect_uri = format!("{}/oauth/callback", state.config().base_url);
-    let auth_url = upstream.authorization_url(client_id, &redirect_uri, &oidc_state, &nonce);
-    let auth_host = url::Url::parse(&auth_url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_string))
-        .unwrap_or_else(|| "unknown".to_string());
-
-    tracing::info!(
-        "Direct enrollment: redirecting to OIDC authorization endpoint: {}",
-        auth_host,
-    );
-
-    Redirect::to(&auth_url).into_response()
+    match auth_request.action {
+        crate::services::idp::AuthAction::Redirect { url } => Redirect::to(&url).into_response(),
+        crate::services::idp::AuthAction::PostForm {
+            action_url,
+            saml_request,
+            relay_state,
+        } => SamlPostFormTemplate {
+            action_url,
+            saml_request,
+            relay_state,
+        }
+        .into_response(),
+    }
 }
 
 /// Check if a device auth request is for direct enrollment.

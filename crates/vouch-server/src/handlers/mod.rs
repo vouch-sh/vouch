@@ -19,6 +19,7 @@ pub mod keys;
 pub mod legal;
 pub mod oidc;
 pub mod registration;
+pub mod saml;
 pub mod scim;
 pub mod session;
 
