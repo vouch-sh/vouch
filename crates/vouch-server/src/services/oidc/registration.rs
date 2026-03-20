@@ -157,6 +157,8 @@ pub struct RegistrationResponse {
     pub software_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dpop_bound_access_tokens: Option<bool>,
+    /// OIDC: Algorithm used for signing ID tokens.
+    pub id_token_signed_response_alg: String,
 }
 
 // ============================================================================
@@ -527,6 +529,7 @@ pub async fn register_client(
         software_id: request.software_id,
         software_version: request.software_version,
         dpop_bound_access_tokens: if dpop_bound { Some(true) } else { None },
+        id_token_signed_response_alg: "ES256".to_string(),
     })
 }
 
@@ -689,6 +692,7 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
         } else {
             None
         },
+        id_token_signed_response_alg: "ES256".to_string(),
     }
 }
 
@@ -1621,6 +1625,7 @@ mod tests {
             software_id: None,
             software_version: None,
             dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: "ES256".to_string(),
         };
 
         let json = serde_json::to_string(&response).unwrap();
@@ -1631,6 +1636,7 @@ mod tests {
         assert!(value.get("token_endpoint_auth_method").is_some());
         assert!(value.get("grant_types").is_some());
         assert!(value.get("response_types").is_some());
+        assert_eq!(value["id_token_signed_response_alg"], "ES256");
 
         // Optional None fields must be absent
         assert!(
@@ -1679,6 +1685,7 @@ mod tests {
             software_id: None,
             software_version: None,
             dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: "ES256".to_string(),
         };
 
         let json = serde_json::to_string(&response).unwrap();
