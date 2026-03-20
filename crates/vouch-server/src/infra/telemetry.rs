@@ -76,7 +76,7 @@ fn init_opentelemetry() -> Result<
         std::env::var("OTEL_SERVICE_NAME").unwrap_or_else(|_| "vouch-server".to_string());
 
     let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_http()
+        .with_tonic()
         .build()
         .map_err(|e| anyhow::anyhow!("Failed to build OTLP exporter: {e}"))?;
 
