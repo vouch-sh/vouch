@@ -428,9 +428,7 @@ pub async fn exchange_authorization_code(
             dpop_jkt,
             act: None,
             audience,
-            // auth_time is the iat of the authorization code, reflecting when the
-            // FIDO2 session was active at the time of authorization.
-            auth_time: Some(auth_code.iat),
+            auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
             amr: Some(AuthMethod::all_fido2().to_vec()),
             acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
             hardware_verified: true,
@@ -454,9 +452,7 @@ pub async fn exchange_authorization_code(
             expires_in,
             dpop_jkt,
             scope: &auth_code.scope,
-            // auth_time is the iat of the authorization code, which reflects when
-            // the FIDO2 session was active at the time of authorization.
-            auth_time: Some(auth_code.iat),
+            auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
             amr: Some(AuthMethod::all_fido2().to_vec()),
             acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
             access_token: Some(access_token.expose_secret()),
