@@ -36,9 +36,13 @@ use subtle::ConstantTimeEq;
 // ============================================================================
 
 /// Grant types that this server accepts for dynamic registration.
+/// Note: `refresh_token` is accepted in registration but the server never
+/// issues refresh tokens — clients that request it will simply never
+/// receive one in token responses.
 const ALLOWED_GRANT_TYPES: &[&str] = &[
     "authorization_code",
     "client_credentials",
+    "refresh_token",
     "urn:ietf:params:oauth:grant-type:device_code",
     "urn:ietf:params:oauth:grant-type:token-exchange",
     "urn:ietf:params:oauth:grant-type:jwt-bearer",
@@ -1715,8 +1719,8 @@ mod tests {
             "device_code URN must be an allowed grant type"
         );
         assert!(
-            !ALLOWED_GRANT_TYPES.contains(&"refresh_token"),
-            "refresh_token must NOT be an allowed grant type"
+            ALLOWED_GRANT_TYPES.contains(&"refresh_token"),
+            "refresh_token must be accepted in registration (though never issued)"
         );
     }
 
