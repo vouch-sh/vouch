@@ -633,21 +633,23 @@ fn extract_path<T>(req: &http::Request<T>) -> String {
 /// (RFC 1866), not RFC 3986. RFC 9421 §2.2.8 references RFC 3986 percent-encoding.
 fn url_decode(input: &str) -> String {
     let mut result = String::with_capacity(input.len());
-    let mut chars = input.bytes();
-    loop {
-        match chars.next() {
-            None => break,
-            Some(b'%') => {
-                let hi = chars.next().and_then(hex_val);
-                let lo = chars.next().and_then(hex_val);
-                match (hi, lo) {
-                    (Some(h), Some(l)) => result.push(char::from(h << 4 | l)),
-                    _ => result.push('%'),
-                }
+    let bytes = input.as_bytes();
+    let mut i = 0;
+
+    while let Some(&c) = bytes.get(i) {
+        if c == b'%' {
+            let hi = bytes.get(i + 1).copied().and_then(hex_val);
+            let lo = bytes.get(i + 2).copied().and_then(hex_val);
+            if let (Some(h), Some(l)) = (hi, lo) {
+                result.push(char::from(h << 4 | l));
+                i += 3;
+                continue;
             }
-            Some(c) => result.push(char::from(c)),
         }
+        result.push(char::from(c));
+        i += 1;
     }
+
     result
 }
 
@@ -799,6 +801,18 @@ mod tests {
         let req = make_request("GET", "https://example.com/path?name=value&other=2", &[]);
         let cid = ComponentIdentifier::query_param("name");
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "value");
+    }
+
+    #[test]
+    fn test_url_decode_preserves_malformed_percent_encoding() {
+        assert_eq!(url_decode("%2G"), "%2G");
+        assert_eq!(url_decode("foo%2"), "foo%2");
+        assert_eq!(url_decode("%ZZhello"), "%ZZhello");
+    }
+
+    #[test]
+    fn test_url_decode_decodes_valid_percent_encoding() {
+        assert_eq!(url_decode("name%20with%20space"), "name with space");
     }
 
     #[test]
