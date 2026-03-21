@@ -4,8 +4,11 @@
 use crate::algorithm::VerifyingAlgorithm;
 use crate::error::HttpSigError;
 use crate::sfv::parse::parse_dictionary;
+use crate::sfv::serialize::serialize_inner_list_to_string;
 use crate::sfv::types::{SfvBareItem, SfvDictMember};
-use crate::signature_base::{build_request_base, build_response_base};
+use crate::signature_base::{
+    build_request_base_with_params_str, build_response_base_with_params_str,
+};
 use crate::signature_params::SignatureParams;
 
 /// Verify a signature on an HTTP request.
@@ -30,11 +33,11 @@ pub fn verify_request_signature<T>(
     verifier: &dyn VerifyingAlgorithm,
     max_age: Option<i64>,
 ) -> Result<SignatureParams, HttpSigError> {
-    let (params, signature_bytes) = extract_signature_parts(req.headers(), label)?;
+    let (params, params_str, signature_bytes) = extract_signature_parts(req.headers(), label)?;
     validate_algorithm(&params, verifier)?;
     validate_timestamps(&params, max_age)?;
 
-    let base = build_request_base(req, &params)?;
+    let base = build_request_base_with_params_str(req, &params, &params_str)?;
     verifier.verify(&base, &signature_bytes)?;
 
     Ok(params)
@@ -53,11 +56,11 @@ pub fn verify_response_signature<T, U>(
     req: Option<&http::Request<U>>,
     max_age: Option<i64>,
 ) -> Result<SignatureParams, HttpSigError> {
-    let (params, signature_bytes) = extract_signature_parts(resp.headers(), label)?;
+    let (params, params_str, signature_bytes) = extract_signature_parts(resp.headers(), label)?;
     validate_algorithm(&params, verifier)?;
     validate_timestamps(&params, max_age)?;
 
-    let base = build_response_base(resp, req, &params)?;
+    let base = build_response_base_with_params_str(resp, req, &params, &params_str)?;
     verifier.verify(&base, &signature_bytes)?;
 
     Ok(params)
@@ -114,10 +117,10 @@ pub fn extract_signature_labels(headers: &http::HeaderMap) -> Result<Vec<String>
 fn extract_signature_parts(
     headers: &http::HeaderMap,
     label: &str,
-) -> Result<(SignatureParams, Vec<u8>), HttpSigError> {
-    let params = find_signature_input(headers, "signature-input", label)?;
+) -> Result<(SignatureParams, String, Vec<u8>), HttpSigError> {
+    let (params, params_str) = find_signature_input(headers, "signature-input", label)?;
     let signature_bytes = find_signature_value(headers, "signature", label)?;
-    Ok((params, signature_bytes))
+    Ok((params, params_str, signature_bytes))
 }
 
 /// Find and parse the signature input for a specific label from header values.
@@ -125,7 +128,7 @@ fn find_signature_input(
     headers: &http::HeaderMap,
     header_name: &str,
     label: &str,
-) -> Result<SignatureParams, HttpSigError> {
+) -> Result<(SignatureParams, String), HttpSigError> {
     let mut found_header = false;
     for hv in headers.get_all(header_name).iter() {
         let value = hv
@@ -136,7 +139,11 @@ fn find_signature_input(
         let dict = parse_dictionary(value)?;
         if let Some(member) = dict.get(label) {
             return match member {
-                SfvDictMember::InnerList(list) => SignatureParams::from_inner_list(list),
+                SfvDictMember::InnerList(list) => {
+                    let params = SignatureParams::from_inner_list(list)?;
+                    let params_str = serialize_inner_list_to_string(list);
+                    Ok((params, params_str))
+                }
                 _ => Err(HttpSigError::SfvParse(format!(
                     "Signature-Input '{label}' must be an inner list"
                 ))),
@@ -250,10 +257,15 @@ fn validate_timestamps(params: &SignatureParams, max_age: Option<i64>) -> Result
 )]
 mod tests {
     use super::*;
+    use crate::algorithm::SigningAlgorithm;
     use crate::algorithm::ecdsa_p256::EcdsaP256Signer;
     use crate::algorithm::ed25519::Ed25519Signer;
     use crate::algorithm::hmac_sha256::HmacSha256Key;
+    use crate::sfv::parse::parse_inner_list;
+    use crate::sfv::serialize::serialize_dictionary;
+    use crate::sfv::types::{SfvDictionary, SfvItem, SfvParams};
     use crate::sign::SignatureBuilder;
+    use crate::signature_base::build_request_base_with_params_str;
 
     fn make_request(method: &str, uri: &str, headers: &[(&str, &str)]) -> http::Request<()> {
         let mut builder = http::Request::builder().method(method).uri(uri);
@@ -431,6 +443,37 @@ mod tests {
 
         let labels = extract_signature_labels(req.headers()).unwrap();
         assert!(labels.contains(&"sig1".to_string()));
+    }
+
+    #[test]
+    fn test_verify_request_uses_signature_input_param_order() {
+        let key = HmacSha256Key::new(b"secret", "k");
+        let mut req = make_request("GET", "https://example.com/", &[]);
+        let params_str = "(\"@method\");created=1618884473;alg=\"hmac-sha256\";keyid=\"k\"";
+        let list = parse_inner_list(params_str).unwrap();
+        let params = SignatureParams::from_inner_list(&list).unwrap();
+        let base = build_request_base_with_params_str(&req, &params, params_str).unwrap();
+        let signature_bytes = key.sign(&base).unwrap();
+
+        req.headers_mut().insert(
+            "signature-input",
+            http::HeaderValue::from_str(&format!("sig1={params_str}")).unwrap(),
+        );
+        req.headers_mut().insert(
+            "signature",
+            http::HeaderValue::from_str(&serialize_dictionary(&SfvDictionary {
+                entries: vec![(
+                    "sig1".to_string(),
+                    SfvDictMember::Item(SfvItem {
+                        value: SfvBareItem::ByteSequence(signature_bytes),
+                        params: SfvParams::new(),
+                    }),
+                )],
+            }))
+            .unwrap(),
+        );
+
+        verify_request_signature(&req, "sig1", &key, None).unwrap();
     }
 
     #[test]
