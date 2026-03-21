@@ -19,6 +19,7 @@
 pub mod client_assertion;
 pub mod dpop;
 pub mod error;
+pub mod httpsig;
 pub mod interaction;
 pub mod key;
 pub mod key_store;
