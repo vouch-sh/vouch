@@ -5478,6 +5478,7 @@ dependencies = [
  "uuid",
  "vouch-agent",
  "vouch-common",
+ "vouch-httpsig",
  "zeroize",
 ]
 
@@ -5499,6 +5500,20 @@ dependencies = [
  "thiserror 2.0.18",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "vouch-httpsig"
+version = "2026.3.19"
+dependencies = [
+ "aws-lc-rs",
+ "axum",
+ "base64 0.22.1",
+ "http 1.4.0",
+ "jiff",
+ "proptest",
+ "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]
@@ -5573,6 +5588,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "vouch-common",
+ "vouch-httpsig",
  "webauthn-rs",
  "webauthn-rs-proto",
  "wiremock",

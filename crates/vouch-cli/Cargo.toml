@@ -60,6 +60,7 @@ url = { workspace = true }
 urlencoding = { workspace = true }
 uuid = { workspace = true, features = ["v7"] }
 vouch-common = { workspace = true }
+vouch-httpsig = { workspace = true }
 zeroize = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
