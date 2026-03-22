@@ -8,11 +8,13 @@
 #[cfg(any(test, feature = "test-utils"))]
 pub mod attestation_chain;
 #[cfg(not(any(test, feature = "test-utils")))]
+#[allow(unreachable_pub)]
 pub(crate) mod attestation_chain;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod ber;
 #[cfg(not(any(test, feature = "test-utils")))]
+#[allow(unreachable_pub)]
 pub(crate) mod ber;
 pub mod cose;
 pub(crate) mod document_crypto;

@@ -60,8 +60,7 @@ The OIDC signing key signs ID tokens using ES256 algorithm. If not provided, an 
 
 ```bash
 # Generate P-256 EC private key in PKCS#8 format
-openssl ecparam -name prime256v1 -genkey -noout | \
-  openssl pkcs8 -topk8 -nocrypt -out oidc_signing_key.pem
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out oidc_signing_key.pem
 
 # Set restrictive permissions
 chmod 600 oidc_signing_key.pem
@@ -78,6 +77,28 @@ openssl ec -in oidc_signing_key.pem -pubout -out oidc_signing_key.pub
 ```bash
 # Provide base64-encoded PEM content
 export VOUCH_OIDC_SIGNING_KEY="$(base64 -i oidc_signing_key.pem | tr -d '\n')"
+```
+
+## OIDC RSA Signing Key Generation (RSA-3072)
+
+The OIDC RSA signing key signs ID tokens with RS256 algorithm per [OIDC Core Section 3.1.3.7](https://openid.net/specs/openid-connect-core-1_0.html#IDToken). This is optional but recommended for OIDC specification conformance. If not provided, an ephemeral key is generated on each server restart.
+
+```bash
+# Generate RSA-3072 private key in PKCS#8 format
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out oidc_rsa_key.pem
+
+# Set restrictive permissions
+chmod 600 oidc_rsa_key.pem
+
+# Verify key type and size
+openssl rsa -in oidc_rsa_key.pem -text -noout 2>/dev/null | head -3
+# Output should include: Private-Key: (3072 bit)
+```
+
+**Environment variable format (base64-encoded):**
+```bash
+# Provide base64-encoded PEM content
+export VOUCH_OIDC_RSA_SIGNING_KEY="$(base64 -i oidc_rsa_key.pem | tr -d '\n')"
 ```
 
 ## TLS Certificate Generation

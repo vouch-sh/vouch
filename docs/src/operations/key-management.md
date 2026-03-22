@@ -7,7 +7,8 @@ Vouch uses several cryptographic keys. This page covers their lifecycle and rota
 | Key | Algorithm | Purpose | Storage |
 |-----|-----------|---------|---------|
 | SSH CA Key | Ed25519 | Signs SSH user certificates | File, env var, S3 config, or KMS |
-| OIDC Signing Key | P-256 EC (ES256) | Signs ID tokens and access tokens | Env var, S3 config, or KMS |
+| OIDC Signing Key | P-256 EC (ES256) | Signs access tokens and ID tokens (default) | Env var, S3 config, or KMS |
+| OIDC RSA Signing Key | RSA-3072 (RS256) | Signs ID tokens (per-client, OIDC Core conformance) | Env var, S3 config, or KMS |
 | JWT Secret | HMAC-SHA256 | Signs internal state tokens (authorization codes, WebAuthn state, CSRF) | Env var, S3 config, or KMS |
 | Document Encryption Key | P-384 EC (HPKE) | Encrypts sensitive documents stored alongside S3 config | S3 config (KMS-protected) |
 | TLS Certificate | EC/RSA | HTTPS transport | Env var or S3 config |
@@ -62,9 +63,9 @@ curl https://auth.example.com/v1/credentials/ssh/ca
 # ssh-ed25519 AAAA... vouch-ca@example.com
 ```
 
-## OIDC Signing Key
+## OIDC Signing Key (ES256)
 
-Used to sign ID tokens ([OpenID Connect Core](https://openid.net/specs/openid-connect-core-1_0.html)) and access tokens ([RFC 9068](https://www.rfc-editor.org/rfc/rfc9068)) with ES256 algorithm.
+Used to sign access tokens ([RFC 9068](https://www.rfc-editor.org/rfc/rfc9068)) and ID tokens (default algorithm) with ES256.
 
 ### Configuration
 
@@ -83,14 +84,59 @@ When using KMS, the server calls `kms:Sign` with P-256 ECDSA (`ECC_NIST_P256` ke
 ### Generation
 
 ```bash
-openssl ecparam -name prime256v1 -genkey -noout -out oidc_signing_key.pem
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:prime256v1 -out oidc_signing_key.pem
 ```
+
+> **Note**: You must use `openssl genpkey` (which produces PKCS#8 format) rather than `openssl ecparam -genkey` (which produces SEC1 format). The server requires PKCS#8 (`-----BEGIN PRIVATE KEY-----`).
 
 ### Rotation
 
 When rotating the OIDC signing key:
 
 1. Generate a new key
+2. Update the server configuration
+3. Restart the server
+4. The JWKS endpoint (`/oauth/jwks`) automatically serves the new public key
+5. Relying parties that cache JWKS will pick up the new key on their next refresh
+
+## OIDC RSA Signing Key (RS256)
+
+Used to sign ID tokens with RS256 algorithm per [OIDC Core Section 3.1.3.7](https://openid.net/specs/openid-connect-core-1_0.html#IDToken). RS256 is the default `id_token_signed_response_alg` in the OIDC specification and must be supported for conformance. Clients can select RS256 via OAuth 2.0 Dynamic Client Registration (`id_token_signed_response_alg` field).
+
+Access tokens are always signed with ES256 (the OIDC Signing Key above).
+
+### Generation
+
+```bash
+openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:3072 -out oidc_rsa_key.pem
+```
+
+A minimum key size of 3072 bits is enforced. Keys smaller than 3072 bits are rejected at startup.
+
+### Configuration
+
+```bash
+# Option 1: Local key (base64-encoded PEM)
+VOUCH_OIDC_RSA_SIGNING_KEY="$(base64 -i oidc_rsa_key.pem | tr -d '\n')"
+
+# Option 2: AWS KMS (overrides Option 1)
+VOUCH_OIDC_RSA_SIGNING_KMS_KEY_ID=mrk-rsa1234abcd5678
+```
+
+If neither is set, an ephemeral RSA-3072 key is generated on startup. This means RS256 ID tokens cannot be verified after a server restart unless the same key is provided. A warning is logged when an ephemeral key is generated.
+
+When using KMS, the key must be:
+- Key spec: `RSA_3072`
+- Key usage: `SIGN_VERIFY`
+- Signing algorithm: `RSASSA_PKCS1_V1_5_SHA_256`
+
+Multi-region keys (`mrk-` prefix) are recommended.
+
+### Rotation
+
+When rotating the OIDC RSA signing key:
+
+1. Generate a new RSA-3072 key
 2. Update the server configuration
 3. Restart the server
 4. The JWKS endpoint (`/oauth/jwks`) automatically serves the new public key

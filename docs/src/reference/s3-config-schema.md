@@ -54,11 +54,19 @@ The S3 configuration file is a JSON document with the following schema:
     "client_id": "...",
     "client_secret": "..."
   },
+  "saml": {
+    "idp_metadata_url": "https://idp.example.com/saml/metadata",
+    "sp_entity_id": "https://vouch.example.com",
+    "email_attribute": "http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress",
+    "domain_attribute": "department"
+  },
   "allowed_domains": ["example.com"],
   "ssh_ca_key": "<base64-encoded PEM Ed25519 private key>",
   "ssh_ca_kms_key_id": "mrk-1234abcd5678efgh",
   "oidc_signing_key": "<base64-encoded PEM EC P-256 private key>",
   "oidc_signing_kms_key_id": "mrk-abcd1234efgh5678",
+  "oidc_rsa_signing_key": "<base64-encoded PEM RSA-3072 private key>",
+  "oidc_rsa_signing_kms_key_id": "mrk-rsa1234abcd5678",
   "jwt_hmac_kms_key_id": "mrk-5678abcd1234efgh",
   "document_key": {
     "kms_key_id": "mrk-<key-id>",
@@ -106,11 +114,17 @@ The S3 configuration file is a JSON document with the following schema:
 | `oidc.issuer_url` | string | External OIDC issuer URL for enrollment. |
 | `oidc.client_id` | string | OIDC client ID from the external identity provider. |
 | `oidc.client_secret` | string | OIDC client secret from the external identity provider. |
+| `saml.idp_metadata_url` | string | URL to the SAML IdP metadata XML document. |
+| `saml.sp_entity_id` | string | SAML SP entity ID (defaults to `base_url`). |
+| `saml.email_attribute` | string | SAML attribute name for email extraction. |
+| `saml.domain_attribute` | string | SAML attribute name for domain extraction. |
 | `allowed_domains` | array of strings | Allowed email domains for enrollment. |
 | `ssh_ca_key` | string | SSH CA private key (base64-encoded PEM, Ed25519). |
 | `ssh_ca_kms_key_id` | string | AWS KMS key ID for SSH CA signing (Ed25519). Overrides `ssh_ca_key`. |
 | `oidc_signing_key` | string | OIDC signing key (base64-encoded PEM, P-256 ECDSA). |
 | `oidc_signing_kms_key_id` | string | AWS KMS key ID for OIDC token signing (P-256). Overrides `oidc_signing_key`. |
+| `oidc_rsa_signing_key` | string | OIDC RSA signing key (base64-encoded PEM, RSA-3072). Signs ID tokens with RS256. |
+| `oidc_rsa_signing_kms_key_id` | string | AWS KMS key ID for OIDC RSA signing (RSA-3072). Overrides `oidc_rsa_signing_key`. |
 | `jwt_hmac_kms_key_id` | string | AWS KMS key ID for HMAC state token signing. Overrides `jwt_secret`. |
 | `document_key` | object | P-384 document encryption key. Contains `kms_key_id` and `encrypted_private_key`. |
 | `dpop.max_age_seconds` | integer | Maximum age of DPoP proofs in seconds. |
@@ -150,7 +164,9 @@ The server polls S3 at the configured interval and detects changes via ETag comp
 | `tls.cert`, `tls.key` | **Yes** | Automatic reload on change |
 | All other fields | **No** | Requires server restart |
 
-Non-hot-reloadable fields include: `jwt_secret`, `database_url`, `listen_addr`, `rp_id`, `rp_name`, `session_hours`, `cors_origins`, `allowed_domains`, `dpop.*`, OIDC settings, GitHub App settings, SSH CA key, OIDC signing key, and all KMS key IDs.
+Non-hot-reloadable fields include: `jwt_secret`, `database_url`, `listen_addr`, `rp_id`, `rp_name`, `session_hours`, `cors_origins`, `allowed_domains`, `dpop.*`, OIDC settings, SAML settings, GitHub App settings, SSH CA key, OIDC signing keys, and all KMS key IDs.
+
+> **Note:** The `oidc` and `saml` blocks are mutually exclusive. If both are present, the server will refuse to start.
 
 Changes to non-hot-reloadable fields in S3 are silently ignored. A server restart is required to apply them.
 

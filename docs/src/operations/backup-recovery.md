@@ -6,7 +6,8 @@
 |-----------|-------------|-----------------|
 | Database | Critical | Loss of user registrations, sessions, authenticator records |
 | SSH CA private key | Critical | Must re-distribute new CA public key to all hosts |
-| OIDC signing key | High | Token verification fails until new key distributed |
+| OIDC signing key (ES256) | High | Token verification fails until new key distributed |
+| OIDC RSA signing key (RS256) | High | RS256 ID token verification fails until new key distributed |
 | JWT secret | High | All sessions invalidated on change |
 | TLS certificate & key | Medium | Service unavailable until replaced |
 | Server configuration | Medium | Can be reconstructed from documentation |
@@ -39,8 +40,11 @@ Back up all keys to a secure, offline location:
 # SSH CA key
 cp ssh_ca_key /secure-backup/ssh_ca_key
 
-# OIDC signing key
+# OIDC signing key (ES256)
 cp oidc_signing_key.pem /secure-backup/oidc_signing_key.pem
+
+# OIDC RSA signing key (RS256) — if configured
+cp oidc_rsa_key.pem /secure-backup/oidc_rsa_key.pem
 ```
 
 Store key backups:

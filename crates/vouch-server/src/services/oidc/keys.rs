@@ -91,23 +91,30 @@ impl OidcSigningKey {
     }
 
     /// Load from PEM-encoded private key content.
+    ///
+    /// Accepts raw PEM, base64-encoded PEM, or base64-encoded DER.
     pub fn from_pem(pem_content: &str) -> Result<Self> {
-        // Parse PEM to get DER bytes
-        let pem_content = pem_content.trim();
+        let trimmed = pem_content.trim();
 
-        // Extract the base64 content between headers (zeroized on drop)
-        let der_bytes = Zeroizing::new(if pem_content.starts_with("-----BEGIN") {
-            pem_to_der(pem_content)?
+        let der_bytes = Zeroizing::new(if trimmed.starts_with("-----BEGIN") {
+            pem_to_der(trimmed)?
         } else {
-            // Assume it's already base64-encoded DER
-            URL_SAFE_NO_PAD
-                .decode(pem_content)
-                .or_else(|_| base64::engine::general_purpose::STANDARD.decode(pem_content))
-                .context("Invalid base64 encoding for key")?
+            match crate::crypto::pem::decode_base64_pem(trimmed) {
+                Ok(pem_text) => pem_to_der(&pem_text)?,
+                Err(_) => {
+                    // Fall back to base64-encoded DER
+                    URL_SAFE_NO_PAD
+                        .decode(trimmed)
+                        .or_else(|_| {
+                            base64::engine::general_purpose::STANDARD.decode(trimmed)
+                        })
+                        .context("Failed to decode OIDC signing key: expected PEM, base64(PEM), or base64(DER)")?
+                }
+            }
         });
 
         let key_pair = EcdsaKeyPair::from_pkcs8(&ECDSA_P256_SHA256_FIXED_SIGNING, &der_bytes)
-            .map_err(|e| anyhow::anyhow!("Failed to parse ECDSA key from PEM: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("Failed to parse ECDSA key from PKCS#8 DER: {e}"))?;
 
         // Generate key ID from public key
         let pub_key_bytes = key_pair.public_key().as_ref();
@@ -532,17 +539,26 @@ impl OidcRsaSigningKey {
     }
 
     /// Load from PEM-encoded RSA private key content (PKCS#8).
+    ///
+    /// Accepts raw PEM, base64-encoded PEM, or base64-encoded DER.
     pub fn from_pem(pem_content: &str) -> Result<Self> {
-        let pem_content = pem_content.trim();
+        let trimmed = pem_content.trim();
 
-        let der_bytes = Zeroizing::new(if pem_content.starts_with("-----BEGIN") {
-            pem_to_der(pem_content)?
+        let der_bytes = Zeroizing::new(if trimmed.starts_with("-----BEGIN") {
+            pem_to_der(trimmed)?
         } else {
-            // Assume base64-encoded DER
-            URL_SAFE_NO_PAD
-                .decode(pem_content)
-                .or_else(|_| base64::engine::general_purpose::STANDARD.decode(pem_content))
-                .context("Invalid base64 encoding for RSA key")?
+            match crate::crypto::pem::decode_base64_pem(trimmed) {
+                Ok(pem_text) => pem_to_der(&pem_text)?,
+                Err(_) => {
+                    // Fall back to base64-encoded DER
+                    URL_SAFE_NO_PAD
+                        .decode(trimmed)
+                        .or_else(|_| {
+                            base64::engine::general_purpose::STANDARD.decode(trimmed)
+                        })
+                        .context("Failed to decode RSA signing key: expected PEM, base64(PEM), or base64(DER)")?
+                }
+            }
         });
 
         let key_pair = RsaKeyPair::from_pkcs8(&der_bytes)

@@ -17,7 +17,10 @@
 # Identity Provider Setup
 
 - [Identity Provider Overview](idp/overview.md)
-- [Google Workspace](idp/google-workspace.md)
+- [Google Workspace (OIDC)](idp/google-workspace.md)
+- [Microsoft Entra ID (OIDC)](idp/entra-id.md)
+- [Generic OIDC Provider](idp/generic-oidc.md)
+- [SAML 2.0](idp/saml.md)
 
 # Operations
 

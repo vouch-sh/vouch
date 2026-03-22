@@ -1,6 +1,6 @@
-# Google Workspace
+# Google Workspace (OIDC)
 
-Configure Google Workspace as your external identity provider for Vouch enrollment.
+Configure Google Workspace as your external identity provider for Vouch enrollment via OpenID Connect.
 
 ## Prerequisites
 
@@ -39,6 +39,8 @@ VOUCH_OIDC_ISSUER=https://accounts.google.com
 VOUCH_OIDC_CLIENT_ID=<your-client-id>.apps.googleusercontent.com
 VOUCH_OIDC_CLIENT_SECRET=<your-client-secret>
 ```
+
+The server automatically discovers Google's authorization, token, and JWKS endpoints via [OIDC Discovery](https://openid.net/specs/openid-connect-discovery-1_0.html). No manual endpoint configuration is needed.
 
 Optionally restrict enrollment to specific domains:
 

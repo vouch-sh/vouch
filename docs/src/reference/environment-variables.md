@@ -20,15 +20,30 @@ All Vouch server configuration is done via environment variables (prefixed with 
 |----------|----------|---------|-------------|
 | `VOUCH_LISTEN_ADDR` | No | `[::]:3000` | Address and port to listen on. Ignored when TLS is configured (server listens on 443 instead). |
 
-## OIDC (External IdP)
+## Upstream Identity Provider
 
-These variables configure an external OpenID Connect identity provider for enrollment (e.g., Google Workspace). All three must be set together for OIDC enrollment to work.
+Configure **one** upstream IdP for enrollment: either OIDC or SAML 2.0. They are mutually exclusive — if both are configured, the server will refuse to start.
+
+### OIDC (External IdP)
+
+These variables configure an external OpenID Connect identity provider for enrollment. All three must be set together for OIDC enrollment to work. At startup, the server fetches the OIDC discovery document from `{issuer}/.well-known/openid-configuration` to auto-discover authorization, token, and JWKS endpoints.
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_OIDC_ISSUER` | No | _(none)_ | OIDC issuer URL (e.g., `https://accounts.google.com`). |
+| `VOUCH_OIDC_ISSUER` | No | _(none)_ | OIDC issuer URL (e.g., `https://accounts.google.com`). Must serve a valid OIDC discovery document. |
 | `VOUCH_OIDC_CLIENT_ID` | No | _(none)_ | OIDC client ID from the external identity provider. |
 | `VOUCH_OIDC_CLIENT_SECRET` | No | _(none)_ | OIDC client secret from the external identity provider. |
+
+### SAML (External IdP)
+
+These variables configure an external SAML 2.0 identity provider for enrollment. `VOUCH_SAML_IDP_METADATA_URL` is required for SAML; the others are optional.
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `VOUCH_SAML_IDP_METADATA_URL` | No | _(none)_ | URL to the SAML IdP metadata XML document. Fetched at server startup. |
+| `VOUCH_SAML_SP_ENTITY_ID` | No | `{VOUCH_BASE_URL}` | SAML SP entity ID sent in authentication requests. Defaults to the server's base URL. |
+| `VOUCH_SAML_EMAIL_ATTRIBUTE` | No | _(auto-detect)_ | SAML attribute name containing the user's email address. |
+| `VOUCH_SAML_DOMAIN_ATTRIBUTE` | No | _(none)_ | SAML attribute name containing the user's domain (for domain restriction). |
 
 ## Session
 
@@ -49,7 +64,8 @@ These variables configure an external OpenID Connect identity provider for enrol
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `VOUCH_OIDC_SIGNING_KEY` | No | _(auto-generate)_ | OIDC signing key content (base64-encoded PEM format, P-256 ECDSA). Used for signing OIDC ID tokens with ES256 algorithm. If not set, an ephemeral key is generated on each server restart (not recommended for production). |
+| `VOUCH_OIDC_SIGNING_KEY` | No | _(auto-generate)_ | OIDC signing key content (base64-encoded PEM format, P-256 ECDSA). Used for signing access tokens and ID tokens with ES256 algorithm. If not set, an ephemeral key is generated on each server restart (not recommended for production). |
+| `VOUCH_OIDC_RSA_SIGNING_KEY` | No | _(auto-generate)_ | OIDC RSA signing key content (base64-encoded PEM format, RSA-3072). Used for signing ID tokens with RS256 algorithm per OIDC Core Section 3.1.3.7. Minimum 3072-bit key enforced. If not set, an ephemeral key is generated on each server restart. |
 
 ## AWS KMS
 
@@ -57,6 +73,7 @@ These variables configure an external OpenID Connect identity provider for enrol
 |----------|----------|---------|-------------|
 | `VOUCH_SSH_CA_KMS_KEY_ID` | No | _(none)_ | AWS KMS key ID for SSH CA signing (Ed25519). When set, overrides `VOUCH_SSH_CA_KEY` and `VOUCH_SSH_CA_KEY_PATH`. |
 | `VOUCH_OIDC_SIGNING_KMS_KEY_ID` | No | _(none)_ | AWS KMS key ID for OIDC token signing (P-256 ECDSA). When set, overrides `VOUCH_OIDC_SIGNING_KEY`. |
+| `VOUCH_OIDC_RSA_SIGNING_KMS_KEY_ID` | No | _(none)_ | AWS KMS key ID for OIDC RSA token signing (RSA-3072, `RSASSA_PKCS1_V1_5_SHA_256`). When set, overrides `VOUCH_OIDC_RSA_SIGNING_KEY`. |
 | `VOUCH_JWT_HMAC_KMS_KEY_ID` | No | _(none)_ | AWS KMS key ID for HMAC state token signing. When set, `VOUCH_JWT_SECRET` is not required. |
 
 ## DPoP

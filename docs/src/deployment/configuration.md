@@ -57,11 +57,17 @@ VOUCH_S3_CONFIG_POLL_INTERVAL=60
     "client_id": "...",
     "client_secret": "..."
   },
+  "saml": {
+    "idp_metadata_url": "https://idp.example.com/saml/metadata",
+    "sp_entity_id": "https://vouch.example.com"
+  },
   "allowed_domains": ["example.com"],
   "ssh_ca_key": "<base64-encoded PEM Ed25519 private key>",
   "ssh_ca_kms_key_id": "mrk-...",
   "oidc_signing_key": "<base64-encoded PEM EC P-256 private key>",
   "oidc_signing_kms_key_id": "mrk-...",
+  "oidc_rsa_signing_key": "<base64-encoded PEM RSA-3072 private key>",
+  "oidc_rsa_signing_kms_key_id": "mrk-...",
   "jwt_hmac_kms_key_id": "mrk-..."
 }
 ```
@@ -82,6 +88,7 @@ As an alternative to managing local key material, Vouch supports AWS KMS for sig
 |---------------------|----------|----------|
 | `VOUCH_SSH_CA_KMS_KEY_ID` | Ed25519 (`ECC_EDWARDS_CURVE_25519`) | `VOUCH_SSH_CA_KEY` / `VOUCH_SSH_CA_KEY_PATH` |
 | `VOUCH_OIDC_SIGNING_KMS_KEY_ID` | P-256 (`ECC_NIST_P256`) | `VOUCH_OIDC_SIGNING_KEY` |
+| `VOUCH_OIDC_RSA_SIGNING_KMS_KEY_ID` | RSA-3072 (`RSA_3072`) | `VOUCH_OIDC_RSA_SIGNING_KEY` |
 | `VOUCH_JWT_HMAC_KMS_KEY_ID` | HMAC-256 (`HMAC_256`) | `VOUCH_JWT_SECRET` |
 
 Multi-region keys (`mrk-` prefix) are recommended for high availability. KMS key IDs can also be set in the S3 config (`ssh_ca_kms_key_id`, `oidc_signing_kms_key_id`, `jwt_hmac_kms_key_id`).
@@ -95,7 +102,7 @@ See [Key Management](../operations/key-management.md) for generation and rotatio
 | `tls.cert`, `tls.key` | Yes | Automatic reload on change |
 | All other fields | **No** | Requires server restart |
 
-Non-hot-reloadable fields include: `jwt_secret`, `database_url`, `listen_addr`, `rp_id`, `rp_name`, `session_hours`, `cors_origins`, `allowed_domains`, `dpop.*`, OIDC settings, GitHub App settings, SSH CA key, OIDC signing key, and all KMS key IDs.
+Non-hot-reloadable fields include: `jwt_secret`, `database_url`, `listen_addr`, `rp_id`, `rp_name`, `session_hours`, `cors_origins`, `allowed_domains`, `dpop.*`, OIDC settings, SAML settings, GitHub App settings, SSH CA key, OIDC signing keys, and all KMS key IDs.
 
 Changes to non-hot-reloadable fields in S3 are silently ignored. A server restart is required to apply them.
 
