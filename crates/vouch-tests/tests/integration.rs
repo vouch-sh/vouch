@@ -2477,3 +2477,223 @@ mod encoding_verification {
         );
     }
 }
+
+mod httpsig {
+    use super::*;
+    use vouch_cli::fapi::ClientKey;
+    use vouch_cli::fapi::httpsig::ClientKeySigner;
+    use vouch_httpsig::SignatureBuilder;
+
+    /// Helper: create a user with an OAuth client that has JWKS containing
+    /// the given ClientKey's public key, and a session bound to that client.
+    async fn setup_user_with_httpsig_key(harness: &TestHarness, key: &ClientKey) -> String {
+        let user = harness.create_user("httpsig@example.com").await.unwrap();
+        let auth_id = harness.create_authenticator(&user.id).await.unwrap();
+
+        // Create OAuth client with the key's public JWK in JWKS
+        let public_jwk = key.public_jwk().unwrap();
+        let jwks = serde_json::json!({ "keys": [public_jwk] });
+
+        let (client, client_id) = vouch_server::db::create_oauth_client(
+            &harness.state.store,
+            &vouch_server::db::CreateOAuthClientParams {
+                user_id: Some(&user.id),
+                name: "Test FAPI Client",
+                description: None,
+                application_type: vouch_server::db::OAuthClientType::Native,
+                redirect_uris: &[],
+                access_scope: vouch_server::db::AccessScope::Public,
+                org_id: None,
+                resource_uris: &[],
+                token_endpoint_auth_method: Some(
+                    vouch_server::db::TokenEndpointAuthMethod::PrivateKeyJwt,
+                ),
+                jwks: Some(&jwks),
+                jwks_uri: None,
+                fapi_profile: None,
+                dpop_bound_access_tokens: Some(true),
+                grant_types: None,
+                response_types: None,
+                software_id: Some("vouch-cli"),
+                software_version: None,
+                registration_source: vouch_server::db::RegistrationSource::Dynamic,
+                registration_access_token_hash: None,
+                registration_metadata: None,
+                id_token_signed_response_alg: "ES256",
+            },
+        )
+        .await
+        .expect("create OAuth client");
+
+        // Ensure client_id is deterministic by reading it back
+        let _ = client;
+
+        harness
+            .create_session_for_client(&user.id, "httpsig@example.com", &auth_id, &client_id)
+            .await
+            .unwrap()
+    }
+
+    /// Build RFC 9421 signature headers for a GET request.
+    fn sign_get_request(url: &str, auth_header: &str, key: &ClientKey) -> Vec<(String, String)> {
+        let signer = ClientKeySigner::from_client_key(key).unwrap();
+
+        let mut req: http::Request<Vec<u8>> = http::Request::builder()
+            .method("GET")
+            .uri(url)
+            .header("authorization", auth_header)
+            .body(Vec::new())
+            .unwrap();
+
+        SignatureBuilder::new("sig1")
+            .method()
+            .authority()
+            .path()
+            .field("authorization")
+            .created_now()
+            .sign_request(&mut req, &signer)
+            .unwrap();
+
+        let mut headers: Vec<(String, String)> = Vec::new();
+        if let Some(v) = req.headers().get("signature-input") {
+            let val: &str = v.to_str().unwrap();
+            headers.push(("Signature-Input".to_string(), val.to_string()));
+        }
+        if let Some(v) = req.headers().get("signature") {
+            let val: &str = v.to_str().unwrap();
+            headers.push(("Signature".to_string(), val.to_string()));
+        }
+        headers
+    }
+
+    #[tokio::test]
+    async fn test_httpsig_verified_request_succeeds() {
+        let harness = TestHarness::new().await;
+        let key = ClientKey::generate().unwrap();
+        let token = setup_user_with_httpsig_key(&harness, &key).await;
+
+        let url = harness.url("/v1/auth/status");
+        let auth_header = format!("Bearer {token}");
+        let sig_headers = sign_get_request(&url, &auth_header, &key);
+
+        let extra_refs: Vec<(&str, &str)> = sig_headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        let response = harness
+            .http_client
+            .request(
+                "GET",
+                &url,
+                None,
+                None,
+                Some(&auth_header),
+                Some(&extra_refs),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status,
+            200,
+            "signed request should succeed: {}",
+            response.text().unwrap_or_default()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_httpsig_unsigned_request_still_succeeds() {
+        // Verify backward compatibility: requests without signatures pass through
+        let harness = TestHarness::new().await;
+        let key = ClientKey::generate().unwrap();
+        let token = setup_user_with_httpsig_key(&harness, &key).await;
+
+        let response = harness
+            .get_authenticated("/v1/auth/status", &token)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status, 200,
+            "unsigned request should still succeed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_httpsig_tampered_signature_rejected_on_v1_keys() {
+        let harness = TestHarness::new().await;
+        let key = ClientKey::generate().unwrap();
+        let token = setup_user_with_httpsig_key(&harness, &key).await;
+
+        let url = harness.url("/v1/keys");
+        let auth_header = format!("Bearer {token}");
+
+        // Sign with the correct key
+        let mut sig_headers = sign_get_request(&url, &auth_header, &key);
+
+        // Tamper with the signature value
+        for (name, value) in &mut sig_headers {
+            if name == "Signature" {
+                *value = "sig1=:dGFtcGVyZWQ=:".to_string();
+            }
+        }
+
+        let extra_refs: Vec<(&str, &str)> = sig_headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        let response = harness
+            .http_client
+            .request(
+                "GET",
+                &url,
+                None,
+                None,
+                Some(&auth_header),
+                Some(&extra_refs),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.status, 401,
+            "tampered signature should be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_httpsig_wrong_key_rejected() {
+        let harness = TestHarness::new().await;
+        let registered_key = ClientKey::generate().unwrap();
+        let wrong_key = ClientKey::generate().unwrap();
+        let token = setup_user_with_httpsig_key(&harness, &registered_key).await;
+
+        let url = harness.url("/v1/keys");
+        let auth_header = format!("Bearer {token}");
+
+        // Sign with a different key than what's registered
+        let sig_headers = sign_get_request(&url, &auth_header, &wrong_key);
+
+        let extra_refs: Vec<(&str, &str)> = sig_headers
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+
+        let response = harness
+            .http_client
+            .request(
+                "GET",
+                &url,
+                None,
+                None,
+                Some(&auth_header),
+                Some(&extra_refs),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status, 401, "wrong key should be rejected");
+    }
+}

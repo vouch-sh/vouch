@@ -220,14 +220,30 @@ pub fn test_router(state: Arc<AppState>) -> Router {
             "/enroll/webauthn/complete",
             post(handlers::enroll::browser_register_complete),
         )
-        // Key management
-        .route("/v1/keys", get(handlers::keys::list_keys))
-        .route("/v1/keys/{id}", delete(handlers::keys::delete_key))
-        // Credential issuance
-        .route(
-            "/v1/credentials/ssh",
-            post(handlers::credentials::issue_ssh_certificate),
-        )
+        // Key management (with HTTP signature verification)
+        .merge({
+            let httpsig_resolver = std::sync::Arc::new(
+                crate::infra::httpsig::OAuthClientKeyResolver::new(state.clone()),
+            );
+            Router::new()
+                .route("/v1/keys", get(handlers::keys::list_keys))
+                .route("/v1/keys/{id}", delete(handlers::keys::delete_key))
+                .route(
+                    "/v1/credentials/ssh",
+                    post(handlers::credentials::issue_ssh_certificate),
+                )
+                .route(
+                    "/v1/credentials/aws/token",
+                    get(handlers::credentials::get_aws_token),
+                )
+                .layer(axum::middleware::from_fn_with_state(
+                    httpsig_resolver,
+                    vouch_httpsig::middleware::verify_signature::<
+                        crate::infra::httpsig::OAuthClientKeyResolver,
+                    >,
+                ))
+        })
+        // Public credential endpoints (no httpsig)
         .route(
             "/v1/credentials/ssh/ca",
             get(handlers::credentials::get_ssh_ca_public_key),
@@ -235,10 +251,6 @@ pub fn test_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/credentials/ssh/krl/{serial}",
             get(handlers::credentials::check_ssh_revocation),
-        )
-        .route(
-            "/v1/credentials/aws/token",
-            get(handlers::credentials::get_aws_token),
         )
         // Org admin API (JSON, JWT Bearer auth)
         .route(
