@@ -236,12 +236,12 @@ pub fn build_jwks(state: &Arc<AppState>) -> Result<JwksResponse, ServiceError> {
     }
 
     // EC key (always present, used for access tokens)
-    keys.push(super::keys::Jwk::Ec(state.oidc_key.public_key_jwk().map_err(
-        |e| {
+    keys.push(super::keys::Jwk::Ec(
+        state.oidc_key.public_key_jwk().map_err(|e| {
             tracing::error!("Failed to get OIDC public key JWK: {}", e);
             ServiceError::Internal("Failed to export OIDC public key".to_string())
-        },
-    )?));
+        })?,
+    ));
 
     Ok(JwksResponse { keys })
 }

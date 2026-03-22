@@ -277,7 +277,6 @@ impl OidcSigningKey {
             }
         }
     }
-
 }
 
 /// Parse PEM-encoded content and return the DER bytes.
@@ -515,9 +514,11 @@ impl OidcRsaSigningKey {
             "vouch-oidc-rsa-{}",
             hex::encode(n_bytes.get(..8).unwrap_or(&n_bytes))
         );
-        let decoding_key =
-            DecodingKey::from_rsa_components(&URL_SAFE_NO_PAD.encode(&n_bytes), &URL_SAFE_NO_PAD.encode(&e_bytes))
-                .map_err(|e| anyhow::anyhow!("Failed to build RSA decoding key: {e}"))?;
+        let decoding_key = DecodingKey::from_rsa_components(
+            &URL_SAFE_NO_PAD.encode(&n_bytes),
+            &URL_SAFE_NO_PAD.encode(&e_bytes),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to build RSA decoding key: {e}"))?;
 
         tracing::info!("Generated new OIDC RSA signing key: {}", key_id);
 
@@ -570,9 +571,11 @@ impl OidcRsaSigningKey {
             "vouch-oidc-rsa-{}",
             hex::encode(n_bytes.get(..8).unwrap_or(&n_bytes))
         );
-        let decoding_key =
-            DecodingKey::from_rsa_components(&URL_SAFE_NO_PAD.encode(&n_bytes), &URL_SAFE_NO_PAD.encode(&e_bytes))
-                .map_err(|e| anyhow::anyhow!("Failed to build RSA decoding key from PEM: {e}"))?;
+        let decoding_key = DecodingKey::from_rsa_components(
+            &URL_SAFE_NO_PAD.encode(&n_bytes),
+            &URL_SAFE_NO_PAD.encode(&e_bytes),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to build RSA decoding key from PEM: {e}"))?;
 
         tracing::info!("Loaded OIDC RSA signing key from PEM: {}", key_id);
 
@@ -591,14 +594,15 @@ impl OidcRsaSigningKey {
     pub async fn from_kms(kms_client: aws_sdk_kms::Client, key_id: String) -> Result<Self> {
         let signer = KmsSignerRsa3072::new(kms_client, key_id).await?;
 
-        let decoding_key =
-            DecodingKey::from_rsa_components(signer.n_b64(), signer.e_b64()).map_err(|e| {
+        let decoding_key = DecodingKey::from_rsa_components(signer.n_b64(), signer.e_b64())
+            .map_err(|e| {
                 anyhow::anyhow!("Failed to build RSA decoding key from KMS components: {e}")
             })?;
 
         // Derive key ID from the modulus prefix (unique per key), not the SPKI
         // header bytes (identical for all RSA-3072 keys).
-        let n_prefix = URL_SAFE_NO_PAD.decode(signer.n_b64())
+        let n_prefix = URL_SAFE_NO_PAD
+            .decode(signer.n_b64())
             .map_err(|e| anyhow::anyhow!("Failed to decode KMS RSA modulus: {e}"))?;
         let kid = format!(
             "vouch-oidc-rsa-kms-{}",
@@ -753,7 +757,12 @@ fn sign_jwt_rsa_local(
     let mut sig_bytes = vec![0u8; key_pair.public_modulus_len()];
     let rng = SystemRandom::new();
     key_pair
-        .sign(&RSA_PKCS1_SHA256, &rng, signing_input.as_bytes(), &mut sig_bytes)
+        .sign(
+            &RSA_PKCS1_SHA256,
+            &rng,
+            signing_input.as_bytes(),
+            &mut sig_bytes,
+        )
         .map_err(|e| anyhow::anyhow!("RSA-3072 signing failed: {e}"))?;
 
     let sig_b64 = URL_SAFE_NO_PAD.encode(&sig_bytes);
@@ -1024,7 +1033,9 @@ mod tests {
         let parts: Vec<&str> = token.split('.').collect();
         assert_eq!(parts.len(), 3, "JWT must have 3 parts");
 
-        let header_json = URL_SAFE_NO_PAD.decode(parts[0]).expect("header base64 failed");
+        let header_json = URL_SAFE_NO_PAD
+            .decode(parts[0])
+            .expect("header base64 failed");
         let header: serde_json::Value =
             serde_json::from_slice(&header_json).expect("header JSON failed");
 

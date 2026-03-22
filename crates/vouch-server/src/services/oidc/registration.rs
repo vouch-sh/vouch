@@ -407,7 +407,11 @@ pub async fn register_client(
 
     // When the client didn't specify, use RS256 if available, otherwise ES256.
     let id_token_alg = explicit_alg.unwrap_or_else(|| {
-        if state.oidc_rsa_key.is_some() { "RS256" } else { "ES256" }
+        if state.oidc_rsa_key.is_some() {
+            "RS256"
+        } else {
+            "ES256"
+        }
     });
 
     // 13. Infer application type

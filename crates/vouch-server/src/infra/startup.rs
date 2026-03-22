@@ -17,7 +17,10 @@ use crate::{
     crypto::{ssh_ca, tpm_decrypt},
     db::{Pool, dsql::DsqlEndpoint, migrations::run_dsql_migrations, pool::redact_database_url},
     infra::{cleanup, s3_config, s3_config::DocumentKeyMaterial},
-    services::{integrations::github::GitHubApp, oidc::{OidcRsaSigningKey, OidcSigningKey}},
+    services::{
+        integrations::github::GitHubApp,
+        oidc::{OidcRsaSigningKey, OidcSigningKey},
+    },
 };
 
 /// All components needed to run the server after initialization.

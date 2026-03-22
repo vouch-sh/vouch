@@ -348,7 +348,10 @@ impl std::fmt::Debug for S3Config {
             .field("oidc_signing_key", &"[REDACTED]")
             .field("oidc_signing_kms_key_id", &self.oidc_signing_kms_key_id)
             .field("oidc_rsa_signing_key", &"[REDACTED]")
-            .field("oidc_rsa_signing_kms_key_id", &self.oidc_rsa_signing_kms_key_id)
+            .field(
+                "oidc_rsa_signing_kms_key_id",
+                &self.oidc_rsa_signing_kms_key_id,
+            )
             .field("jwt_hmac_kms_key_id", &self.jwt_hmac_kms_key_id)
             .field("cleanup_interval_minutes", &self.cleanup_interval_minutes)
             .field(

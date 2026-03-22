@@ -304,14 +304,14 @@ fn parse_rsa_public_key_der(der: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
     // We do not import `der` crate for this — the structure is simple enough
     // to parse directly, matching the approach used for P-256 coordinate extraction.
 
-    let (seq_content, _rest) = read_der_tlv(der, 0x30)
-        .context("RSAPublicKey outer SEQUENCE missing or malformed")?;
+    let (seq_content, _rest) =
+        read_der_tlv(der, 0x30).context("RSAPublicKey outer SEQUENCE missing or malformed")?;
 
-    let (n_bytes, after_n) = read_der_integer(seq_content)
-        .context("RSAPublicKey modulus (n) missing or malformed")?;
+    let (n_bytes, after_n) =
+        read_der_integer(seq_content).context("RSAPublicKey modulus (n) missing or malformed")?;
 
-    let (e_bytes, _after_e) = read_der_integer(after_n)
-        .context("RSAPublicKey exponent (e) missing or malformed")?;
+    let (e_bytes, _after_e) =
+        read_der_integer(after_n).context("RSAPublicKey exponent (e) missing or malformed")?;
 
     // Strip DER sign-padding: INTEGERs may have a leading 0x00 when the high
     // bit of the magnitude is set (to indicate a positive value in two's complement).
@@ -332,11 +332,16 @@ fn parse_rsa_public_key_der(der: &[u8]) -> Result<(Vec<u8>, Vec<u8>)> {
 ///
 /// Returns `(value_bytes, remaining_input)`.
 fn read_der_tlv(input: &[u8], expected_tag: u8) -> Result<(&[u8], &[u8])> {
-    let tag = input.first().copied().ok_or_else(|| anyhow::anyhow!("DER input is empty"))?;
+    let tag = input
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("DER input is empty"))?;
     if tag != expected_tag {
         bail!("Expected DER tag 0x{expected_tag:02x}, got 0x{tag:02x}");
     }
-    let input = input.get(1..).ok_or_else(|| anyhow::anyhow!("DER input truncated after tag"))?;
+    let input = input
+        .get(1..)
+        .ok_or_else(|| anyhow::anyhow!("DER input truncated after tag"))?;
     let (length, after_length) = read_der_length(input)?;
     let value = after_length
         .get(..length)
@@ -351,7 +356,10 @@ fn read_der_tlv(input: &[u8], expected_tag: u8) -> Result<(&[u8], &[u8])> {
 ///
 /// Returns `(length, remaining_input)`. Supports lengths up to `usize::MAX`.
 fn read_der_length(input: &[u8]) -> Result<(usize, &[u8])> {
-    let first = input.first().copied().ok_or_else(|| anyhow::anyhow!("DER length missing"))?;
+    let first = input
+        .first()
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("DER length missing"))?;
     if first < 0x80 {
         // Short form: single-byte length
         return Ok((usize::from(first), input.get(1..).unwrap_or_default()));
@@ -744,8 +752,9 @@ mod tests {
 
         // Get SPKI DER (X.509 SubjectPublicKeyInfo)
         let pub_key = key_pair.public_key();
-        let spki_der: aws_lc_rs::encoding::PublicKeyX509Der<'static> =
-            pub_key.as_der().expect("Failed to encode public key as SPKI DER");
+        let spki_der: aws_lc_rs::encoding::PublicKeyX509Der<'static> = pub_key
+            .as_der()
+            .expect("Failed to encode public key as SPKI DER");
 
         let (n, e) = parse_spki_rsa(spki_der.as_ref()).expect("parse_spki_rsa should succeed");
 
