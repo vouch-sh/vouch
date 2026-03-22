@@ -82,6 +82,8 @@ pub fn test_config() -> ServerConfig {
         ssh_ca_kms_key_id: None,
         oidc_signing_key: None,
         oidc_signing_kms_key_id: None,
+        oidc_rsa_signing_key: None,
+        oidc_rsa_signing_kms_key_id: None,
         jwt_hmac_kms_key_id: None,
         dpop_max_age_seconds: 300,
         cleanup_interval_minutes: 0, // Disabled for tests
@@ -140,6 +142,7 @@ pub async fn test_app_state() -> Arc<AppState> {
         webauthn,
         ssh_ca: None,
         oidc_key,
+        oidc_rsa_key: None,
         state_signer: crate::crypto::jwt::StateTokenSigner::local(
             b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
         ),
@@ -813,6 +816,7 @@ pub async fn create_test_oauth_client(store: &DocumentStore, user_id: &str) -> T
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
+            id_token_signed_response_alg: "RS256",
         },
     )
     .await
@@ -870,6 +874,7 @@ pub async fn create_test_oauth_client_with_options(
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
+            id_token_signed_response_alg: "RS256",
         },
     )
     .await
@@ -920,6 +925,7 @@ pub async fn create_test_public_oauth_client(
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
+            id_token_signed_response_alg: "RS256",
         },
     )
     .await

@@ -175,6 +175,16 @@ pub struct Args {
     #[arg(long, env = "VOUCH_OIDC_SIGNING_KMS_KEY_ID")]
     pub oidc_signing_kms_key_id: Option<String>,
 
+    /// OIDC RSA signing key (PEM-encoded RSA-3072 private key, base64).
+    /// When set, enables RS256 ID token signing.
+    #[arg(long, env = "VOUCH_OIDC_RSA_SIGNING_KEY")]
+    pub oidc_rsa_signing_key: Option<String>,
+
+    /// AWS KMS key ID for OIDC RSA signing (RSA_3072, SIGN_VERIFY).
+    /// When set, KMS signing is used instead of local RSA signing key.
+    #[arg(long, env = "VOUCH_OIDC_RSA_SIGNING_KMS_KEY_ID")]
+    pub oidc_rsa_signing_kms_key_id: Option<String>,
+
     /// AWS KMS key ID for HMAC state token signing.
     /// When set, KMS HMAC-SHA256 is used instead of local VOUCH_JWT_SECRET.
     #[arg(long, env = "VOUCH_JWT_HMAC_KMS_KEY_ID")]
@@ -385,6 +395,12 @@ pub struct ServerConfig {
     /// AWS KMS key ID for OIDC signing (multi-region `mrk-` prefix).
     /// When set, KMS signing is used and `oidc_signing_key` is ignored.
     pub oidc_signing_kms_key_id: Option<String>,
+    /// OIDC RSA signing key (PEM-encoded RSA-3072 private key, base64).
+    /// When set, enables RS256 ID token signing.
+    pub oidc_rsa_signing_key: Option<SecretString>,
+    /// AWS KMS key ID for OIDC RSA signing (RSA_3072, SIGN_VERIFY).
+    /// When set, KMS signing is used instead of local RSA signing key.
+    pub oidc_rsa_signing_kms_key_id: Option<String>,
     /// AWS KMS key ID for HMAC state token signing.
     /// When set, KMS HMAC-SHA256 is used instead of local `jwt_secret`.
     pub jwt_hmac_kms_key_id: Option<String>,
@@ -533,6 +549,8 @@ impl ServerConfig {
             ssh_ca_kms_key_id: args.ssh_ca_kms_key_id,
             oidc_signing_key: args.oidc_signing_key.map(SecretString::from),
             oidc_signing_kms_key_id: args.oidc_signing_kms_key_id,
+            oidc_rsa_signing_key: args.oidc_rsa_signing_key.map(SecretString::from),
+            oidc_rsa_signing_kms_key_id: args.oidc_rsa_signing_kms_key_id,
             jwt_hmac_kms_key_id: args.jwt_hmac_kms_key_id,
             dpop_max_age_seconds: args.dpop_max_age,
             cleanup_interval_minutes: args.cleanup_interval,

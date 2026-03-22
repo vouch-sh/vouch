@@ -409,6 +409,7 @@ async fn test_oauth_client_crud() {
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
+            id_token_signed_response_alg: "RS256",
         },
     )
     .await
@@ -516,6 +517,7 @@ async fn test_oauth_client_types() {
                 registration_source: RegistrationSource::Manual,
                 registration_access_token_hash: None,
                 registration_metadata: None,
+                id_token_signed_response_alg: "RS256",
             },
         )
         .await
@@ -568,6 +570,7 @@ async fn test_oauth_client_list_for_user() {
                 registration_source: RegistrationSource::Manual,
                 registration_access_token_hash: None,
                 registration_metadata: None,
+                id_token_signed_response_alg: "RS256",
             },
         )
         .await
@@ -598,6 +601,7 @@ async fn test_oauth_client_list_for_user() {
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
+            id_token_signed_response_alg: "RS256",
         },
     )
     .await
@@ -647,6 +651,7 @@ async fn test_oauth_client_secret_management() {
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
+            id_token_signed_response_alg: "RS256",
         },
     )
     .await
@@ -718,6 +723,7 @@ async fn test_oauth_usage_recording() {
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
+            id_token_signed_response_alg: "RS256",
         },
     )
     .await
@@ -1314,6 +1320,7 @@ async fn test_oauth_client_cascade_delete() {
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
+            id_token_signed_response_alg: "RS256",
         },
     )
     .await

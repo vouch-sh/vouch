@@ -108,6 +108,8 @@ pub struct RegistrationRequest {
     pub software_statement: Option<String>,
     /// FAPI 2.0: Whether access tokens must be DPoP-bound.
     pub dpop_bound_access_tokens: Option<bool>,
+    /// OIDC Core Section 3.1.3.7: ID token signing algorithm.
+    pub id_token_signed_response_alg: Option<String>,
 }
 
 /// RFC 7591 Section 3.2.1: Client Information Response.
@@ -378,6 +380,36 @@ pub async fn register_client(
         FapiProfile::None
     };
 
+    // OIDC Core Section 3.1.3.7: Default is RS256, but fall back to ES256 if no RSA key.
+    let explicit_alg = request.id_token_signed_response_alg.as_deref();
+
+    // Validate against supported algorithms (only when client makes an explicit choice)
+    if let Some(alg) = explicit_alg {
+        if alg != "RS256" && alg != "ES256" {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!(
+                    "Unsupported id_token_signed_response_alg: '{alg}'. \
+                     Supported: RS256, ES256"
+                ),
+            ));
+        }
+
+        // If RS256 is explicitly requested but no RSA key is configured, reject.
+        // An unspecified algorithm falls back to ES256 automatically (see below).
+        if alg == "RS256" && state.oidc_rsa_key.is_none() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                "RS256 is not available (no RSA signing key configured)",
+            ));
+        }
+    }
+
+    // When the client didn't specify, use RS256 if available, otherwise ES256.
+    let id_token_alg = explicit_alg.unwrap_or_else(|| {
+        if state.oidc_rsa_key.is_some() { "RS256" } else { "ES256" }
+    });
+
     // 13. Infer application type
     let has_client_credentials_only = grant_types.len() == 1
         && grant_types
@@ -439,6 +471,7 @@ pub async fn register_client(
             registration_source: RegistrationSource::Dynamic,
             registration_access_token_hash: Some(&reg_token_hash),
             registration_metadata: Some(&registration_metadata),
+            id_token_signed_response_alg: id_token_alg,
         },
     )
     .await
@@ -533,7 +566,7 @@ pub async fn register_client(
         software_id: request.software_id,
         software_version: request.software_version,
         dpop_bound_access_tokens: if dpop_bound { Some(true) } else { None },
-        id_token_signed_response_alg: "ES256".to_string(),
+        id_token_signed_response_alg: id_token_alg.to_string(),
     })
 }
 
@@ -696,7 +729,7 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
         } else {
             None
         },
-        id_token_signed_response_alg: "ES256".to_string(),
+        id_token_signed_response_alg: client.id_token_signed_response_alg.clone(),
     }
 }
 
@@ -1274,6 +1307,7 @@ mod tests {
             software_version: None,
             software_statement: None,
             dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1313,6 +1347,7 @@ mod tests {
             software_version: None,
             software_statement: None,
             dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1350,6 +1385,7 @@ mod tests {
             software_version: None,
             software_statement: None,
             dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1385,6 +1421,7 @@ mod tests {
             software_version: None,
             software_statement: None,
             dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1417,6 +1454,7 @@ mod tests {
             software_version: None,
             software_statement: None,
             dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
         };
 
         let metadata = build_registration_metadata(&request);

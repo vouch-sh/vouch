@@ -76,8 +76,10 @@ pub struct AppState {
     pub webauthn: webauthn_rs::Webauthn,
     /// SSH Certificate Authority (optional, None if disabled).
     pub ssh_ca: Option<crypto::ssh_ca::SshCa>,
-    /// OIDC signing key for ES256 JWT signing.
+    /// ES256 OIDC signing key (always present, used for access tokens).
     pub oidc_key: services::oidc::OidcSigningKey,
+    /// OIDC RSA signing key for RS256 ID token signing (optional).
+    pub oidc_rsa_key: Option<services::oidc::OidcRsaSigningKey>,
     /// State token signer (Local HS256 or KMS HMAC-SHA256).
     pub state_signer: crypto::jwt::StateTokenSigner,
     /// GitHub App for credential issuance (optional, None if not configured).
@@ -203,6 +205,8 @@ mod redirect_tests {
             ssh_ca_kms_key_id: None,
             oidc_signing_key: None,
             oidc_signing_kms_key_id: None,
+            oidc_rsa_signing_key: None,
+            oidc_rsa_signing_kms_key_id: None,
             jwt_hmac_kms_key_id: None,
             dpop_max_age_seconds: 300,
             cleanup_interval_minutes: 0,
@@ -253,6 +257,7 @@ mod redirect_tests {
             webauthn,
             ssh_ca: None,
             oidc_key: OidcSigningKey::generate().unwrap(),
+            oidc_rsa_key: None,
             state_signer: crypto::jwt::StateTokenSigner::local(
                 b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
             ),

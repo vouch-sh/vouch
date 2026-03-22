@@ -17,7 +17,7 @@ use crate::{
     crypto::{ssh_ca, tpm_decrypt},
     db::{Pool, dsql::DsqlEndpoint, migrations::run_dsql_migrations, pool::redact_database_url},
     infra::{cleanup, s3_config, s3_config::DocumentKeyMaterial},
-    services::{integrations::github::GitHubApp, oidc::OidcSigningKey},
+    services::{integrations::github::GitHubApp, oidc::{OidcRsaSigningKey, OidcSigningKey}},
 };
 
 /// All components needed to run the server after initialization.
@@ -377,6 +377,7 @@ async fn build_app_state(
     // was provided (e.g., non-S3 deployments that still use KMS signing).
     let kms_needs = config.ssh_ca_kms_key_id.is_some()
         || config.oidc_signing_kms_key_id.is_some()
+        || config.oidc_rsa_signing_kms_key_id.is_some()
         || config.jwt_hmac_kms_key_id.is_some();
     let kms_client = if kms_needs && kms_client.is_none() {
         tracing::info!("Creating KMS client for signing key access");
@@ -457,6 +458,35 @@ async fn build_app_state(
             );
         }
         key
+    };
+
+    // Initialize OIDC RSA signing key (RS256 for ID tokens).
+    // Priority: KMS key ID > PEM content > generate ephemeral (with warning).
+    // The RSA key is always initialized so RS256 is available for OIDC conformance.
+    let oidc_rsa_key = if let Some(key_id) = &config.oidc_rsa_signing_kms_key_id {
+        let client = kms_client
+            .as_ref()
+            .context("KMS client required for OIDC RSA KMS signing")?
+            .clone();
+        let key = OidcRsaSigningKey::from_kms(client, key_id.clone())
+            .await
+            .context("Failed to initialize KMS OIDC RSA signing key")?;
+        tracing::info!("OIDC RSA signing key initialized (KMS): {}", key.key_id());
+        Some(key)
+    } else {
+        // Clone the PEM content (or None) before crossing the spawn_blocking boundary.
+        // RSA-3072 generation takes ~200ms; offload to avoid blocking the tokio runtime.
+        let pem_owned = config
+            .oidc_rsa_signing_key
+            .as_ref()
+            .map(|s| s.expose_secret().to_string());
+        let key = tokio::task::spawn_blocking(move || {
+            OidcRsaSigningKey::load_or_generate(pem_owned.as_deref())
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("RSA key generation task panicked: {e}"))??;
+        tracing::info!("OIDC RSA signing key initialized: {}", key.key_id());
+        Some(key)
     };
 
     // Initialize state token signer (Local HS256 or KMS HMAC-SHA256)
@@ -616,6 +646,7 @@ async fn build_app_state(
         webauthn,
         ssh_ca,
         oidc_key,
+        oidc_rsa_key,
         state_signer,
         github_app,
         http_client,

@@ -440,6 +440,13 @@ pub async fn exchange_authorization_code(
     let access_token = session_result.token;
     let expires_in = session_result.expires_in;
 
+    // Extract the per-client ID token signing algorithm.
+    // Public clients (no credentials) fall back to "RS256" per OIDC Core default.
+    let id_token_alg = authenticated_client
+        .as_ref()
+        .map(|c| c.client.id_token_signed_response_alg.as_str())
+        .unwrap_or("RS256");
+
     // Generate ID token (with at_hash computed from the access token)
     let id_token = generate_id_token(
         state,
@@ -456,6 +463,7 @@ pub async fn exchange_authorization_code(
             amr: Some(AuthMethod::all_fido2().to_vec()),
             acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
             access_token: Some(access_token.expose_secret()),
+            id_token_alg,
         },
     )
     .await?;
@@ -638,6 +646,8 @@ struct IdTokenParams<'a> {
     acr: Option<String>,
     /// Access token string, used to compute `at_hash` (OIDC Core Section 3.1.3.6).
     access_token: Option<&'a str>,
+    /// OIDC Core: Algorithm for signing this ID token.
+    id_token_alg: &'a str,
 }
 
 /// Generate an OIDC ID token.
@@ -682,6 +692,21 @@ async fn generate_id_token(
         at_hash: params.access_token.and_then(compute_at_hash),
     };
 
+    // Use RS256 if requested and an RSA key is available; otherwise fall back to ES256.
+    // The registration endpoint already rejects RS256 when no RSA key is configured,
+    // but manually-created clients and older records carry the RS256 default and must
+    // not cause a 500 when no RSA key is provisioned.
+    if params.id_token_alg == "RS256" {
+        if let Some(rsa_key) = state.oidc_rsa_key.as_ref() {
+            return rsa_key
+                .sign_jwt(&claims)
+                .await
+                .map_err(|e| ServiceError::Internal(format!("Failed to generate ID token: {e}")));
+        }
+        tracing::warn!(
+            "RS256 requested but no RSA key configured; falling back to ES256 for ID token"
+        );
+    }
     state
         .oidc_key
         .sign_jwt(&claims)
