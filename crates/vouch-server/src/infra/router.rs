@@ -19,7 +19,7 @@ use tower_http::timeout::TimeoutLayer;
 
 use crate::{
     AppState, config, handlers,
-    infra::{metrics, rate_limit, request_id, security_headers, static_assets},
+    infra::{httpsig, metrics, rate_limit, request_id, security_headers, static_assets},
 };
 
 /// Body limit for credential endpoints (SSH public key is ~500 bytes).
@@ -80,7 +80,8 @@ pub fn print_startup_banner() {
 ///
 /// Returns an error if rate limiter configuration fails.
 pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow::Result<Router> {
-    let api_routes = build_api_routes(config)?;
+    let httpsig_resolver = Arc::new(httpsig::OAuthClientKeyResolver::new(Arc::clone(&state)));
+    let api_routes = build_api_routes(config, Arc::clone(&httpsig_resolver))?;
     let ui_routes = build_ui_routes(config)?;
 
     // Install Prometheus metrics recorder and optionally expose /metrics endpoint.
@@ -135,9 +136,10 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
 /// These endpoints are brute-force targets so rate limiting is critical.
 fn build_rate_limited_routes(
     config: &config::ServerConfig,
+    httpsig_resolver: Arc<httpsig::OAuthClientKeyResolver>,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
-    Ok(Router::new()
-        // Key registration routes (FAPI 2.0)
+    // Key registration routes use HTTP signature verification
+    let key_routes = Router::new()
         .route(
             "/v1/keys/register/start",
             post(handlers::keys::register_start),
@@ -146,6 +148,13 @@ fn build_rate_limited_routes(
             "/v1/keys/register/complete",
             post(handlers::keys::register_complete),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            httpsig_resolver,
+            vouch_httpsig::middleware::verify_signature::<httpsig::OAuthClientKeyResolver>,
+        ));
+
+    Ok(Router::new()
+        .merge(key_routes)
         .route("/oauth/token", post(handlers::oidc::token))
         .route("/oauth/par", post(handlers::oidc::par))
         .route("/oauth/register", post(handlers::oidc::register))
@@ -164,8 +173,14 @@ fn build_rate_limited_routes(
 }
 
 /// Rate-limited credential issuance routes.
-fn build_credential_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<AppState>>> {
-    Ok(Router::new()
+fn build_credential_routes(
+    config: &config::ServerConfig,
+    httpsig_resolver: Arc<httpsig::OAuthClientKeyResolver>,
+) -> anyhow::Result<Router<Arc<AppState>>> {
+    // Credential routes with HTTP signature verification.
+    // Layer order (outside→inside): rate_limit → body_limit → httpsig → handler
+    // Rate limiting runs first to reject DoS before signature verification.
+    let credential_routes = Router::new()
         .route(
             "/v1/credentials/ssh",
             post(handlers::credentials::issue_ssh_certificate),
@@ -182,6 +197,12 @@ fn build_credential_routes(config: &config::ServerConfig) -> anyhow::Result<Rout
             "/v1/credentials/github/token",
             post(handlers::credentials::get_github_token),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            httpsig_resolver,
+            vouch_httpsig::middleware::verify_signature::<httpsig::OAuthClientKeyResolver>,
+        ));
+
+    Ok(credential_routes
         .layer(rate_limit::build_credential_rate_limiter(
             &config.trusted_proxies,
         )?)
@@ -248,7 +269,10 @@ fn build_general_limited_routes(
 }
 
 /// Build all API routes with CORS and cache headers.
-fn build_api_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<AppState>>> {
+fn build_api_routes(
+    config: &config::ServerConfig,
+    httpsig_resolver: Arc<httpsig::OAuthClientKeyResolver>,
+) -> anyhow::Result<Router<Arc<AppState>>> {
     Ok(Router::new()
         // OIDC Provider endpoints
         .route(
@@ -270,10 +294,16 @@ fn build_api_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Arc<
         // Auth endpoints
         .route("/v1/auth/status", get(handlers::auth::status))
         // Merge rate-limited route groups
-        .merge(build_rate_limited_routes(config)?)
-        .merge(build_credential_routes(config)?)
+        .merge(build_rate_limited_routes(
+            config,
+            Arc::clone(&httpsig_resolver),
+        )?)
+        .merge(build_credential_routes(
+            config,
+            Arc::clone(&httpsig_resolver),
+        )?)
         .merge(build_general_limited_routes(config)?)
-        .merge(build_api_management_routes(config)?)
+        .merge(build_api_management_routes(config, httpsig_resolver)?)
         .merge(build_public_read_routes(config)?)
         .layer(security_headers::build_api_cors_layer())
         .layer(SetResponseHeaderLayer::if_not_present(
@@ -325,17 +355,26 @@ fn build_public_read_routes(
 /// application CRUD endpoints that need protection from abuse.
 fn build_api_management_routes(
     config: &config::ServerConfig,
+    httpsig_resolver: Arc<httpsig::OAuthClientKeyResolver>,
 ) -> anyhow::Result<Router<Arc<AppState>>> {
-    Ok(Router::new()
-        // Token operations
-        .route("/oauth/revoke", post(handlers::oidc::revoke))
-        .route("/oauth/introspect", post(handlers::oidc::introspect))
-        // Key management (authenticated API)
+    // Key management routes use HTTP signature verification
+    let key_mgmt_routes = Router::new()
         .route("/v1/keys", get(handlers::keys::list_keys))
         .route(
             "/v1/keys/{id}",
             patch(handlers::keys::rename_key).delete(handlers::keys::delete_key),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            httpsig_resolver,
+            vouch_httpsig::middleware::verify_signature::<httpsig::OAuthClientKeyResolver>,
+        ));
+
+    Ok(Router::new()
+        // Token operations
+        .route("/oauth/revoke", post(handlers::oidc::revoke))
+        .route("/oauth/introspect", post(handlers::oidc::introspect))
+        // Key management (authenticated API, with HTTP signature verification)
+        .merge(key_mgmt_routes)
         // GitHub webhook API
         .route(
             "/api/webhooks/github",

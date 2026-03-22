@@ -8,10 +8,23 @@
 use anyhow::{Context, Result};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Serialize, de::DeserializeOwned};
+use vouch_cli::fapi::httpsig::ClientKeySigner;
 use vouch_cli::fapi::{ClientKey, DpopProofBuilder};
 use vouch_cli::http::{
     HttpClient, HttpResponse, ReqwestClient, format_http_error, parse_www_authenticate,
 };
+
+/// Parameters for building RFC 9421 HTTP signature headers.
+struct SignRequestParams<'a> {
+    method: &'a str,
+    url: &'a str,
+    auth_header: &'a str,
+    dpop_proof: Option<&'a str>,
+    content_type: Option<&'a str>,
+    body: Option<&'a [u8]>,
+    nonce: Option<&'a str>,
+    key: &'a ClientKey,
+}
 
 /// HTTP client wrapper for vouch server API.
 ///
@@ -32,6 +45,10 @@ pub(crate) struct VouchClient<H: HttpClient = ReqwestClient> {
     /// FAPI 2.0 client key for DPoP proof generation on resource requests.
     /// `None` when FAPI infrastructure is not available.
     fapi_key: Option<ClientKey>,
+    /// Server-issued nonce for RFC 9421 HTTP signature replay protection.
+    /// Updated from the `Signature-Nonce` response header after each request.
+    /// Uses `Mutex` for interior mutability (updated through `&self`).
+    sig_nonce: std::sync::Mutex<Option<String>>,
 }
 
 impl VouchClient<ReqwestClient> {
@@ -62,6 +79,7 @@ impl VouchClient<ReqwestClient> {
             base_url: base_url.trim_end_matches('/').to_string(),
             token: Some(token),
             fapi_key: None,
+            sig_nonce: std::sync::Mutex::new(None),
         };
         client.fapi_key = vouch_cli::fapi::key_store::load_client_key();
         Ok(client)
@@ -78,6 +96,7 @@ impl VouchClient<ReqwestClient> {
             base_url: base_url.trim_end_matches('/').to_string(),
             token: None,
             fapi_key: None,
+            sig_nonce: std::sync::Mutex::new(None),
         })
     }
 
@@ -110,6 +129,7 @@ impl<H: HttpClient> VouchClient<H> {
             base_url: base_url.trim_end_matches('/').to_string(),
             token: None,
             fapi_key: None,
+            sig_nonce: std::sync::Mutex::new(None),
         }
     }
 
@@ -188,6 +208,124 @@ impl<H: HttpClient> VouchClient<H> {
         format!("{}{}", self.base_url, path)
     }
 
+    /// Build RFC 9421 HTTP signature headers for a request.
+    ///
+    /// Signs the request using `ecdsa-p256-sha256` (RFC 9421 Section 3.3.4)
+    /// covering `@method`, `@authority`, `@path`, `@query`, `authorization`,
+    /// and `dpop` (when present). When a body is present, also covers
+    /// `content-type` and `content-digest`.
+    ///
+    /// Returns the extra headers to add (Signature, Signature-Input, and
+    /// optionally Content-Digest). Returns an empty vec if signing fails
+    /// (non-fatal, similar to DPoP fallback).
+    fn sign_request_headers(params: &SignRequestParams<'_>) -> Vec<(String, String)> {
+        let signer = match ClientKeySigner::from_client_key(params.key) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("HTTP signature signer creation failed: {e}");
+                eprintln!("Warning: HTTP signature creation failed ({e}).");
+                return Vec::new();
+            }
+        };
+
+        // Build a temporary http::Request to sign
+        let mut builder = http::Request::builder()
+            .method(params.method)
+            .uri(params.url)
+            .header("authorization", params.auth_header);
+
+        if let Some(proof) = params.dpop_proof {
+            builder = builder.header("dpop", proof);
+        }
+
+        if let Some(ct) = params.content_type {
+            builder = builder.header("content-type", ct);
+        }
+
+        let body_bytes = params.body.unwrap_or_default();
+        let mut req = match builder.body(body_bytes.to_vec()) {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!("HTTP signature request build failed: {e}");
+                eprintln!("Warning: HTTP signature creation failed ({e}).");
+                return Vec::new();
+            }
+        };
+
+        // Add Content-Digest for requests with a body (RFC 9530)
+        if params.body.is_some()
+            && let Err(e) = vouch_httpsig::digest::set_content_digest(
+                req.headers_mut(),
+                body_bytes,
+                vouch_httpsig::DigestAlgorithm::Sha256,
+            )
+        {
+            tracing::warn!("Content-Digest computation failed: {e}");
+            eprintln!("Warning: HTTP signature creation failed ({e}).");
+            return Vec::new();
+        }
+
+        // Build the signature covering relevant components.
+        // Includes @query to protect query parameters on GET requests
+        // (e.g., /v1/credentials/aws/token?role_arn=...).
+        let mut sig_builder = vouch_httpsig::SignatureBuilder::new("sig1")
+            .method()
+            .authority()
+            .path()
+            .query()
+            .field("authorization")
+            .created_now();
+
+        // Include DPoP proof in signed components to cryptographically
+        // link the HTTP signature and DPoP proof.
+        if params.dpop_proof.is_some() {
+            sig_builder = sig_builder.field("dpop");
+        }
+
+        if params.body.is_some() {
+            sig_builder = sig_builder.field("content-type").field("content-digest");
+        }
+
+        // Include server-issued nonce for replay protection
+        if let Some(n) = params.nonce {
+            sig_builder = sig_builder.nonce(n);
+        }
+
+        if let Err(e) = sig_builder.sign_request(&mut req, &signer) {
+            tracing::warn!("HTTP message signing failed: {e}");
+            eprintln!("Warning: HTTP signature creation failed ({e}).");
+            return Vec::new();
+        }
+
+        // Extract the generated headers
+        let mut headers = Vec::new();
+
+        if let Some(v) = req.headers().get("signature-input")
+            && let Ok(s) = v.to_str()
+        {
+            headers.push(("Signature-Input".to_string(), s.to_string()));
+        }
+        if let Some(v) = req.headers().get("signature")
+            && let Ok(s) = v.to_str()
+        {
+            headers.push(("Signature".to_string(), s.to_string()));
+        }
+        if let Some(v) = req.headers().get("content-digest")
+            && let Ok(s) = v.to_str()
+        {
+            headers.push(("Content-Digest".to_string(), s.to_string()));
+        }
+
+        if !headers.is_empty() {
+            tracing::debug!(
+                "Signed request with HTTP message signature (kid={})",
+                params.key.kid()
+            );
+        }
+
+        headers
+    }
+
     /// Send an HTTP request with automatic retry on transient errors.
     ///
     /// Retries up to [`MAX_RETRIES`] times on 429 (using `Retry-After`)
@@ -209,17 +347,40 @@ impl<H: HttpClient> VouchClient<H> {
             let response = match auth {
                 Auth::Authenticated => {
                     let (hdr, dpop_proof) = self.build_auth(method, &url)?;
-                    let extra: Option<Vec<(&str, &str)>> =
-                        dpop_proof.as_deref().map(|p| vec![("DPoP", p)]);
-                    self.http
-                        .request(
+
+                    // Collect all extra headers (DPoP proof + HTTP signature)
+                    let mut extra_headers: Vec<(String, String)> = Vec::new();
+                    if let Some(ref proof) = dpop_proof {
+                        extra_headers.push(("DPoP".to_string(), proof.clone()));
+                    }
+
+                    // Sign with RFC 9421 HTTP message signatures when FAPI key is present
+                    if let Some(ref key) = self.fapi_key {
+                        let nonce = self.sig_nonce.lock().ok().and_then(|g| g.clone());
+                        extra_headers.extend(Self::sign_request_headers(&SignRequestParams {
                             method,
-                            &url,
-                            body,
+                            url: &url,
+                            auth_header: &hdr,
+                            dpop_proof: dpop_proof.as_deref(),
                             content_type,
-                            Some(&hdr),
-                            extra.as_deref(),
-                        )
+                            body,
+                            nonce: nonce.as_deref(),
+                            key,
+                        }));
+                    }
+
+                    let extra_refs: Vec<(&str, &str)> = extra_headers
+                        .iter()
+                        .map(|(k, v)| (k.as_str(), v.as_str()))
+                        .collect();
+                    let extra_slice = if extra_refs.is_empty() {
+                        None
+                    } else {
+                        Some(extra_refs.as_slice())
+                    };
+
+                    self.http
+                        .request(method, &url, body, content_type, Some(&hdr), extra_slice)
                         .await
                 }
                 Auth::None => {
@@ -229,6 +390,13 @@ impl<H: HttpClient> VouchClient<H> {
                 }
             }
             .with_context(|| format!("failed to connect to {url}"))?;
+
+            // Capture server-issued nonce for the next request's HTTP signature
+            if let Some(ref nonce) = response.sig_nonce
+                && let Ok(mut guard) = self.sig_nonce.lock()
+            {
+                *guard = Some(nonce.clone());
+            }
 
             match retry_delay(&response, attempt) {
                 Some(wait) => {
@@ -606,6 +774,7 @@ mod tests {
                     .to_string(),
             ),
             dpop_nonce: None,
+            sig_nonce: None,
             retry_after: None,
         };
         let result: Result<serde_json::Value> =
@@ -810,5 +979,129 @@ mod tests {
             aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, b"access-token-abc");
         let expected_ath = URL_SAFE_NO_PAD.encode(expected_digest.as_ref());
         assert_eq!(claims["ath"].as_str().unwrap(), expected_ath);
+    }
+
+    // =========================================================================
+    // RFC 9421 HTTP Message Signature Tests
+    // =========================================================================
+
+    #[test]
+    fn test_sign_request_headers_produces_signature_for_get() {
+        let key = vouch_cli::fapi::ClientKey::generate().unwrap();
+        let headers = VouchClient::<ReqwestClient>::sign_request_headers(&SignRequestParams {
+            method: "GET",
+            url: "https://example.com/v1/keys",
+            auth_header: "DPoP my-token",
+            dpop_proof: None,
+            content_type: None,
+            body: None,
+            nonce: None,
+            key: &key,
+        });
+
+        let names: Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(
+            names.contains(&"Signature-Input"),
+            "should have Signature-Input: {names:?}"
+        );
+        assert!(
+            names.contains(&"Signature"),
+            "should have Signature: {names:?}"
+        );
+        // No body → no Content-Digest
+        assert!(
+            !names.contains(&"Content-Digest"),
+            "GET should not have Content-Digest"
+        );
+    }
+
+    #[test]
+    fn test_sign_request_headers_includes_content_digest_for_body() {
+        let key = vouch_cli::fapi::ClientKey::generate().unwrap();
+        let body = br#"{"key":"value"}"#;
+        let headers = VouchClient::<ReqwestClient>::sign_request_headers(&SignRequestParams {
+            method: "POST",
+            url: "https://example.com/v1/credentials/ssh",
+            auth_header: "DPoP my-token",
+            dpop_proof: None,
+            content_type: Some("application/json"),
+            body: Some(body.as_slice()),
+            nonce: None,
+            key: &key,
+        });
+
+        let names: Vec<&str> = headers.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(names.contains(&"Signature-Input"));
+        assert!(names.contains(&"Signature"));
+        assert!(
+            names.contains(&"Content-Digest"),
+            "POST with body should have Content-Digest"
+        );
+
+        // Verify Content-Digest format
+        let digest = headers
+            .iter()
+            .find(|(k, _)| k == "Content-Digest")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        assert!(
+            digest.starts_with("sha-256=:"),
+            "should be sha-256 digest: {digest}"
+        );
+
+        // Verify Signature-Input covers content-digest and content-type
+        let sig_input = headers
+            .iter()
+            .find(|(k, _)| k == "Signature-Input")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+        assert!(
+            sig_input.contains("\"content-digest\""),
+            "should cover content-digest: {sig_input}"
+        );
+        assert!(
+            sig_input.contains("\"content-type\""),
+            "should cover content-type: {sig_input}"
+        );
+    }
+
+    #[test]
+    fn test_sign_request_headers_covers_required_components() {
+        let key = vouch_cli::fapi::ClientKey::generate().unwrap();
+        let headers = VouchClient::<ReqwestClient>::sign_request_headers(&SignRequestParams {
+            method: "GET",
+            url: "https://example.com/v1/keys",
+            auth_header: "Bearer my-token",
+            dpop_proof: None,
+            content_type: None,
+            body: None,
+            nonce: None,
+            key: &key,
+        });
+
+        let sig_input = headers
+            .iter()
+            .find(|(k, _)| k == "Signature-Input")
+            .map(|(_, v)| v.as_str())
+            .unwrap();
+
+        assert!(sig_input.contains("\"@method\""), "should cover @method");
+        assert!(
+            sig_input.contains("\"@authority\""),
+            "should cover @authority"
+        );
+        assert!(sig_input.contains("\"@path\""), "should cover @path");
+        assert!(
+            sig_input.contains("\"authorization\""),
+            "should cover authorization"
+        );
+        assert!(
+            sig_input.contains("alg=\"ecdsa-p256-sha256\""),
+            "should use ecdsa-p256-sha256: {sig_input}"
+        );
+        assert!(
+            sig_input.contains(&format!("keyid=\"{}\"", key.kid())),
+            "should include keyid"
+        );
     }
 }

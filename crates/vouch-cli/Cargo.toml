@@ -10,7 +10,7 @@ readme = "../../README.md"
 workspace = true
 
 [features]
-test-utils = ["ed25519-dalek/rand_core", "axum", "tower", "http"]
+test-utils = ["ed25519-dalek/rand_core", "axum", "tower"]
 
 [lib]
 path = "src/lib.rs"
@@ -83,7 +83,7 @@ optional = true
 
 [dependencies.http]
 workspace = true
-optional = true
+features = ["std"]
 
 [dependencies.tower]
 workspace = true

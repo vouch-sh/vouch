@@ -31,6 +31,9 @@ pub struct HttpResponse {
     /// Returned by the server to bind the next DPoP proof to a server-issued nonce
     /// (RFC 9449 Section 8).
     pub dpop_nonce: Option<String>,
+    /// Signature-Nonce header value (if present).
+    /// Server-issued nonce for RFC 9421 HTTP signature replay protection.
+    pub sig_nonce: Option<String>,
     /// Retry-After header value in seconds (if present on 429 responses).
     pub retry_after: Option<u64>,
 }
@@ -44,6 +47,7 @@ impl HttpResponse {
             body,
             www_authenticate: None,
             dpop_nonce: None,
+            sig_nonce: None,
             retry_after: None,
         }
     }
@@ -81,7 +85,7 @@ impl HttpResponse {
 fn extract_response_headers(
     status: u16,
     headers: &reqwest::header::HeaderMap,
-) -> (Option<String>, Option<String>, Option<u64>) {
+) -> (Option<String>, Option<String>, Option<String>, Option<u64>) {
     let www_authenticate = if status == 401 {
         headers
             .get("www-authenticate")
@@ -96,6 +100,11 @@ fn extract_response_headers(
         .and_then(|v| v.to_str().ok())
         .map(String::from);
 
+    let sig_nonce = headers
+        .get("signature-nonce")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
+
     let retry_after = if status == 429 {
         headers
             .get("retry-after")
@@ -105,7 +114,7 @@ fn extract_response_headers(
         None
     };
 
-    (www_authenticate, dpop_nonce, retry_after)
+    (www_authenticate, dpop_nonce, sig_nonce, retry_after)
 }
 
 /// Trait for abstracting HTTP client operations.
@@ -203,6 +212,7 @@ impl HttpClient for ReqwestClient {
     ) -> Result<HttpResponse> {
         let method =
             reqwest::Method::from_bytes(method.as_bytes()).context("invalid HTTP method")?;
+        let method_str = method.to_string();
 
         let mut builder = self.client.request(method, url);
 
@@ -224,11 +234,32 @@ impl HttpClient for ReqwestClient {
             builder = builder.body(b.to_vec());
         }
 
+        // Trace-level request logging (headers redacted for sensitive values)
+        if tracing::enabled!(tracing::Level::TRACE) {
+            let redacted = redact_request_headers(auth_header, content_type, extra_headers);
+            tracing::trace!(
+                http.method = %method_str,
+                http.url = %url,
+                headers = ?redacted,
+                "HTTP request"
+            );
+        }
+
         let response = builder.send().await.context("HTTP request failed")?;
 
         let status = response.status().as_u16();
-        let (www_authenticate, dpop_nonce, retry_after) =
+        let (www_authenticate, dpop_nonce, sig_nonce, retry_after) =
             extract_response_headers(status, response.headers());
+
+        // Trace-level response logging
+        if tracing::enabled!(tracing::Level::TRACE) {
+            let redacted = redact_response_headers(response.headers());
+            tracing::trace!(
+                status = %status,
+                headers = ?redacted,
+                "HTTP response"
+            );
+        }
 
         let body = response
             .bytes()
@@ -240,6 +271,7 @@ impl HttpClient for ReqwestClient {
             body: body.to_vec(),
             www_authenticate,
             dpop_nonce,
+            sig_nonce,
             retry_after,
         })
     }
@@ -442,6 +474,69 @@ pub fn parse_www_authenticate(header: &str) -> Option<StepUpChallenge> {
     })
 }
 
+/// Build a redacted view of request headers for trace logging.
+///
+/// Redacts `Authorization` values (shows scheme only), shows signature-related
+/// headers in full (`Signature`, `Signature-Input`, `Content-Digest`, `DPoP`).
+fn redact_request_headers(
+    auth_header: Option<&str>,
+    content_type: Option<&str>,
+    extra_headers: Option<&[(&str, &str)]>,
+) -> Vec<(&'static str, String)> {
+    let mut headers = Vec::new();
+
+    if let Some(auth) = auth_header {
+        let scheme = auth.split_once(' ').map_or(auth, |(s, _)| s);
+        headers.push(("authorization", format!("{scheme} ***")));
+    }
+    if let Some(ct) = content_type {
+        headers.push(("content-type", ct.to_string()));
+    }
+    if let Some(extras) = extra_headers {
+        for (name, value) in extras {
+            headers.push((
+                // Safety: these header names are all static strings from client.rs
+                // The leak is bounded by a small fixed set of header names.
+                // This avoids lifetime complexity for trace-only logging.
+                string_to_static(name),
+                value.to_string(),
+            ));
+        }
+    }
+
+    headers
+}
+
+/// Leak a string reference for trace logging header names.
+///
+/// Only used in the trace logging path (guarded by `tracing::enabled!(TRACE)`).
+/// The set of header names is small and fixed (DPoP, Signature, etc.), so the
+/// leaked memory is bounded.
+fn string_to_static(s: &str) -> &'static str {
+    // For known header names, return static strings to avoid leaking
+    match s {
+        "DPoP" => "dpop",
+        "Signature" => "signature",
+        "Signature-Input" => "signature-input",
+        "Content-Digest" => "content-digest",
+        _ => "other",
+    }
+}
+
+/// Build a redacted view of response headers for trace logging.
+fn redact_response_headers(headers: &reqwest::header::HeaderMap) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    for (name, value) in headers {
+        let name_str = name.as_str();
+        let value_str = match name_str {
+            "set-cookie" => "***".to_string(),
+            _ => value.to_str().unwrap_or("<non-utf8>").to_string(),
+        };
+        result.push((name_str.to_string(), value_str));
+    }
+    result
+}
+
 #[cfg(feature = "test-utils")]
 pub use test_utils::*;
 
@@ -487,19 +582,18 @@ mod test_utils {
         ) -> Result<HttpResponse> {
             use axum::body::Body;
 
-            // Parse URL to extract path and query
+            // Keep the absolute URI so middleware can derive @scheme/@authority in tests.
             let parsed = url::Url::parse(url).context("invalid URL")?;
-            let path_and_query = if let Some(query) = parsed.query() {
-                format!("{}?{}", parsed.path(), query)
-            } else {
-                parsed.path().to_string()
-            };
+            let uri: http::Uri = parsed
+                .as_str()
+                .parse()
+                .context("invalid URI in test client request")?;
 
             // Build request
             let method =
                 http::Method::from_bytes(method.as_bytes()).context("invalid HTTP method")?;
 
-            let mut builder = http::Request::builder().method(method).uri(&path_and_query);
+            let mut builder = http::Request::builder().method(method).uri(uri);
 
             if let Some(ct) = content_type {
                 builder = builder.header("Content-Type", ct);
@@ -529,7 +623,7 @@ mod test_utils {
                 .context("router error")?;
 
             let status = response.status().as_u16();
-            let (www_authenticate, dpop_nonce, retry_after) =
+            let (www_authenticate, dpop_nonce, sig_nonce, retry_after) =
                 extract_response_headers(status, response.headers());
 
             let body_bytes = axum::body::to_bytes(response.into_body(), 10 * 1024 * 1024)
@@ -541,6 +635,7 @@ mod test_utils {
                 body: body_bytes.to_vec(),
                 www_authenticate,
                 dpop_nonce,
+                sig_nonce,
                 retry_after,
             })
         }
@@ -616,6 +711,7 @@ mod tests {
             body: b"{}".to_vec(),
             www_authenticate: None,
             dpop_nonce: None,
+            sig_nonce: None,
             retry_after: None,
         };
         assert!(response.dpop_nonce.is_none());

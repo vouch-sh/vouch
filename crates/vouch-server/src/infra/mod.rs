@@ -7,6 +7,7 @@
 
 pub mod cleanup;
 pub mod generate_document_key;
+pub mod httpsig;
 pub mod metrics;
 pub mod rate_limit;
 pub mod request_id;

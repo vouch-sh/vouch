@@ -22,6 +22,7 @@ aws-lc-rs = { workspace = true }
 base64 = { workspace = true, features = ["std"] }
 ciborium = { workspace = true }
 hex = { workspace = true, features = ["std"] }
+http = { workspace = true, features = ["std"] }
 jiff = { workspace = true, features = ["std", "serde", "tz-system"] }
 secrecy = { workspace = true, features = ["serde"] }
 serde = { workspace = true, features = ["std", "derive"] }
@@ -32,6 +33,7 @@ uuid = { workspace = true, features = ["v7", "serde", "std"] }
 vouch-agent = { path = "../vouch-agent", features = ["test-utils"] }
 vouch-cli = { path = "../vouch-cli", features = ["test-utils"] }
 vouch-common = { path = "../vouch-common" }
+vouch-httpsig = { workspace = true }
 vouch-server = { path = "../vouch-server", features = ["test-utils"] }
 
 [dev-dependencies]
