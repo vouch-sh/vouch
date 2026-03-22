@@ -97,7 +97,7 @@ pub fn cose_key_to_cbor(key: &COSEKey) -> Result<Vec<u8>, CoseError> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use webauthn_rs::prelude::{COSEAlgorithm, COSEEC2Key, COSEKey, COSEKeyType, ECDSACurve};
@@ -118,9 +118,12 @@ mod tests {
 
         // Decode and verify structure
         let value: ciborium::Value = ciborium::from_reader(cbor.as_slice()).expect("valid CBOR");
-        let map = match value {
-            ciborium::Value::Map(m) => m,
-            other => panic!("Expected CBOR map, got: {other:?}"),
+        assert!(
+            matches!(value, ciborium::Value::Map(_)),
+            "Expected CBOR map"
+        );
+        let ciborium::Value::Map(map) = value else {
+            return;
         };
 
         // kty = 2 (EC2)

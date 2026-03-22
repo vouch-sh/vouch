@@ -6,7 +6,7 @@ use std::process::Command;
 use vouch_common::posture::DevicePosture;
 
 /// Detect execution context, setting flat fields directly.
-pub fn detect(posture: &mut DevicePosture) {
+pub(super) fn detect(posture: &mut DevicePosture) {
     posture.elevated = Some(detect_elevated());
     posture.tty = Some(std::io::IsTerminal::is_terminal(&std::io::stdin()));
     posture.parent_process = detect_parent_process();
@@ -98,7 +98,7 @@ fn detect_parent_process() -> Option<String> {
 }
 
 /// Run a command and capture stdout. Returns `None` on any failure.
-pub fn run_command(program: &str, args: &[&str]) -> Option<String> {
+pub(super) fn run_command(program: &str, args: &[&str]) -> Option<String> {
     let output = Command::new(program)
         .args(args)
         .stdout(std::process::Stdio::piped())

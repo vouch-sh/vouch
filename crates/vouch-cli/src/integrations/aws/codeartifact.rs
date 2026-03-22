@@ -12,7 +12,7 @@ use super::sigv4::sign_and_send_rest;
 use super::sts::StsCredentials;
 
 /// CodeArtifact authorization token and expiration.
-pub struct CodeArtifactToken {
+pub(crate) struct CodeArtifactToken {
     /// Bearer token for authenticating with CodeArtifact.
     pub authorization_token: SecretString,
     /// Unix timestamp when the token expires.
@@ -30,7 +30,7 @@ impl std::fmt::Debug for CodeArtifactToken {
 
 /// Parsed components of a CodeArtifact registry URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodeArtifactRegistry {
+pub(crate) struct CodeArtifactRegistry {
     /// CodeArtifact domain name.
     pub domain: String,
     /// AWS account ID that owns the domain.
@@ -52,7 +52,7 @@ pub struct CodeArtifactRegistry {
 ///
 /// The URL may include a scheme (`https://`) and a path (e.g., `/cargo/my-repo/`).
 #[must_use]
-pub fn parse_codeartifact_url(url: &str) -> Option<CodeArtifactRegistry> {
+pub(crate) fn parse_codeartifact_url(url: &str) -> Option<CodeArtifactRegistry> {
     // Strip scheme and path to get just the host
     let url = url.strip_prefix("sparse+").unwrap_or(url);
     let url = url.strip_prefix("https://").unwrap_or(url);
@@ -101,7 +101,7 @@ impl CodeArtifactRegistry {
     ///
     /// All repositories within a single domain share one authorization token,
     /// so this key combines domain, owner, and region.
-    pub fn token_cache_key(&self) -> String {
+    pub(crate) fn token_cache_key(&self) -> String {
         format!("{}:{}:{}", self.domain, self.domain_owner, self.region)
     }
 }
@@ -133,7 +133,7 @@ impl std::fmt::Debug for GetAuthorizationTokenResponse {
 /// # Arguments
 /// * `registry` - CodeArtifact registry details (domain, owner, region)
 /// * `creds` - Temporary AWS credentials from STS
-pub async fn get_authorization_token(
+pub(crate) async fn get_authorization_token(
     http_client: &reqwest::Client,
     registry: &CodeArtifactRegistry,
     creds: &StsCredentials,

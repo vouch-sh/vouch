@@ -114,7 +114,7 @@ pub async fn get_device_auth_by_user_code(
 
 /// Get a device auth request by ID.
 #[allow(dead_code)] // Used in db/tests.rs
-pub async fn get_device_auth_by_id(
+pub(crate) async fn get_device_auth_by_id(
     store: &DocumentStore,
     id: &str,
 ) -> Result<Option<DeviceAuthRequest>> {

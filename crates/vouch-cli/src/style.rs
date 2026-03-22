@@ -12,7 +12,7 @@ static COLOR_ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
 /// Color output preference (maps to `--color` CLI flag).
 #[derive(Clone, Copy, Debug, Default, clap::ValueEnum)]
-pub enum ColorChoice {
+pub(crate) enum ColorChoice {
     /// Enable color when stdout is a TTY and `NO_COLOR` is unset.
     #[default]
     Auto,
@@ -23,7 +23,7 @@ pub enum ColorChoice {
 }
 
 /// Initialize global color state. Call once after CLI parsing.
-pub fn init(choice: ColorChoice) {
+pub(crate) fn init(choice: ColorChoice) {
     let enabled = match choice {
         ColorChoice::Always => true,
         ColorChoice::Never => false,
@@ -58,31 +58,31 @@ fn styled(codes: &str, text: &str) -> String {
 }
 
 /// Green text.
-pub fn green(text: &str) -> String {
+pub(crate) fn green(text: &str) -> String {
     styled(GREEN, text)
 }
 
 /// Red text.
-pub fn red(text: &str) -> String {
+pub(crate) fn red(text: &str) -> String {
     styled(RED, text)
 }
 
 /// Yellow text.
-pub fn yellow(text: &str) -> String {
+pub(crate) fn yellow(text: &str) -> String {
     styled(YELLOW, text)
 }
 
 /// Dim (faint) text.
-pub fn dim(text: &str) -> String {
+pub(crate) fn dim(text: &str) -> String {
     styled(DIM, text)
 }
 
 /// Bold green text.
-pub fn bold_green(text: &str) -> String {
+pub(crate) fn bold_green(text: &str) -> String {
     styled(BOLD_GREEN, text)
 }
 
 /// Bold red text.
-pub fn bold_red(text: &str) -> String {
+pub(crate) fn bold_red(text: &str) -> String {
     styled(BOLD_RED, text)
 }

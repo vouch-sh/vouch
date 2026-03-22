@@ -9,7 +9,7 @@ use super::exec::{CodeArtifactOptions, RdsOptions, RedshiftOptions};
 
 /// Shell format for environment variable output.
 #[derive(Clone, Debug, clap::ValueEnum)]
-pub enum Shell {
+pub(crate) enum Shell {
     /// Bash / Zsh (export VAR=value).
     Bash,
     /// Fish (set -gx VAR value).
@@ -17,7 +17,7 @@ pub enum Shell {
 }
 
 /// Run the env command - output shell-evaluable credential exports.
-pub async fn run(
+pub(crate) async fn run(
     server: &str,
     credential_type: &CredentialType,
     shell: &Shell,

@@ -19,7 +19,7 @@ use vouch_common::K8sTokenResponse;
 ///
 /// Outputs a Kubernetes `ExecCredential` JSON to stdout for use as a
 /// kubeconfig exec-based credential plugin.
-pub async fn run(server: &str, cluster: &str, audience: Option<&str>) -> Result<()> {
+pub(crate) async fn run(server: &str, cluster: &str, audience: Option<&str>) -> Result<()> {
     let aud = audience.unwrap_or("kubernetes");
     let cache_key = format!("k8s:{cluster}:{aud}");
 

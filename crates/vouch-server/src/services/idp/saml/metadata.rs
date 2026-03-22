@@ -42,7 +42,7 @@ pub struct IdpMetadata {
 
 /// Errors during IdP metadata parsing.
 #[derive(Debug, thiserror::Error)]
-pub enum MetadataError {
+pub(crate) enum MetadataError {
     /// The metadata document exceeds the maximum allowed size.
     #[error("metadata document too large ({size} bytes, max {MAX_METADATA_SIZE})")]
     TooLarge {
@@ -83,7 +83,7 @@ pub enum MetadataError {
 ///
 /// Returns `MetadataError` if the XML is malformed, required elements are missing,
 /// the document exceeds 1 MiB, or certificate base64 decoding fails.
-pub fn parse_idp_metadata(xml: &str) -> Result<IdpMetadata, MetadataError> {
+pub(crate) fn parse_idp_metadata(xml: &str) -> Result<IdpMetadata, MetadataError> {
     // Size check before parsing to avoid OOM on large federation metadata.
     let size = xml.len();
     if size > MAX_METADATA_SIZE {
@@ -210,7 +210,7 @@ fn find_entity_descriptor<'a, 'input>(
 /// The output is valid XML with entity ID and ACS URL XML-attribute-escaped.
 /// No SP metadata signing is included (optional per spec).
 #[must_use]
-pub fn generate_sp_metadata(sp_entity_id: &str, acs_url: &str) -> String {
+pub(crate) fn generate_sp_metadata(sp_entity_id: &str, acs_url: &str) -> String {
     let escaped_entity_id = xml_escape_attr(sp_entity_id);
     let escaped_acs_url = xml_escape_attr(acs_url);
     format!(
@@ -243,7 +243,7 @@ fn xml_escape_attr(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::panic)]
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     // =========================================================================

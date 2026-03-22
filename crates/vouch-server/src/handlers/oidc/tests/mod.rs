@@ -1,12 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Tests for OIDC handlers — organized by RFC/specification.
 
-#![allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 
 mod helpers;
 

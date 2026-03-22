@@ -11,7 +11,7 @@ use std::io::{BufRead, Write};
 
 /// Git credential protocol input.
 #[derive(Debug, Default)]
-pub struct CredentialInput {
+pub(crate) struct CredentialInput {
     pub protocol: Option<String>,
     pub host: Option<String>,
     pub path: Option<String>,
@@ -20,7 +20,7 @@ pub struct CredentialInput {
 /// Parse git credential protocol input from stdin.
 ///
 /// Reads key=value pairs until an empty line or EOF.
-pub fn read_credential_input() -> Result<CredentialInput> {
+pub(crate) fn read_credential_input() -> Result<CredentialInput> {
     let stdin = std::io::stdin();
     let mut input = CredentialInput::default();
 
@@ -47,7 +47,7 @@ pub fn read_credential_input() -> Result<CredentialInput> {
 ///
 /// Outputs `key=value` pairs followed by a blank line, as required by
 /// the [git credential protocol](https://git-scm.com/docs/git-credential#IOFMT).
-pub fn write_credential_output(
+pub(crate) fn write_credential_output(
     out: &mut impl Write,
     protocol: &str,
     host: &str,

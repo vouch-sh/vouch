@@ -50,7 +50,7 @@ impl From<Document<CustomPosturePolicyDoc>> for CustomPosturePolicy {
 /// Get the posture config for an org (which preconfigured slugs are active).
 ///
 /// Returns `None` if no config exists yet (no preconfigured policies activated).
-pub async fn get_posture_config(
+pub(super) async fn get_posture_config(
     store: &DocumentStore,
     org_id: &str,
 ) -> Result<Option<Document<PostureConfigDoc>>> {

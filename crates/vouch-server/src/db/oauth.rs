@@ -50,6 +50,7 @@ pub struct OAuthClient {
     pub registration_source: Option<RegistrationSource>,
     pub registration_access_token_hash: Option<String>,
     pub registration_metadata: Option<serde_json::Value>,
+    pub id_token_signed_response_alg: String,
 }
 
 impl From<Document<OAuthClientDoc>> for OAuthClient {
@@ -85,6 +86,7 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
             registration_source: doc.data.registration_source,
             registration_access_token_hash: doc.data.registration_access_token_hash,
             registration_metadata: doc.data.registration_metadata,
+            id_token_signed_response_alg: doc.data.id_token_signed_response_alg,
         }
     }
 }
@@ -131,6 +133,7 @@ pub struct CreateOAuthClientParams<'a> {
     pub registration_source: RegistrationSource,
     pub registration_access_token_hash: Option<&'a str>,
     pub registration_metadata: Option<&'a serde_json::Value>,
+    pub id_token_signed_response_alg: &'a str,
 }
 
 /// Create a new OAuth client application.
@@ -167,6 +170,7 @@ pub async fn create_oauth_client(
         registration_source: Some(params.registration_source),
         registration_access_token_hash: params.registration_access_token_hash.map(String::from),
         registration_metadata: params.registration_metadata.cloned(),
+        id_token_signed_response_alg: params.id_token_signed_response_alg.to_string(),
     };
 
     let result = store.insert(&doc).await?;
@@ -572,7 +576,7 @@ pub async fn update_client_jwks_cache(
 
 /// Test-only helpers for modifying OAuth clients.
 #[cfg(test)]
-pub mod test_helpers {
+pub(super) mod test_helpers {
     use super::*;
 
     pub async fn update_oauth_client_jwks(
@@ -940,6 +944,7 @@ mod tests {
                 registration_source: RegistrationSource::Manual,
                 registration_access_token_hash: None,
                 registration_metadata: None,
+                id_token_signed_response_alg: "RS256",
             },
         )
         .await

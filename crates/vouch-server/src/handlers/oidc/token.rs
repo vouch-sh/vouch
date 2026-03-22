@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 /// OAuth grant types supported by this server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum OAuthGrantType {
+pub(super) enum OAuthGrantType {
     /// Standard OAuth 2.0 authorization code grant.
     AuthorizationCode,
     /// Client credentials grant (RFC 6749 Section 4.4).
@@ -44,13 +44,13 @@ pub enum OAuthGrantType {
 
 /// Parse error for OAuth `grant_type` values.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ParseOAuthGrantTypeError {
+pub(super) struct ParseOAuthGrantTypeError {
     value: String,
 }
 
 impl ParseOAuthGrantTypeError {
     #[must_use]
-    pub fn new(value: &str) -> Self {
+    pub(super) fn new(value: &str) -> Self {
         Self {
             value: value.to_string(),
         }
@@ -77,7 +77,7 @@ impl OAuthGrantType {
 
     /// Wire-format `grant_type` value.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub(super) const fn as_str(self) -> &'static str {
         match self {
             Self::AuthorizationCode => "authorization_code",
             Self::ClientCredentials => "client_credentials",
@@ -90,7 +90,7 @@ impl OAuthGrantType {
 
     /// All supported `grant_type` wire values.
     #[must_use]
-    pub fn supported_wire_values() -> Vec<&'static str> {
+    pub(super) fn supported_wire_values() -> Vec<&'static str> {
         Self::SUPPORTED.iter().copied().map(Self::as_str).collect()
     }
 }
@@ -109,7 +109,7 @@ impl std::str::FromStr for OAuthGrantType {
 
 /// Token response (RFC 6749 Section 5.1).
 #[derive(Serialize)]
-pub struct TokenResponse {
+pub(super) struct TokenResponse {
     /// The access token issued by the authorization server.
     pub access_token: String,
     /// The type of the token issued ("Bearer" or "DPoP").
@@ -250,7 +250,7 @@ impl TokenRequest {
 
 /// Token exchange response (RFC 8693 Section 2.2).
 #[derive(Serialize)]
-pub struct TokenExchangeResponse {
+pub(super) struct TokenExchangeResponse {
     /// The security token issued by the authorization server.
     pub access_token: String,
     /// RFC 8693 Section 2.2.1: The type of the issued security token.
@@ -500,6 +500,7 @@ async fn handle_authorization_code_grant(
         code,
         redirect_uri: params.redirect_uri.as_deref(),
         credentials: credentials.as_ref(),
+        jwt_authenticated_client: jwt_authenticated.as_ref(),
         code_verifier: params.code_verifier.as_deref(),
         dpop_proof,
         client_id: exchange_client_id,

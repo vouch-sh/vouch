@@ -16,6 +16,7 @@ mod client;
 mod commands;
 mod config;
 mod exit_code;
+#[allow(unreachable_pub)] // Items are pub for lib.rs re-exports used by vouch-tests
 mod fido2;
 mod integrations;
 mod server_url;

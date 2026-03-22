@@ -203,7 +203,7 @@ struct CredentialError {
 /// 1. Send Hello message with supported versions
 /// 2. Read CredentialRequest from stdin
 /// 3. Handle the request and send response to stdout
-pub async fn run() -> Result<()> {
+pub(crate) async fn run() -> Result<()> {
     // Send Hello message
     let hello = CredentialHello {
         v: vec![PROTOCOL_VERSION],

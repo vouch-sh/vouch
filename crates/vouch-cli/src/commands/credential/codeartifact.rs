@@ -28,7 +28,7 @@ use crate::integrations::aws::get_local_aws_role;
 /// 2. Named profile (`--profile <name>`)
 /// 3. Default profile (`codeartifact.default`)
 /// 4. Error with helpful message
-pub fn resolve_codeartifact_params(
+pub(crate) fn resolve_codeartifact_params(
     domain: Option<&str>,
     domain_owner: Option<&str>,
     region: Option<&str>,
@@ -109,7 +109,7 @@ pub fn resolve_codeartifact_params(
 /// 2. Calls AWS STS `AssumeRoleWithWebIdentity`
 /// 3. Calls CodeArtifact `GetAuthorizationToken` with SigV4 signing
 /// 4. Outputs the bearer token to stdout
-pub async fn run(
+pub(crate) async fn run(
     server: &str,
     domain: Option<&str>,
     domain_owner: Option<&str>,
@@ -129,7 +129,7 @@ pub async fn run(
 ///
 /// This is the shared core used by both the standalone command and the
 /// Cargo credential provider when it detects a CodeArtifact index URL.
-pub async fn get_token(
+pub(crate) async fn get_token(
     server: &str,
     domain: &str,
     domain_owner: &str,

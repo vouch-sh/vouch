@@ -47,7 +47,7 @@ struct IdTokenClaims {
 ///
 /// Returns error if fetch fails, JSON is invalid, required fields missing,
 /// endpoints aren't valid URLs, or discovered issuer doesn't match configured.
-pub async fn fetch_discovery(
+pub(crate) async fn fetch_discovery(
     http_client: &reqwest::Client,
     issuer_url: &str,
 ) -> Result<OidcProvider, anyhow::Error> {
@@ -125,7 +125,7 @@ pub async fn fetch_discovery(
 /// Returns error if JWKS fetch fails, no matching key is found,
 /// signature is invalid, claims validation fails, nonce mismatches,
 /// or the email is not verified.
-pub async fn verify_id_token(
+pub(crate) async fn verify_id_token(
     http_client: &reqwest::Client,
     provider: &OidcProvider,
     id_token: &str,
@@ -282,12 +282,7 @@ fn is_localhost(url: &Url) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::panic
-    )]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
 

@@ -809,10 +809,21 @@ pub fn check_client_access(client: &OAuthClient, user: &User) -> ServiceResult<(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::db::{FapiProfile, OAuthClientType, TokenEndpointAuthMethod};
+
+    fn assert_oauth_error<T: std::fmt::Debug>(
+        result: Result<T, ServiceError>,
+        expected: OAuthErrorCode,
+    ) {
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == expected),
+            "Expected {expected:?}",
+        );
+    }
 
     // Helper to create a test OAuthClient
     fn test_client(user_id: &str, access_scope: AccessScope, org_id: Option<&str>) -> OAuthClient {
@@ -848,6 +859,7 @@ mod tests {
             registration_source: None,
             registration_access_token_hash: None,
             registration_metadata: None,
+            id_token_signed_response_alg: "RS256".to_string(),
         }
     }
 
@@ -907,6 +919,7 @@ mod tests {
             registration_source: None,
             registration_access_token_hash: None,
             registration_metadata: None,
+            id_token_signed_response_alg: "RS256".to_string(),
         }
     }
 
@@ -983,11 +996,13 @@ mod tests {
             AuthorizationCode::decode(&token, &signer, "https://example.com", "client-a").await;
 
         assert!(result.is_err(), "Wrong issuer must be rejected");
-        match result.unwrap_err() {
-            crate::crypto::jwt::StateTokenError::Validation(msg) => {
-                assert!(msg.contains("Issuer"), "Error should mention issuer: {msg}");
-            }
-            other => panic!("Expected Validation error, got: {other}"),
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, crate::crypto::jwt::StateTokenError::Validation(_)),
+            "Expected Validation error, got: {err}",
+        );
+        if let crate::crypto::jwt::StateTokenError::Validation(msg) = err {
+            assert!(msg.contains("Issuer"), "Error should mention issuer: {msg}");
         }
     }
 
@@ -1008,14 +1023,16 @@ mod tests {
         .await;
 
         assert!(result.is_err(), "Wrong audience must be rejected");
-        match result.unwrap_err() {
-            crate::crypto::jwt::StateTokenError::Validation(msg) => {
-                assert!(
-                    msg.contains("Audience"),
-                    "Error should mention audience: {msg}"
-                );
-            }
-            other => panic!("Expected Validation error, got: {other}"),
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, crate::crypto::jwt::StateTokenError::Validation(_)),
+            "Expected Validation error, got: {err}",
+        );
+        if let crate::crypto::jwt::StateTokenError::Validation(msg) = err {
+            assert!(
+                msg.contains("Audience"),
+                "Error should mention audience: {msg}"
+            );
         }
     }
 
@@ -1085,12 +1102,7 @@ mod tests {
 
         let result = validate_authorize_request(params);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::UnsupportedResponseType);
-            }
-            _ => panic!("Expected OAuth error"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::UnsupportedResponseType);
     }
 
     #[test]
@@ -1175,12 +1187,7 @@ mod tests {
 
         let result = require_pkce_for_client(&validated, &client);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRequest);
-            }
-            _ => panic!("Expected OAuth InvalidRequest error"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRequest);
     }
 
     #[test]
@@ -1246,12 +1253,7 @@ mod tests {
 
         let result = validate_authorize_request(params);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRequest);
-            }
-            _ => panic!("Expected OAuth InvalidRequest error"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRequest);
     }
 
     // =========================================================================
@@ -1283,12 +1285,7 @@ mod tests {
 
         let result = check_client_access(&client, &other_user);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::AccessDenied);
-            }
-            _ => panic!("Expected OAuth AccessDenied error"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::AccessDenied);
     }
 
     #[test]
@@ -1307,12 +1304,7 @@ mod tests {
 
         let result = check_client_access(&client, &diff_org_user);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::AccessDenied);
-            }
-            _ => panic!("Expected OAuth AccessDenied error"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::AccessDenied);
     }
 
     #[test]
@@ -1322,12 +1314,7 @@ mod tests {
 
         let result = check_client_access(&client, &no_org_user);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::AccessDenied);
-            }
-            _ => panic!("Expected OAuth AccessDenied error"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::AccessDenied);
     }
 
     #[test]
@@ -1516,13 +1503,12 @@ mod tests {
 
         let result = validate_authorize_request(params);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRequest);
-                assert!(description.contains("invalid characters"));
-            }
-            _ => panic!("Expected OAuth InvalidRequest error"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, description }
+                if *code == OAuthErrorCode::InvalidRequest && description.contains("invalid characters")),
+            "Expected OAuth InvalidRequest with 'invalid characters', got: {err:?}",
+        );
     }
 
     #[test]
@@ -1567,12 +1553,7 @@ mod tests {
 
         let result = validate_authorize_request(params);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRequest);
-            }
-            _ => panic!("Expected OAuth InvalidRequest error"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRequest);
     }
 
     #[test]

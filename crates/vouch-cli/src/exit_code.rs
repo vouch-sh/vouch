@@ -7,28 +7,28 @@
 use std::process::ExitCode;
 
 /// General or unknown error.
-pub const GENERAL: u8 = 1;
+pub(crate) const GENERAL: u8 = 1;
 
 /// Not authenticated (session expired or missing).
-pub const NOT_AUTHENTICATED: u8 = 2;
+pub(crate) const NOT_AUTHENTICATED: u8 = 2;
 
 /// Hardware key not detected (YubiKey missing or timed out).
-pub const HARDWARE_NOT_FOUND: u8 = 3;
+pub(crate) const HARDWARE_NOT_FOUND: u8 = 3;
 
 /// Network or server unreachable.
-pub const NETWORK_ERROR: u8 = 4;
+pub(crate) const NETWORK_ERROR: u8 = 4;
 
 /// Permission denied or unauthorized by server.
-pub const PERMISSION_DENIED: u8 = 5;
+pub(crate) const PERMISSION_DENIED: u8 = 5;
 
 /// Configuration error (missing or invalid config).
-pub const CONFIG_ERROR: u8 = 6;
+pub(crate) const CONFIG_ERROR: u8 = 6;
 
 /// Step-up authentication required but failed (e.g., no YubiKey attached).
-pub const STEP_UP_REQUIRED: u8 = 7;
+pub(crate) const STEP_UP_REQUIRED: u8 = 7;
 
 /// Server rate-limited the request (429 Too Many Requests).
-pub const RATE_LIMITED: u8 = 8;
+pub(crate) const RATE_LIMITED: u8 = 8;
 
 /// Typed CLI errors that map directly to exit codes.
 ///
@@ -41,7 +41,7 @@ pub const RATE_LIMITED: u8 = 8;
 /// Err(CliError::NotAuthenticated { reason: "...".into() })?
 /// ```
 #[derive(Debug, thiserror::Error)]
-pub enum CliError {
+pub(crate) enum CliError {
     /// User is not authenticated — session missing or expired.
     #[error("{reason}")]
     NotAuthenticated {
@@ -93,7 +93,7 @@ pub enum CliError {
 /// Inspects the error chain for known types (`CliError`, `AgentError`,
 /// `reqwest::Error`) and falls back to message-pattern matching for
 /// errors wrapped by `anyhow`.
-pub fn classify(err: &anyhow::Error) -> ExitCode {
+pub(crate) fn classify(err: &anyhow::Error) -> ExitCode {
     // 1. Check for CliError first (typed, most reliable)
     for cause in err.chain() {
         if let Some(cli_err) = cause.downcast_ref::<CliError>() {

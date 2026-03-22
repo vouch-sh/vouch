@@ -16,7 +16,7 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 /// Tracks which preconfigured policy slugs (defined in code) are active
 /// for a given organization. There is at most one of these per org.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PostureConfigDoc {
+pub(crate) struct PostureConfigDoc {
     pub org_id: String,
     /// Slugs of active preconfigured policies (e.g., `["disk_encryption", "firewall"]`).
     pub active_slugs: Vec<String>,

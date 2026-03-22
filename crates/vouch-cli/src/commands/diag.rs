@@ -34,7 +34,7 @@ use vouch_common::fixtures::{
 
 /// Arguments for the diag command.
 #[derive(Args)]
-pub struct DiagArgs {
+pub(crate) struct DiagArgs {
     /// Export fixture data to a JSON file for use in tests.
     #[arg(long, value_name = "FILE")]
     pub export_fixture: Option<PathBuf>,
@@ -57,7 +57,7 @@ struct DiagJson {
 }
 
 /// Run diagnostic test of YubiKey registration + authentication + verification.
-pub fn run(args: DiagArgs) -> Result<()> {
+pub(crate) fn run(args: DiagArgs) -> Result<()> {
     let json = args.json;
 
     // When json mode is active, use stderr for progress output so stdout is clean JSON.
@@ -624,7 +624,7 @@ pub fn run(args: DiagArgs) -> Result<()> {
 
 // Re-use rand for challenge generation
 mod rand {
-    pub fn random<T: Default + AsMut<[u8]>>() -> T {
+    pub(super) fn random<T: Default + AsMut<[u8]>>() -> T {
         let mut val = T::default();
         aws_lc_rs::rand::fill(val.as_mut()).expect("RNG failure");
         val

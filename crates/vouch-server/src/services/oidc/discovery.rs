@@ -105,7 +105,7 @@ pub struct OidcDiscoveryDocument {
 #[derive(Debug, Serialize)]
 pub struct JwksResponse {
     /// RFC 7517 Section 5.1: The "keys" parameter is an array of JWK values.
-    pub keys: Vec<super::keys::EcJwk>,
+    pub keys: Vec<super::keys::Jwk>,
 }
 
 /// Build the OIDC discovery document for this server.
@@ -144,7 +144,11 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
             "urn:ietf:params:oauth:grant-type:fido2-assertion".to_string(),
         ],
         subject_types_supported: vec!["public".to_string()],
-        id_token_signing_alg_values_supported: vec!["ES256".to_string()],
+        id_token_signing_alg_values_supported: if state.oidc_rsa_key.is_some() {
+            vec!["RS256".to_string(), "ES256".to_string()]
+        } else {
+            vec!["ES256".to_string()]
+        },
         token_endpoint_auth_methods_supported: vec![
             "none".to_string(),
             "client_secret_basic".to_string(),
@@ -209,18 +213,35 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
 /// Build the JSON Web Key Set for token verification.
 ///
 /// # Arguments
-/// * `state` - Application state containing the OIDC signing key
+/// * `state` - Application state containing the OIDC signing keys
 ///
 /// # Returns
-/// The JWKS containing the public key used to sign tokens.
+/// The JWKS containing all public keys used to sign tokens.
+/// RSA key (RS256) is listed first per OIDC Core Section 3.1.3.7 (RS256 is the default).
+/// EC key (ES256) is always present (used for access tokens).
 ///
 /// # Errors
-/// Returns `ServiceError` if the public key cannot be exported.
+/// Returns `ServiceError` if a public key cannot be exported.
 pub fn build_jwks(state: &Arc<AppState>) -> Result<JwksResponse, ServiceError> {
-    let jwk = state.oidc_key.public_key_jwk().map_err(|e| {
-        tracing::error!("Failed to get OIDC public key JWK: {}", e);
-        ServiceError::Internal("Failed to export OIDC public key".to_string())
-    })?;
+    let mut keys = Vec::new();
 
-    Ok(JwksResponse { keys: vec![jwk] })
+    // RSA key first (primary for ID tokens per OIDC Core Section 3.1.3.7)
+    if let Some(rsa_key) = &state.oidc_rsa_key {
+        keys.push(super::keys::Jwk::Rsa(rsa_key.public_key_jwk().map_err(
+            |e| {
+                tracing::error!("Failed to get OIDC RSA public key JWK: {}", e);
+                ServiceError::Internal("Failed to export OIDC RSA public key".to_string())
+            },
+        )?));
+    }
+
+    // EC key (always present, used for access tokens)
+    keys.push(super::keys::Jwk::Ec(
+        state.oidc_key.public_key_jwk().map_err(|e| {
+            tracing::error!("Failed to get OIDC public key JWK: {}", e);
+            ServiceError::Internal("Failed to export OIDC public key".to_string())
+        })?,
+    ));
+
+    Ok(JwksResponse { keys })
 }

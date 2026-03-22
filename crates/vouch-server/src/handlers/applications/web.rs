@@ -294,6 +294,7 @@ pub async fn create_application_form(
             registration_source: RegistrationSource::Manual,
             registration_access_token_hash: None,
             registration_metadata: None,
+            id_token_signed_response_alg: "RS256",
         },
     )
     .await

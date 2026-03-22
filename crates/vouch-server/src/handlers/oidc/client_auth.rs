@@ -28,7 +28,7 @@ const JWT_BEARER_CLIENT_ASSERTION_TYPE: &str =
 ///
 /// Represents the mutually-exclusive authentication methods that a client
 /// can use at OAuth endpoints (RFC 7521 Section 4.2).
-pub enum ExtractedClientAuth {
+pub(crate) enum ExtractedClientAuth {
     /// Client secret via Basic header or body params.
     Secret(ClientCredentials),
     /// JWT assertion (RFC 7523).
@@ -46,7 +46,7 @@ pub enum ExtractedClientAuth {
 ///
 /// Both `TokenRequest` and `ParRequest` implement this trait so the shared
 /// extraction logic can work with either.
-pub trait ClientAuthFields {
+pub(crate) trait ClientAuthFields {
     fn client_id(&self) -> Option<&str>;
     fn client_secret(&self) -> Option<SecretString>;
     fn client_assertion(&self) -> Option<&str>;
@@ -57,7 +57,7 @@ pub trait ClientAuthFields {
 ///
 /// Supports both `client_secret_basic` (RFC 6749 Section 2.3.1) and
 /// `client_secret_post` (RFC 6749 Section 2.3.1) authentication methods.
-pub fn extract_client_credentials(
+pub(crate) fn extract_client_credentials(
     headers: &HeaderMap,
     client_id_param: Option<&str>,
     client_secret_param: Option<SecretString>,
@@ -96,7 +96,7 @@ pub fn extract_client_credentials(
 /// Handles mutual exclusion: a request MUST NOT use more than one client
 /// authentication method (e.g., Basic auth header + client_assertion = error).
 #[allow(clippy::result_large_err)]
-pub fn extract_client_auth<T: ClientAuthFields>(
+pub(crate) fn extract_client_auth<T: ClientAuthFields>(
     headers: &HeaderMap,
     params: &T,
 ) -> Result<ExtractedClientAuth, Response> {
@@ -155,7 +155,7 @@ pub fn extract_client_auth<T: ClientAuthFields>(
 ///
 /// Dispatches to secret-based or JWT-based authentication depending on
 /// the extracted authentication method.
-pub async fn authenticate_client_any(
+pub(crate) async fn authenticate_client_any(
     state: &Arc<AppState>,
     auth: ExtractedClientAuth,
 ) -> Result<Option<(AuthenticatedClient, String)>, Response> {

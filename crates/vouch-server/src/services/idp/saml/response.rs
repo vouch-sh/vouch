@@ -42,7 +42,7 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// Identity assertion extracted from a validated SAML Response.
 #[derive(Debug, Clone)]
-pub struct SamlAssertion {
+pub(crate) struct SamlAssertion {
     /// Email address extracted from NameID or configured attribute.
     pub email: String,
     /// Domain extracted from email or configured domain attribute.
@@ -61,7 +61,7 @@ const SUBJECT_BEARER: &str = "urn:oasis:names:tc:SAML:2.0:cm:bearer";
 
 /// Errors during SAML response validation.
 #[derive(Debug, thiserror::Error)]
-pub enum ResponseError {
+pub(crate) enum ResponseError {
     /// The base64 decoding of the SAMLResponse failed.
     #[error("failed to decode SAML response: {0}")]
     DecodeFailed(String),
@@ -144,7 +144,7 @@ pub enum ResponseError {
 ///
 /// Returns `ResponseError` for any validation failure. The caller must delete the
 /// SAML state record (replay prevention) after this function returns `Ok`.
-pub fn validate_saml_response(
+pub(crate) fn validate_saml_response(
     base64_response: &str,
     expected_request_id: &str,
     provider: &SamlProvider,
@@ -653,7 +653,7 @@ fn parse_saml_timestamp(s: &str) -> Result<Timestamp, ResponseError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::panic, clippy::too_many_lines)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
     use super::*;
 
     // =========================================================================
@@ -1522,7 +1522,7 @@ mod tests {
 
         let base64_response = B64.encode(xml.as_bytes());
         let result = validate_saml_response(&base64_response, "_request001", &provider);
-        let assertion = result.unwrap_or_else(|e| panic!("Expected Ok but got Err: {e}"));
+        let assertion = result.expect("Expected Ok");
 
         assert_eq!(assertion.email, "alice@example.com");
         assert_eq!(assertion.domain, Some("example.com".to_string()));

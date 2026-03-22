@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
 
 /// EKS integration checker.
-pub struct EksIntegration;
+pub(crate) struct EksIntegration;
 
 impl EksIntegration {
     /// Create a new EKS integration checker.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }

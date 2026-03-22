@@ -29,7 +29,7 @@ use std::sync::Arc;
 /// Access denied error template.
 #[derive(Template)]
 #[template(path = "authorize_denied.html")]
-pub struct AuthorizeDeniedTemplate {
+pub(super) struct AuthorizeDeniedTemplate {
     pub client_name: String,
     pub error_message: String,
 }

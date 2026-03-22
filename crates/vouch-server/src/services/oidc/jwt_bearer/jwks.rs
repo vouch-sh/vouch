@@ -411,12 +411,7 @@ fn build_decoding_key_from_jwk(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -530,15 +525,13 @@ mod tests {
     #[test]
     fn test_parse_jwks_invalid_json() {
         let result = parse_jwks("not json");
-        assert!(result.is_err());
         let err = result.unwrap_err();
-        match &err {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(*code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "Invalid JWKS format");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "Invalid JWKS format")
+        );
     }
 
     #[test]
@@ -604,14 +597,13 @@ mod tests {
         let hdr = header("ES256", Some("missing"));
 
         let result = find_matching_key(&jwks, &hdr);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "No matching key found in JWKS");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "No matching key found in JWKS")
+        );
     }
 
     #[test]
@@ -646,14 +638,13 @@ mod tests {
         let hdr = header("ES256", None);
 
         let result = find_matching_key(&jwks, &hdr);
-        assert!(result.is_err(), "should skip key with use=enc");
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "No matching key found in JWKS");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "No matching key found in JWKS")
+        );
     }
 
     #[test]
@@ -677,14 +668,13 @@ mod tests {
         let hdr = header("ES256", None);
 
         let result = find_matching_key(&jwks, &hdr);
-        assert!(result.is_err(), "should skip key with wrong alg");
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "No matching key found in JWKS");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "No matching key found in JWKS")
+        );
     }
 
     #[test]
@@ -708,17 +698,13 @@ mod tests {
         let hdr = header("ES384", None);
 
         let result = find_matching_key(&jwks, &hdr);
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert!(
-                    description.contains("Unsupported algorithm"),
-                    "error should mention unsupported algorithm, got: {description}"
-                );
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("Unsupported algorithm"))
+        );
     }
 
     #[test]
@@ -782,14 +768,13 @@ mod tests {
         key.x = None;
 
         let result = build_decoding_key_from_jwk(&key, "ES256");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "EC key missing x component");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "EC key missing x component")
+        );
     }
 
     #[test]
@@ -798,14 +783,13 @@ mod tests {
         key.y = None;
 
         let result = build_decoding_key_from_jwk(&key, "ES256");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "EC key missing y component");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "EC key missing y component")
+        );
     }
 
     #[test]
@@ -814,14 +798,13 @@ mod tests {
         key.x = Some("not-valid-base64url!!!".to_string());
 
         let result = build_decoding_key_from_jwk(&key, "ES256");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "Invalid key in JWKS");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "Invalid key in JWKS")
+        );
     }
 
     #[test]
@@ -837,14 +820,13 @@ mod tests {
         key.n = None;
 
         let result = build_decoding_key_from_jwk(&key, "RS256");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "RSA key missing n component");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "RSA key missing n component")
+        );
     }
 
     #[test]
@@ -853,14 +835,13 @@ mod tests {
         key.e = None;
 
         let result = build_decoding_key_from_jwk(&key, "RS256");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "RSA key missing e component");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "RSA key missing e component")
+        );
     }
 
     #[test]
@@ -869,14 +850,13 @@ mod tests {
         key.n = Some("not-valid!!!".to_string());
 
         let result = build_decoding_key_from_jwk(&key, "RS256");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "Invalid key in JWKS");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "Invalid key in JWKS")
+        );
     }
 
     #[test]
@@ -884,14 +864,13 @@ mod tests {
         // EC key with RS256 algorithm — unsupported combination
         let key = ec_jwk_entry(None, None, None);
         let result = build_decoding_key_from_jwk(&key, "RS256");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "No matching key found in JWKS");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "No matching key found in JWKS")
+        );
     }
 
     #[test]
@@ -917,42 +896,39 @@ mod tests {
     async fn test_fetch_jwks_rejects_http_url() {
         let client = reqwest::Client::new();
         let result = fetch_jwks("http://example.com/jwks", &client).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "JWKS URI must use HTTPS");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "JWKS URI must use HTTPS")
+        );
     }
 
     #[tokio::test]
     async fn test_fetch_jwks_rejects_ftp_url() {
         let client = reqwest::Client::new();
         let result = fetch_jwks("ftp://example.com/jwks", &client).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "JWKS URI must use HTTPS");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "JWKS URI must use HTTPS")
+        );
     }
 
     #[tokio::test]
     async fn test_fetch_jwks_rejects_empty_uri() {
         let client = reqwest::Client::new();
         let result = fetch_jwks("", &client).await;
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "JWKS URI must use HTTPS");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "JWKS URI must use HTTPS")
+        );
     }
 
     // ====================================================================
@@ -1017,14 +993,13 @@ mod tests {
         key.x = None;
 
         let result = build_decoding_key_from_jwk(&key, "EdDSA");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "OKP key missing x component");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "OKP key missing x component")
+        );
     }
 
     #[test]
@@ -1033,14 +1008,13 @@ mod tests {
         key.crv = None;
 
         let result = build_decoding_key_from_jwk(&key, "EdDSA");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "OKP key missing crv component");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "OKP key missing crv component")
+        );
     }
 
     #[test]
@@ -1049,13 +1023,12 @@ mod tests {
         key.crv = Some("Ed448".to_string());
 
         let result = build_decoding_key_from_jwk(&key, "EdDSA");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClient);
-                assert_eq!(description, "EdDSA requires OKP key with Ed25519 curve");
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClient)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description == "EdDSA requires OKP key with Ed25519 curve")
+        );
     }
 }

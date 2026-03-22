@@ -10,7 +10,7 @@ use super::credential::cache;
 
 /// CodeArtifact-specific options for exec/env commands.
 #[derive(Default)]
-pub struct CodeArtifactOptions<'a> {
+pub(crate) struct CodeArtifactOptions<'a> {
     pub domain: Option<&'a str>,
     pub domain_owner: Option<&'a str>,
     pub region: Option<&'a str>,
@@ -19,7 +19,7 @@ pub struct CodeArtifactOptions<'a> {
 
 /// RDS-specific options for exec/env commands.
 #[derive(Default)]
-pub struct RdsOptions<'a> {
+pub(crate) struct RdsOptions<'a> {
     pub hostname: Option<&'a str>,
     pub port: u16,
     pub username: Option<&'a str>,
@@ -28,7 +28,7 @@ pub struct RdsOptions<'a> {
 
 /// Redshift-specific options for exec/env commands.
 #[derive(Default)]
-pub struct RedshiftOptions<'a> {
+pub(crate) struct RedshiftOptions<'a> {
     pub cluster_id: Option<&'a str>,
     pub workgroup: Option<&'a str>,
     pub db_name: Option<&'a str>,
@@ -42,7 +42,7 @@ pub struct RedshiftOptions<'a> {
 /// identifiers (they appear in CloudTrail logs, IAM consoles, etc.).
 /// Only `secret_access_key` and `session_token` are wrapped in `SecretString`
 /// for automatic zeroization on drop and redacted `Debug` output.
-pub struct AwsEnvCredentials {
+pub(crate) struct AwsEnvCredentials {
     pub access_key_id: String,
     pub secret_access_key: SecretString,
     pub session_token: SecretString,
@@ -61,7 +61,10 @@ impl std::fmt::Debug for AwsEnvCredentials {
 }
 
 /// Fetch AWS credentials (cache-first) and extract environment variable values.
-pub async fn fetch_aws_credentials(server: &str, role_arn: &str) -> Result<AwsEnvCredentials> {
+pub(crate) async fn fetch_aws_credentials(
+    server: &str,
+    role_arn: &str,
+) -> Result<AwsEnvCredentials> {
     let cache_key = format!("aws:{role_arn}");
 
     let data = cache::get_or_fetch(&cache_key, "AWS credentials", || async {
@@ -105,7 +108,7 @@ pub async fn fetch_aws_credentials(server: &str, role_arn: &str) -> Result<AwsEn
 ///
 /// Token is wrapped in `SecretString` for automatic zeroization on drop
 /// and redacted `Debug` output.
-pub struct GitHubEnvToken {
+pub(crate) struct GitHubEnvToken {
     pub token: SecretString,
 }
 
@@ -118,7 +121,7 @@ impl std::fmt::Debug for GitHubEnvToken {
 }
 
 /// Fetch a GitHub token (cache-first) and extract the token value.
-pub async fn fetch_github_token_cached(server: &str) -> Result<GitHubEnvToken> {
+pub(crate) async fn fetch_github_token_cached(server: &str) -> Result<GitHubEnvToken> {
     let cache_key = "github";
 
     let data = cache::get_or_fetch(cache_key, "GitHub token", || async {
@@ -144,7 +147,7 @@ pub async fn fetch_github_token_cached(server: &str) -> Result<GitHubEnvToken> {
 }
 
 /// Run a command with credentials injected as environment variables.
-pub async fn run(
+pub(crate) async fn run(
     server: &str,
     credential_type: &CredentialType,
     role: Option<&str>,

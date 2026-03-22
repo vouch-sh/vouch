@@ -57,7 +57,7 @@ const NS_EC: &str = "http://www.w3.org/2001/10/xml-exc-c14n#";
 
 /// Errors during XML signature verification.
 #[derive(Debug, thiserror::Error)]
-pub enum SignatureError {
+pub(crate) enum SignatureError {
     /// No `<ds:Signature>` element found in the document.
     #[error("no Signature element found")]
     NoSignature,
@@ -93,7 +93,7 @@ pub enum SignatureError {
 /// Callers must re-resolve this ID in the document to extract identity data,
 /// rather than using a cached DOM position (XSW mitigation).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SignedElementId(pub String);
+pub(crate) struct SignedElementId(pub String);
 
 // ============================================================================
 // Public API
@@ -114,7 +114,7 @@ pub struct SignedElementId(pub String);
 ///
 /// Returns `SignatureError` if the signature is missing, malformed, invalid,
 /// uses an unsupported algorithm, or no provided certificate matches.
-pub fn verify_xml_signature(
+pub(crate) fn verify_xml_signature(
     doc: &roxmltree::Document,
     signing_certificates: &[Vec<u8>],
 ) -> Result<SignedElementId, SignatureError> {
@@ -593,7 +593,7 @@ fn try_verify_with_cert(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::panic)]
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     // =========================================================================

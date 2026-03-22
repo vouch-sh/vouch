@@ -8,7 +8,7 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 
 /// A DPoP nonce issued by the server.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DpopNonceDoc {
+pub(crate) struct DpopNonceDoc {
     pub nonce: String,
     pub expires_at: Timestamp,
 }
@@ -30,7 +30,7 @@ impl DocumentType for DpopNonceDoc {
 
 /// A DPoP JTI (replay prevention cache entry).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DpopJtiDoc {
+pub(crate) struct DpopJtiDoc {
     pub jti: String,
     pub expires_at: Timestamp,
 }

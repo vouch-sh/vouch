@@ -29,7 +29,7 @@ use subtle::ConstantTimeEq;
 /// Per OIDC Core Section 5.4, `email` and `email_verified` claims are only
 /// returned when the `email` scope was granted.
 #[derive(Debug, Serialize)]
-pub struct UserInfoResponse {
+pub(super) struct UserInfoResponse {
     /// OIDC Core Section 5.1: Subject Identifier.
     sub: String,
     /// OIDC Core Section 5.1: User email address.

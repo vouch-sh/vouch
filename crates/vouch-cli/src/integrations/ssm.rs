@@ -7,12 +7,12 @@ use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
 use crate::commands::setup::ssm::SSM_MARKER;
 
 /// SSM integration checker.
-pub struct SsmIntegration;
+pub(crate) struct SsmIntegration;
 
 impl SsmIntegration {
     /// Create a new SSM integration checker.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }
@@ -24,7 +24,7 @@ impl Default for SsmIntegration {
 }
 
 /// Check whether `session-manager-plugin` is installed and on PATH.
-pub fn is_plugin_available() -> bool {
+pub(crate) fn is_plugin_available() -> bool {
     match std::process::Command::new("session-manager-plugin")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -106,7 +106,7 @@ impl IntegrationCheck for SsmIntegration {
 }
 
 /// Extract the value following a `--flag` in a command string.
-pub fn extract_flag_value(line: &str, flag: &str) -> Option<String> {
+pub(crate) fn extract_flag_value(line: &str, flag: &str) -> Option<String> {
     let mut parts = line.split_whitespace();
     while let Some(part) = parts.next() {
         if part == flag {

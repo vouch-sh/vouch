@@ -237,7 +237,7 @@ pub struct OAuthErrorResponse {
 
 /// SCIM error response (RFC 7644 Section 3.12).
 #[derive(Debug, Serialize)]
-pub struct ScimErrorResponse {
+pub(crate) struct ScimErrorResponse {
     /// SCIM schema URIs.
     pub schemas: Vec<String>,
     /// Error detail message.
@@ -509,10 +509,10 @@ impl IntoResponse for ServiceError {
 }
 
 /// Result type for service operations.
-pub type ServiceResult<T> = Result<T, ServiceError>;
+pub(crate) type ServiceResult<T> = Result<T, ServiceError>;
 
 #[cfg(test)]
-#[allow(clippy::panic, clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -558,18 +558,21 @@ mod tests {
             "ssh_ca_not_configured",
             "SSH CA is not configured",
         );
-        match err {
-            ServiceError::Api {
-                status,
-                code,
-                message,
-            } => {
-                assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-                assert_eq!(code, "ssh_ca_not_configured");
-                assert_eq!(message, "SSH CA is not configured");
-            }
-            _ => panic!("Expected Api"),
-        }
+        assert!(
+            matches!(err, ServiceError::Api { .. }),
+            "Expected ServiceError::Api"
+        );
+        let ServiceError::Api {
+            status,
+            code,
+            message,
+        } = err
+        else {
+            return;
+        };
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(code, "ssh_ca_not_configured");
+        assert_eq!(message, "SSH CA is not configured");
     }
 
     /// Verify that `ServiceError::Api` produces `{"code": "...", "message": "..."}`.
@@ -665,18 +668,21 @@ mod tests {
     #[test]
     fn test_service_error_scim_factory() {
         let err = ServiceError::scim(400, "Invalid attribute", Some("invalidValue"));
-        match err {
-            ServiceError::Scim {
-                status,
-                detail,
-                scim_type,
-            } => {
-                assert_eq!(status, 400);
-                assert_eq!(detail, "Invalid attribute");
-                assert_eq!(scim_type, Some("invalidValue".to_string()));
-            }
-            _ => panic!("Expected Scim error"),
-        }
+        assert!(
+            matches!(err, ServiceError::Scim { .. }),
+            "Expected ServiceError::Scim"
+        );
+        let ServiceError::Scim {
+            status,
+            detail,
+            scim_type,
+        } = err
+        else {
+            return;
+        };
+        assert_eq!(status, 400);
+        assert_eq!(detail, "Invalid attribute");
+        assert_eq!(scim_type, Some("invalidValue".to_string()));
     }
 
     // =========================================================================

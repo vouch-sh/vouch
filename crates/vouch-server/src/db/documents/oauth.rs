@@ -287,6 +287,16 @@ pub struct OAuthClientDoc {
     pub registration_access_token_hash: Option<String>,
     /// RFC 7591 cosmetic metadata (JSON).
     pub registration_metadata: Option<serde_json::Value>,
+    /// OIDC Core Section 3.1.3.7: ID token signing algorithm.
+    /// New registrations default to "RS256" per OIDC Core spec, but the serde
+    /// default is "ES256" for backward compatibility with existing client records
+    /// that were created before RS256 support was added.
+    #[serde(default = "default_id_token_alg")]
+    pub id_token_signed_response_alg: String,
+}
+
+fn default_id_token_alg() -> String {
+    "ES256".to_string()
 }
 
 impl DocumentType for OAuthClientDoc {
@@ -413,7 +423,7 @@ impl DocumentType for DelegationPolicyDoc {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{AccessScope, OAuthClientType, OAuthDocumentParseError, TokenEndpointAuthMethod};
     use std::str::FromStr;
@@ -444,14 +454,54 @@ mod tests {
 
     #[test]
     fn test_token_endpoint_auth_method_from_str_typed_error() {
-        let err = match TokenEndpointAuthMethod::from_str("mtls") {
-            Ok(value) => panic!("must reject mtls, got {value:?}"),
-            Err(err) => err,
-        };
+        let result = TokenEndpointAuthMethod::from_str("mtls");
+        assert!(result.is_err(), "must reject mtls");
+        let err = result.unwrap_err();
         assert_eq!(
             err,
             OAuthDocumentParseError::TokenEndpointAuthMethod("mtls".to_string())
         );
         assert_eq!(err.to_string(), "Unknown token endpoint auth method: mtls");
+    }
+
+    #[test]
+    fn test_id_token_signed_response_alg_serde_default() {
+        // Existing client records without id_token_signed_response_alg should
+        // default to "ES256" for backward compatibility (not "RS256").
+        let json = r#"{
+            "user_id": null,
+            "client_id": "test-client",
+            "name": "Test",
+            "description": null,
+            "application_type": "web",
+            "redirect_uris": [],
+            "active": true,
+            "access_scope": "public",
+            "org_id": null,
+            "resource_uris": [],
+            "jwks": null,
+            "jwks_uri": null,
+            "jwks_uri_cached_at": null,
+            "jwks_uri_cache": null,
+            "token_endpoint_auth_method": "none",
+            "request_object_signing_alg": null,
+            "require_signed_request_object": null,
+            "fapi_profile": "none",
+            "dpop_bound_access_tokens": false,
+            "grant_types": null,
+            "response_types": null,
+            "software_id": null,
+            "software_version": null,
+            "registration_source": null,
+            "registration_access_token_hash": null,
+            "registration_metadata": null
+        }"#;
+
+        let doc: super::OAuthClientDoc = serde_json::from_str(json)
+            .expect("Should deserialize OAuthClientDoc without id_token_signed_response_alg");
+        assert_eq!(
+            doc.id_token_signed_response_alg, "ES256",
+            "Missing field should default to ES256 for backward compatibility"
+        );
     }
 }

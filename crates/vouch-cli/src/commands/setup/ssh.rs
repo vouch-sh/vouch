@@ -64,7 +64,7 @@ fn default_key_path() -> Result<PathBuf> {
 /// 3. Optionally updates ~/.ssh/known_hosts to trust the CA for host verification
 /// 4. Optionally updates ~/.ssh/config to use the Vouch SSH agent
 /// 5. Shows instructions for SSH config
-pub async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
+pub(crate) async fn run(server: &str, hosts: Option<&str>) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     // Download CA public key

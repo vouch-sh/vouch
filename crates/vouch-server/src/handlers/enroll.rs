@@ -1431,12 +1431,7 @@ fn is_valid_user_code_format(code: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    #![allow(
-        clippy::unwrap_used,
-        clippy::expect_used,
-        clippy::indexing_slicing,
-        clippy::panic
-    )]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
     use crate::test_utils::{http_post_json, test_app};

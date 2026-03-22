@@ -285,6 +285,12 @@ pub struct S3Config {
     /// AWS KMS key ID for OIDC signing (multi-region `mrk-` prefix).
     pub oidc_signing_kms_key_id: Option<String>,
 
+    /// OIDC RSA signing key (base64-encoded PEM RSA-3072 private key).
+    pub oidc_rsa_signing_key: Option<String>,
+
+    /// AWS KMS key ID for OIDC RSA signing (RSA_3072).
+    pub oidc_rsa_signing_kms_key_id: Option<String>,
+
     /// AWS KMS key ID for HMAC state token signing.
     pub jwt_hmac_kms_key_id: Option<String>,
 
@@ -341,6 +347,11 @@ impl std::fmt::Debug for S3Config {
             .field("ssh_ca_kms_key_id", &self.ssh_ca_kms_key_id)
             .field("oidc_signing_key", &"[REDACTED]")
             .field("oidc_signing_kms_key_id", &self.oidc_signing_kms_key_id)
+            .field("oidc_rsa_signing_key", &"[REDACTED]")
+            .field(
+                "oidc_rsa_signing_kms_key_id",
+                &self.oidc_rsa_signing_kms_key_id,
+            )
             .field("jwt_hmac_kms_key_id", &self.jwt_hmac_kms_key_id)
             .field("cleanup_interval_minutes", &self.cleanup_interval_minutes)
             .field(
@@ -787,6 +798,14 @@ impl ServerConfig {
             self.oidc_signing_kms_key_id = Some(v.clone());
         }
 
+        // OIDC RSA signing key
+        if let Some(v) = &s3.oidc_rsa_signing_key {
+            self.oidc_rsa_signing_key = Some(SecretString::from(v.clone()));
+        }
+        if let Some(v) = &s3.oidc_rsa_signing_kms_key_id {
+            self.oidc_rsa_signing_kms_key_id = Some(v.clone());
+        }
+
         // JWT HMAC KMS key ID
         if let Some(v) = &s3.jwt_hmac_kms_key_id {
             self.jwt_hmac_kms_key_id = Some(v.clone());
@@ -1171,6 +1190,66 @@ mod tests {
         assert!(config.ssh_ca_kms_key_id.is_none());
         assert!(config.oidc_signing_kms_key_id.is_none());
         assert!(config.jwt_hmac_kms_key_id.is_none());
+    }
+
+    #[test]
+    fn test_s3_config_deserialization_with_rsa_signing_key_fields() {
+        let json = r#"{
+            "version": 1,
+            "rp_id": "vouch.example.com",
+            "oidc_rsa_signing_key": "base64encodedpemkey",
+            "oidc_rsa_signing_kms_key_id": "mrk-rsa-key-123"
+        }"#;
+
+        let config: S3Config = serde_json::from_str(json).expect("Failed to parse");
+
+        assert_eq!(
+            config.oidc_rsa_signing_key,
+            Some("base64encodedpemkey".to_string())
+        );
+        assert_eq!(
+            config.oidc_rsa_signing_kms_key_id,
+            Some("mrk-rsa-key-123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_merge_s3_config_rsa_signing_key_startup() {
+        let mut config = crate::test_utils::test_config();
+        assert!(config.oidc_rsa_signing_key.is_none());
+        assert!(config.oidc_rsa_signing_kms_key_id.is_none());
+
+        let s3 = S3Config {
+            oidc_rsa_signing_key: Some("base64encodedpemkey".to_string()),
+            oidc_rsa_signing_kms_key_id: Some("mrk-rsa-key-123".to_string()),
+            ..Default::default()
+        };
+
+        // Startup merge should apply RSA key fields
+        config.merge_s3_config(&s3, false);
+
+        assert!(config.oidc_rsa_signing_key.is_some());
+        assert_eq!(
+            config.oidc_rsa_signing_kms_key_id,
+            Some("mrk-rsa-key-123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_merge_s3_config_rsa_signing_key_runtime_blocked() {
+        let mut config = crate::test_utils::test_config();
+
+        let s3 = S3Config {
+            oidc_rsa_signing_key: Some("base64encodedpemkey".to_string()),
+            oidc_rsa_signing_kms_key_id: Some("mrk-rsa-key-123".to_string()),
+            ..Default::default()
+        };
+
+        // Runtime update should NOT apply RSA signing key fields
+        config.merge_s3_config(&s3, true);
+
+        assert!(config.oidc_rsa_signing_key.is_none());
+        assert!(config.oidc_rsa_signing_kms_key_id.is_none());
     }
 
     #[test]

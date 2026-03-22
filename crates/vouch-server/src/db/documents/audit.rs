@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 /// Data payload for OAuth usage audit events.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct OAuthUsageData {
+pub(crate) struct OAuthUsageData {
     pub oauth_client_id: String,
     pub details: Option<String>,
     #[serde(alias = "ip_address")]
@@ -27,7 +27,7 @@ pub struct OAuthUsageData {
 
 /// Data payload for SCIM operation audit events.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ScimAuditData {
+pub(crate) struct ScimAuditData {
     pub operation: String,
     pub resource_type: String,
     pub resource_id: String,

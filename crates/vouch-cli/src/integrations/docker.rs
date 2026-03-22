@@ -5,12 +5,12 @@ use crate::commands::setup::docker::{DockerSetupStatus, check_docker_config};
 use crate::integrations::{ConfiguredDetails, IntegrationCheck, IntegrationState};
 
 /// Docker integration checker.
-pub struct DockerIntegration;
+pub(crate) struct DockerIntegration;
 
 impl DockerIntegration {
     /// Create a new Docker integration checker.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }

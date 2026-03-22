@@ -17,7 +17,7 @@ use crate::style;
 
 /// Output format for the status command.
 #[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
-pub enum OutputFormat {
+pub(crate) enum OutputFormat {
     /// Human-readable output (default).
     #[default]
     Human,
@@ -77,7 +77,7 @@ pub(crate) fn print_shell(
 }
 
 /// Run the status command.
-pub async fn run(server: &str, mode: OutputFormat) -> Result<()> {
+pub(crate) async fn run(server: &str, mode: OutputFormat) -> Result<()> {
     // First, try to get session from agent (Unix only)
     #[cfg(unix)]
     match get_session_from_agent().await {

@@ -108,6 +108,8 @@ pub struct RegistrationRequest {
     pub software_statement: Option<String>,
     /// FAPI 2.0: Whether access tokens must be DPoP-bound.
     pub dpop_bound_access_tokens: Option<bool>,
+    /// OIDC Core Section 3.1.3.7: ID token signing algorithm.
+    pub id_token_signed_response_alg: Option<String>,
 }
 
 /// RFC 7591 Section 3.2.1: Client Information Response.
@@ -188,186 +190,29 @@ pub async fn register_client(
         apply_software_statement(state, &mut request, &statement_jwt).await?;
     }
 
-    // 2. Reject implicit grant (deprecated by RFC 9700)
-    if let Some(ref grant_types) = request.grant_types
-        && grant_types.iter().any(|g| g == "implicit")
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            "The 'implicit' grant type is not supported (deprecated by RFC 9700)",
-        ));
-    }
-    if let Some(ref response_types) = request.response_types {
-        for rt in response_types {
-            if rt == "token"
-                || rt == "id_token"
-                || rt == "id_token token"
-                || rt == "code token"
-                || rt == "code id_token token"
-            {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    "Implicit response types ('token', 'id_token') are not supported \
-                     (deprecated by RFC 9700)",
-                ));
-            }
-        }
-    }
+    // 2-6. Validate grant/response types, apply defaults, check consistency
+    let validated = validate_grant_and_response_types(&mut request)?;
 
-    // 3. Apply defaults
-    let grant_types = request
-        .grant_types
-        .take()
-        .unwrap_or_else(|| vec!["authorization_code".to_string()]);
-    let response_types = request
-        .response_types
-        .take()
-        .unwrap_or_else(|| vec!["code".to_string()]);
-    let auth_method_str = request
-        .token_endpoint_auth_method
-        .take()
-        .unwrap_or_else(|| "client_secret_basic".to_string());
+    // 7. Validate redirect URIs
+    let redirect_uris = validate_redirect_uris(&mut request, validated.has_auth_code)?;
 
-    // 4. Validate grant types are in the allowed set
-    for gt in &grant_types {
-        if !ALLOWED_GRANT_TYPES.contains(&gt.as_str()) {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                format!("Unsupported grant type: '{gt}'"),
-            ));
-        }
-    }
+    // 8-9. Validate JWKS and auth method
+    let jwks_auth = validate_jwks_and_auth_method(&mut request, &validated.auth_method_str)?;
 
-    // 5. Validate response types are in the allowed set
-    for rt in &response_types {
-        if !ALLOWED_RESPONSE_TYPES.contains(&rt.as_str()) {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                format!("Unsupported response type: '{rt}'"),
-            ));
-        }
-    }
-
-    // 6. Grant/response type consistency
-    let has_auth_code = grant_types.iter().any(|g| g == "authorization_code");
-    let has_code_response = response_types.iter().any(|r| r == "code");
-    if has_auth_code && !has_code_response {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            "grant_types includes 'authorization_code' but response_types is missing 'code'",
-        ));
-    }
-
-    // 7. Redirect URIs: required when authorization_code grant is present
-    let redirect_uris = request.redirect_uris.take().unwrap_or_default();
-    if has_auth_code && redirect_uris.is_empty() {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            "redirect_uris is required when grant_types includes 'authorization_code'",
-        ));
-    }
-
-    // Cardinality limit
-    if redirect_uris.len() > MAX_REDIRECT_URIS {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            format!("Too many redirect_uris (max {MAX_REDIRECT_URIS})"),
-        ));
-    }
-
-    // Validate redirect URIs (reuse existing validation + fragment check)
-    for uri in &redirect_uris {
-        validate_registration_redirect_uri(uri)?;
-    }
-
-    // 8. JWKS mutual exclusivity
-    let jwks_value = request.jwks.take();
-    let jwks_uri = request.jwks_uri.take();
-    if jwks_value.is_some() && jwks_uri.is_some() {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            "jwks and jwks_uri are mutually exclusive",
-        ));
-    }
-
-    // Validate JWKS JSON structure if provided
-    if let Some(ref jwks) = jwks_value
-        && !jwks
-            .get("keys")
-            .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            "jwks must be a JSON object with a non-empty \"keys\" array",
-        ));
-    }
-
-    // Validate JWKS URI is HTTPS
-    if let Some(ref uri) = jwks_uri {
-        match url::Url::parse(uri) {
-            Ok(parsed) if parsed.scheme() == "https" => {}
-            _ => {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    "jwks_uri must be a valid https:// URL",
-                ));
-            }
-        }
-    }
-
-    // 9. Auth method validation
-    let auth_method: TokenEndpointAuthMethod = auth_method_str.parse().map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            format!("Unsupported token_endpoint_auth_method: '{auth_method_str}'"),
-        )
-    })?;
-
-    if auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
-        && jwks_value.is_none()
-        && jwks_uri.is_none()
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            "private_key_jwt requires jwks or jwks_uri",
-        ));
-    }
-
-    // 10. URI field validation (must be HTTPS)
-    validate_https_uri("client_uri", request.client_uri.as_deref())?;
-    validate_https_uri("logo_uri", request.logo_uri.as_deref())?;
-    validate_https_uri("tos_uri", request.tos_uri.as_deref())?;
-    validate_https_uri("policy_uri", request.policy_uri.as_deref())?;
-
-    // 11. Contacts validation
-    if let Some(ref contacts) = request.contacts {
-        if contacts.len() > MAX_CONTACTS {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidClientMetadata,
-                format!("Too many contacts (max {MAX_CONTACTS})"),
-            ));
-        }
-        for contact in contacts {
-            if !contact.contains('@') {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    format!("Invalid contact email: '{contact}'"),
-                ));
-            }
-        }
-    }
+    // 10-11. Validate contacts and URI fields
+    validate_contacts_and_uris(&request)?;
 
     // 12. FAPI 2.0 enforcement
     let dpop_bound = request.dpop_bound_access_tokens.unwrap_or(false);
     let fapi_profile = if dpop_bound {
         // Require FAPI constraints
-        if auth_method != TokenEndpointAuthMethod::PrivateKeyJwt {
+        if jwks_auth.auth_method != TokenEndpointAuthMethod::PrivateKeyJwt {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
                 "FAPI 2.0 requires token_endpoint_auth_method 'private_key_jwt'",
             ));
         }
-        if jwks_value.is_none() && jwks_uri.is_none() {
+        if jwks_auth.jwks_value.is_none() && jwks_auth.jwks_uri.is_none() {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
                 "FAPI 2.0 requires jwks or jwks_uri",
@@ -378,28 +223,46 @@ pub async fn register_client(
         FapiProfile::None
     };
 
-    // 13. Infer application type
-    let has_client_credentials_only = grant_types.len() == 1
-        && grant_types
-            .first()
-            .is_some_and(|g| g == "client_credentials");
-    let is_public = auth_method == TokenEndpointAuthMethod::None;
-    let has_loopback = redirect_uris.iter().any(|u| {
-        url::Url::parse(u)
-            .ok()
-            .and_then(|p| p.host_str().map(|h| h.to_string()))
-            .is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "[::1]")
+    // OIDC Core Section 3.1.3.7: Default is RS256, but fall back to ES256 if no RSA key.
+    let explicit_alg = request.id_token_signed_response_alg.as_deref();
+
+    // Validate against supported algorithms (only when client makes an explicit choice)
+    if let Some(alg) = explicit_alg {
+        if alg != "RS256" && alg != "ES256" {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!(
+                    "Unsupported id_token_signed_response_alg: '{alg}'. \
+                     Supported: RS256, ES256"
+                ),
+            ));
+        }
+
+        // If RS256 is explicitly requested but no RSA key is configured, reject.
+        // An unspecified algorithm falls back to ES256 automatically (see below).
+        if alg == "RS256" && state.oidc_rsa_key.is_none() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                "RS256 is not available (no RSA signing key configured)",
+            ));
+        }
+    }
+
+    // When the client didn't specify, use RS256 if available, otherwise ES256.
+    let id_token_alg = explicit_alg.unwrap_or_else(|| {
+        if state.oidc_rsa_key.is_some() {
+            "RS256"
+        } else {
+            "ES256"
+        }
     });
 
-    let app_type = if has_client_credentials_only {
-        OAuthClientType::Service
-    } else if is_public && has_loopback {
-        OAuthClientType::Native
-    } else if is_public {
-        OAuthClientType::Spa
-    } else {
-        OAuthClientType::Web
-    };
+    // 13. Infer application type
+    let app_type = determine_client_type(
+        &validated.grant_types,
+        jwks_auth.auth_method,
+        &redirect_uris,
+    );
 
     // Build the client name (fallback to software_id or "Unnamed Client")
     let client_name = request.client_name.as_deref().unwrap_or("Unnamed Client");
@@ -427,18 +290,19 @@ pub async fn register_client(
             },
             org_id: None,
             resource_uris: &[],
-            token_endpoint_auth_method: Some(auth_method),
-            jwks: jwks_value.as_ref(),
-            jwks_uri: jwks_uri.as_deref(),
+            token_endpoint_auth_method: Some(jwks_auth.auth_method),
+            jwks: jwks_auth.jwks_value.as_ref(),
+            jwks_uri: jwks_auth.jwks_uri.as_deref(),
             fapi_profile: Some(fapi_profile),
             dpop_bound_access_tokens: Some(dpop_bound),
-            grant_types: Some(&grant_types),
-            response_types: Some(&response_types),
+            grant_types: Some(&validated.grant_types),
+            response_types: Some(&validated.response_types),
             software_id: request.software_id.as_deref(),
             software_version: request.software_version.as_deref(),
             registration_source: RegistrationSource::Dynamic,
             registration_access_token_hash: Some(&reg_token_hash),
             registration_metadata: Some(&registration_metadata),
+            id_token_signed_response_alg: id_token_alg,
         },
     )
     .await
@@ -449,7 +313,7 @@ pub async fn register_client(
 
     // 16. Generate client_secret for confidential clients
     let client_secret = if matches!(
-        auth_method,
+        jwks_auth.auth_method,
         TokenEndpointAuthMethod::ClientSecretBasic | TokenEndpointAuthMethod::ClientSecretPost
     ) {
         let secret_bytes = generate_random_bytes(SECRET_LENGTH)
@@ -518,9 +382,9 @@ pub async fn register_client(
         } else {
             Some(redirect_uris)
         },
-        token_endpoint_auth_method: auth_method.as_str().to_string(),
-        grant_types,
-        response_types,
+        token_endpoint_auth_method: jwks_auth.auth_method.as_str().to_string(),
+        grant_types: validated.grant_types,
+        response_types: validated.response_types,
         client_name: Some(client_name.to_string()),
         client_uri: request.client_uri,
         logo_uri: request.logo_uri,
@@ -528,13 +392,248 @@ pub async fn register_client(
         policy_uri: request.policy_uri,
         scope: request.scope,
         contacts: request.contacts,
-        jwks: jwks_value,
-        jwks_uri,
+        jwks: jwks_auth.jwks_value,
+        jwks_uri: jwks_auth.jwks_uri,
         software_id: request.software_id,
         software_version: request.software_version,
         dpop_bound_access_tokens: if dpop_bound { Some(true) } else { None },
-        id_token_signed_response_alg: "ES256".to_string(),
+        id_token_signed_response_alg: id_token_alg.to_string(),
     })
+}
+
+// ============================================================================
+// Registration Validation Helpers
+// ============================================================================
+
+/// Validated grant/response types and auth method from a registration request.
+#[derive(Debug)]
+struct ValidatedGrantTypes {
+    grant_types: Vec<String>,
+    response_types: Vec<String>,
+    auth_method_str: String,
+    has_auth_code: bool,
+}
+
+/// Reject implicit grant, apply defaults, validate allowed types, check consistency.
+fn validate_grant_and_response_types(
+    request: &mut RegistrationRequest,
+) -> Result<ValidatedGrantTypes, ServiceError> {
+    // Reject implicit grant (deprecated by RFC 9700)
+    if let Some(ref grant_types) = request.grant_types
+        && grant_types.iter().any(|g| g == "implicit")
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "The 'implicit' grant type is not supported (deprecated by RFC 9700)",
+        ));
+    }
+    if let Some(ref response_types) = request.response_types {
+        for rt in response_types {
+            if rt == "token"
+                || rt == "id_token"
+                || rt == "id_token token"
+                || rt == "code token"
+                || rt == "code id_token token"
+            {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    "Implicit response types ('token', 'id_token') are not supported \
+                     (deprecated by RFC 9700)",
+                ));
+            }
+        }
+    }
+
+    let grant_types = request
+        .grant_types
+        .take()
+        .unwrap_or_else(|| vec!["authorization_code".to_string()]);
+    let response_types = request
+        .response_types
+        .take()
+        .unwrap_or_else(|| vec!["code".to_string()]);
+    let auth_method_str = request
+        .token_endpoint_auth_method
+        .take()
+        .unwrap_or_else(|| "client_secret_basic".to_string());
+
+    for gt in &grant_types {
+        if !ALLOWED_GRANT_TYPES.contains(&gt.as_str()) {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!("Unsupported grant type: '{gt}'"),
+            ));
+        }
+    }
+    for rt in &response_types {
+        if !ALLOWED_RESPONSE_TYPES.contains(&rt.as_str()) {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!("Unsupported response type: '{rt}'"),
+            ));
+        }
+    }
+
+    let has_auth_code = grant_types.iter().any(|g| g == "authorization_code");
+    let has_code_response = response_types.iter().any(|r| r == "code");
+    if has_auth_code && !has_code_response {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "grant_types includes 'authorization_code' but response_types is missing 'code'",
+        ));
+    }
+
+    Ok(ValidatedGrantTypes {
+        grant_types,
+        response_types,
+        auth_method_str,
+        has_auth_code,
+    })
+}
+
+/// Validate redirect URIs: required for auth_code grant, cardinality, format.
+fn validate_redirect_uris(
+    request: &mut RegistrationRequest,
+    has_auth_code: bool,
+) -> Result<Vec<String>, ServiceError> {
+    let redirect_uris = request.redirect_uris.take().unwrap_or_default();
+    if has_auth_code && redirect_uris.is_empty() {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "redirect_uris is required when grant_types includes 'authorization_code'",
+        ));
+    }
+    if redirect_uris.len() > MAX_REDIRECT_URIS {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!("Too many redirect_uris (max {MAX_REDIRECT_URIS})"),
+        ));
+    }
+    for uri in &redirect_uris {
+        validate_registration_redirect_uri(uri)?;
+    }
+    Ok(redirect_uris)
+}
+
+/// Validated JWKS and auth method from a registration request.
+#[derive(Debug)]
+struct ValidatedJwksAuth {
+    jwks_value: Option<serde_json::Value>,
+    jwks_uri: Option<String>,
+    auth_method: TokenEndpointAuthMethod,
+}
+
+/// Validate JWKS mutual exclusivity, structure, and auth method.
+fn validate_jwks_and_auth_method(
+    request: &mut RegistrationRequest,
+    auth_method_str: &str,
+) -> Result<ValidatedJwksAuth, ServiceError> {
+    let jwks_value = request.jwks.take();
+    let jwks_uri = request.jwks_uri.take();
+    if jwks_value.is_some() && jwks_uri.is_some() {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "jwks and jwks_uri are mutually exclusive",
+        ));
+    }
+    if let Some(ref jwks) = jwks_value
+        && !jwks
+            .get("keys")
+            .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "jwks must be a JSON object with a non-empty \"keys\" array",
+        ));
+    }
+    if let Some(ref uri) = jwks_uri {
+        match url::Url::parse(uri) {
+            Ok(parsed) if parsed.scheme() == "https" => {}
+            _ => {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    "jwks_uri must be a valid https:// URL",
+                ));
+            }
+        }
+    }
+
+    let auth_method: TokenEndpointAuthMethod = auth_method_str.parse().map_err(|_| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            format!("Unsupported token_endpoint_auth_method: '{auth_method_str}'"),
+        )
+    })?;
+
+    if auth_method == TokenEndpointAuthMethod::PrivateKeyJwt
+        && jwks_value.is_none()
+        && jwks_uri.is_none()
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "private_key_jwt requires jwks or jwks_uri",
+        ));
+    }
+
+    Ok(ValidatedJwksAuth {
+        jwks_value,
+        jwks_uri,
+        auth_method,
+    })
+}
+
+/// Validate HTTPS URI fields and contacts.
+fn validate_contacts_and_uris(request: &RegistrationRequest) -> Result<(), ServiceError> {
+    validate_https_uri("client_uri", request.client_uri.as_deref())?;
+    validate_https_uri("logo_uri", request.logo_uri.as_deref())?;
+    validate_https_uri("tos_uri", request.tos_uri.as_deref())?;
+    validate_https_uri("policy_uri", request.policy_uri.as_deref())?;
+    if let Some(ref contacts) = request.contacts {
+        if contacts.len() > MAX_CONTACTS {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                format!("Too many contacts (max {MAX_CONTACTS})"),
+            ));
+        }
+        for contact in contacts {
+            if !contact.contains('@') {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    format!("Invalid contact email: '{contact}'"),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Infer OAuth client application type from grants, auth method, and URIs.
+fn determine_client_type(
+    grant_types: &[String],
+    auth_method: TokenEndpointAuthMethod,
+    redirect_uris: &[String],
+) -> OAuthClientType {
+    let has_client_credentials_only = grant_types.len() == 1
+        && grant_types
+            .first()
+            .is_some_and(|g| g == "client_credentials");
+    let is_public = auth_method == TokenEndpointAuthMethod::None;
+    let has_loopback = redirect_uris.iter().any(|u| {
+        url::Url::parse(u)
+            .ok()
+            .and_then(|p| p.host_str().map(|h| h.to_string()))
+            .is_some_and(|h| h == "localhost" || h == "127.0.0.1" || h == "[::1]")
+    });
+
+    if has_client_credentials_only {
+        OAuthClientType::Service
+    } else if is_public && has_loopback {
+        OAuthClientType::Native
+    } else if is_public {
+        OAuthClientType::Spa
+    } else {
+        OAuthClientType::Web
+    }
 }
 
 // ============================================================================
@@ -696,7 +795,7 @@ fn build_client_response(client: &OAuthClient, base_url: &str) -> RegistrationRe
         } else {
             None
         },
-        id_token_signed_response_alg: "ES256".to_string(),
+        id_token_signed_response_alg: client.id_token_signed_response_alg.clone(),
     }
 }
 
@@ -852,133 +951,7 @@ async fn apply_software_statement(
     request: &mut RegistrationRequest,
     statement_jwt: &str,
 ) -> Result<(), ServiceError> {
-    use crate::services::oidc::jwt_bearer::validate::{
-        decode_claims_unverified, map_algorithm, parse_assertion_header, validate_jwt_assertion,
-    };
-
-    // Parse header to get algorithm
-    let header = parse_assertion_header(statement_jwt).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidSoftwareStatement,
-            "Malformed software statement JWT",
-        )
-    })?;
-
-    // Decode claims to find the issuer (without signature verification)
-    let unverified_claims = decode_claims_unverified(statement_jwt).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidSoftwareStatement,
-            "Cannot decode software statement claims",
-        )
-    })?;
-
-    // Look up the trusted issuer
-    let issuer = db::get_trusted_jwt_issuer_by_issuer(&state.store, &unverified_claims.iss)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to look up trusted JWT issuer: {e}");
-            ServiceError::Internal("Database error".to_string())
-        })?
-        .ok_or_else(|| {
-            ServiceError::oauth(
-                OAuthErrorCode::UnapprovedSoftwareStatement,
-                format!(
-                    "Software statement issuer '{}' is not trusted",
-                    unverified_claims.iss
-                ),
-            )
-        })?;
-
-    if !issuer.enabled {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::UnapprovedSoftwareStatement,
-            "Software statement issuer is disabled",
-        ));
-    }
-
-    // Get the JWKS for this issuer (cached or from URI)
-    let jwks = issuer.jwks_cache.as_ref().ok_or_else(|| {
-        ServiceError::oauth(
-            OAuthErrorCode::UnapprovedSoftwareStatement,
-            "No JWKS available for software statement issuer",
-        )
-    })?;
-
-    // Find the right key in the JWKS
-    let keys = jwks.get("keys").and_then(|k| k.as_array()).ok_or_else(|| {
-        ServiceError::Internal("Trusted issuer JWKS has no keys array".to_string())
-    })?;
-
-    // Try each key until one verifies
-    let algorithm = map_algorithm(&header.alg).map_err(|_| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidSoftwareStatement,
-            format!(
-                "Unsupported algorithm in software statement: {}",
-                header.alg
-            ),
-        )
-    })?;
-
-    let base_url = &state.config().base_url;
-    let token_endpoint = format!("{base_url}/oauth/token");
-    let audiences = [base_url.as_str(), token_endpoint.as_str()];
-
-    let max_lifetime = i64::from(issuer.max_token_lifetime_seconds);
-
-    let mut verified = false;
-    for key in keys {
-        if let Some(decoding_key) = serde_json::to_string(key)
-            .ok()
-            .and_then(|s| jsonwebtoken::DecodingKey::from_jwk(&serde_json::from_str(&s).ok()?).ok())
-            && validate_jwt_assertion(
-                statement_jwt,
-                &header,
-                &decoding_key,
-                algorithm,
-                &audiences,
-                max_lifetime,
-            )
-            .is_ok()
-        {
-            verified = true;
-            break;
-        }
-    }
-
-    if !verified {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidSoftwareStatement,
-            "Software statement signature verification failed",
-        ));
-    }
-
-    // Apply software statement claims as overrides (statement takes precedence)
-    // Parse the payload to get software-specific claims
-    let payload_part = statement_jwt.split('.').nth(1).ok_or_else(|| {
-        ServiceError::oauth(
-            OAuthErrorCode::InvalidSoftwareStatement,
-            "Malformed software statement",
-        )
-    })?;
-
-    let payload_bytes = URL_SAFE_NO_PAD
-        .decode(payload_part)
-        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(payload_part))
-        .map_err(|_| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidSoftwareStatement,
-                "Invalid software statement payload encoding",
-            )
-        })?;
-
-    let statement_claims: serde_json::Value =
-        serde_json::from_slice(&payload_bytes).map_err(|_| {
-            ServiceError::oauth(
-                OAuthErrorCode::InvalidSoftwareStatement,
-                "Invalid software statement payload JSON",
-            )
-        })?;
+    let statement_claims = verify_software_statement_jwt(state, statement_jwt).await?;
 
     // Override request fields with statement claims (RFC 7591 Section 2.3)
     if let Some(v) = statement_claims.get("client_name").and_then(|v| v.as_str()) {
@@ -1024,19 +997,151 @@ async fn apply_software_statement(
     Ok(())
 }
 
+/// Verify a software statement JWT against trusted issuers.
+///
+/// Returns the verified payload claims on success.
+async fn verify_software_statement_jwt(
+    state: &Arc<AppState>,
+    statement_jwt: &str,
+) -> Result<serde_json::Value, ServiceError> {
+    use crate::services::oidc::jwt_bearer::validate::{
+        decode_claims_unverified, map_algorithm, parse_assertion_header, validate_jwt_assertion,
+    };
+
+    let header = parse_assertion_header(statement_jwt).map_err(|_| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidSoftwareStatement,
+            "Malformed software statement JWT",
+        )
+    })?;
+
+    let unverified_claims = decode_claims_unverified(statement_jwt).map_err(|_| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidSoftwareStatement,
+            "Cannot decode software statement claims",
+        )
+    })?;
+
+    let issuer = db::get_trusted_jwt_issuer_by_issuer(&state.store, &unverified_claims.iss)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to look up trusted JWT issuer: {e}");
+            ServiceError::Internal("Database error".to_string())
+        })?
+        .ok_or_else(|| {
+            ServiceError::oauth(
+                OAuthErrorCode::UnapprovedSoftwareStatement,
+                format!(
+                    "Software statement issuer '{}' is not trusted",
+                    unverified_claims.iss
+                ),
+            )
+        })?;
+
+    if !issuer.enabled {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::UnapprovedSoftwareStatement,
+            "Software statement issuer is disabled",
+        ));
+    }
+
+    let jwks = issuer.jwks_cache.as_ref().ok_or_else(|| {
+        ServiceError::oauth(
+            OAuthErrorCode::UnapprovedSoftwareStatement,
+            "No JWKS available for software statement issuer",
+        )
+    })?;
+
+    let keys = jwks.get("keys").and_then(|k| k.as_array()).ok_or_else(|| {
+        ServiceError::Internal("Trusted issuer JWKS has no keys array".to_string())
+    })?;
+
+    let algorithm = map_algorithm(&header.alg).map_err(|_| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidSoftwareStatement,
+            format!(
+                "Unsupported algorithm in software statement: {}",
+                header.alg
+            ),
+        )
+    })?;
+
+    let base_url = &state.config().base_url;
+    let token_endpoint = format!("{base_url}/oauth/token");
+    let audiences = [base_url.as_str(), token_endpoint.as_str()];
+    let max_lifetime = i64::from(issuer.max_token_lifetime_seconds);
+
+    let mut verified = false;
+    for key in keys {
+        if let Some(decoding_key) = serde_json::to_string(key)
+            .ok()
+            .and_then(|s| jsonwebtoken::DecodingKey::from_jwk(&serde_json::from_str(&s).ok()?).ok())
+            && validate_jwt_assertion(
+                statement_jwt,
+                &header,
+                &decoding_key,
+                algorithm,
+                &audiences,
+                max_lifetime,
+            )
+            .is_ok()
+        {
+            verified = true;
+            break;
+        }
+    }
+
+    if !verified {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidSoftwareStatement,
+            "Software statement signature verification failed",
+        ));
+    }
+
+    let payload_part = statement_jwt.split('.').nth(1).ok_or_else(|| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidSoftwareStatement,
+            "Malformed software statement",
+        )
+    })?;
+
+    let payload_bytes = URL_SAFE_NO_PAD
+        .decode(payload_part)
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(payload_part))
+        .map_err(|_| {
+            ServiceError::oauth(
+                OAuthErrorCode::InvalidSoftwareStatement,
+                "Invalid software statement payload encoding",
+            )
+        })?;
+
+    serde_json::from_slice(&payload_bytes).map_err(|_| {
+        ServiceError::oauth(
+            OAuthErrorCode::InvalidSoftwareStatement,
+            "Invalid software statement payload JSON",
+        )
+    })
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    fn assert_oauth_error<T: std::fmt::Debug>(
+        result: Result<T, ServiceError>,
+        expected: OAuthErrorCode,
+    ) {
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == expected),
+            "Expected {expected:?}",
+        );
+    }
 
     // =========================================================================
     // Redirect URI Validation Tests
@@ -1070,36 +1175,21 @@ mod tests {
     fn test_rejects_http_non_loopback() {
         let result = validate_registration_redirect_uri("http://example.com/callback");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRedirectUri);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
     }
 
     #[test]
     fn test_rejects_redirect_uri_with_fragment() {
         let result = validate_registration_redirect_uri("https://example.com/callback#anchor");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRedirectUri);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
     }
 
     #[test]
     fn test_rejects_invalid_redirect_uri() {
         let result = validate_registration_redirect_uri("not a valid uri !!!");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRedirectUri);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
     }
 
     // =========================================================================
@@ -1134,15 +1224,13 @@ mod tests {
     #[test]
     fn test_rejects_redirect_uri_with_fragment_before_parse() {
         // A URI that would otherwise be valid https but contains '#'
-        let result = validate_registration_redirect_uri("https://example.com/cb#");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRedirectUri);
-                assert!(description.contains("fragment"));
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = validate_registration_redirect_uri("https://example.com/cb#").unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidRedirectUri)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("fragment"))
+        );
     }
 
     /// HTTP to a non-loopback private IP (e.g., 192.168.x.x) must be rejected.
@@ -1150,12 +1238,7 @@ mod tests {
     fn test_rejects_http_private_ip_redirect_uri() {
         let result = validate_registration_redirect_uri("http://192.168.1.1/callback");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRedirectUri);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
     }
 
     /// An empty string is not a valid redirect URI.
@@ -1163,12 +1246,7 @@ mod tests {
     fn test_rejects_empty_redirect_uri() {
         let result = validate_registration_redirect_uri("");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRedirectUri);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
     }
 
     // =========================================================================
@@ -1185,12 +1263,7 @@ mod tests {
     fn test_rejects_http_uri() {
         let result = validate_https_uri("client_uri", Some("http://example.com"));
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
@@ -1203,12 +1276,7 @@ mod tests {
     fn test_rejects_invalid_uri() {
         let result = validate_https_uri("client_uri", Some("not a url"));
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     // =========================================================================
@@ -1218,16 +1286,10 @@ mod tests {
     /// The error message must include the field name for debuggability.
     #[test]
     fn test_https_uri_error_includes_field_name() {
-        let result = validate_https_uri("logo_uri", Some("http://example.com/logo.png"));
-        match result.unwrap_err() {
-            ServiceError::OAuth { description, .. } => {
-                assert!(
-                    description.contains("logo_uri"),
-                    "Error description must include field name: '{description}'"
-                );
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = validate_https_uri("logo_uri", Some("http://example.com/logo.png")).unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("logo_uri"))
+        );
     }
 
     /// Custom (non-http/https) schemes must be rejected for URI fields.
@@ -1235,12 +1297,7 @@ mod tests {
     fn test_https_uri_rejects_custom_scheme() {
         let result = validate_https_uri("tos_uri", Some("ftp://example.com/tos"));
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     /// An empty string for a URI field must be rejected (invalid URL).
@@ -1274,6 +1331,7 @@ mod tests {
             software_version: None,
             software_statement: None,
             dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1313,6 +1371,7 @@ mod tests {
             software_version: None,
             software_statement: None,
             dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1350,6 +1409,7 @@ mod tests {
             software_version: None,
             software_statement: None,
             dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1385,6 +1445,7 @@ mod tests {
             software_version: None,
             software_statement: None,
             dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1417,6 +1478,7 @@ mod tests {
             software_version: None,
             software_statement: None,
             dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1846,5 +1908,527 @@ mod tests {
     fn test_registration_source_default_is_manual() {
         let default = RegistrationSource::default();
         assert_eq!(default.as_str(), "manual");
+    }
+
+    // =========================================================================
+    // validate_grant_and_response_types
+    // =========================================================================
+
+    fn make_request_with_grant_response(
+        grant_types: Option<Vec<&str>>,
+        response_types: Option<Vec<&str>>,
+    ) -> RegistrationRequest {
+        RegistrationRequest {
+            redirect_uris: None,
+            token_endpoint_auth_method: None,
+            grant_types: grant_types.map(|v| v.iter().map(|s| s.to_string()).collect()),
+            response_types: response_types.map(|v| v.iter().map(|s| s.to_string()).collect()),
+            client_name: None,
+            client_uri: None,
+            logo_uri: None,
+            tos_uri: None,
+            policy_uri: None,
+            scope: None,
+            contacts: None,
+            jwks: None,
+            jwks_uri: None,
+            software_id: None,
+            software_version: None,
+            software_statement: None,
+            dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_grant_and_response_types_defaults() {
+        let mut req = make_request_with_grant_response(None, None);
+        let result = validate_grant_and_response_types(&mut req);
+        let validated = result.expect("Defaults must be accepted");
+        assert!(
+            validated
+                .grant_types
+                .contains(&"authorization_code".to_string())
+        );
+        assert!(validated.response_types.contains(&"code".to_string()));
+        assert_eq!(validated.auth_method_str, "client_secret_basic");
+        assert!(validated.has_auth_code);
+    }
+
+    #[test]
+    fn test_validate_grant_and_response_types_implicit_grant_rejected() {
+        let mut req = make_request_with_grant_response(Some(vec!["implicit"]), None);
+        let result = validate_grant_and_response_types(&mut req);
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    #[test]
+    fn test_validate_grant_and_response_types_implicit_response_token_rejected() {
+        let mut req = make_request_with_grant_response(None, Some(vec!["token"]));
+        let result = validate_grant_and_response_types(&mut req);
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    #[test]
+    fn test_validate_grant_and_response_types_implicit_response_id_token_rejected() {
+        let mut req = make_request_with_grant_response(None, Some(vec!["id_token"]));
+        let result = validate_grant_and_response_types(&mut req);
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    #[test]
+    fn test_validate_grant_and_response_types_unknown_grant_rejected() {
+        let mut req = make_request_with_grant_response(Some(vec!["magic_grant"]), None);
+        let err = validate_grant_and_response_types(&mut req).unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClientMetadata)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("magic_grant"))
+        );
+    }
+
+    #[test]
+    fn test_validate_grant_and_response_types_unknown_response_type_rejected() {
+        let mut req = make_request_with_grant_response(None, Some(vec!["magic_response"]));
+        let err = validate_grant_and_response_types(&mut req).unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClientMetadata)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("magic_response"))
+        );
+    }
+
+    #[test]
+    fn test_validate_grant_and_response_types_auth_code_without_code_response() {
+        // authorization_code grant requires "code" response type.
+        let mut req =
+            make_request_with_grant_response(Some(vec!["authorization_code"]), Some(vec!["code"]));
+        // Deliberately overwrite response_types to omit "code" after construction
+        req.response_types = Some(vec!["token".to_string()]); // will fail earlier for "token"
+        // Use a minimal non-implicit, non-code type — but those are all rejected.
+        // Instead, craft a request where has_auth_code=true but response_types != ["code"].
+        // The only allowed response type is "code", so we must test via a two-step approach:
+        // Force grant_types to include authorization_code while response_types is empty.
+        let mut req2 = RegistrationRequest {
+            redirect_uris: None,
+            token_endpoint_auth_method: None,
+            grant_types: Some(vec!["authorization_code".to_string()]),
+            response_types: Some(vec![]), // empty but won't hit implicit check
+            client_name: None,
+            client_uri: None,
+            logo_uri: None,
+            tos_uri: None,
+            policy_uri: None,
+            scope: None,
+            contacts: None,
+            jwks: None,
+            jwks_uri: None,
+            software_id: None,
+            software_version: None,
+            software_statement: None,
+            dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
+        };
+        let result = validate_grant_and_response_types(&mut req2);
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    #[test]
+    fn test_validate_grant_and_response_types_client_credentials_valid() {
+        let mut req =
+            make_request_with_grant_response(Some(vec!["client_credentials"]), Some(vec!["code"]));
+        let result = validate_grant_and_response_types(&mut req);
+        let validated = result.expect("client_credentials + code must be valid");
+        assert!(!validated.has_auth_code);
+        assert!(
+            validated
+                .grant_types
+                .contains(&"client_credentials".to_string())
+        );
+    }
+
+    #[test]
+    fn test_validate_grant_and_response_types_auth_method_extracted() {
+        let mut req = make_request_with_grant_response(None, None);
+        req.token_endpoint_auth_method = Some("private_key_jwt".to_string());
+        let validated = validate_grant_and_response_types(&mut req).unwrap();
+        assert_eq!(validated.auth_method_str, "private_key_jwt");
+    }
+
+    // =========================================================================
+    // validate_redirect_uris
+    // =========================================================================
+
+    fn make_request_with_redirect_uris(uris: Option<Vec<&str>>) -> RegistrationRequest {
+        RegistrationRequest {
+            redirect_uris: uris.map(|v| v.iter().map(|s| s.to_string()).collect()),
+            token_endpoint_auth_method: None,
+            grant_types: None,
+            response_types: None,
+            client_name: None,
+            client_uri: None,
+            logo_uri: None,
+            tos_uri: None,
+            policy_uri: None,
+            scope: None,
+            contacts: None,
+            jwks: None,
+            jwks_uri: None,
+            software_id: None,
+            software_version: None,
+            software_statement: None,
+            dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_redirect_uris_required_for_auth_code_empty() {
+        let mut req = make_request_with_redirect_uris(None);
+        let result = validate_redirect_uris(&mut req, true);
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    #[test]
+    fn test_validate_redirect_uris_not_required_without_auth_code() {
+        let mut req = make_request_with_redirect_uris(None);
+        let result = validate_redirect_uris(&mut req, false);
+        let uris = result.expect("Empty redirect_uris allowed when has_auth_code=false");
+        assert!(uris.is_empty());
+    }
+
+    #[test]
+    fn test_validate_redirect_uris_too_many() {
+        let many: Vec<&str> = (0..=MAX_REDIRECT_URIS)
+            .map(|_| "https://example.com/callback")
+            .collect();
+        let mut req = make_request_with_redirect_uris(Some(many));
+        let result = validate_redirect_uris(&mut req, false);
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    #[test]
+    fn test_validate_redirect_uris_valid_uris_pass_through() {
+        let mut req = make_request_with_redirect_uris(Some(vec![
+            "https://example.com/callback",
+            "http://localhost:8080/callback",
+        ]));
+        let result = validate_redirect_uris(&mut req, true);
+        let uris = result.expect("Valid URIs must pass");
+        assert_eq!(uris.len(), 2);
+    }
+
+    #[test]
+    fn test_validate_redirect_uris_invalid_uri_rejected() {
+        let mut req = make_request_with_redirect_uris(Some(vec!["not a uri !!"]));
+        let result = validate_redirect_uris(&mut req, false);
+        assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
+    }
+
+    // =========================================================================
+    // validate_jwks_and_auth_method
+    // =========================================================================
+
+    fn make_request_with_jwks(
+        jwks: Option<serde_json::Value>,
+        jwks_uri: Option<&str>,
+    ) -> RegistrationRequest {
+        RegistrationRequest {
+            redirect_uris: None,
+            token_endpoint_auth_method: None,
+            grant_types: None,
+            response_types: None,
+            client_name: None,
+            client_uri: None,
+            logo_uri: None,
+            tos_uri: None,
+            policy_uri: None,
+            scope: None,
+            contacts: None,
+            jwks,
+            jwks_uri: jwks_uri.map(String::from),
+            software_id: None,
+            software_version: None,
+            software_statement: None,
+            dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_jwks_and_auth_method_mutual_exclusivity() {
+        let jwks = serde_json::json!({"keys": [{"kty": "EC"}]});
+        let mut req = make_request_with_jwks(Some(jwks), Some("https://example.com/jwks"));
+        let err = validate_jwks_and_auth_method(&mut req, "client_secret_basic").unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClientMetadata)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("mutually exclusive"))
+        );
+    }
+
+    #[test]
+    fn test_validate_jwks_and_auth_method_empty_keys_rejected() {
+        let jwks = serde_json::json!({"keys": []});
+        let mut req = make_request_with_jwks(Some(jwks), None);
+        let result = validate_jwks_and_auth_method(&mut req, "client_secret_basic");
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    #[test]
+    fn test_validate_jwks_and_auth_method_jwks_uri_not_https() {
+        let mut req = make_request_with_jwks(None, Some("http://example.com/jwks"));
+        let err = validate_jwks_and_auth_method(&mut req, "client_secret_basic").unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClientMetadata)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("https"))
+        );
+    }
+
+    #[test]
+    fn test_validate_jwks_and_auth_method_private_key_jwt_without_jwks() {
+        let mut req = make_request_with_jwks(None, None);
+        let result = validate_jwks_and_auth_method(&mut req, "private_key_jwt");
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    #[test]
+    fn test_validate_jwks_and_auth_method_private_key_jwt_with_jwks_uri_valid() {
+        let mut req = make_request_with_jwks(None, Some("https://example.com/jwks.json"));
+        let result = validate_jwks_and_auth_method(&mut req, "private_key_jwt");
+        let validated = result.expect("private_key_jwt + jwks_uri must succeed");
+        assert_eq!(
+            validated.auth_method,
+            TokenEndpointAuthMethod::PrivateKeyJwt
+        );
+        assert_eq!(
+            validated.jwks_uri,
+            Some("https://example.com/jwks.json".to_string())
+        );
+    }
+
+    #[test]
+    fn test_validate_jwks_and_auth_method_private_key_jwt_with_inline_jwks_valid() {
+        let jwks = serde_json::json!({"keys": [{"kty": "EC", "crv": "P-256"}]});
+        let mut req = make_request_with_jwks(Some(jwks.clone()), None);
+        let result = validate_jwks_and_auth_method(&mut req, "private_key_jwt");
+        let validated = result.expect("private_key_jwt + inline jwks must succeed");
+        assert_eq!(
+            validated.auth_method,
+            TokenEndpointAuthMethod::PrivateKeyJwt
+        );
+        assert!(validated.jwks_value.is_some());
+    }
+
+    #[test]
+    fn test_validate_jwks_and_auth_method_none_auth_method() {
+        let mut req = make_request_with_jwks(None, None);
+        let result = validate_jwks_and_auth_method(&mut req, "none");
+        let validated = result.expect("none auth method must be accepted");
+        assert_eq!(validated.auth_method, TokenEndpointAuthMethod::None);
+    }
+
+    #[test]
+    fn test_validate_jwks_and_auth_method_unknown_auth_method_rejected() {
+        let mut req = make_request_with_jwks(None, None);
+        let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    // =========================================================================
+    // validate_contacts_and_uris
+    // =========================================================================
+
+    fn make_request_with_uris(
+        client_uri: Option<&str>,
+        logo_uri: Option<&str>,
+        tos_uri: Option<&str>,
+        policy_uri: Option<&str>,
+        contacts: Option<Vec<&str>>,
+    ) -> RegistrationRequest {
+        RegistrationRequest {
+            redirect_uris: None,
+            token_endpoint_auth_method: None,
+            grant_types: None,
+            response_types: None,
+            client_name: None,
+            client_uri: client_uri.map(String::from),
+            logo_uri: logo_uri.map(String::from),
+            tos_uri: tos_uri.map(String::from),
+            policy_uri: policy_uri.map(String::from),
+            scope: None,
+            contacts: contacts.map(|v| v.iter().map(|s| s.to_string()).collect()),
+            jwks: None,
+            jwks_uri: None,
+            software_id: None,
+            software_version: None,
+            software_statement: None,
+            dpop_bound_access_tokens: None,
+            id_token_signed_response_alg: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_contacts_and_uris_all_none_valid() {
+        let req = make_request_with_uris(None, None, None, None, None);
+        let result = validate_contacts_and_uris(&req);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_contacts_and_uris_all_https_valid() {
+        let req = make_request_with_uris(
+            Some("https://example.com"),
+            Some("https://example.com/logo.png"),
+            Some("https://example.com/tos"),
+            Some("https://example.com/privacy"),
+            Some(vec!["admin@example.com"]),
+        );
+        let result = validate_contacts_and_uris(&req);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_contacts_and_uris_http_client_uri_rejected() {
+        let req = make_request_with_uris(Some("http://example.com"), None, None, None, None);
+        let result = validate_contacts_and_uris(&req);
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    #[test]
+    fn test_validate_contacts_and_uris_http_logo_uri_rejected() {
+        let req =
+            make_request_with_uris(None, Some("http://example.com/logo.png"), None, None, None);
+        let result = validate_contacts_and_uris(&req);
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    #[test]
+    fn test_validate_contacts_and_uris_http_tos_uri_rejected() {
+        let req = make_request_with_uris(None, None, Some("http://example.com/tos"), None, None);
+        let result = validate_contacts_and_uris(&req);
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    #[test]
+    fn test_validate_contacts_and_uris_http_policy_uri_rejected() {
+        let req =
+            make_request_with_uris(None, None, None, Some("http://example.com/privacy"), None);
+        let result = validate_contacts_and_uris(&req);
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    #[test]
+    fn test_validate_contacts_and_uris_too_many_contacts() {
+        let contacts: Vec<&str> = (0..=MAX_CONTACTS).map(|_| "user@example.com").collect();
+        let req = make_request_with_uris(None, None, None, None, Some(contacts));
+        let result = validate_contacts_and_uris(&req);
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    #[test]
+    fn test_validate_contacts_and_uris_invalid_email_format() {
+        let req = make_request_with_uris(None, None, None, None, Some(vec!["notanemail"]));
+        let err = validate_contacts_and_uris(&req).unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClientMetadata)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("notanemail"))
+        );
+    }
+
+    // =========================================================================
+    // determine_client_type
+    // =========================================================================
+
+    #[test]
+    fn test_determine_client_type_client_credentials_only_is_service() {
+        let grant_types = vec!["client_credentials".to_string()];
+        let result = determine_client_type(
+            &grant_types,
+            TokenEndpointAuthMethod::ClientSecretBasic,
+            &[],
+        );
+        assert_eq!(result, OAuthClientType::Service);
+    }
+
+    #[test]
+    fn test_determine_client_type_public_with_loopback_is_native() {
+        let grant_types = vec!["authorization_code".to_string()];
+        let redirect_uris = vec!["http://localhost:7777/callback".to_string()];
+        let result =
+            determine_client_type(&grant_types, TokenEndpointAuthMethod::None, &redirect_uris);
+        assert_eq!(result, OAuthClientType::Native);
+    }
+
+    #[test]
+    fn test_determine_client_type_public_with_127_0_0_1_is_native() {
+        let grant_types = vec!["authorization_code".to_string()];
+        let redirect_uris = vec!["http://127.0.0.1:3000/callback".to_string()];
+        let result =
+            determine_client_type(&grant_types, TokenEndpointAuthMethod::None, &redirect_uris);
+        assert_eq!(result, OAuthClientType::Native);
+    }
+
+    #[test]
+    fn test_determine_client_type_public_no_loopback_is_spa() {
+        let grant_types = vec!["authorization_code".to_string()];
+        let redirect_uris = vec!["https://app.example.com/callback".to_string()];
+        let result =
+            determine_client_type(&grant_types, TokenEndpointAuthMethod::None, &redirect_uris);
+        assert_eq!(result, OAuthClientType::Spa);
+    }
+
+    #[test]
+    fn test_determine_client_type_public_no_redirect_uris_is_spa() {
+        let grant_types = vec!["authorization_code".to_string()];
+        let result = determine_client_type(&grant_types, TokenEndpointAuthMethod::None, &[]);
+        assert_eq!(result, OAuthClientType::Spa);
+    }
+
+    #[test]
+    fn test_determine_client_type_confidential_is_web() {
+        let grant_types = vec!["authorization_code".to_string()];
+        let redirect_uris = vec!["https://app.example.com/callback".to_string()];
+        let result = determine_client_type(
+            &grant_types,
+            TokenEndpointAuthMethod::ClientSecretBasic,
+            &redirect_uris,
+        );
+        assert_eq!(result, OAuthClientType::Web);
+    }
+
+    #[test]
+    fn test_determine_client_type_private_key_jwt_is_web() {
+        let grant_types = vec!["authorization_code".to_string()];
+        let redirect_uris = vec!["https://app.example.com/callback".to_string()];
+        let result = determine_client_type(
+            &grant_types,
+            TokenEndpointAuthMethod::PrivateKeyJwt,
+            &redirect_uris,
+        );
+        assert_eq!(result, OAuthClientType::Web);
+    }
+
+    #[test]
+    fn test_determine_client_type_client_credentials_with_multiple_grants_not_service() {
+        // Only single-grant client_credentials → Service. Multiple grants → Web.
+        let grant_types = vec![
+            "client_credentials".to_string(),
+            "authorization_code".to_string(),
+        ];
+        let redirect_uris = vec!["https://app.example.com/callback".to_string()];
+        let result = determine_client_type(
+            &grant_types,
+            TokenEndpointAuthMethod::ClientSecretBasic,
+            &redirect_uris,
+        );
+        assert_eq!(result, OAuthClientType::Web);
     }
 }

@@ -1574,7 +1574,6 @@ impl std::fmt::Debug for StoreTransaction<'_> {
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::panic,
     clippy::unreachable,
     clippy::indexing_slicing
 )]

@@ -392,14 +392,14 @@ impl Transaction<'_> {
 
 /// Generic query result that works with both SQLite and PostgreSQL.
 #[derive(Debug)]
-pub struct QueryResult {
+pub(crate) struct QueryResult {
     rows_affected: u64,
 }
 
 impl QueryResult {
     /// Number of rows affected by the query.
     #[must_use]
-    pub fn rows_affected(&self) -> u64 {
+    pub(crate) fn rows_affected(&self) -> u64 {
         self.rows_affected
     }
 }
@@ -747,7 +747,7 @@ fn spawn_token_refresh(pool: sqlx::PgPool, dsql: DsqlEndpoint, user: String, is_
 // ============================================================================
 
 /// Maximum number of retries for transient DSQL errors.
-pub const MAX_DSQL_RETRIES: u32 = 3;
+pub(crate) const MAX_DSQL_RETRIES: u32 = 3;
 
 /// SQLSTATE codes that indicate a transient, retryable error.
 ///
@@ -759,7 +759,7 @@ const RETRYABLE_SQL_STATES: &[&str] = &["40001", "OC000"];
 ///
 /// Downcasts through `anyhow::Error` → `sqlx::Error::Database` and
 /// inspects the SQLSTATE code.
-pub fn is_retryable_db_error(err: &anyhow::Error) -> bool {
+pub(crate) fn is_retryable_db_error(err: &anyhow::Error) -> bool {
     if let Some(sqlx_err) = err.downcast_ref::<sqlx::Error>()
         && let sqlx::Error::Database(db_err) = sqlx_err
         && let Some(code) = db_err.code()
@@ -772,7 +772,7 @@ pub fn is_retryable_db_error(err: &anyhow::Error) -> bool {
 /// Compute a jittered exponential backoff duration for the given attempt.
 ///
 /// Base delay doubles each attempt (~10ms, ~20ms, ~40ms) with ±25% jitter.
-pub fn retry_backoff(attempt: u32) -> Duration {
+pub(crate) fn retry_backoff(attempt: u32) -> Duration {
     let base_ms = 10u64.saturating_mul(1u64 << attempt);
     // ±25% jitter using simple xorshift on timestamp
     let jitter_range = base_ms / 4;

@@ -1,16 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
-//! OIDC signing key management for ES256 (P-256 ECDSA) JWT signing.
+//! OIDC signing key management for ES256 (P-256 ECDSA) and RS256 (RSA-3072) JWT signing.
 //!
 //! This module provides functionality to:
-//! - Generate P-256 EC keypairs for OIDC ID token signing (Local variant)
-//! - Sign using AWS KMS P-256 keys via `kms:Sign` (Kms variant)
+//! - Generate P-256 EC keypairs for OIDC access token signing — [`OidcSigningKey`]
+//! - Generate RSA-3072 keypairs for OIDC ID token signing — [`OidcRsaSigningKey`]
+//! - Sign using AWS KMS P-256 or RSA-3072 keys via `kms:Sign`
 //! - Load keys from PEM content or generate new ones
 //! - Export public keys in JWK format for the JWKS endpoint
-//! - Sign JWTs with ES256 algorithm
+//! - Sign JWTs with ES256 or RS256 algorithm
 
 use anyhow::{Context, Result, bail};
 use aws_lc_rs::{
+    digest,
+    encoding::AsDer,
     rand::SystemRandom,
+    rsa::{KeyPair as RsaKeyPair, KeySize},
     signature::{ECDSA_P256_SHA256_FIXED_SIGNING, EcdsaKeyPair, KeyPair},
 };
 use base64::Engine;
@@ -19,7 +23,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header};
 use serde::Serialize;
 use zeroize::Zeroizing;
 
-use crate::crypto::kms_signer::KmsSignerP256;
+use crate::crypto::kms_signer::{KmsSignerP256, KmsSignerRsa3072, parse_spki_rsa};
 
 /// OIDC signing key using P-256 ECDSA (ES256).
 ///
@@ -93,7 +97,7 @@ impl OidcSigningKey {
 
         // Extract the base64 content between headers (zeroized on drop)
         let der_bytes = Zeroizing::new(if pem_content.starts_with("-----BEGIN") {
-            Self::pem_to_der(pem_content)?
+            pem_to_der(pem_content)?
         } else {
             // Assume it's already base64-encoded DER
             URL_SAFE_NO_PAD
@@ -273,32 +277,30 @@ impl OidcSigningKey {
             }
         }
     }
+}
 
-    /// Convert PEM to DER bytes.
-    fn pem_to_der(pem_content: &str) -> Result<Vec<u8>> {
-        // Find the content between headers
-        let lines: Vec<&str> = pem_content.lines().collect();
-        let mut base64_content = String::new();
-        let mut in_content = false;
+/// Parse PEM-encoded content and return the DER bytes.
+fn pem_to_der(pem_content: &str) -> Result<Vec<u8>> {
+    let mut base64_content = String::new();
+    let mut in_content = false;
 
-        for line in lines {
-            let line = line.trim();
-            if line.starts_with("-----BEGIN") {
-                in_content = true;
-                continue;
-            }
-            if line.starts_with("-----END") {
-                break;
-            }
-            if in_content {
-                base64_content.push_str(line);
-            }
+    for line in pem_content.lines() {
+        let line = line.trim();
+        if line.starts_with("-----BEGIN") {
+            in_content = true;
+            continue;
         }
-
-        base64::engine::general_purpose::STANDARD
-            .decode(&base64_content)
-            .context("Failed to decode PEM base64 content")
+        if line.starts_with("-----END") {
+            break;
+        }
+        if in_content {
+            base64_content.push_str(line);
+        }
     }
+
+    base64::engine::general_purpose::STANDARD
+        .decode(&base64_content)
+        .context("Failed to decode PEM base64 content")
 }
 
 /// JWT header for KMS-signed tokens.
@@ -414,6 +416,401 @@ pub struct EcJwk {
     pub x: String,
     /// RFC 7518 Section 6.2.1.3: Y Coordinate (base64url encoded).
     pub y: String,
+}
+
+/// RSA JWK (JSON Web Key) for RSA-3072 keys (RFC 7517 Section 4, RFC 7518 Section 6.3).
+#[derive(Debug, Clone, Serialize)]
+pub struct RsaJwk {
+    /// RFC 7517 Section 4.1: Key Type — "RSA".
+    pub kty: String,
+    /// RFC 7517 Section 4.4: Algorithm — "RS256" (RSASSA-PKCS1-v1_5 using SHA-256).
+    pub alg: String,
+    /// RFC 7517 Section 4.5: Key ID.
+    pub kid: String,
+    /// RFC 7517 Section 4.2: Public Key Use — "sig" for signature.
+    #[serde(rename = "use")]
+    pub key_use: String,
+    /// RFC 7518 Section 6.3.1.1: RSA modulus (base64url, no padding).
+    pub n: String,
+    /// RFC 7518 Section 6.3.1.2: RSA public exponent (base64url, no padding).
+    pub e: String,
+}
+
+/// Polymorphic JWK for JWKS responses containing mixed key types.
+///
+/// Only `Serialize` is derived — `Deserialize` is intentionally omitted because
+/// `#[serde(untagged)]` produces poor, ambiguous error messages on deserialization
+/// failure, and the server never needs to deserialize its own JWKS response.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum Jwk {
+    /// P-256 EC key (ES256).
+    Ec(EcJwk),
+    /// RSA-3072 key (RS256).
+    Rsa(RsaJwk),
+}
+
+/// OIDC signing key using RSA-3072 (RS256).
+///
+/// Used to sign OIDC ID tokens. Per OIDC Core Section 3.1.3.7, RS256 is the
+/// default `id_token_signed_response_alg` and MUST be supported.
+///
+/// Supports two modes:
+/// - `Local`: Uses a local RSA-3072 key pair (generated or from PEM)
+/// - `Kms`: Uses an AWS KMS RSA-3072 key via `kms:Sign`
+pub enum OidcRsaSigningKey {
+    /// Local RSA-3072 key pair for signing.
+    Local {
+        /// RSA-3072 key pair (signing only; aws-lc-rs does not expose private key inspection).
+        key_pair: RsaKeyPair,
+        /// Key ID for the JWK (`kid` header).
+        key_id: String,
+        /// PKCS#8 DER private key bytes, zeroized on drop.
+        der_bytes: Zeroizing<Vec<u8>>,
+        /// Cached decoding key for RS256 JWT verification.
+        decoding_key: DecodingKey,
+        /// SPKI DER for JWK extraction (cached at construction).
+        spki_der: Vec<u8>,
+    },
+    /// AWS KMS RSA-3072 key for signing.
+    Kms {
+        /// KMS signer that calls `kms:Sign` for each operation.
+        signer: KmsSignerRsa3072,
+        /// Key ID for the JWK.
+        key_id: String,
+        /// Cached decoding key for RS256 JWT verification.
+        decoding_key: DecodingKey,
+    },
+}
+
+impl OidcRsaSigningKey {
+    /// Generate a new RSA-3072 key pair.
+    ///
+    /// RSA-3072 generation takes ~200ms. Use `spawn_blocking` if calling from an async context.
+    pub fn generate() -> Result<Self> {
+        let key_pair = RsaKeyPair::generate(KeySize::Rsa3072)
+            .map_err(|e| anyhow::anyhow!("Failed to generate RSA-3072 key: {e}"))?;
+
+        // Serialize to PKCS#8 DER (private key, zeroized on drop)
+        let pkcs8_der = key_pair
+            .as_der()
+            .map_err(|e| anyhow::anyhow!("Failed to serialize RSA key to PKCS#8 DER: {e}"))?;
+        let der_bytes = Zeroizing::new(pkcs8_der.as_ref().to_vec());
+
+        // Get SPKI DER for the public key (X.509 SubjectPublicKeyInfo)
+        let spki_der_obj = key_pair
+            .public_key()
+            .as_der()
+            .map_err(|e| anyhow::anyhow!("Failed to serialize RSA public key to SPKI DER: {e}"))?;
+        let spki_der = spki_der_obj.as_ref().to_vec();
+
+        let (n_bytes, e_bytes) =
+            parse_spki_rsa(&spki_der).context("Failed to extract RSA components from SPKI")?;
+
+        // Derive key ID from first 8 bytes of the modulus (unique per key).
+        // Unlike the SPKI DER prefix (which is identical for all RSA-3072 keys),
+        // the modulus is unique per generated key pair.
+        let key_id = format!(
+            "vouch-oidc-rsa-{}",
+            hex::encode(n_bytes.get(..8).unwrap_or(&n_bytes))
+        );
+        let decoding_key = DecodingKey::from_rsa_components(
+            &URL_SAFE_NO_PAD.encode(&n_bytes),
+            &URL_SAFE_NO_PAD.encode(&e_bytes),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to build RSA decoding key: {e}"))?;
+
+        tracing::info!("Generated new OIDC RSA signing key: {}", key_id);
+
+        Ok(Self::Local {
+            key_pair,
+            key_id,
+            der_bytes,
+            decoding_key,
+            spki_der,
+        })
+    }
+
+    /// Load from PEM-encoded RSA private key content (PKCS#8).
+    pub fn from_pem(pem_content: &str) -> Result<Self> {
+        let pem_content = pem_content.trim();
+
+        let der_bytes = Zeroizing::new(if pem_content.starts_with("-----BEGIN") {
+            pem_to_der(pem_content)?
+        } else {
+            // Assume base64-encoded DER
+            URL_SAFE_NO_PAD
+                .decode(pem_content)
+                .or_else(|_| base64::engine::general_purpose::STANDARD.decode(pem_content))
+                .context("Invalid base64 encoding for RSA key")?
+        });
+
+        let key_pair = RsaKeyPair::from_pkcs8(&der_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to parse RSA key from PKCS#8 DER: {e}"))?;
+
+        let spki_der_obj = key_pair
+            .public_key()
+            .as_der()
+            .map_err(|e| anyhow::anyhow!("Failed to serialize RSA public key to SPKI DER: {e}"))?;
+        let spki_der = spki_der_obj.as_ref().to_vec();
+
+        let (n_bytes, e_bytes) =
+            parse_spki_rsa(&spki_der).context("Failed to extract RSA components from SPKI")?;
+
+        // Enforce minimum RSA-3072 key size.
+        // generate() uses KeySize::Rsa3072, and KMS validates KeySpec::Rsa3072,
+        // but from_pem() accepts any PKCS#8 RSA key — reject undersized keys.
+        // Use bit-counting (not byte length) to handle edge cases where
+        // strip_leading_zeros may remove DER sign-padding bytes.
+        let key_bits =
+            n_bytes.len() * 8 - n_bytes.first().map_or(0, |b| b.leading_zeros() as usize);
+        if key_bits < 3072 {
+            bail!("RSA key must be at least 3072 bits, got {key_bits} bits");
+        }
+
+        let key_id = format!(
+            "vouch-oidc-rsa-{}",
+            hex::encode(n_bytes.get(..8).unwrap_or(&n_bytes))
+        );
+        let decoding_key = DecodingKey::from_rsa_components(
+            &URL_SAFE_NO_PAD.encode(&n_bytes),
+            &URL_SAFE_NO_PAD.encode(&e_bytes),
+        )
+        .map_err(|e| anyhow::anyhow!("Failed to build RSA decoding key from PEM: {e}"))?;
+
+        tracing::info!("Loaded OIDC RSA signing key from PEM: {}", key_id);
+
+        Ok(Self::Local {
+            key_pair,
+            key_id,
+            der_bytes,
+            decoding_key,
+            spki_der,
+        })
+    }
+
+    /// Create a KMS-backed OIDC RSA signing key.
+    ///
+    /// Calls `kms:GetPublicKey` to fetch and cache the RSA-3072 public key.
+    pub async fn from_kms(kms_client: aws_sdk_kms::Client, key_id: String) -> Result<Self> {
+        let signer = KmsSignerRsa3072::new(kms_client, key_id).await?;
+
+        let decoding_key = DecodingKey::from_rsa_components(signer.n_b64(), signer.e_b64())
+            .map_err(|e| {
+                anyhow::anyhow!("Failed to build RSA decoding key from KMS components: {e}")
+            })?;
+
+        // Derive key ID from the modulus prefix (unique per key), not the SPKI
+        // header bytes (identical for all RSA-3072 keys).
+        let n_prefix = URL_SAFE_NO_PAD
+            .decode(signer.n_b64())
+            .map_err(|e| anyhow::anyhow!("Failed to decode KMS RSA modulus: {e}"))?;
+        let kid = format!(
+            "vouch-oidc-rsa-kms-{}",
+            hex::encode(n_prefix.get(..8).unwrap_or(&n_prefix))
+        );
+
+        tracing::debug!("KMS OIDC RSA signing key initialized: {}", kid);
+
+        Ok(Self::Kms {
+            signer,
+            key_id: kid,
+            decoding_key,
+        })
+    }
+
+    /// Load from PEM content or generate a new ephemeral RSA-3072 key.
+    ///
+    /// RSA key generation takes ~200ms. The caller should use `spawn_blocking`
+    /// when generating during server startup.
+    pub fn load_or_generate(pem_content: Option<&str>) -> Result<Self> {
+        if let Some(pem) = pem_content {
+            if pem.trim().is_empty() {
+                tracing::info!("Empty OIDC RSA signing key provided, generating new key");
+                Self::generate()
+            } else {
+                Self::from_pem(pem)
+            }
+        } else {
+            tracing::warn!(
+                "No OIDC RSA signing key configured; generating ephemeral RSA-3072 key (~200ms). \
+                 Set VOUCH_OIDC_RSA_SIGNING_KEY or VOUCH_OIDC_RSA_SIGNING_KMS_KEY_ID for production."
+            );
+            Self::generate()
+        }
+    }
+
+    /// Get the key ID (`kid`).
+    #[must_use]
+    pub fn key_id(&self) -> &str {
+        match self {
+            Self::Local { key_id, .. } | Self::Kms { key_id, .. } => key_id,
+        }
+    }
+
+    /// Get the cached `jsonwebtoken` decoding key for verifying RS256 JWTs.
+    #[must_use]
+    pub fn decoding_key(&self) -> &DecodingKey {
+        match self {
+            Self::Local { decoding_key, .. } | Self::Kms { decoding_key, .. } => decoding_key,
+        }
+    }
+
+    /// Get the public key as an RSA JWK for the JWKS endpoint.
+    pub fn public_key_jwk(&self) -> Result<RsaJwk> {
+        match self {
+            Self::Local {
+                key_id, spki_der, ..
+            } => {
+                let (n_bytes, e_bytes) = parse_spki_rsa(spki_der)
+                    .context("Failed to extract RSA public key components from SPKI")?;
+                Ok(RsaJwk {
+                    kty: "RSA".to_string(),
+                    alg: "RS256".to_string(),
+                    kid: key_id.clone(),
+                    key_use: "sig".to_string(),
+                    n: URL_SAFE_NO_PAD.encode(&n_bytes),
+                    e: URL_SAFE_NO_PAD.encode(&e_bytes),
+                })
+            }
+            Self::Kms { signer, key_id, .. } => Ok(RsaJwk {
+                kty: "RSA".to_string(),
+                alg: "RS256".to_string(),
+                kid: key_id.clone(),
+                key_use: "sig".to_string(),
+                n: signer.n_b64().to_string(),
+                e: signer.e_b64().to_string(),
+            }),
+        }
+    }
+
+    /// Sign a JWT with RS256 (`typ: "JWT"`).
+    ///
+    /// Used for OIDC ID tokens. Access tokens remain ES256 via `OidcSigningKey`.
+    pub async fn sign_jwt<T: Serialize>(&self, claims: &T) -> Result<String> {
+        self.sign_jwt_with_typ(claims, None).await
+    }
+
+    /// Sign a JWT with RS256 and an optional `typ` header override.
+    pub async fn sign_jwt_with_typ<T: Serialize>(
+        &self,
+        claims: &T,
+        typ: Option<&str>,
+    ) -> Result<String> {
+        match self {
+            Self::Local {
+                der_bytes, key_id, ..
+            } => {
+                let claims_json = serde_json::to_vec(claims)
+                    .map_err(|e| anyhow::anyhow!("Failed to serialize JWT claims: {e}"))?;
+                let der = der_bytes.clone();
+                let kid = key_id.clone();
+                let typ_owned = typ.map(String::from);
+
+                // RSA-3072 signing is CPU-intensive (~10ms); offload to avoid starving
+                // the tokio runtime on low-vCPU instances.
+                tokio::task::spawn_blocking(move || {
+                    sign_jwt_rsa_local(&der, &kid, &claims_json, typ_owned.as_deref())
+                })
+                .await
+                .map_err(|e| anyhow::anyhow!("JWT signing task failed: {e}"))?
+            }
+            Self::Kms { signer, key_id, .. } => {
+                sign_jwt_rsa_with_kms(signer, key_id, claims, typ).await
+            }
+        }
+    }
+}
+
+/// Sign a JWT with RS256 locally using aws-lc-rs.
+///
+/// Called from `spawn_blocking` to avoid blocking the tokio runtime.
+/// Manually constructs the JWT instead of using `jsonwebtoken::encode` because
+/// `jsonwebtoken` expects PKCS#1 DER for the private key, but aws-lc-rs generates
+/// PKCS#8. We build the signing input and call `KeyPair::sign()` directly.
+fn sign_jwt_rsa_local(
+    pkcs8_der: &[u8],
+    kid: &str,
+    claims_json: &[u8],
+    typ: Option<&str>,
+) -> Result<String> {
+    use aws_lc_rs::signature::RSA_PKCS1_SHA256;
+
+    // aws-lc-rs RsaKeyPair is !Send — it cannot be stored in AppState or moved
+    // across the spawn_blocking boundary. Re-parsing from PKCS#8 DER on each call
+    // costs ~1ms, which is acceptable relative to the ~10ms RSA signing operation.
+    let key_pair = RsaKeyPair::from_pkcs8(pkcs8_der)
+        .map_err(|e| anyhow::anyhow!("Failed to load RSA key from PKCS#8: {e}"))?;
+
+    let header = KmsJwtHeader {
+        alg: "RS256",
+        typ: typ.unwrap_or("JWT"),
+        kid,
+    };
+
+    let header_json = serde_json::to_vec(&header).context("Failed to serialize JWT header")?;
+    let header_b64 = URL_SAFE_NO_PAD.encode(&header_json);
+    let claims_b64 = URL_SAFE_NO_PAD.encode(claims_json);
+
+    let signing_input = format!("{header_b64}.{claims_b64}");
+
+    // sign() takes the full message and hashes internally with SHA-256.
+    let mut sig_bytes = vec![0u8; key_pair.public_modulus_len()];
+    let rng = SystemRandom::new();
+    key_pair
+        .sign(
+            &RSA_PKCS1_SHA256,
+            &rng,
+            signing_input.as_bytes(),
+            &mut sig_bytes,
+        )
+        .map_err(|e| anyhow::anyhow!("RSA-3072 signing failed: {e}"))?;
+
+    let sig_b64 = URL_SAFE_NO_PAD.encode(&sig_bytes);
+    Ok(format!("{signing_input}.{sig_b64}"))
+}
+
+/// Manually construct and sign a JWT using KMS RSA.
+///
+/// Steps:
+/// 1. Build header JSON with `alg: "RS256"`, `typ`, and `kid`
+/// 2. Serialize claims to JSON
+/// 3. Base64url-encode header and payload, join with "."
+/// 4. SHA-256 hash the signing input (`header.payload`)
+/// 5. Call `signer.sign_digest(&sha256_hash)` → raw PKCS#1 v1.5 signature bytes
+/// 6. Base64url-encode signature, return `header.payload.signature`
+async fn sign_jwt_rsa_with_kms<T: Serialize>(
+    signer: &KmsSignerRsa3072,
+    key_id: &str,
+    claims: &T,
+    typ: Option<&str>,
+) -> Result<String> {
+    let header = KmsJwtHeader {
+        alg: "RS256",
+        typ: typ.unwrap_or("JWT"),
+        kid: key_id,
+    };
+
+    let header_json = serde_json::to_vec(&header).context("Failed to serialize JWT header")?;
+    let header_b64 = URL_SAFE_NO_PAD.encode(&header_json);
+
+    let claims_json = serde_json::to_vec(claims).context("Failed to serialize JWT claims")?;
+    let claims_b64 = URL_SAFE_NO_PAD.encode(&claims_json);
+
+    let signing_input = format!("{header_b64}.{claims_b64}");
+
+    // SHA-256 hash the signing input. KMS RSA requires MessageType::Digest.
+    let sha256_digest = digest::digest(&digest::SHA256, signing_input.as_bytes());
+
+    let sig_bytes = signer
+        .sign_digest(sha256_digest.as_ref())
+        .await
+        .context("KMS RSA JWT signing failed")?;
+
+    // RSA PKCS#1 v1.5 signatures are raw bytes — no DER conversion needed.
+    let sig_b64 = URL_SAFE_NO_PAD.encode(&sig_bytes);
+
+    Ok(format!("{signing_input}.{sig_b64}"))
 }
 
 #[cfg(test)]
@@ -592,5 +989,191 @@ mod tests {
 
         pem.push_str("-----END PRIVATE KEY-----\n");
         pem
+    }
+
+    // -----------------------------------------------------------------------
+    // RSA (OidcRsaSigningKey) tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_generate_rsa_key() {
+        let key = OidcRsaSigningKey::generate().expect("RSA key generation failed");
+        assert!(
+            key.key_id().starts_with("vouch-oidc-rsa-"),
+            "key_id should have 'vouch-oidc-rsa-' prefix, got: {}",
+            key.key_id()
+        );
+    }
+
+    #[test]
+    fn test_rsa_public_key_jwk() {
+        let key = OidcRsaSigningKey::generate().expect("RSA key generation failed");
+        let jwk = key.public_key_jwk().expect("public_key_jwk failed");
+
+        assert_eq!(jwk.kty, "RSA");
+        assert_eq!(jwk.alg, "RS256");
+        assert_eq!(jwk.key_use, "sig");
+        assert_eq!(jwk.kid, key.key_id());
+        assert!(!jwk.n.is_empty(), "modulus must not be empty");
+        assert!(!jwk.e.is_empty(), "exponent must not be empty");
+    }
+
+    #[tokio::test]
+    async fn test_rsa_sign_and_verify_jwt() {
+        let key = OidcRsaSigningKey::generate().expect("RSA key generation failed");
+
+        let claims = TestClaims {
+            sub: "test@example.com".to_string(),
+            iss: "https://example.com".to_string(),
+            exp: 9_999_999_999,
+            iat: 1_000_000_000,
+        };
+
+        let token = key.sign_jwt(&claims).await.expect("sign_jwt failed");
+
+        let parts: Vec<&str> = token.split('.').collect();
+        assert_eq!(parts.len(), 3, "JWT must have 3 parts");
+
+        let header_json = URL_SAFE_NO_PAD
+            .decode(parts[0])
+            .expect("header base64 failed");
+        let header: serde_json::Value =
+            serde_json::from_slice(&header_json).expect("header JSON failed");
+
+        assert_eq!(header["alg"], "RS256");
+        assert_eq!(header["typ"], "JWT");
+        assert!(header.get("kid").is_some(), "header must have kid");
+    }
+
+    #[tokio::test]
+    async fn test_rsa_decoding_key_roundtrip() {
+        let key = OidcRsaSigningKey::generate().expect("RSA key generation failed");
+        let decoding_key = key.decoding_key();
+
+        let claims = TestClaims {
+            sub: "rsa-roundtrip@example.com".to_string(),
+            iss: "https://example.com".to_string(),
+            exp: 9_999_999_999,
+            iat: 1_000_000_000,
+        };
+
+        let token = key.sign_jwt(&claims).await.expect("sign_jwt failed");
+
+        let mut validation = jsonwebtoken::Validation::new(Algorithm::RS256);
+        validation.validate_aud = false;
+        let decoded = jsonwebtoken::decode::<TestClaims>(&token, decoding_key, &validation)
+            .expect("decode failed");
+
+        assert_eq!(decoded.claims.sub, "rsa-roundtrip@example.com");
+        assert_eq!(decoded.header.typ, Some("JWT".to_string()));
+    }
+
+    #[test]
+    fn test_rsa_load_or_generate_none() {
+        let key = OidcRsaSigningKey::load_or_generate(None).expect("load_or_generate failed");
+        assert!(key.key_id().starts_with("vouch-oidc-rsa-"));
+    }
+
+    #[test]
+    fn test_rsa_load_or_generate_empty() {
+        let key =
+            OidcRsaSigningKey::load_or_generate(Some("")).expect("load_or_generate empty failed");
+        assert!(key.key_id().starts_with("vouch-oidc-rsa-"));
+    }
+
+    #[test]
+    fn test_rsa_roundtrip_pem() {
+        let key1 = OidcRsaSigningKey::generate().expect("RSA key generation failed");
+        let jwk1 = key1.public_key_jwk().expect("jwk1 failed");
+
+        let OidcRsaSigningKey::Local { der_bytes, .. } = &key1 else {
+            // generate() always returns Local variant
+            return;
+        };
+
+        let pem_str = pkcs8_to_pem(der_bytes);
+        let key2 = OidcRsaSigningKey::from_pem(&pem_str).expect("from_pem failed");
+        let jwk2 = key2.public_key_jwk().expect("jwk2 failed");
+
+        // Same key → same modulus and exponent
+        assert_eq!(jwk1.n, jwk2.n, "modulus must match after PEM round-trip");
+        assert_eq!(jwk1.e, jwk2.e, "exponent must match after PEM round-trip");
+    }
+
+    #[test]
+    fn test_jwk_enum_serialization() {
+        let ec_key = OidcSigningKey::generate().expect("EC key generation failed");
+        let ec_jwk = ec_key.public_key_jwk().expect("EC JWK failed");
+
+        let rsa_key = OidcRsaSigningKey::generate().expect("RSA key generation failed");
+        let rsa_jwk = rsa_key.public_key_jwk().expect("RSA JWK failed");
+
+        let ec = Jwk::Ec(ec_jwk);
+        let rsa = Jwk::Rsa(rsa_jwk);
+
+        let ec_json = serde_json::to_value(&ec).expect("EC JWK serialization failed");
+        let rsa_json = serde_json::to_value(&rsa).expect("RSA JWK serialization failed");
+
+        assert_eq!(ec_json["kty"], "EC");
+        assert_eq!(ec_json["alg"], "ES256");
+
+        assert_eq!(rsa_json["kty"], "RSA");
+        assert_eq!(rsa_json["alg"], "RS256");
+        assert!(rsa_json.get("n").is_some(), "RSA JWK must have n");
+        assert!(rsa_json.get("e").is_some(), "RSA JWK must have e");
+        // EC JWK must not leak RSA fields (untagged serialization)
+        assert!(ec_json.get("n").is_none(), "EC JWK must not have n");
+        assert!(ec_json.get("crv").is_some(), "EC JWK must have crv");
+    }
+
+    #[test]
+    fn test_rsa_from_pem_rejects_small_key() {
+        // Generate an RSA-2048 key (below the 3072-bit minimum)
+        use aws_lc_rs::encoding::AsDer;
+        let small_key = aws_lc_rs::rsa::KeyPair::generate(aws_lc_rs::rsa::KeySize::Rsa2048)
+            .expect("RSA-2048 keygen");
+        let pkcs8_der = small_key.as_der().expect("PKCS#8 DER");
+
+        // Convert to PEM
+        let der_slice: &[u8] = pkcs8_der.as_ref();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der_slice);
+        let pem = format!("-----BEGIN PRIVATE KEY-----\n{b64}\n-----END PRIVATE KEY-----\n");
+
+        let result = OidcRsaSigningKey::from_pem(&pem);
+        let err = result.err().expect("RSA-2048 should be rejected");
+        let err_msg = format!("{err}");
+        assert!(
+            err_msg.contains("3072 bits"),
+            "Error should mention 3072-bit requirement, got: {err_msg}"
+        );
+    }
+
+    #[test]
+    fn test_rsa_key_id_is_unique() {
+        // Two independently generated keys must have different key IDs
+        let key1 = OidcRsaSigningKey::generate().expect("RSA key 1");
+        let key2 = OidcRsaSigningKey::generate().expect("RSA key 2");
+        assert_ne!(
+            key1.key_id(),
+            key2.key_id(),
+            "Different RSA keys must have different key IDs"
+        );
+    }
+
+    #[test]
+    fn test_rsa_from_pem_rejects_ec_key() {
+        // Generate an EC P-256 key and try to load it as RSA
+        let ec_key = OidcSigningKey::generate().expect("EC key");
+        let OidcSigningKey::Local { der_bytes, .. } = &ec_key else {
+            return;
+        };
+        let der_slice: &[u8] = der_bytes;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der_slice);
+        let pem = format!("-----BEGIN PRIVATE KEY-----\n{b64}\n-----END PRIVATE KEY-----\n");
+
+        assert!(
+            OidcRsaSigningKey::from_pem(&pem).is_err(),
+            "EC key should be rejected by RSA loader"
+        );
     }
 }

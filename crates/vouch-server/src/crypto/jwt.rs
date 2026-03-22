@@ -337,7 +337,7 @@ async fn kms_decode<T: DeserializeOwned>(
 /// Context for token validation, bundling the OIDC signing key and issuer info.
 ///
 /// Avoids parameter proliferation on [`decode_token`].
-pub struct TokenValidationContext<'a> {
+pub(crate) struct TokenValidationContext<'a> {
     /// ES256 OIDC signing key.
     pub(crate) oidc_key: &'a OidcSigningKey,
     /// Expected issuer (base_url).
@@ -357,7 +357,7 @@ impl<'a> TokenValidationContext<'a> {
     /// Note: `config` must be passed separately because `AppState::config()`
     /// returns a guard that must be held for the lifetime of the reference.
     #[must_use]
-    pub fn new(oidc_key: &'a OidcSigningKey, expected_issuer: &'a str) -> Self {
+    pub(crate) fn new(oidc_key: &'a OidcSigningKey, expected_issuer: &'a str) -> Self {
         Self {
             oidc_key,
             expected_issuer,
@@ -376,7 +376,7 @@ impl<'a> TokenValidationContext<'a> {
 /// validate `aud` against their expected audience (RFC 8725 Section 3.9).
 ///
 /// Returns `None` for invalid, expired, or unsupported tokens.
-pub fn decode_token(token: &str, ctx: &TokenValidationContext<'_>) -> Option<DecodedToken> {
+pub(crate) fn decode_token(token: &str, ctx: &TokenValidationContext<'_>) -> Option<DecodedToken> {
     // Peek at the header to determine the algorithm
     let header = jsonwebtoken::decode_header(token).ok()?;
 
@@ -416,7 +416,7 @@ pub fn decode_token(token: &str, ctx: &TokenValidationContext<'_>) -> Option<Dec
 /// This is a generic helper for the state token types (registration, authentication,
 /// browser registration, browser authentication, GitHub state, FIDO2 challenge) that
 /// share the same encode pattern: set `typ` header from [`JwtType`], sign with HS256.
-pub fn encode_state_token<T: Serialize>(
+pub(crate) fn encode_state_token<T: Serialize>(
     claims: &T,
     jwt_type: JwtType,
     secret: &[u8],
@@ -433,7 +433,7 @@ pub fn encode_state_token<T: Serialize>(
 /// This is a generic helper for the state token types. It decodes with
 /// default validation (only `exp` check), then validates that the `typ`
 /// header matches the expected [`JwtType`].
-pub fn decode_state_token<T: DeserializeOwned>(
+pub(crate) fn decode_state_token<T: DeserializeOwned>(
     token: &str,
     jwt_type: JwtType,
     secret: &[u8],
@@ -454,12 +454,7 @@ pub fn decode_state_token<T: DeserializeOwned>(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use crate::services::auth::AccessTokenClaims;

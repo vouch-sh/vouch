@@ -39,7 +39,7 @@ use crate::session;
 /// 1. Contact the server first (async) — fail fast if unreachable.
 /// 2. All FIDO2 device work on a plain OS thread (wait, PIN, authenticate).
 /// 3. Complete authentication with the server (async).
-pub async fn run(server: &str, timeout_secs: u64) -> Result<()> {
+pub(crate) async fn run(server: &str, timeout_secs: u64) -> Result<()> {
     println!("Logging in...\n");
 
     let client = VouchClient::unauthenticated(server)?;

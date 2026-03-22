@@ -16,7 +16,7 @@ use vouch_common::posture::DevicePosture;
 
 /// Maximum number of active policies (preconfigured + custom combined).
 /// There are 6 preconfigured policies, so 8 allows all 6 + 2 custom.
-pub const MAX_ACTIVE_POLICIES: usize = 8;
+pub(crate) const MAX_ACTIVE_POLICIES: usize = 8;
 
 // ============================================================
 // Preconfigured Policies (code-defined)
@@ -29,7 +29,7 @@ pub const MAX_ACTIVE_POLICIES: usize = 8;
 /// which produces compile errors everywhere that needs updating
 /// (remediation hints, template icons, etc.).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PreconfiguredSlug {
+pub(crate) enum PreconfiguredSlug {
     DiskEncryption,
     Firewall,
     ScreenLock,
@@ -41,7 +41,7 @@ pub enum PreconfiguredSlug {
 impl PreconfiguredSlug {
     /// The slug string stored in the DB and used in API responses.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::DiskEncryption => "disk_encryption",
             Self::Firewall => "firewall",
@@ -76,7 +76,7 @@ impl std::fmt::Display for PreconfiguredSlug {
 }
 
 /// A preconfigured posture policy defined in code.
-pub struct PreconfiguredPolicy {
+pub(crate) struct PreconfiguredPolicy {
     pub slug: PreconfiguredSlug,
     pub name: &'static str,
     pub description: &'static str,
@@ -105,7 +105,7 @@ static COMPILED_PRECONFIGURED: LazyLock<HashMap<PreconfiguredSlug, Program>> =
     });
 
 /// All preconfigured policies. Updated by deploying new code.
-pub const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
+pub(crate) const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
     PreconfiguredPolicy {
         slug: PreconfiguredSlug::DiskEncryption,
         name: "Disk Encryption",
@@ -158,7 +158,7 @@ pub const PRECONFIGURED_POLICIES: &[PreconfiguredPolicy] = &[
 
 /// Check if a slug string is a valid preconfigured policy.
 #[must_use]
-pub fn is_valid_preconfigured_slug(slug: &str) -> bool {
+pub(crate) fn is_valid_preconfigured_slug(slug: &str) -> bool {
     slug.parse::<PreconfiguredSlug>().is_ok()
 }
 
@@ -170,7 +170,7 @@ pub fn is_valid_preconfigured_slug(slug: &str) -> bool {
 ///
 /// Returns `Ok(())` if the expression parses successfully, or a
 /// `ServiceError` with the parse error details.
-pub fn validate_cel_expression(expression: &str) -> ServiceResult<()> {
+pub(crate) fn validate_cel_expression(expression: &str) -> ServiceResult<()> {
     let trimmed = expression.trim();
     if trimmed.is_empty() {
         tracing::debug!("CEL validation rejected: empty expression");
@@ -416,7 +416,10 @@ fn evaluate_cel(expression: &str, ctx: &Context<'_>) -> bool {
 ///
 /// Returns `Ok(true)` if the policy passes, `Ok(false)` if it fails,
 /// or `Err` if the expression cannot be compiled.
-pub fn test_cel_expression(expression: &str, posture: &DevicePosture) -> ServiceResult<bool> {
+pub(crate) fn test_cel_expression(
+    expression: &str,
+    posture: &DevicePosture,
+) -> ServiceResult<bool> {
     // Reuse validation (handles empty, panics, parse errors)
     validate_cel_expression(expression)?;
 
@@ -447,7 +450,7 @@ pub fn test_cel_expression(expression: &str, posture: &DevicePosture) -> Service
 
 /// Get OS-specific remediation guidance for a preconfigured policy.
 #[must_use]
-pub fn remediation_for_slug(slug: PreconfiguredSlug, os: Option<&str>) -> String {
+pub(crate) fn remediation_for_slug(slug: PreconfiguredSlug, os: Option<&str>) -> String {
     let os = os.unwrap_or("unknown");
 
     match (slug, os) {
@@ -552,7 +555,7 @@ pub fn remediation_for_slug(slug: PreconfiguredSlug, os: Option<&str>) -> String
 /// Returns `ServiceError::OAuth { AccessDenied, ... }` if:
 /// - Active policies exist but no device posture was provided
 /// - Any active policy's CEL expression evaluates to `false`
-pub async fn evaluate_posture_policies(
+pub(crate) async fn evaluate_posture_policies(
     store: &DocumentStore,
     org_id: &str,
     authorization_details: Option<&serde_json::Value>,
@@ -682,12 +685,7 @@ fn extract_device_posture(ad_value: Option<&serde_json::Value>) -> ServiceResult
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use vouch_common::posture::{EdrAgent, MdmAgent, OperatingSystem, PostureTypeTag};
@@ -853,8 +851,11 @@ mod tests {
     #[test]
     fn test_all_preconfigured_policies_compile() {
         for policy in PRECONFIGURED_POLICIES {
-            Program::compile(policy.cel_expression)
-                .unwrap_or_else(|e| panic!("Policy '{}' failed to compile: {e}", policy.slug));
+            assert!(
+                Program::compile(policy.cel_expression).is_ok(),
+                "Policy '{}' failed to compile",
+                policy.slug
+            );
         }
     }
 

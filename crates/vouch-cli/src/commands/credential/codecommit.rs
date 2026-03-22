@@ -29,7 +29,7 @@ use crate::integrations::aws::sts::StsCredentials;
 ///
 /// # Arguments
 /// * `operation` - The git credential operation ("get", "store", or "erase")
-pub async fn run(operation: &str) -> Result<()> {
+pub(crate) async fn run(operation: &str) -> Result<()> {
     match operation {
         "get" => get_credential().await,
         "store" | "erase" => {
@@ -96,7 +96,7 @@ async fn get_credential() -> Result<()> {
 /// # Arguments
 /// * `remote_name` - The git remote name (e.g., "origin")
 /// * `url` - The `codecommit://` URL
-pub async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()> {
+pub(crate) async fn run_remote_helper(remote_name: &str, url: &str) -> Result<()> {
     let parsed = parse_codecommit_url(url).ok_or_else(|| {
         anyhow::anyhow!(
             "invalid CodeCommit URL: {url}\n\

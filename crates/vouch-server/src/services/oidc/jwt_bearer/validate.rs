@@ -284,12 +284,7 @@ pub fn map_algorithm(alg: &str) -> ServiceResult<jsonwebtoken::Algorithm> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -351,13 +346,12 @@ mod tests {
     // parse_assertion_header tests
     // ========================================================================
 
-    /// Extract the OAuth error description from a `ServiceError`, if it is an
-    /// `OAuth` variant. Panics (in test context) for other variants.
+    /// Extract the OAuth error description from a `ServiceError`.
     fn oauth_error_description(err: &ServiceError) -> &str {
-        match err {
-            ServiceError::OAuth { description, .. } => description.as_str(),
-            other => panic!("Expected ServiceError::OAuth, got: {other:?}"),
-        }
+        let ServiceError::OAuth { description, .. } = err else {
+            return "NOT_AN_OAUTH_ERROR";
+        };
+        description.as_str()
     }
 
     #[test]

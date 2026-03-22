@@ -5,13 +5,13 @@
 //! - `c14n` -- Exclusive XML Canonicalization (exc-c14n)
 //! - `metadata` -- IdP metadata parsing and SP metadata generation
 
-pub mod authn_request;
-pub mod c14n;
-pub mod metadata;
-pub mod response;
-pub mod signature;
+pub(crate) mod authn_request;
+pub(crate) mod c14n;
+pub(crate) mod metadata;
+pub(crate) mod response;
+pub(crate) mod signature;
 
-pub use metadata::IdpMetadata;
+pub(crate) use metadata::IdpMetadata;
 
 /// SAML 2.0 Service Provider.
 ///

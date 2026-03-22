@@ -283,6 +283,7 @@ mod tests {
             registration_source: None,
             registration_access_token_hash: None,
             registration_metadata: None,
+            id_token_signed_response_alg: "RS256".to_string(),
         }
     }
 
@@ -320,6 +321,7 @@ mod tests {
             registration_source: None,
             registration_access_token_hash: None,
             registration_metadata: None,
+            id_token_signed_response_alg: "RS256".to_string(),
         }
     }
 

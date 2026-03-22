@@ -24,7 +24,7 @@ use crate::fido2::{self, YubiKey};
 ///    unreachable or unauthenticated
 /// 2. All FIDO2 device work on a plain OS thread (wait, PIN, register)
 /// 3. Complete registration with the server (async)
-pub async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> Result<()> {
+pub(crate) async fn run(server: &str, name: Option<&str>, timeout_secs: u64) -> Result<()> {
     let name = name.unwrap_or("YubiKey");
     println!("Registering additional YubiKey '{name}'...\n");
 

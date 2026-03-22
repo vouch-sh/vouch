@@ -23,7 +23,7 @@ use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 /// ```bash
 /// cat your-key.pem | base64 | tr -d '\n'
 /// ```
-pub fn decode_base64_pem(content: &str) -> Result<String> {
+pub(crate) fn decode_base64_pem(content: &str) -> Result<String> {
     let trimmed = content.trim();
 
     if trimmed.starts_with("-----BEGIN") {

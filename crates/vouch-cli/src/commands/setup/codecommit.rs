@@ -40,7 +40,11 @@ const PARTITION_PATTERNS: &[&str] = &[
 /// * `region` - Optional specific region (default: wildcard `*` matching all regions)
 /// * `profile` - Optional AWS profile name (default: auto-detect vouch profile)
 /// * `configure` - If true, automatically configure; if false, just show instructions
-pub async fn run(region: Option<&str>, profile: Option<&str>, configure: bool) -> Result<()> {
+pub(crate) async fn run(
+    region: Option<&str>,
+    profile: Option<&str>,
+    configure: bool,
+) -> Result<()> {
     // Load config to verify enrollment
     let config = Config::load().context("failed to load config - run 'vouch enroll' first")?;
     let _server = config

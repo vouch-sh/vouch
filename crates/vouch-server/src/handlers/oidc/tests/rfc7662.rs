@@ -182,18 +182,15 @@ async fn test_rfc7662_introspection_requires_client_auth() {
         http_post_form(&app, "/oauth/introspect", "token=some_token_value", &[]).await;
 
     // Should either return 401 or return active=false (server policy)
-    if status == StatusCode::UNAUTHORIZED {
-        // Explicit rejection
-    } else if status == StatusCode::OK {
+    assert!(
+        status == StatusCode::UNAUTHORIZED || status == StatusCode::OK,
+        "Expected 401 or 200 with active=false, got: {status} {body}"
+    );
+    if status == StatusCode::OK {
         let response: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         assert_eq!(
             response["active"], false,
             "Unauthenticated introspection should return active=false"
-        );
-    } else {
-        panic!(
-            "Expected 401 or 200 with active=false, got: {} {}",
-            status, body
         );
     }
 }

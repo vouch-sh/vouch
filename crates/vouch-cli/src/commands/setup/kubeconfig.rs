@@ -13,7 +13,7 @@ use crate::utils::{ensure_secure_dir, write_secure_file};
 
 /// Kubeconfig structure (partial - only what we need to read/modify).
 #[derive(Debug, Default, Serialize, Deserialize)]
-pub struct Kubeconfig {
+pub(crate) struct Kubeconfig {
     #[serde(default, rename = "apiVersion")]
     pub api_version: Option<String>,
     #[serde(default)]
@@ -31,13 +31,13 @@ pub struct Kubeconfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KubeconfigCluster {
+pub(crate) struct KubeconfigCluster {
     pub name: String,
     pub cluster: KubeconfigClusterData,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KubeconfigClusterData {
+pub(crate) struct KubeconfigClusterData {
     pub server: String,
     #[serde(
         default,
@@ -48,13 +48,13 @@ pub struct KubeconfigClusterData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KubeconfigContext {
+pub(crate) struct KubeconfigContext {
     pub name: String,
     pub context: KubeconfigContextData,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KubeconfigContextData {
+pub(crate) struct KubeconfigContextData {
     pub cluster: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub namespace: Option<String>,
@@ -62,13 +62,13 @@ pub struct KubeconfigContextData {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KubeconfigUser {
+pub(crate) struct KubeconfigUser {
     pub name: String,
     pub user: KubeconfigUserData,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct KubeconfigUserData {
+pub(crate) struct KubeconfigUserData {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub exec: Option<ExecConfig>,
     #[serde(flatten)]
@@ -77,7 +77,7 @@ pub struct KubeconfigUserData {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ExecConfig {
+pub(crate) struct ExecConfig {
     pub api_version: String,
     pub command: String,
     pub args: Vec<String>,
@@ -88,7 +88,7 @@ pub struct ExecConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EnvVar {
+pub(crate) struct EnvVar {
     pub name: String,
     pub value: String,
 }
@@ -98,7 +98,7 @@ pub struct EnvVar {
 // ============================================================================
 
 /// Get the default kubeconfig path (~/.kube/config).
-pub fn default_kubeconfig_path() -> Result<PathBuf> {
+pub(crate) fn default_kubeconfig_path() -> Result<PathBuf> {
     if let Ok(kubeconfig) = std::env::var("KUBECONFIG")
         && let Some(first_path) = kubeconfig.split(':').next()
         && !first_path.is_empty()
@@ -111,7 +111,7 @@ pub fn default_kubeconfig_path() -> Result<PathBuf> {
 }
 
 /// Load kubeconfig from file, or return empty config if file doesn't exist.
-pub fn load_kubeconfig(path: &std::path::Path) -> Result<Kubeconfig> {
+pub(crate) fn load_kubeconfig(path: &std::path::Path) -> Result<Kubeconfig> {
     if !path.exists() {
         return Ok(Kubeconfig {
             api_version: Some("v1".to_string()),
@@ -128,7 +128,7 @@ pub fn load_kubeconfig(path: &std::path::Path) -> Result<Kubeconfig> {
 }
 
 /// Save kubeconfig to file.
-pub fn save_kubeconfig(path: &std::path::Path, config: &Kubeconfig) -> Result<()> {
+pub(crate) fn save_kubeconfig(path: &std::path::Path, config: &Kubeconfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         ensure_secure_dir(parent)?;
     }

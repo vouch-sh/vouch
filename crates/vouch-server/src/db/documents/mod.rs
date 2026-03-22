@@ -4,21 +4,21 @@
 //! Each module defines serializable document types that implement
 //! [`DocumentType`] for storage in the 3-table document store.
 
-pub mod audit;
-pub mod authenticator;
-pub mod authorization_code;
-pub mod challenge_state;
-pub mod credential;
-pub mod device_auth;
-pub mod dpop;
-pub mod github;
-pub mod jwt_assertion_jti;
-pub mod jwt_issuer;
-pub mod oauth;
-pub mod organization;
-pub mod par;
-pub mod pending_oauth;
-pub mod posture_policy;
-pub mod scim;
-pub mod session;
-pub mod user;
+pub(crate) mod audit;
+pub(crate) mod authenticator;
+pub(crate) mod authorization_code;
+pub(crate) mod challenge_state;
+pub(crate) mod credential;
+pub(crate) mod device_auth;
+pub(crate) mod dpop;
+pub(crate) mod github;
+pub(crate) mod jwt_assertion_jti;
+pub(crate) mod jwt_issuer;
+pub(crate) mod oauth;
+pub(crate) mod organization;
+pub(crate) mod par;
+pub(crate) mod pending_oauth;
+pub(crate) mod posture_policy;
+pub(crate) mod scim;
+pub(crate) mod session;
+pub(crate) mod user;

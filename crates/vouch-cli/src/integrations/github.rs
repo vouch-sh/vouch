@@ -9,14 +9,14 @@ use crate::client::VouchClient;
 use crate::style;
 
 /// GitHub integration checker.
-pub struct GitHubIntegration {
+pub(crate) struct GitHubIntegration {
     server: String,
 }
 
 impl GitHubIntegration {
     /// Create a new GitHub integration checker.
     #[must_use]
-    pub fn new(server: &str) -> Self {
+    pub(crate) fn new(server: &str) -> Self {
         Self {
             server: server.to_string(),
         }
@@ -53,7 +53,7 @@ impl GitHubIntegration {
     /// Check and print GitHub integration status.
     ///
     /// GitHub needs custom printing due to its complex account list format.
-    pub async fn check_and_print(&self) {
+    pub(crate) async fn check_and_print(&self) {
         let status = check_github_status(&self.server).await;
         print_github_status(&status, &self.server);
     }

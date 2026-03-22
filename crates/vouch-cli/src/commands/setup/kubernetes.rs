@@ -25,7 +25,7 @@ fn read_ca_data(ca_path: &str) -> Result<String> {
 ///
 /// Configures kubeconfig so kubectl uses `vouch credential k8s` for
 /// OIDC token generation against a Vouch-backed Kubernetes cluster.
-pub async fn run(
+pub(crate) async fn run(
     server: &str,
     cluster: &str,
     k8s_server: &str,

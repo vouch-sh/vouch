@@ -14,7 +14,7 @@ use tracing::debug;
 ///
 /// Returns the credential data as a JSON value, or `None` if the agent is
 /// unreachable, the cache key is missing, or the cached credential has expired.
-pub async fn get(cache_key: &str) -> Option<serde_json::Value> {
+pub(crate) async fn get(cache_key: &str) -> Option<serde_json::Value> {
     #[cfg(not(unix))]
     {
         let _ = cache_key;
@@ -38,7 +38,7 @@ pub async fn get(cache_key: &str) -> Option<serde_json::Value> {
 /// Store a credential in the agent cache (best-effort).
 ///
 /// Does nothing if the agent is unreachable.
-pub async fn store(cache_key: &str, data: serde_json::Value, expires_at: &str) {
+pub(crate) async fn store(cache_key: &str, data: serde_json::Value, expires_at: &str) {
     #[cfg(not(unix))]
     {
         let _ = (cache_key, data, expires_at);
@@ -62,7 +62,7 @@ pub async fn store(cache_key: &str, data: serde_json::Value, expires_at: &str) {
 ///
 /// The `fetch` closure must return `(data, expires_at)` where `expires_at` is
 /// an ISO 8601 timestamp string for the cache TTL.
-pub async fn get_or_fetch<F, Fut>(
+pub(crate) async fn get_or_fetch<F, Fut>(
     cache_key: &str,
     label: &str,
     fetch: F,
@@ -99,13 +99,13 @@ where
 ///
 /// Delegates to [`crate::exit_code::classify`] which checks for `reqwest::Error`,
 /// `CliError::NetworkError`, and message-based patterns in a single place.
-pub fn is_network_error(err: &anyhow::Error) -> bool {
+pub(crate) fn is_network_error(err: &anyhow::Error) -> bool {
     crate::exit_code::classify(err) == std::process::ExitCode::from(crate::exit_code::NETWORK_ERROR)
 }
 
 /// Build a default expiry timestamp (1 hour from now) for tokens that don't
 /// include an explicit expiration.
-pub fn default_expiry() -> String {
+pub(crate) fn default_expiry() -> String {
     jiff::Timestamp::now()
         .checked_add(jiff::SignedDuration::from_hours(1))
         .map(|ts| ts.to_string())

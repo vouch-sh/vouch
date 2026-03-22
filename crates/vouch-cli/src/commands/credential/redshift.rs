@@ -24,7 +24,7 @@ const DEFAULT_DURATION_SECONDS: u32 = 900;
 
 /// Which Redshift target to fetch credentials for.
 #[derive(Debug)]
-pub enum RedshiftTarget<'a> {
+pub(crate) enum RedshiftTarget<'a> {
     /// Provisioned cluster, identified by cluster ID.
     Cluster {
         cluster_id: &'a str,
@@ -37,7 +37,7 @@ pub enum RedshiftTarget<'a> {
 /// Run the Redshift credential command.
 ///
 /// Outputs JSON with `DbUser`, `DbPassword`, and `Expiration` to stdout.
-pub async fn run(
+pub(crate) async fn run(
     server: &str,
     target: RedshiftTarget<'_>,
     db_name: Option<&str>,
@@ -91,7 +91,7 @@ pub async fn run(
 /// Fetch Redshift credentials through the full Vouch → STS → Redshift flow.
 ///
 /// Routes to the provisioned cluster or serverless API based on `target`.
-pub async fn fetch_redshift_credentials(
+pub(crate) async fn fetch_redshift_credentials(
     server: &str,
     target: &RedshiftTarget<'_>,
     db_name: Option<&str>,
@@ -134,7 +134,7 @@ pub async fn fetch_redshift_credentials(
 /// Build a `RedshiftTarget` from CLI arguments.
 ///
 /// Exactly one of `cluster_id` or `workgroup` must be `Some`.
-pub fn resolve_target<'a>(
+pub(crate) fn resolve_target<'a>(
     cluster_id: Option<&'a str>,
     workgroup: Option<&'a str>,
     duration: Option<u32>,

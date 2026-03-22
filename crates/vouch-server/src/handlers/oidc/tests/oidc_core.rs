@@ -125,6 +125,10 @@ async fn test_oidc_id_token_aud_contains_client_id() {
     let aud = &claims["aud"];
 
     // aud can be a string or an array
+    assert!(
+        aud.is_string() || aud.is_array(),
+        "ID token aud must be a string or array"
+    );
     if let Some(aud_str) = aud.as_str() {
         assert_eq!(
             aud_str, client.client_id,
@@ -137,8 +141,6 @@ async fn test_oidc_id_token_aud_contains_client_id() {
                 .any(|a| a.as_str() == Some(&client.client_id)),
             "ID token aud array must include client_id"
         );
-    } else {
-        panic!("ID token aud must be a string or array");
     }
 }
 
