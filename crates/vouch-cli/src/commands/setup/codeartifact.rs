@@ -18,7 +18,7 @@ use crate::integrations::cargo::CargoConfig;
 
 /// Supported package manager tools for CodeArtifact.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
-pub enum Tool {
+pub(crate) enum Tool {
     /// Rust Cargo package manager.
     Cargo,
     /// Python pip package manager.
@@ -44,7 +44,7 @@ pub enum Tool {
 /// * `region` - AWS region (optional if profile configured)
 /// * `repository` - CodeArtifact repository name
 /// * `profile` - Named profile to use/save
-pub async fn run(
+pub(crate) async fn run(
     server: &str,
     tool: Tool,
     domain: Option<&str>,

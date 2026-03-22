@@ -9,7 +9,7 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 
 /// An OAuth authorization code (single-use).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuthorizationCodeDoc {
+pub(crate) struct AuthorizationCodeDoc {
     pub code_hash: String,
     pub client_id: String,
     pub user_id: String,

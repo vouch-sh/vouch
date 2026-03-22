@@ -19,7 +19,7 @@ use crate::config::Config;
 /// # Arguments
 /// * `host` - The GitHub host to configure (default: "github.com")
 /// * `configure` - If true, automatically configure git; if false, just show instructions
-pub async fn run(host: &str, configure: bool) -> Result<()> {
+pub(crate) async fn run(host: &str, configure: bool) -> Result<()> {
     // Load config to get server URL
     let config = Config::load().context("failed to load config - run 'vouch enroll' first")?;
     let server = config

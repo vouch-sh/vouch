@@ -30,7 +30,7 @@ use uuid::Uuid;
 use super::{OAuthErrorCode, ServiceError, ServiceResult};
 
 /// Parameters for verifying authenticator ownership.
-pub struct AuthenticatorLookupParams<'a> {
+pub(crate) struct AuthenticatorLookupParams<'a> {
     /// The credential ID from the WebAuthn assertion.
     pub credential_id: &'a [u8],
     /// The user ID from the user handle.
@@ -38,7 +38,7 @@ pub struct AuthenticatorLookupParams<'a> {
 }
 
 /// Result of authenticator lookup and ownership verification.
-pub struct AuthenticatorLookupResult {
+pub(crate) struct AuthenticatorLookupResult {
     /// The verified authenticator.
     pub authenticator: Authenticator,
     /// The user who owns the authenticator.
@@ -54,7 +54,7 @@ pub struct AuthenticatorLookupResult {
 ///
 /// Returns `ServiceError::NotFound` if the credential or user is not found.
 /// Returns `ServiceError::Forbidden` if the credential doesn't belong to the user.
-pub async fn lookup_and_verify_authenticator(
+pub(crate) async fn lookup_and_verify_authenticator(
     state: &AppState,
     params: AuthenticatorLookupParams<'_>,
 ) -> ServiceResult<AuthenticatorLookupResult> {
@@ -78,7 +78,7 @@ pub async fn lookup_and_verify_authenticator(
 }
 
 /// Parameters for verifying a WebAuthn login assertion.
-pub struct LoginAssertionParams {
+pub(crate) struct LoginAssertionParams {
     /// Authenticator data from the assertion.
     pub authenticator_data: Vec<u8>,
     /// Client data JSON from the assertion.
@@ -96,7 +96,7 @@ pub struct LoginAssertionParams {
 }
 
 /// Result of WebAuthn assertion verification.
-pub struct LoginAssertionResult {
+pub(crate) struct LoginAssertionResult {
     /// New counter value to store.
     pub new_counter: u32,
     /// Whether user verification was performed.
@@ -115,7 +115,7 @@ pub struct LoginAssertionResult {
 /// # Errors
 ///
 /// Returns `ServiceError::OAuth` with `InvalidGrant` if verification fails.
-pub async fn verify_login_assertion(
+pub(crate) async fn verify_login_assertion(
     params: LoginAssertionParams,
 ) -> ServiceResult<LoginAssertionResult> {
     tokio::task::spawn_blocking(move || {
@@ -157,7 +157,7 @@ pub async fn verify_login_assertion(
 /// Used in both token exchange responses and access token JWTs to
 /// represent the acting party in a delegation chain.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ActorClaim {
+pub(crate) struct ActorClaim {
     /// RFC 8693 Section 4.1: Subject identifier of the actor.
     pub sub: String,
     /// RFC 8693 Section 4.1: Nested actor (for multi-hop delegation).
@@ -172,7 +172,7 @@ impl ActorClaim {
     /// Uses iterative traversal to prevent stack overflow from
     /// deeply nested (potentially malicious) actor chains.
     #[must_use]
-    pub fn depth(&self) -> usize {
+    pub(crate) fn depth(&self) -> usize {
         let mut depth = 1;
         let mut current = &self.actor;
         while let Some(inner) = current {
@@ -186,7 +186,7 @@ impl ActorClaim {
 /// Maximum allowed delegation depth for actor chains.
 ///
 /// Prevents unbounded nesting in token exchange delegation chains.
-pub const MAX_DELEGATION_DEPTH: usize = 5;
+pub(crate) const MAX_DELEGATION_DEPTH: usize = 5;
 
 /// JWT Access Token claims per RFC 9068 Section 2.2.
 ///
@@ -197,7 +197,7 @@ pub const MAX_DELEGATION_DEPTH: usize = 5;
 /// prevent information leakage. It is stored server-side in the sessions
 /// table and looked up via the token hash.
 #[derive(Debug, Serialize, Deserialize)]
-pub struct AccessTokenClaims {
+pub(crate) struct AccessTokenClaims {
     /// RFC 9068 Section 2.2: REQUIRED. Issuer identifier (base_url).
     pub iss: String,
     /// RFC 9068 Section 2.2: REQUIRED. Subject identifier (user ID).
@@ -246,7 +246,7 @@ pub struct AccessTokenClaims {
 }
 
 /// Parameters for creating an OAuth access token (RFC 9068).
-pub struct CreateOAuthTokenParams<'a> {
+pub(crate) struct CreateOAuthTokenParams<'a> {
     /// User ID (stored as `sub` claim).
     pub user_id: &'a str,
     /// User email (included when email scope is granted).
@@ -281,7 +281,7 @@ pub struct CreateOAuthTokenParams<'a> {
 }
 
 /// Result of creating a session token.
-pub struct CreateSessionResult {
+pub(crate) struct CreateSessionResult {
     /// The JWT token.
     pub token: SecretString,
     /// Token lifetime in seconds.
@@ -298,7 +298,7 @@ pub struct CreateSessionResult {
 /// # Errors
 ///
 /// Returns `ServiceError::Internal` if token signing or database operations fail.
-pub async fn create_oauth_access_token(
+pub(crate) async fn create_oauth_access_token(
     state: &AppState,
     params: CreateOAuthTokenParams<'_>,
 ) -> ServiceResult<CreateSessionResult> {
@@ -381,7 +381,7 @@ pub async fn create_oauth_access_token(
 }
 
 /// Decoded JWT token — an RFC 9068 OAuth access token (ES256, `at+jwt`).
-pub enum DecodedToken {
+pub(crate) enum DecodedToken {
     /// OAuth 2.0 access token (ES256, RFC 9068).
     AccessToken(AccessTokenClaims),
 }
@@ -389,7 +389,7 @@ pub enum DecodedToken {
 impl DecodedToken {
     /// RFC 7519 Section 4.1.2: Subject claim.
     #[must_use]
-    pub fn sub(&self) -> &str {
+    pub(crate) fn sub(&self) -> &str {
         match self {
             Self::AccessToken(c) => &c.sub,
         }
@@ -397,7 +397,7 @@ impl DecodedToken {
 
     /// User email. Returns `None` for access tokens without email scope.
     #[must_use]
-    pub fn email(&self) -> Option<&str> {
+    pub(crate) fn email(&self) -> Option<&str> {
         match self {
             Self::AccessToken(c) => c.email.as_deref(),
         }
@@ -405,7 +405,7 @@ impl DecodedToken {
 
     /// RFC 6749 Section 3.3: Granted scope.
     #[must_use]
-    pub fn scope(&self) -> Option<&ScopeSet> {
+    pub(crate) fn scope(&self) -> Option<&ScopeSet> {
         match self {
             Self::AccessToken(c) => c.scope.as_ref(),
         }
@@ -413,7 +413,7 @@ impl DecodedToken {
 
     /// DPoP confirmation claim (None for non-DPoP tokens).
     #[must_use]
-    pub fn cnf(&self) -> Option<&CnfClaim> {
+    pub(crate) fn cnf(&self) -> Option<&CnfClaim> {
         match self {
             Self::AccessToken(c) => c.cnf.as_ref(),
         }
@@ -421,7 +421,7 @@ impl DecodedToken {
 
     /// RFC 7519 Section 4.1.4: Expiration time (Unix timestamp).
     #[must_use]
-    pub fn exp(&self) -> Option<i64> {
+    pub(crate) fn exp(&self) -> Option<i64> {
         match self {
             Self::AccessToken(c) => Some(c.exp),
         }
@@ -430,7 +430,7 @@ impl DecodedToken {
     /// RFC 8693 Section 4.1: Actor claim for delegation chains.
     /// Only present in access tokens that resulted from token exchange.
     #[must_use]
-    pub fn act(&self) -> Option<&ActorClaim> {
+    pub(crate) fn act(&self) -> Option<&ActorClaim> {
         match self {
             Self::AccessToken(c) => c.act.as_ref(),
         }
@@ -447,7 +447,7 @@ impl DecodedToken {
 /// Pass `None` for endpoints that accept tokens for any audience (introspection, revocation).
 ///
 /// Returns `None` for invalid, expired, or unsupported tokens.
-pub fn decode_token(
+pub(crate) fn decode_token(
     token: &str,
     oidc_key: &OidcSigningKey,
     expected_issuer: &str,

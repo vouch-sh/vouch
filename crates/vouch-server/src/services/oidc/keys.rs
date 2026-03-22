@@ -557,14 +557,15 @@ impl OidcRsaSigningKey {
         let (n_bytes, e_bytes) =
             parse_spki_rsa(&spki_der).context("Failed to extract RSA components from SPKI")?;
 
-        // Enforce minimum RSA-3072 key size (384 bytes = 3072 bits).
+        // Enforce minimum RSA-3072 key size.
         // generate() uses KeySize::Rsa3072, and KMS validates KeySpec::Rsa3072,
         // but from_pem() accepts any PKCS#8 RSA key — reject undersized keys.
-        if n_bytes.len() < 384 {
-            bail!(
-                "RSA key must be at least 3072 bits, got {} bits",
-                n_bytes.len() * 8
-            );
+        // Use bit-counting (not byte length) to handle edge cases where
+        // strip_leading_zeros may remove DER sign-padding bytes.
+        let key_bits =
+            n_bytes.len() * 8 - n_bytes.first().map_or(0, |b| b.leading_zeros() as usize);
+        if key_bits < 3072 {
+            bail!("RSA key must be at least 3072 bits, got {key_bits} bits");
         }
 
         let key_id = format!(

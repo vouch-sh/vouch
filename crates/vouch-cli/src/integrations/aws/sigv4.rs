@@ -14,7 +14,7 @@ use super::sts::StsCredentials;
 
 /// Format timestamp for AWS `X-Amz-Date` header (`YYYYMMDDTHHMMSSZ`).
 #[must_use]
-pub fn format_amz_date(ts: jiff::Timestamp) -> String {
+pub(crate) fn format_amz_date(ts: jiff::Timestamp) -> String {
     let dt = ts.to_zoned(jiff::tz::TimeZone::UTC);
     format!(
         "{:04}{:02}{:02}T{:02}{:02}{:02}Z",
@@ -29,21 +29,21 @@ pub fn format_amz_date(ts: jiff::Timestamp) -> String {
 
 /// Format timestamp for AWS date stamp (`YYYYMMDD`).
 #[must_use]
-pub fn format_date_stamp(ts: jiff::Timestamp) -> String {
+pub(crate) fn format_date_stamp(ts: jiff::Timestamp) -> String {
     let dt = ts.to_zoned(jiff::tz::TimeZone::UTC);
     format!("{:04}{:02}{:02}", dt.year(), dt.month(), dt.day())
 }
 
 /// Compute SHA-256 hash and return as hex string.
 #[must_use]
-pub fn sha256_hex(data: &[u8]) -> String {
+pub(crate) fn sha256_hex(data: &[u8]) -> String {
     use aws_lc_rs::digest::{SHA256, digest};
     hex::encode(digest(&SHA256, data).as_ref())
 }
 
 /// Compute HMAC-SHA256.
 #[must_use]
-pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
     use aws_lc_rs::hmac::{HMAC_SHA256, Key, sign};
     let key = Key::new(HMAC_SHA256, key);
     sign(&key, data).as_ref().to_vec()
@@ -60,7 +60,7 @@ pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 /// Accepts `&SecretString` so the secret is only exposed at this single call site.
 /// Returns `Zeroizing<Vec<u8>>` so the signing key is zeroed on drop.
 #[must_use]
-pub fn derive_signing_key(
+pub(crate) fn derive_signing_key(
     secret_access_key: &SecretString,
     date_stamp: &str,
     region: &str,
@@ -90,7 +90,7 @@ pub fn derive_signing_key(
 /// * `region` - AWS region
 /// * `creds` - Temporary AWS credentials from STS
 /// * `body` - JSON request body
-pub async fn sign_and_send_json_rpc(
+pub(crate) async fn sign_and_send_json_rpc(
     http_client: &reqwest::Client,
     endpoint: &str,
     service: &str,
@@ -179,7 +179,7 @@ pub async fn sign_and_send_json_rpc(
 /// * `region` - AWS region
 /// * `creds` - Temporary AWS credentials from STS
 #[allow(clippy::too_many_arguments)]
-pub async fn sign_and_send_rest(
+pub(crate) async fn sign_and_send_rest(
     http_client: &reqwest::Client,
     method: reqwest::Method,
     endpoint: &str,
@@ -274,7 +274,7 @@ pub async fn sign_and_send_rest(
 /// Some AWS services (e.g., Redshift) use the Query API pattern with
 /// `application/x-www-form-urlencoded` content type. This function handles
 /// SigV4 signing over the form body.
-pub async fn sign_and_send_form_post(
+pub(crate) async fn sign_and_send_form_post(
     http_client: &reqwest::Client,
     endpoint: &str,
     service: &str,
@@ -359,7 +359,7 @@ pub async fn sign_and_send_form_post(
 }
 
 /// Parameters for building a SigV4 presigned URL.
-pub struct PresignedUrlParams<'a> {
+pub(crate) struct PresignedUrlParams<'a> {
     /// HTTP method (typically "GET").
     pub method: &'a str,
     /// Base URL (e.g., `https://sts.us-east-1.amazonaws.com`).
@@ -386,7 +386,7 @@ pub struct PresignedUrlParams<'a> {
 /// `Authorization` header, presigned URLs embed all auth parameters in the
 /// query string. Used by EKS tokens and RDS IAM auth tokens.
 #[must_use]
-pub fn build_presigned_url(params: &PresignedUrlParams<'_>) -> String {
+pub(crate) fn build_presigned_url(params: &PresignedUrlParams<'_>) -> String {
     let PresignedUrlParams {
         method,
         endpoint,

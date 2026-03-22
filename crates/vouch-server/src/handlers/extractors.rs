@@ -164,7 +164,7 @@ impl From<&HeaderMap> for ClientInfo {
 /// trusted, `X-Forwarded-For` is ignored entirely (fail closed).
 ///
 /// This implements the "rightmost-trusted" algorithm per RFC 7239.
-pub fn resolve_client_ip(
+pub(crate) fn resolve_client_ip(
     peer_ip: Option<IpAddr>,
     headers: &HeaderMap,
     trusted_cidrs: &[IpNet],

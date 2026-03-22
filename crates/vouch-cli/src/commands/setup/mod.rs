@@ -3,21 +3,21 @@
 
 use clap::Subcommand;
 
-pub mod aws;
-pub mod cargo;
-pub mod codeartifact;
-pub mod codecommit;
-pub mod docker;
-pub mod eks;
-pub mod github;
-pub mod kubeconfig;
-pub mod kubernetes;
-pub mod ssh;
-pub mod ssm;
+pub(crate) mod aws;
+pub(crate) mod cargo;
+pub(crate) mod codeartifact;
+pub(crate) mod codecommit;
+pub(crate) mod docker;
+pub(crate) mod eks;
+pub(crate) mod github;
+pub(crate) mod kubeconfig;
+pub(crate) mod kubernetes;
+pub(crate) mod ssh;
+pub(crate) mod ssm;
 
 /// Setup subcommands.
 #[derive(Subcommand)]
-pub enum SetupCommands {
+pub(crate) enum SetupCommands {
     /// Configure AWS CLI/SDK to use Vouch credentials.
     Aws {
         /// AWS profile name to configure. Defaults to "vouch" if not specified.

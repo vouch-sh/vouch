@@ -13,7 +13,7 @@ use super::sigv4::{sign_and_send_form_post, sign_and_send_json_rpc};
 use super::sts::StsCredentials;
 
 /// Temporary Redshift database credentials.
-pub struct RedshiftCredentials {
+pub(crate) struct RedshiftCredentials {
     /// Database user (e.g., "IAMR:role-name").
     pub db_user: String,
     /// Temporary database password.
@@ -36,7 +36,7 @@ impl std::fmt::Debug for RedshiftCredentials {
 ///
 /// This uses the newer IAM-identity-based API which auto-maps the IAM
 /// identity to a database user, avoiding the need to specify `DbUser`.
-pub async fn get_cluster_credentials(
+pub(crate) async fn get_cluster_credentials(
     http_client: &reqwest::Client,
     cluster_id: &str,
     db_name: Option<&str>,
@@ -79,7 +79,7 @@ pub async fn get_cluster_credentials(
 /// Redshift API which uses XML query protocol). Requests use
 /// `Content-Type: application/x-amz-json-1.1` with
 /// `X-Amz-Target: RedshiftServerless.GetCredentials`.
-pub async fn get_serverless_credentials(
+pub(crate) async fn get_serverless_credentials(
     http_client: &reqwest::Client,
     workgroup: &str,
     db_name: Option<&str>,

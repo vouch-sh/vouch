@@ -1,25 +1,25 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! CLI command implementations.
 
-pub mod completions;
-pub mod credential;
-pub mod diag;
-pub mod doctor;
-pub mod enroll;
-pub mod env;
-pub mod exec;
-pub mod init;
-pub mod keys;
-pub mod login;
-pub mod logout;
-pub mod posture;
-pub mod register;
-pub mod setup;
-pub mod status;
+pub(crate) mod completions;
+pub(crate) mod credential;
+pub(crate) mod diag;
+pub(crate) mod doctor;
+pub(crate) mod enroll;
+pub(crate) mod env;
+pub(crate) mod exec;
+pub(crate) mod init;
+pub(crate) mod keys;
+pub(crate) mod login;
+pub(crate) mod logout;
+pub(crate) mod posture;
+pub(crate) mod register;
+pub(crate) mod setup;
+pub(crate) mod status;
 
 /// Credential type to inject into the subprocess environment.
 #[derive(Clone, Debug, clap::ValueEnum)]
-pub enum CredentialType {
+pub(crate) enum CredentialType {
     /// AWS temporary credentials (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_SESSION_TOKEN).
     Aws,
     /// GitHub token (GITHUB_TOKEN, GH_TOKEN).

@@ -42,7 +42,7 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 
 /// Identity assertion extracted from a validated SAML Response.
 #[derive(Debug, Clone)]
-pub struct SamlAssertion {
+pub(crate) struct SamlAssertion {
     /// Email address extracted from NameID or configured attribute.
     pub email: String,
     /// Domain extracted from email or configured domain attribute.
@@ -61,7 +61,7 @@ const SUBJECT_BEARER: &str = "urn:oasis:names:tc:SAML:2.0:cm:bearer";
 
 /// Errors during SAML response validation.
 #[derive(Debug, thiserror::Error)]
-pub enum ResponseError {
+pub(crate) enum ResponseError {
     /// The base64 decoding of the SAMLResponse failed.
     #[error("failed to decode SAML response: {0}")]
     DecodeFailed(String),
@@ -144,7 +144,7 @@ pub enum ResponseError {
 ///
 /// Returns `ResponseError` for any validation failure. The caller must delete the
 /// SAML state record (replay prevention) after this function returns `Ok`.
-pub fn validate_saml_response(
+pub(crate) fn validate_saml_response(
     base64_response: &str,
     expected_request_id: &str,
     provider: &SamlProvider,

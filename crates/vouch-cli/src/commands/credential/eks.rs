@@ -36,7 +36,7 @@ const EKS_EXPIRY_MARGIN_SECONDS: i64 = 15;
 ///
 /// Outputs a Kubernetes `ExecCredential` JSON to stdout for use as a
 /// kubeconfig exec-based credential plugin.
-pub async fn run(
+pub(crate) async fn run(
     server: &str,
     cluster_name: &str,
     region: Option<&str>,

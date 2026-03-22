@@ -61,7 +61,7 @@ pub trait DocumentCrypto: Send + Sync + std::fmt::Debug {
 /// plaintext value, enabling human-readable database inspection during
 /// development.
 #[derive(Debug)]
-pub struct PlaintextDocumentCrypto;
+pub(crate) struct PlaintextDocumentCrypto;
 
 impl DocumentCrypto for PlaintextDocumentCrypto {
     fn seal(&self, _info: &[u8], _aad: &[u8], plaintext: &[u8]) -> Result<EncryptedDocument> {
@@ -92,7 +92,7 @@ impl DocumentCrypto for PlaintextDocumentCrypto {
 /// is used for `open()` (decrypted from KMS on startup). The HMAC key is
 /// derived from the public key via HKDF so that writers can compute index
 /// values without access to the private key.
-pub struct HpkeDocumentCrypto {
+pub(crate) struct HpkeDocumentCrypto {
     public_key: HpkePublicKey,
     private_key: HpkePrivateKey,
     hmac_key: Zeroizing<Vec<u8>>,
@@ -117,7 +117,7 @@ impl HpkeDocumentCrypto {
     /// # Errors
     ///
     /// Returns an error if the HMAC key derivation fails.
-    pub fn new(public_key: HpkePublicKey, private_key: HpkePrivateKey) -> Result<Self> {
+    pub(crate) fn new(public_key: HpkePublicKey, private_key: HpkePrivateKey) -> Result<Self> {
         let hmac_key = derive_hmac_key(&public_key.0)?;
         Ok(Self {
             public_key,
@@ -230,7 +230,9 @@ impl aws_lc_rs::hkdf::KeyType for HkdfLen {
 ///
 /// Returns an error if the DER is malformed, the key is not P-384,
 /// or the extracted key sizes are unexpected.
-pub fn p384_hpke_keys_from_private_key_der(der: &[u8]) -> Result<(HpkePublicKey, HpkePrivateKey)> {
+pub(crate) fn p384_hpke_keys_from_private_key_der(
+    der: &[u8],
+) -> Result<(HpkePublicKey, HpkePrivateKey)> {
     use aws_lc_rs::agreement;
     use aws_lc_rs::encoding::AsBigEndian;
 

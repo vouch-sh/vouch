@@ -237,7 +237,7 @@ pub struct OAuthErrorResponse {
 
 /// SCIM error response (RFC 7644 Section 3.12).
 #[derive(Debug, Serialize)]
-pub struct ScimErrorResponse {
+pub(crate) struct ScimErrorResponse {
     /// SCIM schema URIs.
     pub schemas: Vec<String>,
     /// Error detail message.
@@ -509,7 +509,7 @@ impl IntoResponse for ServiceError {
 }
 
 /// Result type for service operations.
-pub type ServiceResult<T> = Result<T, ServiceError>;
+pub(crate) type ServiceResult<T> = Result<T, ServiceError>;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::indexing_slicing)]

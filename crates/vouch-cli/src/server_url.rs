@@ -15,7 +15,7 @@ use std::fmt;
 ///
 /// Construct via [`ServerUrl::parse`].
 #[derive(Debug, Clone)]
-pub struct ServerUrl {
+pub(crate) struct ServerUrl {
     url: String,
 }
 
@@ -30,7 +30,7 @@ impl ServerUrl {
     ///
     /// If the URL uses HTTP for a non-loopback host and `allow_insecure` is true,
     /// a warning is printed to stderr but the URL is accepted.
-    pub fn parse(url: &str, allow_insecure: bool) -> Result<Self, ServerUrlError> {
+    pub(crate) fn parse(url: &str, allow_insecure: bool) -> Result<Self, ServerUrlError> {
         if url.is_empty() {
             return Err(ServerUrlError::Empty);
         }
@@ -60,7 +60,7 @@ impl ServerUrl {
     }
 
     /// Get the URL as a string slice.
-    pub fn as_str(&self) -> &str {
+    pub(crate) fn as_str(&self) -> &str {
         &self.url
     }
 }
@@ -79,7 +79,7 @@ impl AsRef<str> for ServerUrl {
 
 /// Errors from [`ServerUrl::parse`].
 #[derive(Debug, thiserror::Error)]
-pub enum ServerUrlError {
+pub(crate) enum ServerUrlError {
     /// The URL string was empty.
     #[error("server URL is empty")]
     Empty,

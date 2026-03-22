@@ -10,7 +10,7 @@ use secrecy::ExposeSecret;
 /// ```bash
 /// curl -H "Authorization: Bearer $(vouch credential token)" ...
 /// ```
-pub async fn run() -> Result<()> {
+pub(crate) async fn run() -> Result<()> {
     let token = crate::session::resolve_token().await?;
     print!("{}", token.expose_secret());
     Ok(())

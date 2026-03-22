@@ -20,7 +20,7 @@ use std::path::PathBuf;
 ///
 /// The config file is protected with 0600 permissions on Unix systems.
 #[derive(Default)]
-pub struct Config {
+pub(crate) struct Config {
     /// Hostname of the currently active server.
     current_server: Option<String>,
     /// Per-server state, keyed by hostname (e.g. "us.vouch.sh").
@@ -31,7 +31,7 @@ pub struct Config {
 
 /// Per-server configuration state.
 #[derive(Default, Clone)]
-pub struct ServerConfig {
+pub(crate) struct ServerConfig {
     /// Full server URL (e.g. "https://us.vouch.sh").
     server_url: String,
     /// Current session token (JWT), protected in memory.
@@ -50,7 +50,7 @@ pub struct ServerConfig {
 
 /// CodeArtifact configuration with named profiles (similar to AWS CLI profiles).
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct CodeArtifactConfig {
+pub(crate) struct CodeArtifactConfig {
     /// Name of the default profile (used when `--profile` is omitted).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default: Option<String>,
@@ -61,7 +61,7 @@ pub struct CodeArtifactConfig {
 
 /// A single CodeArtifact domain profile.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CodeArtifactProfile {
+pub(crate) struct CodeArtifactProfile {
     /// CodeArtifact domain name.
     pub domain: String,
     /// AWS account ID that owns the domain.
@@ -176,7 +176,7 @@ impl std::fmt::Debug for ServerConfig {
 ///
 /// Returns `host` for standard ports (443/80), or `host:port` for
 /// non-standard ports (e.g. `localhost:3000`).
-pub fn hostname_from_url(url_str: &str) -> Result<String> {
+pub(crate) fn hostname_from_url(url_str: &str) -> Result<String> {
     let parsed =
         url::Url::parse(url_str).with_context(|| format!("invalid server URL: {url_str}"))?;
 
@@ -199,7 +199,7 @@ fn is_standard_port(scheme: &str, port: u16) -> bool {
 
 impl Config {
     /// Load configuration from disk, or return defaults if not found.
-    pub fn load() -> Result<Self> {
+    pub(crate) fn load() -> Result<Self> {
         let path = Self::config_path()?;
 
         if path.exists() {
@@ -217,7 +217,7 @@ impl Config {
     ///
     /// Uses atomic write (temp file + rename) to prevent corruption
     /// if the process is interrupted mid-write.
-    pub fn save(&self) -> Result<()> {
+    pub(crate) fn save(&self) -> Result<()> {
         let path = Self::config_path()?;
 
         let config_file = ConfigFile::from(self);
@@ -237,7 +237,7 @@ impl Config {
     /// other's changes. The lock is held for the entire
     /// load-modify-save cycle.
     #[cfg(unix)]
-    pub fn modify(f: impl FnOnce(&mut Config)) -> Result<()> {
+    pub(crate) fn modify(f: impl FnOnce(&mut Config)) -> Result<()> {
         let path = Self::config_path()?;
         let lock_path = path.with_extension("lock");
 
@@ -289,7 +289,7 @@ impl Config {
     /// Extracts the hostname, sets `current_server`, and ensures a
     /// `ServerConfig` entry exists. If this is a new hostname, a fresh
     /// entry is created with the full URL stored.
-    pub fn set_server_url(&mut self, url: &str) {
+    pub(crate) fn set_server_url(&mut self, url: &str) {
         if let Ok(hostname) = hostname_from_url(url) {
             self.current_server = Some(hostname.clone());
             let entry = self.servers.entry(hostname).or_default();
@@ -317,25 +317,25 @@ impl Config {
 
     /// Get the configured server URL (from the current server context).
     #[must_use]
-    pub fn server_url(&self) -> Option<&str> {
+    pub(crate) fn server_url(&self) -> Option<&str> {
         self.current().map(|s| s.server_url.as_str())
     }
 
     /// Get the current session token.
     #[must_use]
-    pub fn token(&self) -> Option<&SecretString> {
+    pub(crate) fn token(&self) -> Option<&SecretString> {
         self.current().and_then(|s| s.token.as_ref())
     }
 
     /// Set a new session token (in memory only, call `save()` to persist).
-    pub fn set_token(&mut self, token: &str) {
+    pub(crate) fn set_token(&mut self, token: &str) {
         if let Some(sc) = self.current_mut() {
             sc.token = Some(SecretString::from(token.to_string()));
         }
     }
 
     /// Clear the session token in memory (call `save()` to persist).
-    pub fn clear_token(&mut self) {
+    pub(crate) fn clear_token(&mut self) {
         if let Some(sc) = self.current_mut() {
             sc.token = None;
         }
@@ -347,13 +347,13 @@ impl Config {
 
     /// Get the CodeArtifact configuration.
     #[must_use]
-    pub fn codeartifact(&self) -> Option<&CodeArtifactConfig> {
+    pub(crate) fn codeartifact(&self) -> Option<&CodeArtifactConfig> {
         self.codeartifact.as_ref()
     }
 
     /// Add a CodeArtifact profile (in memory only, call `save()` to
     /// persist). If this is the first profile, it becomes the default.
-    pub fn set_codeartifact_profile(&mut self, name: &str, profile: CodeArtifactProfile) {
+    pub(crate) fn set_codeartifact_profile(&mut self, name: &str, profile: CodeArtifactProfile) {
         let ca = self
             .codeartifact
             .get_or_insert_with(CodeArtifactConfig::default);
@@ -374,20 +374,20 @@ impl Config {
 impl Config {
     /// Get the OAuth 2.0 client ID from dynamic registration.
     #[must_use]
-    pub fn client_id(&self) -> Option<&str> {
+    pub(crate) fn client_id(&self) -> Option<&str> {
         self.current().and_then(|s| s.client_id.as_deref())
     }
 
     /// Get the registration access token (RFC 7592).
     #[must_use]
-    pub fn registration_access_token(&self) -> Option<&SecretString> {
+    pub(crate) fn registration_access_token(&self) -> Option<&SecretString> {
         self.current()
             .and_then(|s| s.registration_access_token.as_ref())
     }
 
     /// Get the registration client URI (RFC 7592).
     #[must_use]
-    pub fn registration_client_uri(&self) -> Option<&str> {
+    pub(crate) fn registration_client_uri(&self) -> Option<&str> {
         self.current()
             .and_then(|s| s.registration_client_uri.as_deref())
     }
@@ -395,33 +395,33 @@ impl Config {
     /// Get the DPoP key ID for the stored client keypair.
     #[must_use]
     #[allow(dead_code)]
-    pub fn dpop_key_id(&self) -> Option<&str> {
+    pub(crate) fn dpop_key_id(&self) -> Option<&str> {
         self.current().and_then(|s| s.dpop_key_id.as_deref())
     }
 
     /// Set the OAuth 2.0 client ID.
-    pub fn set_client_id(&mut self, client_id: &str) {
+    pub(crate) fn set_client_id(&mut self, client_id: &str) {
         if let Some(sc) = self.current_mut() {
             sc.client_id = Some(client_id.to_string());
         }
     }
 
     /// Set the registration access token.
-    pub fn set_registration_access_token(&mut self, token: &str) {
+    pub(crate) fn set_registration_access_token(&mut self, token: &str) {
         if let Some(sc) = self.current_mut() {
             sc.registration_access_token = Some(SecretString::from(token.to_string()));
         }
     }
 
     /// Set the registration client URI.
-    pub fn set_registration_client_uri(&mut self, uri: &str) {
+    pub(crate) fn set_registration_client_uri(&mut self, uri: &str) {
         if let Some(sc) = self.current_mut() {
             sc.registration_client_uri = Some(uri.to_string());
         }
     }
 
     /// Set the DPoP key ID.
-    pub fn set_dpop_key_id(&mut self, kid: &str) {
+    pub(crate) fn set_dpop_key_id(&mut self, kid: &str) {
         if let Some(sc) = self.current_mut() {
             sc.dpop_key_id = Some(kid.to_string());
         }
@@ -429,13 +429,13 @@ impl Config {
 
     /// Get the timestamp of last successful registration verification.
     #[must_use]
-    pub fn registration_verified_at(&self) -> Option<&str> {
+    pub(crate) fn registration_verified_at(&self) -> Option<&str> {
         self.current()
             .and_then(|s| s.registration_verified_at.as_deref())
     }
 
     /// Set the registration verified timestamp.
-    pub fn set_registration_verified_at(&mut self, ts: &str) {
+    pub(crate) fn set_registration_verified_at(&mut self, ts: &str) {
         if let Some(sc) = self.current_mut() {
             sc.registration_verified_at = Some(ts.to_string());
         }
@@ -443,7 +443,7 @@ impl Config {
 
     /// Clear all FAPI 2.0 dynamic registration fields for the
     /// current server.
-    pub fn clear_fapi(&mut self) {
+    pub(crate) fn clear_fapi(&mut self) {
         if let Some(sc) = self.current_mut() {
             sc.client_id = None;
             sc.registration_access_token = None;

@@ -8,7 +8,7 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 
 /// A JWT assertion JTI (prevents replay attacks).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct JwtAssertionJtiDoc {
+pub(crate) struct JwtAssertionJtiDoc {
     pub jti: String,
     pub client_id: String,
     pub expires_at: Timestamp,

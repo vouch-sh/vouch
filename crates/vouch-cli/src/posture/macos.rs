@@ -6,7 +6,7 @@ use vouch_common::posture::{DevicePosture, EdrAgent, MdmAgent};
 use super::common::run_command;
 
 /// Run all macOS-specific posture detection and populate the struct.
-pub fn detect(posture: &mut DevicePosture) {
+pub(super) fn detect(posture: &mut DevicePosture) {
     detect_os_version(posture);
     detect_filevault(posture);
     detect_screen_lock(posture);

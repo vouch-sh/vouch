@@ -18,7 +18,7 @@ use super::sigv4;
 use super::sts::StsCredentials;
 
 /// SigV4-signed credentials for CodeCommit.
-pub struct CodeCommitCredentials {
+pub(crate) struct CodeCommitCredentials {
     /// Username: `{access_key_id}%{session_token}` for temporary credentials.
     /// Stored as `SecretString` because it may contain the session token.
     pub username: SecretString,
@@ -73,7 +73,7 @@ fn format_codecommit_timestamp(now: jiff::Timestamp) -> String {
 /// * `path` - Repository path with leading slash (e.g., `/v1/repos/my-repo`)
 /// * `region` - AWS region (e.g., `us-east-1`)
 #[must_use]
-pub fn sign_request(
+pub(crate) fn sign_request(
     creds: &StsCredentials,
     hostname: &str,
     path: &str,
@@ -124,7 +124,7 @@ pub fn sign_request(
 /// - `codecommit://[profile@]repo-name`
 /// - `codecommit::region://[profile@]repo-name`
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CodeCommitUrl {
+pub(crate) struct CodeCommitUrl {
     /// AWS profile name (optional, from `profile@` prefix).
     pub profile: Option<String>,
     /// Repository name.
@@ -141,7 +141,7 @@ pub struct CodeCommitUrl {
 /// - `codecommit::us-east-1://my-repo` → region=us-east-1, repo=my-repo
 /// - `codecommit::us-east-1://profile@my-repo` → all three
 #[must_use]
-pub fn parse_codecommit_url(url: &str) -> Option<CodeCommitUrl> {
+pub(crate) fn parse_codecommit_url(url: &str) -> Option<CodeCommitUrl> {
     // Format 1: codecommit::region://[profile@]repo
     // Format 2: codecommit://[profile@]repo
     let (region, remainder) = if let Some(after_double_colon) = url.strip_prefix("codecommit::") {
@@ -189,7 +189,7 @@ pub fn parse_codecommit_url(url: &str) -> Option<CodeCommitUrl> {
 /// - `git-codecommit.us-east-1.amazonaws.com` → `Some("us-east-1")`
 /// - `git-codecommit.cn-north-1.amazonaws.com.cn` → `Some("cn-north-1")`
 #[must_use]
-pub fn extract_region_from_hostname(hostname: &str) -> Option<&str> {
+pub(crate) fn extract_region_from_hostname(hostname: &str) -> Option<&str> {
     let rest = hostname.strip_prefix("git-codecommit.")?;
     // rest = "us-east-1.amazonaws.com" or "cn-north-1.amazonaws.com.cn"
     let dot_idx = rest.find('.')?;
@@ -212,7 +212,7 @@ const CODECOMMIT_DOMAINS: &[&str] = &[
 
 /// Check if a hostname is a CodeCommit host in any partition.
 #[must_use]
-pub fn is_codecommit_host(host: &str) -> bool {
+pub(crate) fn is_codecommit_host(host: &str) -> bool {
     if !host.starts_with("git-codecommit.") {
         return false;
     }
@@ -228,7 +228,7 @@ pub fn is_codecommit_host(host: &str) -> bool {
 /// - `eu-isoe-*` → `amazonaws.eu` (European Sovereign Cloud, future)
 /// - All others → `amazonaws.com` (Commercial, GovCloud)
 #[must_use]
-pub fn hostname_for_region(region: &str) -> String {
+pub(crate) fn hostname_for_region(region: &str) -> String {
     let domain = codecommit_domain_for_region(region);
     format!("git-codecommit.{region}.{domain}")
 }

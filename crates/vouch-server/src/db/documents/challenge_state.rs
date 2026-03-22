@@ -11,7 +11,7 @@ use crate::db::document_type::{DocumentType, IndexEntry};
 /// Stored after issuing a challenge JWT and consumed atomically
 /// when the assertion is exchanged at the token endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChallengeStateDoc {
+pub(crate) struct ChallengeStateDoc {
     /// SHA-256 hash of the challenge state JWT.
     pub state_hash: String,
     /// Expiration time (matches the JWT's 5-minute lifetime).

@@ -23,7 +23,7 @@ use vouch_cli::http::{
 /// to the access token hash (`ath` claim, RFC 9449 Section 4.2).
 /// If DPoP proof generation fails, the client falls back to
 /// `Authorization: Bearer <token>` transparently.
-pub struct VouchClient<H: HttpClient = ReqwestClient> {
+pub(crate) struct VouchClient<H: HttpClient = ReqwestClient> {
     http: H,
     base_url: String,
     /// Authentication token. Set at construction for authenticated clients,
@@ -42,7 +42,7 @@ impl VouchClient<ReqwestClient> {
     /// for DPoP proof generation on resource requests.
     ///
     /// This is the standard constructor for most commands.
-    pub async fn new(base_url: &str) -> Result<Self> {
+    pub(crate) async fn new(base_url: &str) -> Result<Self> {
         let mut client = Self::unauthenticated(base_url)?;
         let token = crate::session::resolve_token().await?;
         client.token = Some(token);
@@ -55,7 +55,7 @@ impl VouchClient<ReqwestClient> {
     ///
     /// Used when a token is already available (e.g. after enrollment)
     /// without resolving from the agent or config file.
-    pub fn with_token(base_url: &str, token: SecretString) -> Result<Self> {
+    pub(crate) fn with_token(base_url: &str, token: SecretString) -> Result<Self> {
         let http = ReqwestClient::new()?;
         let mut client = Self {
             http,
@@ -71,7 +71,7 @@ impl VouchClient<ReqwestClient> {
     ///
     /// Used only during login/enroll flows where the user doesn't have a
     /// token yet, and for health checks that don't require auth.
-    pub fn unauthenticated(base_url: &str) -> Result<Self> {
+    pub(crate) fn unauthenticated(base_url: &str) -> Result<Self> {
         let http = ReqwestClient::new()?;
         Ok(Self {
             http,
@@ -85,7 +85,7 @@ impl VouchClient<ReqwestClient> {
     ///
     /// This is the standard pattern for credential commands that have already
     /// called `resolve_session()`.
-    pub fn from_session(session: &crate::session::ResolvedSession) -> Result<Self> {
+    pub(crate) fn from_session(session: &crate::session::ResolvedSession) -> Result<Self> {
         let mut client = Self::unauthenticated(&session.server_url)?;
         client.token = Some(session.token.clone());
         // Load the FAPI key for DPoP on resource endpoints (non-fatal).
@@ -94,7 +94,7 @@ impl VouchClient<ReqwestClient> {
     }
 
     /// Get a reference to the raw reqwest client.
-    pub fn raw_client(&self) -> &reqwest::Client {
+    pub(crate) fn raw_client(&self) -> &reqwest::Client {
         self.http.inner()
     }
 }
@@ -104,7 +104,7 @@ impl<H: HttpClient> VouchClient<H> {
     ///
     /// Used for testing with `TestHttpClient`.
     #[allow(dead_code)]
-    pub fn with_http(http: H, base_url: &str) -> Self {
+    pub(crate) fn with_http(http: H, base_url: &str) -> Self {
         Self {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
@@ -117,7 +117,7 @@ impl<H: HttpClient> VouchClient<H> {
     ///
     /// Used when the caller has already resolved the token (e.g., from
     /// `resolve_session()`) and wants to avoid resolving it again.
-    pub fn set_token(&mut self, token: SecretString) {
+    pub(crate) fn set_token(&mut self, token: SecretString) {
         self.token = Some(token);
     }
 
@@ -125,12 +125,12 @@ impl<H: HttpClient> VouchClient<H> {
     ///
     /// Used when the caller already has the key in memory (e.g., from
     /// the login flow) and wants to avoid reloading from the keychain.
-    pub fn set_fapi_key(&mut self, key: ClientKey) {
+    pub(crate) fn set_fapi_key(&mut self, key: ClientKey) {
         self.fapi_key = Some(key);
     }
 
     /// Get the base URL.
-    pub fn base_url(&self) -> &str {
+    pub(crate) fn base_url(&self) -> &str {
         &self.base_url
     }
 
@@ -242,7 +242,7 @@ impl<H: HttpClient> VouchClient<H> {
 
     /// POST a form-encoded request and get a JSON response.
     /// Used for OAuth endpoints which require application/x-www-form-urlencoded.
-    pub async fn post_form<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
+    pub(crate) async fn post_form<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
     where
         Req: Serialize,
         Resp: DeserializeOwned,
@@ -261,7 +261,7 @@ impl<H: HttpClient> VouchClient<H> {
     /// GET a JSON response with authentication.
     ///
     /// Uses DPoP when a FAPI client key is available; falls back to Bearer.
-    pub async fn get_authenticated<Resp>(&self, path: &str) -> Result<Resp>
+    pub(crate) async fn get_authenticated<Resp>(&self, path: &str) -> Result<Resp>
     where
         Resp: DeserializeOwned,
     {
@@ -272,7 +272,7 @@ impl<H: HttpClient> VouchClient<H> {
     /// DELETE with authentication.
     ///
     /// Uses DPoP when a FAPI client key is available; falls back to Bearer.
-    pub async fn delete_authenticated<Resp>(&self, path: &str) -> Result<Resp>
+    pub(crate) async fn delete_authenticated<Resp>(&self, path: &str) -> Result<Resp>
     where
         Resp: DeserializeOwned,
     {
@@ -283,7 +283,7 @@ impl<H: HttpClient> VouchClient<H> {
     /// POST a JSON request with authentication and get a JSON response.
     ///
     /// Uses DPoP when a FAPI client key is available; falls back to Bearer.
-    pub async fn post_authenticated<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
+    pub(crate) async fn post_authenticated<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
     where
         Req: Serialize,
         Resp: DeserializeOwned,
@@ -302,7 +302,11 @@ impl<H: HttpClient> VouchClient<H> {
     /// PATCH a JSON request with authentication and get a JSON response.
     ///
     /// Uses DPoP when a FAPI client key is available; falls back to Bearer.
-    pub async fn patch_authenticated<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
+    pub(crate) async fn patch_authenticated<Req, Resp>(
+        &self,
+        path: &str,
+        body: &Req,
+    ) -> Result<Resp>
     where
         Req: Serialize,
         Resp: DeserializeOwned,

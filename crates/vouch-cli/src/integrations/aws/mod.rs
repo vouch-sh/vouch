@@ -4,18 +4,18 @@
 //! - `config` - AWS config file (~/.aws/config) parsing
 //! - `sts` - AWS STS (Security Token Service) utilities
 
-pub mod codeartifact;
-pub mod codecommit;
-pub mod config;
-pub mod redshift;
-pub mod sigv4;
-pub mod sts;
+pub(crate) mod codeartifact;
+pub(crate) mod codecommit;
+pub(crate) mod config;
+pub(crate) mod redshift;
+pub(crate) mod sigv4;
+pub(crate) mod sts;
 
 // Re-export commonly used types
-pub use config::{AwsConfig, AwsProfile, extract_role_from_credential_process};
+pub(crate) use config::{AwsConfig, AwsProfile, extract_role_from_credential_process};
 
 /// Resolve the AWS profile to use, auto-detecting from ~/.aws/config if not specified.
-pub fn resolve_profile(profile: Option<&str>) -> anyhow::Result<String> {
+pub(crate) fn resolve_profile(profile: Option<&str>) -> anyhow::Result<String> {
     if let Some(p) = profile {
         return Ok(p.to_string());
     }
@@ -36,7 +36,7 @@ pub fn resolve_profile(profile: Option<&str>) -> anyhow::Result<String> {
 }
 
 /// Resolve the AWS region, checking profile config then environment variables.
-pub fn resolve_region(region: Option<&str>, profile_name: &str) -> anyhow::Result<String> {
+pub(crate) fn resolve_region(region: Option<&str>, profile_name: &str) -> anyhow::Result<String> {
     if let Some(r) = region {
         return Ok(r.to_string());
     }
@@ -81,7 +81,7 @@ pub(crate) fn get_local_aws_role() -> Option<String> {
 /// that need both a role and region (EKS, RDS, Redshift). It:
 /// 1. Uses the `--role` flag if provided, otherwise reads from `~/.aws/config`
 /// 2. Resolves region from `--region` flag, AWS profile, or env vars
-pub fn resolve_role_and_region(
+pub(crate) fn resolve_role_and_region(
     role: Option<&str>,
     region: Option<&str>,
 ) -> anyhow::Result<(String, String)> {
@@ -104,12 +104,12 @@ pub fn resolve_role_and_region(
 use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
 
 /// AWS integration checker.
-pub struct AwsIntegration;
+pub(crate) struct AwsIntegration;
 
 impl AwsIntegration {
     /// Create a new AWS integration checker.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }

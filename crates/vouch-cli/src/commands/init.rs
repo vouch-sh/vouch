@@ -10,14 +10,14 @@ use anyhow::Result;
 
 /// Shell to generate a hook for.
 #[derive(Clone, Debug, clap::ValueEnum)]
-pub enum Shell {
+pub(crate) enum Shell {
     Bash,
     Zsh,
     Fish,
 }
 
 /// Run the init command - print a shell hook to stdout.
-pub fn run(shell: &Shell) -> Result<()> {
+pub(crate) fn run(shell: &Shell) -> Result<()> {
     match shell {
         Shell::Bash => print_bash_hook(),
         Shell::Zsh => print_zsh_hook(),

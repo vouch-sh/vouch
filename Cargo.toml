@@ -11,6 +11,7 @@ repository = "https://github.com/vouch-sh/vouch"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+unreachable_pub = "warn"
 
 [workspace.lints.clippy]
 # Panic-prevention lints

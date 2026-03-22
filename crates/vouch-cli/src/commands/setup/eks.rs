@@ -97,7 +97,7 @@ async fn describe_cluster(
 ///
 /// Configures kubeconfig so kubectl uses `vouch credential eks` for
 /// native EKS token generation (no AWS CLI required).
-pub async fn run(
+pub(crate) async fn run(
     server: &str,
     cluster_name: &str,
     region: Option<&str>,

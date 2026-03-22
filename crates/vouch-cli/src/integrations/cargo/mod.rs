@@ -3,18 +3,18 @@
 
 mod config;
 
-pub use config::CargoConfig;
+pub(crate) use config::CargoConfig;
 
 use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
 use crate::integrations::aws::codeartifact;
 
 /// Cargo integration checker.
-pub struct CargoIntegration;
+pub(crate) struct CargoIntegration;
 
 impl CargoIntegration {
     /// Create a new Cargo integration checker.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }

@@ -60,7 +60,7 @@ use std::collections::BTreeSet;
 ///
 /// Returns empty string for non-element nodes.
 #[must_use]
-pub fn exclusive_c14n(node: roxmltree::Node<'_, '_>, inclusive_prefixes: &[&str]) -> String {
+pub(crate) fn exclusive_c14n(node: roxmltree::Node<'_, '_>, inclusive_prefixes: &[&str]) -> String {
     if !node.is_element() {
         return String::new();
     }
@@ -371,7 +371,7 @@ fn node_qualified_name(node: roxmltree::Node<'_, '_>) -> String {
 ///
 /// Replacements: `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `\r` → `&#xD;`
 #[must_use]
-pub fn escape_text(s: &str) -> String {
+pub(crate) fn escape_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
@@ -390,7 +390,7 @@ pub fn escape_text(s: &str) -> String {
 /// Replacements: `&` → `&amp;`, `<` → `&lt;`, `"` → `&quot;`,
 /// `\t` → `&#x9;`, `\n` → `&#xA;`, `\r` → `&#xD;`
 #[must_use]
-pub fn escape_attribute(s: &str) -> String {
+pub(crate) fn escape_attribute(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {

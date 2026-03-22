@@ -17,10 +17,10 @@ use crate::integrations::ssm as ssm_integration;
 use crate::utils::{atomic_write_secure, ensure_secure_dir};
 
 /// Marker comment used for idempotency detection.
-pub const SSM_MARKER: &str = "# Vouch SSM Configuration";
+pub(crate) const SSM_MARKER: &str = "# Vouch SSM Configuration";
 
 /// Default SSH host patterns for SSM proxying.
-pub const DEFAULT_HOST_PATTERN: &str = "i-* mi-*";
+pub(crate) const DEFAULT_HOST_PATTERN: &str = "i-* mi-*";
 
 /// Validate that a value is safe for interpolation into a shell command and SSH config.
 ///
@@ -132,7 +132,7 @@ fn strip_ssm_block(content: &str) -> String {
 /// 2. Checks that `session-manager-plugin` is on PATH
 /// 3. Resolves AWS profile and region
 /// 4. Appends an SSH config block to `~/.ssh/config`
-pub async fn run(
+pub(crate) async fn run(
     profile: Option<&str>,
     region: Option<&str>,
     hosts: &str,

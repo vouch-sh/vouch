@@ -265,7 +265,7 @@ impl YubiKey {
     ///
     /// Returns immediately if a device is found, or an error if not.
     #[allow(dead_code)]
-    pub fn discover() -> Result<Self> {
+    pub(crate) fn discover() -> Result<Self> {
         let cfg = LibCfg::init();
         let device = FidoKeyHidFactory::create(&cfg)
             .context("no YubiKey found - please insert your YubiKey")?;
@@ -347,7 +347,7 @@ impl YubiKey {
     /// - `Ok(true)` if a PIN is set
     /// - `Ok(false)` if no PIN is set (user needs to create one)
     /// - `Err` if PIN is not supported or device communication failed
-    pub fn is_pin_set(&self) -> Result<bool> {
+    pub(crate) fn is_pin_set(&self) -> Result<bool> {
         match with_suppressed_stdout(|| self.device.enable_info_option(&InfoOption::ClientPin))
             .context("failed to query PIN status")?
         {
@@ -361,7 +361,7 @@ impl YubiKey {
     ///
     /// Returns the count of attempts before the PIN is blocked.
     #[allow(dead_code)]
-    pub fn pin_retries(&self) -> Result<i32> {
+    pub(crate) fn pin_retries(&self) -> Result<i32> {
         self.device
             .get_pin_retries()
             .context("failed to get PIN retry count")
@@ -371,7 +371,7 @@ impl YubiKey {
     ///
     /// # Errors
     /// Returns an error if a PIN is already set (use `change_pin` instead).
-    pub fn set_new_pin(&self, pin: &str) -> Result<()> {
+    pub(crate) fn set_new_pin(&self, pin: &str) -> Result<()> {
         self.device.set_new_pin(pin).map_err(|e| {
             let err_str = e.to_string();
             if err_str.contains("0x37") || err_str.contains("PIN_POLICY") {
@@ -389,7 +389,7 @@ impl YubiKey {
 
     /// Change the PIN on a `YubiKey`.
     #[allow(dead_code)]
-    pub fn change_pin(&self, current_pin: &str, new_pin: &str) -> Result<()> {
+    pub(crate) fn change_pin(&self, current_pin: &str, new_pin: &str) -> Result<()> {
         self.device
             .change_pin(current_pin, new_pin)
             .context("failed to change PIN")
@@ -399,7 +399,7 @@ impl YubiKey {
     ///
     /// This creates a new credential on the `YubiKey`.
     #[allow(clippy::too_many_arguments)]
-    pub fn register(
+    pub(crate) fn register(
         &self,
         rp_id: &str,
         _rp_name: &str,
@@ -449,7 +449,7 @@ impl YubiKey {
     ///
     /// This uses the YubiKey's resident/discoverable credential to identify
     /// the user without needing to provide credential IDs upfront.
-    pub fn authenticate(
+    pub(crate) fn authenticate(
         &self,
         rp_id: &str,
         challenge: &[u8],

@@ -18,7 +18,7 @@ use std::path::PathBuf;
 /// `servers` map) and the legacy flat format (top-level `server_url`
 /// + `token`).
 #[derive(Debug, Default, Deserialize)]
-pub struct VouchConfig {
+pub(crate) struct VouchConfig {
     /// Hostname of the currently active server (multi-server format).
     current_server: Option<String>,
     /// Per-server state, keyed by hostname (multi-server format).
@@ -43,7 +43,7 @@ impl VouchConfig {
     /// Checks the multi-server `servers` map first (via
     /// `current_server`), then falls back to the legacy flat
     /// `server_url` field.
-    pub fn server_url(&self) -> Option<&str> {
+    pub(crate) fn server_url(&self) -> Option<&str> {
         if let Some(host) = &self.current_server
             && let Some(entry) = self.servers.get(host)
             && let Some(url) = &entry.server_url
@@ -58,7 +58,7 @@ impl VouchConfig {
     /// Checks the multi-server `servers` map first (via
     /// `current_server`), then falls back to the legacy flat
     /// `token` field.
-    pub fn token(&self) -> Option<&str> {
+    pub(crate) fn token(&self) -> Option<&str> {
         if let Some(host) = &self.current_server
             && let Some(entry) = self.servers.get(host)
             && let Some(tok) = &entry.token
@@ -81,7 +81,7 @@ fn config_path() -> Result<PathBuf> {
 /// Returns an error if the file exists but cannot be read or parsed.
 ///
 /// On Unix, rejects files that are group/other-readable (mode & 0o077 != 0).
-pub fn read_config() -> Result<Option<VouchConfig>> {
+pub(crate) fn read_config() -> Result<Option<VouchConfig>> {
     let path = config_path()?;
 
     if !path.exists() {

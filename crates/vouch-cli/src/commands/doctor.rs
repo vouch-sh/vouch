@@ -56,7 +56,7 @@ impl CheckResult {
 /// Returns an error if any checks fail, so the CLI exits with a non-zero code.
 /// When `quiet` is true, all output is suppressed (exit code only).
 /// When `json` is true, results are printed as JSON to stdout.
-pub async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
+pub(crate) async fn run(server: &str, quiet: bool, json: bool) -> Result<()> {
     let suppress = quiet || json;
 
     if !suppress {

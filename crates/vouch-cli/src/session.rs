@@ -10,7 +10,7 @@ use vouch_agent::{AgentClient, AgentError};
 use vouch_common::{SessionCookie, write_cookie};
 
 /// A resolved session: server URL and authentication token.
-pub struct ResolvedSession {
+pub(crate) struct ResolvedSession {
     /// The server URL.
     pub server_url: String,
     /// The session token.
@@ -44,7 +44,7 @@ async fn try_agent_token() -> Option<SecretString> {
 /// 2. Config file - saved during login/enroll
 ///
 /// Returns an error if no session is available.
-pub async fn resolve_session() -> Result<ResolvedSession> {
+pub(crate) async fn resolve_session() -> Result<ResolvedSession> {
     // 1. Try agent first (Unix only)
     #[cfg(unix)]
     {
@@ -88,7 +88,7 @@ pub async fn resolve_session() -> Result<ResolvedSession> {
 /// 2. Config file - saved during login/enroll
 ///
 /// Returns an error if no token is available.
-pub async fn resolve_token() -> Result<SecretString> {
+pub(crate) async fn resolve_token() -> Result<SecretString> {
     // 1. Try agent first (Unix only)
     #[cfg(unix)]
     if let Some(token) = try_agent_token().await {
@@ -110,7 +110,7 @@ pub async fn resolve_token() -> Result<SecretString> {
 /// Returns `true` if the session was successfully stored, `false` otherwise.
 /// This is a best-effort operation — agent not running is not an error.
 #[cfg(unix)]
-pub async fn store_session_in_agent(
+pub(crate) async fn store_session_in_agent(
     token: &str,
     email: &str,
     expires_at: &str,
@@ -171,7 +171,7 @@ fn write_session_cookie_file(server: &str, token: &str, expires_at_ts: Option<ji
 /// so the SSH cert request uses DPoP without reloading from the keychain.
 ///
 /// Returns whether the agent stored the session successfully.
-pub async fn store_and_finalize(
+pub(crate) async fn store_and_finalize(
     server: &str,
     token: &str,
     email: &str,
@@ -217,7 +217,7 @@ pub async fn store_and_finalize(
 /// Tries multiple sources in order:
 /// 1. Agent (Unix only) - most reliable, always up-to-date
 /// 2. Server status endpoint - fallback for edge cases
-pub async fn get_user_email(server: &str) -> Option<String> {
+pub(crate) async fn get_user_email(server: &str) -> Option<String> {
     // 1. Try agent first (Unix only)
     #[cfg(unix)]
     if let Ok(mut agent) = vouch_agent::AgentClient::connect().await

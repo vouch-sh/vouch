@@ -15,7 +15,7 @@ use crate::integrations::cargo::CargoConfig;
 /// # Arguments
 /// * `registry` - Optional registry name to configure (default: all registries)
 /// * `configure` - If true, automatically configure Cargo; if false, just show instructions
-pub async fn run(registry: Option<&str>, configure: bool) -> Result<()> {
+pub(crate) async fn run(registry: Option<&str>, configure: bool) -> Result<()> {
     println!("Cargo Credential Provider Setup");
     println!("================================\n");
 

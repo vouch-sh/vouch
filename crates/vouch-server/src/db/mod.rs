@@ -88,7 +88,7 @@ pub use device_auth::{
 
 // Re-export device auth test helpers (only available in tests)
 #[cfg(test)]
-pub use device_auth::get_device_auth_by_id;
+pub(crate) use device_auth::get_device_auth_by_id;
 
 // Re-export config and auth event types and functions
 pub use config::{AuthEventParams, AuthEventType, delete_old_auth_events, insert_auth_event};

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 /// On Unix systems, always enforces permissions to 0o700 (owner read/write/execute only),
 /// even if the directory already exists, to guard against directories created
 /// by another process with permissive modes.
-pub fn ensure_secure_dir(path: &Path) -> Result<()> {
+pub(crate) fn ensure_secure_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path)
         .with_context(|| format!("failed to create directory {}", path.display()))?;
     #[cfg(unix)]
@@ -93,7 +93,7 @@ fn atomic_write_impl(path: &Path, content: &[u8], mode: FileMode) -> Result<()> 
 /// partially-written state if the process is interrupted.
 ///
 /// Creates parent directories if they don't exist.
-pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
+pub(crate) fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
     atomic_write_impl(path, content, FileMode::Default)
 }
 
@@ -102,7 +102,7 @@ pub fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
 /// Same as [`atomic_write`], but sets restrictive file permissions before
 /// the rename, so the file is never visible with default (world-readable)
 /// permissions.
-pub fn atomic_write_secure(path: &Path, content: &[u8]) -> Result<()> {
+pub(crate) fn atomic_write_secure(path: &Path, content: &[u8]) -> Result<()> {
     atomic_write_impl(path, content, FileMode::Secure)
 }
 
@@ -113,7 +113,7 @@ pub fn atomic_write_secure(path: &Path, content: &[u8]) -> Result<()> {
 ///
 /// This is a convenience wrapper around [`atomic_write_secure`] that
 /// accepts a string slice.
-pub fn write_secure_file(path: &Path, content: &str) -> Result<()> {
+pub(crate) fn write_secure_file(path: &Path, content: &str) -> Result<()> {
     atomic_write_secure(path, content.as_bytes())
 }
 

@@ -33,7 +33,7 @@ impl std::fmt::Debug for DeviceTokenResponse {
 }
 
 /// Run the enroll command.
-pub async fn run(server: &str) -> Result<()> {
+pub(crate) async fn run(server: &str) -> Result<()> {
     let client = VouchClient::unauthenticated(server)?;
 
     println!("Starting enrollment...\n");

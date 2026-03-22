@@ -60,7 +60,7 @@ impl std::fmt::Debug for DockerCredential {
 
 /// Registry type detected from the server URL.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RegistryType {
+pub(crate) enum RegistryType {
     /// AWS Elastic Container Registry
     AwsEcr {
         account_id: String,
@@ -80,7 +80,7 @@ pub enum RegistryType {
 ///
 /// # Arguments
 /// * `operation` - The Docker credential operation ("get", "store", "erase", or "list")
-pub async fn run(operation: &str) -> Result<()> {
+pub(crate) async fn run(operation: &str) -> Result<()> {
     match operation {
         "get" => get_credential().await,
         "store" | "erase" => {
@@ -118,7 +118,7 @@ fn read_server_url() -> Result<String> {
 }
 
 /// Detect the registry type from the server URL.
-pub fn detect_registry_type(server_url: &str) -> RegistryType {
+pub(crate) fn detect_registry_type(server_url: &str) -> RegistryType {
     let url = server_url.to_lowercase();
 
     // AWS ECR: account.dkr.ecr.region.amazonaws.{com,cn,eu}

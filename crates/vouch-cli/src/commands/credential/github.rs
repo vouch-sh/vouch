@@ -40,7 +40,7 @@ fn extract_owner(path: Option<&str>) -> Option<String> {
 ///
 /// # Arguments
 /// * `operation` - The git credential operation ("get", "store", or "erase")
-pub async fn run(operation: &str) -> Result<()> {
+pub(crate) async fn run(operation: &str) -> Result<()> {
     match operation {
         "get" => get_credential().await,
         "store" | "erase" => {
@@ -112,7 +112,7 @@ async fn get_credential() -> Result<()> {
 }
 
 /// Check GitHub integration status.
-pub async fn check_status(server: &str) -> Result<GitHubStatusResponse> {
+pub(crate) async fn check_status(server: &str) -> Result<GitHubStatusResponse> {
     let client = VouchClient::new(server).await?;
     client
         .get_authenticated("/v1/credentials/github/status")

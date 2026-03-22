@@ -10,7 +10,7 @@ use crate::services::error::ServiceError;
 use vouch_common::{KeyInfo, lookup_device_model};
 
 /// Maximum session age (in seconds) for destructive key operations.
-pub const KEY_DELETE_MAX_AGE_SECS: i64 = 60;
+pub(crate) const KEY_DELETE_MAX_AGE_SECS: i64 = 60;
 
 /// Require the given issued-at or auth timestamp to be within `max_age_secs` seconds.
 ///
@@ -20,7 +20,10 @@ pub const KEY_DELETE_MAX_AGE_SECS: i64 = 60;
 /// # Errors
 ///
 /// Returns `ServiceError::StepUpRequired` when `issued_at` is older than `max_age_secs`.
-pub fn require_fresh_timestamp(issued_at: i64, max_age_secs: i64) -> Result<(), ServiceError> {
+pub(crate) fn require_fresh_timestamp(
+    issued_at: i64,
+    max_age_secs: i64,
+) -> Result<(), ServiceError> {
     let now = jiff::Timestamp::now().as_second();
     let session_age = now.saturating_sub(issued_at);
     if session_age > max_age_secs {
@@ -41,7 +44,7 @@ pub fn require_fresh_timestamp(issued_at: i64, max_age_secs: i64) -> Result<(), 
 /// # Errors
 ///
 /// Returns `ServiceError::Internal` if the database query fails.
-pub async fn list_keys_for_user(
+pub(crate) async fn list_keys_for_user(
     store: &DocumentStore,
     user_id: &str,
     current_authenticator_id: Option<&str>,
@@ -84,7 +87,7 @@ pub async fn list_keys_for_user(
 /// - `ServiceError::NotFound` if the key does not exist.
 /// - `ServiceError::Forbidden` if the key does not belong to the user.
 /// - `ServiceError::Internal` on database errors.
-pub async fn rename_key(
+pub(crate) async fn rename_key(
     store: &DocumentStore,
     user_id: &str,
     key_id: &str,
@@ -152,7 +155,7 @@ pub async fn rename_key(
 /// - `ServiceError::Forbidden` if the key does not belong to the user.
 /// - `ServiceError::Validation` if this is the user's last key.
 /// - `ServiceError::Internal` on database errors.
-pub async fn delete_key(
+pub(crate) async fn delete_key(
     store: &DocumentStore,
     user_id: &str,
     key_id: &str,

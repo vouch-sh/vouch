@@ -12,7 +12,7 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value};
 ///
 /// Uses toml_edit to properly parse and modify ~/.cargo/config.toml files,
 /// preserving existing sections, keys, and formatting when making changes.
-pub struct CargoConfig {
+pub(crate) struct CargoConfig {
     doc: DocumentMut,
     path: PathBuf,
 }
@@ -21,13 +21,13 @@ impl CargoConfig {
     /// Load Cargo config from the default path.
     ///
     /// Checks `$CARGO_HOME/config.toml` first, then falls back to `~/.cargo/config.toml`.
-    pub fn load() -> Result<Self> {
+    pub(crate) fn load() -> Result<Self> {
         let path = Self::default_path()?;
         Self::load_from(path)
     }
 
     /// Load Cargo config from a specific path.
-    pub fn load_from(path: PathBuf) -> Result<Self> {
+    pub(crate) fn load_from(path: PathBuf) -> Result<Self> {
         let doc = if path.exists() {
             let content = std::fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
@@ -42,7 +42,7 @@ impl CargoConfig {
 
     /// Create an empty config for a specific path.
     #[must_use]
-    pub fn empty(path: PathBuf) -> Self {
+    pub(crate) fn empty(path: PathBuf) -> Self {
         Self {
             doc: DocumentMut::new(),
             path,
@@ -51,7 +51,7 @@ impl CargoConfig {
 
     /// Check if vouch is configured as a global credential provider.
     #[must_use]
-    pub fn has_global_vouch(&self) -> bool {
+    pub(crate) fn has_global_vouch(&self) -> bool {
         self.doc
             .get("registry")
             .and_then(|r| r.get("global-credential-providers"))
@@ -60,7 +60,7 @@ impl CargoConfig {
 
     /// Check if vouch is configured for a specific registry.
     #[must_use]
-    pub fn has_registry_vouch(&self, registry: &str) -> bool {
+    pub(crate) fn has_registry_vouch(&self, registry: &str) -> bool {
         self.doc
             .get("registries")
             .and_then(|r| r.get(registry))
@@ -70,7 +70,7 @@ impl CargoConfig {
 
     /// Get the index URL for a specific registry.
     #[must_use]
-    pub fn get_registry_index(&self, registry: &str) -> Option<String> {
+    pub(crate) fn get_registry_index(&self, registry: &str) -> Option<String> {
         self.doc
             .get("registries")
             .and_then(|r| r.get(registry))
@@ -81,7 +81,7 @@ impl CargoConfig {
 
     /// Find the first registry that uses vouch.
     #[must_use]
-    pub fn find_vouch_registry(&self) -> Option<String> {
+    pub(crate) fn find_vouch_registry(&self) -> Option<String> {
         if let Some(registries) = self.doc.get("registries").and_then(|r| r.as_table()) {
             for (name, config) in registries.iter() {
                 if let Some(provider) = config.get("credential-provider")
@@ -97,7 +97,7 @@ impl CargoConfig {
     /// Set the global credential providers.
     ///
     /// This sets the `[registry].global-credential-providers` array.
-    pub fn set_global_provider(&mut self, command: &[&str]) {
+    pub(crate) fn set_global_provider(&mut self, command: &[&str]) {
         // Ensure [registry] section exists
         if self.doc.get("registry").is_none() {
             self.doc.insert("registry", Item::Table(Table::new()));
@@ -115,7 +115,7 @@ impl CargoConfig {
     /// Set the index URL for a specific registry.
     ///
     /// This sets `[registries.<name>].index`.
-    pub fn set_registry_index(&mut self, registry: &str, index_url: &str) {
+    pub(crate) fn set_registry_index(&mut self, registry: &str, index_url: &str) {
         // Ensure [registries] section exists
         if self.doc.get("registries").is_none() {
             self.doc.insert("registries", Item::Table(Table::new()));
@@ -144,7 +144,7 @@ impl CargoConfig {
     /// Set the credential provider for a specific registry.
     ///
     /// This sets `[registries.<name>].credential-provider`.
-    pub fn set_registry_provider(&mut self, registry: &str, command: &[&str]) {
+    pub(crate) fn set_registry_provider(&mut self, registry: &str, command: &[&str]) {
         // Ensure [registries] section exists
         if self.doc.get("registries").is_none() {
             self.doc.insert("registries", Item::Table(Table::new()));
@@ -170,21 +170,21 @@ impl CargoConfig {
     ///
     /// Uses atomic write (temp file + rename) to prevent corruption
     /// if the process is interrupted mid-write.
-    pub fn save(&self) -> Result<()> {
+    pub(crate) fn save(&self) -> Result<()> {
         crate::utils::atomic_write(&self.path, self.doc.to_string().as_bytes())
             .with_context(|| format!("failed to write {}", self.path.display()))
     }
 
     /// Get the path to this config file.
     #[must_use]
-    pub fn path(&self) -> &Path {
+    pub(crate) fn path(&self) -> &Path {
         &self.path
     }
 
     /// Get the default Cargo config path.
     ///
     /// Checks `$CARGO_HOME/config.toml` first, then falls back to `~/.cargo/config.toml`.
-    pub fn default_path() -> Result<PathBuf> {
+    pub(crate) fn default_path() -> Result<PathBuf> {
         // Check for CARGO_HOME environment variable
         if let Ok(cargo_home) = std::env::var("CARGO_HOME") {
             return Ok(PathBuf::from(cargo_home).join("config.toml"));

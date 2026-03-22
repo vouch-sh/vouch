@@ -3,26 +3,26 @@
 
 use clap::Subcommand;
 
-pub mod aws;
+pub(crate) mod aws;
 pub(crate) mod cache;
-pub mod cargo;
-pub mod codeartifact;
-pub mod codecommit;
-pub mod docker;
-pub mod eks;
-pub mod git_protocol;
-pub mod github;
-pub mod kubernetes;
-pub mod pip;
-pub mod rds;
-pub mod redshift;
+pub(crate) mod cargo;
+pub(crate) mod codeartifact;
+pub(crate) mod codecommit;
+pub(crate) mod docker;
+pub(crate) mod eks;
+pub(crate) mod git_protocol;
+pub(crate) mod github;
+pub(crate) mod kubernetes;
+pub(crate) mod pip;
+pub(crate) mod rds;
+pub(crate) mod redshift;
 
-pub mod ssh;
-pub mod token;
+pub(crate) mod ssh;
+pub(crate) mod token;
 
 /// Credential subcommands.
 #[derive(Subcommand)]
-pub enum CredentialCommands {
+pub(crate) enum CredentialCommands {
     /// Obtain temporary AWS credentials.
     Aws {
         /// AWS IAM role ARN to assume.

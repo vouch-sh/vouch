@@ -576,7 +576,7 @@ pub async fn update_client_jwks_cache(
 
 /// Test-only helpers for modifying OAuth clients.
 #[cfg(test)]
-pub mod test_helpers {
+pub(super) mod test_helpers {
     use super::*;
 
     pub async fn update_oauth_client_jwks(

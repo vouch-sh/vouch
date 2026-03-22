@@ -4,9 +4,9 @@
 //! Supports OIDC and SAML (stub) upstream identity providers with
 //! protocol-agnostic auth initiation and provider-specific UI branding.
 
-pub mod icons;
-pub mod oidc;
-pub mod saml;
+pub(crate) mod icons;
+pub(crate) mod oidc;
+pub(crate) mod saml;
 
 /// Known identity provider for UI branding.
 #[derive(Debug)]
@@ -94,7 +94,7 @@ impl IdpBrand {
 /// This is the protocol-agnostic output: the caller doesn't need to know
 /// whether the identity came from an OIDC ID token or a SAML assertion.
 #[derive(Debug)]
-pub struct IdentityResult {
+pub(crate) struct IdentityResult {
     /// Verified email address.
     pub email: String,
     /// Email domain (e.g., "acme.com").

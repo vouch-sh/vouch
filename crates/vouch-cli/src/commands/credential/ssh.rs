@@ -202,7 +202,7 @@ pub(crate) async fn auto_provision(
 /// 1. Generates an SSH keypair if it doesn't exist
 /// 2. Requests a certificate from the Vouch server
 /// 3. Stores the certificate alongside the key
-pub async fn run(server: &str, key_path: Option<&str>) -> Result<()> {
+pub(crate) async fn run(server: &str, key_path: Option<&str>) -> Result<()> {
     let result = provision_ssh_certificate(server, key_path, None).await?;
 
     if result.keypair_generated {

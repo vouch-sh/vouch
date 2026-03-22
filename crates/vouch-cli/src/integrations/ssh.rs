@@ -7,12 +7,12 @@ use super::{ConfiguredDetails, IntegrationCheck, IntegrationState};
 use crate::commands::credential::ssh::default_key_path;
 
 /// SSH certificate integration checker.
-pub struct SshIntegration;
+pub(crate) struct SshIntegration;
 
 impl SshIntegration {
     /// Create a new SSH integration checker.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self
     }
 }

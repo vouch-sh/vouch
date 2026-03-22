@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 /// Represents an AWS profile configuration.
 #[derive(Debug, Clone, Default)]
-pub struct AwsProfile {
+pub(crate) struct AwsProfile {
     /// Profile name (e.g., "vouch", "default", "prod").
     pub name: String,
     /// The credential_process command if configured.
@@ -25,20 +25,20 @@ pub struct AwsProfile {
 ///
 /// Uses rust-ini to properly parse and modify ~/.aws/config files,
 /// preserving existing sections and keys when making changes.
-pub struct AwsConfig {
+pub(crate) struct AwsConfig {
     ini: Ini,
     path: PathBuf,
 }
 
 impl AwsConfig {
     /// Load AWS config from the default path (~/.aws/config).
-    pub fn load() -> Result<Self> {
+    pub(crate) fn load() -> Result<Self> {
         let path = Self::default_path()?;
         Self::load_from(path)
     }
 
     /// Load AWS config from a specific path.
-    pub fn load_from(path: PathBuf) -> Result<Self> {
+    pub(crate) fn load_from(path: PathBuf) -> Result<Self> {
         let ini = if path.exists() {
             Ini::load_from_file(&path)
                 .with_context(|| format!("failed to load {}", path.display()))?
@@ -50,7 +50,7 @@ impl AwsConfig {
 
     /// Create an empty config for a specific path.
     #[must_use]
-    pub fn empty(path: PathBuf) -> Self {
+    pub(crate) fn empty(path: PathBuf) -> Self {
         Self {
             ini: Ini::new(),
             path,
@@ -59,7 +59,7 @@ impl AwsConfig {
 
     /// Check if a profile exists in the config.
     #[must_use]
-    pub fn profile_exists(&self, name: &str) -> bool {
+    pub(crate) fn profile_exists(&self, name: &str) -> bool {
         let section = Self::profile_to_section(name);
         self.ini.section(Some(section.as_str())).is_some()
     }
@@ -67,7 +67,7 @@ impl AwsConfig {
     /// Get a profile by name.
     #[must_use]
     #[allow(dead_code)] // Used in tests and useful for future features
-    pub fn get_profile(&self, name: &str) -> Option<AwsProfile> {
+    pub(crate) fn get_profile(&self, name: &str) -> Option<AwsProfile> {
         let section_name = Self::profile_to_section(name);
         let section = self.ini.section(Some(section_name.as_str()))?;
         Some(AwsProfile {
@@ -80,13 +80,13 @@ impl AwsConfig {
 
     /// Find the first profile that uses vouch for credential_process.
     #[must_use]
-    pub fn find_vouch_profile(&self) -> Option<AwsProfile> {
+    pub(crate) fn find_vouch_profile(&self) -> Option<AwsProfile> {
         self.find_all_vouch_profiles().into_iter().next()
     }
 
     /// Find all profiles that use vouch via `credential_process`.
     #[must_use]
-    pub fn find_all_vouch_profiles(&self) -> Vec<AwsProfile> {
+    pub(crate) fn find_all_vouch_profiles(&self) -> Vec<AwsProfile> {
         let mut profiles = Vec::new();
         for (section_name, props) in &self.ini {
             let Some(section_str) = section_name else {
@@ -119,7 +119,7 @@ impl AwsConfig {
 
     /// Find an existing vouch profile that targets a specific role ARN.
     #[must_use]
-    pub fn find_vouch_profile_for_role(&self, role_arn: &str) -> Option<AwsProfile> {
+    pub(crate) fn find_vouch_profile_for_role(&self, role_arn: &str) -> Option<AwsProfile> {
         self.find_all_vouch_profiles().into_iter().find(|p| {
             p.credential_process
                 .as_deref()
@@ -133,7 +133,7 @@ impl AwsConfig {
     ///
     /// Returns "vouch" if it doesn't exist, otherwise "vouch-2", "vouch-3", etc.
     #[must_use]
-    pub fn next_vouch_profile_name(&self) -> String {
+    pub(crate) fn next_vouch_profile_name(&self) -> String {
         if !self.profile_exists("vouch") {
             return "vouch".to_string();
         }
@@ -152,7 +152,7 @@ impl AwsConfig {
     /// This preserves existing keys in the profile section that are not
     /// explicitly set in the `AwsProfile`. Fields set to `None` are left
     /// unchanged (not removed).
-    pub fn set_profile(&mut self, profile: &AwsProfile) {
+    pub(crate) fn set_profile(&mut self, profile: &AwsProfile) {
         let section = Self::profile_to_section(&profile.name);
         if let Some(ref cp) = profile.credential_process {
             self.ini
@@ -173,7 +173,7 @@ impl AwsConfig {
     ///
     /// Uses atomic write (temp file + rename) to prevent corruption
     /// if the process is interrupted mid-write.
-    pub fn save(&self) -> Result<()> {
+    pub(crate) fn save(&self) -> Result<()> {
         let mut buf = Vec::new();
         self.ini
             .write_to(&mut buf)
@@ -206,7 +206,7 @@ impl AwsConfig {
     }
 
     /// Get the default AWS config path (~/.aws/config).
-    pub fn default_path() -> Result<PathBuf> {
+    pub(crate) fn default_path() -> Result<PathBuf> {
         let home = dirs::home_dir().context("could not determine home directory")?;
         Ok(home.join(".aws").join("config"))
     }
@@ -216,7 +216,7 @@ impl AwsConfig {
 ///
 /// Looks for `--role <arn>` in the command string.
 #[must_use]
-pub fn extract_role_from_credential_process(credential_process: &str) -> Option<String> {
+pub(crate) fn extract_role_from_credential_process(credential_process: &str) -> Option<String> {
     // Find --role and extract the next token
     if let Some(role_start) = credential_process.find("--role") {
         let after_flag = credential_process.get(role_start + 6..)?.trim_start();

@@ -8,21 +8,21 @@
 //! Each integration is organized as a submodule containing both utilities
 //! and status checking (AWS, Cargo, GitHub, EKS, SSH, Docker).
 
-pub mod aws;
-pub mod cargo;
-pub mod docker;
-pub mod eks;
-pub mod github;
-pub mod ssh;
-pub mod ssm;
+pub(crate) mod aws;
+pub(crate) mod cargo;
+pub(crate) mod docker;
+pub(crate) mod eks;
+pub(crate) mod github;
+pub(crate) mod ssh;
+pub(crate) mod ssm;
 
-pub use aws::AwsIntegration;
-pub use cargo::CargoIntegration;
-pub use docker::DockerIntegration;
-pub use eks::EksIntegration;
-pub use github::GitHubIntegration;
-pub use ssh::SshIntegration;
-pub use ssm::SsmIntegration;
+pub(crate) use aws::AwsIntegration;
+pub(crate) use cargo::CargoIntegration;
+pub(crate) use docker::DockerIntegration;
+pub(crate) use eks::EksIntegration;
+pub(crate) use github::GitHubIntegration;
+pub(crate) use ssh::SshIntegration;
+pub(crate) use ssm::SsmIntegration;
 
 use crate::style;
 
@@ -33,7 +33,7 @@ pub(crate) const LABEL_WIDTH: usize = 8;
 pub(crate) const VALUE_INDENT: &str = "           ";
 
 /// Result of checking an integration's status.
-pub enum IntegrationState {
+pub(crate) enum IntegrationState {
     /// Integration is fully configured and ready.
     Configured(ConfiguredDetails),
     /// Integration is not configured.
@@ -46,7 +46,7 @@ pub enum IntegrationState {
 }
 
 /// Details about a configured integration.
-pub struct ConfiguredDetails {
+pub(crate) struct ConfiguredDetails {
     /// Summary line (e.g., "profile: vouch").
     pub summary: String,
     /// Additional key-value details to display.
@@ -54,7 +54,7 @@ pub struct ConfiguredDetails {
 }
 
 /// Trait for checking integration status synchronously.
-pub trait IntegrationCheck {
+pub(crate) trait IntegrationCheck {
     /// Name of the integration (e.g., "SSH", "AWS").
     fn name(&self) -> &'static str;
 
@@ -63,7 +63,7 @@ pub trait IntegrationCheck {
 }
 
 /// Print the status of a synchronous integration check.
-pub fn print_integration_status<I: IntegrationCheck>(integration: &I) {
+pub(crate) fn print_integration_status<I: IntegrationCheck>(integration: &I) {
     let name = integration.name();
     let label = format!("{name}:");
     match integration.check() {

@@ -180,7 +180,7 @@ pub(crate) async fn exchange_for_sts_credentials(
 /// 1. Check agent cache — return immediately if valid cached credentials exist
 /// 2. Fetch fresh OIDC token from Vouch server, call STS, cache the result
 /// 3. On network error, fall back to cached credentials (if any)
-pub async fn run(server: &str, role_arn: &str) -> Result<()> {
+pub(crate) async fn run(server: &str, role_arn: &str) -> Result<()> {
     let cache_key = format!("aws:{role_arn}");
 
     let data = super::cache::get_or_fetch(&cache_key, "AWS credentials", || async {

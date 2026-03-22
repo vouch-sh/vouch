@@ -29,7 +29,7 @@ struct DockerConfig {
 /// # Arguments
 /// * `registries` - Registry URLs to configure (e.g., "ghcr.io", "123456789012.dkr.ecr.us-east-1.amazonaws.com")
 /// * `configure` - If true, automatically configure Docker; if false, just show instructions
-pub async fn run(registries: &[String], configure: bool) -> Result<()> {
+pub(crate) async fn run(registries: &[String], configure: bool) -> Result<()> {
     // Load config to verify enrollment
     let config = Config::load().context("failed to load config - run 'vouch enroll' first")?;
     let _server = config
@@ -159,7 +159,7 @@ fn print_example_config() {
 }
 
 /// Check if Docker credential helper is configured.
-pub fn check_docker_config() -> DockerSetupStatus {
+pub(crate) fn check_docker_config() -> DockerSetupStatus {
     // Check for symlink or batch file
     let symlink_exists = crate::utils::vouch_helper_path("docker-credential-vouch")
         .map(|p| {
@@ -185,7 +185,7 @@ pub fn check_docker_config() -> DockerSetupStatus {
 }
 
 /// Docker setup status.
-pub struct DockerSetupStatus {
+pub(crate) struct DockerSetupStatus {
     pub symlink_exists: bool,
     pub configured_registries: Vec<String>,
 }

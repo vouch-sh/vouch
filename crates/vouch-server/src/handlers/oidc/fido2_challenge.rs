@@ -38,7 +38,7 @@ struct Fido2ChallengeState {
 
 /// Response from `POST /oauth/fido2/challenge`.
 #[derive(Debug, Serialize)]
-pub struct Fido2ChallengeResponse {
+pub(super) struct Fido2ChallengeResponse {
     /// Base64url-encoded 32-byte challenge.
     pub challenge: Challenge<Base64Url>,
     /// Relying Party ID.

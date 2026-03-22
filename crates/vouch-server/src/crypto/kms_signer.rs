@@ -393,10 +393,12 @@ fn read_der_integer(input: &[u8]) -> Result<(&[u8], &[u8])> {
 ///
 /// DER INTEGERs for positive values with a high bit set include a leading `0x00`
 /// sign byte. Strip those to get the magnitude bytes for use as JWK `n` and `e`.
+/// Preserves at least one byte (the value 0 itself).
 fn strip_leading_zeros(bytes: &[u8]) -> &[u8] {
     let non_zero_start = bytes.iter().position(|&b| b != 0).unwrap_or(bytes.len());
-    // Preserve at least one byte (the value 0 itself)
-    bytes.get(non_zero_start..).unwrap_or(bytes)
+    // Preserve at least one byte so that a zero value returns &[0] not &[]
+    let start = non_zero_start.min(bytes.len().saturating_sub(1));
+    bytes.get(start..).unwrap_or(bytes)
 }
 
 /// Allow `Builder::sign()` to extract the public key from our signer.

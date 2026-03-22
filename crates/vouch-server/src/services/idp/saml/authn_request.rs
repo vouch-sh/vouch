@@ -38,7 +38,7 @@ const NAMEID_FORMAT_EMAIL: &str = "urn:oasis:names:tc:SAML:2.0:nameid-format:ema
 
 /// Result of building a SAML AuthnRequest.
 #[derive(Debug)]
-pub struct AuthnRequestResult {
+pub(crate) struct AuthnRequestResult {
     /// The SAML AuthnRequest ID (`_` + 32 hex chars). Used for `InResponseTo` validation.
     pub request_id: String,
     /// Encoded AuthnRequest XML: base64 for POST, DEFLATE+base64 for Redirect.
@@ -51,7 +51,7 @@ pub struct AuthnRequestResult {
 
 /// Errors during AuthnRequest generation.
 #[derive(Debug, thiserror::Error)]
-pub enum AuthnRequestError {
+pub(crate) enum AuthnRequestError {
     /// Failed to generate random bytes for the request ID.
     #[error("failed to generate random request ID: {0}")]
     RandomId(String),
@@ -77,7 +77,7 @@ pub enum AuthnRequestError {
 ///
 /// Returns `AuthnRequestError` if random ID generation fails, DEFLATE
 /// compression fails (Redirect binding only), or no SSO URL is configured.
-pub fn build_authn_request(
+pub(crate) fn build_authn_request(
     provider: &SamlProvider,
 ) -> Result<AuthnRequestResult, AuthnRequestError> {
     let request_id = generate_request_id()?;

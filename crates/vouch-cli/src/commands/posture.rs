@@ -8,7 +8,7 @@ use anyhow::Result;
 
 /// Output format for the posture command.
 #[derive(Debug, Default, Clone, Copy, clap::ValueEnum)]
-pub enum OutputFormat {
+pub(crate) enum OutputFormat {
     /// Human-readable summary (default).
     #[default]
     Text,
@@ -17,7 +17,7 @@ pub enum OutputFormat {
 }
 
 /// Run the posture inspection command.
-pub fn run(format: OutputFormat) -> Result<()> {
+pub(crate) fn run(format: OutputFormat) -> Result<()> {
     let posture = vouch_cli::posture::collect();
 
     match format {

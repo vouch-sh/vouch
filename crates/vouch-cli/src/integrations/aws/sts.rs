@@ -8,7 +8,7 @@ use anyhow::{Context, Result};
 use jiff::Timestamp;
 use secrecy::SecretString;
 
-pub use vouch_common::aws::Arn;
+pub(crate) use vouch_common::aws::Arn;
 
 /// Parse and validate an IAM role ARN.
 ///
@@ -18,7 +18,7 @@ pub use vouch_common::aws::Arn;
 ///
 /// Returns an error if the ARN format is invalid, the partition
 /// is unrecognized, or the resource is not an IAM role.
-pub fn parse_role_arn(arn: &str) -> Result<Arn> {
+pub(crate) fn parse_role_arn(arn: &str) -> Result<Arn> {
     let parsed = Arn::parse(arn).map_err(|e| anyhow::anyhow!("{e}"))?;
 
     if !parsed.is_iam_role() {
@@ -37,7 +37,7 @@ pub fn parse_role_arn(arn: &str) -> Result<Arn> {
 ///
 /// Sensitive fields (`secret_access_key`, `session_token`) use `SecretString`
 /// for memory protection and automatic zeroing on drop.
-pub struct StsCredentials {
+pub(crate) struct StsCredentials {
     pub access_key_id: String,
     pub secret_access_key: SecretString,
     pub session_token: SecretString,
@@ -66,7 +66,7 @@ impl std::fmt::Debug for StsCredentials {
 /// * `web_identity_token` - The OIDC ID token from Vouch
 /// * `region` - AWS region (e.g., "us-east-1", "cn-north-1")
 /// * `domain_suffix` - AWS domain suffix (e.g., "amazonaws.com")
-pub async fn assume_role_with_web_identity(
+pub(crate) async fn assume_role_with_web_identity(
     http_client: &reqwest::Client,
     role_arn: &str,
     role_session_name: &str,

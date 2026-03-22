@@ -22,7 +22,7 @@ use crate::integrations::aws::codeartifact::parse_codeartifact_url;
 ///
 /// Implements the keyring CLI protocol. Only the `get` operation is meaningful;
 /// `set` and `del` are silently ignored since vouch manages tokens dynamically.
-pub async fn run(
+pub(crate) async fn run(
     operation: &str,
     service_url: Option<&str>,
     _username: Option<&str>,

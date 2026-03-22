@@ -16,7 +16,7 @@ use crate::exit_code::CliError;
 
 /// Keys subcommands.
 #[derive(Subcommand)]
-pub enum KeysCommands {
+pub(crate) enum KeysCommands {
     /// List all registered keys (non-interactive).
     List {
         /// Output as JSON.
@@ -41,7 +41,7 @@ pub enum KeysCommands {
 }
 
 /// Interactive key management.
-pub async fn interactive(server: &str) -> Result<()> {
+pub(crate) async fn interactive(server: &str) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     loop {
@@ -226,7 +226,7 @@ fn format_key_for_display(key: &KeyInfo) -> String {
 }
 
 /// List all registered keys (non-interactive).
-pub async fn list(server: &str, json: bool) -> Result<()> {
+pub(crate) async fn list(server: &str, json: bool) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     let response: ListKeysResponse = client.get_authenticated("/v1/keys").await?;
@@ -268,7 +268,7 @@ pub async fn list(server: &str, json: bool) -> Result<()> {
 }
 
 /// Remove a registered key (non-interactive).
-pub async fn remove(server: &str, key_id: &str, force: bool) -> Result<()> {
+pub(crate) async fn remove(server: &str, key_id: &str, force: bool) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     // First, get key info to show the name
@@ -315,7 +315,7 @@ pub async fn remove(server: &str, key_id: &str, force: bool) -> Result<()> {
 }
 
 /// Rename a registered key (non-interactive).
-pub async fn rename(server: &str, key_id: &str, new_name: &str) -> Result<()> {
+pub(crate) async fn rename(server: &str, key_id: &str, new_name: &str) -> Result<()> {
     let client = VouchClient::new(server).await?;
 
     // Validate name
