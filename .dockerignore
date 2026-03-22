@@ -7,6 +7,7 @@
 
 # Workspace crate manifests (needed for dependency caching layer)
 !crates/vouch-common/Cargo.toml
+!crates/vouch-httpsig/Cargo.toml
 !crates/vouch-server/Cargo.toml
 !crates/vouch-cli/Cargo.toml
 !crates/vouch-agent/Cargo.toml
@@ -14,6 +15,7 @@
 
 # Source code: only server and its shared dependency
 !crates/vouch-common/src/
+!crates/vouch-httpsig/src/
 !crates/vouch-server/src/
 !crates/vouch-server/data/
 !crates/vouch-server/migrations/

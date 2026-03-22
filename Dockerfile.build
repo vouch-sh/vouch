@@ -49,6 +49,7 @@ ARG CARGO_PACKAGES="-p vouch-cli -p vouch-agent -p vouch-server"
 # Touch entry-point files for reproducible builds
 RUN touch -d "@${SOURCE_DATE_EPOCH}" \
       crates/vouch-common/src/lib.rs \
+      crates/vouch-httpsig/src/lib.rs \
       crates/vouch-cli/src/main.rs \
       crates/vouch-agent/src/main.rs \
       crates/vouch-server/src/main.rs
