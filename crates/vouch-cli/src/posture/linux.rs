@@ -6,7 +6,7 @@ use vouch_common::posture::{DevicePosture, EdrAgent};
 use super::common::run_command;
 
 /// Run all Linux-specific posture detection and populate the struct.
-pub fn detect(posture: &mut DevicePosture) {
+pub(super) fn detect(posture: &mut DevicePosture) {
     detect_os_version(posture);
     detect_disk_encryption(posture);
     detect_screen_lock(posture);
