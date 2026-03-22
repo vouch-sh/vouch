@@ -500,6 +500,7 @@ async fn handle_authorization_code_grant(
         code,
         redirect_uri: params.redirect_uri.as_deref(),
         credentials: credentials.as_ref(),
+        jwt_authenticated_client: jwt_authenticated.as_ref(),
         code_verifier: params.code_verifier.as_deref(),
         dpop_proof,
         client_id: exchange_client_id,

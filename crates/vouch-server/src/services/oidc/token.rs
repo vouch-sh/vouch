@@ -37,6 +37,8 @@ pub struct AuthCodeExchangeParams<'a> {
     pub redirect_uri: Option<&'a str>,
     /// RFC 6749 Section 2.3: Client credentials for authentication.
     pub credentials: Option<&'a ClientCredentials>,
+    /// RFC 7523 Section 2.2: JWT-authenticated client (private_key_jwt), if used.
+    pub jwt_authenticated_client: Option<&'a AuthenticatedClient>,
     /// RFC 7636 Section 4.5: The PKCE code verifier.
     pub code_verifier: Option<&'a str>,
     /// RFC 9449 Section 5: Validated DPoP proof (if present).
@@ -248,10 +250,15 @@ pub async fn exchange_authorization_code(
     let expires_in = session_result.expires_in;
 
     // Extract the per-client ID token signing algorithm.
-    // Public clients (no credentials) fall back to "RS256" per OIDC Core default.
+    // Public/unauthenticated clients fall back to "RS256" per OIDC Core default.
     let id_token_alg = authenticated_client
         .as_ref()
         .map(|c| c.client.id_token_signed_response_alg.as_str())
+        .or_else(|| {
+            params
+                .jwt_authenticated_client
+                .map(|c| c.client.id_token_signed_response_alg.as_str())
+        })
         .unwrap_or("RS256");
 
     // Generate ID token (with at_hash computed from the access token)
