@@ -653,7 +653,7 @@ fn parse_saml_timestamp(s: &str) -> Result<Timestamp, ResponseError> {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::panic, clippy::too_many_lines)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
     use super::*;
 
     // =========================================================================
@@ -1522,7 +1522,7 @@ mod tests {
 
         let base64_response = B64.encode(xml.as_bytes());
         let result = validate_saml_response(&base64_response, "_request001", &provider);
-        let assertion = result.unwrap_or_else(|e| panic!("Expected Ok but got Err: {e}"));
+        let assertion = result.expect("Expected Ok");
 
         assert_eq!(assertion.email, "alice@example.com");
         assert_eq!(assertion.domain, Some("example.com".to_string()));

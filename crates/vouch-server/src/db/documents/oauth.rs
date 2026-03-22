@@ -423,7 +423,7 @@ impl DocumentType for DelegationPolicyDoc {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::{AccessScope, OAuthClientType, OAuthDocumentParseError, TokenEndpointAuthMethod};
     use std::str::FromStr;
@@ -454,10 +454,9 @@ mod tests {
 
     #[test]
     fn test_token_endpoint_auth_method_from_str_typed_error() {
-        let err = match TokenEndpointAuthMethod::from_str("mtls") {
-            Ok(value) => panic!("must reject mtls, got {value:?}"),
-            Err(err) => err,
-        };
+        let result = TokenEndpointAuthMethod::from_str("mtls");
+        assert!(result.is_err(), "must reject mtls");
+        let err = result.unwrap_err();
         assert_eq!(
             err,
             OAuthDocumentParseError::TokenEndpointAuthMethod("mtls".to_string())

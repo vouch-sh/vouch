@@ -218,12 +218,7 @@ fn validate_no_control_chars(value: &serde_json::Value) -> bool {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -248,12 +243,9 @@ mod tests {
     fn test_parse_non_array() {
         let raw = r#"{"type":"payment_initiation"}"#;
         let err = AuthorizationDetails::parse(raw).unwrap_err();
-        match &err {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(*code, OAuthErrorCode::InvalidAuthorizationDetails);
-            }
-            _ => panic!("Expected OAuth error"),
-        }
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidAuthorizationDetails)
+        );
     }
 
     #[test]

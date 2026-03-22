@@ -342,12 +342,7 @@ impl GitHubService<'_> {
 // ============================================================================
 
 #[cfg(test)]
-#[allow(
-    clippy::expect_used,
-    clippy::unwrap_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
 
@@ -360,19 +355,22 @@ mod tests {
             "sender": { "login": "Codertocat" }
         }"#;
         let event: InstallationEvent = serde_json::from_str(payload).unwrap();
-        match event {
-            InstallationEvent::Created {
-                installation,
-                repositories,
-                ..
-            } => {
-                assert_eq!(installation.id, 957387);
-                assert_eq!(installation.account.login, "Codertocat");
-                assert_eq!(repositories.len(), 1);
-                assert_eq!(repositories[0].name, "Hello-World");
-            }
-            _ => panic!("Expected Created event"),
-        }
+        assert!(
+            matches!(event, InstallationEvent::Created { .. }),
+            "Expected Created event"
+        );
+        let InstallationEvent::Created {
+            installation,
+            repositories,
+            ..
+        } = event
+        else {
+            return;
+        };
+        assert_eq!(installation.id, 957387);
+        assert_eq!(installation.account.login, "Codertocat");
+        assert_eq!(repositories.len(), 1);
+        assert_eq!(repositories[0].name, "Hello-World");
     }
 
     #[test]
@@ -383,12 +381,14 @@ mod tests {
             "sender": { "login": "admin" }
         }"#;
         let event: InstallationEvent = serde_json::from_str(payload).unwrap();
-        match event {
-            InstallationEvent::Created { repositories, .. } => {
-                assert!(repositories.is_empty());
-            }
-            _ => panic!("Expected Created event"),
-        }
+        assert!(
+            matches!(event, InstallationEvent::Created { .. }),
+            "Expected Created event"
+        );
+        let InstallationEvent::Created { repositories, .. } = event else {
+            return;
+        };
+        assert!(repositories.is_empty());
     }
 
     #[test]
@@ -441,19 +441,22 @@ mod tests {
             "repositories_removed": []
         }"#;
         let event: InstallationRepositoriesEvent = serde_json::from_str(payload).unwrap();
-        match event {
-            InstallationRepositoriesEvent::Added {
-                installation,
-                repositories_added,
-                repositories_removed,
-            } => {
-                assert_eq!(installation.id, 957387);
-                assert_eq!(repositories_added.len(), 1);
-                assert_eq!(repositories_added[0].name, "Space");
-                assert!(repositories_removed.is_empty());
-            }
-            _ => panic!("Expected Added event"),
-        }
+        assert!(
+            matches!(event, InstallationRepositoriesEvent::Added { .. }),
+            "Expected Added event"
+        );
+        let InstallationRepositoriesEvent::Added {
+            installation,
+            repositories_added,
+            repositories_removed,
+        } = event
+        else {
+            return;
+        };
+        assert_eq!(installation.id, 957387);
+        assert_eq!(repositories_added.len(), 1);
+        assert_eq!(repositories_added[0].name, "Space");
+        assert!(repositories_removed.is_empty());
     }
 
     #[test]
@@ -465,18 +468,21 @@ mod tests {
             "repositories_removed": [{ "name": "OldRepo", "full_name": "Codertocat/OldRepo", "private": true }]
         }"#;
         let event: InstallationRepositoriesEvent = serde_json::from_str(payload).unwrap();
-        match event {
-            InstallationRepositoriesEvent::Removed {
-                repositories_added,
-                repositories_removed,
-                ..
-            } => {
-                assert!(repositories_added.is_empty());
-                assert_eq!(repositories_removed.len(), 1);
-                assert_eq!(repositories_removed[0].name, "OldRepo");
-            }
-            _ => panic!("Expected Removed event"),
-        }
+        assert!(
+            matches!(event, InstallationRepositoriesEvent::Removed { .. }),
+            "Expected Removed event"
+        );
+        let InstallationRepositoriesEvent::Removed {
+            repositories_added,
+            repositories_removed,
+            ..
+        } = event
+        else {
+            return;
+        };
+        assert!(repositories_added.is_empty());
+        assert_eq!(repositories_removed.len(), 1);
+        assert_eq!(repositories_removed[0].name, "OldRepo");
     }
 
     #[test]

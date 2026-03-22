@@ -593,7 +593,7 @@ fn try_verify_with_cert(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::panic)]
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     // =========================================================================

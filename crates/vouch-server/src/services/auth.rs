@@ -457,12 +457,7 @@ pub fn decode_token(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use crate::test_utils::{TEST_ISSUER, make_test_access_token, make_test_oidc_key};

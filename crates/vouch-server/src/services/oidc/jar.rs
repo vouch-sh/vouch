@@ -444,12 +444,7 @@ pub async fn validate_request_object(
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use crate::services::oidc::jwt_bearer::validate::SUPPORTED_ALGORITHMS;
@@ -467,18 +462,23 @@ mod tests {
 
     /// Extract the OAuth error description from a `ServiceError`.
     fn oauth_error_description(err: &ServiceError) -> &str {
-        match err {
-            ServiceError::OAuth { description, .. } => description.as_str(),
-            other => panic!("Expected ServiceError::OAuth, got: {other:?}"),
-        }
+        let ServiceError::OAuth { description, .. } = err else {
+            return "NOT_AN_OAUTH_ERROR";
+        };
+        description.as_str()
     }
 
     /// Extract the OAuth error code from a `ServiceError`.
     fn oauth_error_code(err: &ServiceError) -> &OAuthErrorCode {
-        match err {
-            ServiceError::OAuth { code, .. } => code,
-            other => panic!("Expected ServiceError::OAuth, got: {other:?}"),
-        }
+        assert!(
+            matches!(err, ServiceError::OAuth { .. }),
+            "Expected ServiceError::OAuth",
+        );
+        let ServiceError::OAuth { code, .. } = err else {
+            // unreachable after the assert above
+            return &OAuthErrorCode::InvalidRequest;
+        };
+        code
     }
 
     // ========================================================================

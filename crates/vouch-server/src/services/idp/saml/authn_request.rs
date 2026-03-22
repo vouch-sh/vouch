@@ -215,7 +215,7 @@ fn xml_escape_attr(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::services::idp::saml::{IdpMetadata, SamlProvider};
     use flate2::read::DeflateDecoder;

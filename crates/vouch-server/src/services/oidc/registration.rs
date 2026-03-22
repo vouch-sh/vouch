@@ -1128,14 +1128,20 @@ async fn verify_software_statement_jwt(
 // ============================================================================
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    fn assert_oauth_error<T: std::fmt::Debug>(
+        result: Result<T, ServiceError>,
+        expected: OAuthErrorCode,
+    ) {
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == expected),
+            "Expected {expected:?}",
+        );
+    }
 
     // =========================================================================
     // Redirect URI Validation Tests
@@ -1169,36 +1175,21 @@ mod tests {
     fn test_rejects_http_non_loopback() {
         let result = validate_registration_redirect_uri("http://example.com/callback");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRedirectUri);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
     }
 
     #[test]
     fn test_rejects_redirect_uri_with_fragment() {
         let result = validate_registration_redirect_uri("https://example.com/callback#anchor");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRedirectUri);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
     }
 
     #[test]
     fn test_rejects_invalid_redirect_uri() {
         let result = validate_registration_redirect_uri("not a valid uri !!!");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRedirectUri);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
     }
 
     // =========================================================================
@@ -1233,15 +1224,13 @@ mod tests {
     #[test]
     fn test_rejects_redirect_uri_with_fragment_before_parse() {
         // A URI that would otherwise be valid https but contains '#'
-        let result = validate_registration_redirect_uri("https://example.com/cb#");
-        assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRedirectUri);
-                assert!(description.contains("fragment"));
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = validate_registration_redirect_uri("https://example.com/cb#").unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidRedirectUri)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("fragment"))
+        );
     }
 
     /// HTTP to a non-loopback private IP (e.g., 192.168.x.x) must be rejected.
@@ -1249,12 +1238,7 @@ mod tests {
     fn test_rejects_http_private_ip_redirect_uri() {
         let result = validate_registration_redirect_uri("http://192.168.1.1/callback");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRedirectUri);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
     }
 
     /// An empty string is not a valid redirect URI.
@@ -1262,12 +1246,7 @@ mod tests {
     fn test_rejects_empty_redirect_uri() {
         let result = validate_registration_redirect_uri("");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRedirectUri);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
     }
 
     // =========================================================================
@@ -1284,12 +1263,7 @@ mod tests {
     fn test_rejects_http_uri() {
         let result = validate_https_uri("client_uri", Some("http://example.com"));
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
@@ -1302,12 +1276,7 @@ mod tests {
     fn test_rejects_invalid_uri() {
         let result = validate_https_uri("client_uri", Some("not a url"));
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     // =========================================================================
@@ -1317,16 +1286,10 @@ mod tests {
     /// The error message must include the field name for debuggability.
     #[test]
     fn test_https_uri_error_includes_field_name() {
-        let result = validate_https_uri("logo_uri", Some("http://example.com/logo.png"));
-        match result.unwrap_err() {
-            ServiceError::OAuth { description, .. } => {
-                assert!(
-                    description.contains("logo_uri"),
-                    "Error description must include field name: '{description}'"
-                );
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        let err = validate_https_uri("logo_uri", Some("http://example.com/logo.png")).unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("logo_uri"))
+        );
     }
 
     /// Custom (non-http/https) schemes must be rejected for URI fields.
@@ -1334,12 +1297,7 @@ mod tests {
     fn test_https_uri_rejects_custom_scheme() {
         let result = validate_https_uri("tos_uri", Some("ftp://example.com/tos"));
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected OAuth error, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     /// An empty string for a URI field must be rejected (invalid URL).
@@ -2001,62 +1959,45 @@ mod tests {
     fn test_validate_grant_and_response_types_implicit_grant_rejected() {
         let mut req = make_request_with_grant_response(Some(vec!["implicit"]), None);
         let result = validate_grant_and_response_types(&mut req);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
     fn test_validate_grant_and_response_types_implicit_response_token_rejected() {
         let mut req = make_request_with_grant_response(None, Some(vec!["token"]));
         let result = validate_grant_and_response_types(&mut req);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
     fn test_validate_grant_and_response_types_implicit_response_id_token_rejected() {
         let mut req = make_request_with_grant_response(None, Some(vec!["id_token"]));
         let result = validate_grant_and_response_types(&mut req);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
     fn test_validate_grant_and_response_types_unknown_grant_rejected() {
         let mut req = make_request_with_grant_response(Some(vec!["magic_grant"]), None);
-        let result = validate_grant_and_response_types(&mut req);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-                assert!(description.contains("magic_grant"));
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        let err = validate_grant_and_response_types(&mut req).unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClientMetadata)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("magic_grant"))
+        );
     }
 
     #[test]
     fn test_validate_grant_and_response_types_unknown_response_type_rejected() {
         let mut req = make_request_with_grant_response(None, Some(vec!["magic_response"]));
-        let result = validate_grant_and_response_types(&mut req);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-                assert!(description.contains("magic_response"));
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        let err = validate_grant_and_response_types(&mut req).unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClientMetadata)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("magic_response"))
+        );
     }
 
     #[test]
@@ -2091,12 +2032,7 @@ mod tests {
             id_token_signed_response_alg: None,
         };
         let result = validate_grant_and_response_types(&mut req2);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
@@ -2152,12 +2088,7 @@ mod tests {
     fn test_validate_redirect_uris_required_for_auth_code_empty() {
         let mut req = make_request_with_redirect_uris(None);
         let result = validate_redirect_uris(&mut req, true);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
@@ -2175,12 +2106,7 @@ mod tests {
             .collect();
         let mut req = make_request_with_redirect_uris(Some(many));
         let result = validate_redirect_uris(&mut req, false);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
@@ -2198,12 +2124,7 @@ mod tests {
     fn test_validate_redirect_uris_invalid_uri_rejected() {
         let mut req = make_request_with_redirect_uris(Some(vec!["not a uri !!"]));
         let result = validate_redirect_uris(&mut req, false);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRedirectUri);
-            }
-            other => panic!("Expected InvalidRedirectUri, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRedirectUri);
     }
 
     // =========================================================================
@@ -2240,14 +2161,13 @@ mod tests {
     fn test_validate_jwks_and_auth_method_mutual_exclusivity() {
         let jwks = serde_json::json!({"keys": [{"kty": "EC"}]});
         let mut req = make_request_with_jwks(Some(jwks), Some("https://example.com/jwks"));
-        let result = validate_jwks_and_auth_method(&mut req, "client_secret_basic");
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-                assert!(description.contains("mutually exclusive"));
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        let err = validate_jwks_and_auth_method(&mut req, "client_secret_basic").unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClientMetadata)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("mutually exclusive"))
+        );
     }
 
     #[test]
@@ -2255,37 +2175,26 @@ mod tests {
         let jwks = serde_json::json!({"keys": []});
         let mut req = make_request_with_jwks(Some(jwks), None);
         let result = validate_jwks_and_auth_method(&mut req, "client_secret_basic");
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
     fn test_validate_jwks_and_auth_method_jwks_uri_not_https() {
         let mut req = make_request_with_jwks(None, Some("http://example.com/jwks"));
-        let result = validate_jwks_and_auth_method(&mut req, "client_secret_basic");
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-                assert!(description.contains("https"));
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        let err = validate_jwks_and_auth_method(&mut req, "client_secret_basic").unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClientMetadata)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("https"))
+        );
     }
 
     #[test]
     fn test_validate_jwks_and_auth_method_private_key_jwt_without_jwks() {
         let mut req = make_request_with_jwks(None, None);
         let result = validate_jwks_and_auth_method(&mut req, "private_key_jwt");
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
@@ -2328,12 +2237,7 @@ mod tests {
     fn test_validate_jwks_and_auth_method_unknown_auth_method_rejected() {
         let mut req = make_request_with_jwks(None, None);
         let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     // =========================================================================
@@ -2393,12 +2297,7 @@ mod tests {
     fn test_validate_contacts_and_uris_http_client_uri_rejected() {
         let req = make_request_with_uris(Some("http://example.com"), None, None, None, None);
         let result = validate_contacts_and_uris(&req);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
@@ -2406,24 +2305,14 @@ mod tests {
         let req =
             make_request_with_uris(None, Some("http://example.com/logo.png"), None, None, None);
         let result = validate_contacts_and_uris(&req);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
     fn test_validate_contacts_and_uris_http_tos_uri_rejected() {
         let req = make_request_with_uris(None, None, Some("http://example.com/tos"), None, None);
         let result = validate_contacts_and_uris(&req);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
@@ -2431,12 +2320,7 @@ mod tests {
         let req =
             make_request_with_uris(None, None, None, Some("http://example.com/privacy"), None);
         let result = validate_contacts_and_uris(&req);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
@@ -2444,25 +2328,19 @@ mod tests {
         let contacts: Vec<&str> = (0..=MAX_CONTACTS).map(|_| "user@example.com").collect();
         let req = make_request_with_uris(None, None, None, None, Some(contacts));
         let result = validate_contacts_and_uris(&req);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
     #[test]
     fn test_validate_contacts_and_uris_invalid_email_format() {
         let req = make_request_with_uris(None, None, None, None, Some(vec!["notanemail"]));
-        let result = validate_contacts_and_uris(&req);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, description } => {
-                assert_eq!(code, OAuthErrorCode::InvalidClientMetadata);
-                assert!(description.contains("notanemail"));
-            }
-            other => panic!("Expected InvalidClientMetadata, got: {other:?}"),
-        }
+        let err = validate_contacts_and_uris(&req).unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == OAuthErrorCode::InvalidClientMetadata)
+        );
+        assert!(
+            matches!(&err, ServiceError::OAuth { description, .. } if description.contains("notanemail"))
+        );
     }
 
     // =========================================================================

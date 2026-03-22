@@ -408,14 +408,12 @@ pub fn escape_attribute(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::panic)]
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn c14n(xml: &str, xpath: &str, inclusive_prefixes: &[&str]) -> String {
         let doc = roxmltree::Document::parse(xml).unwrap();
-        let node = find_element(&doc, xpath).unwrap_or_else(|| {
-            panic!("Element not found: {xpath}");
-        });
+        let node = find_element(&doc, xpath).expect("Element not found");
         exclusive_c14n(node, inclusive_prefixes)
     }
 
@@ -845,17 +843,16 @@ mod tests {
                 .root()
                 .children()
                 .find(|n| n.is_element())
-                .unwrap_or_else(|| panic!("No root element in: {input}"));
+                .expect("No root element");
             let first = exclusive_c14n(root1, &[]);
 
-            let doc2 = roxmltree::Document::parse(&first).unwrap_or_else(|e| {
-                panic!("First c14n output is invalid XML: {e}\nOutput: {first}")
-            });
+            let doc2 =
+                roxmltree::Document::parse(&first).expect("First c14n output is invalid XML");
             let root2 = doc2
                 .root()
                 .children()
                 .find(|n| n.is_element())
-                .unwrap_or_else(|| panic!("No root in re-parsed c14n output"));
+                .expect("No root in re-parsed c14n output");
             let second = exclusive_c14n(root2, &[]);
 
             assert_eq!(first, second, "Idempotency failed for input: {input}");

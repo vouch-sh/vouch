@@ -308,7 +308,6 @@ fn raw_to_audit_event(row: RawAuditRow) -> AuditEvent {
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
-    clippy::panic,
     clippy::unreachable,
     clippy::indexing_slicing
 )]

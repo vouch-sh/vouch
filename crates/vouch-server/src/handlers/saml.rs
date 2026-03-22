@@ -166,7 +166,7 @@ pub async fn acs(State(state): State<Arc<AppState>>, Form(form): Form<SamlAcsFor
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::panic)]
+    #![allow(clippy::unwrap_used)]
     use crate::test_utils::{http_get_full, http_post_form, test_app};
     use axum::http::StatusCode;
 

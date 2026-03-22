@@ -747,7 +747,7 @@ pub fn resolve_dsql_endpoints(endpoints: &HashMap<String, String>) -> Result<Str
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use crate::test_utils::test_config;
     use secrecy::SecretString;

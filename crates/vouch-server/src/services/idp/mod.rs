@@ -266,7 +266,7 @@ impl UpstreamIdp {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::panic)]
+    #![allow(clippy::unwrap_used)]
 
     use super::*;
     use crate::test_utils::test_config;
@@ -395,8 +395,12 @@ mod tests {
 
         let auth = idp.initiate_auth(&config).unwrap();
 
+        assert!(
+            matches!(auth.action, AuthAction::Redirect { .. }),
+            "Expected AuthAction::Redirect"
+        );
         let AuthAction::Redirect { url } = auth.action else {
-            panic!("Expected AuthAction::Redirect");
+            return;
         };
         assert!(
             url.starts_with("https://accounts.google.com/o/oauth2/v2/auth?"),
@@ -432,8 +436,12 @@ mod tests {
 
         let auth = idp.initiate_auth(&config).unwrap();
 
+        assert!(
+            matches!(auth.action, AuthAction::Redirect { .. }),
+            "Expected AuthAction::Redirect"
+        );
         let AuthAction::Redirect { url } = auth.action else {
-            panic!("Expected AuthAction::Redirect");
+            return;
         };
         assert!(
             url.contains("existing=param"),
@@ -505,8 +513,12 @@ mod tests {
         let config = test_config();
 
         let result = idp.initiate_auth(&config).unwrap();
+        assert!(
+            matches!(result.action, AuthAction::Redirect { .. }),
+            "Expected AuthAction::Redirect for SAML redirect binding"
+        );
         let AuthAction::Redirect { url } = result.action else {
-            panic!("Expected AuthAction::Redirect for SAML redirect binding");
+            return;
         };
         assert!(
             url.contains("SAMLRequest="),
@@ -533,8 +545,12 @@ mod tests {
 
         let auth = idp.initiate_auth(&config).unwrap();
 
+        assert!(
+            matches!(auth.action, AuthAction::Redirect { .. }),
+            "Expected AuthAction::Redirect"
+        );
         let AuthAction::Redirect { url } = auth.action else {
-            panic!("Expected AuthAction::Redirect");
+            return;
         };
         assert!(
             url.contains("code_challenge="),

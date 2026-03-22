@@ -682,12 +682,7 @@ fn extract_device_posture(ad_value: Option<&serde_json::Value>) -> ServiceResult
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
     use vouch_common::posture::{EdrAgent, MdmAgent, OperatingSystem, PostureTypeTag};
@@ -853,8 +848,11 @@ mod tests {
     #[test]
     fn test_all_preconfigured_policies_compile() {
         for policy in PRECONFIGURED_POLICIES {
-            Program::compile(policy.cel_expression)
-                .unwrap_or_else(|e| panic!("Policy '{}' failed to compile: {e}", policy.slug));
+            assert!(
+                Program::compile(policy.cel_expression).is_ok(),
+                "Policy '{}' failed to compile",
+                policy.slug
+            );
         }
     }
 

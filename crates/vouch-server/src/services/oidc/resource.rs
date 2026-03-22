@@ -76,7 +76,7 @@ impl std::fmt::Display for ResourceUri {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
@@ -108,40 +108,28 @@ mod tests {
     fn test_rejects_fragment() {
         let result = ResourceUri::parse("https://api.example.com/v1#section");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ResourceError::HasFragment => {}
-            other => panic!("Expected HasFragment, got: {other:?}"),
-        }
+        assert!(matches!(result.unwrap_err(), ResourceError::HasFragment));
     }
 
     #[test]
     fn test_rejects_relative_uri() {
         let result = ResourceUri::parse("/api/v1/resources");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ResourceError::NotAbsolute => {}
-            other => panic!("Expected NotAbsolute, got: {other:?}"),
-        }
+        assert!(matches!(result.unwrap_err(), ResourceError::NotAbsolute));
     }
 
     #[test]
     fn test_rejects_empty_string() {
         let result = ResourceUri::parse("");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ResourceError::Empty => {}
-            other => panic!("Expected Empty, got: {other:?}"),
-        }
+        assert!(matches!(result.unwrap_err(), ResourceError::Empty));
     }
 
     #[test]
     fn test_rejects_bare_string() {
         let result = ResourceUri::parse("not-a-uri");
         assert!(result.is_err());
-        match result.unwrap_err() {
-            ResourceError::NotAbsolute => {}
-            other => panic!("Expected NotAbsolute, got: {other:?}"),
-        }
+        assert!(matches!(result.unwrap_err(), ResourceError::NotAbsolute));
     }
 
     #[test]

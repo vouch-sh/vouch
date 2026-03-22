@@ -243,7 +243,7 @@ fn xml_escape_attr(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::panic)]
+    #![allow(clippy::unwrap_used)]
     use super::*;
 
     // =========================================================================

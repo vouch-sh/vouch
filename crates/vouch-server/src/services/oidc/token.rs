@@ -912,9 +912,20 @@ pub async fn validate_session_token(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+
+    fn assert_oauth_error<T: std::fmt::Debug>(
+        result: Result<T, ServiceError>,
+        expected: OAuthErrorCode,
+    ) {
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ServiceError::OAuth { code, .. } if *code == expected),
+            "Expected {expected:?}",
+        );
+    }
 
     // =========================================================================
     // validate_code_bindings — redirect_uri
@@ -959,24 +970,14 @@ mod tests {
         let auth_code = make_auth_code("https://example.com/callback");
         let result =
             validate_code_bindings(&auth_code, Some("https://attacker.com/steal"), None, None);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidGrant);
-            }
-            other => panic!("Expected InvalidGrant, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
     }
 
     #[test]
     fn test_validate_code_bindings_redirect_uri_missing_when_required() {
         let auth_code = make_auth_code("https://example.com/callback");
         let result = validate_code_bindings(&auth_code, None, None, None);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidRequest);
-            }
-            other => panic!("Expected InvalidRequest, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidRequest);
     }
 
     #[test]
@@ -1018,12 +1019,7 @@ mod tests {
     fn test_validate_code_bindings_dpop_bound_no_proof() {
         let auth_code = make_auth_code_with_dpop_jkt("some-key-thumbprint");
         let result = validate_code_bindings(&auth_code, None, None, None);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidGrant);
-            }
-            other => panic!("Expected InvalidGrant for missing DPoP proof, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
     }
 
     #[test]
@@ -1031,12 +1027,7 @@ mod tests {
         let auth_code = make_auth_code_with_dpop_jkt("correct-thumbprint");
         let proof = make_dpop_proof("wrong-thumbprint");
         let result = validate_code_bindings(&auth_code, None, None, Some(&proof));
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::InvalidGrant);
-            }
-            other => panic!("Expected InvalidGrant for jkt mismatch, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
     }
 
     #[test]
@@ -1093,12 +1084,7 @@ mod tests {
     fn test_validate_code_bindings_acr_missing_aal3() {
         let auth_code = make_auth_code_with_acr("urn:nist:authentication:assurance-level:aal1");
         let result = validate_code_bindings(&auth_code, None, None, None);
-        match result.unwrap_err() {
-            ServiceError::OAuth { code, .. } => {
-                assert_eq!(code, OAuthErrorCode::UnmetAuthenticationRequirements);
-            }
-            other => panic!("Expected UnmetAuthenticationRequirements, got: {other:?}"),
-        }
+        assert_oauth_error(result, OAuthErrorCode::UnmetAuthenticationRequirements);
     }
 
     #[test]
