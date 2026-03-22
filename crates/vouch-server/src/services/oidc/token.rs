@@ -189,7 +189,6 @@ pub struct IdTokenClaims {
 ///
 /// # Errors
 /// Returns `ServiceError` for invalid requests.
-#[allow(clippy::too_many_lines)]
 pub async fn exchange_authorization_code(
     state: &Arc<AppState>,
     params: AuthCodeExchangeParams<'_>,
@@ -198,222 +197,30 @@ pub async fn exchange_authorization_code(
     let auth_code = decode_authorization_code(state, params.code, params.client_id).await?;
 
     // RFC 6749 Section 10.5: Enforce single-use authorization codes.
-    // Try to consume the code; if already consumed this is a replay attack.
     let code_hash = hash_token(params.code);
-    match db::try_consume_authorization_code(&state.store, &code_hash).await {
-        Ok(true) => { /* First use — proceed */ }
-        Ok(false) => {
-            // Code was already consumed or doesn't exist.
-            // Single atomic query combines consumed check + owner lookup
-            if let Ok(Some((user_id, _client_id))) =
-                db::get_consumed_code_owner(&state.store, &code_hash).await
-            {
-                tracing::warn!(
-                    target: "security",
-                    client_id = %auth_code.client_id,
-                    "Authorization code replay detected — code already consumed"
-                );
-
-                // RFC 6749 Section 10.5: "If the authorization server observes
-                // multiple attempts to exchange an authorization code, the
-                // authorization server SHOULD attempt to revoke all access tokens
-                // already granted based on the compromised authorization code."
-                match db::delete_oauth_sessions_for_user(&state.store, &user_id).await {
-                    Ok(count) if count > 0 => {
-                        state.session_cache.invalidate_for_user(&user_id);
-                        tracing::warn!(
-                            target: "security",
-                            user_id = %user_id,
-                            revoked_count = count,
-                            "Revoked OAuth tokens due to authorization code replay"
-                        );
-                    }
-                    Ok(_) => {}
-                    Err(e) => {
-                        tracing::error!("Failed to revoke tokens during replay detection: {e}");
-                    }
-                }
-            }
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
-                "Authorization code has already been used",
-            ));
-        }
-        Err(e) => {
-            tracing::error!("Failed to consume authorization code: {}", e);
-            return Err(ServiceError::Internal(
-                "Failed to validate authorization code".to_string(),
-            ));
-        }
-    }
+    enforce_single_use_code(state, &code_hash, &auth_code).await?;
 
     // RFC 6749 Section 4.1.3: Authenticate the client (if credentials provided)
-    let authenticated_client = if let Some(creds) = params.credentials {
-        match authenticate_client(state, creds).await {
-            Ok(client) => {
-                // RFC 6749 Section 4.1.3: Verify the client_id in the authorization code matches
-                if client.client.client_id != auth_code.client_id {
-                    tracing::warn!(
-                        "Client ID mismatch: token request from {} but code was issued to {}",
-                        client.client.client_id,
-                        auth_code.client_id
-                    );
-                    return Err(ServiceError::oauth(
-                        OAuthErrorCode::InvalidGrant,
-                        "Client ID mismatch",
-                    ));
-                }
+    let authenticated_client =
+        authenticate_and_validate_client(state, params.credentials, &auth_code).await?;
 
-                // RFC 7636 Section 4: Require PKCE for public clients and client types that mandate it
-                let pkce_required =
-                    client.is_public || client.client.application_type.requires_pkce();
-                if pkce_required && auth_code.code_challenge.is_none() {
-                    tracing::warn!(
-                        "Client {} requires PKCE but no code_challenge was present",
-                        client.client.client_id
-                    );
-                    return Err(ServiceError::oauth(
-                        OAuthErrorCode::InvalidRequest,
-                        "PKCE required for this client type",
-                    ));
-                }
+    // Validate redirect_uri, PKCE, DPoP binding, and ACR
+    validate_code_bindings(
+        &auth_code,
+        params.redirect_uri,
+        params.code_verifier,
+        params.dpop_proof.as_ref(),
+    )?;
 
-                Some(client)
-            }
-            // RFC 6749 Section 4.1.3: Client authentication is REQUIRED
-            Err(ClientAuthError::InvalidClient | ClientAuthError::MissingClientId) => {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClient,
-                    "Client authentication required",
-                ));
-            }
-            Err(e) => {
-                return Err(e.into_service_error());
-            }
-        }
-    } else {
-        None
-    };
-
-    // RFC 6749 Section 4.1.3: redirect_uri MUST be present if it was in the authorization request
-    if !auth_code.redirect_uri.is_empty() {
-        match params.redirect_uri {
-            Some(redirect_uri) if redirect_uri != auth_code.redirect_uri => {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidGrant,
-                    "Redirect URI mismatch",
-                ));
-            }
-            None => {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidRequest,
-                    "redirect_uri is required when it was included in the authorization request",
-                ));
-            }
-            _ => {} // matches
-        }
-    }
-
-    // Validate PKCE code_verifier if code_challenge was present
-    validate_pkce(&auth_code, params.code_verifier)?;
-
-    // FAPI 2.0 / RFC 9449 Section 10: Verify DPoP authorization code binding.
-    // If the authorization code was bound to a DPoP key at PAR time, the same
-    // key must be used at the token endpoint.
-    if let Some(ref bound_jkt) = auth_code.dpop_jkt {
-        let proof_jkt = match &params.dpop_proof {
-            Some(proof) => &proof.jkt,
-            None => {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidGrant,
-                    "Authorization code is bound to a DPoP key but no DPoP proof was provided",
-                ));
-            }
-        };
-        // Constant-time comparison to prevent timing attacks
-        let is_match: bool = bound_jkt.as_bytes().ct_eq(proof_jkt.as_bytes()).into();
-        if !is_match {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidGrant,
-                "DPoP key does not match the key bound during authorization",
-            ));
-        }
-    }
-
-    // RFC 9470 Section 4: Defense-in-depth ACR validation.
-    // If the authorization code carried acr_values, verify that Vouch's AAL3
-    // is among the requested values. The authorization endpoint already checks
-    // this, but we verify again here to prevent code injection attacks.
-    if let Some(ref acr_values) = auth_code.acr_values {
-        let acr_ok = acr_values
-            .split_whitespace()
-            .any(|v| v == crate::services::oidc::amr::ACR_AAL3);
-        if !acr_ok {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::UnmetAuthenticationRequirements,
-                "The requested authentication context class cannot be satisfied",
-            ));
-        }
-    }
-
-    // RFC 9396: Retrieve authorization_details from server-side storage.
-    let granted_ad_value = db::get_authorization_code_details(&state.store, &code_hash)
-        .await
-        .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?;
-    let granted_ad = granted_ad_value
-        .as_ref()
-        .and_then(|v| AuthorizationDetails::try_from(v).ok());
-
-    // RFC 9396 Section 6: If the token request includes authorization_details,
-    // it MUST be a subset of the granted details (downscoping).
-    let (effective_ad, effective_ad_value);
-    if let Some(requested_raw) = params.authorization_details {
-        let requested_ad = AuthorizationDetails::parse(requested_raw)?;
-        match &granted_ad {
-            Some(granted) => {
-                if !requested_ad.is_subset_of(granted) {
-                    return Err(ServiceError::oauth(
-                        OAuthErrorCode::InvalidAuthorizationDetails,
-                        "Requested authorization_details is not a \
-                         subset of the granted authorization_details",
-                    ));
-                }
-            }
-            None => {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidAuthorizationDetails,
-                    "authorization_details was not granted \
-                     during authorization",
-                ));
-            }
-        }
-        effective_ad_value = Some(serde_json::Value::from(&requested_ad));
-        effective_ad = Some(requested_ad);
-    } else {
-        effective_ad_value = granted_ad_value;
-        effective_ad = granted_ad;
-    }
-
-    // RFC 8707: Resource narrowing — determine the audience for the access token.
-    // The resource from the auth code (granted at authorization time) takes precedence.
-    let audience = match (auth_code.resource.as_deref(), params.resource) {
-        // Both present: must match
-        (Some(granted), Some(requested)) if granted != requested => {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidTarget,
-                "Resource parameter does not match the value from the authorization request",
-            ));
-        }
-        (Some(granted), _) => Some(granted),
-        // Can't add resource at token time if not granted during authorization
-        (None, Some(_)) => {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidTarget,
-                "Resource was not requested during authorization",
-            ));
-        }
-        (None, None) => None,
-    };
+    // RFC 9396 + RFC 8707: Resolve authorization details and resource audience
+    let grants = resolve_authorization_details(
+        state,
+        &code_hash,
+        params.authorization_details,
+        &auth_code,
+        params.resource,
+    )
+    .await?;
 
     // Generate access token as an RFC 9068 JWT (ES256, verifiable via JWKS)
     let dpop_jkt = params.dpop_proof.as_ref().map(|p| p.jkt.as_str());
@@ -427,13 +234,13 @@ pub async fn exchange_authorization_code(
             scope: Some(auth_code.scope.clone()),
             dpop_jkt,
             act: None,
-            audience,
+            audience: grants.audience.as_deref(),
             auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
             amr: Some(AuthMethod::all_fido2().to_vec()),
             acr: Some(crate::services::oidc::amr::ACR_AAL3.to_string()),
             hardware_verified: true,
             session_purpose: db::SessionPurpose::OAuthAccessToken,
-            authorization_details: effective_ad_value.as_ref(),
+            authorization_details: grants.authorization_details_value.as_ref(),
         },
     )
     .await?;
@@ -509,7 +316,251 @@ pub async fn exchange_authorization_code(
         expires_in,
         id_token,
         scope: auth_code.scope,
-        authorization_details: effective_ad,
+        authorization_details: grants.authorization_details,
+    })
+}
+
+/// Result of resolving authorization details and resource audience.
+struct ResolvedGrants {
+    authorization_details: Option<AuthorizationDetails>,
+    authorization_details_value: Option<serde_json::Value>,
+    audience: Option<String>,
+}
+
+/// RFC 6749 Section 10.5: Enforce single-use authorization codes.
+///
+/// Tries to consume the code atomically. If it was already consumed,
+/// revoke all tokens issued under the compromised code (replay defense).
+async fn enforce_single_use_code(
+    state: &Arc<AppState>,
+    code_hash: &str,
+    auth_code: &AuthorizationCode,
+) -> ServiceResult<()> {
+    match db::try_consume_authorization_code(&state.store, code_hash).await {
+        Ok(true) => Ok(()),
+        Ok(false) => {
+            if let Ok(Some((user_id, _client_id))) =
+                db::get_consumed_code_owner(&state.store, code_hash).await
+            {
+                tracing::warn!(
+                    target: "security",
+                    client_id = %auth_code.client_id,
+                    "Authorization code replay detected — code already consumed"
+                );
+                match db::delete_oauth_sessions_for_user(&state.store, &user_id).await {
+                    Ok(count) if count > 0 => {
+                        state.session_cache.invalidate_for_user(&user_id);
+                        tracing::warn!(
+                            target: "security",
+                            user_id = %user_id,
+                            revoked_count = count,
+                            "Revoked OAuth tokens due to authorization code replay"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!("Failed to revoke tokens during replay detection: {e}");
+                    }
+                }
+            }
+            Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "Authorization code has already been used",
+            ))
+        }
+        Err(e) => {
+            tracing::error!("Failed to consume authorization code: {}", e);
+            Err(ServiceError::Internal(
+                "Failed to validate authorization code".to_string(),
+            ))
+        }
+    }
+}
+
+/// Authenticate client credentials and validate against the authorization code.
+///
+/// Verifies the client_id matches the code's client_id and that PKCE is
+/// present when required for the client type.
+async fn authenticate_and_validate_client(
+    state: &Arc<AppState>,
+    credentials: Option<&ClientCredentials>,
+    auth_code: &AuthorizationCode,
+) -> ServiceResult<Option<AuthenticatedClient>> {
+    let Some(creds) = credentials else {
+        return Ok(None);
+    };
+    match authenticate_client(state, creds).await {
+        Ok(client) => {
+            if client.client.client_id != auth_code.client_id {
+                tracing::warn!(
+                    "Client ID mismatch: token request from {} but code was issued to {}",
+                    client.client.client_id,
+                    auth_code.client_id
+                );
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidGrant,
+                    "Client ID mismatch",
+                ));
+            }
+            let pkce_required = client.is_public || client.client.application_type.requires_pkce();
+            if pkce_required && auth_code.code_challenge.is_none() {
+                tracing::warn!(
+                    "Client {} requires PKCE but no code_challenge was present",
+                    client.client.client_id
+                );
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidRequest,
+                    "PKCE required for this client type",
+                ));
+            }
+            Ok(Some(client))
+        }
+        Err(ClientAuthError::InvalidClient | ClientAuthError::MissingClientId) => {
+            Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
+                "Client authentication required",
+            ))
+        }
+        Err(e) => Err(e.into_service_error()),
+    }
+}
+
+/// Validate redirect URI, PKCE, DPoP binding, and ACR constraints.
+fn validate_code_bindings(
+    auth_code: &AuthorizationCode,
+    redirect_uri: Option<&str>,
+    code_verifier: Option<&str>,
+    dpop_proof: Option<&ValidatedDpopProof>,
+) -> ServiceResult<()> {
+    // RFC 6749 Section 4.1.3: redirect_uri must match if present in authorization request
+    if !auth_code.redirect_uri.is_empty() {
+        match redirect_uri {
+            Some(uri) if uri != auth_code.redirect_uri => {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidGrant,
+                    "Redirect URI mismatch",
+                ));
+            }
+            None => {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidRequest,
+                    "redirect_uri is required when it was included \
+                     in the authorization request",
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    validate_pkce(auth_code, code_verifier)?;
+
+    // FAPI 2.0 / RFC 9449 Section 10: Verify DPoP authorization code binding
+    if let Some(ref bound_jkt) = auth_code.dpop_jkt {
+        let proof_jkt = match dpop_proof {
+            Some(proof) => &proof.jkt,
+            None => {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidGrant,
+                    "Authorization code is bound to a DPoP key \
+                     but no DPoP proof was provided",
+                ));
+            }
+        };
+        let is_match: bool = bound_jkt.as_bytes().ct_eq(proof_jkt.as_bytes()).into();
+        if !is_match {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidGrant,
+                "DPoP key does not match the key bound during authorization",
+            ));
+        }
+    }
+
+    // RFC 9470 Section 4: Defense-in-depth ACR validation
+    if let Some(ref acr_values) = auth_code.acr_values {
+        let acr_ok = acr_values
+            .split_whitespace()
+            .any(|v| v == crate::services::oidc::amr::ACR_AAL3);
+        if !acr_ok {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::UnmetAuthenticationRequirements,
+                "The requested authentication context class cannot be satisfied",
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Resolve authorization details and resource audience for the token.
+///
+/// Retrieves granted authorization details from storage, validates any
+/// downscoping request, and verifies resource indicator consistency.
+async fn resolve_authorization_details(
+    state: &Arc<AppState>,
+    code_hash: &str,
+    requested_ad_raw: Option<&str>,
+    auth_code: &AuthorizationCode,
+    requested_resource: Option<&str>,
+) -> ServiceResult<ResolvedGrants> {
+    let granted_ad_value = db::get_authorization_code_details(&state.store, code_hash)
+        .await
+        .map_err(|e| ServiceError::Internal(format!("Database error: {e}")))?;
+    let granted_ad = granted_ad_value
+        .as_ref()
+        .and_then(|v| AuthorizationDetails::try_from(v).ok());
+
+    // RFC 9396 Section 6: Validate downscoping if requested
+    let (authorization_details, authorization_details_value);
+    if let Some(raw) = requested_ad_raw {
+        let requested_ad = AuthorizationDetails::parse(raw)?;
+        match &granted_ad {
+            Some(granted) => {
+                if !requested_ad.is_subset_of(granted) {
+                    return Err(ServiceError::oauth(
+                        OAuthErrorCode::InvalidAuthorizationDetails,
+                        "Requested authorization_details is not a \
+                         subset of the granted authorization_details",
+                    ));
+                }
+            }
+            None => {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidAuthorizationDetails,
+                    "authorization_details was not granted \
+                     during authorization",
+                ));
+            }
+        }
+        authorization_details_value = Some(serde_json::Value::from(&requested_ad));
+        authorization_details = Some(requested_ad);
+    } else {
+        authorization_details_value = granted_ad_value;
+        authorization_details = granted_ad;
+    }
+
+    // RFC 8707: Resource narrowing
+    let audience = match (auth_code.resource.as_deref(), requested_resource) {
+        (Some(granted), Some(requested)) if granted != requested => {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidTarget,
+                "Resource parameter does not match the value \
+                 from the authorization request",
+            ));
+        }
+        (Some(granted), _) => Some(granted.to_string()),
+        (None, Some(_)) => {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidTarget,
+                "Resource was not requested during authorization",
+            ));
+        }
+        (None, None) => None,
+    };
+
+    Ok(ResolvedGrants {
+        authorization_details,
+        authorization_details_value,
+        audience,
     })
 }
 
@@ -854,9 +905,205 @@ pub async fn validate_session_token(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    // =========================================================================
+    // validate_code_bindings — redirect_uri
+    // =========================================================================
+
+    fn make_auth_code(redirect_uri: &str) -> AuthorizationCode {
+        AuthorizationCode {
+            iss: "https://test.example.com".to_string(),
+            aud: "test".to_string(),
+            client_id: "test".to_string(),
+            redirect_uri: redirect_uri.to_string(),
+            user_id: "user1".to_string(),
+            email: "test@example.com".to_string(),
+            authenticator_id: "auth1".to_string(),
+            aaguid: None,
+            scope: ScopeSet::parse("openid"),
+            nonce: None,
+            code_challenge: None,
+            code_challenge_method: None,
+            resource: None,
+            acr_values: None,
+            dpop_jkt: None,
+            iat: 0,
+            exp: i64::MAX,
+            auth_time: None,
+        }
+    }
+
+    #[test]
+    fn test_validate_code_bindings_redirect_uri_match() {
+        let auth_code = make_auth_code("https://example.com/callback");
+        let result =
+            validate_code_bindings(&auth_code, Some("https://example.com/callback"), None, None);
+        assert!(
+            result.is_ok(),
+            "Matching redirect_uri must succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_code_bindings_redirect_uri_mismatch() {
+        let auth_code = make_auth_code("https://example.com/callback");
+        let result =
+            validate_code_bindings(&auth_code, Some("https://attacker.com/steal"), None, None);
+        match result.unwrap_err() {
+            ServiceError::OAuth { code, .. } => {
+                assert_eq!(code, OAuthErrorCode::InvalidGrant);
+            }
+            other => panic!("Expected InvalidGrant, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_code_bindings_redirect_uri_missing_when_required() {
+        let auth_code = make_auth_code("https://example.com/callback");
+        let result = validate_code_bindings(&auth_code, None, None, None);
+        match result.unwrap_err() {
+            ServiceError::OAuth { code, .. } => {
+                assert_eq!(code, OAuthErrorCode::InvalidRequest);
+            }
+            other => panic!("Expected InvalidRequest, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_code_bindings_empty_redirect_uri_skips_check() {
+        // When auth_code.redirect_uri is empty, no redirect_uri check is performed.
+        let auth_code = make_auth_code("");
+        let result = validate_code_bindings(&auth_code, None, None, None);
+        assert!(
+            result.is_ok(),
+            "Empty redirect_uri in auth_code must skip the check: {result:?}"
+        );
+    }
+
+    // =========================================================================
+    // validate_code_bindings — DPoP binding
+    // =========================================================================
+
+    fn make_auth_code_with_dpop_jkt(jkt: &str) -> AuthorizationCode {
+        AuthorizationCode {
+            dpop_jkt: Some(jkt.to_string()),
+            ..make_auth_code("")
+        }
+    }
+
+    fn make_dpop_proof(jkt: &str) -> ValidatedDpopProof {
+        ValidatedDpopProof {
+            jkt: jkt.to_string(),
+            jwk: dpop::DpopJwk::Ec(dpop::EcJwk {
+                kty: "EC".to_string(),
+                crv: "P-256".to_string(),
+                x: "test-x".to_string(),
+                y: "test-y".to_string(),
+            }),
+            jti: "jti-value".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_validate_code_bindings_dpop_bound_no_proof() {
+        let auth_code = make_auth_code_with_dpop_jkt("some-key-thumbprint");
+        let result = validate_code_bindings(&auth_code, None, None, None);
+        match result.unwrap_err() {
+            ServiceError::OAuth { code, .. } => {
+                assert_eq!(code, OAuthErrorCode::InvalidGrant);
+            }
+            other => panic!("Expected InvalidGrant for missing DPoP proof, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_code_bindings_dpop_jkt_mismatch() {
+        let auth_code = make_auth_code_with_dpop_jkt("correct-thumbprint");
+        let proof = make_dpop_proof("wrong-thumbprint");
+        let result = validate_code_bindings(&auth_code, None, None, Some(&proof));
+        match result.unwrap_err() {
+            ServiceError::OAuth { code, .. } => {
+                assert_eq!(code, OAuthErrorCode::InvalidGrant);
+            }
+            other => panic!("Expected InvalidGrant for jkt mismatch, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_code_bindings_dpop_jkt_match() {
+        let auth_code = make_auth_code_with_dpop_jkt("matching-thumbprint");
+        let proof = make_dpop_proof("matching-thumbprint");
+        let result = validate_code_bindings(&auth_code, None, None, Some(&proof));
+        assert!(result.is_ok(), "Matching DPoP jkt must succeed: {result:?}");
+    }
+
+    #[test]
+    fn test_validate_code_bindings_dpop_not_bound_but_proof_provided() {
+        // Auth code has no dpop_jkt; providing a proof anyway is allowed (bearer fallback).
+        let auth_code = make_auth_code("");
+        let proof = make_dpop_proof("some-thumbprint");
+        let result = validate_code_bindings(&auth_code, None, None, Some(&proof));
+        assert!(
+            result.is_ok(),
+            "Proof on unbound code must not fail: {result:?}"
+        );
+    }
+
+    // =========================================================================
+    // validate_code_bindings — ACR values
+    // =========================================================================
+
+    fn make_auth_code_with_acr(acr_values: &str) -> AuthorizationCode {
+        AuthorizationCode {
+            acr_values: Some(acr_values.to_string()),
+            ..make_auth_code("")
+        }
+    }
+
+    #[test]
+    fn test_validate_code_bindings_acr_contains_aal3() {
+        let auth_code = make_auth_code_with_acr("urn:nist:authentication:assurance-level:aal3");
+        let result = validate_code_bindings(&auth_code, None, None, None);
+        assert!(result.is_ok(), "AAL3 present must succeed: {result:?}");
+    }
+
+    #[test]
+    fn test_validate_code_bindings_acr_multiple_values_includes_aal3() {
+        let auth_code = make_auth_code_with_acr(
+            "urn:nist:authentication:assurance-level:aal1 urn:nist:authentication:assurance-level:aal3",
+        );
+        let result = validate_code_bindings(&auth_code, None, None, None);
+        assert!(
+            result.is_ok(),
+            "AAL3 among multiple ACR values must succeed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_code_bindings_acr_missing_aal3() {
+        let auth_code = make_auth_code_with_acr("urn:nist:authentication:assurance-level:aal1");
+        let result = validate_code_bindings(&auth_code, None, None, None);
+        match result.unwrap_err() {
+            ServiceError::OAuth { code, .. } => {
+                assert_eq!(code, OAuthErrorCode::UnmetAuthenticationRequirements);
+            }
+            other => panic!("Expected UnmetAuthenticationRequirements, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_code_bindings_no_acr_values() {
+        // No acr_values in the code — skip ACR check.
+        let auth_code = make_auth_code("");
+        let result = validate_code_bindings(&auth_code, None, None, None);
+        assert!(
+            result.is_ok(),
+            "Absent acr_values must skip ACR check: {result:?}"
+        );
+    }
 
     #[test]
     fn test_pkce_s256_validation() {
