@@ -582,19 +582,18 @@ mod test_utils {
         ) -> Result<HttpResponse> {
             use axum::body::Body;
 
-            // Parse URL to extract path and query
+            // Keep the absolute URI so middleware can derive @scheme/@authority in tests.
             let parsed = url::Url::parse(url).context("invalid URL")?;
-            let path_and_query = if let Some(query) = parsed.query() {
-                format!("{}?{}", parsed.path(), query)
-            } else {
-                parsed.path().to_string()
-            };
+            let uri: http::Uri = parsed
+                .as_str()
+                .parse()
+                .context("invalid URI in test client request")?;
 
             // Build request
             let method =
                 http::Method::from_bytes(method.as_bytes()).context("invalid HTTP method")?;
 
-            let mut builder = http::Request::builder().method(method).uri(&path_and_query);
+            let mut builder = http::Request::builder().method(method).uri(uri);
 
             if let Some(ct) = content_type {
                 builder = builder.header("Content-Type", ct);
