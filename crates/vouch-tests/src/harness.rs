@@ -32,7 +32,9 @@ impl TestHarness {
     /// Create a new test harness with default configuration.
     pub async fn new() -> Self {
         let state = test_utils::test_app_state().await;
-        let router = test_utils::test_router(state.clone());
+        let config = state.config();
+        let router = vouch_server::infra::router::build_app(state.clone(), &config)
+            .expect("Failed to build test app router");
         let http_client = TestHttpClient::new(router);
         let clock = Arc::new(TestClock::default());
 

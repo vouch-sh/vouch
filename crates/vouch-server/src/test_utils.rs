@@ -10,10 +10,11 @@ use arc_swap::ArcSwap;
 use axum::{
     Router,
     body::Body,
+    extract::ConnectInfo,
     http::{Request, StatusCode},
-    routing::{delete, get, post},
 };
 use secrecy::SecretString;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -21,10 +22,10 @@ use crate::crypto::document_crypto::PlaintextDocumentCrypto;
 use crate::db::audit::AuditStore;
 use crate::db::store::DocumentStore;
 use crate::db::{CreateOAuthClientParams, Pool, RegistrationSource};
+use crate::infra::router::build_app;
 
 use crate::AppState;
 use crate::config::ServerConfig;
-use crate::handlers;
 use crate::services::oidc::OidcSigningKey;
 
 /// Create an in-memory SQLite database with migrations for testing.
@@ -148,235 +149,11 @@ pub async fn test_app_state() -> Arc<AppState> {
     })
 }
 
-/// Build test router with all routes.
-pub fn test_router(state: Arc<AppState>) -> Router {
-    Router::new()
-        // Health check
-        .route("/health", get(|| async { "ok" }))
-        // OIDC Provider endpoints
-        .route(
-            "/.well-known/openid-configuration",
-            get(handlers::oidc::discovery),
-        )
-        // RFC 8414 Section 3: OAuth Authorization Server Metadata alias
-        .route(
-            "/.well-known/oauth-authorization-server",
-            get(handlers::oidc::discovery),
-        )
-        .route("/oauth/jwks", get(handlers::oidc::jwks))
-        .route(
-            "/oauth/authorize",
-            get(handlers::oidc::authorize).post(handlers::oidc::authorize_post),
-        )
-        // OIDC Core Section 5.3.1: UserInfo MUST support GET and POST
-        .route(
-            "/oauth/userinfo",
-            get(handlers::oidc::userinfo).post(handlers::oidc::userinfo),
-        )
-        .route("/oauth/revoke", post(handlers::oidc::revoke))
-        .route("/oauth/introspect", post(handlers::oidc::introspect))
-        .route("/oauth/token", post(handlers::oidc::token))
-        // FIDO2 assertion grant challenge endpoint
-        .route(
-            "/oauth/fido2/challenge",
-            post(handlers::oidc::fido2_challenge),
-        )
-        // Pushed Authorization Request (RFC 9126)
-        .route("/oauth/par", post(handlers::oidc::par))
-        // Device Authorization Grant (RFC 8628)
-        .route("/oauth/device", post(handlers::device::device_code))
-        // RFC 7591 Dynamic Client Registration
-        .route("/oauth/register", post(handlers::oidc::register))
-        // RFC 7592 Client Configuration (read + delete)
-        .route(
-            "/oauth/register/{client_id}",
-            get(handlers::oidc::read_client).delete(handlers::oidc::delete_client),
-        )
-        // Key registration routes (FAPI 2.0)
-        .route(
-            "/v1/keys/register/start",
-            post(handlers::keys::register_start),
-        )
-        .route(
-            "/v1/keys/register/complete",
-            post(handlers::keys::register_complete),
-        )
-        .route("/v1/auth/status", get(handlers::auth::status))
-        // Browser-based WebAuthn login
-        .route("/login", get(handlers::browser_login::login_page))
-        // Browser-based enrollment
-        .route("/device", get(handlers::enroll::device_verify_page))
-        .route("/device", post(handlers::enroll::device_verify_submit))
-        .route("/oauth/callback", get(handlers::enroll::oidc_callback))
-        // SAML 2.0 SP endpoints
-        .route("/saml/acs", post(handlers::saml::acs))
-        .route("/saml/metadata", get(handlers::saml::metadata))
-        .route("/logout", post(handlers::auth::logout))
-        .route(
-            "/enroll/webauthn/start",
-            post(handlers::enroll::browser_register_start),
-        )
-        .route(
-            "/enroll/webauthn/complete",
-            post(handlers::enroll::browser_register_complete),
-        )
-        // Key management (with HTTP signature verification)
-        .merge({
-            let httpsig_resolver = std::sync::Arc::new(
-                crate::infra::httpsig::OAuthClientKeyResolver::new(state.clone()),
-            );
-            Router::new()
-                .route("/v1/keys", get(handlers::keys::list_keys))
-                .route("/v1/keys/{id}", delete(handlers::keys::delete_key))
-                .route(
-                    "/v1/credentials/ssh",
-                    post(handlers::credentials::issue_ssh_certificate),
-                )
-                .route(
-                    "/v1/credentials/aws/token",
-                    get(handlers::credentials::get_aws_token),
-                )
-                .layer(axum::middleware::from_fn_with_state(
-                    httpsig_resolver,
-                    vouch_httpsig::middleware::verify_signature::<
-                        crate::infra::httpsig::OAuthClientKeyResolver,
-                    >,
-                ))
-        })
-        // Public credential endpoints (no httpsig)
-        .route(
-            "/v1/credentials/ssh/ca",
-            get(handlers::credentials::get_ssh_ca_public_key),
-        )
-        .route(
-            "/v1/credentials/ssh/krl/{serial}",
-            get(handlers::credentials::check_ssh_revocation),
-        )
-        // Org admin API (JSON, JWT Bearer auth)
-        .route(
-            "/api/v1/org/scim-tokens",
-            get(handlers::admin::list_scim_tokens).post(handlers::admin::create_scim_token),
-        )
-        .route(
-            "/api/v1/org/scim-tokens/{id}",
-            delete(handlers::admin::delete_scim_token),
-        )
-        // SCIM 2.0 endpoints (RFC 7643/7644)
-        .route(
-            "/scim/v2/ServiceProviderConfig",
-            get(handlers::scim::service_provider_config),
-        )
-        .route("/scim/v2/Schemas", get(handlers::scim::schemas))
-        .route(
-            "/scim/v2/ResourceTypes",
-            get(handlers::scim::resource_types),
-        )
-        .route(
-            "/scim/v2/Users",
-            get(handlers::scim::list_users).post(handlers::scim::create_user),
-        )
-        .route(
-            "/scim/v2/Users/{id}",
-            get(handlers::scim::get_user)
-                .patch(handlers::scim::patch_user)
-                .delete(handlers::scim::delete_user),
-        )
-        .route(
-            "/scim/v2/Groups",
-            get(handlers::scim::list_groups).post(handlers::scim::create_group),
-        )
-        .route(
-            "/scim/v2/Groups/{id}",
-            get(handlers::scim::get_group)
-                .patch(handlers::scim::patch_group)
-                .delete(handlers::scim::delete_group),
-        )
-        // OAuth Application Registration Portal
-        .route(
-            "/applications",
-            get(handlers::applications::list_applications_page),
-        )
-        .route(
-            "/applications/new",
-            get(handlers::applications::create_application_page)
-                .post(handlers::applications::create_application_form),
-        )
-        .route(
-            "/applications/{id}",
-            get(handlers::applications::detail_application_page)
-                .post(handlers::applications::update_application_form),
-        )
-        .route(
-            "/applications/{id}/delete",
-            post(handlers::applications::delete_application_form),
-        )
-        .route(
-            "/applications/{id}/secrets",
-            post(handlers::applications::add_secret_form),
-        )
-        .route(
-            "/applications/{id}/secrets/{secret_id}/delete",
-            post(handlers::applications::delete_secret_form),
-        )
-        // Applications API (JSON)
-        .route(
-            "/api/v1/applications",
-            get(handlers::applications::list_applications_api)
-                .post(handlers::applications::create_application_api),
-        )
-        .route(
-            "/api/v1/applications/{id}",
-            get(handlers::applications::get_application_api)
-                .patch(handlers::applications::update_application_api)
-                .delete(handlers::applications::delete_application_api),
-        )
-        .route(
-            "/api/v1/applications/{id}/secrets",
-            get(handlers::applications::list_secrets_api)
-                .post(handlers::applications::add_secret_api),
-        )
-        .route(
-            "/api/v1/applications/{id}/secrets/{secret_id}",
-            delete(handlers::applications::delete_secret_api),
-        )
-        .route(
-            "/api/v1/applications/{id}/revoke",
-            post(handlers::applications::revoke_tokens_api),
-        )
-        // Admin member management UI
-        .route("/admin", get(handlers::admin::admin_members_page))
-        .route(
-            "/admin/members/{id}/promote",
-            post(handlers::admin::promote_member),
-        )
-        .route(
-            "/admin/members/{id}/demote",
-            post(handlers::admin::demote_member),
-        )
-        .route(
-            "/admin/members/{id}/deactivate",
-            post(handlers::admin::deactivate_member),
-        )
-        .route(
-            "/admin/members/{id}/activate",
-            post(handlers::admin::activate_member),
-        )
-        .route(
-            "/admin/members/{id}/revoke-credentials",
-            post(handlers::admin::revoke_member_credentials),
-        )
-        .route(
-            "/admin/members/{id}/remove",
-            post(handlers::admin::remove_member),
-        )
-        .route("/admin/audit", get(handlers::admin::admin_audit_page))
-        .with_state(state)
-}
-
 /// Create test app (router + state) for handler testing.
 pub async fn test_app() -> (Router, Arc<AppState>) {
     let state = test_app_state().await;
-    let router = test_router(state.clone());
+    let config = state.config();
+    let router = build_app(state.clone(), &config).expect("Failed to build test app router");
     (router, state)
 }
 
@@ -400,6 +177,11 @@ pub async fn http_request(
     };
 
     let request = req_builder.body(body).expect("Failed to build request");
+    let (mut parts, body) = request.into_parts();
+    parts
+        .extensions
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+    let request = Request::from_parts(parts, body);
 
     let response: axum::response::Response = app
         .clone()
@@ -446,6 +228,11 @@ pub async fn http_request_full(
     };
 
     let request = req_builder.body(body).expect("Failed to build request");
+    let (mut parts, body) = request.into_parts();
+    parts
+        .extensions
+        .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 0))));
+    let request = Request::from_parts(parts, body);
 
     let response: axum::response::Response = app
         .clone()

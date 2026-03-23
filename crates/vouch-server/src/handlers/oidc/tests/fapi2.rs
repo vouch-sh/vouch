@@ -258,21 +258,6 @@ async fn create_fapi_test_client(
     (client, pkcs8_bytes)
 }
 
-/// Create a test router with `x-fapi-interaction-id` middleware applied.
-///
-/// The standard `test_app()` router omits the production middleware layers
-/// for simplicity. This wrapper adds the FAPI interaction ID layers so
-/// that header propagation can be tested.
-async fn test_app_with_request_id() -> (axum::Router, std::sync::Arc<crate::AppState>) {
-    use crate::infra::request_id;
-
-    let (router, state) = test_app().await;
-    let router_with_layers = router
-        .layer(request_id::propagate_request_id_layer())
-        .layer(request_id::set_request_id_layer());
-    (router_with_layers, state)
-}
-
 // ========================================================================
 // CRITICAL — DPoP Code Binding
 // ========================================================================
@@ -886,7 +871,7 @@ async fn test_fapi2_discovery_tls_client_certificate_field() {
 async fn test_fapi2_interaction_id_header_generated() {
     // FAPI 2.0: Server must include `x-fapi-interaction-id` in all responses.
     // This test uses a router with the production request ID middleware applied.
-    let (app, _state) = test_app_with_request_id().await;
+    let (app, _state) = test_app().await;
 
     let response = http_get_full(&app, "/.well-known/openid-configuration", &[]).await;
 
@@ -911,7 +896,7 @@ async fn test_fapi2_interaction_id_header_echoed() {
     // FAPI 2.0: If the client sends `x-fapi-interaction-id`, the server must
     // echo the same value in the response.
     // This test uses a router with the production request ID middleware applied.
-    let (app, _state) = test_app_with_request_id().await;
+    let (app, _state) = test_app().await;
 
     let client_id = "test-interaction-id-12345-abcde";
 
