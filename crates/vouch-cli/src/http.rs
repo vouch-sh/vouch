@@ -615,6 +615,14 @@ mod test_utils {
             };
 
             let request = builder.body(body).context("failed to build request")?;
+            let (mut parts, body) = request.into_parts();
+            parts
+                .extensions
+                .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                    [127, 0, 0, 1],
+                    0,
+                ))));
+            let request = http::Request::from_parts(parts, body);
 
             // Call the router - clone the inner Router for oneshot
             let router: axum::Router = (*self.router).clone();
