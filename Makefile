@@ -31,10 +31,10 @@ css-build: ## Build minified CSS for production
 	cd crates/vouch-server && tailwindcss -i styles/input.css -o static/css/output.css --minify
 
 run: ## Run the vouch CLI locally
-	RUST_LOG=debug $(CARGO) run --bin vouch -- ${ARGS}
+	RUST_LOG=warn,vouch_cli=trace $(CARGO) run --bin vouch -- ${ARGS}
 
 run-server: css-build ## Run the vouch server locally (loads .env if present)
-	$(CARGO) run --bin vouch-server -- ${ARGS}
+	RUST_LOG=info,vouch_server=debug,vouch_httpsig=trace $(CARGO) run --bin vouch-server -- ${ARGS}
 
 run-agent:
 	RUST_LOG=debug $(CARGO) run --bin vouch-agent -- --verbose --foreground

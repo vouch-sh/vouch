@@ -10,6 +10,7 @@
 //! - GET /github/success - Success page after connection
 
 use crate::db;
+use crate::handlers::HasVersion;
 use crate::handlers::session::AuthContext;
 use crate::services::error::ServiceError;
 use crate::services::integrations::github::{

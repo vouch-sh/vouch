@@ -8,6 +8,7 @@
 
 use crate::AppState;
 use crate::db::{self, CreatePendingOAuthParams};
+use crate::handlers::HasVersion;
 use crate::impl_template_response;
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization::{
