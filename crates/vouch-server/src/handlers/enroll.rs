@@ -4,6 +4,7 @@
 use super::extractors::ClientInfo;
 use crate::AppState;
 use crate::db::{self, AuthEventParams, AuthEventType};
+use crate::handlers::HasVersion;
 use crate::impl_template_response;
 use askama::Template;
 use axum::{

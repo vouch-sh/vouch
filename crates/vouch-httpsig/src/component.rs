@@ -592,29 +592,45 @@ fn extract_scheme<T>(req: &http::Request<T>) -> Result<String, HttpSigError> {
 }
 
 /// Extract the authority from a request, lowercased, with default ports omitted.
+///
+/// Tries `req.uri().host()` first (HTTP/2 or absolute-form requests), then
+/// falls back to the `Host` header (HTTP/1.1 origin-form requests) per
+/// RFC 9421 §2.2.3 and RFC 9110 §7.2.
 fn extract_authority<T>(req: &http::Request<T>) -> Result<String, HttpSigError> {
-    let host = req
-        .uri()
-        .host()
-        .map(|h| h.to_ascii_lowercase())
-        .ok_or_else(|| HttpSigError::MissingComponent("URI has no authority/host".into()))?;
+    // Try URI first (HTTP/2 or absolute-form requests)
+    if let Some(host) = req.uri().host() {
+        let host = host.to_ascii_lowercase();
+        let scheme = req.uri().scheme_str().unwrap_or("https");
+        let port = req.uri().port_u16();
 
-    let scheme = extract_scheme(req)?;
-    let port = req.uri().port_u16();
+        // Omit default ports per RFC 9421
+        let is_default_port = matches!(
+            (scheme, port),
+            ("http", Some(80)) | ("https", Some(443)) | (_, None)
+        );
 
-    // Omit default ports per RFC 9421
-    let is_default_port = matches!(
-        (scheme.as_str(), port),
-        ("http", Some(80)) | ("https", Some(443)) | (_, None)
-    );
-
-    if is_default_port {
-        Ok(host)
-    } else if let Some(p) = port {
-        Ok(format!("{host}:{p}"))
-    } else {
-        Ok(host)
+        return if is_default_port {
+            Ok(host)
+        } else if let Some(p) = port {
+            Ok(format!("{host}:{p}"))
+        } else {
+            Ok(host)
+        };
     }
+
+    // Fall back to Host header (HTTP/1.1 origin-form requests).
+    // The Host header includes the port when non-default (e.g., "localhost:3000"),
+    // so no separate default-port stripping is needed — the signer and Host header
+    // will agree on the representation.
+    let host_header = req
+        .headers()
+        .get(http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            HttpSigError::MissingComponent("URI has no authority and no Host header".into())
+        })?;
+
+    Ok(host_header.trim().to_ascii_lowercase())
 }
 
 /// Extract the path from a request URI. Empty path becomes "/".
@@ -713,6 +729,33 @@ mod tests {
         let req = make_request("GET", "http://example.com:80/path", &[]);
         let cid = ComponentIdentifier::authority();
         assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com");
+    }
+
+    #[test]
+    fn test_authority_from_host_header() {
+        // Path-only URI (HTTP/1.1 origin-form) — falls back to Host header
+        let req = make_request("POST", "/v1/credentials/ssh", &[("host", "example.com")]);
+        let cid = ComponentIdentifier::authority();
+        assert_eq!(cid.resolve_from_request(&req).unwrap(), "example.com");
+    }
+
+    #[test]
+    fn test_authority_from_host_header_with_port() {
+        let req = make_request("POST", "/v1/credentials/ssh", &[("host", "localhost:3000")]);
+        let cid = ComponentIdentifier::authority();
+        assert_eq!(cid.resolve_from_request(&req).unwrap(), "localhost:3000");
+    }
+
+    #[test]
+    fn test_authority_uri_preferred_over_host() {
+        // Full URI takes precedence over Host header
+        let req = make_request(
+            "GET",
+            "https://from-uri.com/path",
+            &[("host", "from-header.com")],
+        );
+        let cid = ComponentIdentifier::authority();
+        assert_eq!(cid.resolve_from_request(&req).unwrap(), "from-uri.com");
     }
 
     #[test]

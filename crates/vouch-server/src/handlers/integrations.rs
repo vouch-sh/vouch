@@ -8,6 +8,7 @@
 //! - EKS (via AWS IAM and EKS Access Entries)
 
 use crate::db;
+use crate::handlers::HasVersion;
 use crate::handlers::session::{
     AuthContext, extract_session_from_cookie, get_resource_auth_context,
 };

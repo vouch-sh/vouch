@@ -5,6 +5,7 @@
 //! both the web UI and API handlers.
 
 use crate::db::{AccessScope, OAuthClient};
+use crate::handlers::HasVersion;
 use crate::impl_template_response;
 use askama::Template;
 use axum::{
@@ -162,6 +163,8 @@ impl_template_response!(
     SecretAddedTemplate,
     ApplicationErrorTemplate,
 );
+
+impl HasVersion for ApplicationUnauthorizedTemplate {}
 
 // Note: ApplicationUnauthorizedTemplate needs a custom implementation
 // because it returns a different status code

@@ -3,6 +3,7 @@
 
 use crate::AppState;
 use crate::db;
+use crate::handlers::HasVersion;
 use crate::impl_template_response;
 use crate::services::error::ServiceError;
 use askama::Template;

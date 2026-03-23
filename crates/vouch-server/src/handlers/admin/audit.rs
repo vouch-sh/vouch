@@ -4,6 +4,7 @@
 use crate::AppState;
 use crate::db;
 use crate::db::audit::AuditEventFilter;
+use crate::handlers::HasVersion;
 use crate::impl_template_response;
 use askama::Template;
 use axum::extract::{Query, State};

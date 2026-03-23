@@ -30,11 +30,24 @@ pub(crate) use session::{
     clear_session_cookie, create_session_cookie, extract_session_from_cookie,
 };
 
+/// Returns the server version at compile time.
+///
+/// Implemented automatically by [`impl_template_response!`] so that
+/// Askama templates can render `{{ self.version() }}`.
+pub trait HasVersion {
+    fn version(&self) -> &'static str {
+        env!("CARGO_PKG_VERSION")
+    }
+}
+
 /// Macro to implement `IntoResponse` for Askama templates.
 ///
 /// This reduces boilerplate when implementing `IntoResponse` for HTML templates.
 /// The macro generates an implementation that renders the template and returns
 /// either the HTML content or a 500 error if rendering fails.
+///
+/// It also implements [`HasVersion`] so templates can access the server version
+/// via `{{ self.version() }}`.
 ///
 /// # Example
 ///
@@ -65,6 +78,8 @@ macro_rules! impl_template_response {
                     }
                 }
             }
+
+            impl $crate::handlers::HasVersion for $template {}
         )*
     };
 }
