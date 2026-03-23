@@ -233,7 +233,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=ci-scan
 
       - name: Run Grype vulnerability scanner
-        uses: anchore/scan-action@7037fa011853d5a11690026fb85feee79f4c946c # v7.3.2
+        uses: anchore/scan-action@e1165082ffb1fe366ebaf02d8526e7c4989ea9d2 # v7.4.0
         id: grype
         with:
           image: 'vouch-server:scan'
@@ -243,7 +243,7 @@ jobs:
           cache-db: true
 
       - name: Upload scan results to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@b1bff81932f5cdfc8695c7752dcee935dcd061c8 # v4.33.0
+        uses: github/codeql-action/upload-sarif@38697555549f1db7851b81482ff19f1fa5c4fedc # v4.34.1
         continue-on-error: true
         with:
           sarif_file: ${{ steps.grype.outputs.sarif }}
