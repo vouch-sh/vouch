@@ -119,18 +119,17 @@ pub async fn complete_login(
     };
 
     // ── 4. Get or create the certification test authenticator ─────────────
-    let authenticator_id = match get_or_create_cert_authenticator(&state, &user.id, &user.email)
-        .await
-    {
-        Ok(id) => id,
-        Err(e) => {
-            tracing::error!(
-                error = %e,
-                "Certification login: failed to get/create cert authenticator"
-            );
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    let authenticator_id =
+        match get_or_create_cert_authenticator(&state, &user.id, &user.email).await {
+            Ok(id) => id,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "Certification login: failed to get/create cert authenticator"
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
 
     // ── 5. Look up the OAuth client for lifetime calculation ──────────────
     let client = match db::get_oauth_client_by_client_id(&state.store, &pending.client_id).await {
@@ -266,8 +265,8 @@ async fn get_or_create_cert_authenticator(
         "Certification Test Authenticator",
         &dummy_credential_id,
         &dummy_public_key,
-        None, // aaguid
-        None, // user_handle
+        None,  // aaguid
+        None,  // user_handle
         false, // attestation_verified
     )
     .await?;
@@ -323,8 +322,7 @@ mod tests {
         let user =
             crate::test_utils::create_test_user(&state.store, "cert-owner-forbidden@example.com")
                 .await;
-        let client =
-            crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
 
         let pending_id = crate::db::create_pending_oauth_authorization(
             &state.store,
@@ -350,9 +348,7 @@ mod tests {
 
         let resp = crate::test_utils::http_get_full(
             &app,
-            &format!(
-                "/certification/complete-login?pending_auth={pending_id}&token=invaliddtoken"
-            ),
+            &format!("/certification/complete-login?pending_auth={pending_id}&token=invaliddtoken"),
             &[],
         )
         .await;
@@ -365,10 +361,8 @@ mod tests {
         let (app, state) = crate::test_utils::test_app_with_certification().await;
 
         let user =
-            crate::test_utils::create_test_user(&state.store, "cert-owner-valid@example.com")
-                .await;
-        let client =
-            crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
+            crate::test_utils::create_test_user(&state.store, "cert-owner-valid@example.com").await;
+        let client = crate::test_utils::create_test_oauth_client(&state.store, &user.id).await;
 
         let pending_id = crate::db::create_pending_oauth_authorization(
             &state.store,
@@ -403,9 +397,7 @@ mod tests {
 
         let resp = crate::test_utils::http_get_full(
             &app,
-            &format!(
-                "/certification/complete-login?pending_auth={pending_id}&token={token}"
-            ),
+            &format!("/certification/complete-login?pending_auth={pending_id}&token={token}"),
             &[],
         )
         .await;

@@ -166,8 +166,7 @@ pub async fn test_app_with_certification() -> (Router, Arc<AppState>) {
     let state = test_app_state().await;
     // Override config with certification token set
     let mut config = (**state.config()).clone();
-    config.certification_test_token =
-        Some(SecretString::from("test-cert-token-32bytes-padding!!"));
+    config.certification_test_token = Some(SecretString::from("test-cert-token-32bytes-padding!!"));
     state.config.store(Arc::new(config.clone()));
     let router = build_app(state.clone(), &config).expect("Failed to build test app router");
     (router, state)
