@@ -194,18 +194,12 @@ pub async fn complete_login(
 
     // ── 8. Build redirect URL ─────────────────────────────────────────────
     // RFC 6749 Section 4.1.2: code + state (if present) + iss (RFC 9207).
-    let iss = urlencoding::encode(&state.config().base_url).into_owned();
-    let code_enc = urlencoding::encode(&code).into_owned();
-
-    let redirect_url = if let Some(ref oauth_state) = pending.state {
-        let state_enc = urlencoding::encode(oauth_state).into_owned();
-        format!(
-            "{}?code={}&state={}&iss={}",
-            pending.redirect_uri, code_enc, state_enc, iss
-        )
-    } else {
-        format!("{}?code={}&iss={}", pending.redirect_uri, code_enc, iss)
-    };
+    let redirect_url = build_certification_redirect(
+        &pending.redirect_uri,
+        &code,
+        pending.state.as_deref(),
+        &state.config().base_url,
+    );
 
     tracing::info!(
         pending_auth = %query.pending_auth,
@@ -214,6 +208,28 @@ pub async fn complete_login(
     );
 
     Redirect::to(&redirect_url).into_response()
+}
+
+fn build_certification_redirect(
+    redirect_uri: &str,
+    code: &str,
+    oauth_state: Option<&str>,
+    issuer: &str,
+) -> String {
+    match url::Url::parse(redirect_uri) {
+        Ok(mut url) => {
+            {
+                let mut query = url.query_pairs_mut();
+                query.append_pair("code", code);
+                if let Some(state_param) = oauth_state {
+                    query.append_pair("state", state_param);
+                }
+                query.append_pair("iss", issuer);
+            }
+            url.to_string()
+        }
+        Err(_) => redirect_uri.to_string(),
+    }
 }
 
 /// Get the certification test user, creating it if it doesn't exist.
@@ -313,6 +329,27 @@ mod tests {
 
         let valid: bool = expected.as_bytes().ct_eq(token.as_bytes()).into();
         assert!(!valid, "Different pending_auth must not match");
+    }
+
+    #[test]
+    fn test_build_certification_redirect_preserves_existing_query() {
+        let redirect = build_certification_redirect(
+            "https://example.com/callback?existing=1",
+            "code123",
+            Some("state123"),
+            "https://issuer.example.com",
+        );
+
+        let url = url::Url::parse(&redirect).expect("redirect must be a valid URL");
+        let query_pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
+
+        assert!(query_pairs.contains(&(String::from("existing"), String::from("1"))));
+        assert!(query_pairs.contains(&(String::from("code"), String::from("code123"))));
+        assert!(query_pairs.contains(&(String::from("state"), String::from("state123"))));
+        assert!(query_pairs.contains(&(
+            String::from("iss"),
+            String::from("https://issuer.example.com")
+        )));
     }
 
     #[tokio::test]

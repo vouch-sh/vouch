@@ -376,7 +376,13 @@ jobs:
 
           for i in $(seq 20); do
             if curl -sf http://localhost:3000/health; then
+              echo "Vouch is healthy after tunnel restart"
               break
+            fi
+            if [ "$i" -eq 20 ]; then
+              echo "ERROR: Restarted vouch did not become healthy in time"
+              docker logs vouch2
+              exit 1
             fi
             sleep 2
           done
