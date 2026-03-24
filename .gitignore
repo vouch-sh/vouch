@@ -81,6 +81,7 @@ docs/book/
 scripts/*
 !scripts/certification/
 !scripts/certification/**
+scripts/certification/__pycache__/
 .local/
 fuzz/corpus/
 fuzz/artifacts/
