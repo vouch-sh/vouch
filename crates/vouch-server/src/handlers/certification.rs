@@ -20,6 +20,7 @@ use subtle::ConstantTimeEq;
 use crate::{
     AppState, db,
     handlers::browser_login::hmac_sha256_base64url,
+    handlers::oidc::build_authorization_success_redirect_url,
     services::oidc::{
         authorization::{AuthorizationCodeParams, CodeChallengeMethod, issue_authorization_code},
         fapi::auth_code_lifetime_seconds,
@@ -213,17 +214,8 @@ fn build_certification_redirect(
     oauth_state: Option<&str>,
     issuer: &str,
 ) -> anyhow::Result<String> {
-    let mut url = url::Url::parse(redirect_uri)
-        .map_err(|e| anyhow::anyhow!("failed to parse redirect_uri '{redirect_uri}': {e}"))?;
-    {
-        let mut query = url.query_pairs_mut();
-        query.append_pair("code", code);
-        if let Some(state_param) = oauth_state {
-            query.append_pair("state", state_param);
-        }
-        query.append_pair("iss", issuer);
-    }
-    Ok(url.to_string())
+    build_authorization_success_redirect_url(redirect_uri, code, oauth_state, issuer)
+        .map_err(|e| anyhow::anyhow!("failed to parse redirect_uri '{redirect_uri}': {e}"))
 }
 
 /// Get the certification test user, creating it if it doesn't exist.
