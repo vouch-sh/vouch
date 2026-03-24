@@ -31,6 +31,36 @@ mod register;
 mod token;
 mod userinfo;
 
+/// Build an OAuth authorization success redirect URL (`code`, optional `state`, and `iss`).
+pub(crate) fn build_authorization_success_redirect_url(
+    redirect_uri: &str,
+    code: &str,
+    state: Option<&str>,
+    issuer: &str,
+) -> Result<String, url::ParseError> {
+    let mut params = vec![("code", code)];
+    if let Some(state_param) = state {
+        params.push(("state", state_param));
+    }
+    params.push(("iss", issuer));
+    build_redirect_url_with_params(redirect_uri, &params)
+}
+
+/// Build a redirect URL by appending query parameters to a validated redirect URI.
+pub(crate) fn build_redirect_url_with_params(
+    redirect_uri: &str,
+    params: &[(&str, &str)],
+) -> Result<String, url::ParseError> {
+    let mut url = url::Url::parse(redirect_uri)?;
+    {
+        let mut query = url.query_pairs_mut();
+        for (key, value) in params {
+            query.append_pair(key, value);
+        }
+    }
+    Ok(url.to_string())
+}
+
 // Re-export handler functions
 pub use authorize::{authorize, authorize_post};
 pub use discovery::{discovery, jwks};

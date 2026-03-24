@@ -6,6 +6,7 @@
 //! - RFC 9207 (Authorization Server Issuer Identification)
 //! - RFC 9700 (OAuth 2.0 Security Best Current Practice)
 
+use super::{build_authorization_success_redirect_url, build_redirect_url_with_params};
 use crate::AppState;
 use crate::db::{self, CreatePendingOAuthParams};
 use crate::handlers::HasVersion;
@@ -1199,16 +1200,19 @@ async fn issue_code_and_redirect(
 ) -> Response {
     match issue_authorization_code(state, code_params).await {
         Ok(code) => {
-            // RFC 9207: Include iss parameter in authorization response
-            let mut params = vec![("code", code.as_str())];
-            let state_owned;
-            if let Some(state_param) = oauth_state {
-                state_owned = state_param.to_string();
-                params.push(("state", &state_owned));
-            }
             let base_url = state.config().base_url.clone();
-            params.push(("iss", &base_url));
-            build_authorization_redirect(redirect_uri, &params)
+            match build_authorization_success_redirect_url(
+                redirect_uri,
+                code.as_str(),
+                oauth_state,
+                &base_url,
+            ) {
+                Ok(url) => Redirect::to(&url).into_response(),
+                Err(_) => {
+                    // Fallback: should not happen since redirect_uri was already validated
+                    Redirect::to(redirect_uri).into_response()
+                }
+            }
         }
         Err(_) => oauth_error_redirect(
             redirect_uri,
@@ -1226,16 +1230,8 @@ async fn issue_code_and_redirect(
 /// axum's `Redirect::to()` produces a 303 See Other, which is correct for
 /// FAPI 2.0 and the OAuth best-practice POST-redirect-GET pattern (RFC 9700).
 fn build_authorization_redirect(redirect_uri: &str, params: &[(&str, &str)]) -> Response {
-    match url::Url::parse(redirect_uri) {
-        Ok(mut url) => {
-            {
-                let mut query = url.query_pairs_mut();
-                for (key, value) in params {
-                    query.append_pair(key, value);
-                }
-            }
-            Redirect::to(url.as_str()).into_response()
-        }
+    match build_redirect_url_with_params(redirect_uri, params) {
+        Ok(url) => Redirect::to(&url).into_response(),
         Err(_) => {
             // Fallback: should not happen since redirect_uri was already validated
             Redirect::to(redirect_uri).into_response()
