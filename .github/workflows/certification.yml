@@ -260,20 +260,6 @@ jobs:
             sleep 2
           done
 
-      - name: Register OAuth client via DCR
-        env:
-          PLAN: ${{ matrix.plan }}
-          CLIENT_ALIAS: ${{ matrix.client-alias }}
-        run: |
-          # cryptography is only needed for FAPI 2.0 (EC key generation)
-          if [[ "$PLAN" == *"fapi2"* ]]; then
-            pip install --quiet cryptography
-          fi
-          python3 scripts/certification/register_client.py \
-            --plan "$PLAN" \
-            --client-alias "$CLIENT_ALIAS" \
-            --vouch-url http://localhost:3000
-
       - name: Start cloudflared tunnel
         env:
           VOUCH_CERTIFICATION_TEST_TOKEN: ${{ secrets.VOUCH_CERTIFICATION_TEST_TOKEN }}
@@ -331,6 +317,20 @@ jobs:
             fi
             sleep 2
           done
+
+      - name: Register OAuth client via DCR
+        env:
+          PLAN: ${{ matrix.plan }}
+          CLIENT_ALIAS: ${{ matrix.client-alias }}
+        run: |
+          # cryptography is only needed for FAPI 2.0 (EC key generation)
+          if [[ "$PLAN" == *"fapi2"* ]]; then
+            pip install --quiet cryptography
+          fi
+          python3 scripts/certification/register_client.py \
+            --plan "$PLAN" \
+            --client-alias "$CLIENT_ALIAS" \
+            --vouch-url http://localhost:3000
 
       - name: Run certification
         env:

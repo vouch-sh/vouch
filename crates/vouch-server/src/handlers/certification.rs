@@ -182,7 +182,7 @@ pub async fn complete_login(
 
     // ── 8. Build redirect URL ─────────────────────────────────────────────
     // RFC 6749 Section 4.1.2: code + state (if present) + iss (RFC 9207).
-    let redirect_url = match build_certification_redirect(
+    let redirect_url = match build_authorization_success_redirect_url(
         &pending.redirect_uri,
         &code,
         pending.state.as_deref(),
@@ -206,16 +206,6 @@ pub async fn complete_login(
     );
 
     Redirect::to(&redirect_url).into_response()
-}
-
-fn build_certification_redirect(
-    redirect_uri: &str,
-    code: &str,
-    oauth_state: Option<&str>,
-    issuer: &str,
-) -> anyhow::Result<String> {
-    build_authorization_success_redirect_url(redirect_uri, code, oauth_state, issuer)
-        .map_err(|e| anyhow::anyhow!("failed to parse redirect_uri '{redirect_uri}': {e}"))
 }
 
 /// Get the certification test user, creating it if it doesn't exist.
@@ -335,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_build_certification_redirect_preserves_existing_query() {
-        let redirect = build_certification_redirect(
+        let redirect = build_authorization_success_redirect_url(
             "https://example.com/callback?existing=1",
             "code123",
             Some("state123"),
@@ -357,7 +347,7 @@ mod tests {
 
     #[test]
     fn test_build_certification_redirect_invalid_uri_returns_error() {
-        let result = build_certification_redirect(
+        let result = build_authorization_success_redirect_url(
             "://not-a-valid-url",
             "code123",
             Some("state123"),
