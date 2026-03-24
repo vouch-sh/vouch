@@ -54,13 +54,18 @@ def load_config(
 ) -> dict:
     """Load and substitute the config template."""
     raw = config_path.read_text()
+    # Placeholders embedded in JSON strings must be escaped as JSON string
+    # fragments so special characters (", \, newlines, etc.) cannot break JSON.
+    def json_escape_fragment(value: str) -> str:
+        return json.dumps(value)[1:-1]
+
     substitutions = {
-        "{BASEURL}": base_url.rstrip("/"),
-        "{CLIENT_ID}": client_id,
-        "{CLIENT_SECRET}": client_secret,
+        "{BASEURL}": json_escape_fragment(base_url.rstrip("/")),
+        "{CLIENT_ID}": json_escape_fragment(client_id),
+        "{CLIENT_SECRET}": json_escape_fragment(client_secret),
         "{CLIENT_JWKS}": client_jwks or "null",
-        "{CONFORMANCE_SERVER}": conformance_server.rstrip("/"),
-        "{VERSION}": version or "dev",
+        "{CONFORMANCE_SERVER}": json_escape_fragment(conformance_server.rstrip("/")),
+        "{VERSION}": json_escape_fragment(version or "dev"),
     }
     for placeholder, value in substitutions.items():
         raw = raw.replace(placeholder, value)
