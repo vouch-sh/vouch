@@ -303,7 +303,9 @@ jobs:
 
           # Restart vouch with the public tunnel URL as base_url so that
           # discovery documents and redirect URIs use the public hostname.
-          RP_ID=$(echo "$TUNNEL_URL" | sed 's|https://||')
+          # NOTE: $TUNNEL_URL (written to $GITHUB_ENV above) is only available
+          # in subsequent steps; use $URL here within the same step.
+          RP_ID=$(echo "$URL" | sed 's|https://||')
           docker stop vouch
 
           docker run -d --name vouch2 \
@@ -312,7 +314,7 @@ jobs:
             -e VOUCH_RP_ID="${RP_ID}" \
             -e VOUCH_RP_NAME="Vouch Cert Test" \
             -e VOUCH_JWT_SECRET="${JWT_SECRET}" \
-            -e VOUCH_BASE_URL="${TUNNEL_URL}" \
+            -e VOUCH_BASE_URL="${URL}" \
             -e VOUCH_CERTIFICATION_TEST_TOKEN="${VOUCH_CERTIFICATION_TEST_TOKEN}" \
             -v /tmp/vouch-data:/data \
             vouch-server:cert
