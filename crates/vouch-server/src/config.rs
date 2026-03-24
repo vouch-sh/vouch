@@ -302,6 +302,12 @@ pub struct Args {
     #[arg(long, env = "VOUCH_METRICS_BEARER_TOKEN")]
     pub metrics_bearer_token: Option<String>,
 
+    /// Secret token for the certification test-mode login endpoint.
+    /// When set, enables GET /certification/complete-login for automated OpenID conformance
+    /// testing. MUST NOT be set in production deployments.
+    #[arg(long, env = "VOUCH_CERTIFICATION_TEST_TOKEN")]
+    pub certification_test_token: Option<String>,
+
     /// Maximum number of database connections in the pool.
     #[arg(long, env = "VOUCH_DB_MAX_CONNECTIONS", default_value = "25")]
     pub db_max_connections: u32,
@@ -454,6 +460,10 @@ pub struct ServerConfig {
     /// Bearer token for /metrics endpoint access control.
     /// If `None`, the /metrics endpoint is not exposed.
     pub metrics_bearer_token: Option<SecretString>,
+    /// Secret token for the certification test-mode endpoint.
+    /// When `Some`, `GET /certification/complete-login` is registered.
+    /// MUST NOT be set in production deployments.
+    pub certification_test_token: Option<SecretString>,
     /// Database pool configuration.
     pub pool_config: crate::db::pool::PoolConfig,
     /// Maximum entries in the session lookup cache.
@@ -575,6 +585,7 @@ impl ServerConfig {
             log_format,
             trusted_proxies,
             metrics_bearer_token: args.metrics_bearer_token.map(SecretString::from),
+            certification_test_token: args.certification_test_token.map(SecretString::from),
             pool_config: crate::db::pool::PoolConfig {
                 max_connections: args.db_max_connections,
                 min_connections: args.db_min_connections,

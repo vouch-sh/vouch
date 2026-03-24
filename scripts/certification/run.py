@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: Apache-2.0 OR MIT
+"""
+Run an OpenID conformance test plan against a Vouch server.
+
+Orchestrates the full certification workflow:
+  1. Load config template and substitute {BASEURL}, {CLIENT_ID}, {CLIENT_SECRET}
+  2. Create a test plan (with "publish": "everything" for public results)
+  3. Run each module sequentially, collecting results
+  4. Export HTML report and ZIP archive
+  5. Optionally create a formal certification package (--publish)
+  6. Print a summary table; exit non-zero if any module FAILED
+
+Usage:
+    python3 run.py \\
+        --plan oidcc-basic-certification-test-plan \\
+        --config config/oidcc-basic.json \\
+        --base-url https://xxx.trycloudflare.com \\
+        --client-id <CLIENT_ID> \\
+        --client-secret <CLIENT_SECRET> \\
+        [--export-dir /tmp/cert-results] \\
+        [--publish]
+
+Environment variables:
+    CONFORMANCE_SERVER   Base URL of the conformance server (default: https://www.certification.openid.net/)
+    CONFORMANCE_TOKEN    Bearer token for the conformance API
+"""
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import sys
+from pathlib import Path
+
+from conformance import ConformanceClient, ConformanceError
+
+log = logging.getLogger(__name__)
+
+# Result values that count as "passed enough" (WARNING is still OK for cert)
+PASSING_RESULTS = {"PASSED", "WARNING", "REVIEW", "SKIPPED"}
+FAILING_RESULTS = {"FAILED"}
+
+
+def load_config(
+    config_path: Path,
+    base_url: str,
+    client_id: str,
+    client_secret: str,
+    conformance_server: str,
+) -> dict:
+    """Load and substitute the config template."""
+    raw = config_path.read_text()
+
+    # Strip trailing slash for clean URL construction
+    base_url = base_url.rstrip("/")
+    conformance_server = conformance_server.rstrip("/")
+
+    raw = raw.replace("{BASEURL}", base_url)
+    raw = raw.replace("{CLIENT_ID}", client_id)
+    raw = raw.replace("{CLIENT_SECRET}", client_secret)
+    raw = raw.replace("{CONFORMANCE_SERVER}", conformance_server)
+
+    config = json.loads(raw)
+    # Always publish results publicly (like Authlete does)
+    config.setdefault("publish", "everything")
+    return config
+
+
+def print_summary(results: list[dict], plan_id: str, conformance_server: str) -> None:
+    """Print a formatted summary table of module results."""
+    width = 60
+    print("\n" + "=" * width)
+    print("OpenID Conformance Test Results")
+    print("=" * width)
+
+    counts: dict[str, int] = {}
+    for r in results:
+        result = r.get("result", "UNKNOWN")
+        counts[result] = counts.get(result, 0) + 1
+        icon = "✓" if result in PASSING_RESULTS else "✗"
+        print(f"  {icon} [{result:<8}] {r['name']}")
+
+    print("-" * width)
+    summary_parts = [f"{v} {k}" for k, v in sorted(counts.items())]
+    print("  " + " | ".join(summary_parts))
+    print("=" * width)
+    print(f"\nPublic results: {conformance_server}/plans.html?public=true")
+    print(f"Plan ID: {plan_id}\n")
+
+
+async def run_plan(
+    plan_name: str,
+    config: dict,
+    variant: dict | None,
+    export_dir: Path,
+    publish: bool,
+    conformance_server: str,
+    conformance_token: str,
+    module_timeout: int,
+) -> bool:
+    """Run all modules in a test plan. Returns True if all passed."""
+    async with ConformanceClient(server=conformance_server, token=conformance_token) as client:
+        # Create the plan
+        plan_id = await client.create_test_plan(plan_name, config, variant)
+        log.info("Plan ID: %s", plan_id)
+
+        # Get module list
+        modules = await client.get_plan_modules(plan_id)
+        log.info("Plan has %d modules", len(modules))
+
+        results = []
+        any_failed = False
+
+        # Run each module sequentially
+        for module in modules:
+            module_name = module.get("testModule") or module.get("name", "unknown")
+            log.info("Running module: %s", module_name)
+
+            try:
+                module_id = await client.start_test_module(plan_id, module_name)
+                info = await client.wait_for_state(
+                    module_id, timeout=module_timeout
+                )
+                result = info.get("result", "UNKNOWN")
+            except ConformanceError as e:
+                log.error("Module %s error: %s", module_name, e)
+                result = "FAILED"
+
+            results.append({"name": module_name, "result": result})
+
+            if result in FAILING_RESULTS:
+                any_failed = True
+                log.error("FAILED: %s", module_name)
+            else:
+                log.info("%s: %s", result, module_name)
+
+        # Export results
+        try:
+            await client.export_html(plan_id, export_dir)
+            await client.export_results(plan_id, export_dir)
+        except ConformanceError as e:
+            log.warning("Failed to export results: %s", e)
+
+        # Create certification package if all passed and --publish requested
+        if publish and not any_failed:
+            try:
+                pkg = await client.create_certification_package(plan_id)
+                log.info("Certification package created: %s", pkg)
+            except ConformanceError as e:
+                log.warning("Failed to create certification package: %s", e)
+
+        print_summary(results, plan_id, conformance_server)
+        return not any_failed
+
+
+def parse_variant(variant_str: str | None) -> dict | None:
+    """Parse a JSON variant string into a dict."""
+    if not variant_str:
+        return None
+    return json.loads(variant_str)
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+
+    parser = argparse.ArgumentParser(description="Run OpenID conformance tests against Vouch")
+    parser.add_argument(
+        "--plan",
+        required=True,
+        help="Conformance suite plan name (e.g. oidcc-basic-certification-test-plan)",
+    )
+    parser.add_argument(
+        "--config",
+        required=True,
+        type=Path,
+        help="Path to plan config JSON template",
+    )
+    parser.add_argument(
+        "--base-url",
+        required=True,
+        help="Public base URL of the Vouch server (e.g. https://xxx.trycloudflare.com)",
+    )
+    parser.add_argument(
+        "--client-id",
+        default=os.environ.get("VOUCH_CLIENT_ID", ""),
+        help="OAuth client ID (or set VOUCH_CLIENT_ID env var)",
+    )
+    parser.add_argument(
+        "--client-secret",
+        default=os.environ.get("VOUCH_CLIENT_SECRET", ""),
+        help="OAuth client secret (or set VOUCH_CLIENT_SECRET env var)",
+    )
+    parser.add_argument(
+        "--variant",
+        default=None,
+        help='Variant JSON (e.g. \'{"sender_constrained_access_tokens": "dpop"}\')',
+    )
+    parser.add_argument(
+        "--export-dir",
+        default=Path("/tmp/cert-results"),
+        type=Path,
+        help="Directory for exported test results (default: /tmp/cert-results)",
+    )
+    parser.add_argument(
+        "--publish",
+        action="store_true",
+        help="Create a formal certification package if all tests pass",
+    )
+    parser.add_argument(
+        "--module-timeout",
+        type=int,
+        default=300,
+        help="Seconds to wait for each module to complete (default: 300)",
+    )
+    args = parser.parse_args()
+
+    conformance_server = os.environ.get(
+        "CONFORMANCE_SERVER", "https://www.certification.openid.net/"
+    )
+    conformance_token = os.environ.get("CONFORMANCE_TOKEN", "")
+    if not conformance_token:
+        print("ERROR: CONFORMANCE_TOKEN environment variable is required", file=sys.stderr)
+        sys.exit(1)
+
+    config = load_config(
+        args.config,
+        args.base_url,
+        args.client_id,
+        args.client_secret,
+        conformance_server,
+    )
+
+    variant = parse_variant(args.variant)
+
+    success = asyncio.run(
+        run_plan(
+            plan_name=args.plan,
+            config=config,
+            variant=variant,
+            export_dir=args.export_dir,
+            publish=args.publish,
+            conformance_server=conformance_server,
+            conformance_token=conformance_token,
+            module_timeout=args.module_timeout,
+        )
+    )
+
+    sys.exit(0 if success else 1)
+
+
+if __name__ == "__main__":
+    main()

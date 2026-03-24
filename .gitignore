@@ -75,6 +75,8 @@ docs/book/
 .claude/worktrees
 .mcp.json
 scripts/*
+!scripts/certification/
+!scripts/certification/**
 .local/
 fuzz/corpus/
 fuzz/artifacts/

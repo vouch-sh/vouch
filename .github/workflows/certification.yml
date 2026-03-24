@@ -1,0 +1,428 @@
+name: OpenID Certification
+
+# Runs in two modes:
+#
+# 1. Release mode (workflow_run after Release, or workflow_dispatch with a tag):
+#    - Pulls the pre-built image from GHCR
+#    - Publishes results publicly at certification.openid.net
+#
+# 2. Dev mode (push to main, or workflow_dispatch with a branch ref):
+#    - Builds the image from source inline
+#    - Runs certification WITHOUT publishing results
+#    - Lets you iterate on spec compliance without cutting a release
+#
+# Required secrets:
+#   CONFORMANCE_TOKEN             — API token from certification.openid.net
+#   VOUCH_CERTIFICATION_TEST_TOKEN — Random 32-byte hex secret (openssl rand -hex 32)
+
+on:
+  push:
+    branches: [main]
+  workflow_run: # zizmor: ignore[dangerous-triggers]
+    workflows: ["Release"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to certify (e.g., v0.1.0). Pulls from GHCR and publishes results.'
+        required: false
+        type: string
+      ref:
+        description: 'Branch or SHA to build and test (e.g., main). Does NOT publish results.'
+        required: false
+        default: 'main'
+        type: string
+      publish:
+        description: 'Publish results publicly (only meaningful with a tag)'
+        required: false
+        default: false
+        type: boolean
+
+permissions: {}
+
+jobs:
+  # ── Determine what to build/pull and whether to publish ──────────────────
+  prepare:
+    name: Prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    if: |
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success')
+    outputs:
+      # "release" — pull pre-built image from GHCR, publish results
+      # "dev"     — build image from source, do not publish
+      mode: ${{ steps.mode.outputs.mode }}
+      # Docker image reference to pull (release mode only)
+      image: ${{ steps.image.outputs.image }}
+      # Git ref to checkout
+      ref: ${{ steps.ref.outputs.ref }}
+      # Whether to publish certification results
+      publish: ${{ steps.mode.outputs.publish }}
+      # Short label for artifacts (version tag or short SHA)
+      label: ${{ steps.label.outputs.label }}
+
+    steps:
+      - name: Determine mode, ref, and image
+        id: mode
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_PUBLISH: ${{ github.event.inputs.publish }}
+          WR_CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_TAG" ]; then
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+            echo "publish=${INPUT_PUBLISH}" >> "$GITHUB_OUTPUT"
+          else
+            # push to main or workflow_dispatch with a ref (no tag)
+            echo "mode=dev" >> "$GITHUB_OUTPUT"
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve git ref
+        id: ref
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          INPUT_REF: ${{ github.event.inputs.ref }}
+          WR_HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          PUSH_SHA: ${{ github.sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            echo "ref=${WR_HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_TAG" ]; then
+            echo "ref=refs/tags/${INPUT_TAG}" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "ref=${INPUT_REF}" >> "$GITHUB_OUTPUT"
+          else
+            # push to main
+            echo "ref=${PUSH_SHA}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve GHCR image reference (release mode)
+        id: image
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          WR_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            TAG="$WR_HEAD_BRANCH"
+            VERSION="${TAG#v}"
+            echo "image=ghcr.io/${REPOSITORY}:${VERSION}" >> "$GITHUB_OUTPUT"
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ] && [ -n "$INPUT_TAG" ]; then
+            VERSION="${INPUT_TAG#v}"
+            echo "image=ghcr.io/${REPOSITORY}:${VERSION}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Validate release tag format
+        if: steps.mode.outputs.mode == 'release'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          WR_HEAD_BRANCH: ${{ github.event.workflow_run.head_branch }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            TAG="$WR_HEAD_BRANCH"
+          else
+            TAG="$INPUT_TAG"
+          fi
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "ERROR: Invalid tag format '${TAG}'"
+            exit 1
+          fi
+
+      - name: Compute label for artifact naming
+        id: label
+        env:
+          MODE: ${{ steps.mode.outputs.mode }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          REF: ${{ steps.ref.outputs.ref }}
+        run: |
+          if [ "$MODE" = "release" ]; then
+            # Extract version from image reference (ghcr.io/org/repo:1.2.3 → 1.2.3)
+            LABEL=$(echo "$IMAGE" | sed 's/.*://')
+          else
+            LABEL=$(echo "$REF" | cut -c1-12)
+          fi
+          echo "label=${LABEL}" >> "$GITHUB_OUTPUT"
+
+  # ── Run certification plans (matrix: one job per plan) ───────────────────
+  certification:
+    name: ${{ matrix.plan-label }} (${{ needs.prepare.outputs.mode }})
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - plan: oidcc-basic-certification-test-plan
+            plan-label: OIDC Basic OP
+            config: scripts/certification/config/oidcc-basic.json
+            client-alias: vouch-oidcc-basic
+          - plan: fapi2-security-profile-id2-test-plan
+            plan-label: FAPI 2.0 Security Profile
+            config: scripts/certification/config/fapi2-security-profile.json
+            client-alias: vouch-fapi2
+            variant: '{"sender_constrained_access_tokens":"dpop","client_auth_type":"private_key_jwt","fapi_response_mode":"plain_response"}'
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.prepare.outputs.ref }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      # ── Release mode: pull pre-built image ─────────────────────────────
+      - name: Log in to GHCR
+        if: needs.prepare.outputs.mode == 'release'
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Pull vouch-server image (release mode)
+        if: needs.prepare.outputs.mode == 'release'
+        env:
+          IMAGE: ${{ needs.prepare.outputs.image }}
+        run: |
+          docker pull "$IMAGE"
+          docker tag "$IMAGE" vouch-server:cert
+
+      # ── Dev mode: build image from source ──────────────────────────────
+      - name: Set up Docker Buildx (dev mode)
+        if: needs.prepare.outputs.mode == 'dev'
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
+
+      - name: Build vouch-server image (dev mode)
+        if: needs.prepare.outputs.mode == 'dev'
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150eda0754b6e053 # v6.15.0
+        with:
+          context: .
+          push: false
+          load: true
+          tags: vouch-server:cert
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Common: spin up vouch and run tests ─────────────────────────────
+      - name: Start vouch server in certification mode
+        env:
+          VOUCH_CERTIFICATION_TEST_TOKEN: ${{ secrets.VOUCH_CERTIFICATION_TEST_TOKEN }}
+        run: |
+          mkdir -p /tmp/vouch-data
+          JWT_SECRET=$(openssl rand -hex 32)
+
+          docker run -d --name vouch \
+            -p 3000:3000 \
+            -e DATABASE_URL="sqlite:///data/vouch.db" \
+            -e VOUCH_RP_ID="localhost" \
+            -e VOUCH_RP_NAME="Vouch Cert Test" \
+            -e VOUCH_JWT_SECRET="${JWT_SECRET}" \
+            -e VOUCH_BASE_URL="http://localhost:3000" \
+            -e VOUCH_CERTIFICATION_TEST_TOKEN="${VOUCH_CERTIFICATION_TEST_TOKEN}" \
+            -v /tmp/vouch-data:/data \
+            vouch-server:cert
+
+      - name: Wait for vouch to be healthy
+        run: |
+          for i in $(seq 30); do
+            if curl -sf http://localhost:3000/health; then
+              echo "Vouch is healthy"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "ERROR: Vouch did not become healthy in time"
+              docker logs vouch
+              exit 1
+            fi
+            sleep 2
+          done
+
+      - name: Register OAuth client via DCR
+        env:
+          PLAN: ${{ matrix.plan }}
+          CLIENT_ALIAS: ${{ matrix.client-alias }}
+        run: |
+          if echo "$PLAN" | grep -q "fapi2"; then
+            # Generate ES256 key pair for FAPI 2.0 private_key_jwt auth
+            openssl ecparam -genkey -name prime256v1 -noout -out /tmp/client.key
+            openssl ec -in /tmp/client.key -pubout -out /tmp/client.pub
+
+            pip install --quiet cryptography
+            python3 - <<'PYEOF'
+          import json, base64
+          from cryptography.hazmat.primitives import serialization
+          from cryptography.hazmat.primitives.asymmetric import ec
+
+          with open("/tmp/client.key", "rb") as f:
+              private_key = serialization.load_pem_private_key(f.read(), password=None)
+
+          pub = private_key.public_key().public_numbers()
+          priv_numbers = private_key.private_numbers()
+
+          def b64url(n, length=32):
+              return base64.urlsafe_b64encode(n.to_bytes(length, 'big')).rstrip(b'=').decode()
+
+          public_jwk = {"kty": "EC", "crv": "P-256", "x": b64url(pub.x), "y": b64url(pub.y),
+                        "kid": "cert-key-1", "use": "sig", "alg": "ES256"}
+          private_jwk = {**public_jwk, "d": b64url(priv_numbers.private_value)}
+
+          with open("/tmp/client-public-jwks.json", "w") as f:
+              json.dump({"keys": [public_jwk]}, f)
+          with open("/tmp/client-private-jwk.json", "w") as f:
+              json.dump(private_jwk, f)
+          print("JWK generated successfully")
+          PYEOF
+
+            CONFORMANCE_REDIRECT="https://www.certification.openid.net/test/a/${CLIENT_ALIAS}/callback"
+            JWKS=$(cat /tmp/client-public-jwks.json)
+            PAYLOAD=$(python3 -c "
+          import json
+          print(json.dumps({
+            'redirect_uris': ['${CONFORMANCE_REDIRECT}'],
+            'token_endpoint_auth_method': 'private_key_jwt',
+            'grant_types': ['authorization_code'],
+            'response_types': ['code'],
+            'scope': 'openid',
+            'jwks': $(cat /tmp/client-public-jwks.json)
+          }))
+          ")
+          else
+            CONFORMANCE_REDIRECT="https://www.certification.openid.net/test/a/${CLIENT_ALIAS}/callback"
+            PAYLOAD=$(python3 -c "
+          import json
+          print(json.dumps({
+            'redirect_uris': ['${CONFORMANCE_REDIRECT}'],
+            'token_endpoint_auth_method': 'client_secret_basic',
+            'grant_types': ['authorization_code'],
+            'response_types': ['code'],
+            'scope': 'openid email'
+          }))
+          ")
+          fi
+
+          RESPONSE=$(curl -sf -X POST http://localhost:3000/oauth/register \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")
+
+          echo "DCR response: $RESPONSE"
+          python3 -c "
+          import json, sys, os
+          data = json.loads('$RESPONSE')
+          with open(os.environ['GITHUB_ENV'], 'a') as f:
+              f.write(f\"CLIENT_ID={data['client_id']}\n\")
+              f.write(f\"CLIENT_SECRET={data.get('client_secret', '')}\n\")
+          "
+
+      - name: Start cloudflared tunnel
+        env:
+          VOUCH_CERTIFICATION_TEST_TOKEN: ${{ secrets.VOUCH_CERTIFICATION_TEST_TOKEN }}
+        run: |
+          curl -fsSL \
+            https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+            -o /usr/local/bin/cloudflared
+          chmod +x /usr/local/bin/cloudflared
+
+          cloudflared tunnel --url http://localhost:3000 --no-autoupdate \
+            2>&1 | tee /tmp/cf.log &
+
+          for i in $(seq 30); do
+            URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' /tmp/cf.log | head -1)
+            if [ -n "$URL" ]; then
+              echo "Tunnel URL: $URL"
+              echo "TUNNEL_URL=${URL}" >> "$GITHUB_ENV"
+              break
+            fi
+            if [ "$i" -eq 30 ]; then
+              echo "ERROR: Tunnel did not start"
+              cat /tmp/cf.log
+              exit 1
+            fi
+            sleep 2
+          done
+
+          # Restart vouch with the public tunnel URL as base_url so that
+          # discovery documents and redirect URIs use the public hostname.
+          RP_ID=$(echo "$TUNNEL_URL" | sed 's|https://||')
+          docker stop vouch
+          JWT_SECRET=$(openssl rand -hex 32)
+
+          docker run -d --name vouch2 \
+            -p 3000:3000 \
+            -e DATABASE_URL="sqlite:///data/vouch.db" \
+            -e VOUCH_RP_ID="${RP_ID}" \
+            -e VOUCH_RP_NAME="Vouch Cert Test" \
+            -e VOUCH_JWT_SECRET="${JWT_SECRET}" \
+            -e VOUCH_BASE_URL="${TUNNEL_URL}" \
+            -e VOUCH_CERTIFICATION_TEST_TOKEN="${VOUCH_CERTIFICATION_TEST_TOKEN}" \
+            -v /tmp/vouch-data:/data \
+            vouch-server:cert
+
+          for i in $(seq 20); do
+            if curl -sf http://localhost:3000/health; then
+              break
+            fi
+            sleep 2
+          done
+
+      - name: Run certification
+        env:
+          CONFORMANCE_SERVER: https://www.certification.openid.net/
+          CONFORMANCE_TOKEN: ${{ secrets.CONFORMANCE_TOKEN }}
+          VOUCH_CLIENT_ID: ${{ env.CLIENT_ID }}
+          VOUCH_CLIENT_SECRET: ${{ env.CLIENT_SECRET }}
+          PLAN: ${{ matrix.plan }}
+          CONFIG: ${{ matrix.config }}
+          VARIANT: ${{ matrix.variant }}
+          MODE: ${{ needs.prepare.outputs.mode }}
+          PUBLISH: ${{ needs.prepare.outputs.publish }}
+        run: |
+          pip install --quiet aiohttp
+
+          PUBLISH_ARG=""
+          if [ "$PUBLISH" = "true" ]; then
+            PUBLISH_ARG="--publish"
+          fi
+
+          VARIANT_ARG=""
+          if [ -n "$VARIANT" ]; then
+            VARIANT_ARG="--variant $VARIANT"
+          fi
+
+          # shellcheck disable=SC2086
+          python3 scripts/certification/run.py \
+            --plan "$PLAN" \
+            --config "$CONFIG" \
+            --base-url "$TUNNEL_URL" \
+            --client-id "$VOUCH_CLIENT_ID" \
+            --client-secret "$VOUCH_CLIENT_SECRET" \
+            --export-dir /tmp/cert-results \
+            $VARIANT_ARG \
+            $PUBLISH_ARG
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: certification-${{ matrix.plan }}-${{ needs.prepare.outputs.label }}
+          path: /tmp/cert-results/
+
+      - name: Show vouch logs on failure
+        if: failure()
+        run: docker logs vouch2 2>/dev/null || docker logs vouch 2>/dev/null || true
