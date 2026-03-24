@@ -31,8 +31,7 @@ use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
 use crate::{
-    AppState,
-    db,
+    AppState, db,
     handlers::browser_login::hmac_sha256_base64url,
     services::oidc::{
         authorization::{AuthorizationCodeParams, CodeChallengeMethod, issue_authorization_code},
@@ -90,26 +89,25 @@ pub async fn complete_login(
     }
 
     // ── 2. Consume pending authorization ─────────────────────────────────
-    let pending = match db::consume_pending_oauth_authorization(&state.store, &query.pending_auth)
-        .await
-    {
-        Ok(Some(p)) => p,
-        Ok(None) => {
-            tracing::warn!(
-                pending_auth = %query.pending_auth,
-                "Certification login: pending authorization not found or already consumed"
-            );
-            return StatusCode::NOT_FOUND.into_response();
-        }
-        Err(e) => {
-            tracing::error!(
-                pending_auth = %query.pending_auth,
-                error = %e,
-                "Certification login: DB error consuming pending authorization"
-            );
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    let pending =
+        match db::consume_pending_oauth_authorization(&state.store, &query.pending_auth).await {
+            Ok(Some(p)) => p,
+            Ok(None) => {
+                tracing::warn!(
+                    pending_auth = %query.pending_auth,
+                    "Certification login: pending authorization not found or already consumed"
+                );
+                return StatusCode::NOT_FOUND.into_response();
+            }
+            Err(e) => {
+                tracing::error!(
+                    pending_auth = %query.pending_auth,
+                    error = %e,
+                    "Certification login: DB error consuming pending authorization"
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
 
     // ── 3. Get or create the certification test user ──────────────────────
     let user = match get_or_create_cert_user(&state).await {

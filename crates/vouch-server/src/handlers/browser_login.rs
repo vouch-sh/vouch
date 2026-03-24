@@ -232,7 +232,10 @@ pub async fn login_page(
     // The link embeds an HMAC of the pending_auth ID so only the server can
     // generate valid links. This is only set when both the token is configured
     // AND there is a pending authorization to complete.
-    let cert_login_url = match (&state.config().certification_test_token, &query.pending_auth) {
+    let cert_login_url = match (
+        &state.config().certification_test_token,
+        &query.pending_auth,
+    ) {
         (Some(secret), Some(pending_id)) => {
             let token = hmac_sha256_base64url(secret.expose_secret(), pending_id);
             Some(format!(
