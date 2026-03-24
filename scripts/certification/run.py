@@ -5,7 +5,7 @@ Run an OpenID conformance test plan against a Vouch server.
 
 Orchestrates the full certification workflow:
   1. Load config template and substitute {BASEURL}, {CLIENT_ID}, {CLIENT_SECRET}, {CLIENT_JWKS}
-  2. Create a test plan (with "publish": "everything" for public results)
+  2. Create a test plan (public only when --publish is set)
   3. Run each module sequentially, collecting results
   4. Export HTML report and ZIP archive
   5. Optionally create a formal certification package (--publish)
@@ -49,7 +49,7 @@ def load_config(
     client_id: str,
     client_secret: str,
     client_jwks: str,
-    conformance_server: str,
+    publish: bool,
     version: str = "",
 ) -> dict:
     """Load and substitute the config template."""
@@ -64,14 +64,15 @@ def load_config(
         "{CLIENT_ID}": json_escape_fragment(client_id),
         "{CLIENT_SECRET}": json_escape_fragment(client_secret),
         "{CLIENT_JWKS}": client_jwks or "null",
-        "{CONFORMANCE_SERVER}": json_escape_fragment(conformance_server.rstrip("/")),
         "{VERSION}": json_escape_fragment(version or "dev"),
     }
     for placeholder, value in substitutions.items():
         raw = raw.replace(placeholder, value)
     config = json.loads(raw)
-    # Always publish results publicly (like Authlete does)
-    config.setdefault("publish", "everything")
+    if publish:
+        config["publish"] = "everything"
+    else:
+        config.pop("publish", None)
     return config
 
 
@@ -236,7 +237,7 @@ def main() -> None:
         args.client_id,
         args.client_secret,
         args.client_jwks,
-        conformance_server,
+        args.publish,
         version=args.version,
     )
 
