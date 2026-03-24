@@ -1,5 +1,5 @@
 {
-  "description": "Vouch FAPI 2.0 Security Profile Certification",
+  "description": "Vouch {VERSION} FAPI 2.0 Security Profile Certification",
   "publish": "everything",
   "server": {
     "discoveryUrl": "{BASEURL}/.well-known/openid-configuration"

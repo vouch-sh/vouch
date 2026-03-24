@@ -412,6 +412,7 @@ jobs:
             --base-url "$TUNNEL_URL" \
             --client-id "$VOUCH_CLIENT_ID" \
             --client-secret "$VOUCH_CLIENT_SECRET" \
+            --version "${{ needs.prepare.outputs.label }}" \
             --export-dir /tmp/cert-results \
             $VARIANT_ARG \
             $PUBLISH_ARG

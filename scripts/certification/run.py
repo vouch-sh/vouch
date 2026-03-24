@@ -49,6 +49,7 @@ def load_config(
     client_id: str,
     client_secret: str,
     conformance_server: str,
+    version: str = "",
 ) -> dict:
     """Load and substitute the config template."""
     raw = config_path.read_text()
@@ -61,6 +62,7 @@ def load_config(
     raw = raw.replace("{CLIENT_ID}", client_id)
     raw = raw.replace("{CLIENT_SECRET}", client_secret)
     raw = raw.replace("{CONFORMANCE_SERVER}", conformance_server)
+    raw = raw.replace("{VERSION}", version or "dev")
 
     config = json.loads(raw)
     # Always publish results publicly (like Authlete does)
@@ -207,6 +209,11 @@ def main() -> None:
         help="Directory for exported test results (default: /tmp/cert-results)",
     )
     parser.add_argument(
+        "--version",
+        default=os.environ.get("VOUCH_VERSION", "dev"),
+        help="Vouch version string for plan description (e.g. 1.2.0)",
+    )
+    parser.add_argument(
         "--publish",
         action="store_true",
         help="Create a formal certification package if all tests pass",
@@ -233,6 +240,7 @@ def main() -> None:
         args.client_id,
         args.client_secret,
         conformance_server,
+        version=args.version,
     )
 
     variant = parse_variant(args.variant)

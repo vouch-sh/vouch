@@ -1,5 +1,5 @@
 {
-  "description": "Vouch OIDC Basic OP Certification",
+  "description": "Vouch {VERSION} OIDC Basic OP Certification",
   "publish": "everything",
   "server": {
     "discoveryUrl": "{BASEURL}/.well-known/openid-configuration"
