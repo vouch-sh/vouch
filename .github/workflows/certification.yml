@@ -217,8 +217,8 @@ jobs:
           push: false
           load: true
           tags: vouch-server:cert
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=ci-scan
+          cache-to: type=gha,mode=max,scope=ci-scan
 
       # ── Common: spin up vouch and run tests ─────────────────────────────
       - name: Start vouch server in certification mode
