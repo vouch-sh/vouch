@@ -194,12 +194,22 @@ pub async fn complete_login(
 
     // ── 8. Build redirect URL ─────────────────────────────────────────────
     // RFC 6749 Section 4.1.2: code + state (if present) + iss (RFC 9207).
-    let redirect_url = build_certification_redirect(
+    let redirect_url = match build_certification_redirect(
         &pending.redirect_uri,
         &code,
         pending.state.as_deref(),
         &state.config().base_url,
-    );
+    ) {
+        Ok(url) => url,
+        Err(e) => {
+            tracing::error!(
+                redirect_uri = %pending.redirect_uri,
+                error = %e,
+                "Certification login: invalid redirect URI"
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     tracing::info!(
         pending_auth = %query.pending_auth,
@@ -215,21 +225,18 @@ fn build_certification_redirect(
     code: &str,
     oauth_state: Option<&str>,
     issuer: &str,
-) -> String {
-    match url::Url::parse(redirect_uri) {
-        Ok(mut url) => {
-            {
-                let mut query = url.query_pairs_mut();
-                query.append_pair("code", code);
-                if let Some(state_param) = oauth_state {
-                    query.append_pair("state", state_param);
-                }
-                query.append_pair("iss", issuer);
-            }
-            url.to_string()
+) -> anyhow::Result<String> {
+    let mut url = url::Url::parse(redirect_uri)
+        .map_err(|e| anyhow::anyhow!("failed to parse redirect_uri '{redirect_uri}': {e}"))?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("code", code);
+        if let Some(state_param) = oauth_state {
+            query.append_pair("state", state_param);
         }
-        Err(_) => redirect_uri.to_string(),
+        query.append_pair("iss", issuer);
     }
+    Ok(url.to_string())
 }
 
 /// Get the certification test user, creating it if it doesn't exist.
@@ -240,14 +247,22 @@ async fn get_or_create_cert_user(state: &Arc<AppState>) -> anyhow::Result<db::Us
     }
 
     // Create new cert user via SCIM (no cfg gate, no special permissions).
-    db::create_scim_user(
+    if let Err(e) = db::create_scim_user(
         &state.store,
         CERT_USER_EMAIL,
         Some("Certification Test User"),
         Some("cert-test"),
         true,
     )
-    .await?;
+    .await
+    {
+        // Handle concurrent create races by re-fetching and returning the
+        // existing user if another request created it first.
+        if let Some(user) = db::get_user_by_email(&state.store, CERT_USER_EMAIL).await? {
+            return Ok(user);
+        }
+        return Err(e);
+    }
 
     // Fetch the newly created user to get a full `User` record.
     db::get_user_by_email(&state.store, CERT_USER_EMAIL)
@@ -274,7 +289,7 @@ async fn get_or_create_cert_authenticator(
     let dummy_credential_id = [0u8; 32];
     let dummy_public_key = [0u8; 64];
 
-    let id = db::create_authenticator(
+    match db::create_authenticator(
         &state.store,
         user_id,
         user_email,
@@ -285,9 +300,19 @@ async fn get_or_create_cert_authenticator(
         None,  // user_handle
         false, // attestation_verified
     )
-    .await?;
-
-    Ok(id)
+    .await
+    {
+        Ok(id) => Ok(id),
+        Err(e) => {
+            // Handle concurrent create races by re-fetching an authenticator
+            // if another request created one first.
+            let authenticators = db::get_authenticators_for_user(&state.store, user_id).await?;
+            if let Some(auth) = authenticators.into_iter().next() {
+                return Ok(auth.id);
+            }
+            Err(e)
+        }
+    }
 }
 
 // ============================================================================
@@ -338,7 +363,8 @@ mod tests {
             "code123",
             Some("state123"),
             "https://issuer.example.com",
-        );
+        )
+        .expect("redirect should be built successfully");
 
         let url = url::Url::parse(&redirect).expect("redirect must be a valid URL");
         let query_pairs: Vec<(String, String)> = url.query_pairs().into_owned().collect();
@@ -350,6 +376,18 @@ mod tests {
             String::from("iss"),
             String::from("https://issuer.example.com")
         )));
+    }
+
+    #[test]
+    fn test_build_certification_redirect_invalid_uri_returns_error() {
+        let result = build_certification_redirect(
+            "://not-a-valid-url",
+            "code123",
+            Some("state123"),
+            "https://issuer.example.com",
+        );
+
+        assert!(result.is_err(), "invalid redirect URI should return error");
     }
 
     #[tokio::test]

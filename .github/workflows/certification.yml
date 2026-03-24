@@ -286,7 +286,7 @@ jobs:
           with open("/tmp/client-public-jwks.json", "w") as f:
               json.dump({"keys": [public_jwk]}, f)
           with open("/tmp/client-private-jwk.json", "w") as f:
-              json.dump(private_jwk, f)
+              json.dump({"keys": [private_jwk]}, f)
           print("JWK generated successfully")
           PYEOF
 
@@ -315,6 +315,7 @@ jobs:
             'scope': 'openid email'
           }))
           ")
+            CLIENT_JWKS=""
           fi
 
           RESPONSE=$(curl -sf -X POST http://localhost:3000/oauth/register \
@@ -325,9 +326,14 @@ jobs:
           python3 -c "
           import json, sys, os
           data = json.loads('$RESPONSE')
+          client_jwks = ''
+          if 'fapi2' in os.environ['PLAN']:
+              with open('/tmp/client-private-jwk.json', 'r', encoding='utf-8') as f:
+                  client_jwks = json.dumps(json.load(f), separators=(',', ':'))
           with open(os.environ['GITHUB_ENV'], 'a') as f:
               f.write(f\"CLIENT_ID={data['client_id']}\n\")
               f.write(f\"CLIENT_SECRET={data.get('client_secret', '')}\n\")
+              f.write(f\"CLIENT_JWKS={client_jwks}\n\")
           "
 
       - name: Start cloudflared tunnel
@@ -393,6 +399,7 @@ jobs:
           CONFORMANCE_TOKEN: ${{ secrets.CONFORMANCE_TOKEN }}
           VOUCH_CLIENT_ID: ${{ env.CLIENT_ID }}
           VOUCH_CLIENT_SECRET: ${{ env.CLIENT_SECRET }}
+          VOUCH_CLIENT_JWKS: ${{ env.CLIENT_JWKS }}
           PLAN: ${{ matrix.plan }}
           CONFIG: ${{ matrix.config }}
           VARIANT: ${{ matrix.variant }}
@@ -418,6 +425,7 @@ jobs:
             --base-url "$TUNNEL_URL" \
             --client-id "$VOUCH_CLIENT_ID" \
             --client-secret "$VOUCH_CLIENT_SECRET" \
+            --client-jwks "$VOUCH_CLIENT_JWKS" \
             --version "${{ needs.prepare.outputs.label }}" \
             --export-dir /tmp/cert-results \
             $VARIANT_ARG \
