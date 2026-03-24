@@ -4,7 +4,7 @@
 Run an OpenID conformance test plan against a Vouch server.
 
 Orchestrates the full certification workflow:
-  1. Load config template and substitute {BASEURL}, {CLIENT_ID}, {CLIENT_SECRET}
+  1. Load config template and substitute {BASEURL}, {CLIENT_ID}, {CLIENT_SECRET}, {CLIENT_JWKS}
   2. Create a test plan (with "publish": "everything" for public results)
   3. Run each module sequentially, collecting results
   4. Export HTML report and ZIP archive
@@ -48,6 +48,7 @@ def load_config(
     base_url: str,
     client_id: str,
     client_secret: str,
+    client_jwks: str,
     conformance_server: str,
     version: str = "",
 ) -> dict:
@@ -61,6 +62,7 @@ def load_config(
     raw = raw.replace("{BASEURL}", base_url)
     raw = raw.replace("{CLIENT_ID}", client_id)
     raw = raw.replace("{CLIENT_SECRET}", client_secret)
+    raw = raw.replace("{CLIENT_JWKS}", client_jwks or "null")
     raw = raw.replace("{CONFORMANCE_SERVER}", conformance_server)
     raw = raw.replace("{VERSION}", version or "dev")
 
@@ -198,6 +200,11 @@ def main() -> None:
         help="OAuth client secret (or set VOUCH_CLIENT_SECRET env var)",
     )
     parser.add_argument(
+        "--client-jwks",
+        default=os.environ.get("VOUCH_CLIENT_JWKS", ""),
+        help="Client private JWKS JSON for private_key_jwt auth",
+    )
+    parser.add_argument(
         "--variant",
         default=None,
         help='Variant JSON (e.g. \'{"sender_constrained_access_tokens": "dpop"}\')',
@@ -239,6 +246,7 @@ def main() -> None:
         args.base_url,
         args.client_id,
         args.client_secret,
+        args.client_jwks,
         conformance_server,
         version=args.version,
     )

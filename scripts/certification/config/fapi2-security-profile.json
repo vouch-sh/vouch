@@ -6,6 +6,7 @@
   },
   "client": {
     "client_id": "{CLIENT_ID}",
+    "jwks": {CLIENT_JWKS},
     "scope": "openid"
   },
   "browser": [
