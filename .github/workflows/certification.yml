@@ -259,82 +259,11 @@ jobs:
           PLAN: ${{ matrix.plan }}
           CLIENT_ALIAS: ${{ matrix.client-alias }}
         run: |
-          if echo "$PLAN" | grep -q "fapi2"; then
-            # Generate ES256 key pair for FAPI 2.0 private_key_jwt auth
-            openssl ecparam -genkey -name prime256v1 -noout -out /tmp/client.key
-            openssl ec -in /tmp/client.key -pubout -out /tmp/client.pub
-
-            pip install --quiet cryptography
-            python3 - <<'PYEOF'
-          import json, base64
-          from cryptography.hazmat.primitives import serialization
-          from cryptography.hazmat.primitives.asymmetric import ec
-
-          with open("/tmp/client.key", "rb") as f:
-              private_key = serialization.load_pem_private_key(f.read(), password=None)
-
-          pub = private_key.public_key().public_numbers()
-          priv_numbers = private_key.private_numbers()
-
-          def b64url(n, length=32):
-              return base64.urlsafe_b64encode(n.to_bytes(length, 'big')).rstrip(b'=').decode()
-
-          public_jwk = {"kty": "EC", "crv": "P-256", "x": b64url(pub.x), "y": b64url(pub.y),
-                        "kid": "cert-key-1", "use": "sig", "alg": "ES256"}
-          private_jwk = {**public_jwk, "d": b64url(priv_numbers.private_value)}
-
-          with open("/tmp/client-public-jwks.json", "w") as f:
-              json.dump({"keys": [public_jwk]}, f)
-          with open("/tmp/client-private-jwk.json", "w") as f:
-              json.dump({"keys": [private_jwk]}, f)
-          print("JWK generated successfully")
-          PYEOF
-
-            CONFORMANCE_REDIRECT="https://www.certification.openid.net/test/a/${CLIENT_ALIAS}/callback"
-            JWKS=$(cat /tmp/client-public-jwks.json)
-            PAYLOAD=$(python3 -c "
-          import json
-          print(json.dumps({
-            'redirect_uris': ['${CONFORMANCE_REDIRECT}'],
-            'token_endpoint_auth_method': 'private_key_jwt',
-            'grant_types': ['authorization_code'],
-            'response_types': ['code'],
-            'scope': 'openid',
-            'jwks': $(cat /tmp/client-public-jwks.json)
-          }))
-          ")
-          else
-            CONFORMANCE_REDIRECT="https://www.certification.openid.net/test/a/${CLIENT_ALIAS}/callback"
-            PAYLOAD=$(python3 -c "
-          import json
-          print(json.dumps({
-            'redirect_uris': ['${CONFORMANCE_REDIRECT}'],
-            'token_endpoint_auth_method': 'client_secret_basic',
-            'grant_types': ['authorization_code'],
-            'response_types': ['code'],
-            'scope': 'openid email'
-          }))
-          ")
-            CLIENT_JWKS=""
-          fi
-
-          RESPONSE=$(curl -sf -X POST http://localhost:3000/oauth/register \
-            -H "Content-Type: application/json" \
-            -d "$PAYLOAD")
-
-          echo "DCR response: $RESPONSE"
-          python3 -c "
-          import json, sys, os
-          data = json.loads('$RESPONSE')
-          client_jwks = ''
-          if 'fapi2' in os.environ['PLAN']:
-              with open('/tmp/client-private-jwk.json', 'r', encoding='utf-8') as f:
-                  client_jwks = json.dumps(json.load(f), separators=(',', ':'))
-          with open(os.environ['GITHUB_ENV'], 'a') as f:
-              f.write(f\"CLIENT_ID={data['client_id']}\n\")
-              f.write(f\"CLIENT_SECRET={data.get('client_secret', '')}\n\")
-              f.write(f\"CLIENT_JWKS={client_jwks}\n\")
-          "
+          pip install --quiet cryptography
+          python3 scripts/certification/register_client.py \
+            --plan "$PLAN" \
+            --client-alias "$CLIENT_ALIAS" \
+            --vouch-url http://localhost:3000
 
       - name: Start cloudflared tunnel
         env:
