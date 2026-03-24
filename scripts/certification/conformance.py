@@ -213,14 +213,6 @@ class ConformanceClient:
 
     # ── Results and export ───────────────────────────────────────────────────
 
-    async def get_module_result(self, module_id: str) -> str:
-        """Return the overall result string of a finished module.
-
-        Typical values: "PASSED", "FAILED", "WARNING", "REVIEW", "SKIPPED".
-        """
-        info = await self.get_module_info(module_id)
-        return info.get("result", "UNKNOWN")
-
     async def export_results(self, plan_id: str, output_dir: Path) -> Path:
         """Download the ZIP export of test results for a plan.
 

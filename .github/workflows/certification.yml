@@ -180,6 +180,11 @@ jobs:
             variant: '{"sender_constrained_access_tokens":"dpop","client_auth_type":"private_key_jwt","fapi_response_mode":"plain_response"}'
 
     steps:
+      # GHAS "checkout of untrusted code in privileged workflow_run" is a
+      # false positive here: the workflow_run trigger fires only after the
+      # "Release" workflow, which itself only runs on v* tags pushed by
+      # maintainers — never on PR branches.  The job has no write permissions
+      # (contents: read, packages: read) and persist-credentials is false.
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:

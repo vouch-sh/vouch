@@ -9,7 +9,7 @@ Orchestrates the full certification workflow:
   3. Run each module sequentially, collecting results
   4. Export HTML report and ZIP archive
   5. Optionally create a formal certification package (--publish)
-  6. Print a summary table; exit non-zero if any module FAILED
+  6. Print a summary table; exit non-zero if any module is not in PASSING_RESULTS
 
 Usage:
     python3 run.py \\
@@ -38,9 +38,10 @@ from conformance import ConformanceClient, ConformanceError
 
 log = logging.getLogger(__name__)
 
-# Result values that count as "passed enough" (WARNING is still OK for cert)
+# Result values that count as "passed enough" (WARNING is still OK for cert).
+# Anything not in this set — including "FAILED" and "UNKNOWN" — is treated as
+# a failure so that missing or unexpected result values never silently pass CI.
 PASSING_RESULTS = {"PASSED", "WARNING", "REVIEW", "SKIPPED"}
-FAILING_RESULTS = {"FAILED"}
 
 
 def load_config(
@@ -134,9 +135,9 @@ async def run_plan(
 
             results.append({"name": module_name, "result": result})
 
-            if result in FAILING_RESULTS:
+            if result not in PASSING_RESULTS:
                 any_failed = True
-                log.error("FAILED: %s", module_name)
+                log.error("%s: %s", result, module_name)
             else:
                 log.info("%s: %s", result, module_name)
 
