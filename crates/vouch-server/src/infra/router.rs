@@ -123,10 +123,14 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
              GET /certification/complete-login is active. \
              Do NOT run this in production."
         );
-        Router::new().route(
-            "/certification/complete-login",
-            get(handlers::certification::complete_login),
-        )
+        Router::new()
+            .route(
+                "/certification/complete-login",
+                get(handlers::certification::complete_login),
+            )
+            .layer(rate_limit::build_auth_rate_limiter(
+                &config.trusted_proxies,
+            )?)
     } else {
         Router::new()
     };
