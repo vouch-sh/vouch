@@ -156,7 +156,7 @@ class ConformanceClient:
 
     async def get_module_info(self, module_id: str) -> dict[str, Any]:
         """Fetch module instance status and results."""
-        url = f"{self.server}/api/runner/{module_id}"
+        url = f"{self.server}/api/info/{module_id}"
         async with self.session.get(url) as resp:
             if resp.status != 200:
                 text = await resp.text()
@@ -186,6 +186,11 @@ class ConformanceClient:
             ConformanceError: If timeout is exceeded.
         """
         if terminal_states is None:
+            # FINISHED = test completed normally
+            # INTERRUPTED = test was interrupted (counts as done)
+            # FAILED = test framework error (distinct from FAILED test result)
+            # Note: WAITING means the suite is waiting for browser interaction;
+            # we do NOT treat it as terminal since our browser task handles it.
             terminal_states = {"FINISHED", "INTERRUPTED", "FAILED"}
 
         deadline = time.monotonic() + timeout
@@ -253,7 +258,7 @@ class ConformanceClient:
             Path to the downloaded HTML file.
         """
         output_dir.mkdir(parents=True, exist_ok=True)
-        url = f"{self.server}/api/plan/{plan_id}/exporthtml"
+        url = f"{self.server}/api/plan/exporthtml/{plan_id}"
         html_path = output_dir / f"plan-{plan_id}.html"
 
         log.info("Exporting HTML report for plan %s", plan_id)
@@ -280,11 +285,10 @@ class ConformanceClient:
         Returns:
             API response dict.
         """
-        url = f"{self.server}/api/certification"
-        params = {"planId": plan_id}
+        url = f"{self.server}/api/plan/{plan_id}/certificationpackage"
         log.info("Creating certification package for plan %s", plan_id)
 
-        async with self.session.post(url, params=params) as resp:
+        async with self.session.post(url) as resp:
             if resp.status not in (200, 201):
                 text = await resp.text()
                 raise ConformanceError(
