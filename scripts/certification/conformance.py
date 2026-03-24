@@ -54,20 +54,12 @@ class ConformanceClient:
         self.token = token
 
     def _get(self, path: str, params: dict | None = None) -> Any:
+        return json.loads(self._get_bytes(path, params=params))
+
+    def _get_bytes(self, path: str, params: dict | None = None) -> bytes:
         url = f"{self.server}{path}"
         if params:
             url = f"{url}?{urllib.parse.urlencode(params)}"
-        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}"})
-        try:
-            with urllib.request.urlopen(req) as resp:
-                return json.loads(resp.read())
-        except urllib.error.HTTPError as e:
-            raise ConformanceError(
-                f"GET {path} failed: HTTP {e.code}: {e.read().decode()}"
-            ) from e
-
-    def _get_bytes(self, path: str) -> bytes:
-        url = f"{self.server}{path}"
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}"})
         try:
             with urllib.request.urlopen(req) as resp:
