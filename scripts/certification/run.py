@@ -225,7 +225,7 @@ def main() -> None:
 
     conformance_server = os.environ.get(
         "CONFORMANCE_SERVER", "https://www.certification.openid.net/"
-    )
+    ).rstrip("/")
     conformance_token = os.environ.get("CONFORMANCE_TOKEN", "")
     if not conformance_token:
         print("ERROR: CONFORMANCE_TOKEN environment variable is required", file=sys.stderr)
