@@ -27,7 +27,6 @@ Environment variables:
 """
 
 import argparse
-import asyncio
 import json
 import logging
 import os
@@ -55,18 +54,16 @@ def load_config(
 ) -> dict:
     """Load and substitute the config template."""
     raw = config_path.read_text()
-
-    # Strip trailing slash for clean URL construction
-    base_url = base_url.rstrip("/")
-    conformance_server = conformance_server.rstrip("/")
-
-    raw = raw.replace("{BASEURL}", base_url)
-    raw = raw.replace("{CLIENT_ID}", client_id)
-    raw = raw.replace("{CLIENT_SECRET}", client_secret)
-    raw = raw.replace("{CLIENT_JWKS}", client_jwks or "null")
-    raw = raw.replace("{CONFORMANCE_SERVER}", conformance_server)
-    raw = raw.replace("{VERSION}", version or "dev")
-
+    substitutions = {
+        "{BASEURL}": base_url.rstrip("/"),
+        "{CLIENT_ID}": client_id,
+        "{CLIENT_SECRET}": client_secret,
+        "{CLIENT_JWKS}": client_jwks or "null",
+        "{CONFORMANCE_SERVER}": conformance_server.rstrip("/"),
+        "{VERSION}": version or "dev",
+    }
+    for placeholder, value in substitutions.items():
+        raw = raw.replace(placeholder, value)
     config = json.loads(raw)
     # Always publish results publicly (like Authlete does)
     config.setdefault("publish", "everything")
@@ -88,14 +85,13 @@ def print_summary(results: list[dict], plan_id: str, conformance_server: str) ->
         print(f"  {icon} [{result:<8}] {r['name']}")
 
     print("-" * width)
-    summary_parts = [f"{v} {k}" for k, v in sorted(counts.items())]
-    print("  " + " | ".join(summary_parts))
+    print("  " + " | ".join(f"{v} {k}" for k, v in sorted(counts.items())))
     print("=" * width)
     print(f"\nPublic results: {conformance_server}/plans.html?public=true")
     print(f"Plan ID: {plan_id}\n")
 
 
-async def run_plan(
+def run_plan(
     plan_name: str,
     config: dict,
     variant: dict | None,
@@ -106,65 +102,52 @@ async def run_plan(
     module_timeout: int,
 ) -> bool:
     """Run all modules in a test plan. Returns True if all passed."""
-    async with ConformanceClient(server=conformance_server, token=conformance_token) as client:
-        # Create the plan
-        plan_id = await client.create_test_plan(plan_name, config, variant)
-        log.info("Plan ID: %s", plan_id)
+    client = ConformanceClient(server=conformance_server, token=conformance_token)
 
-        # Get module list
-        modules = await client.get_plan_modules(plan_id)
-        log.info("Plan has %d modules", len(modules))
+    plan_id = client.create_test_plan(plan_name, config, variant)
+    log.info("Plan ID: %s", plan_id)
 
-        results = []
-        any_failed = False
+    modules = client.get_plan_modules(plan_id)
+    log.info("Plan has %d modules", len(modules))
 
-        # Run each module sequentially
-        for module in modules:
-            module_name = module.get("testModule") or module.get("name", "unknown")
-            log.info("Running module: %s", module_name)
+    results = []
+    any_failed = False
 
-            try:
-                module_id = await client.start_test_module(plan_id, module_name)
-                info = await client.wait_for_state(
-                    module_id, timeout=module_timeout
-                )
-                result = info.get("result", "UNKNOWN")
-            except ConformanceError as e:
-                log.error("Module %s error: %s", module_name, e)
-                result = "FAILED"
+    for module in modules:
+        module_name = module.get("testModule") or module.get("name", "unknown")
+        log.info("Running module: %s", module_name)
 
-            results.append({"name": module_name, "result": result})
-
-            if result not in PASSING_RESULTS:
-                any_failed = True
-                log.error("%s: %s", result, module_name)
-            else:
-                log.info("%s: %s", result, module_name)
-
-        # Export results
         try:
-            await client.export_html(plan_id, export_dir)
-            await client.export_results(plan_id, export_dir)
+            module_id = client.start_test_module(plan_id, module_name)
+            info = client.wait_for_state(module_id, timeout=module_timeout)
+            result = info.get("result", "UNKNOWN")
         except ConformanceError as e:
-            log.warning("Failed to export results: %s", e)
+            log.error("Module %s error: %s", module_name, e)
+            result = "FAILED"
 
-        # Create certification package if all passed and --publish requested
-        if publish and not any_failed:
-            try:
-                pkg = await client.create_certification_package(plan_id)
-                log.info("Certification package created: %s", pkg)
-            except ConformanceError as e:
-                log.warning("Failed to create certification package: %s", e)
+        results.append({"name": module_name, "result": result})
 
-        print_summary(results, plan_id, conformance_server)
-        return not any_failed
+        if result not in PASSING_RESULTS:
+            any_failed = True
+            log.error("%s: %s", result, module_name)
+        else:
+            log.info("%s: %s", result, module_name)
 
+    try:
+        client.export_html(plan_id, export_dir)
+        client.export_results(plan_id, export_dir)
+    except ConformanceError as e:
+        log.warning("Failed to export results: %s", e)
 
-def parse_variant(variant_str: str | None) -> dict | None:
-    """Parse a JSON variant string into a dict."""
-    if not variant_str:
-        return None
-    return json.loads(variant_str)
+    if publish and not any_failed:
+        try:
+            pkg = client.create_certification_package(plan_id)
+            log.info("Certification package created: %s", pkg)
+        except ConformanceError as e:
+            log.warning("Failed to create certification package: %s", e)
+
+    print_summary(results, plan_id, conformance_server)
+    return not any_failed
 
 
 def main() -> None:
@@ -252,19 +235,17 @@ def main() -> None:
         version=args.version,
     )
 
-    variant = parse_variant(args.variant)
+    variant = json.loads(args.variant) if args.variant else None
 
-    success = asyncio.run(
-        run_plan(
-            plan_name=args.plan,
-            config=config,
-            variant=variant,
-            export_dir=args.export_dir,
-            publish=args.publish,
-            conformance_server=conformance_server,
-            conformance_token=conformance_token,
-            module_timeout=args.module_timeout,
-        )
+    success = run_plan(
+        plan_name=args.plan,
+        config=config,
+        variant=variant,
+        export_dir=args.export_dir,
+        publish=args.publish,
+        conformance_server=conformance_server,
+        conformance_token=conformance_token,
+        module_timeout=args.module_timeout,
     )
 
     sys.exit(0 if success else 1)

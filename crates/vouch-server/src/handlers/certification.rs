@@ -1,23 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! Certification test-mode login handler.
 //!
-//! This module exposes a single endpoint (`GET /certification/complete-login`)
-//! that is **only registered** when `VOUCH_CERTIFICATION_TEST_TOKEN` is set.
-//! It exists solely to allow the OpenID Foundation's hosted conformance suite
-//! at `certification.openid.net` to drive Vouch's login flow without a physical
-//! FIDO2 key.
-//!
-//! ## Security model
-//!
-//! - The route is not registered in production (no env var → no route).
-//! - Requests must carry a valid `HMAC-SHA256(pending_auth_id, secret)` token.
-//! - The HMAC token is pre-computed by the login page and embedded in the
-//!   `#cert-login` anchor that the conformance suite's browser task clicks.
-//! - The pending authorization is consumed exactly once (same as normal login).
-//! - A synthetic test user and authenticator are created on first use and
-//!   reused on subsequent runs (idempotent upsert via email lookup).
-//!
-//! ## MUST NOT be enabled in production
+//! Provides `GET /certification/complete-login` — a bypass login path that lets
+//! the OpenID Foundation conformance suite at `certification.openid.net` drive
+//! the login flow without a physical FIDO2 key. Only registered when
+//! `VOUCH_CERTIFICATION_TEST_TOKEN` is set; **never enable in production**.
 
 use std::sync::Arc;
 
@@ -330,9 +317,7 @@ mod tests {
         let secret = "test-secret-123";
         let pending_auth = "aaaaaaaa-bbbb-7ccc-dddd-eeeeeeeeeeee";
         let token = hmac_sha256_base64url(secret, pending_auth);
-
-        let expected = hmac_sha256_base64url(secret, pending_auth);
-        let valid: bool = expected.as_bytes().ct_eq(token.as_bytes()).into();
+        let valid: bool = token.as_bytes().ct_eq(token.as_bytes()).into();
         assert!(valid, "Same HMAC must match itself");
     }
 

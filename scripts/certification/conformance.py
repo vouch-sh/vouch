@@ -1,27 +1,25 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0 OR MIT
 """
-Async API client for the OpenID Foundation conformance suite.
-
-Adapted from the upstream conformance-suite Python client at:
-https://gitlab.com/openid/conformance-suite/-/blob/master/scripts/conformance.py
+API client for the OpenID Foundation conformance suite.
 
 Usage:
     from conformance import ConformanceClient
-    async with ConformanceClient() as client:
-        plan_id = await client.create_test_plan("oidcc-basic-certification-test-plan", config)
-        modules = await client.get_test_plan(plan_id)
-        ...
+    client = ConformanceClient()
+    plan_id = client.create_test_plan("oidcc-basic-certification-test-plan", config)
+    modules = client.get_plan_modules(plan_id)
+    ...
 """
 
-import asyncio
+import json
 import logging
 import os
 import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Any
-
-import aiohttp
 
 log = logging.getLogger(__name__)
 
@@ -45,7 +43,7 @@ class ConformanceError(Exception):
 
 
 class ConformanceClient:
-    """Async HTTP client for certification.openid.net."""
+    """HTTP client for certification.openid.net."""
 
     def __init__(
         self,
@@ -54,77 +52,76 @@ class ConformanceClient:
     ) -> None:
         self.server = server.rstrip("/")
         self.token = token
-        self._session: aiohttp.ClientSession | None = None
 
-    async def __aenter__(self) -> "ConformanceClient":
-        headers = {"Authorization": f"Bearer {self.token}"}
-        self._session = aiohttp.ClientSession(headers=headers)
-        return self
+    def _get(self, path: str, params: dict | None = None) -> Any:
+        url = f"{self.server}{path}"
+        if params:
+            url = f"{url}?{urllib.parse.urlencode(params)}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}"})
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise ConformanceError(
+                f"GET {path} failed: HTTP {e.code}: {e.read().decode()}"
+            ) from e
 
-    async def __aexit__(self, *args: Any) -> None:
-        if self._session:
-            await self._session.close()
+    def _get_bytes(self, path: str) -> bytes:
+        url = f"{self.server}{path}"
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.token}"})
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return resp.read()
+        except urllib.error.HTTPError as e:
+            raise ConformanceError(
+                f"GET {path} failed: HTTP {e.code}: {e.read().decode()}"
+            ) from e
 
-    @property
-    def session(self) -> aiohttp.ClientSession:
-        if self._session is None:
-            raise RuntimeError("ConformanceClient must be used as an async context manager")
-        return self._session
+    def _post(self, path: str, params: dict | None = None, body: Any = None) -> Any:
+        url = f"{self.server}{path}"
+        if params:
+            url = f"{url}?{urllib.parse.urlencode(params)}"
+        headers: dict[str, str] = {"Authorization": f"Bearer {self.token}"}
+        data: bytes | None = None
+        if body is not None:
+            data = json.dumps(body).encode()
+            headers["Content-Type"] = "application/json"
+        req = urllib.request.Request(url, data=data, method="POST", headers=headers)
+        try:
+            with urllib.request.urlopen(req) as resp:
+                return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            raise ConformanceError(
+                f"POST {path} failed: HTTP {e.code}: {e.read().decode()}"
+            ) from e
 
     # ── Plan management ──────────────────────────────────────────────────────
 
-    async def create_test_plan(
+    def create_test_plan(
         self,
         plan_name: str,
         config: dict[str, Any],
         variant: dict[str, str] | None = None,
     ) -> str:
-        """Create a new test plan and return its ID.
-
-        Args:
-            plan_name: Conformance suite plan name (e.g. "oidcc-basic-certification-test-plan").
-            config: Plan configuration JSON object.
-            variant: Optional variant parameters (e.g. {"sender_constrained_access_tokens": "dpop"}).
-
-        Returns:
-            The plan ID string.
-        """
-        params = {"planName": plan_name}
+        """Create a new test plan and return its ID."""
+        params: dict = {"planName": plan_name}
         if variant:
-            # Variant params are passed as separate query parameters
-            for k, v in variant.items():
-                params[k] = v
-
-        url = f"{self.server}/api/plan"
+            params.update(variant)
         log.info("Creating test plan %s", plan_name)
-
-        async with self.session.post(url, params=params, json=config) as resp:
-            if resp.status not in (200, 201):
-                text = await resp.text()
-                raise ConformanceError(
-                    f"Failed to create plan {plan_name}: HTTP {resp.status}: {text}"
-                )
-            data = await resp.json()
-
+        data = self._post("/api/plan", params=params, body=config)
         plan_id = data.get("id") or data.get("plan", {}).get("id")
         if not plan_id:
             raise ConformanceError(f"No plan ID in create response: {data}")
-
         log.info("Created plan %s with ID %s", plan_name, plan_id)
         return plan_id
 
-    async def get_test_plan(self, plan_id: str) -> dict[str, Any]:
+    def get_test_plan(self, plan_id: str) -> dict[str, Any]:
         """Fetch plan details including the list of test modules."""
-        url = f"{self.server}/api/plan/{plan_id}"
-        async with self.session.get(url) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise ConformanceError(f"Failed to get plan {plan_id}: HTTP {resp.status}: {text}")
-            return await resp.json()
+        return self._get(f"/api/plan/{plan_id}")
 
-    async def get_plan_modules(self, plan_id: str) -> list[dict[str, Any]]:
+    def get_plan_modules(self, plan_id: str) -> list[dict[str, Any]]:
         """Return the list of test module descriptors for a plan."""
-        plan = await self.get_test_plan(plan_id)
+        plan = self.get_test_plan(plan_id)
         modules = plan.get("modules", [])
         if not modules:
             raise ConformanceError(f"Plan {plan_id} has no modules")
@@ -132,55 +129,27 @@ class ConformanceClient:
 
     # ── Module execution ─────────────────────────────────────────────────────
 
-    async def start_test_module(self, plan_id: str, module_name: str) -> str:
+    def start_test_module(self, plan_id: str, module_name: str) -> str:
         """Start a test module and return the module instance ID."""
-        url = f"{self.server}/api/runner"
-        params = {"planId": plan_id, "test": module_name}
-
         log.info("Starting module %s in plan %s", module_name, plan_id)
-
-        async with self.session.post(url, params=params) as resp:
-            if resp.status not in (200, 201):
-                text = await resp.text()
-                raise ConformanceError(
-                    f"Failed to start module {module_name}: HTTP {resp.status}: {text}"
-                )
-            data = await resp.json()
-
+        data = self._post("/api/runner", params={"planId": plan_id, "test": module_name})
         module_id = data.get("id")
         if not module_id:
             raise ConformanceError(f"No module ID in start response: {data}")
-
         log.info("Started module %s with ID %s", module_name, module_id)
         return module_id
 
-    async def get_module_info(self, module_id: str) -> dict[str, Any]:
+    def get_module_info(self, module_id: str) -> dict[str, Any]:
         """Fetch module instance status and results."""
-        url = f"{self.server}/api/info/{module_id}"
-        async with self.session.get(url) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise ConformanceError(
-                    f"Failed to get module {module_id}: HTTP {resp.status}: {text}"
-                )
-            return await resp.json()
+        return self._get(f"/api/info/{module_id}")
 
-    async def wait_for_state(
+    def wait_for_state(
         self,
         module_id: str,
         terminal_states: set[str] | None = None,
         timeout: float = DEFAULT_TIMEOUT,
     ) -> dict[str, Any]:
         """Poll module info until it reaches a terminal state.
-
-        Args:
-            module_id: Module instance ID.
-            terminal_states: Set of status strings that indicate completion.
-                Defaults to {"FINISHED", "INTERRUPTED", "FAILED"}.
-            timeout: Maximum seconds to wait.
-
-        Returns:
-            Final module info dict.
 
         Raises:
             ConformanceError: If timeout is exceeded.
@@ -195,7 +164,7 @@ class ConformanceClient:
 
         deadline = time.monotonic() + timeout
         while True:
-            info = await self.get_module_info(module_id)
+            info = self.get_module_info(module_id)
             status = info.get("status", "")
             log.debug("Module %s status: %s", module_id, status)
 
@@ -209,82 +178,30 @@ class ConformanceClient:
                     f"(last status: {status})"
                 )
 
-            await asyncio.sleep(min(POLL_INTERVAL, remaining))
+            time.sleep(min(POLL_INTERVAL, remaining))
 
     # ── Results and export ───────────────────────────────────────────────────
 
-    async def export_results(self, plan_id: str, output_dir: Path) -> Path:
-        """Download the ZIP export of test results for a plan.
+    def _download(self, path: str, dest: Path) -> Path:
+        """Download a file from the server and write it to dest."""
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(self._get_bytes(path))
+        log.info("Downloaded %s to %s", path, dest)
+        return dest
 
-        Args:
-            plan_id: The plan ID.
-            output_dir: Directory to write the results ZIP.
+    def export_results(self, plan_id: str, output_dir: Path) -> Path:
+        """Download the ZIP export of test results for a plan."""
+        return self._download(
+            f"/api/plan/{plan_id}/export", output_dir / f"plan-{plan_id}.zip"
+        )
 
-        Returns:
-            Path to the downloaded ZIP file.
-        """
-        output_dir.mkdir(parents=True, exist_ok=True)
-        url = f"{self.server}/api/plan/{plan_id}/export"
-        zip_path = output_dir / f"plan-{plan_id}.zip"
+    def export_html(self, plan_id: str, output_dir: Path) -> Path:
+        """Download the HTML report for a plan."""
+        return self._download(
+            f"/api/plan/exporthtml/{plan_id}", output_dir / f"plan-{plan_id}.html"
+        )
 
-        log.info("Exporting results for plan %s to %s", plan_id, zip_path)
-        async with self.session.get(url) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise ConformanceError(
-                    f"Failed to export plan {plan_id}: HTTP {resp.status}: {text}"
-                )
-            zip_path.write_bytes(await resp.read())
-
-        log.info("Results exported to %s", zip_path)
-        return zip_path
-
-    async def export_html(self, plan_id: str, output_dir: Path) -> Path:
-        """Download the HTML report for a plan.
-
-        Args:
-            plan_id: The plan ID.
-            output_dir: Directory to write the HTML report.
-
-        Returns:
-            Path to the downloaded HTML file.
-        """
-        output_dir.mkdir(parents=True, exist_ok=True)
-        url = f"{self.server}/api/plan/exporthtml/{plan_id}"
-        html_path = output_dir / f"plan-{plan_id}.html"
-
-        log.info("Exporting HTML report for plan %s", plan_id)
-        async with self.session.get(url) as resp:
-            if resp.status != 200:
-                text = await resp.text()
-                raise ConformanceError(
-                    f"Failed to export HTML for plan {plan_id}: HTTP {resp.status}: {text}"
-                )
-            html_path.write_bytes(await resp.read())
-
-        log.info("HTML report exported to %s", html_path)
-        return html_path
-
-    async def create_certification_package(self, plan_id: str) -> dict[str, Any]:
-        """Generate an official certification package for a passing plan.
-
-        This is the API call that initiates the formal certification submission
-        process at certification.openid.net.
-
-        Args:
-            plan_id: The plan ID (must have all modules PASSED).
-
-        Returns:
-            API response dict.
-        """
-        url = f"{self.server}/api/plan/{plan_id}/certificationpackage"
+    def create_certification_package(self, plan_id: str) -> dict[str, Any]:
+        """Generate an official certification package for a passing plan."""
         log.info("Creating certification package for plan %s", plan_id)
-
-        async with self.session.post(url) as resp:
-            if resp.status not in (200, 201):
-                text = await resp.text()
-                raise ConformanceError(
-                    f"Failed to create certification package for {plan_id}: "
-                    f"HTTP {resp.status}: {text}"
-                )
-            return await resp.json()
+        return self._post(f"/api/plan/{plan_id}/certificationpackage")

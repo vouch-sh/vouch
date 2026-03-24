@@ -265,7 +265,10 @@ jobs:
           PLAN: ${{ matrix.plan }}
           CLIENT_ALIAS: ${{ matrix.client-alias }}
         run: |
-          pip install --quiet cryptography
+          # cryptography is only needed for FAPI 2.0 (EC key generation)
+          if [[ "$PLAN" == *"fapi2"* ]]; then
+            pip install --quiet cryptography
+          fi
           python3 scripts/certification/register_client.py \
             --plan "$PLAN" \
             --client-alias "$CLIENT_ALIAS" \
@@ -340,8 +343,6 @@ jobs:
           MODE: ${{ needs.prepare.outputs.mode }}
           PUBLISH: ${{ needs.prepare.outputs.publish }}
         run: |
-          pip install --quiet aiohttp
-
           PUBLISH_ARG=""
           if [ "$PUBLISH" = "true" ]; then
             PUBLISH_ARG="--publish"
