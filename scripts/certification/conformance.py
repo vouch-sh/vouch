@@ -98,7 +98,7 @@ class ConformanceClient:
         """Create a new test plan and return its ID."""
         params: dict = {"planName": plan_name}
         if variant:
-            params.update(variant)
+            params["variant"] = json.dumps(variant)
         log.info("Creating test plan %s", plan_name)
         data = self._post("/api/plan", params=params, body=config)
         plan_id = data.get("id") or data.get("plan", {}).get("id")
