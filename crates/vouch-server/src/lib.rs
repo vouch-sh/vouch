@@ -231,6 +231,7 @@ mod redirect_tests {
             log_format: config::LogFormat::Text,
             trusted_proxies: Vec::new(),
             metrics_bearer_token: None,
+            certification_test_token: None,
             pool_config: crate::db::pool::PoolConfig::default(),
             session_cache_max_capacity: 10_000,
             session_cache_ttl_secs: 30,

@@ -51,6 +51,16 @@ use vouch_common::{
     BrowserLoginStartResponse,
 };
 
+/// Compute an HMAC-SHA256 tag over `message` using `secret`, returning the
+/// result base64url-encoded (no padding). Used by the certification test-mode
+/// login link to bind the link to a specific pending authorization ID.
+pub(crate) fn hmac_sha256_base64url(secret: &str, message: &str) -> String {
+    use aws_lc_rs::hmac;
+    let key = hmac::Key::new(hmac::HMAC_SHA256, secret.as_bytes());
+    let tag = hmac::sign(&key, message.as_bytes());
+    URL_SAFE_NO_PAD.encode(tag.as_ref())
+}
+
 // ============================================================================
 // Templates
 // ============================================================================
@@ -67,6 +77,9 @@ pub struct LoginTemplate {
     pub rp_id: String,
     /// Authentication context for header.
     pub auth: crate::handlers::session::AuthContext,
+    /// URL for the certification test-mode login link.
+    /// `Some` only when `VOUCH_CERTIFICATION_TEST_TOKEN` is set and there is a pending auth.
+    pub cert_login_url: Option<String>,
 }
 
 impl_template_response!(LoginTemplate);
@@ -215,11 +228,31 @@ pub async fn login_page(
         None => None,
     };
 
+    // Build the certification test-mode login link when the feature is enabled.
+    // The link embeds an HMAC of the pending_auth ID so only the server can
+    // generate valid links. This is only set when both the token is configured
+    // AND there is a pending authorization to complete.
+    let cert_login_url = match (
+        &state.config().certification_test_token,
+        &query.pending_auth,
+    ) {
+        (Some(secret), Some(pending_id)) => {
+            let token = hmac_sha256_base64url(secret.expose_secret(), pending_id);
+            let encoded_pending_id = urlencoding::encode(pending_id);
+            let encoded_token = urlencoding::encode(&token);
+            Some(format!(
+                "/certification/complete-login?pending_auth={encoded_pending_id}&token={encoded_token}"
+            ))
+        }
+        _ => None,
+    };
+
     LoginTemplate {
         pending_auth: query.pending_auth,
         client_name,
         rp_id: state.config().rp_id.clone(),
         auth,
+        cert_login_url,
     }
     .into_response()
 }

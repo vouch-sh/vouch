@@ -115,8 +115,31 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
         Router::new()
     };
 
+    // Register the certification test-mode login endpoint when the secret token
+    // is configured. This route MUST NOT be enabled in production deployments.
+    let certification_route = if let Some(ref _token) = config.certification_test_token {
+        tracing::warn!(
+            "Certification test mode ENABLED — \
+             GET /certification/complete-login is active. \
+             Do NOT run this in production."
+        );
+        Router::new()
+            .route(
+                "/certification/complete-login",
+                get(handlers::certification::complete_login),
+            )
+            .layer(rate_limit::build_auth_rate_limiter(
+                &config.trusted_proxies,
+            )?)
+    } else {
+        Router::new()
+    };
+
     Ok(security_headers::apply_security_layers(
-        api_routes.merge(ui_routes).merge(metrics_route),
+        api_routes
+            .merge(ui_routes)
+            .merge(metrics_route)
+            .merge(certification_route),
         config,
     )
     .layer(axum::middleware::from_fn(metrics_middleware))
