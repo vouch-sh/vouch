@@ -238,8 +238,10 @@ pub async fn login_page(
     ) {
         (Some(secret), Some(pending_id)) => {
             let token = hmac_sha256_base64url(secret.expose_secret(), pending_id);
+            let encoded_pending_id = urlencoding::encode(pending_id);
+            let encoded_token = urlencoding::encode(&token);
             Some(format!(
-                "/certification/complete-login?pending_auth={pending_id}&token={token}"
+                "/certification/complete-login?pending_auth={encoded_pending_id}&token={encoded_token}"
             ))
         }
         _ => None,
