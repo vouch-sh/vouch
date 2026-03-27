@@ -50,7 +50,7 @@ def load_config(
     client_jwks: str,
     publish: bool,
     version: str = "",
-) -> dict:
+) -> tuple[dict, dict | None]:
     """Load config template, substitute placeholders, extract variant."""
     raw = config_path.read_text()
     # Placeholders embedded in JSON strings must be escaped as JSON string

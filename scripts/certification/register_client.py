@@ -13,6 +13,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import sys
 import urllib.request
 from pathlib import Path
@@ -123,8 +124,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    config = json.loads(args.config.read_text())
-    client_alias = config.get("client_alias")
+    # The config template may contain bare placeholders like {CLIENT_JWKS}
+    # that aren't valid JSON, so we extract client_alias via regex instead
+    # of json.loads.
+    raw = args.config.read_text()
+    match = re.search(r'"client_alias"\s*:\s*"([^"]+)"', raw)
+    client_alias = match.group(1) if match else None
     if not client_alias:
         print(f"ERROR: No client_alias in {args.config}", file=sys.stderr)
         sys.exit(1)
