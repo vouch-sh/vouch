@@ -238,10 +238,7 @@ pub async fn complete_login(
     };
 
     let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
-    let cookie = create_session_cookie(
-        session_result.token.expose_secret(),
-        session_hours * 3600,
-    );
+    let cookie = create_session_cookie(session_result.token.expose_secret(), session_hours * 3600);
 
     tracing::info!(
         pending_auth = %query.pending_auth,
