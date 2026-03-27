@@ -17,11 +17,17 @@ use secrecy::ExposeSecret;
 use serde::Deserialize;
 use subtle::ConstantTimeEq;
 
+use axum::http::header;
+use jiff::Timestamp;
+
 use crate::{
     AppState, db,
     handlers::browser_login::hmac_sha256_base64url,
     handlers::oidc::build_authorization_success_redirect_url,
+    handlers::session::create_session_cookie,
+    services::auth::{CreateOAuthTokenParams, create_oauth_access_token},
     services::oidc::{
+        amr::{ACR_AAL3, AuthMethod},
         authorization::{AuthorizationCodeParams, CodeChallengeMethod, issue_authorization_code},
         fapi::auth_code_lifetime_seconds,
         scope::ScopeSet,
@@ -199,13 +205,55 @@ pub async fn complete_login(
         }
     };
 
+    // ── 9. Create a browser session ──────────────────────────────────────
+    // Set a session cookie so that subsequent authorization requests from
+    // the same browser (e.g. prompt=none, max_age) recognize the user.
+    let client_id = state.config().base_url.clone();
+    let session_result = match create_oauth_access_token(
+        &state,
+        CreateOAuthTokenParams {
+            user_id: &user.id,
+            email: &user.email,
+            authenticator_id: Some(&authenticator_id),
+            client_id: &client_id,
+            scope: Some(ScopeSet::all()),
+            dpop_jkt: None,
+            act: None,
+            audience: None,
+            auth_time: Some(Timestamp::now().as_second()),
+            amr: Some(AuthMethod::all_fido2().to_vec()),
+            acr: Some(ACR_AAL3.to_string()),
+            hardware_verified: true,
+            session_purpose: db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+        },
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "Certification login: failed to create session");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    let session_hours = i64::try_from(state.config().session_hours).unwrap_or(8);
+    let cookie = create_session_cookie(
+        session_result.token.expose_secret(),
+        session_hours * 3600,
+    );
+
     tracing::info!(
         pending_auth = %query.pending_auth,
         user_id = %user.id,
         "Certification login: authorization code issued, redirecting to callback"
     );
 
-    Redirect::to(&redirect_url).into_response()
+    (
+        [(header::SET_COOKIE, cookie.to_string())],
+        Redirect::to(&redirect_url),
+    )
+        .into_response()
 }
 
 /// Get the certification test user, creating it if it doesn't exist.
