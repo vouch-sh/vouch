@@ -172,13 +172,9 @@ jobs:
           - plan: oidcc-basic-certification-test-plan
             plan-label: OIDC Basic OP
             config: scripts/certification/config/oidcc-basic.json
-            client-alias: vouch-oidcc-basic
-            variant: '{"client_registration":"dynamic_client"}'
           - plan: fapi2-security-profile-id2-test-plan
             plan-label: FAPI 2.0 Security Profile
             config: scripts/certification/config/fapi2-security-profile.json
-            client-alias: vouch-fapi2
-            variant: '{"sender_constrain":"dpop","client_auth_type":"private_key_jwt","fapi_response_mode":"plain_response"}'
 
     steps:
       # GHAS "checkout of untrusted code in privileged workflow_run" is a
@@ -321,12 +317,12 @@ jobs:
         if: contains(matrix.plan, 'fapi2')
         env:
           PLAN: ${{ matrix.plan }}
-          CLIENT_ALIAS: ${{ matrix.client-alias }}
+          CONFIG: ${{ matrix.config }}
         run: |
           pip install --quiet cryptography
           python3 scripts/certification/register_client.py \
             --plan "$PLAN" \
-            --client-alias "$CLIENT_ALIAS" \
+            --config "$CONFIG" \
             --vouch-url http://localhost:3000
 
       - name: Run certification
@@ -338,8 +334,6 @@ jobs:
           VOUCH_CLIENT_JWKS: ${{ env.CLIENT_JWKS }}
           PLAN: ${{ matrix.plan }}
           CONFIG: ${{ matrix.config }}
-          VARIANT: ${{ matrix.variant }}
-          MODE: ${{ needs.prepare.outputs.mode }}
           PUBLISH: ${{ needs.prepare.outputs.publish }}
           TUNNEL_URL: ${{ steps.tunnel.outputs.tunnel_url }}
           VERSION: ${{ needs.prepare.outputs.label }}
@@ -347,11 +341,6 @@ jobs:
           PUBLISH_ARG=""
           if [ "$PUBLISH" = "true" ]; then
             PUBLISH_ARG="--publish"
-          fi
-
-          VARIANT_ARG=""
-          if [ -n "$VARIANT" ]; then
-            VARIANT_ARG="--variant $VARIANT"
           fi
 
           # shellcheck disable=SC2086
@@ -364,7 +353,6 @@ jobs:
             --client-jwks "$VOUCH_CLIENT_JWKS" \
             --version "$VERSION" \
             --export-dir /tmp/cert-results \
-            $VARIANT_ARG \
             $PUBLISH_ARG
 
       - name: Upload results

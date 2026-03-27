@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Register an OAuth client with the Vouch server via Dynamic Client Registration.
 
-Handles two auth methods:
+Reads client_alias and auth method from the plan config JSON, then:
   - client_secret_basic  (OIDC Basic plans)
   - private_key_jwt      (FAPI 2.0 plans — generates an ES256 key pair)
 
@@ -13,6 +13,7 @@ import argparse
 import base64
 import json
 import os
+import sys
 import urllib.request
 from pathlib import Path
 
@@ -105,7 +106,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", required=True, help="Conformance test plan name")
     parser.add_argument(
-        "--client-alias", required=True, help="Client alias for redirect URI"
+        "--config",
+        required=True,
+        type=Path,
+        help="Path to plan config JSON (reads client_alias from it)",
     )
     parser.add_argument(
         "--vouch-url",
@@ -119,6 +123,12 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    config = json.loads(args.config.read_text())
+    client_alias = config.get("client_alias")
+    if not client_alias:
+        print(f"ERROR: No client_alias in {args.config}", file=sys.stderr)
+        sys.exit(1)
+
     is_fapi2 = "fapi2" in args.plan
 
     public_jwks = None
@@ -127,7 +137,7 @@ def main() -> None:
         public_jwks, private_jwks = generate_ec_jwk(Path(args.key_dir))
         print("ES256 key pair generated")
 
-    payload = build_payload(args.plan, args.client_alias, public_jwks)
+    payload = build_payload(args.plan, client_alias, public_jwks)
     response = post_dcr(args.vouch_url, payload)
     print(f"DCR response: {json.dumps(response)}")
 

@@ -1,5 +1,14 @@
 {
   "description": "Vouch {VERSION} FAPI 2.0 Security Profile Certification",
+  "variant": {
+    "openid": "openid_connect",
+    "client_auth_type": "private_key_jwt",
+    "fapi_request_method": "signed_non_repudiation",
+    "sender_constrain": "dpop",
+    "fapi_profile": "plain_fapi",
+    "fapi_response_mode": "plain_response"
+  },
+  "client_alias": "vouch-fapi2",
   "server": {
     "discoveryUrl": "{BASEURL}/.well-known/openid-configuration"
   },

@@ -4,20 +4,19 @@
 Run an OpenID conformance test plan against a Vouch server.
 
 Orchestrates the full certification workflow:
-  1. Load config template and substitute {BASEURL}, {CLIENT_ID}, {CLIENT_SECRET}, {CLIENT_JWKS}
-  2. Create a test plan (public only when --publish is set)
-  3. Run each module sequentially, collecting results
-  4. Export HTML report and ZIP archive
-  5. Optionally create a formal certification package (--publish)
-  6. Print a summary table; exit non-zero if any module is not in PASSING_RESULTS
+  1. Load config template and substitute placeholders
+  2. Extract variant from config (passed separately to the API)
+  3. Create a test plan
+  4. Run each module sequentially, collecting results
+  5. Export HTML report and ZIP archive
+  6. Optionally create a formal certification package (--publish)
+  7. Print a summary table; exit non-zero if any module is not in PASSING_RESULTS
 
 Usage:
     python3 run.py \\
         --plan oidcc-basic-certification-test-plan \\
         --config config/oidcc-basic.json \\
         --base-url https://xxx.trycloudflare.com \\
-        --client-id <CLIENT_ID> \\
-        --client-secret <CLIENT_SECRET> \\
         [--export-dir /tmp/cert-results] \\
         [--publish]
 
@@ -52,7 +51,7 @@ def load_config(
     publish: bool,
     version: str = "",
 ) -> dict:
-    """Load and substitute the config template."""
+    """Load config template, substitute placeholders, extract variant."""
     raw = config_path.read_text()
     # Placeholders embedded in JSON strings must be escaped as JSON string
     # fragments so special characters (", \, newlines, etc.) cannot break JSON.
@@ -73,7 +72,13 @@ def load_config(
         config["publish"] = "everything"
     else:
         config.pop("publish", None)
-    return config
+
+    # Extract variant and client_alias — these are our fields,
+    # not part of the conformance API config body.
+    variant = config.pop("variant", None)
+    config.pop("client_alias", None)
+
+    return config, variant
 
 
 def print_summary(results: list[dict], plan_id: str, conformance_server: str) -> None:
@@ -172,7 +177,7 @@ def main() -> None:
         "--config",
         required=True,
         type=Path,
-        help="Path to plan config JSON template",
+        help="Path to plan config JSON (includes variant, client config, browser tasks)",
     )
     parser.add_argument(
         "--base-url",
@@ -193,11 +198,6 @@ def main() -> None:
         "--client-jwks",
         default=os.environ.get("VOUCH_CLIENT_JWKS", ""),
         help="Client private JWKS JSON for private_key_jwt auth",
-    )
-    parser.add_argument(
-        "--variant",
-        default=None,
-        help='Variant JSON (e.g. \'{"sender_constrain": "dpop"}\')',
     )
     parser.add_argument(
         "--export-dir",
@@ -231,7 +231,7 @@ def main() -> None:
         print("ERROR: CONFORMANCE_TOKEN environment variable is required", file=sys.stderr)
         sys.exit(1)
 
-    config = load_config(
+    config, variant = load_config(
         args.config,
         args.base_url,
         args.client_id,
@@ -240,8 +240,6 @@ def main() -> None:
         args.publish,
         version=args.version,
     )
-
-    variant = json.loads(args.variant) if args.variant else None
 
     success = run_plan(
         plan_name=args.plan,
