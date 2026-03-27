@@ -173,11 +173,12 @@ jobs:
             plan-label: OIDC Basic OP
             config: scripts/certification/config/oidcc-basic.json
             client-alias: vouch-oidcc-basic
+            variant: '{"client_registration":"dynamic_client"}'
           - plan: fapi2-security-profile-id2-test-plan
             plan-label: FAPI 2.0 Security Profile
             config: scripts/certification/config/fapi2-security-profile.json
             client-alias: vouch-fapi2
-            variant: '{"sender_constrained_access_tokens":"dpop","client_auth_type":"private_key_jwt","fapi_response_mode":"plain_response"}'
+            variant: '{"sender_constrain":"dpop","client_auth_type":"private_key_jwt","fapi_response_mode":"plain_response"}'
 
     steps:
       # GHAS "checkout of untrusted code in privileged workflow_run" is a
@@ -317,14 +318,12 @@ jobs:
           done
 
       - name: Register OAuth client via DCR
+        if: contains(matrix.plan, 'fapi2')
         env:
           PLAN: ${{ matrix.plan }}
           CLIENT_ALIAS: ${{ matrix.client-alias }}
         run: |
-          # cryptography is only needed for FAPI 2.0 (EC key generation)
-          if [[ "$PLAN" == *"fapi2"* ]]; then
-            pip install --quiet cryptography
-          fi
+          pip install --quiet cryptography
           python3 scripts/certification/register_client.py \
             --plan "$PLAN" \
             --client-alias "$CLIENT_ALIAS" \

@@ -4,8 +4,6 @@
     "discoveryUrl": "{BASEURL}/.well-known/openid-configuration"
   },
   "client": {
-    "client_id": "{CLIENT_ID}",
-    "client_secret": "{CLIENT_SECRET}",
     "scope": "openid email"
   },
   "browser": [

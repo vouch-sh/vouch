@@ -197,7 +197,7 @@ def main() -> None:
     parser.add_argument(
         "--variant",
         default=None,
-        help='Variant JSON (e.g. \'{"sender_constrained_access_tokens": "dpop"}\')',
+        help='Variant JSON (e.g. \'{"sender_constrain": "dpop"}\')',
     )
     parser.add_argument(
         "--export-dir",
