@@ -124,7 +124,7 @@ class ConformanceClient:
     def start_test_module(self, plan_id: str, module_name: str) -> str:
         """Start a test module and return the module instance ID."""
         log.info("Starting module %s in plan %s", module_name, plan_id)
-        data = self._post("/api/runner", params={"planId": plan_id, "test": module_name})
+        data = self._post("/api/runner", params={"plan": plan_id, "test": module_name})
         module_id = data.get("id")
         if not module_id:
             raise ConformanceError(f"No module ID in start response: {data}")
@@ -172,26 +172,7 @@ class ConformanceClient:
 
             time.sleep(min(POLL_INTERVAL, remaining))
 
-    # ── Results and export ───────────────────────────────────────────────────
-
-    def _download(self, path: str, dest: Path) -> Path:
-        """Download a file from the server and write it to dest."""
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(self._get_bytes(path))
-        log.info("Downloaded %s to %s", path, dest)
-        return dest
-
-    def export_results(self, plan_id: str, output_dir: Path) -> Path:
-        """Download the ZIP export of test results for a plan."""
-        return self._download(
-            f"/api/plan/{plan_id}/export", output_dir / f"plan-{plan_id}.zip"
-        )
-
-    def export_html(self, plan_id: str, output_dir: Path) -> Path:
-        """Download the HTML report for a plan."""
-        return self._download(
-            f"/api/plan/exporthtml/{plan_id}", output_dir / f"plan-{plan_id}.html"
-        )
+    # ── Certification ────────────────────────────────────────────────────────
 
     def create_certification_package(self, plan_id: str) -> dict[str, Any]:
         """Generate an official certification package for a passing plan."""

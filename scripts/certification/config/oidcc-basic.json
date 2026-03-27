@@ -1,18 +1,35 @@
 {
   "description": "Vouch {VERSION} OIDC Basic OP Certification",
+  "variant": {
+    "server_metadata": "discovery",
+    "client_registration": "dynamic_client"
+  },
   "server": {
     "discoveryUrl": "{BASEURL}/.well-known/openid-configuration"
   },
   "client": {
+    "client_name": "vouch-oidcc-basic",
     "scope": "openid email"
   },
   "browser": [
     {
-      "match": "{BASEURL}/login*",
+      "match": "{BASEURL}/oauth/authorize*",
       "tasks": [
         {
-          "task": "Click",
-          "selector": "#cert-login"
+          "task": "Login",
+          "optional": true,
+          "match": "{BASEURL}/login*",
+          "commands": [
+            ["click", "id", "cert-login"]
+          ]
+        },
+        {
+          "task": "Verify Complete",
+          "optional": true,
+          "match": "*/test/*/callback*",
+          "commands": [
+            ["wait", "id", "submission_complete", 10]
+          ]
         }
       ]
     }

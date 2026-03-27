@@ -43,6 +43,18 @@ const SAML_ACS_BODY_LIMIT: usize = 64 * 1024;
 /// Global body size limit (per-route overrides above are more restrictive).
 const GLOBAL_BODY_LIMIT: usize = 256 * 1024;
 
+/// Build a rate limiter, or a no-op passthrough when certification test mode
+/// is active (`VOUCH_CERTIFICATION_TEST_TOKEN` is set).
+macro_rules! maybe_rate_limit {
+    ($builder:path, $config:expr) => {
+        tower::util::option_layer(if $config.certification_test_token.is_some() {
+            None
+        } else {
+            Some($builder(&$config.trusted_proxies)?)
+        })
+    };
+}
+
 /// Format `SOURCE_DATE_EPOCH` (compile-time) as a date string for the banner.
 fn build_date() -> String {
     option_env!("SOURCE_DATE_EPOCH")
@@ -123,14 +135,10 @@ pub fn build_app(state: Arc<AppState>, config: &config::ServerConfig) -> anyhow:
              GET /certification/complete-login is active. \
              Do NOT run this in production."
         );
-        Router::new()
-            .route(
-                "/certification/complete-login",
-                get(handlers::certification::complete_login),
-            )
-            .layer(rate_limit::build_auth_rate_limiter(
-                &config.trusted_proxies,
-            )?)
+        Router::new().route(
+            "/certification/complete-login",
+            get(handlers::certification::complete_login),
+        )
     } else {
         Router::new()
     };
@@ -190,9 +198,10 @@ fn build_rate_limited_routes(
             post(handlers::oidc::fido2_challenge),
         )
         .route("/oauth/device", post(handlers::device::device_code))
-        .layer(rate_limit::build_auth_rate_limiter(
-            &config.trusted_proxies,
-        )?))
+        .layer(maybe_rate_limit!(
+            rate_limit::build_auth_rate_limiter,
+            config
+        )))
 }
 
 /// Rate-limited credential issuance routes.
@@ -226,9 +235,10 @@ fn build_credential_routes(
         ));
 
     Ok(credential_routes
-        .layer(rate_limit::build_credential_rate_limiter(
-            &config.trusted_proxies,
-        )?)
+        .layer(maybe_rate_limit!(
+            rate_limit::build_credential_rate_limiter,
+            config
+        ))
         .layer(DefaultBodyLimit::max(CREDENTIAL_BODY_LIMIT)))
 }
 
@@ -285,9 +295,10 @@ fn build_general_limited_routes(
                 .patch(handlers::scim::patch_group)
                 .delete(handlers::scim::delete_group),
         )
-        .layer(rate_limit::build_general_rate_limiter(
-            &config.trusted_proxies,
-        )?)
+        .layer(maybe_rate_limit!(
+            rate_limit::build_general_rate_limiter,
+            config
+        ))
         .layer(DefaultBodyLimit::max(SCIM_BODY_LIMIT)))
 }
 
@@ -367,9 +378,10 @@ fn build_public_read_routes(
             "/v1/credentials/github/status",
             get(handlers::credentials::get_github_status),
         )
-        .layer(rate_limit::build_general_rate_limiter(
-            &config.trusted_proxies,
-        )?))
+        .layer(maybe_rate_limit!(
+            rate_limit::build_general_rate_limiter,
+            config
+        )))
 }
 
 /// Rate-limited API management routes.
@@ -428,9 +440,10 @@ fn build_api_management_routes(
             "/api/v1/applications/{id}/revoke",
             post(handlers::applications::revoke_tokens_api),
         )
-        .layer(rate_limit::build_general_rate_limiter(
-            &config.trusted_proxies,
-        )?))
+        .layer(maybe_rate_limit!(
+            rate_limit::build_general_rate_limiter,
+            config
+        )))
 }
 
 /// Rate-limited browser WebAuthn routes.
@@ -459,9 +472,10 @@ fn build_browser_auth_routes(
             post(handlers::enroll::browser_register_complete)
                 .layer(DefaultBodyLimit::max(ENROLL_BODY_LIMIT)),
         )
-        .layer(rate_limit::build_auth_rate_limiter(
-            &config.trusted_proxies,
-        )?))
+        .layer(maybe_rate_limit!(
+            rate_limit::build_auth_rate_limiter,
+            config
+        )))
 }
 
 /// Rate-limited admin member management routes.
@@ -525,9 +539,10 @@ fn build_admin_routes(config: &config::ServerConfig) -> anyhow::Result<Router<Ar
             "/admin/scim-tokens/{id}/revoke",
             post(handlers::admin::admin_revoke_scim_token),
         )
-        .layer(rate_limit::build_general_rate_limiter(
-            &config.trusted_proxies,
-        )?))
+        .layer(maybe_rate_limit!(
+            rate_limit::build_general_rate_limiter,
+            config
+        )))
 }
 
 /// Readiness probe handler.

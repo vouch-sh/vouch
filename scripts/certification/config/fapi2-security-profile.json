@@ -1,5 +1,12 @@
 {
   "description": "Vouch {VERSION} FAPI 2.0 Security Profile Certification",
+  "variant": {
+    "openid": "openid_connect",
+    "client_auth_type": "private_key_jwt",
+    "sender_constrain": "dpop",
+    "fapi_profile": "plain_fapi"
+  },
+  "client_alias": "vouch-fapi2",
   "server": {
     "discoveryUrl": "{BASEURL}/.well-known/openid-configuration"
   },
@@ -8,13 +15,33 @@
     "jwks": {CLIENT_JWKS},
     "scope": "openid"
   },
+  "resource": {
+    "resourceUrl": "{BASEURL}/oauth/userinfo"
+  },
+  "client2": {
+    "client_id": "{CLIENT2_ID}",
+    "jwks": {CLIENT2_JWKS},
+    "scope": "openid"
+  },
   "browser": [
     {
-      "match": "{BASEURL}/login*",
+      "match": "{BASEURL}/oauth/authorize*",
       "tasks": [
         {
-          "task": "Click",
-          "selector": "#cert-login"
+          "task": "Login",
+          "optional": true,
+          "match": "{BASEURL}/login*",
+          "commands": [
+            ["click", "id", "cert-login"]
+          ]
+        },
+        {
+          "task": "Verify Complete",
+          "optional": true,
+          "match": "*/test/*/callback*",
+          "commands": [
+            ["wait", "id", "submission_complete", 10]
+          ]
         }
       ]
     }

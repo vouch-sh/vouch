@@ -4,20 +4,19 @@
 Run an OpenID conformance test plan against a Vouch server.
 
 Orchestrates the full certification workflow:
-  1. Load config template and substitute {BASEURL}, {CLIENT_ID}, {CLIENT_SECRET}, {CLIENT_JWKS}
-  2. Create a test plan (public only when --publish is set)
-  3. Run each module sequentially, collecting results
-  4. Export HTML report and ZIP archive
-  5. Optionally create a formal certification package (--publish)
-  6. Print a summary table; exit non-zero if any module is not in PASSING_RESULTS
+  1. Load config template and substitute placeholders
+  2. Extract variant from config (passed separately to the API)
+  3. Create a test plan
+  4. Run each module sequentially, collecting results
+  5. Export HTML report and ZIP archive
+  6. Optionally create a formal certification package (--publish)
+  7. Print a summary table; exit non-zero if any module is not in PASSING_RESULTS
 
 Usage:
     python3 run.py \\
         --plan oidcc-basic-certification-test-plan \\
         --config config/oidcc-basic.json \\
         --base-url https://xxx.trycloudflare.com \\
-        --client-id <CLIENT_ID> \\
-        --client-secret <CLIENT_SECRET> \\
         [--export-dir /tmp/cert-results] \\
         [--publish]
 
@@ -27,6 +26,7 @@ Environment variables:
 """
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import os
@@ -51,19 +51,23 @@ def load_config(
     client_jwks: str,
     publish: bool,
     version: str = "",
-) -> dict:
-    """Load and substitute the config template."""
+) -> tuple[dict, dict | None]:
+    """Load config template, substitute placeholders, extract variant."""
     raw = config_path.read_text()
     # Placeholders embedded in JSON strings must be escaped as JSON string
     # fragments so special characters (", \, newlines, etc.) cannot break JSON.
     def json_escape_fragment(value: str) -> str:
         return json.dumps(value)[1:-1]
 
+    client2_id = os.environ.get("CLIENT2_ID", "")
+    client2_jwks = os.environ.get("CLIENT2_JWKS", "")
     substitutions = {
         "{BASEURL}": json_escape_fragment(base_url.rstrip("/")),
         "{CLIENT_ID}": json_escape_fragment(client_id),
         "{CLIENT_SECRET}": json_escape_fragment(client_secret),
         "{CLIENT_JWKS}": client_jwks or "null",
+        "{CLIENT2_ID}": json_escape_fragment(client2_id),
+        "{CLIENT2_JWKS}": client2_jwks or "null",
         "{VERSION}": json_escape_fragment(version or "dev"),
     }
     for placeholder, value in substitutions.items():
@@ -73,7 +77,13 @@ def load_config(
         config["publish"] = "everything"
     else:
         config.pop("publish", None)
-    return config
+
+    # Extract variant and client_alias — these are our fields,
+    # not part of the conformance API config body.
+    variant = config.pop("variant", None)
+    config.pop("client_alias", None)
+
+    return config, variant
 
 
 def print_summary(results: list[dict], plan_id: str, conformance_server: str) -> None:
@@ -101,8 +111,8 @@ def run_plan(
     plan_name: str,
     config: dict,
     variant: dict | None,
-    export_dir: Path,
     publish: bool,
+    parallel: int,
     conformance_server: str,
     conformance_token: str,
     module_timeout: int,
@@ -116,13 +126,9 @@ def run_plan(
     modules = client.get_plan_modules(plan_id)
     log.info("Plan has %d modules", len(modules))
 
-    results = []
-    any_failed = False
-
-    for module in modules:
+    def run_module(module: dict) -> dict:
         module_name = module.get("testModule") or module.get("name", "unknown")
         log.info("Running module: %s", module_name)
-
         try:
             module_id = client.start_test_module(plan_id, module_name)
             info = client.wait_for_state(module_id, timeout=module_timeout)
@@ -130,20 +136,16 @@ def run_plan(
         except ConformanceError as e:
             log.error("Module %s error: %s", module_name, e)
             result = "FAILED"
-
-        results.append({"name": module_name, "result": result})
-
-        if result not in PASSING_RESULTS:
-            any_failed = True
-            log.error("%s: %s", result, module_name)
-        else:
+        if result in PASSING_RESULTS:
             log.info("%s: %s", result, module_name)
+        else:
+            log.error("%s: %s", result, module_name)
+        return {"name": module_name, "result": result}
 
-    try:
-        client.export_html(plan_id, export_dir)
-        client.export_results(plan_id, export_dir)
-    except ConformanceError as e:
-        log.warning("Failed to export results: %s", e)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
+        results = list(pool.map(run_module, modules))
+
+    any_failed = any(r["result"] not in PASSING_RESULTS for r in results)
 
     if publish and not any_failed:
         try:
@@ -172,7 +174,7 @@ def main() -> None:
         "--config",
         required=True,
         type=Path,
-        help="Path to plan config JSON template",
+        help="Path to plan config JSON (includes variant, client config, browser tasks)",
     )
     parser.add_argument(
         "--base-url",
@@ -195,17 +197,6 @@ def main() -> None:
         help="Client private JWKS JSON for private_key_jwt auth",
     )
     parser.add_argument(
-        "--variant",
-        default=None,
-        help='Variant JSON (e.g. \'{"sender_constrain": "dpop"}\')',
-    )
-    parser.add_argument(
-        "--export-dir",
-        default=Path("/tmp/cert-results"),
-        type=Path,
-        help="Directory for exported test results (default: /tmp/cert-results)",
-    )
-    parser.add_argument(
         "--version",
         default=os.environ.get("VOUCH_VERSION", "dev"),
         help="Vouch version string for plan description (e.g. 1.2.0)",
@@ -214,6 +205,12 @@ def main() -> None:
         "--publish",
         action="store_true",
         help="Create a formal certification package if all tests pass",
+    )
+    parser.add_argument(
+        "--parallel",
+        type=int,
+        default=3,
+        help="Number of modules to run in parallel (default: 3)",
     )
     parser.add_argument(
         "--module-timeout",
@@ -231,7 +228,7 @@ def main() -> None:
         print("ERROR: CONFORMANCE_TOKEN environment variable is required", file=sys.stderr)
         sys.exit(1)
 
-    config = load_config(
+    config, variant = load_config(
         args.config,
         args.base_url,
         args.client_id,
@@ -241,14 +238,12 @@ def main() -> None:
         version=args.version,
     )
 
-    variant = json.loads(args.variant) if args.variant else None
-
     success = run_plan(
         plan_name=args.plan,
         config=config,
         variant=variant,
-        export_dir=args.export_dir,
         publish=args.publish,
+        parallel=args.parallel,
         conformance_server=conformance_server,
         conformance_token=conformance_token,
         module_timeout=args.module_timeout,
