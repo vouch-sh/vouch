@@ -26,6 +26,7 @@ Environment variables:
 """
 
 import argparse
+import concurrent.futures
 import json
 import logging
 import os
@@ -111,6 +112,7 @@ def run_plan(
     config: dict,
     variant: dict | None,
     publish: bool,
+    parallel: int,
     conformance_server: str,
     conformance_token: str,
     module_timeout: int,
@@ -124,13 +126,9 @@ def run_plan(
     modules = client.get_plan_modules(plan_id)
     log.info("Plan has %d modules", len(modules))
 
-    results = []
-    any_failed = False
-
-    for module in modules:
+    def run_module(module: dict) -> dict:
         module_name = module.get("testModule") or module.get("name", "unknown")
         log.info("Running module: %s", module_name)
-
         try:
             module_id = client.start_test_module(plan_id, module_name)
             info = client.wait_for_state(module_id, timeout=module_timeout)
@@ -138,14 +136,16 @@ def run_plan(
         except ConformanceError as e:
             log.error("Module %s error: %s", module_name, e)
             result = "FAILED"
-
-        results.append({"name": module_name, "result": result})
-
-        if result not in PASSING_RESULTS:
-            any_failed = True
-            log.error("%s: %s", result, module_name)
-        else:
+        if result in PASSING_RESULTS:
             log.info("%s: %s", result, module_name)
+        else:
+            log.error("%s: %s", result, module_name)
+        return {"name": module_name, "result": result}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
+        results = list(pool.map(run_module, modules))
+
+    any_failed = any(r["result"] not in PASSING_RESULTS for r in results)
 
     if publish and not any_failed:
         try:
@@ -207,6 +207,12 @@ def main() -> None:
         help="Create a formal certification package if all tests pass",
     )
     parser.add_argument(
+        "--parallel",
+        type=int,
+        default=3,
+        help="Number of modules to run in parallel (default: 3)",
+    )
+    parser.add_argument(
         "--module-timeout",
         type=int,
         default=300,
@@ -237,6 +243,7 @@ def main() -> None:
         config=config,
         variant=variant,
         publish=args.publish,
+        parallel=args.parallel,
         conformance_server=conformance_server,
         conformance_token=conformance_token,
         module_timeout=args.module_timeout,

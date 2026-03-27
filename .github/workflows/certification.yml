@@ -349,4 +349,6 @@ jobs:
 
       - name: Show vouch logs on failure
         if: failure()
-        run: docker logs vouch2 2>/dev/null || docker logs vouch 2>/dev/null || true
+        run: |
+          (docker logs vouch2 2>&1 || docker logs vouch 2>&1 || true) \
+            | grep -i "error\|warn\|panic" || true
