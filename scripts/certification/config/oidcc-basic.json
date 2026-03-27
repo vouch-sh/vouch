@@ -13,7 +13,7 @@
   },
   "browser": [
     {
-      "match": "{BASEURL}/*",
+      "match": "{BASEURL}/oauth/authorize*",
       "tasks": [
         {
           "task": "Login",
