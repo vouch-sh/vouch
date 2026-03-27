@@ -25,7 +25,7 @@
     </div>
 </div>
 <div id="login-config" data-rp-id="{{ rp_id }}" {% if pending_auth.is_some() %}data-pending-auth="{{ pending_auth.as_ref().unwrap() }}"{% endif %} hidden></div>
-{% if cert_login_url.is_some() %}<a id="cert-login" href="{{ cert_login_url.as_ref().unwrap() }}" hidden>Certification Test Login</a>{% endif %}
+{% if cert_login_url.is_some() %}<a id="cert-login" href="{{ cert_login_url.as_ref().unwrap() }}">Certification Test Login</a>{% endif %}
 {% endblock %}
 
 {% block scripts %}

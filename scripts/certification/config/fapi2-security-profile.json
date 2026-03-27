@@ -19,11 +19,21 @@
   },
   "browser": [
     {
-      "match": "{BASEURL}/login*",
+      "match": "{BASEURL}/*",
       "tasks": [
         {
-          "task": "Click",
-          "selector": "#cert-login"
+          "task": "Login",
+          "match": "{BASEURL}/login*",
+          "commands": [
+            ["click", "id", "cert-login"]
+          ]
+        },
+        {
+          "task": "Verify Complete",
+          "match": "*/test/*/callback*",
+          "commands": [
+            ["wait", "id", "submission_complete", 10]
+          ]
         }
       ]
     }
