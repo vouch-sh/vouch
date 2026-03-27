@@ -231,19 +231,17 @@ jobs:
         env:
           VOUCH_CERTIFICATION_TEST_TOKEN: ${{ secrets.VOUCH_CERTIFICATION_TEST_TOKEN }}
         run: |
-          mkdir -p /tmp/vouch-data
           JWT_SECRET=$(openssl rand -hex 32)
           echo "jwt_secret=${JWT_SECRET}" >> "$GITHUB_OUTPUT"
 
           docker run -d --name vouch \
             -p 3000:3000 \
-            -e DATABASE_URL="sqlite:///data/vouch.db" \
             -e VOUCH_RP_ID="localhost" \
             -e VOUCH_RP_NAME="Vouch Cert Test" \
             -e VOUCH_JWT_SECRET="${JWT_SECRET}" \
             -e VOUCH_BASE_URL="http://localhost:3000" \
             -e VOUCH_CERTIFICATION_TEST_TOKEN="${VOUCH_CERTIFICATION_TEST_TOKEN}" \
-            -v /tmp/vouch-data:/data \
+            -v vouch-data:/data \
             vouch-server:cert
 
       - name: Wait for vouch to be healthy
@@ -297,13 +295,12 @@ jobs:
 
           docker run -d --name vouch2 \
             -p 3000:3000 \
-            -e DATABASE_URL="sqlite:///data/vouch.db" \
             -e VOUCH_RP_ID="${RP_ID}" \
             -e VOUCH_RP_NAME="Vouch Cert Test" \
             -e VOUCH_JWT_SECRET="${JWT_SECRET}" \
             -e VOUCH_BASE_URL="${URL}" \
             -e VOUCH_CERTIFICATION_TEST_TOKEN="${VOUCH_CERTIFICATION_TEST_TOKEN}" \
-            -v /tmp/vouch-data:/data \
+            -v vouch-data:/data \
             vouch-server:cert
 
           for i in $(seq 20); do
