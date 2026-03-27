@@ -10,7 +10,7 @@ workspace = true
 
 [features]
 default = []
-test-utils = ["tower"]
+test-utils = []
 
 [lib]
 path = "src/lib.rs"
@@ -78,7 +78,7 @@ thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
 tokio-util = { workspace = true }
-tower = { workspace = true, features = ["util"], optional = true }
+tower = { workspace = true, features = ["util"] }
 tower-http = { workspace = true, features = ["cors", "request-id", "set-header", "timeout"] }
 tower_governor = { workspace = true, features = ["axum", "tracing"] }
 tracing = { workspace = true, features = ["std"] }
@@ -95,5 +95,4 @@ x509-cert = { workspace = true, features = ["std", "pem"] }
 zeroize = { workspace = true }
 
 [dev-dependencies]
-tower = { workspace = true, features = ["util"] }
 wiremock = { workspace = true }
