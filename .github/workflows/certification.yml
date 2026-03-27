@@ -150,14 +150,14 @@ jobs:
         run: |
           if [ "$MODE" = "release" ]; then
             # Extract version from image reference (ghcr.io/org/repo:1.2.3 → 1.2.3)
-            LABEL=$(echo "$IMAGE" | sed 's/.*://')
+            LABEL="${IMAGE##*:}"
           else
             LABEL=$(echo "$REF" | cut -c1-12)
           fi
           echo "label=${LABEL}" >> "$GITHUB_OUTPUT"
 
   # ── Run certification plans (matrix: one job per plan) ───────────────────
-  certification:
+  certification: # zizmor: ignore[secrets-outside-env]
     name: ${{ matrix.plan-label }} (${{ needs.prepare.outputs.mode }})
     needs: prepare
     runs-on: ubuntu-latest
@@ -195,7 +195,7 @@ jobs:
       # ── Release mode: pull pre-built image ─────────────────────────────
       - name: Log in to GHCR
         if: needs.prepare.outputs.mode == 'release'
-        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        uses: docker/login-action@b45d80f862d83dbcd57f89517bcf500b2ab88fb2 # v4.0.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -216,7 +216,7 @@ jobs:
 
       - name: Build vouch-server image (dev mode)
         if: needs.prepare.outputs.mode == 'dev'
-        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150eda0754b6e053 # v6.15.0
+        uses: docker/build-push-action@d08e5c354a6adb9ed34480a06d141179aa583294 # v7.0.0
         with:
           context: .
           push: false
@@ -227,12 +227,13 @@ jobs:
 
       # ── Common: spin up vouch and run tests ─────────────────────────────
       - name: Start vouch server in certification mode
+        id: start-vouch
         env:
           VOUCH_CERTIFICATION_TEST_TOKEN: ${{ secrets.VOUCH_CERTIFICATION_TEST_TOKEN }}
         run: |
           mkdir -p /tmp/vouch-data
           JWT_SECRET=$(openssl rand -hex 32)
-          echo "JWT_SECRET=${JWT_SECRET}" >> "$GITHUB_ENV"
+          echo "jwt_secret=${JWT_SECRET}" >> "$GITHUB_OUTPUT"
 
           docker run -d --name vouch \
             -p 3000:3000 \
@@ -261,8 +262,10 @@ jobs:
           done
 
       - name: Start cloudflared tunnel
+        id: tunnel
         env:
           VOUCH_CERTIFICATION_TEST_TOKEN: ${{ secrets.VOUCH_CERTIFICATION_TEST_TOKEN }}
+          JWT_SECRET: ${{ steps.start-vouch.outputs.jwt_secret }}
         run: |
           curl -fsSL \
             https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
@@ -276,7 +279,7 @@ jobs:
             URL=$(grep -o 'https://[^ ]*\.trycloudflare\.com' /tmp/cf.log | head -1)
             if [ -n "$URL" ]; then
               echo "Tunnel URL: $URL"
-              echo "TUNNEL_URL=${URL}" >> "$GITHUB_ENV"
+              echo "tunnel_url=${URL}" >> "$GITHUB_OUTPUT"
               break
             fi
             if [ "$i" -eq 30 ]; then
@@ -289,9 +292,7 @@ jobs:
 
           # Restart vouch with the public tunnel URL as base_url so that
           # discovery documents and redirect URIs use the public hostname.
-          # NOTE: $TUNNEL_URL (written to $GITHUB_ENV above) is only available
-          # in subsequent steps; use $URL here within the same step.
-          RP_ID=$(echo "$URL" | sed 's|https://||')
+          RP_ID="${URL#https://}"
           docker stop vouch
 
           docker run -d --name vouch2 \
@@ -344,6 +345,8 @@ jobs:
           VARIANT: ${{ matrix.variant }}
           MODE: ${{ needs.prepare.outputs.mode }}
           PUBLISH: ${{ needs.prepare.outputs.publish }}
+          TUNNEL_URL: ${{ steps.tunnel.outputs.tunnel_url }}
+          VERSION: ${{ needs.prepare.outputs.label }}
         run: |
           PUBLISH_ARG=""
           if [ "$PUBLISH" = "true" ]; then
@@ -363,7 +366,7 @@ jobs:
             --client-id "$VOUCH_CLIENT_ID" \
             --client-secret "$VOUCH_CLIENT_SECRET" \
             --client-jwks "$VOUCH_CLIENT_JWKS" \
-            --version "${{ needs.prepare.outputs.label }}" \
+            --version "$VERSION" \
             --export-dir /tmp/cert-results \
             $VARIANT_ARG \
             $PUBLISH_ARG
