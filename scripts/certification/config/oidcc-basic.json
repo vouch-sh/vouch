@@ -41,10 +41,10 @@
           "match": "{BASEURL}/oauth/authorize*",
           "tasks": [
             {
-              "task": "Expect error page",
-              "match": "{BASEURL}/*",
+              "task": "Expect redirect uri mismatch error page",
+              "match": "{BASEURL}/oauth/authorize*",
               "commands": [
-                ["wait", "xpath", "//*", 10, ".*Access Denied.*", "update-image-placeholder"]
+                ["wait", "xpath", "//*", 10, "Access Denied", "update-image-placeholder"]
               ]
             }
           ]
@@ -61,7 +61,7 @@
               "optional": true,
               "match": "{BASEURL}/login*",
               "commands": [
-                ["wait", "xpath", "//*", 10, ".*Sign In.*", "update-image-placeholder-optional"],
+                ["wait", "xpath", "//*", 10, "Sign In", "update-image-placeholder-optional"],
                 ["click", "id", "cert-login"]
               ]
             },
@@ -87,7 +87,7 @@
               "optional": true,
               "match": "{BASEURL}/login*",
               "commands": [
-                ["wait", "xpath", "//*", 10, ".*Sign In.*", "update-image-placeholder-optional"],
+                ["wait", "xpath", "//*", 10, "Sign In", "update-image-placeholder-optional"],
                 ["click", "id", "cert-login"]
               ]
             },
