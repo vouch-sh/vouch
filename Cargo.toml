@@ -56,7 +56,7 @@ similar_names = "allow"
 [workspace.dependencies]
 anyhow = { version = "=1.0.102", default-features = false }
 arc-swap = { version = "=1.9.0", default-features = false }
-askama = { version = "=0.15.5", default-features = false }
+askama = { version = "=0.15.6", default-features = false }
 aws-config = { version = "=1.8.15", default-features = false }
 aws-lc-rs = { version = "=1.16.2", default-features = false }
 aws-sdk-dsql = { version = "=1.54.0", default-features = false }
@@ -99,7 +99,7 @@ opentelemetry = { version = "=0.31.0", default-features = false }
 opentelemetry_sdk = { version = "=0.31.0", default-features = false }
 opentelemetry-otlp = { version = "=0.31.1", default-features = false }
 p256 = { version = "=0.13.2", default-features = false }
-proptest = { version = "=1.10.0", default-features = false }
+proptest = { version = "=1.11.0", default-features = false }
 reqwest = { version = "=0.13.2", default-features = false }
 roxmltree = { version = "=0.21.1", default-features = false }
 rpassword = { version = "=7.4.0", default-features = false }
@@ -124,7 +124,7 @@ thiserror = { version = "=2.0.18", default-features = false }
 time = { version = "=0.3.47", default-features = false }
 tokio = { version = "=1.50.0", default-features = false }
 tokio-util = { version = "=0.7.18", default-features = false }
-toml_edit = { version = "=0.25.5", default-features = false }
+toml_edit = { version = "=0.25.8", default-features = false }
 tower = { version = "=0.5.3", default-features = false }
 tower-http = { version = "=0.6.8", default-features = false }
 tower_governor = { version = "=0.8.0", default-features = false }
@@ -133,7 +133,7 @@ tracing-opentelemetry = { version = "=0.32.1", default-features = false }
 tracing-subscriber = { version = "=0.3.23", default-features = false }
 url = { version = "=2.5.8", default-features = false }
 urlencoding = { version = "=2.1.3", default-features = false }
-uuid = { version = "=1.22.0", default-features = false }
+uuid = { version = "=1.23.0", default-features = false }
 vouch-agent = { path = "crates/vouch-agent" }
 vouch-common = { path = "crates/vouch-common" }
 vouch-httpsig = { path = "crates/vouch-httpsig" }
