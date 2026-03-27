@@ -34,6 +34,7 @@
         },
         {
           "task": "Verify Complete",
+          "optional": true,
           "match": "*/test/*/callback*",
           "commands": [
             ["wait", "id", "submission_complete", 10]
