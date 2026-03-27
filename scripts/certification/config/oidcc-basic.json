@@ -33,5 +33,75 @@
         }
       ]
     }
-  ]
+  ],
+  "override": {
+    "oidcc-ensure-registered-redirect-uri": {
+      "browser": [
+        {
+          "match": "{BASEURL}/oauth/authorize*",
+          "tasks": [
+            {
+              "task": "Expect error page",
+              "match": "{BASEURL}/*",
+              "commands": [
+                ["wait", "xpath", "//*", 10, ".*Access Denied.*", "update-image-placeholder"]
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "oidcc-prompt-login": {
+      "browser": [
+        {
+          "match": "{BASEURL}/oauth/authorize*",
+          "tasks": [
+            {
+              "task": "Login",
+              "optional": true,
+              "match": "{BASEURL}/login*",
+              "commands": [
+                ["wait", "xpath", "//*", 10, ".*Sign In.*", "update-image-placeholder-optional"],
+                ["click", "id", "cert-login"]
+              ]
+            },
+            {
+              "task": "Verify Complete",
+              "optional": true,
+              "match": "*/test/*/callback*",
+              "commands": [
+                ["wait", "id", "submission_complete", 10]
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "oidcc-max-age-1": {
+      "browser": [
+        {
+          "match": "{BASEURL}/oauth/authorize*",
+          "tasks": [
+            {
+              "task": "Login",
+              "optional": true,
+              "match": "{BASEURL}/login*",
+              "commands": [
+                ["wait", "xpath", "//*", 10, ".*Sign In.*", "update-image-placeholder-optional"],
+                ["click", "id", "cert-login"]
+              ]
+            },
+            {
+              "task": "Verify Complete",
+              "optional": true,
+              "match": "*/test/*/callback*",
+              "commands": [
+                ["wait", "id", "submission_complete", 10]
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
 }

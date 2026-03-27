@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 //! RFC 7592 — OAuth 2.0 Dynamic Client Registration Management tests.
 //!
-//! Tests for the `DELETE /oauth/register/:client_id` endpoint.
+//! Tests for `PUT /oauth/register/:client_id` and `DELETE /oauth/register/:client_id`.
 //!
 //! Reference: <https://www.rfc-editor.org/rfc/rfc7592>
 
@@ -26,6 +26,190 @@ async fn register_dynamic_client(app: &axum::Router) -> (String, String) {
 
     (client_id, token)
 }
+
+// =========================================================================
+// PUT /oauth/register/:client_id — Update Client Configuration
+// =========================================================================
+
+#[tokio::test]
+async fn test_rfc7592_put_updates_redirect_uris() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://new-callback.example.com/callback"],
+        "client_name": "Updated Client"
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "PUT failed: {body}");
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(json["client_id"].as_str().unwrap(), client_id);
+    let uris = json["redirect_uris"]
+        .as_array()
+        .expect("redirect_uris array");
+    assert_eq!(uris.len(), 1, "Old URI should be gone");
+    assert_eq!(
+        uris[0].as_str().unwrap(),
+        "https://new-callback.example.com/callback"
+    );
+    // PUT must return a new registration_access_token (token rotation)
+    let new_token = json["registration_access_token"]
+        .as_str()
+        .expect("PUT response must include a new registration_access_token");
+
+    // Verify stored state via GET with the new token
+    let (status, body) = http_request(
+        &app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {new_token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "GET after PUT failed: {body}");
+    let get_json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    assert_eq!(
+        get_json["redirect_uris"][0].as_str().unwrap(),
+        "https://new-callback.example.com/callback",
+        "Stored redirect_uri should match the PUT update"
+    );
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_rotates_token() {
+    let (app, _state) = test_app().await;
+    let (client_id, token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback2"]
+    });
+
+    let (status, body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", &format!("Bearer {token}")),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let json: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+    let new_token = json["registration_access_token"]
+        .as_str()
+        .expect("new token")
+        .to_string();
+
+    // Old token must no longer work
+    let (status, _body) = http_request(
+        &app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {token}"))],
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "Old token should be rejected after rotation"
+    );
+
+    // New token must work
+    let (status, _body) = http_request(
+        &app,
+        "GET",
+        &format!("/oauth/register/{client_id}"),
+        None,
+        &[("Authorization", &format!("Bearer {new_token}"))],
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "New token should work");
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_missing_bearer_token() {
+    let (app, _state) = test_app().await;
+    let (client_id, _token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let response = http_request_full(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[("Content-Type", "application/json")],
+    )
+    .await;
+    assert_eq!(response.status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_invalid_bearer_token() {
+    let (app, _state) = test_app().await;
+    let (client_id, _token) = register_dynamic_client(&app).await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let (status, _body) = http_request(
+        &app,
+        "PUT",
+        &format!("/oauth/register/{client_id}"),
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", "Bearer invalid_token_value"),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn test_rfc7592_put_nonexistent_client() {
+    let (app, _state) = test_app().await;
+
+    let update_body = serde_json::json!({
+        "redirect_uris": ["https://example.com/callback"]
+    });
+
+    let (status, _body) = http_request(
+        &app,
+        "PUT",
+        "/oauth/register/nonexistent-client-id",
+        Some(update_body.to_string()),
+        &[
+            ("Authorization", "Bearer some_token"),
+            ("Content-Type", "application/json"),
+        ],
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// =========================================================================
+// DELETE /oauth/register/:client_id — Delete Client Configuration
+// =========================================================================
 
 #[tokio::test]
 async fn test_rfc7592_delete_client_succeeds() {

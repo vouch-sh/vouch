@@ -68,6 +68,7 @@ def build_payload(plan: str, client_alias: str, public_jwks: dict | None) -> dic
             "response_types": ["code"],
             "scope": "openid",
             "jwks": public_jwks,
+            "dpop_bound_access_tokens": True,
         }
     return {
         "redirect_uris": [conformance_redirect],
@@ -154,6 +155,7 @@ def main() -> None:
         "CLIENT_ID": response["client_id"],
         "CLIENT_SECRET": response.get("client_secret", ""),
         "CLIENT_JWKS": client_jwks,
+        "CLIENT_REG_TOKEN": response.get("registration_access_token", ""),
     }
 
     # FAPI 2.0 tests require a second client for certain modules.
@@ -170,6 +172,7 @@ def main() -> None:
         env["CLIENT2_JWKS"] = json.dumps(
             private_jwks2, separators=(",", ":")
         )
+        env["CLIENT2_REG_TOKEN"] = response2.get("registration_access_token", "")
 
     write_github_env(env)
 

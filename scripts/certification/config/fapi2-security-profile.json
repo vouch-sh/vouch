@@ -13,7 +13,8 @@
   "client": {
     "client_id": "{CLIENT_ID}",
     "jwks": {CLIENT_JWKS},
-    "scope": "openid"
+    "scope": "openid",
+    "registration_access_token": "{CLIENT_REG_TOKEN}"
   },
   "resource": {
     "resourceUrl": "{BASEURL}/oauth/userinfo"
@@ -21,7 +22,8 @@
   "client2": {
     "client_id": "{CLIENT2_ID}",
     "jwks": {CLIENT2_JWKS},
-    "scope": "openid"
+    "scope": "openid",
+    "registration_access_token": "{CLIENT2_REG_TOKEN}"
   },
   "browser": [
     {

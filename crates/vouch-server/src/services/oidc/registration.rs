@@ -22,7 +22,7 @@ use crate::AppState;
 use crate::crypto::{generate_random_bytes, hash_token};
 use crate::db::{
     self, CreateOAuthClientParams, FapiProfile, OAuthClient, OAuthClientType, OAuthEventType,
-    RegistrationSource, TokenEndpointAuthMethod,
+    RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
 };
 use crate::services::error::{OAuthErrorCode, ServiceError};
 use base64::Engine;
@@ -707,6 +707,88 @@ pub async fn delete_client_configuration(
     );
 
     Ok(())
+}
+
+/// Update a dynamically registered client (RFC 7592 Section 2.2).
+///
+/// Authenticates the caller using the registration access token, updates
+/// the client's mutable registration fields, rotates the token, and
+/// returns the updated metadata.
+///
+/// # Errors
+///
+/// - `ServiceError::Unauthorized` if the Bearer token is invalid.
+/// - `ServiceError::NotFound` if the `client_id` does not exist.
+/// - `ServiceError::OAuth` if the request body contains invalid metadata.
+pub async fn update_client_configuration(
+    state: &Arc<AppState>,
+    client_id: &str,
+    registration_access_token: &str,
+    request: RegistrationRequest,
+) -> Result<RegistrationResponse, ServiceError> {
+    let client =
+        lookup_and_verify_registration_token(state, client_id, registration_access_token).await?;
+
+    // Validate grant/response types (take() empties the request fields)
+    let mut mutable_request = request;
+    let validated = validate_grant_and_response_types(&mut mutable_request)?;
+
+    // Validate redirect URIs (same cardinality + format rules as initial registration)
+    let redirect_uris = validate_redirect_uris(&mut mutable_request, validated.has_auth_code)?;
+
+    // Build updated registration metadata (cosmetic fields)
+    let registration_metadata = build_registration_metadata(&mutable_request);
+
+    // Rotate the registration access token per RFC 7592 Section 2.2
+    let new_reg_token = generate_registration_token()?;
+    let new_reg_token_hash = hash_token(&new_reg_token);
+
+    // token_endpoint_auth_method is intentionally NOT updated — it is immutable
+    // per RFC 7592 (clients cannot change their auth method after registration).
+    let updated = db::update_oauth_client_registration(
+        &state.store,
+        &client.id,
+        &UpdateClientRegistrationParams {
+            redirect_uris: &redirect_uris,
+            grant_types: Some(&validated.grant_types),
+            response_types: Some(&validated.response_types),
+            jwks: mutable_request.jwks.as_ref(),
+            jwks_uri: mutable_request.jwks_uri.as_deref(),
+            registration_access_token_hash: &new_reg_token_hash,
+            registration_metadata: Some(&registration_metadata),
+        },
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to update client {client_id}: {e}");
+        ServiceError::Internal("Failed to update client".to_string())
+    })?;
+
+    if let Err(e) = db::record_oauth_event(
+        &state.audit,
+        &client.id,
+        OAuthEventType::ClientUpdated,
+        client.user_id.as_deref(),
+        None,
+        None,
+        Some("RFC 7592 client configuration PUT"),
+    )
+    .await
+    {
+        tracing::warn!("Failed to record client update event: {e}");
+    }
+
+    tracing::info!(
+        "Dynamic client updated: client_id={}, user={}",
+        client_id,
+        client.user_id.as_deref().unwrap_or("(none)"),
+    );
+
+    let base_url = &state.config().base_url;
+    let mut response = build_client_response(&updated, base_url);
+    response.registration_access_token = Some(new_reg_token);
+
+    Ok(response)
 }
 
 /// Look up a client by `client_id` and verify the registration access token.

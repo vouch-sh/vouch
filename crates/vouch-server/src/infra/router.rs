@@ -191,7 +191,9 @@ fn build_rate_limited_routes(
         .route("/oauth/register", post(handlers::oidc::register))
         .route(
             "/oauth/register/{client_id}",
-            get(handlers::oidc::read_client).delete(handlers::oidc::delete_client),
+            get(handlers::oidc::read_client)
+                .put(handlers::oidc::update_client)
+                .delete(handlers::oidc::delete_client),
         )
         .route(
             "/oauth/fido2/challenge",

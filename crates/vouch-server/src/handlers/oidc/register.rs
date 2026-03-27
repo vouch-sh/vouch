@@ -15,6 +15,7 @@
 use crate::AppState;
 use crate::services::oidc::registration::{
     RegistrationRequest, delete_client_configuration, read_client_configuration, register_client,
+    update_client_configuration,
 };
 use axum::extract::OriginalUri;
 use axum::{
@@ -116,6 +117,48 @@ pub async fn read_client(
     };
 
     match read_client_configuration(&state, &client_id, token).await {
+        Ok(response) => (
+            StatusCode::OK,
+            [
+                ("cache-control", "no-cache, no-store, must-revalidate"),
+                ("pragma", "no-cache"),
+                ("expires", "0"),
+            ],
+            Json(response),
+        )
+            .into_response(),
+        Err(e) => e.into_oauth_response().into_response(),
+    }
+}
+
+/// PUT /oauth/register/:client_id — RFC 7592 Client Configuration Update.
+///
+/// Authenticates via Bearer token (the `registration_access_token` issued
+/// during dynamic registration or the previous PUT). Replaces the client's
+/// mutable registration metadata.  Returns 200 with updated metadata
+/// (including a new `registration_access_token`) on success.
+pub async fn update_client(
+    State(state): State<Arc<AppState>>,
+    Path(client_id): Path<String>,
+    headers: HeaderMap,
+    Json(request): Json<RegistrationRequest>,
+) -> Response {
+    let token = match extract_bearer_token(&headers) {
+        Some(t) => t,
+        None => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                [("www-authenticate", "Bearer")],
+                Json(serde_json::json!({
+                    "error": "invalid_client",
+                    "error_description": "Bearer token required"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    match update_client_configuration(&state, &client_id, token, request).await {
         Ok(response) => (
             StatusCode::OK,
             [
