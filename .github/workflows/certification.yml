@@ -172,7 +172,7 @@ jobs:
           - plan: oidcc-basic-certification-test-plan
             plan-label: OIDC Basic OP
             config: scripts/certification/config/oidcc-basic.json
-          - plan: fapi2-security-profile-id2-test-plan
+          - plan: fapi2-security-profile-final-test-plan
             plan-label: FAPI 2.0 Security Profile
             config: scripts/certification/config/fapi2-security-profile.json
 
