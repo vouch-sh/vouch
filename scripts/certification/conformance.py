@@ -124,7 +124,7 @@ class ConformanceClient:
     def start_test_module(self, plan_id: str, module_name: str) -> str:
         """Start a test module and return the module instance ID."""
         log.info("Starting module %s in plan %s", module_name, plan_id)
-        data = self._post("/api/runner", params={"planId": plan_id, "test": module_name})
+        data = self._post("/api/runner", params={"plan": plan_id, "test": module_name})
         module_id = data.get("id")
         if not module_id:
             raise ConformanceError(f"No module ID in start response: {data}")
