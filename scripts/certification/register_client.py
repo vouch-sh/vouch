@@ -150,13 +150,28 @@ def main() -> None:
         json.dumps(private_jwks, separators=(",", ":")) if private_jwks else ""
     )
 
-    write_github_env(
-        {
-            "CLIENT_ID": response["client_id"],
-            "CLIENT_SECRET": response.get("client_secret", ""),
-            "CLIENT_JWKS": client_jwks,
-        }
-    )
+    env = {
+        "CLIENT_ID": response["client_id"],
+        "CLIENT_SECRET": response.get("client_secret", ""),
+        "CLIENT_JWKS": client_jwks,
+    }
+
+    # FAPI 2.0 tests require a second client for certain modules.
+    if is_fapi2:
+        public_jwks2, private_jwks2 = generate_ec_jwk(
+            Path(args.key_dir) / "client2"
+        )
+        print("ES256 key pair generated for client2")
+        payload2 = build_payload(args.plan, client_alias, public_jwks2)
+        response2 = post_dcr(args.vouch_url, payload2)
+        print(f"DCR response (client2): {json.dumps(response2)}")
+        env["CLIENT2_ID"] = response2["client_id"]
+        env["CLIENT2_SECRET"] = response2.get("client_secret", "")
+        env["CLIENT2_JWKS"] = json.dumps(
+            private_jwks2, separators=(",", ":")
+        )
+
+    write_github_env(env)
 
 
 if __name__ == "__main__":

@@ -15,6 +15,11 @@
     "jwks": {CLIENT_JWKS},
     "scope": "openid"
   },
+  "client2": {
+    "client_id": "{CLIENT2_ID}",
+    "jwks": {CLIENT2_JWKS},
+    "scope": "openid"
+  },
   "browser": [
     {
       "match": "{BASEURL}/oauth/authorize*",

@@ -58,11 +58,15 @@ def load_config(
     def json_escape_fragment(value: str) -> str:
         return json.dumps(value)[1:-1]
 
+    client2_id = os.environ.get("CLIENT2_ID", "")
+    client2_jwks = os.environ.get("CLIENT2_JWKS", "")
     substitutions = {
         "{BASEURL}": json_escape_fragment(base_url.rstrip("/")),
         "{CLIENT_ID}": json_escape_fragment(client_id),
         "{CLIENT_SECRET}": json_escape_fragment(client_secret),
         "{CLIENT_JWKS}": client_jwks or "null",
+        "{CLIENT2_ID}": json_escape_fragment(client2_id),
+        "{CLIENT2_JWKS}": client2_jwks or "null",
         "{VERSION}": json_escape_fragment(version or "dev"),
     }
     for placeholder, value in substitutions.items():
