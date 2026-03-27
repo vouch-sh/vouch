@@ -29,6 +29,8 @@
 {% endblock %}
 
 {% block scripts %}
+{% if cert_login_url.is_none() %}
 <script src="/static/js/webauthn.js"></script>
 <script src="/static/js/login.js"></script>
+{% endif %}
 {% endblock %}
