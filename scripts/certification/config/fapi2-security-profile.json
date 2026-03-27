@@ -22,6 +22,7 @@
       "tasks": [
         {
           "task": "Login",
+          "optional": true,
           "match": "{BASEURL}/login*",
           "commands": [
             ["click", "id", "cert-login"]
