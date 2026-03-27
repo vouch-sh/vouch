@@ -146,7 +146,6 @@ def run_plan(
 
     try:
         client.export_html(plan_id, export_dir)
-        client.export_results(plan_id, export_dir)
     except ConformanceError as e:
         log.warning("Failed to export results: %s", e)
 

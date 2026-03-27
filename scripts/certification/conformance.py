@@ -181,16 +181,10 @@ class ConformanceClient:
         log.info("Downloaded %s to %s", path, dest)
         return dest
 
-    def export_results(self, plan_id: str, output_dir: Path) -> Path:
-        """Download the ZIP export of test results for a plan."""
-        return self._download(
-            f"/api/plan/{plan_id}/export", output_dir / f"plan-{plan_id}.zip"
-        )
-
     def export_html(self, plan_id: str, output_dir: Path) -> Path:
-        """Download the HTML report for a plan."""
+        """Download the HTML results archive for a plan."""
         return self._download(
-            f"/api/plan/exporthtml/{plan_id}", output_dir / f"plan-{plan_id}.html"
+            f"/api/plan/exporthtml/{plan_id}", output_dir / f"plan-{plan_id}.zip"
         )
 
     def create_certification_package(self, plan_id: str) -> dict[str, Any]:
