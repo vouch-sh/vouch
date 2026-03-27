@@ -352,15 +352,7 @@ jobs:
             --client-secret "$VOUCH_CLIENT_SECRET" \
             --client-jwks "$VOUCH_CLIENT_JWKS" \
             --version "$VERSION" \
-            --export-dir /tmp/cert-results \
             $PUBLISH_ARG
-
-      - name: Upload results
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        with:
-          name: certification-${{ matrix.plan }}-${{ needs.prepare.outputs.label }}
-          path: /tmp/cert-results/
 
       - name: Show vouch logs on failure
         if: failure()

@@ -106,7 +106,6 @@ def run_plan(
     plan_name: str,
     config: dict,
     variant: dict | None,
-    export_dir: Path,
     publish: bool,
     conformance_server: str,
     conformance_token: str,
@@ -143,11 +142,6 @@ def run_plan(
             log.error("%s: %s", result, module_name)
         else:
             log.info("%s: %s", result, module_name)
-
-    try:
-        client.export_html(plan_id, export_dir)
-    except ConformanceError as e:
-        log.warning("Failed to export results: %s", e)
 
     if publish and not any_failed:
         try:
@@ -199,12 +193,6 @@ def main() -> None:
         help="Client private JWKS JSON for private_key_jwt auth",
     )
     parser.add_argument(
-        "--export-dir",
-        default=Path("/tmp/cert-results"),
-        type=Path,
-        help="Directory for exported test results (default: /tmp/cert-results)",
-    )
-    parser.add_argument(
         "--version",
         default=os.environ.get("VOUCH_VERSION", "dev"),
         help="Vouch version string for plan description (e.g. 1.2.0)",
@@ -244,7 +232,6 @@ def main() -> None:
         plan_name=args.plan,
         config=config,
         variant=variant,
-        export_dir=args.export_dir,
         publish=args.publish,
         conformance_server=conformance_server,
         conformance_token=conformance_token,

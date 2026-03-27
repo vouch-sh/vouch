@@ -172,20 +172,7 @@ class ConformanceClient:
 
             time.sleep(min(POLL_INTERVAL, remaining))
 
-    # ── Results and export ───────────────────────────────────────────────────
-
-    def _download(self, path: str, dest: Path) -> Path:
-        """Download a file from the server and write it to dest."""
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        dest.write_bytes(self._get_bytes(path))
-        log.info("Downloaded %s to %s", path, dest)
-        return dest
-
-    def export_html(self, plan_id: str, output_dir: Path) -> Path:
-        """Download the HTML results archive for a plan."""
-        return self._download(
-            f"/api/plan/exporthtml/{plan_id}", output_dir / f"plan-{plan_id}.zip"
-        )
+    # ── Certification ────────────────────────────────────────────────────────
 
     def create_certification_package(self, plan_id: str) -> dict[str, Any]:
         """Generate an official certification package for a passing plan."""
