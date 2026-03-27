@@ -15,6 +15,9 @@
     "jwks": {CLIENT_JWKS},
     "scope": "openid"
   },
+  "resource": {
+    "resourceUrl": "{BASEURL}/oauth/userinfo"
+  },
   "client2": {
     "client_id": "{CLIENT2_ID}",
     "jwks": {CLIENT2_JWKS},
