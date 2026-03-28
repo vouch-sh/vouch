@@ -62,6 +62,11 @@ impl JwtAudience {
             Self::Multiple(v) => v.iter().any(|s| s == expected),
         }
     }
+
+    /// Returns true if the audience is a single string (not an array).
+    pub fn is_single(&self) -> bool {
+        matches!(self, Self::Single(_))
+    }
 }
 
 /// Decoded JWT header fields we need for validation.

@@ -77,6 +77,9 @@ struct RequestObjectClaims {
     max_age: Option<u64>,
     #[serde(default)]
     prompt: Option<String>,
+    /// RFC 9449 Section 10: DPoP JWK thumbprint for authorization code binding.
+    #[serde(default)]
+    dpop_jkt: Option<String>,
     /// RFC 9396: Rich authorization details.
     #[serde(default)]
     authorization_details: Option<serde_json::Value>,
@@ -439,6 +442,7 @@ pub async fn validate_request_object(
         acr_values: claims.acr_values,
         max_age: claims.max_age,
         prompt: parsed_prompt,
+        dpop_jkt: claims.dpop_jkt,
         authorization_details: authorization_details_str,
     })
 }

@@ -208,6 +208,14 @@ pub async fn complete_login(
     // ── 9. Create a browser session ──────────────────────────────────────
     // Set a session cookie so that subsequent authorization requests from
     // the same browser (e.g. prompt=none, max_age) recognize the user.
+    //
+    // Delete any previous sessions for the cert user first to prevent
+    // session leakage between conformance test modules (which share a
+    // browser context). Each module should start with a clean session.
+    if let Err(e) = db::delete_sessions_for_user(&state.store, &user.id).await {
+        tracing::warn!("Failed to delete previous cert sessions: {e}");
+    }
+
     let client_id = state.config().base_url.clone();
     let session_result = match create_oauth_access_token(
         &state,

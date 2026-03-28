@@ -196,7 +196,16 @@ pub async fn authenticate_client_jwt(
         ClientAuthError::InvalidCredentials
     })?;
 
-    // 7b. FAPI 2.0: jti is REQUIRED for replay prevention
+    // 7b. FAPI 2.0 Section 5.3.2.1-8: aud MUST be a single string, not an array.
+    if client.is_fapi() && !validated.claims.aud.is_single() {
+        tracing::warn!(
+            "FAPI 2.0 client {} submitted JWT assertion with array audience",
+            client.client_id
+        );
+        return Err(ClientAuthError::InvalidCredentials);
+    }
+
+    // 7c. FAPI 2.0: jti is REQUIRED for replay prevention
     if client.is_fapi() && validated.claims.jti.is_none() {
         tracing::warn!(
             "FAPI 2.0 client {} submitted JWT assertion without jti",

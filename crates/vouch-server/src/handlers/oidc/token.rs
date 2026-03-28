@@ -511,10 +511,16 @@ async fn handle_authorization_code_grant(
 
     match exchange_authorization_code(&state, exchange_params).await {
         Ok(result) => {
-            if let Some(ref pending_jti) = jwt_pending_jti {
-                if let Err(e) = commit_jti(&state, pending_jti).await {
-                    tracing::warn!("Failed to commit JWT assertion JTI: {e:?}");
-                }
+            if let Some(ref pending_jti) = jwt_pending_jti
+                && let Err(e) = commit_jti(&state, pending_jti).await
+            {
+                tracing::warn!("JTI commit failed for authorization_code: {e:?}");
+                return ServiceError::oauth(
+                    OAuthErrorCode::InvalidClient,
+                    "Client authentication failed",
+                )
+                .into_oauth_response()
+                .into_response();
             }
             crate::infra::metrics::record_auth_event("authorization_code_success");
             token_success_response(TokenResponse {
@@ -550,7 +556,7 @@ async fn handle_client_credentials_grant(
         Err(resp) => return resp,
     };
 
-    let Some((authenticated_client, _client_id, _pending_jti)) =
+    let Some((authenticated_client, _client_id, pending_jti)) =
         (match authenticate_client_any(&state, client_auth).await {
             Ok(result) => result,
             Err(resp) => return resp,
@@ -582,6 +588,19 @@ async fn handle_client_credentials_grant(
     .await
     {
         Ok(result) => {
+            // Commit JTI after grant succeeds so clients can retry on failure.
+            if let Some(ref jti) = pending_jti
+                && let Err(e) = commit_jti(&state, jti).await
+            {
+                tracing::warn!("JTI commit failed for client_credentials: {e:?}");
+                return ServiceError::oauth(
+                    OAuthErrorCode::InvalidClient,
+                    "Client authentication failed",
+                )
+                .into_oauth_response()
+                .into_response();
+            }
+
             // Record audit event
             if let Err(e) = crate::db::record_oauth_event(
                 &state.audit,
@@ -643,7 +662,7 @@ async fn handle_token_exchange_grant(
     };
 
     // Authenticate client (required for token exchange)
-    let Some((authenticated_client, _client_id, _pending_jti)) =
+    let Some((authenticated_client, _client_id, pending_jti)) =
         (match authenticate_client_any(&state, client_auth).await {
             Ok(result) => result,
             Err(resp) => return resp,
@@ -704,17 +723,31 @@ async fn handle_token_exchange_grant(
     };
 
     match exchange_token(&state, exchange_params).await {
-        Ok(result) => token_success_response(TokenExchangeResponse {
-            access_token: result.access_token,
-            issued_token_type: result.issued_token_type,
-            token_type: result.token_type,
-            expires_in: result.expires_in,
-            scope: result.scope,
-            authorization_details: result
-                .authorization_details
-                .as_ref()
-                .map(serde_json::Value::from),
-        }),
+        Ok(result) => {
+            // Commit JTI after grant succeeds so clients can retry on failure.
+            if let Some(ref jti) = pending_jti
+                && let Err(e) = commit_jti(&state, jti).await
+            {
+                tracing::warn!("JTI commit failed for token_exchange: {e:?}");
+                return ServiceError::oauth(
+                    OAuthErrorCode::InvalidClient,
+                    "Client authentication failed",
+                )
+                .into_oauth_response()
+                .into_response();
+            }
+            token_success_response(TokenExchangeResponse {
+                access_token: result.access_token,
+                issued_token_type: result.issued_token_type,
+                token_type: result.token_type,
+                expires_in: result.expires_in,
+                scope: result.scope,
+                authorization_details: result
+                    .authorization_details
+                    .as_ref()
+                    .map(serde_json::Value::from),
+            })
+        }
         Err(e) => e.into_oauth_response().into_response(),
     }
 }
@@ -823,7 +856,13 @@ async fn handle_fido2_assertion_grant(
     {
         Ok(result) => {
             if let Err(e) = commit_jti(&state, &jwt_pending_jti).await {
-                tracing::warn!("Failed to commit JWT assertion JTI: {e:?}");
+                tracing::warn!("JTI commit failed for fido2_assertion: {e:?}");
+                return ServiceError::oauth(
+                    OAuthErrorCode::InvalidClient,
+                    "Client authentication failed",
+                )
+                .into_oauth_response()
+                .into_response();
             }
             crate::infra::metrics::record_auth_event("fido2_login_success");
             token_success_response(TokenResponse {

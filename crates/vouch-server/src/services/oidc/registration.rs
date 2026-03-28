@@ -752,6 +752,36 @@ pub async fn update_client_configuration(
     // Build updated registration metadata (cosmetic fields)
     let registration_metadata = build_registration_metadata(&mutable_request);
 
+    // Validate JWKS and jwks_uri (same rules as initial registration):
+    // mutually exclusive, valid structure, HTTPS URI.
+    if mutable_request.jwks.is_some() && mutable_request.jwks_uri.is_some() {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "jwks and jwks_uri are mutually exclusive",
+        ));
+    }
+    if let Some(ref jwks) = mutable_request.jwks
+        && !jwks
+            .get("keys")
+            .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
+    {
+        return Err(ServiceError::oauth(
+            OAuthErrorCode::InvalidClientMetadata,
+            "jwks must be a JSON object with a non-empty \"keys\" array",
+        ));
+    }
+    if let Some(ref uri) = mutable_request.jwks_uri {
+        match url::Url::parse(uri) {
+            Ok(parsed) if parsed.scheme() == "https" => {}
+            _ => {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidClientMetadata,
+                    "jwks_uri must be a valid https:// URL",
+                ));
+            }
+        }
+    }
+
     // Rotate the registration access token per RFC 7592 Section 2.2
     let new_reg_token = generate_registration_token()?;
     let new_reg_token_hash = hash_token(&new_reg_token);

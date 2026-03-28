@@ -167,7 +167,7 @@ pub use github::{
 pub use par::{
     CreateParParams, PAR_EXPIRES_IN, PushedAuthorizationRequest,
     consume_pushed_authorization_request, create_pushed_authorization_request,
-    delete_expired_pushed_authorization_requests,
+    delete_expired_pushed_authorization_requests, get_pushed_authorization_request,
 };
 
 // Re-export pending OAuth types and functions (RFC 6749, RFC 9700)

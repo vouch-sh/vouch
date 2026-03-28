@@ -60,7 +60,6 @@ impl fmt::Display for CodeChallengeMethod {
 /// OIDC Core Section 3.1.2.1: Prompt parameter values.
 ///
 /// Controls whether the authorization server prompts the user for re-authentication.
-/// Vouch only supports `login` (force re-auth) and `none` (no UI).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Prompt {
     /// Force the user to re-authenticate even if they have a valid session.
@@ -72,17 +71,22 @@ pub enum Prompt {
     /// Named `Silent` (not `None`) to avoid ambiguity with `Option::None`.
     #[serde(rename = "none")]
     Silent,
+    /// Request user consent. Vouch has no consent screen, so this is
+    /// treated as a normal authentication flow (no-op).
+    #[serde(rename = "consent")]
+    Consent,
 }
 
 impl Prompt {
     /// Parse a prompt value from a string.
     ///
-    /// Returns `None` for unsupported values (e.g., `consent`, `select_account`).
+    /// Returns `None` for unsupported values (e.g., `select_account`).
     #[must_use]
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "login" => Some(Self::Login),
             "none" => Some(Self::Silent),
+            "consent" => Some(Self::Consent),
             _ => None,
         }
     }
@@ -93,6 +97,7 @@ impl Prompt {
         match self {
             Self::Login => "login",
             Self::Silent => "none",
+            Self::Consent => "consent",
         }
     }
 }
@@ -178,6 +183,8 @@ pub struct AuthorizeRequestParams {
     pub max_age: Option<u64>,
     /// OIDC Core Section 3.1.2.1: Requested prompt behavior.
     pub prompt: Option<Prompt>,
+    /// RFC 9449 Section 10: DPoP JWK thumbprint for authorization code binding.
+    pub dpop_jkt: Option<String>,
     /// RFC 9396: Rich authorization details (raw JSON string from request).
     pub authorization_details: Option<String>,
 }
@@ -203,6 +210,8 @@ pub struct ValidatedAuthRequest {
     max_age: Option<u64>,
     /// OIDC Core: Requested prompt behavior.
     prompt: Option<Prompt>,
+    /// RFC 9449 Section 10: DPoP JWK thumbprint for authorization code binding.
+    dpop_jkt: Option<String>,
     /// RFC 9396: Validated authorization details.
     authorization_details: Option<super::authorization_details::AuthorizationDetails>,
 }
@@ -272,6 +281,12 @@ impl ValidatedAuthRequest {
     #[must_use]
     pub fn prompt(&self) -> Option<Prompt> {
         self.prompt
+    }
+
+    /// RFC 9449 Section 10: DPoP JWK thumbprint.
+    #[must_use]
+    pub fn dpop_jkt(&self) -> Option<&str> {
+        self.dpop_jkt.as_deref()
     }
 
     /// RFC 9396: Validated authorization details.
@@ -544,6 +559,7 @@ pub fn validate_authorize_request(
         acr_values: params.acr_values,
         max_age: params.max_age,
         prompt: params.prompt,
+        dpop_jkt: params.dpop_jkt,
         authorization_details: parsed_authorization_details,
     })
 }
@@ -880,6 +896,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         }
     }
@@ -1073,6 +1090,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1098,6 +1116,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1121,6 +1140,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1143,6 +1163,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1169,6 +1190,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1249,6 +1271,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1347,6 +1370,7 @@ mod tests {
             acr_values: Some("urn:nist:authentication:assurance-level:aal3".to_string()),
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1374,6 +1398,7 @@ mod tests {
             acr_values: None,
             max_age: Some(300),
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1398,6 +1423,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: Some(Prompt::Login),
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1422,6 +1448,7 @@ mod tests {
             acr_values: None,
             max_age: None,
             prompt: Some(Prompt::Silent),
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1446,6 +1473,7 @@ mod tests {
             acr_values: Some("a".repeat(513)),
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1457,7 +1485,7 @@ mod tests {
     fn test_prompt_parse() {
         assert_eq!(Prompt::parse("login"), Some(Prompt::Login));
         assert_eq!(Prompt::parse("none"), Some(Prompt::Silent));
-        assert_eq!(Prompt::parse("consent"), None);
+        assert_eq!(Prompt::parse("consent"), Some(Prompt::Consent));
         assert_eq!(Prompt::parse("select_account"), None);
         assert_eq!(Prompt::parse(""), None);
     }
@@ -1499,6 +1527,7 @@ mod tests {
             acr_values: Some("aal3\", injected=\"bad".to_string()),
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1527,6 +1556,7 @@ mod tests {
             acr_values: Some("aal3\rnewline".to_string()),
             max_age: None,
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1549,6 +1579,7 @@ mod tests {
             acr_values: None,
             max_age: Some(31_536_001), // 1 year + 1 second
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         };
 
@@ -1573,6 +1604,7 @@ mod tests {
             acr_values: None,
             max_age: Some(31_536_000),
             prompt: None,
+            dpop_jkt: None,
             authorization_details: None,
         };
 

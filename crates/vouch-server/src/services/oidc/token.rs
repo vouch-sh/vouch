@@ -144,6 +144,7 @@ pub struct IdTokenClaims {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_time: Option<i64>,
     /// OIDC Core Section 3.1.2.1: Nonce value from the authorization request.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
     /// OIDC Core Section 5.1: User email.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -581,7 +582,7 @@ fn validate_pkce(auth_code: &AuthorizationCode, code_verifier: Option<&str>) -> 
     };
 
     let code_verifier = code_verifier.ok_or_else(|| {
-        ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Missing code_verifier")
+        ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Missing code_verifier")
     })?;
 
     // RFC 9700 Section 2.1.1: Only S256 is supported.

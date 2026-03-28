@@ -238,7 +238,24 @@ fn parse_dpop_header(proof: &str) -> Result<DpopHeader, DpopError> {
     let header_bytes = URL_SAFE_NO_PAD
         .decode(header_part)
         .map_err(|e| DpopError::InvalidFormat(format!("invalid header encoding: {e}")))?;
-    let header: DpopHeader = serde_json::from_slice(&header_bytes)
+
+    // RFC 9449 Section 4.3: The JWK MUST NOT contain a private key.
+    // Check for private key fields (`d`, `p`, `q`, `dp`, `dq`, `qi`) in the
+    // raw JSON before deserializing (our structs intentionally omit these fields
+    // so serde would silently ignore them).
+    let header_json: serde_json::Value = serde_json::from_slice(&header_bytes)
+        .map_err(|e| DpopError::InvalidFormat(format!("invalid header JSON: {e}")))?;
+    if let Some(jwk_value) = header_json.get("jwk") {
+        for private_field in ["d", "p", "q", "dp", "dq", "qi"] {
+            if jwk_value.get(private_field).is_some() {
+                return Err(DpopError::InvalidFormat(
+                    "JWK in DPoP proof header must not contain private key material".to_string(),
+                ));
+            }
+        }
+    }
+
+    let header: DpopHeader = serde_json::from_value(header_json)
         .map_err(|e| DpopError::InvalidFormat(format!("invalid header JSON: {e}")))?;
 
     // Validate header
