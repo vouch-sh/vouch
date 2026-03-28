@@ -80,10 +80,14 @@ def load_config(
     else:
         config.pop("publish", None)
 
-    # Extract variant and client_alias — these are our fields,
-    # not part of the conformance API config body.
+    # Extract variant — this is our field, not part of the conformance
+    # API config body. Rename client_alias -> alias (the conformance API
+    # field name). When alias is set, redirect_uri uses /test/a/{alias}/callback
+    # which matches the pre-registered redirect_uri.
     variant = config.pop("variant", None)
-    config.pop("client_alias", None)
+    client_alias = config.pop("client_alias", None)
+    if client_alias and "alias" not in config:
+        config["alias"] = client_alias
 
     return config, variant
 

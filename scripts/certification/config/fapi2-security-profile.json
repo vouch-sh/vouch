@@ -13,7 +13,7 @@
   "client": {
     "client_id": "{CLIENT_ID}",
     "jwks": {CLIENT_JWKS},
-    "scope": "openid",
+    "scope": "openid email",
     "registration_access_token": "{CLIENT_REG_TOKEN}"
   },
   "resource": {
@@ -22,7 +22,7 @@
   "client2": {
     "client_id": "{CLIENT2_ID}",
     "jwks": {CLIENT2_JWKS},
-    "scope": "openid",
+    "scope": "openid email",
     "registration_access_token": "{CLIENT2_REG_TOKEN}"
   },
   "browser": [
@@ -47,5 +47,32 @@
         }
       ]
     }
-  ]
+  ],
+  "override": {
+    "fapi2-security-profile-final-user-rejects-authentication": {
+      "browser": [
+        {
+          "match": "{BASEURL}/oauth/authorize*",
+          "tasks": [
+            {
+              "task": "Deny Login",
+              "optional": true,
+              "match": "{BASEURL}/login*",
+              "commands": [
+                ["click", "id", "cert-deny"]
+              ]
+            },
+            {
+              "task": "Verify Complete",
+              "optional": true,
+              "match": "*/test/*/callback*",
+              "commands": [
+                ["wait", "id", "submission_complete", 10]
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
 }
