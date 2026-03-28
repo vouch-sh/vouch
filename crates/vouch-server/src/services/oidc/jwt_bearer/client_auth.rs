@@ -14,6 +14,46 @@ use crate::services::oidc::token::{AuthenticatedClient, ClientAuthError};
 use jiff::{Timestamp, ToSpan};
 use std::sync::Arc;
 
+/// A JTI that has been validated but not yet committed to the database.
+///
+/// Call [`commit_jti`] after the full request succeeds to prevent replay.
+/// If the request fails with a retryable error (e.g., `use_dpop_nonce`),
+/// drop this without committing so the client can retry.
+pub struct PendingJti {
+    jti: Option<String>,
+    client_id: String,
+    max_lifetime: i64,
+}
+
+/// Commit a pending JTI to the replay-prevention database.
+///
+/// Must be called after the token/PAR request fully succeeds.
+pub async fn commit_jti(
+    state: &Arc<AppState>,
+    pending: &PendingJti,
+) -> Result<(), ClientAuthError> {
+    let Some(ref jti) = pending.jti else {
+        return Ok(());
+    };
+    let expires_at = Timestamp::now()
+        .checked_add(pending.max_lifetime.seconds())
+        .unwrap_or_else(|_| Timestamp::now());
+
+    let is_new = db::store_jwt_assertion_jti(&state.store, jti, &pending.client_id, expires_at)
+        .await
+        .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
+
+    if !is_new {
+        tracing::warn!(
+            target: "security",
+            client_id = %pending.client_id,
+            "JWT assertion JTI replay detected"
+        );
+        return Err(ClientAuthError::InvalidCredentials);
+    }
+    Ok(())
+}
+
 /// Authenticate a client using a JWT assertion (RFC 7523 Section 2.2).
 ///
 /// # Arguments
@@ -22,12 +62,15 @@ use std::sync::Arc;
 /// * `client_id_hint` - Optional client_id from the request body (for lookup)
 ///
 /// # Returns
-/// The authenticated client.
+/// The authenticated client and a pending JTI that MUST be committed
+/// via [`commit_jti`] after the request succeeds. If the request fails
+/// (e.g., `use_dpop_nonce`), the JTI is NOT consumed and the client
+/// can retry with the same assertion.
 pub async fn authenticate_client_jwt(
     state: &Arc<AppState>,
     client_assertion: &str,
     client_id_hint: Option<&str>,
-) -> Result<AuthenticatedClient, ClientAuthError> {
+) -> Result<(AuthenticatedClient, PendingJti), ClientAuthError> {
     // 1. Parse JWT header to get algorithm and kid
     let header = parse_assertion_header(client_assertion).map_err(|e| {
         tracing::debug!("JWT assertion header parse failed: {e}");
@@ -116,16 +159,33 @@ pub async fn authenticate_client_jwt(
     // 7. Validate JWT assertion (signature + claims)
     let algorithm = map_algorithm(&header.alg).map_err(|_| ClientAuthError::InvalidCredentials)?;
     let base_url = &state.config().base_url;
+    let max_lifetime = state.config().jwt_assertion_max_lifetime_seconds;
+
+    // FAPI 2.0 Section 5.3.2.1-8: aud MUST be the issuer URL only.
+    // RFC 7523 Section 3: aud SHOULD be the token endpoint URL.
+    // We accept both issuer and endpoint URLs for non-FAPI clients,
+    // but restrict to issuer-only for FAPI clients.
     let token_endpoint_url = format!("{base_url}/oauth/token");
     let revoke_endpoint_url = format!("{base_url}/oauth/revoke");
-    let max_lifetime = state.config().jwt_assertion_max_lifetime_seconds;
+    let par_endpoint_url = format!("{base_url}/oauth/par");
+
+    let allowed_audiences: Vec<&str> = if client.is_fapi() {
+        vec![base_url]
+    } else {
+        vec![
+            &token_endpoint_url,
+            &revoke_endpoint_url,
+            &par_endpoint_url,
+            base_url,
+        ]
+    };
 
     let validated = validate_jwt_assertion(
         client_assertion,
         &header,
         &decoding_key,
         algorithm,
-        &[&token_endpoint_url, &revoke_endpoint_url],
+        &allowed_audiences,
         max_lifetime,
     )
     .map_err(|e| {
@@ -145,26 +205,14 @@ pub async fn authenticate_client_jwt(
         return Err(ClientAuthError::InvalidCredentials);
     }
 
-    // 8. Check JTI for replay (RFC 7523 Section 3)
-    //    Atomic insert with UNIQUE(jti, client_id) prevents TOCTOU races.
-    if let Some(ref jti) = validated.claims.jti {
-        let expires_at = Timestamp::now()
-            .checked_add(max_lifetime.seconds())
-            .unwrap_or_else(|_| Timestamp::now());
-
-        let is_new = db::store_jwt_assertion_jti(&state.store, jti, &client.client_id, expires_at)
-            .await
-            .map_err(|e| ClientAuthError::DatabaseError(e.to_string()))?;
-
-        if !is_new {
-            tracing::warn!(
-                target: "security",
-                client_id = %client.client_id,
-                "JWT assertion JTI replay detected"
-            );
-            return Err(ClientAuthError::InvalidCredentials);
-        }
-    }
+    // 8. Build a PendingJti for the caller to commit after the full
+    //    request succeeds. This avoids consuming the JTI on retryable
+    //    errors like `use_dpop_nonce`.
+    let pending_jti = PendingJti {
+        jti: validated.claims.jti.clone(),
+        client_id: client.client_id.clone(),
+        max_lifetime,
+    };
 
     // Update last used timestamp
     if let Err(e) = db::update_oauth_client_last_used(&state.store, &client.id).await {
@@ -176,8 +224,11 @@ pub async fn authenticate_client_jwt(
         client.client_id
     );
 
-    Ok(AuthenticatedClient {
-        client,
-        is_public: false,
-    })
+    Ok((
+        AuthenticatedClient {
+            client,
+            is_public: false,
+        },
+        pending_jti,
+    ))
 }

@@ -155,7 +155,11 @@ impl Pool {
 
         match db_type {
             DatabaseType::Sqlite => {
-                let pool = sqlx::SqlitePool::connect(url).await?;
+                let opts = url
+                    .parse::<sqlx::sqlite::SqliteConnectOptions>()?
+                    .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+                    .busy_timeout(Duration::from_secs(5));
+                let pool = sqlx::SqlitePool::connect_with(opts).await?;
                 Ok(Self::Sqlite(pool))
             }
             DatabaseType::Postgres => {

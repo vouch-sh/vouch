@@ -11,7 +11,8 @@ use crate::services::oidc::{
     ScopeSet,
     client_credentials::exchange_client_credentials,
     exchange::{TokenExchangeParams, exchange_token},
-    jwt_bearer::{client_auth::authenticate_client_jwt, grant::exchange_jwt_bearer_grant},
+    jwt_bearer::client_auth::{authenticate_client_jwt, commit_jti},
+    jwt_bearer::grant::exchange_jwt_bearer_grant,
     token::{AuthCodeExchangeParams, exchange_authorization_code, validate_dpop_if_present},
 };
 use crate::services::{OAuthErrorCode, ServiceError};
@@ -432,7 +433,7 @@ async fn handle_authorization_code_grant(
     let has_jwt_assertion = params.client_assertion.is_some();
 
     // For JWT assertion, authenticate and extract the client
-    let jwt_authenticated = if has_jwt_assertion {
+    let (jwt_authenticated, jwt_pending_jti) = if has_jwt_assertion {
         let client_auth = match extract_client_auth(&headers, &params) {
             Ok(auth) => auth,
             Err(resp) => return resp,
@@ -443,14 +444,14 @@ async fn handle_authorization_code_grant(
         } = client_auth
         {
             match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref()).await {
-                Ok(client) => Some(client),
+                Ok((client, pending_jti)) => (Some(client), Some(pending_jti)),
                 Err(e) => return e.into_service_error().into_oauth_response().into_response(),
             }
         } else {
-            None
+            (None, None)
         }
     } else {
-        None
+        (None, None)
     };
 
     // For non-JWT auth, extract traditional credentials
@@ -510,6 +511,11 @@ async fn handle_authorization_code_grant(
 
     match exchange_authorization_code(&state, exchange_params).await {
         Ok(result) => {
+            if let Some(ref pending_jti) = jwt_pending_jti {
+                if let Err(e) = commit_jti(&state, pending_jti).await {
+                    tracing::warn!("Failed to commit JWT assertion JTI: {e:?}");
+                }
+            }
             crate::infra::metrics::record_auth_event("authorization_code_success");
             token_success_response(TokenResponse {
                 access_token: result.access_token,
@@ -544,7 +550,7 @@ async fn handle_client_credentials_grant(
         Err(resp) => return resp,
     };
 
-    let Some((authenticated_client, _client_id)) =
+    let Some((authenticated_client, _client_id, _pending_jti)) =
         (match authenticate_client_any(&state, client_auth).await {
             Ok(result) => result,
             Err(resp) => return resp,
@@ -637,7 +643,7 @@ async fn handle_token_exchange_grant(
     };
 
     // Authenticate client (required for token exchange)
-    let Some((authenticated_client, _client_id)) =
+    let Some((authenticated_client, _client_id, _pending_jti)) =
         (match authenticate_client_any(&state, client_auth).await {
             Ok(result) => result,
             Err(resp) => return resp,
@@ -760,12 +766,12 @@ async fn handle_fido2_assertion_grant(
         Err(resp) => return resp,
     };
 
-    let jwt_authenticated = match client_auth {
+    let (jwt_authenticated, jwt_pending_jti) = match client_auth {
         ExtractedClientAuth::JwtAssertion {
             client_assertion,
             client_id,
         } => match authenticate_client_jwt(&state, &client_assertion, client_id.as_deref()).await {
-            Ok(client) => client,
+            Ok((client, pending_jti)) => (client, pending_jti),
             Err(e) => return e.into_service_error().into_oauth_response().into_response(),
         },
         _ => {
@@ -816,6 +822,9 @@ async fn handle_fido2_assertion_grant(
         .await
     {
         Ok(result) => {
+            if let Err(e) = commit_jti(&state, &jwt_pending_jti).await {
+                tracing::warn!("Failed to commit JWT assertion JTI: {e:?}");
+            }
             crate::infra::metrics::record_auth_event("fido2_login_success");
             token_success_response(TokenResponse {
                 access_token: result.access_token,

@@ -238,6 +238,14 @@ pub async fn register_client(
             ));
         }
 
+        // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
+        if alg == "RS256" && fapi_profile != FapiProfile::None {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                "RS256 is not permitted for FAPI 2.0 clients. Use ES256",
+            ));
+        }
+
         // If RS256 is explicitly requested but no RSA key is configured, reject.
         // An unspecified algorithm falls back to ES256 automatically (see below).
         if alg == "RS256" && state.oidc_rsa_key.is_none() {
@@ -249,13 +257,18 @@ pub async fn register_client(
     }
 
     // When the client didn't specify, use RS256 if available, otherwise ES256.
-    let id_token_alg = explicit_alg.unwrap_or_else(|| {
-        if state.oidc_rsa_key.is_some() {
-            "RS256"
-        } else {
-            "ES256"
-        }
-    });
+    // FAPI 2.0 Section 5.4: FAPI clients always use ES256.
+    let id_token_alg = if fapi_profile != FapiProfile::None {
+        "ES256"
+    } else {
+        explicit_alg.unwrap_or_else(|| {
+            if state.oidc_rsa_key.is_some() {
+                "RS256"
+            } else {
+                "ES256"
+            }
+        })
+    };
 
     // 13. Infer application type
     let app_type = determine_client_type(

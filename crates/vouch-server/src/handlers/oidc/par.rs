@@ -12,6 +12,7 @@ use crate::services::oidc::authorization::{
 };
 use crate::services::oidc::dpop::DpopError;
 use crate::services::oidc::jar::validate_request_object;
+use crate::services::oidc::jwt_bearer::client_auth::commit_jti;
 use crate::services::oidc::token::validate_dpop_if_present;
 use axum::{
     Json,
@@ -153,7 +154,7 @@ pub async fn par(
     };
 
     // RFC 9126 Section 2: Client authentication is REQUIRED
-    let Some((authenticated_client, _client_id)) =
+    let Some((authenticated_client, _client_id, pending_jti)) =
         (match authenticate_client_any(&state, client_auth).await {
             Ok(result) => result,
             Err(resp) => return resp,
@@ -349,14 +350,21 @@ pub async fn par(
 
     // RFC 9126 Section 2.2: Return 201 Created
     match db::create_pushed_authorization_request(&state.store, create_params).await {
-        Ok((_id, request_uri)) => (
-            StatusCode::CREATED,
-            Json(ParResponse {
-                request_uri,
-                expires_in: PAR_EXPIRES_IN,
-            }),
-        )
-            .into_response(),
+        Ok((_id, request_uri)) => {
+            if let Some(ref pjti) = pending_jti {
+                if let Err(e) = commit_jti(&state, pjti).await {
+                    tracing::warn!("Failed to commit JWT assertion JTI: {e:?}");
+                }
+            }
+            (
+                StatusCode::CREATED,
+                Json(ParResponse {
+                    request_uri,
+                    expires_in: PAR_EXPIRES_IN,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!("Failed to create pushed authorization request: {}", e);
             par_error_response(

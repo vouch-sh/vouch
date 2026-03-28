@@ -564,7 +564,8 @@ pub fn require_pkce_for_client(
     client: &OAuthClient,
 ) -> ServiceResult<()> {
     let is_public = client.token_endpoint_auth_method == TokenEndpointAuthMethod::None;
-    let pkce_required = is_public || client.application_type.requires_pkce();
+    // FAPI 2.0 Section 5.3.2.1: PKCE is required for all FAPI clients.
+    let pkce_required = is_public || client.application_type.requires_pkce() || client.is_fapi();
     if pkce_required && validated.code_challenge().is_none() {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidRequest,
