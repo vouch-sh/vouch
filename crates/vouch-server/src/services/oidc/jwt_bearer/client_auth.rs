@@ -283,9 +283,7 @@ mod tests {
             database_url: "sqlite::memory:".to_string(),
             rp_id: "test.example.com".to_string(),
             rp_name: "Test".to_string(),
-            jwt_secret: SecretString::from(
-                "test_jwt_secret_must_be_at_least_32_characters_long",
-            ),
+            jwt_secret: SecretString::from("test_jwt_secret_must_be_at_least_32_characters_long"),
             session_hours: 8,
             oidc_issuer_url: None,
             oidc_client_id: None,
@@ -385,7 +383,10 @@ mod tests {
 
         let result = commit_jti(&state, &pending).await;
 
-        assert!(result.is_ok(), "First commit_jti call must succeed: {result:?}");
+        assert!(
+            result.is_ok(),
+            "First commit_jti call must succeed: {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -424,7 +425,10 @@ mod tests {
 
         let result = commit_jti(&state, &pending).await;
 
-        assert!(result.is_ok(), "commit_jti with None jti must be a no-op: {result:?}");
+        assert!(
+            result.is_ok(),
+            "commit_jti with None jti must be a no-op: {result:?}"
+        );
     }
 
     #[tokio::test]

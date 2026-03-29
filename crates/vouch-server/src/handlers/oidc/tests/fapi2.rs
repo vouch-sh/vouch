@@ -310,8 +310,12 @@ async fn test_fapi2_dpop_code_binding_matching_key() {
     // aud must be the issuer URL (base_url), not the token endpoint URL
     let dpop_proof =
         create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
-    let assertion =
-        build_client_assertion(&client.client_id, &state.config().base_url, &pkcs8_bytes, None);
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
 
     let body = format!(
         "grant_type=authorization_code\
@@ -396,8 +400,12 @@ async fn test_fapi2_dpop_code_binding_mismatching_key() {
         Some(&nonce),
         None,
     );
-    let assertion =
-        build_client_assertion(&client.client_id, &state.config().base_url, &pkcs8_bytes, None);
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
 
     let body = format!(
         "grant_type=authorization_code\
@@ -544,8 +552,12 @@ async fn test_fapi2_par_accepts_private_key_jwt() {
     let challenge = sha256_base64url(verifier);
 
     // JWT assertion audience must be the issuer URL (base_url)
-    let assertion =
-        build_client_assertion(&client.client_id, &state.config().base_url, &pkcs8_bytes, None);
+    let assertion = build_client_assertion(
+        &client.client_id,
+        &state.config().base_url,
+        &pkcs8_bytes,
+        None,
+    );
 
     let body = format!(
         "response_type=code\
