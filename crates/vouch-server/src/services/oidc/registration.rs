@@ -536,20 +536,22 @@ struct ValidatedJwksAuth {
     auth_method: TokenEndpointAuthMethod,
 }
 
-/// Validate JWKS mutual exclusivity, structure, and auth method.
-fn validate_jwks_and_auth_method(
-    request: &mut RegistrationRequest,
-    auth_method_str: &str,
-) -> Result<ValidatedJwksAuth, ServiceError> {
-    let jwks_value = request.jwks.take();
-    let jwks_uri = request.jwks_uri.take();
-    if jwks_value.is_some() && jwks_uri.is_some() {
+/// Validate JWKS field mutual exclusivity, structure, and HTTPS URI constraint.
+///
+/// Shared by both initial registration and the update path. Does not validate the
+/// relationship to `token_endpoint_auth_method` — that is handled by
+/// `validate_jwks_and_auth_method` for the initial registration path.
+fn validate_jwks_fields(
+    jwks: Option<&serde_json::Value>,
+    jwks_uri: Option<&str>,
+) -> Result<(), ServiceError> {
+    if jwks.is_some() && jwks_uri.is_some() {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
             "jwks and jwks_uri are mutually exclusive",
         ));
     }
-    if let Some(ref jwks) = jwks_value
+    if let Some(jwks) = jwks
         && !jwks
             .get("keys")
             .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
@@ -559,7 +561,7 @@ fn validate_jwks_and_auth_method(
             "jwks must be a JSON object with a non-empty \"keys\" array",
         ));
     }
-    if let Some(ref uri) = jwks_uri {
+    if let Some(uri) = jwks_uri {
         match url::Url::parse(uri) {
             Ok(parsed) if parsed.scheme() == "https" => {}
             _ => {
@@ -570,6 +572,18 @@ fn validate_jwks_and_auth_method(
             }
         }
     }
+    Ok(())
+}
+
+/// Validate JWKS mutual exclusivity, structure, and auth method.
+fn validate_jwks_and_auth_method(
+    request: &mut RegistrationRequest,
+    auth_method_str: &str,
+) -> Result<ValidatedJwksAuth, ServiceError> {
+    let jwks_value = request.jwks.take();
+    let jwks_uri = request.jwks_uri.take();
+
+    validate_jwks_fields(jwks_value.as_ref(), jwks_uri.as_deref())?;
 
     let auth_method: TokenEndpointAuthMethod = auth_method_str.parse().map_err(|_| {
         ServiceError::oauth(
@@ -754,33 +768,10 @@ pub async fn update_client_configuration(
 
     // Validate JWKS and jwks_uri (same rules as initial registration):
     // mutually exclusive, valid structure, HTTPS URI.
-    if mutable_request.jwks.is_some() && mutable_request.jwks_uri.is_some() {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            "jwks and jwks_uri are mutually exclusive",
-        ));
-    }
-    if let Some(ref jwks) = mutable_request.jwks
-        && !jwks
-            .get("keys")
-            .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidClientMetadata,
-            "jwks must be a JSON object with a non-empty \"keys\" array",
-        ));
-    }
-    if let Some(ref uri) = mutable_request.jwks_uri {
-        match url::Url::parse(uri) {
-            Ok(parsed) if parsed.scheme() == "https" => {}
-            _ => {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidClientMetadata,
-                    "jwks_uri must be a valid https:// URL",
-                ));
-            }
-        }
-    }
+    validate_jwks_fields(
+        mutable_request.jwks.as_ref(),
+        mutable_request.jwks_uri.as_deref(),
+    )?;
 
     // Rotate the registration access token per RFC 7592 Section 2.2
     let new_reg_token = generate_registration_token()?;

@@ -307,9 +307,11 @@ async fn test_fapi2_dpop_code_binding_matching_key() {
     let nonce = acquire_dpop_nonce(&app, &dpop_key, &dpop_jwk, "POST", &token_uri).await;
 
     // Exchange code with matching DPoP key + nonce + private_key_jwt
+    // aud must be the issuer URL (base_url), not the token endpoint URL
     let dpop_proof =
         create_dpop_proof(&dpop_key, &dpop_jwk, "POST", &token_uri, Some(&nonce), None);
-    let assertion = build_client_assertion(&client.client_id, &token_uri, &pkcs8_bytes, None);
+    let assertion =
+        build_client_assertion(&client.client_id, &state.config().base_url, &pkcs8_bytes, None);
 
     let body = format!(
         "grant_type=authorization_code\
@@ -385,6 +387,7 @@ async fn test_fapi2_dpop_code_binding_mismatching_key() {
     let nonce = acquire_dpop_nonce(&app, &dpop_key_b, &dpop_jwk_b, "POST", &token_uri).await;
 
     // Exchange code with key B (wrong key)
+    // aud must be the issuer URL (base_url), not the token endpoint URL
     let dpop_proof = create_dpop_proof(
         &dpop_key_b,
         &dpop_jwk_b,
@@ -393,7 +396,8 @@ async fn test_fapi2_dpop_code_binding_mismatching_key() {
         Some(&nonce),
         None,
     );
-    let assertion = build_client_assertion(&client.client_id, &token_uri, &pkcs8_bytes, None);
+    let assertion =
+        build_client_assertion(&client.client_id, &state.config().base_url, &pkcs8_bytes, None);
 
     let body = format!(
         "grant_type=authorization_code\
@@ -530,8 +534,7 @@ async fn test_fapi2_par_accepts_private_key_jwt() {
     // Verify that a FAPI client using the correct private_key_jwt authentication
     // is accepted at the PAR endpoint.
     //
-    // NOTE: Per RFC 7523, the JWT assertion audience must be the token endpoint URL
-    // even when the assertion is presented to the PAR endpoint.
+    // NOTE: FAPI now requires aud = issuer URL (base_url), not the token endpoint URL.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "fapi2-par-pkjwt@example.com").await;
@@ -540,9 +543,9 @@ async fn test_fapi2_par_accepts_private_key_jwt() {
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
 
-    // JWT assertion audience must be the token endpoint URL (RFC 7523)
-    let token_endpoint = format!("{}/oauth/token", state.config().base_url);
-    let assertion = build_client_assertion(&client.client_id, &token_endpoint, &pkcs8_bytes, None);
+    // JWT assertion audience must be the issuer URL (base_url)
+    let assertion =
+        build_client_assertion(&client.client_id, &state.config().base_url, &pkcs8_bytes, None);
 
     let body = format!(
         "response_type=code\

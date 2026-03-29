@@ -698,4 +698,102 @@ mod tests {
             validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
         assert!(result.is_ok());
     }
+
+    // ========================================================================
+    // parse_dpop_header — RFC 9449 Section 4.3 private key rejection
+    //
+    // The JWK embedded in a DPoP proof header MUST NOT contain private key
+    // material. Our structs intentionally omit these fields, so we check the
+    // raw JSON before deserializing.
+    // ========================================================================
+
+    /// Build a minimal JWT string whose header is the given JSON value.
+    ///
+    /// The payload and signature segments are dummy values — only the header
+    /// is inspected by `parse_dpop_header`.
+    fn make_dpop_jwt_with_header(header_json: &serde_json::Value) -> String {
+        let header_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(header_json).unwrap());
+        let payload_b64 = URL_SAFE_NO_PAD.encode(b"{}");
+        let sig_b64 = URL_SAFE_NO_PAD.encode(b"sig");
+        format!("{header_b64}.{payload_b64}.{sig_b64}")
+    }
+
+    #[test]
+    fn test_parse_dpop_header_rejects_jwk_with_private_key_d() {
+        // A DPoP proof whose JWK contains the EC private key field "d" must
+        // be rejected per RFC 9449 Section 4.3.
+        let header_json = serde_json::json!({
+            "typ": "dpop+jwt",
+            "alg": "ES256",
+            "jwk": {
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+                "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0",
+                "d": "jpsQnnGQmL-YBIffH1136cspYG6-0iY7X1fCE9-E9LI"
+            }
+        });
+        let jwt = make_dpop_jwt_with_header(&header_json);
+
+        let result = parse_dpop_header(&jwt);
+
+        assert!(
+            matches!(result, Err(DpopError::InvalidFormat(_))),
+            "JWK with private 'd' field must be rejected with InvalidFormat, got: {result:?}"
+        );
+        if let Err(DpopError::InvalidFormat(msg)) = result {
+            assert!(
+                msg.contains("private key"),
+                "Error message should mention private key material, got: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_dpop_header_rejects_rsa_jwk_with_private_fields() {
+        // RSA private key components (p, q, dp, dq, qi) must also be rejected.
+        let header_json = serde_json::json!({
+            "typ": "dpop+jwt",
+            "alg": "PS256",
+            "jwk": {
+                "kty": "RSA",
+                "n": "somersakeymodulus",
+                "e": "AQAB",
+                "p": "private_p_value"
+            }
+        });
+        let jwt = make_dpop_jwt_with_header(&header_json);
+
+        let result = parse_dpop_header(&jwt);
+
+        assert!(
+            matches!(result, Err(DpopError::InvalidFormat(_))),
+            "JWK with RSA private 'p' field must be rejected with InvalidFormat, got: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_parse_dpop_header_accepts_public_ec_jwk() {
+        // A public EC JWK (no 'd' field) in the header must be accepted.
+        let header_json = serde_json::json!({
+            "typ": "dpop+jwt",
+            "alg": "ES256",
+            "jwk": {
+                "kty": "EC",
+                "crv": "P-256",
+                "x": "f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU",
+                "y": "x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"
+            }
+        });
+        let jwt = make_dpop_jwt_with_header(&header_json);
+
+        let result = parse_dpop_header(&jwt);
+
+        // The header parses successfully — signature verification is not
+        // attempted here since we call parse_dpop_header directly.
+        assert!(
+            result.is_ok(),
+            "Public EC JWK without private key fields must be accepted, got: {result:?}"
+        );
+    }
 }

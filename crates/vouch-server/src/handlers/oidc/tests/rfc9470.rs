@@ -552,7 +552,7 @@ async fn test_rfc9470_prompt_none_with_max_age_zero_returns_login_required() {
 #[tokio::test]
 async fn test_rfc9470_unsupported_prompt_value_rejected() {
     // OIDC Core Section 3.1.2.1: Unsupported prompt values should be rejected.
-    // Vouch supports only "login" and "none".
+    // Vouch supports "login", "none", and "consent".
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "prompt-bad@example.com").await;
@@ -566,7 +566,7 @@ async fn test_rfc9470_unsupported_prompt_value_rejected() {
         &app,
         &format!(
             "/oauth/authorize?response_type=code&client_id={}&redirect_uri={}&scope=openid\
-             &code_challenge={}&code_challenge_method=S256&prompt=consent&state={}",
+             &code_challenge={}&code_challenge_method=S256&prompt=select_account&state={}",
             client.client_id,
             urlencoding::encode("https://example.com/callback"),
             challenge,

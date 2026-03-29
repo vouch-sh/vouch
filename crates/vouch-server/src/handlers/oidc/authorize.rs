@@ -8,14 +8,15 @@
 
 use super::{build_authorization_success_redirect_url, build_redirect_url_with_params};
 use crate::AppState;
-use crate::db::{self, CreatePendingOAuthParams};
+use crate::db::{self, Authenticator, CreatePendingOAuthParams, OAuthClient, Session, User};
 use crate::handlers::HasVersion;
 use crate::impl_template_response;
 use crate::services::oidc::ScopeSet;
 use crate::services::oidc::authorization::{
     AuthorizationCodeParams, AuthorizationSessionState, AuthorizeRequestParams,
-    CodeChallengeMethod, Prompt, check_client_access, check_session_for_authorization,
-    issue_authorization_code, require_pkce_for_client, validate_authorize_request,
+    CodeChallengeMethod, Prompt, ValidatedAuthRequest, check_client_access,
+    check_session_for_authorization, issue_authorization_code, require_pkce_for_client,
+    validate_authorize_request,
 };
 use crate::services::oidc::jar::{QueryParamHints, validate_request_object};
 use askama::Template;
@@ -355,9 +356,6 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
         .get(vouch_common::SESSION_COOKIE_NAME)
         .map(|c| c.value());
 
-    // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
-    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
-
     // Check if we have a valid session
     match check_session_for_authorization(&state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
@@ -365,107 +363,15 @@ async fn authorize_inner(state: Arc<AppState>, params: AuthorizeQuery, jar: Cook
             session: ref auth_session,
             authenticator,
         }) => {
-            // User is authenticated - check access before issuing code
-            if let Err(e) = check_client_access(&oauth_client, &user) {
-                let error_message = match e {
-                    crate::services::ServiceError::OAuth { description, .. } => description,
-                    _ => "You don't have access to this application".to_string(),
-                };
-                return AuthorizeDeniedTemplate {
-                    client_name: oauth_client.name,
-                    error_message,
-                }
-                .into_response();
-            }
-
-            // RFC 9470: Check if re-authentication is required.
-            //
-            // prompt=login always forces re-auth (even with a fresh session).
-            // max_age checks authentication age: if (now - auth_time) > max_age,
-            // the user must re-authenticate with their FIDO2 key.
-            let needs_reauth = validated.prompt() == Some(Prompt::Login)
-                || validated.max_age().is_some_and(|max_age| {
-                    let age_secs = jiff::Timestamp::now()
-                        .duration_since(auth_session.created_at)
-                        .as_secs()
-                        .max(0);
-                    let Ok(age) = u64::try_from(age_secs) else {
-                        return true;
-                    };
-                    age >= max_age
-                });
-
-            // prompt=none means "don't show UI"; if re-auth is needed, return error.
-            if needs_reauth && validated.prompt() == Some(Prompt::Silent) {
-                return oauth_error_redirect(
-                    validated.redirect_uri(),
-                    "login_required",
-                    "Re-authentication required but prompt=none was requested",
-                    validated.state(),
-                    &state.config().base_url,
-                );
-            }
-
-            if needs_reauth {
-                return store_pending_and_redirect(&state, validated).await;
-            }
-
-            // RFC 9470: Validate requested ACR is satisfiable.
-            // Vouch only provides AAL3 — reject requests for other ACR levels.
-            if let Some(acr) = validated.acr_values() {
-                let acr_ok = acr
-                    .split_whitespace()
-                    .any(|v| v == crate::services::oidc::amr::ACR_AAL3);
-                if !acr_ok {
-                    return oauth_error_redirect(
-                        validated.redirect_uri(),
-                        "unmet_authentication_requirements",
-                        "The requested authentication context class is not supported",
-                        validated.state(),
-                        &state.config().base_url,
-                    );
-                }
-            }
-
-            // RFC 8707: Validate resource parameter against registered URIs
-            if let Some(resource) = validated.resource()
-                && !oauth_client.is_valid_resource_uri(resource)
-            {
-                return oauth_error_redirect(
-                    validated.redirect_uri(),
-                    "invalid_target",
-                    "The requested resource is not registered for this client",
-                    validated.state(),
-                    &state.config().base_url,
-                );
-            }
-
-            // Access granted - issue authorization code.
-            let ad_value = validated.authorization_details_value();
-            let code_params = AuthorizationCodeParams {
-                client_id: validated.client_id(),
-                redirect_uri: validated.redirect_uri(),
-                user_id: &user.id,
-                email: &user.email,
-                authenticator_id: &authenticator.id,
-                aaguid: authenticator.aaguid.as_deref(),
-                scope: validated.scope(),
-                nonce: validated.nonce(),
-                code_challenge: validated.code_challenge(),
-                code_challenge_method: validated.code_challenge_method(),
-                resource: validated.resource(),
-                acr_values: validated.acr_values(),
-                dpop_jkt: validated.dpop_jkt(),
-                auth_code_lifetime_seconds: auth_code_lifetime,
-                authorization_details: ad_value.as_ref(),
-                auth_time: Some(auth_session.created_at.as_second()),
-            };
-
-            issue_code_and_redirect(
+            authorize_authenticated_user(
                 &state,
-                code_params,
-                validated.redirect_uri(),
-                validated.state(),
+                validated,
+                &oauth_client,
+                &user,
+                auth_session,
+                &authenticator,
+                ReauthPolicy::OnDemand,
+                None,
             )
             .await
         }
@@ -808,9 +714,6 @@ async fn handle_jar_request(
         .get(vouch_common::SESSION_COOKIE_NAME)
         .map(|c| c.value());
 
-    // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
-    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
-
     // Check if we have a valid session
     match check_session_for_authorization(state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
@@ -818,101 +721,15 @@ async fn handle_jar_request(
             session: ref auth_session,
             authenticator,
         }) => {
-            // User is authenticated - check access
-            if let Err(e) = check_client_access(&oauth_client, &user) {
-                let error_message = match e {
-                    crate::services::ServiceError::OAuth { description, .. } => description,
-                    _ => "You don't have access to this application".to_string(),
-                };
-                return AuthorizeDeniedTemplate {
-                    client_name: oauth_client.name,
-                    error_message,
-                }
-                .into_response();
-            }
-
-            // RFC 9470: Check if re-authentication is required
-            let needs_reauth = validated.prompt() == Some(Prompt::Login)
-                || validated.max_age().is_some_and(|max_age| {
-                    let age_secs = jiff::Timestamp::now()
-                        .duration_since(auth_session.created_at)
-                        .as_secs()
-                        .max(0);
-                    let Ok(age) = u64::try_from(age_secs) else {
-                        return true;
-                    };
-                    age >= max_age
-                });
-
-            if needs_reauth && validated.prompt() == Some(Prompt::Silent) {
-                return oauth_error_redirect(
-                    validated.redirect_uri(),
-                    "login_required",
-                    "Re-authentication required but prompt=none was requested",
-                    validated.state(),
-                    &state.config().base_url,
-                );
-            }
-
-            if needs_reauth {
-                return store_pending_and_redirect(state, validated).await;
-            }
-
-            // RFC 9470: Validate requested ACR
-            if let Some(acr) = validated.acr_values() {
-                let acr_ok = acr
-                    .split_whitespace()
-                    .any(|v| v == crate::services::oidc::amr::ACR_AAL3);
-                if !acr_ok {
-                    return oauth_error_redirect(
-                        validated.redirect_uri(),
-                        "unmet_authentication_requirements",
-                        "The requested authentication context class is not supported",
-                        validated.state(),
-                        &state.config().base_url,
-                    );
-                }
-            }
-
-            // RFC 8707: Validate resource parameter
-            if let Some(resource) = validated.resource()
-                && !oauth_client.is_valid_resource_uri(resource)
-            {
-                return oauth_error_redirect(
-                    validated.redirect_uri(),
-                    "invalid_target",
-                    "The requested resource is not registered for this client",
-                    validated.state(),
-                    &state.config().base_url,
-                );
-            }
-
-            // Issue authorization code.
-            let ad_value = validated.authorization_details_value();
-            let code_params = AuthorizationCodeParams {
-                client_id: validated.client_id(),
-                redirect_uri: validated.redirect_uri(),
-                user_id: &user.id,
-                email: &user.email,
-                authenticator_id: &authenticator.id,
-                aaguid: authenticator.aaguid.as_deref(),
-                scope: validated.scope(),
-                nonce: validated.nonce(),
-                code_challenge: validated.code_challenge(),
-                code_challenge_method: validated.code_challenge_method(),
-                resource: validated.resource(),
-                acr_values: validated.acr_values(),
-                dpop_jkt: validated.dpop_jkt(),
-                auth_code_lifetime_seconds: auth_code_lifetime,
-                authorization_details: ad_value.as_ref(),
-                auth_time: Some(auth_session.created_at.as_second()),
-            };
-
-            issue_code_and_redirect(
+            authorize_authenticated_user(
                 state,
-                code_params,
-                validated.redirect_uri(),
-                validated.state(),
+                validated,
+                &oauth_client,
+                &user,
+                auth_session,
+                &authenticator,
+                ReauthPolicy::OnDemand,
+                None,
             )
             .await
         }
@@ -1084,9 +901,6 @@ async fn handle_par_request(
         .get(vouch_common::SESSION_COOKIE_NAME)
         .map(|c| c.value());
 
-    // Compute auth code lifetime for this client (FAPI 2.0: 60s, standard: 300s).
-    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(&oauth_client);
-
     // Check if we have a valid session
     match check_session_for_authorization(state, session_token).await {
         Ok(AuthorizationSessionState::Authenticated {
@@ -1094,97 +908,19 @@ async fn handle_par_request(
             session: ref auth_session,
             authenticator,
         }) => {
-            // User is authenticated - check access
-            if let Err(e) = check_client_access(&oauth_client, &user) {
-                let error_message = match e {
-                    crate::services::ServiceError::OAuth { description, .. } => description,
-                    _ => "You don't have access to this application".to_string(),
-                };
-                return AuthorizeDeniedTemplate {
-                    client_name: oauth_client.name,
-                    error_message,
-                }
-                .into_response();
-            }
-
-            // Vouch requires hardware presence verification per authorization.
-            // PAR flows always require explicit user interaction unless prompt=none.
-            // This ensures a fresh FIDO2 assertion for each authorization and
-            // prevents stale sessions from auto-authorizing (FAPI 2.0 Section 5.3.2.2 Note 3).
-            if validated.prompt() == Some(Prompt::Silent) {
-                // prompt=none: auto-authorize if session is valid (no user interaction)
-                // Fall through to code issuance below.
-            } else {
-                // All other cases: require fresh authentication.
-                return store_pending_and_redirect(state, validated).await;
-            }
-
-            // RFC 9470: Validate requested ACR
-            if let Some(acr) = validated.acr_values() {
-                let acr_ok = acr
-                    .split_whitespace()
-                    .any(|v| v == crate::services::oidc::amr::ACR_AAL3);
-                if !acr_ok {
-                    return oauth_error_redirect(
-                        validated.redirect_uri(),
-                        "unmet_authentication_requirements",
-                        "The requested authentication context class is not supported",
-                        validated.state(),
-                        &state.config().base_url,
-                    );
-                }
-            }
-
-            // RFC 8707: Validate resource parameter against registered URIs
-            if let Some(resource) = validated.resource()
-                && !oauth_client.is_valid_resource_uri(resource)
-            {
-                return oauth_error_redirect(
-                    validated.redirect_uri(),
-                    "invalid_target",
-                    "The requested resource is not registered for this client",
-                    validated.state(),
-                    &state.config().base_url,
-                );
-            }
-
-            // Consume the PAR now that we're issuing the code.
-            // FAPI 2.0 Section 5.3.2.2 Note 3: consumption happens at code issuance,
-            // not at the initial authorize endpoint visit.
-            if let Err(e) =
-                db::consume_pushed_authorization_request(&state.store, request_uri, client_id).await
-            {
-                tracing::error!("Failed to consume PAR: {e}");
-            }
-
-            // Issue authorization code. dpop_jkt flows through ValidatedAuthRequest
-            // (set from par.dpop_jkt in the AuthorizeRequestParams construction above)
+            // PAR flows always require a fresh FIDO2 assertion (FAPI 2.0 Section 5.3.2.2 Note 3).
+            // ReauthPolicy::Always encodes this: redirect to login unless prompt=none.
+            // dpop_jkt flows through ValidatedAuthRequest (set from par.dpop_jkt above)
             // so the token endpoint can enforce DPoP key binding (RFC 9449 Section 10).
-            let ad_value = validated.authorization_details_value();
-            let code_params = AuthorizationCodeParams {
-                client_id: validated.client_id(),
-                redirect_uri: validated.redirect_uri(),
-                user_id: &user.id,
-                email: &user.email,
-                authenticator_id: &authenticator.id,
-                aaguid: authenticator.aaguid.as_deref(),
-                scope: validated.scope(),
-                nonce: validated.nonce(),
-                code_challenge: validated.code_challenge(),
-                code_challenge_method: validated.code_challenge_method(),
-                resource: validated.resource(),
-                acr_values: validated.acr_values(),
-                dpop_jkt: validated.dpop_jkt(),
-                auth_code_lifetime_seconds: auth_code_lifetime,
-                authorization_details: ad_value.as_ref(),
-                auth_time: Some(auth_session.created_at.as_second()),
-            };
-
-            issue_code_and_redirect(
+            authorize_authenticated_user(
                 state,
-                code_params,
-                validated.redirect_uri(),
-                validated.state(),
+                validated,
+                &oauth_client,
+                &user,
+                auth_session,
+                &authenticator,
+                ReauthPolicy::Always,
+                Some((request_uri, client_id)),
             )
             .await
         }
@@ -1202,6 +938,164 @@ async fn handle_par_request(
             store_pending_and_redirect(state, validated).await
         }
     }
+}
+
+/// Re-authentication policy for the authorization flow.
+///
+/// Controls whether an existing authenticated session is enough to proceed
+/// directly to code issuance, or whether the user must authenticate again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReauthPolicy {
+    /// Standard OAuth/OIDC flow: only re-auth when prompt=login or max_age exceeded.
+    OnDemand,
+    /// PAR/FAPI flow: always re-auth unless prompt=none (hardware presence per authorization).
+    Always,
+}
+
+/// Handle the authenticated-user path common to all three authorization flows.
+///
+/// Called after session validation confirms the user is authenticated.  Checks
+/// client access, applies the re-auth policy, validates ACR and resource, optionally
+/// consumes a PAR record, and issues the authorization code.
+///
+/// `reauth_policy` distinguishes PAR flows (always require fresh auth) from
+/// standard/JAR flows (only re-auth on prompt=login or max_age exceeded).
+///
+/// `par_to_consume` is `Some((request_uri, client_id))` only for PAR flows that
+/// reached code issuance without re-auth (i.e., prompt=none path).
+#[allow(clippy::too_many_arguments)]
+async fn authorize_authenticated_user(
+    state: &Arc<AppState>,
+    validated: ValidatedAuthRequest,
+    oauth_client: &OAuthClient,
+    user: &User,
+    auth_session: &Session,
+    authenticator: &Authenticator,
+    reauth_policy: ReauthPolicy,
+    par_to_consume: Option<(&str, &str)>,
+) -> Response {
+    // Step 1: Check client access.
+    if let Err(e) = check_client_access(oauth_client, user) {
+        let error_message = match e {
+            crate::services::ServiceError::OAuth { description, .. } => description,
+            _ => "You don't have access to this application".to_string(),
+        };
+        return AuthorizeDeniedTemplate {
+            client_name: oauth_client.name.clone(),
+            error_message,
+        }
+        .into_response();
+    }
+
+    // Step 2: Determine whether re-authentication is required.
+    //
+    // PAR flows always require a fresh FIDO2 assertion per authorization
+    // (FAPI 2.0 Section 5.3.2.2 Note 3) unless prompt=none is explicitly
+    // requested.  Standard/JAR flows only re-auth on prompt=login or when
+    // the session age exceeds max_age (RFC 9470).
+    let needs_reauth = match reauth_policy {
+        ReauthPolicy::Always => validated.prompt() != Some(Prompt::Silent),
+        ReauthPolicy::OnDemand => {
+            validated.prompt() == Some(Prompt::Login)
+                || validated.max_age().is_some_and(|max_age| {
+                    let age_secs = jiff::Timestamp::now()
+                        .duration_since(auth_session.created_at)
+                        .as_secs()
+                        .max(0);
+                    let Ok(age) = u64::try_from(age_secs) else {
+                        return true;
+                    };
+                    age >= max_age
+                })
+        }
+    };
+
+    // Step 3: prompt=none + re-auth needed → error (cannot show UI).
+    if needs_reauth && validated.prompt() == Some(Prompt::Silent) {
+        return oauth_error_redirect(
+            validated.redirect_uri(),
+            "login_required",
+            "Re-authentication required but prompt=none was requested",
+            validated.state(),
+            &state.config().base_url,
+        );
+    }
+
+    // Step 4: Re-auth needed — store pending request and redirect to login.
+    if needs_reauth {
+        return store_pending_and_redirect(state, validated).await;
+    }
+
+    // Step 5: Validate requested ACR (RFC 9470).
+    // Vouch only provides AAL3 — reject requests for other ACR levels.
+    if let Some(acr) = validated.acr_values() {
+        let acr_ok = acr
+            .split_whitespace()
+            .any(|v| v == crate::services::oidc::amr::ACR_AAL3);
+        if !acr_ok {
+            return oauth_error_redirect(
+                validated.redirect_uri(),
+                "unmet_authentication_requirements",
+                "The requested authentication context class is not supported",
+                validated.state(),
+                &state.config().base_url,
+            );
+        }
+    }
+
+    // Step 6: Validate resource parameter against registered URIs (RFC 8707).
+    if let Some(resource) = validated.resource()
+        && !oauth_client.is_valid_resource_uri(resource)
+    {
+        return oauth_error_redirect(
+            validated.redirect_uri(),
+            "invalid_target",
+            "The requested resource is not registered for this client",
+            validated.state(),
+            &state.config().base_url,
+        );
+    }
+
+    // Step 7: Consume PAR if applicable.
+    //
+    // FAPI 2.0 Section 5.3.2.2 Note 3: consumption happens at code issuance
+    // (here), not at the initial authorize endpoint visit.
+    if let Some((request_uri, client_id)) = par_to_consume
+        && let Err(e) =
+            db::consume_pushed_authorization_request(&state.store, request_uri, client_id).await
+    {
+        tracing::error!("Failed to consume PAR: {e}");
+    }
+
+    // Step 8: Issue authorization code.
+    let auth_code_lifetime = crate::services::oidc::fapi::auth_code_lifetime_seconds(oauth_client);
+    let ad_value = validated.authorization_details_value();
+    let code_params = AuthorizationCodeParams {
+        client_id: validated.client_id(),
+        redirect_uri: validated.redirect_uri(),
+        user_id: &user.id,
+        email: &user.email,
+        authenticator_id: &authenticator.id,
+        aaguid: authenticator.aaguid.as_deref(),
+        scope: validated.scope(),
+        nonce: validated.nonce(),
+        code_challenge: validated.code_challenge(),
+        code_challenge_method: validated.code_challenge_method(),
+        resource: validated.resource(),
+        acr_values: validated.acr_values(),
+        dpop_jkt: validated.dpop_jkt(),
+        auth_code_lifetime_seconds: auth_code_lifetime,
+        authorization_details: ad_value.as_ref(),
+        auth_time: Some(auth_session.created_at.as_second()),
+    };
+
+    issue_code_and_redirect(
+        state,
+        code_params,
+        validated.redirect_uri(),
+        validated.state(),
+    )
+    .await
 }
 
 /// Issue an authorization code and build the success redirect response.
