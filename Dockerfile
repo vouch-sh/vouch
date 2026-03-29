@@ -44,7 +44,7 @@ RUN cd crates/vouch-server \
     && /app/tailwindcss -i styles/input.css -o static/css/output.css --minify
 
 # cargo-chef base stage - shared between planner and builder
-FROM rust:1.94.0-alpine AS chef
+FROM rust:1.94.1-alpine AS chef
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 

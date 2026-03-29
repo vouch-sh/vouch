@@ -158,7 +158,10 @@ impl Pool {
                 let opts = url
                     .parse::<sqlx::sqlite::SqliteConnectOptions>()?
                     .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
-                    .busy_timeout(Duration::from_secs(5));
+                    .auto_vacuum(sqlx::sqlite::SqliteAutoVacuum::Incremental)
+                    .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
+                    .busy_timeout(Duration::from_secs(5))
+                    .pragma("analysis_limit", "400");
                 let pool = sqlx::SqlitePool::connect_with(opts).await?;
                 Ok(Self::Sqlite(pool))
             }
