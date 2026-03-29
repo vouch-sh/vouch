@@ -98,6 +98,35 @@ fn build_client_assertion(
     sign_jwt_assertion(pkcs8_bytes, &header, &claims)
 }
 
+/// Build a signed JAR Request Object JWT (RFC 9101).
+fn build_request_object(
+    client_id: &str,
+    redirect_uri: &str,
+    audience: &str,
+    pkcs8_bytes: &[u8],
+) -> String {
+    let now = jiff::Timestamp::now().as_second();
+    let header = serde_json::json!({
+        "alg": "ES256",
+        "typ": "oauth-authz-req+jwt",
+        "kid": "test-key-1"
+    });
+    let claims = serde_json::json!({
+        "iss": client_id,
+        "aud": audience,
+        "iat": now,
+        "nbf": now,
+        "exp": now + 60,
+        "client_id": client_id,
+        "response_type": "code",
+        "redirect_uri": redirect_uri,
+        "scope": "openid",
+        "code_challenge": sha256_base64url("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"),
+        "code_challenge_method": "S256"
+    });
+    sign_jwt_assertion(pkcs8_bytes, &header, &claims)
+}
+
 /// Generate an EC P-256 DPoP key pair.
 ///
 /// Returns `(key_pair, jwk)` where the JWK contains the public key fields
@@ -548,9 +577,6 @@ async fn test_fapi2_par_accepts_private_key_jwt() {
     let user = create_test_user(&state.store, "fapi2-par-pkjwt@example.com").await;
     let (client, pkcs8_bytes) = create_fapi_test_client(&state.store, &user.id).await;
 
-    let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
-    let challenge = sha256_base64url(verifier);
-
     // JWT assertion audience must be the issuer URL (base_url)
     let assertion = build_client_assertion(
         &client.client_id,
@@ -559,18 +585,21 @@ async fn test_fapi2_par_accepts_private_key_jwt() {
         None,
     );
 
+    let redirect_uri = "https://example.com/callback";
+    let request_object = build_request_object(
+        &client.client_id,
+        redirect_uri,
+        &state.config().base_url,
+        &pkcs8_bytes,
+    );
+
     let body = format!(
-        "response_type=code\
-         &client_id={}\
-         &redirect_uri={}\
-         &code_challenge={}\
-         &code_challenge_method=S256\
-         &scope=openid\
+        "client_id={}\
+         &request={}\
          &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
          &client_assertion={}",
         client.client_id,
-        urlencoding::encode("https://example.com/callback"),
-        challenge,
+        urlencoding::encode(&request_object),
         assertion,
     );
 

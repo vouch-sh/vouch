@@ -320,7 +320,7 @@ pub async fn validate_request_object(
         }
     }
 
-    // 7b. FAPI 2.0: iss, aud, and exp are REQUIRED for FAPI clients
+    // 7b. FAPI 2.0: iss, aud, exp, and nbf are REQUIRED for FAPI clients
     if client.is_fapi() {
         if claims.iss.is_none() {
             return Err(ServiceError::oauth(
@@ -339,6 +339,34 @@ pub async fn validate_request_object(
                 OAuthErrorCode::InvalidRequestObject,
                 "FAPI 2.0: Request Object must contain 'exp' claim",
             ));
+        }
+        if claims.nbf.is_none() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequestObject,
+                "FAPI 2.0: Request Object must contain 'nbf' claim",
+            ));
+        }
+
+        // FAPI 2.0: exp must not be more than 60 seconds in the future.
+        if let Some(exp) = claims.exp {
+            let max_exp = now + 60 + clock_skew;
+            if exp > max_exp {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidRequestObject,
+                    "FAPI 2.0: Request Object exp must not be more than 60 seconds in the future",
+                ));
+            }
+        }
+
+        // FAPI 2.0: nbf must not be more than 60 seconds in the past.
+        if let Some(nbf) = claims.nbf {
+            let min_nbf = now - 60 - clock_skew;
+            if nbf < min_nbf {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidRequestObject,
+                    "FAPI 2.0: Request Object nbf must not be more than 60 seconds in the past",
+                ));
+            }
         }
     }
 
@@ -461,14 +489,6 @@ mod tests {
         let payload_b64 = URL_SAFE_NO_PAD.encode(b"{}");
         let sig_b64 = URL_SAFE_NO_PAD.encode(b"sig");
         format!("{header_b64}.{payload_b64}.{sig_b64}")
-    }
-
-    /// Extract the OAuth error description from a `ServiceError`.
-    fn oauth_error_description(err: &ServiceError) -> &str {
-        let ServiceError::OAuth { description, .. } = err else {
-            return "NOT_AN_OAUTH_ERROR";
-        };
-        description.as_str()
     }
 
     /// Extract the OAuth error code from a `ServiceError`.
