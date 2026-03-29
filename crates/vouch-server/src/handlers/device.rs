@@ -18,7 +18,7 @@ use vouch_common::{
 };
 
 use crate::redact_email;
-use crate::services::error::ServiceError;
+use crate::services::error::{OAuthErrorCode, ServiceError};
 
 /// Characters used for user code generation (no ambiguous characters).
 const USER_CODE_ALPHABET: &[u8] = b"BCDFGHJKLMNPQRSTVWXZ";
@@ -79,6 +79,25 @@ pub async fn device_code(
 ) -> Result<Json<DeviceCodeResponse>, ServiceError> {
     tracing::info!("Device authorization request");
 
+    // If a client_id is provided, it must refer to a registered OAuth client.
+    if let Some(client_id) = req.client_id.as_deref() {
+        let client = db::get_oauth_client_by_client_id(&state.store, client_id)
+            .await
+            .map_err(|_| {
+                ServiceError::api(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "database_error",
+                    "Failed to validate client_id",
+                )
+            })?;
+        if client.is_none() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
+                "Unknown client_id",
+            ));
+        }
+    }
+
     // Generate codes
     let device_code = generate_device_code().map_err(|_| {
         ServiceError::api(
@@ -110,7 +129,7 @@ pub async fn device_code(
 
     let interval_seconds = i32::try_from(state.config().device_poll_interval_seconds).unwrap_or(5);
 
-    // Store in database (include client_id for HTTP signature key resolution)
+    // Store in database (client_id is validated above when provided)
     db::create_device_auth_request(
         &state.store,
         &device_code_hash,
@@ -314,7 +333,7 @@ mod tests {
         let (app, _state) = test_app().await;
 
         // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
-        let (status, body) = http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
+        let (status, body) = http_post_form(&app, "/oauth/device", "scope=openid", &[]).await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -350,7 +369,7 @@ mod tests {
         let (app, _state) = test_app().await;
 
         // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
-        let (status, body) = http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
+        let (status, body) = http_post_form(&app, "/oauth/device", "scope=openid", &[]).await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -375,7 +394,7 @@ mod tests {
         let (app, _state) = test_app().await;
 
         // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
-        let (status, body) = http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
+        let (status, body) = http_post_form(&app, "/oauth/device", "scope=openid", &[]).await;
 
         assert_eq!(status, StatusCode::OK);
         let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -403,7 +422,7 @@ mod tests {
         // Generate multiple codes to test the character set
         for _ in 0..5 {
             // RFC 8628 Section 3.1: Request uses application/x-www-form-urlencoded
-            let (status, body) = http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
+            let (status, body) = http_post_form(&app, "/oauth/device", "scope=openid", &[]).await;
 
             assert_eq!(status, StatusCode::OK);
             let resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
@@ -444,7 +463,7 @@ mod tests {
         let (app, _state) = test_app().await;
 
         // Create a device auth request (RFC 8628 Section 3.1: form-urlencoded)
-        let (status, body) = http_post_form(&app, "/oauth/device", "client_id=test", &[]).await;
+        let (status, body) = http_post_form(&app, "/oauth/device", "scope=openid", &[]).await;
         assert_eq!(status, StatusCode::OK);
         let code_resp: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
         let device_code = code_resp["device_code"].as_str().expect("device_code");
@@ -689,6 +708,19 @@ mod tests {
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "Device code endpoint should reject JSON content-type per RFC 8628"
         );
+    }
+
+    #[tokio::test]
+    async fn test_device_code_rejects_unknown_client_id() {
+        // Unknown client_id should be rejected as invalid_client.
+        let (app, _state) = test_app().await;
+
+        let (status, body) =
+            http_post_form(&app, "/oauth/device", "client_id=unknown-client", &[]).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        let error: serde_json::Value = serde_json::from_str(&body).expect("Valid JSON");
+        assert_eq!(error["error"], "invalid_client");
     }
 
     // ========================================================================
