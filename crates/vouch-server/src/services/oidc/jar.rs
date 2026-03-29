@@ -279,13 +279,20 @@ pub async fn validate_request_object(
         ));
     }
 
-    if let Some(nbf) = claims.nbf
-        && nbf > now + clock_skew
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestObject,
-            "Request Object is not yet valid (nbf claim)",
-        ));
+    if let Some(nbf) = claims.nbf {
+        if nbf > now + clock_skew {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequestObject,
+                "Request Object is not yet valid (nbf claim)",
+            ));
+        }
+        // FAPI 2.0: nbf must not be more than 60 minutes in the past.
+        if client.is_fapi() && nbf < now - 3600 - clock_skew {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequestObject,
+                "Request Object nbf is too far in the past (more than 60 minutes)",
+            ));
+        }
     }
 
     if let Some(iat) = claims.iat
@@ -345,24 +352,14 @@ pub async fn validate_request_object(
             ));
         }
 
-        // FAPI 2.0: exp must not be more than 60 seconds in the future.
-        if let Some(exp) = claims.exp {
-            let max_exp = now + 60 + clock_skew;
-            if exp > max_exp {
+        // FAPI 2.0 Message Signing: exp must not be more than 60 minutes
+        // after nbf (prevents long-lived request objects).
+        if let (Some(exp), Some(nbf)) = (claims.exp, claims.nbf) {
+            let window = exp - nbf;
+            if window > 3600 {
                 return Err(ServiceError::oauth(
                     OAuthErrorCode::InvalidRequestObject,
-                    "FAPI 2.0: Request Object exp must not be more than 60 seconds in the future",
-                ));
-            }
-        }
-
-        // FAPI 2.0: nbf must not be more than 60 seconds in the past.
-        if let Some(nbf) = claims.nbf {
-            let min_nbf = now - 60 - clock_skew;
-            if nbf < min_nbf {
-                return Err(ServiceError::oauth(
-                    OAuthErrorCode::InvalidRequestObject,
-                    "FAPI 2.0: Request Object nbf must not be more than 60 seconds in the past",
+                    "FAPI 2.0: Request Object exp must not be more than 60 minutes after nbf",
                 ));
             }
         }

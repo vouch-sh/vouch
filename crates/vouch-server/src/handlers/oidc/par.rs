@@ -186,18 +186,6 @@ pub async fn par(
         return par_error_response(StatusCode::UNAUTHORIZED, "invalid_client", &desc);
     }
 
-    // FAPI 2.0: Require signed request objects (JAR) at the PAR endpoint.
-    // This enforces that all authorization parameters are integrity-protected
-    // via a signed JWT, which is required for both Security Profile and
-    // Message Signing certification.
-    if authenticated_client.client.is_fapi() && params.request.is_none() {
-        return par_error_response(
-            StatusCode::BAD_REQUEST,
-            "invalid_request",
-            "FAPI 2.0 requires a signed request object (request parameter) at the PAR endpoint",
-        );
-    }
-
     // RFC 9449 Section 10: Capture DPoP proof at PAR for authorization code binding.
     // If a DPoP proof is provided, bind the JWK thumbprint to the PAR record so
     // that the same key must be used at the token endpoint.
