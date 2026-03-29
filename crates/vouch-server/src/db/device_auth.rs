@@ -17,6 +17,8 @@ pub struct DeviceAuthRequest {
     pub device_code_hash: String,
     pub user_code: String,
     pub status: DeviceAuthStatus,
+    /// OAuth client_id that initiated this device authorization.
+    pub client_id: Option<String>,
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub authenticator_id: Option<String>,
@@ -32,6 +34,7 @@ impl From<Document<DeviceAuthRequestDoc>> for DeviceAuthRequest {
             device_code_hash: doc.data.device_code_hash,
             user_code: doc.data.user_code,
             status: doc.data.status,
+            client_id: doc.data.client_id,
             user_id: doc.data.user_id,
             user_email: doc.data.user_email,
             authenticator_id: doc.data.authenticator_id,
@@ -72,6 +75,7 @@ pub async fn create_device_auth_request(
     store: &DocumentStore,
     device_code_hash: &str,
     user_code: &str,
+    client_id: Option<&str>,
     expires_at: Timestamp,
     interval_seconds: i32,
 ) -> Result<String> {
@@ -79,6 +83,7 @@ pub async fn create_device_auth_request(
         device_code_hash: device_code_hash.to_string(),
         user_code: user_code.to_string(),
         status: DeviceAuthStatus::Pending,
+        client_id: client_id.map(String::from),
         user_id: None,
         user_email: None,
         authenticator_id: None,

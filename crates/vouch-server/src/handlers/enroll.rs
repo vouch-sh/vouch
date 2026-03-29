@@ -1333,6 +1333,7 @@ pub async fn direct_enroll_start(State(state): State<Arc<AppState>>) -> Response
         &state.store,
         &device_code_hash,
         &user_code,
+        None,
         expires_at,
         5,
     )

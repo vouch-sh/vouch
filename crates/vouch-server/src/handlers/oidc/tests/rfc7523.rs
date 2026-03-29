@@ -1011,3 +1011,127 @@ async fn test_rfc7523_jwt_bearer_grant_lifetime_exceeded() {
         "Excessive lifetime should be rejected, got {status}: {resp_body}"
     );
 }
+
+// ========================================================================
+// FAPI 2.0 Section 5.3.2.1-8: JWT assertion audience validation
+//
+// FAPI clients MUST use the issuer URL (base_url) as the audience.
+// Non-FAPI clients accept both issuer and endpoint URLs.
+// These tests prevent the regression where the CLI sent aud=token_endpoint_url
+// which the server rejected after enforcing FAPI 2.0 compliance.
+// ========================================================================
+
+/// Create a FAPI-profiled OAuth client for testing.
+async fn create_test_fapi_jwt_client(
+    store: &db::store::DocumentStore,
+    user_id: &str,
+) -> (TestOAuthClient, Vec<u8>) {
+    let (client, pkcs8_bytes) = create_test_jwt_client(store, user_id).await;
+
+    let oauth_client = db::get_oauth_client_by_client_id(store, &client.client_id)
+        .await
+        .expect("DB error")
+        .expect("Client not found");
+
+    db::update_oauth_client_fapi_settings(
+        store,
+        &oauth_client.id,
+        db::FapiProfile::Fapi2Security,
+        true,
+    )
+    .await
+    .expect("Failed to set FAPI profile");
+
+    (client, pkcs8_bytes)
+}
+
+#[tokio::test]
+async fn test_fapi_client_rejects_token_endpoint_audience() {
+    // FAPI 2.0 Section 5.3.2.1-8: FAPI clients MUST NOT accept the token
+    // endpoint URL as audience. Only the issuer URL is allowed.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fapi-aud-reject@example.com").await;
+    let (client, pkcs8_bytes) = create_test_fapi_jwt_client(&state.store, &user.id).await;
+
+    let base_url = &state.config().base_url;
+    let token_endpoint_url = format!("{base_url}/oauth/token");
+
+    // Build assertion with aud = token endpoint URL (wrong for FAPI)
+    let assertion =
+        build_client_assertion(&client.client_id, &token_endpoint_url, &pkcs8_bytes, None);
+
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        assertion
+    );
+
+    let (status, _resp) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "FAPI client with aud=token_endpoint_url must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn test_fapi_client_accepts_issuer_audience() {
+    // FAPI 2.0 Section 5.3.2.1-8: FAPI clients MUST accept the issuer URL.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "fapi-aud-accept@example.com").await;
+    let (client, pkcs8_bytes) = create_test_fapi_jwt_client(&state.store, &user.id).await;
+
+    let base_url = &state.config().base_url;
+
+    // Build assertion with aud = issuer URL (correct for FAPI)
+    let assertion = build_client_assertion(&client.client_id, base_url, &pkcs8_bytes, None);
+
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        assertion
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    // Client auth must succeed. The grant itself may fail (unauthorized_client)
+    // because the test client isn't configured for client_credentials, but
+    // that's fine — invalid_client would mean auth itself failed.
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_ne!(
+        error["error"], "invalid_client",
+        "FAPI client with aud=issuer_url must pass client auth (status={status}): {resp_body}"
+    );
+}
+
+#[tokio::test]
+async fn test_non_fapi_client_accepts_token_endpoint_audience() {
+    // RFC 7523 Section 3: Non-FAPI clients accept the token endpoint URL.
+    let (app, state) = test_app().await;
+    let user = create_test_user(&state.store, "nonfapi-aud@example.com").await;
+    let (client, pkcs8_bytes) = create_test_jwt_client(&state.store, &user.id).await;
+
+    let base_url = &state.config().base_url;
+    let token_endpoint_url = format!("{base_url}/oauth/token");
+
+    // Build assertion with aud = token endpoint URL (valid for non-FAPI)
+    let assertion =
+        build_client_assertion(&client.client_id, &token_endpoint_url, &pkcs8_bytes, None);
+
+    let body = format!(
+        "grant_type=client_credentials\
+         &client_assertion_type=urn:ietf:params:oauth:client-assertion-type:jwt-bearer\
+         &client_assertion={}",
+        assertion
+    );
+
+    let (status, resp_body) = http_post_form(&app, "/oauth/token", &body, &[]).await;
+    // Client auth must succeed. The grant may fail (unauthorized_client) but
+    // invalid_client would mean client auth itself failed.
+    let error: serde_json::Value = serde_json::from_str(&resp_body).expect("Valid JSON");
+    assert_ne!(
+        error["error"], "invalid_client",
+        "Non-FAPI client with aud=token_endpoint_url must pass client auth (status={status}): {resp_body}"
+    );
+}

@@ -222,8 +222,8 @@ async fn run_fapi_login(
     };
 
     // Step 7: Build client_assertion (private_key_jwt) and DPoP proof.
-    let client_assertion =
-        ClientAssertionBuilder::new(&client_id, &token_endpoint_url).build(fapi_key)?;
+    // FAPI 2.0 Section 5.3.2.1-8: audience must be the issuer URL (base URL).
+    let client_assertion = ClientAssertionBuilder::new(&client_id, server).build(fapi_key)?;
 
     let mut dpop_builder = DpopProofBuilder::new("POST", &token_endpoint_url);
     if let Some(ref nonce) = challenge_dpop_nonce {
@@ -337,8 +337,8 @@ async fn run_fapi_login_with_nonce(
     let token_endpoint_url = format!("{server}/oauth/token");
 
     // Rebuild client_assertion and DPoP proof with the nonce.
-    let client_assertion =
-        ClientAssertionBuilder::new(client_id, &token_endpoint_url).build(fapi_key)?;
+    // FAPI 2.0 Section 5.3.2.1-8: audience must be the issuer URL (base URL).
+    let client_assertion = ClientAssertionBuilder::new(client_id, server).build(fapi_key)?;
 
     let dpop_proof = DpopProofBuilder::new("POST", &token_endpoint_url)
         .nonce(nonce)

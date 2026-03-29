@@ -75,7 +75,8 @@ async fn revoke_on_server(config: &Config) {
 
     let revoke_url = format!("{server_url}/oauth/revoke");
 
-    let assertion = match vouch_cli::fapi::ClientAssertionBuilder::new(client_id, &revoke_url)
+    // FAPI 2.0 Section 5.3.2.1-8: audience must be the issuer URL (base URL).
+    let assertion = match vouch_cli::fapi::ClientAssertionBuilder::new(client_id, server_url)
         .build(&fapi_key)
     {
         Ok(a) => a,

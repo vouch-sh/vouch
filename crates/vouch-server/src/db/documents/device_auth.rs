@@ -23,6 +23,9 @@ pub struct DeviceAuthRequestDoc {
     pub device_code_hash: String,
     pub user_code: String,
     pub status: DeviceAuthStatus,
+    /// OAuth client_id that initiated this device authorization.
+    #[serde(default)]
+    pub client_id: Option<String>,
     pub user_id: Option<String>,
     pub user_email: Option<String>,
     pub authenticator_id: Option<String>,
