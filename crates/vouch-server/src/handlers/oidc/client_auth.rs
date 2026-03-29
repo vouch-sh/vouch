@@ -7,7 +7,7 @@
 use crate::AppState;
 use crate::services::error::OAuthErrorResponse;
 use crate::services::oidc::{
-    jwt_bearer::client_auth::authenticate_client_jwt,
+    jwt_bearer::client_auth::{PendingJti, authenticate_client_jwt},
     token::{AuthenticatedClient, ClientCredentials, authenticate_client},
 };
 use axum::{
@@ -155,15 +155,20 @@ pub(crate) fn extract_client_auth<T: ClientAuthFields>(
 ///
 /// Dispatches to secret-based or JWT-based authentication depending on
 /// the extracted authentication method.
+///
+/// For JWT assertions, returns a [`PendingJti`] that MUST be committed via
+/// [`crate::services::oidc::jwt_bearer::client_auth::commit_jti`] after the
+/// full request succeeds. For all other auth methods, returns `None` for the
+/// pending JTI.
 pub(crate) async fn authenticate_client_any(
     state: &Arc<AppState>,
     auth: ExtractedClientAuth,
-) -> Result<Option<(AuthenticatedClient, String)>, Response> {
+) -> Result<Option<(AuthenticatedClient, String, Option<PendingJti>)>, Response> {
     match auth {
         ExtractedClientAuth::Secret(creds) => {
             let client_id = creds.client_id.clone();
             match authenticate_client(state, &creds).await {
-                Ok(client) => Ok(Some((client, client_id))),
+                Ok(client) => Ok(Some((client, client_id, None))),
                 Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
             }
         }
@@ -171,9 +176,9 @@ pub(crate) async fn authenticate_client_any(
             client_assertion,
             client_id,
         } => match authenticate_client_jwt(state, &client_assertion, client_id.as_deref()).await {
-            Ok(client) => {
+            Ok((client, pending_jti)) => {
                 let cid = client.client.client_id.clone();
-                Ok(Some((client, cid)))
+                Ok(Some((client, cid, Some(pending_jti))))
             }
             Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
         },
@@ -184,7 +189,7 @@ pub(crate) async fn authenticate_client_any(
                 client_secret: None,
             };
             match authenticate_client(state, &creds).await {
-                Ok(client) => Ok(Some((client, client_id))),
+                Ok(client) => Ok(Some((client, client_id, None))),
                 Err(e) => Err(e.into_service_error().into_oauth_response().into_response()),
             }
         }

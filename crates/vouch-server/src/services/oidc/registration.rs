@@ -22,7 +22,7 @@ use crate::AppState;
 use crate::crypto::{generate_random_bytes, hash_token};
 use crate::db::{
     self, CreateOAuthClientParams, FapiProfile, OAuthClient, OAuthClientType, OAuthEventType,
-    RegistrationSource, TokenEndpointAuthMethod,
+    RegistrationSource, TokenEndpointAuthMethod, UpdateClientRegistrationParams,
 };
 use crate::services::error::{OAuthErrorCode, ServiceError};
 use base64::Engine;
@@ -238,6 +238,14 @@ pub async fn register_client(
             ));
         }
 
+        // FAPI 2.0 Section 5.4: RS256 is not permitted for FAPI clients.
+        if alg == "RS256" && fapi_profile != FapiProfile::None {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                "RS256 is not permitted for FAPI 2.0 clients. Use ES256",
+            ));
+        }
+
         // If RS256 is explicitly requested but no RSA key is configured, reject.
         // An unspecified algorithm falls back to ES256 automatically (see below).
         if alg == "RS256" && state.oidc_rsa_key.is_none() {
@@ -249,13 +257,18 @@ pub async fn register_client(
     }
 
     // When the client didn't specify, use RS256 if available, otherwise ES256.
-    let id_token_alg = explicit_alg.unwrap_or_else(|| {
-        if state.oidc_rsa_key.is_some() {
-            "RS256"
-        } else {
-            "ES256"
-        }
-    });
+    // FAPI 2.0 Section 5.4: FAPI clients always use ES256.
+    let id_token_alg = if fapi_profile != FapiProfile::None {
+        "ES256"
+    } else {
+        explicit_alg.unwrap_or_else(|| {
+            if state.oidc_rsa_key.is_some() {
+                "RS256"
+            } else {
+                "ES256"
+            }
+        })
+    };
 
     // 13. Infer application type
     let app_type = determine_client_type(
@@ -523,20 +536,22 @@ struct ValidatedJwksAuth {
     auth_method: TokenEndpointAuthMethod,
 }
 
-/// Validate JWKS mutual exclusivity, structure, and auth method.
-fn validate_jwks_and_auth_method(
-    request: &mut RegistrationRequest,
-    auth_method_str: &str,
-) -> Result<ValidatedJwksAuth, ServiceError> {
-    let jwks_value = request.jwks.take();
-    let jwks_uri = request.jwks_uri.take();
-    if jwks_value.is_some() && jwks_uri.is_some() {
+/// Validate JWKS field mutual exclusivity, structure, and HTTPS URI constraint.
+///
+/// Shared by both initial registration and the update path. Does not validate the
+/// relationship to `token_endpoint_auth_method` — that is handled by
+/// `validate_jwks_and_auth_method` for the initial registration path.
+fn validate_jwks_fields(
+    jwks: Option<&serde_json::Value>,
+    jwks_uri: Option<&str>,
+) -> Result<(), ServiceError> {
+    if jwks.is_some() && jwks_uri.is_some() {
         return Err(ServiceError::oauth(
             OAuthErrorCode::InvalidClientMetadata,
             "jwks and jwks_uri are mutually exclusive",
         ));
     }
-    if let Some(ref jwks) = jwks_value
+    if let Some(jwks) = jwks
         && !jwks
             .get("keys")
             .is_some_and(|k| k.is_array() && !k.as_array().is_some_and(|a| a.is_empty()))
@@ -546,7 +561,7 @@ fn validate_jwks_and_auth_method(
             "jwks must be a JSON object with a non-empty \"keys\" array",
         ));
     }
-    if let Some(ref uri) = jwks_uri {
+    if let Some(uri) = jwks_uri {
         match url::Url::parse(uri) {
             Ok(parsed) if parsed.scheme() == "https" => {}
             _ => {
@@ -557,6 +572,18 @@ fn validate_jwks_and_auth_method(
             }
         }
     }
+    Ok(())
+}
+
+/// Validate JWKS mutual exclusivity, structure, and auth method.
+fn validate_jwks_and_auth_method(
+    request: &mut RegistrationRequest,
+    auth_method_str: &str,
+) -> Result<ValidatedJwksAuth, ServiceError> {
+    let jwks_value = request.jwks.take();
+    let jwks_uri = request.jwks_uri.take();
+
+    validate_jwks_fields(jwks_value.as_ref(), jwks_uri.as_deref())?;
 
     let auth_method: TokenEndpointAuthMethod = auth_method_str.parse().map_err(|_| {
         ServiceError::oauth(
@@ -707,6 +734,95 @@ pub async fn delete_client_configuration(
     );
 
     Ok(())
+}
+
+/// Update a dynamically registered client (RFC 7592 Section 2.2).
+///
+/// Authenticates the caller using the registration access token, updates
+/// the client's mutable registration fields, rotates the token, and
+/// returns the updated metadata.
+///
+/// # Errors
+///
+/// - `ServiceError::Unauthorized` if the Bearer token is invalid.
+/// - `ServiceError::NotFound` if the `client_id` does not exist.
+/// - `ServiceError::OAuth` if the request body contains invalid metadata.
+pub async fn update_client_configuration(
+    state: &Arc<AppState>,
+    client_id: &str,
+    registration_access_token: &str,
+    request: RegistrationRequest,
+) -> Result<RegistrationResponse, ServiceError> {
+    let client =
+        lookup_and_verify_registration_token(state, client_id, registration_access_token).await?;
+
+    // Validate grant/response types (take() empties the request fields)
+    let mut mutable_request = request;
+    let validated = validate_grant_and_response_types(&mut mutable_request)?;
+
+    // Validate redirect URIs (same cardinality + format rules as initial registration)
+    let redirect_uris = validate_redirect_uris(&mut mutable_request, validated.has_auth_code)?;
+
+    // Build updated registration metadata (cosmetic fields)
+    let registration_metadata = build_registration_metadata(&mutable_request);
+
+    // Validate JWKS and jwks_uri (same rules as initial registration):
+    // mutually exclusive, valid structure, HTTPS URI.
+    validate_jwks_fields(
+        mutable_request.jwks.as_ref(),
+        mutable_request.jwks_uri.as_deref(),
+    )?;
+
+    // Rotate the registration access token per RFC 7592 Section 2.2
+    let new_reg_token = generate_registration_token()?;
+    let new_reg_token_hash = hash_token(&new_reg_token);
+
+    // token_endpoint_auth_method is intentionally NOT updated — it is immutable
+    // per RFC 7592 (clients cannot change their auth method after registration).
+    let updated = db::update_oauth_client_registration(
+        &state.store,
+        &client.id,
+        &UpdateClientRegistrationParams {
+            redirect_uris: &redirect_uris,
+            grant_types: Some(&validated.grant_types),
+            response_types: Some(&validated.response_types),
+            jwks: mutable_request.jwks.as_ref(),
+            jwks_uri: mutable_request.jwks_uri.as_deref(),
+            registration_access_token_hash: &new_reg_token_hash,
+            registration_metadata: Some(&registration_metadata),
+        },
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to update client {client_id}: {e}");
+        ServiceError::Internal("Failed to update client".to_string())
+    })?;
+
+    if let Err(e) = db::record_oauth_event(
+        &state.audit,
+        &client.id,
+        OAuthEventType::ClientUpdated,
+        client.user_id.as_deref(),
+        None,
+        None,
+        Some("RFC 7592 client configuration PUT"),
+    )
+    .await
+    {
+        tracing::warn!("Failed to record client update event: {e}");
+    }
+
+    tracing::info!(
+        "Dynamic client updated: client_id={}, user={}",
+        client_id,
+        client.user_id.as_deref().unwrap_or("(none)"),
+    );
+
+    let base_url = &state.config().base_url;
+    let mut response = build_client_response(&updated, base_url);
+    response.registration_access_token = Some(new_reg_token);
+
+    Ok(response)
 }
 
 /// Look up a client by `client_id` and verify the registration access token.

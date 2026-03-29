@@ -12,6 +12,7 @@ use crate::services::oidc::authorization::{
 };
 use crate::services::oidc::dpop::DpopError;
 use crate::services::oidc::jar::validate_request_object;
+use crate::services::oidc::jwt_bearer::client_auth::commit_jti;
 use crate::services::oidc::token::validate_dpop_if_present;
 use axum::{
     Json,
@@ -22,6 +23,7 @@ use axum::{
 use secrecy::SecretString;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 
 /// PAR response (RFC 9126 Section 2.2).
 #[derive(Serialize)]
@@ -89,6 +91,9 @@ pub struct ParRequest {
     /// RFC 9101: JWT-Secured Authorization Request (Request Object).
     #[serde(default)]
     request: Option<String>,
+    /// RFC 9449 Section 10: DPoP JWK thumbprint for authorization code binding.
+    #[serde(default)]
+    dpop_jkt: Option<String>,
     /// RFC 9396: Rich authorization details (JSON array).
     #[serde(default)]
     authorization_details: Option<String>,
@@ -153,7 +158,7 @@ pub async fn par(
     };
 
     // RFC 9126 Section 2: Client authentication is REQUIRED
-    let Some((authenticated_client, _client_id)) =
+    let Some((authenticated_client, _client_id, pending_jti)) =
         (match authenticate_client_any(&state, client_auth).await {
             Ok(result) => result,
             Err(resp) => return resp,
@@ -214,6 +219,19 @@ pub async fn par(
         }
     };
     let dpop_jkt = dpop_proof.as_ref().map(|p| p.jkt.as_str());
+
+    // RFC 9449 Section 10: If both a DPoP proof header and a dpop_jkt request
+    // parameter are present, the JWK thumbprints MUST match.
+    if let (Some(proof_jkt), Some(param_jkt)) = (dpop_jkt, &params.dpop_jkt) {
+        let is_match: bool = proof_jkt.as_bytes().ct_eq(param_jkt.as_bytes()).into();
+        if !is_match {
+            return par_error_response(
+                StatusCode::BAD_REQUEST,
+                "invalid_dpop_proof",
+                "dpop_jkt parameter does not match DPoP proof JWK thumbprint",
+            );
+        }
+    }
 
     // Helper: convert ServiceError to PAR error response fields.
     let service_error_codes = |e: &ServiceError| -> (&str, String) {
@@ -282,6 +300,7 @@ pub async fn par(
             acr_values: params.acr_values.clone(),
             max_age: params.max_age,
             prompt: parsed_prompt,
+            dpop_jkt: params.dpop_jkt.clone(),
             authorization_details: params.authorization_details.clone(),
         };
 
@@ -326,7 +345,12 @@ pub async fn par(
         );
     }
 
-    // Store the pushed authorization request
+    // Store the pushed authorization request.
+    // RFC 9449 Section 10: dpop_jkt can come from the request parameter
+    // (in the authorization request body) or from the DPoP proof header.
+    // The request parameter takes precedence since it's the explicit binding.
+    let effective_dpop_jkt = validated.dpop_jkt().or(dpop_jkt);
+
     let scope_str = validated.scope().to_space_separated();
     let max_age_i64 = validated.max_age().and_then(|v| i64::try_from(v).ok());
     let ad_value = validated.authorization_details_value();
@@ -343,20 +367,32 @@ pub async fn par(
         acr_values: validated.acr_values(),
         max_age: max_age_i64,
         prompt: validated.prompt().map(|p| p.as_str()),
-        dpop_jkt,
+        dpop_jkt: effective_dpop_jkt,
         authorization_details: ad_value.as_ref(),
     };
 
     // RFC 9126 Section 2.2: Return 201 Created
     match db::create_pushed_authorization_request(&state.store, create_params).await {
-        Ok((_id, request_uri)) => (
-            StatusCode::CREATED,
-            Json(ParResponse {
-                request_uri,
-                expires_in: PAR_EXPIRES_IN,
-            }),
-        )
-            .into_response(),
+        Ok((_id, request_uri)) => {
+            if let Some(ref pjti) = pending_jti
+                && let Err(e) = commit_jti(&state, pjti).await
+            {
+                tracing::warn!("JTI commit failed for PAR: {e:?}");
+                return par_error_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "Failed to complete client authentication",
+                );
+            }
+            (
+                StatusCode::CREATED,
+                Json(ParResponse {
+                    request_uri,
+                    expires_in: PAR_EXPIRES_IN,
+                }),
+            )
+                .into_response()
+        }
         Err(e) => {
             tracing::error!("Failed to create pushed authorization request: {}", e);
             par_error_response(

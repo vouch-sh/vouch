@@ -198,6 +198,35 @@ pub async fn consume_pushed_authorization_request(
     Ok(updated.map(PushedAuthorizationRequest::from))
 }
 
+/// Look up a pushed authorization request without consuming it.
+///
+/// FAPI 2.0 Section 5.3.2.2 Note 3: request_uri values should be reusable
+/// until the authorization request has been completed (code issued).
+pub async fn get_pushed_authorization_request(
+    store: &DocumentStore,
+    request_uri: &str,
+    client_id: &str,
+) -> Result<Option<PushedAuthorizationRequest>> {
+    let now = Timestamp::now();
+
+    let doc = store
+        .find_one::<PushedAuthorizationRequestDoc>("request_uri", request_uri)
+        .await?;
+
+    let Some(doc) = doc else {
+        return Ok(None);
+    };
+
+    if doc.data.client_id != client_id
+        || doc.data.consumed_at.is_some()
+        || doc.data.expires_at <= now
+    {
+        return Ok(None);
+    }
+
+    Ok(Some(PushedAuthorizationRequest::from(doc)))
+}
+
 /// Delete expired pushed authorization requests.
 pub async fn delete_expired_pushed_authorization_requests(
     store: &DocumentStore,

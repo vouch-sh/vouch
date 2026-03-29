@@ -62,6 +62,11 @@ impl JwtAudience {
             Self::Multiple(v) => v.iter().any(|s| s == expected),
         }
     }
+
+    /// Returns true if the audience is a single string (not an array).
+    pub fn is_single(&self) -> bool {
+        matches!(self, Self::Single(_))
+    }
 }
 
 /// Decoded JWT header fields we need for validation.
@@ -720,6 +725,79 @@ mod tests {
         assert!(
             desc.contains("audience"),
             "Error should mention audience mismatch, got: {desc}"
+        );
+    }
+
+    // ========================================================================
+    // FAPI 2.0 Section 5.3.2.1-8: aud MUST be the issuer URL only.
+    //
+    // When allowed_audiences contains only the base URL (issuer), a JWT
+    // assertion whose aud is the token endpoint URL must be rejected.
+    // ========================================================================
+
+    #[test]
+    fn test_validate_jwt_assertion_fapi_rejects_token_endpoint_audience() {
+        let (enc, dec) = test_es256_keys();
+        let now = Timestamp::now().as_second();
+        let mut claims = valid_claims(now);
+        // Client sets aud to the token endpoint URL — invalid for FAPI clients
+        // where only the issuer (base) URL is accepted.
+        claims.aud = JwtAudience::Single("https://example.com/oauth/token".to_string());
+
+        let jwt = sign_test_jwt(&claims, &enc);
+        let header = parse_assertion_header(&jwt).expect("header should parse");
+
+        // FAPI restriction: allowed_audiences contains only the issuer URL,
+        // NOT the token endpoint URL.
+        let fapi_audiences: &[&str] = &["https://example.com"];
+
+        let result = validate_jwt_assertion(
+            &jwt,
+            &header,
+            &dec,
+            jsonwebtoken::Algorithm::ES256,
+            fapi_audiences,
+            MAX_LIFETIME,
+        );
+
+        assert!(
+            result.is_err(),
+            "Token endpoint URL must be rejected when FAPI audiences allow issuer URL only"
+        );
+        let err = result.unwrap_err();
+        let desc = oauth_error_description(&err);
+        assert!(
+            desc.contains("audience"),
+            "Error should mention audience mismatch, got: {desc}"
+        );
+    }
+
+    #[test]
+    fn test_validate_jwt_assertion_fapi_accepts_issuer_url_audience() {
+        let (enc, dec) = test_es256_keys();
+        let now = Timestamp::now().as_second();
+        let mut claims = valid_claims(now);
+        // Client correctly uses the issuer URL as aud for a FAPI client.
+        claims.aud = JwtAudience::Single("https://example.com".to_string());
+
+        let jwt = sign_test_jwt(&claims, &enc);
+        let header = parse_assertion_header(&jwt).expect("header should parse");
+
+        let fapi_audiences: &[&str] = &["https://example.com"];
+
+        let result = validate_jwt_assertion(
+            &jwt,
+            &header,
+            &dec,
+            jsonwebtoken::Algorithm::ES256,
+            fapi_audiences,
+            MAX_LIFETIME,
+        );
+
+        assert!(
+            result.is_ok(),
+            "Issuer URL audience must be accepted for FAPI client, got: {:?}",
+            result.unwrap_err()
         );
     }
 

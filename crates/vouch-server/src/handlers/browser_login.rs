@@ -80,6 +80,8 @@ pub struct LoginTemplate {
     /// URL for the certification test-mode login link.
     /// `Some` only when `VOUCH_CERTIFICATION_TEST_TOKEN` is set and there is a pending auth.
     pub cert_login_url: Option<String>,
+    /// URL for the certification test-mode deny link (returns access_denied).
+    pub cert_deny_url: Option<String>,
 }
 
 impl_template_response!(LoginTemplate);
@@ -247,12 +249,28 @@ pub async fn login_page(
         _ => None,
     };
 
+    let cert_deny_url = match (
+        &state.config().certification_test_token,
+        &query.pending_auth,
+    ) {
+        (Some(secret), Some(pending_id)) => {
+            let token = hmac_sha256_base64url(secret.expose_secret(), pending_id);
+            let encoded_pending_id = urlencoding::encode(pending_id);
+            let encoded_token = urlencoding::encode(&token);
+            Some(format!(
+                "/certification/deny-login?pending_auth={encoded_pending_id}&token={encoded_token}"
+            ))
+        }
+        _ => None,
+    };
+
     LoginTemplate {
         pending_auth: query.pending_auth,
         client_name,
         rp_id: state.config().rp_id.clone(),
         auth,
         cert_login_url,
+        cert_deny_url,
     }
     .into_response()
 }

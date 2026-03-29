@@ -77,6 +77,9 @@ struct RequestObjectClaims {
     max_age: Option<u64>,
     #[serde(default)]
     prompt: Option<String>,
+    /// RFC 9449 Section 10: DPoP JWK thumbprint for authorization code binding.
+    #[serde(default)]
+    dpop_jkt: Option<String>,
     /// RFC 9396: Rich authorization details.
     #[serde(default)]
     authorization_details: Option<serde_json::Value>,
@@ -148,19 +151,16 @@ fn parse_request_object_header(
         )
     })?;
 
-    // RFC 8725: Validate typ header to prevent cross-JWT confusion
-    match &full_header.typ {
-        Some(typ) if typ == REQUEST_OBJECT_TYP => {}
-        Some(typ) => {
+    // RFC 9101 Section 10.2: typ SHOULD be "oauth-authz-req+jwt".
+    // Accept case-insensitively per MIME type rules, and also accept
+    // "JWT" (the generic typ) or absent typ for interoperability.
+    if let Some(typ) = &full_header.typ {
+        let is_valid =
+            typ.eq_ignore_ascii_case(REQUEST_OBJECT_TYP) || typ.eq_ignore_ascii_case("JWT");
+        if !is_valid {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidRequestObject,
-                format!("Request Object typ must be '{REQUEST_OBJECT_TYP}', got '{typ}'"),
-            ));
-        }
-        None => {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidRequestObject,
-                format!("Request Object must include typ header '{REQUEST_OBJECT_TYP}'"),
+                format!("Request Object typ must be '{REQUEST_OBJECT_TYP}' or 'JWT', got '{typ}'"),
             ));
         }
     }
@@ -279,13 +279,20 @@ pub async fn validate_request_object(
         ));
     }
 
-    if let Some(nbf) = claims.nbf
-        && nbf > now + clock_skew
-    {
-        return Err(ServiceError::oauth(
-            OAuthErrorCode::InvalidRequestObject,
-            "Request Object is not yet valid (nbf claim)",
-        ));
+    if let Some(nbf) = claims.nbf {
+        if nbf > now + clock_skew {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequestObject,
+                "Request Object is not yet valid (nbf claim)",
+            ));
+        }
+        // FAPI 2.0: nbf must not be more than 60 minutes in the past.
+        if client.is_fapi() && nbf < now - 3600 - clock_skew {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequestObject,
+                "Request Object nbf is too far in the past (more than 60 minutes)",
+            ));
+        }
     }
 
     if let Some(iat) = claims.iat
@@ -318,7 +325,7 @@ pub async fn validate_request_object(
         }
     }
 
-    // 7b. FAPI 2.0: iss, aud, and exp are REQUIRED for FAPI clients
+    // 7b. FAPI 2.0: iss, aud, exp, and nbf are REQUIRED for FAPI clients
     if client.is_fapi() {
         if claims.iss.is_none() {
             return Err(ServiceError::oauth(
@@ -337,6 +344,24 @@ pub async fn validate_request_object(
                 OAuthErrorCode::InvalidRequestObject,
                 "FAPI 2.0: Request Object must contain 'exp' claim",
             ));
+        }
+        if claims.nbf.is_none() {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidRequestObject,
+                "FAPI 2.0: Request Object must contain 'nbf' claim",
+            ));
+        }
+
+        // FAPI 2.0 Message Signing: exp must not be more than 60 minutes
+        // after nbf (prevents long-lived request objects).
+        if let (Some(exp), Some(nbf)) = (claims.exp, claims.nbf) {
+            let window = exp - nbf;
+            if window > 3600 {
+                return Err(ServiceError::oauth(
+                    OAuthErrorCode::InvalidRequestObject,
+                    "FAPI 2.0: Request Object exp must not be more than 60 minutes after nbf",
+                ));
+            }
         }
     }
 
@@ -439,6 +464,7 @@ pub async fn validate_request_object(
         acr_values: claims.acr_values,
         max_age: claims.max_age,
         prompt: parsed_prompt,
+        dpop_jkt: claims.dpop_jkt,
         authorization_details: authorization_details_str,
     })
 }
@@ -458,14 +484,6 @@ mod tests {
         let payload_b64 = URL_SAFE_NO_PAD.encode(b"{}");
         let sig_b64 = URL_SAFE_NO_PAD.encode(b"sig");
         format!("{header_b64}.{payload_b64}.{sig_b64}")
-    }
-
-    /// Extract the OAuth error description from a `ServiceError`.
-    fn oauth_error_description(err: &ServiceError) -> &str {
-        let ServiceError::OAuth { description, .. } = err else {
-            return "NOT_AN_OAUTH_ERROR";
-        };
-        description.as_str()
     }
 
     /// Extract the OAuth error code from a `ServiceError`.
@@ -542,39 +560,39 @@ mod tests {
     }
 
     #[test]
-    fn test_jar_parse_header_rejects_wrong_typ() {
+    fn test_jar_parse_header_accepts_jwt_typ() {
+        // RFC 9101: typ "JWT" is the generic type and must be accepted.
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256", "typ": "JWT"}));
         let result = parse_request_object_header(&jwt);
-        assert!(result.is_err(), "typ=JWT must be rejected");
-        let err = result.unwrap_err();
-        let desc = oauth_error_description(&err);
-        assert!(
-            desc.contains("typ"),
-            "Error should mention typ, got: {desc}"
-        );
+        assert!(result.is_ok(), "typ=JWT must be accepted: {result:?}");
     }
 
     #[test]
-    fn test_jar_parse_header_rejects_missing_typ() {
+    fn test_jar_parse_header_accepts_missing_typ() {
+        // RFC 9101 Section 10.2: typ is RECOMMENDED, not required.
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256"}));
         let result = parse_request_object_header(&jwt);
-        assert!(result.is_err(), "Missing typ must be rejected");
-        let err = result.unwrap_err();
-        let desc = oauth_error_description(&err);
-        assert!(
-            desc.contains("typ"),
-            "Error should mention typ, got: {desc}"
-        );
+        assert!(result.is_ok(), "Missing typ must be accepted: {result:?}");
     }
 
     #[test]
-    fn test_jar_parse_header_rejects_wrong_typ_casing() {
-        // "OAuth-Authz-Req+JWT" is not the correct casing
+    fn test_jar_parse_header_accepts_case_insensitive_typ() {
+        // MIME types are case-insensitive.
         let jwt = make_jwt_with_header(
             &serde_json::json!({"alg": "ES256", "typ": "OAuth-Authz-Req+JWT"}),
         );
         let result = parse_request_object_header(&jwt);
-        assert!(result.is_err(), "Wrong case typ must be rejected");
+        assert!(
+            result.is_ok(),
+            "Case-insensitive typ must be accepted: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_jar_parse_header_rejects_invalid_typ() {
+        let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256", "typ": "at+jwt"}));
+        let result = parse_request_object_header(&jwt);
+        assert!(result.is_err(), "Invalid typ must be rejected");
     }
 
     // ========================================================================
@@ -899,7 +917,7 @@ mod tests {
 
     #[test]
     fn test_jar_error_code_is_invalid_request_object() {
-        let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256"}));
+        let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256", "typ": "at+jwt"}));
         let result = parse_request_object_header(&jwt);
         assert!(result.is_err());
         let err = result.unwrap_err();

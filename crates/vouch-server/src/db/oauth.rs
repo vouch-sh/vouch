@@ -415,6 +415,7 @@ pub enum OAuthEventType {
     AuthSuccess,
     AuthFailure,
     ClientRegistered,
+    ClientUpdated,
     ClientDeleted,
     SecretAdded,
     SecretRevoked,
@@ -440,6 +441,7 @@ impl OAuthEventType {
             Self::AuthSuccess => "auth_success",
             Self::AuthFailure => "auth_failure",
             Self::ClientRegistered => "client_registered",
+            Self::ClientUpdated => "client_updated",
             Self::ClientDeleted => "client_deleted",
             Self::SecretAdded => "secret_added",
             Self::SecretRevoked => "secret_revoked",
@@ -456,6 +458,7 @@ impl OAuthEventType {
             Self::AuthSuccess => "oauth_auth_success",
             Self::AuthFailure => "oauth_auth_failure",
             Self::ClientRegistered => "oauth_client_registered",
+            Self::ClientUpdated => "oauth_client_updated",
             Self::ClientDeleted => "oauth_client_deleted",
             Self::SecretAdded => "oauth_secret_added",
             Self::SecretRevoked => "oauth_secret_revoked",
@@ -639,6 +642,57 @@ pub(super) mod test_helpers {
         }
         Ok(())
     }
+}
+
+/// Parameters for updating a client via RFC 7592 PUT.
+pub struct UpdateClientRegistrationParams<'a> {
+    pub redirect_uris: &'a [String],
+    pub grant_types: Option<&'a [String]>,
+    pub response_types: Option<&'a [String]>,
+    pub jwks: Option<&'a serde_json::Value>,
+    pub jwks_uri: Option<&'a str>,
+    pub registration_access_token_hash: &'a str,
+    pub registration_metadata: Option<&'a serde_json::Value>,
+}
+
+/// Update a dynamically registered OAuth client (RFC 7592 Section 2.2).
+///
+/// Updates mutable registration fields. Immutable fields (client_id,
+/// token_endpoint_auth_method, fapi_profile) are preserved.
+pub async fn update_oauth_client_registration(
+    store: &DocumentStore,
+    id: &str,
+    params: &UpdateClientRegistrationParams<'_>,
+) -> Result<OAuthClient> {
+    store
+        .modify::<OAuthClientDoc, _>(id, |data| {
+            data.redirect_uris = params.redirect_uris.to_vec();
+            if let Some(gt) = params.grant_types {
+                data.grant_types = Some(gt.to_vec());
+            }
+            if let Some(rt) = params.response_types {
+                data.response_types = Some(rt.to_vec());
+            }
+            // RFC 7592: PUT is a full replacement — clear fields not present.
+            data.jwks = params.jwks.cloned();
+            data.jwks_uri = params.jwks_uri.map(String::from);
+            // Clear JWKS URI cache when the URI changes or is removed.
+            if data.jwks_uri.as_deref() != params.jwks_uri {
+                data.jwks_uri_cache = None;
+                data.jwks_uri_cached_at = None;
+            }
+            data.registration_access_token_hash =
+                Some(params.registration_access_token_hash.to_string());
+            data.registration_metadata = params.registration_metadata.cloned();
+        })
+        .await?;
+
+    let updated = store
+        .get::<OAuthClientDoc>(id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Client not found after update"))?;
+
+    Ok(OAuthClient::from(updated))
 }
 
 // ============================================================================

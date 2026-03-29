@@ -208,6 +208,14 @@ pub async fn complete_login(
     // ── 9. Create a browser session ──────────────────────────────────────
     // Set a session cookie so that subsequent authorization requests from
     // the same browser (e.g. prompt=none, max_age) recognize the user.
+    //
+    // Delete any previous sessions for the cert user first to prevent
+    // session leakage between conformance test modules (which share a
+    // browser context). Each module should start with a clean session.
+    if let Err(e) = db::delete_sessions_for_user(&state.store, &user.id).await {
+        tracing::warn!("Failed to delete previous cert sessions: {e}");
+    }
+
     let client_id = state.config().base_url.clone();
     let session_result = match create_oauth_access_token(
         &state,
@@ -251,6 +259,57 @@ pub async fn complete_login(
         Redirect::to(&redirect_url),
     )
         .into_response()
+}
+
+/// GET /certification/deny-login?pending_auth=<UUID>&token=<HMAC>
+///
+/// Simulates user rejection for conformance testing. Consumes the pending
+/// authorization and redirects to the client's callback URI with
+/// `error=access_denied`.
+pub async fn deny_login(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CompleteLoginQuery>,
+) -> Response {
+    // Validate HMAC token.
+    let secret = match state.config().certification_test_token.as_ref() {
+        Some(s) => s.expose_secret().to_string(),
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let expected = hmac_sha256_base64url(&secret, &query.pending_auth);
+    let token_valid: bool = expected.as_bytes().ct_eq(query.token.as_bytes()).into();
+    if !token_valid {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+
+    // Consume pending authorization.
+    let pending =
+        match db::consume_pending_oauth_authorization(&state.store, &query.pending_auth).await {
+            Ok(Some(p)) => p,
+            Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+
+    // Redirect to callback with access_denied error (RFC 6749 Section 4.1.2.1).
+    let mut redirect = match url::Url::parse(&pending.redirect_uri) {
+        Ok(u) => u,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    {
+        let mut q = redirect.query_pairs_mut();
+        q.append_pair("error", "access_denied");
+        q.append_pair("error_description", "User rejected authentication");
+        if let Some(ref s) = pending.state {
+            q.append_pair("state", s);
+        }
+        q.append_pair("iss", &state.config().base_url);
+    }
+
+    tracing::info!(
+        pending_auth = %query.pending_auth,
+        "Certification deny-login: redirecting with access_denied"
+    );
+
+    Redirect::to(redirect.as_str()).into_response()
 }
 
 /// Get the certification test user, creating it if it doesn't exist.

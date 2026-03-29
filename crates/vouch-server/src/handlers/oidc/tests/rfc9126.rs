@@ -575,8 +575,21 @@ async fn test_rfc9126_par_rejects_unregistered_redirect_uri() {
 
 /// Helper: create a PAR request and return the request_uri.
 async fn create_par_request(app: &axum::Router, client: &TestOAuthClient) -> String {
+    create_par_request_with_prompt(app, client, None).await
+}
+
+/// Helper: create a PAR request with an optional `prompt` parameter, returning the request_uri.
+async fn create_par_request_with_prompt(
+    app: &axum::Router,
+    client: &TestOAuthClient,
+    prompt: Option<&str>,
+) -> String {
     let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
     let challenge = sha256_base64url(verifier);
+
+    let prompt_param = prompt
+        .map(|p| format!("&prompt={}", urlencoding::encode(p)))
+        .unwrap_or_default();
 
     let body = format!(
         "response_type=code\
@@ -584,7 +597,7 @@ async fn create_par_request(app: &axum::Router, client: &TestOAuthClient) -> Str
          &redirect_uri={}\
          &code_challenge={}\
          &code_challenge_method=S256\
-         &scope=openid",
+         &scope=openid{prompt_param}",
         client.client_id,
         urlencoding::encode("https://example.com/callback"),
         challenge,
@@ -607,6 +620,7 @@ async fn create_par_request(app: &axum::Router, client: &TestOAuthClient) -> Str
 async fn test_rfc9126_authorize_resolves_request_uri() {
     // RFC 9126 Section 4: The authorization endpoint resolves
     // request_uri to the stored PAR parameters.
+    // Use prompt=none so the existing session auto-authorizes without a login redirect.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "par-resolve@example.com").await;
@@ -614,7 +628,7 @@ async fn test_rfc9126_authorize_resolves_request_uri() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
-    let request_uri = create_par_request(&app, &client).await;
+    let request_uri = create_par_request_with_prompt(&app, &client, Some("none")).await;
 
     // Use request_uri at the authorization endpoint
     let response = http_get_full(
@@ -709,7 +723,9 @@ async fn test_rfc9126_authorize_requires_client_id_with_request_uri() {
 
 #[tokio::test]
 async fn test_rfc9126_request_uri_is_single_use() {
-    // RFC 9126 Section 2.3: request_uri MUST be consumed on first use.
+    // RFC 9126 Section 2.3: request_uri MUST be consumed on first use (code issued).
+    // Use prompt=none so the first visit auto-authorizes and issues a code, consuming
+    // the PAR. The second visit must then return an error page.
     let (app, state) = test_app().await;
 
     let user = create_test_user(&state.store, "par-single@example.com").await;
@@ -717,7 +733,7 @@ async fn test_rfc9126_request_uri_is_single_use() {
     let client = create_test_oauth_client(&state.store, &user.id).await;
     let session_token = create_test_session(&state, &user.id, &user.email, &auth_id).await;
 
-    let request_uri = create_par_request(&app, &client).await;
+    let request_uri = create_par_request_with_prompt(&app, &client, Some("none")).await;
 
     // First use should succeed
     let response1 = http_get_full(

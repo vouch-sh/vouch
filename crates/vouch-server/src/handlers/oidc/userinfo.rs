@@ -78,17 +78,22 @@ pub async fn userinfo(
     };
 
     let (token, is_dpop_scheme) = if let Some(ref auth_header) = auth_header_value {
-        // RFC 6750 Section 2.1: Authorization header takes precedence
-        if let Some(t) = auth_header.strip_prefix("DPoP ") {
-            (t.to_string(), true)
-        } else if let Some(t) = auth_header.strip_prefix("Bearer ") {
-            (t.to_string(), false)
-        } else {
-            return oauth_error(
-                StatusCode::UNAUTHORIZED,
-                "invalid_token",
-                "Unsupported authorization scheme. Use Bearer or DPoP",
-            );
+        // RFC 9110 Section 11.1: auth-scheme is case-insensitive.
+        // Compare the scheme in lowercase but extract the token from the original
+        // header since JWT tokens are case-sensitive (base64url encoding).
+        let scheme_and_token = auth_header.split_once(' ');
+        match scheme_and_token {
+            Some((scheme, tok)) if scheme.eq_ignore_ascii_case("dpop") => (tok.to_string(), true),
+            Some((scheme, tok)) if scheme.eq_ignore_ascii_case("bearer") => {
+                (tok.to_string(), false)
+            }
+            _ => {
+                return oauth_error(
+                    StatusCode::UNAUTHORIZED,
+                    "invalid_token",
+                    "Unsupported authorization scheme. Use Bearer or DPoP",
+                );
+            }
         }
     } else if let Some(ref ft) = form_token {
         // RFC 6750 Section 2.2: POST body access_token (Bearer only, no DPoP)
@@ -103,6 +108,14 @@ pub async fn userinfo(
 
     // RFC 9449 Section 7.1: If DPoP scheme is used, validate the DPoP proof at resource endpoint
     if is_dpop_scheme {
+        // RFC 9449 Section 7.1: There MUST NOT be more than one DPoP header.
+        if headers.get_all("DPoP").iter().count() > 1 {
+            return oauth_error(
+                StatusCode::BAD_REQUEST,
+                OAuthErrorCode::InvalidDpopProof.as_str(),
+                "Request must contain exactly one DPoP header",
+            );
+        }
         let dpop_header = match headers.get("DPoP").and_then(|v| v.to_str().ok()) {
             Some(h) => h,
             None => {
@@ -140,27 +153,34 @@ pub async fn userinfo(
                 // Note: audience is NOT validated here because the userinfo endpoint
                 // receives tokens from any client (aud = client_id per RFC 9068).
                 let config = state.config();
-                if let Some(decoded) = decode_token(&token, &state.oidc_key, &config.base_url) {
-                    match decoded.cnf() {
-                        Some(cnf) => {
-                            let is_valid: bool =
-                                proof.jkt.as_bytes().ct_eq(cnf.jkt.as_bytes()).into();
-                            if !is_valid {
-                                return oauth_error(
-                                    StatusCode::UNAUTHORIZED,
-                                    OAuthErrorCode::InvalidDpopProof.as_str(),
-                                    "DPoP proof key does not match token binding",
-                                );
-                            }
-                        }
-                        None => {
-                            // Token is not DPoP-bound but DPoP scheme was used
+                let decoded = match decode_token(&token, &state.oidc_key, &config.base_url) {
+                    Some(d) => d,
+                    None => {
+                        return oauth_error(
+                            StatusCode::UNAUTHORIZED,
+                            "invalid_token",
+                            "Invalid or expired token",
+                        );
+                    }
+                };
+                match decoded.cnf() {
+                    Some(cnf) => {
+                        let is_valid: bool = proof.jkt.as_bytes().ct_eq(cnf.jkt.as_bytes()).into();
+                        if !is_valid {
                             return oauth_error(
                                 StatusCode::UNAUTHORIZED,
                                 OAuthErrorCode::InvalidDpopProof.as_str(),
-                                "DPoP scheme used but token is not DPoP-bound",
+                                "DPoP proof key does not match token binding",
                             );
                         }
+                    }
+                    None => {
+                        // Token is not DPoP-bound but DPoP scheme was used
+                        return oauth_error(
+                            StatusCode::UNAUTHORIZED,
+                            OAuthErrorCode::InvalidDpopProof.as_str(),
+                            "DPoP scheme used but token is not DPoP-bound",
+                        );
                     }
                 }
             }
@@ -185,6 +205,21 @@ pub async fn userinfo(
                     &e.to_string(),
                 );
             }
+        }
+    }
+
+    // RFC 9449 Section 7.1: If a Bearer scheme is used but the token is
+    // DPoP-bound (cnf.jkt claim), reject it — the client MUST use the DPoP scheme.
+    if !is_dpop_scheme {
+        let config = state.config();
+        if let Some(decoded) = decode_token(&token, &state.oidc_key, &config.base_url)
+            && decoded.cnf().is_some()
+        {
+            return oauth_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Token is DPoP-bound but was presented with Bearer scheme. Use DPoP scheme instead",
+            );
         }
     }
 

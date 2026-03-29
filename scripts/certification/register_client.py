@@ -56,18 +56,31 @@ def generate_ec_jwk(key_dir: Path) -> tuple[dict, dict]:
     return {"keys": [public_jwk]}, {"keys": [private_jwk]}
 
 
-def build_payload(plan: str, client_alias: str, public_jwks: dict | None) -> dict:
+def build_payload(
+    plan: str,
+    client_alias: str,
+    public_jwks: dict | None,
+    is_second_client: bool = False,
+) -> dict:
     conformance_redirect = (
         f"https://www.certification.openid.net/test/a/{client_alias}/callback"
     )
     if public_jwks is not None:
+        # The conformance suite's happy-flow adds dummy query params
+        # to the second client's redirect_uri. Both must be registered.
+        redirect_uris = [conformance_redirect]
+        if is_second_client:
+            redirect_uris.append(
+                f"{conformance_redirect}?dummy1=lorem&dummy2=ipsum"
+            )
         return {
-            "redirect_uris": [conformance_redirect],
+            "redirect_uris": redirect_uris,
             "token_endpoint_auth_method": "private_key_jwt",
             "grant_types": ["authorization_code"],
             "response_types": ["code"],
-            "scope": "openid",
+            "scope": "openid email",
             "jwks": public_jwks,
+            "dpop_bound_access_tokens": True,
         }
     return {
         "redirect_uris": [conformance_redirect],
@@ -154,6 +167,7 @@ def main() -> None:
         "CLIENT_ID": response["client_id"],
         "CLIENT_SECRET": response.get("client_secret", ""),
         "CLIENT_JWKS": client_jwks,
+        "CLIENT_REG_TOKEN": response.get("registration_access_token", ""),
     }
 
     # FAPI 2.0 tests require a second client for certain modules.
@@ -162,7 +176,9 @@ def main() -> None:
             Path(args.key_dir) / "client2"
         )
         print("ES256 key pair generated for client2")
-        payload2 = build_payload(args.plan, client_alias, public_jwks2)
+        payload2 = build_payload(
+            args.plan, client_alias, public_jwks2, is_second_client=True
+        )
         response2 = post_dcr(args.vouch_url, payload2)
         print(f"DCR response (client2): {json.dumps(response2)}")
         env["CLIENT2_ID"] = response2["client_id"]
@@ -170,6 +186,7 @@ def main() -> None:
         env["CLIENT2_JWKS"] = json.dumps(
             private_jwks2, separators=(",", ":")
         )
+        env["CLIENT2_REG_TOKEN"] = response2.get("registration_access_token", "")
 
     write_github_env(env)
 

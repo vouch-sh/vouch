@@ -144,6 +144,7 @@ pub struct IdTokenClaims {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auth_time: Option<i64>,
     /// OIDC Core Section 3.1.2.1: Nonce value from the authorization request.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub nonce: Option<String>,
     /// OIDC Core Section 5.1: User email.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -581,7 +582,7 @@ fn validate_pkce(auth_code: &AuthorizationCode, code_verifier: Option<&str>) -> 
     };
 
     let code_verifier = code_verifier.ok_or_else(|| {
-        ServiceError::oauth(OAuthErrorCode::InvalidRequest, "Missing code_verifier")
+        ServiceError::oauth(OAuthErrorCode::InvalidGrant, "Missing code_verifier")
     })?;
 
     // RFC 9700 Section 2.1.1: Only S256 is supported.
@@ -1180,7 +1181,9 @@ mod tests {
         };
 
         let result = validate_pkce(&auth_code, None);
-        assert!(result.is_err());
+        // RFC 7636 Section 4.6: missing code_verifier when a challenge was registered
+        // must return invalid_grant, not invalid_request or any other error code.
+        assert_oauth_error(result, OAuthErrorCode::InvalidGrant);
     }
 
     #[test]
@@ -1273,6 +1276,60 @@ mod tests {
         assert_ne!(
             hash1, hash2,
             "different tokens should produce different hashes"
+        );
+    }
+
+    // =========================================================================
+    // IdTokenClaims nonce serialization
+    //
+    // OIDC Core Section 3.1.3.7: the nonce claim MUST be present in the ID
+    // token if it was in the authorization request, and MUST be absent (not
+    // null) when no nonce was requested.
+    // =========================================================================
+
+    fn minimal_id_token_claims(nonce: Option<String>) -> IdTokenClaims {
+        IdTokenClaims {
+            iss: "https://test.example.com".to_string(),
+            sub: "user-1".to_string(),
+            aud: "client-1".to_string(),
+            exp: 9_999_999_999,
+            iat: 0,
+            auth_time: None,
+            nonce,
+            email: None,
+            email_verified: None,
+            hardware_verified: false,
+            hardware_aaguid: None,
+            cnf: None,
+            amr: None,
+            acr: None,
+            at_hash: None,
+        }
+    }
+
+    #[test]
+    fn test_id_token_claims_nonce_none_omitted_from_json() {
+        // When nonce is None the field must be absent from the serialized JSON,
+        // not present as `"nonce": null`. The `skip_serializing_if` attribute
+        // on IdTokenClaims.nonce enforces this; this test guards against
+        // accidental removal of that attribute.
+        let claims = minimal_id_token_claims(None);
+        let value = serde_json::to_value(&claims).expect("serialization must succeed");
+        assert!(
+            value.get("nonce").is_none(),
+            "nonce: None must serialize to a missing field, not null"
+        );
+    }
+
+    #[test]
+    fn test_id_token_claims_nonce_some_included_in_json() {
+        // When nonce is Some the field must be present with the correct value.
+        let claims = minimal_id_token_claims(Some("test-nonce-value".to_string()));
+        let value = serde_json::to_value(&claims).expect("serialization must succeed");
+        assert_eq!(
+            value.get("nonce").and_then(|v| v.as_str()),
+            Some("test-nonce-value"),
+            "nonce: Some should serialize as the nonce string"
         );
     }
 }

@@ -69,6 +69,8 @@ def load_config(
         "{CLIENT2_ID}": json_escape_fragment(client2_id),
         "{CLIENT2_JWKS}": client2_jwks or "null",
         "{VERSION}": json_escape_fragment(version or "dev"),
+        "{CLIENT_REG_TOKEN}": json_escape_fragment(os.environ.get("CLIENT_REG_TOKEN", "")),
+        "{CLIENT2_REG_TOKEN}": json_escape_fragment(os.environ.get("CLIENT2_REG_TOKEN", "")),
     }
     for placeholder, value in substitutions.items():
         raw = raw.replace(placeholder, value)
@@ -78,10 +80,14 @@ def load_config(
     else:
         config.pop("publish", None)
 
-    # Extract variant and client_alias — these are our fields,
-    # not part of the conformance API config body.
+    # Extract variant — this is our field, not part of the conformance
+    # API config body. Rename client_alias -> alias (the conformance API
+    # field name). When alias is set, redirect_uri uses /test/a/{alias}/callback
+    # which matches the pre-registered redirect_uri.
     variant = config.pop("variant", None)
-    config.pop("client_alias", None)
+    client_alias = config.pop("client_alias", None)
+    if client_alias and "alias" not in config:
+        config["alias"] = client_alias
 
     return config, variant
 
@@ -97,8 +103,13 @@ def print_summary(results: list[dict], plan_id: str, conformance_server: str) ->
     for r in results:
         result = r.get("result", "UNKNOWN")
         counts[result] = counts.get(result, 0) + 1
-        icon = "✓" if result in PASSING_RESULTS else "✗"
-        print(f"  {icon} [{result:<8}] {r['name']}")
+        if result in {"PASSED", "SKIPPED"}:
+            cmd = "notice"
+        elif result in {"WARNING", "REVIEW"}:
+            cmd = "warning"
+        else:
+            cmd = "error"
+        print(f"::{cmd}::{result:<8} {r['name']}")
 
     print("-" * width)
     print("  " + " | ".join(f"{v} {k}" for k, v in sorted(counts.items())))
@@ -137,9 +148,9 @@ def run_plan(
             log.error("Module %s error: %s", module_name, e)
             result = "FAILED"
         if result in PASSING_RESULTS:
-            log.info("%s: %s", result, module_name)
+            log.info("Module %s: %s", module_name, result)
         else:
-            log.error("%s: %s", result, module_name)
+            log.error("Module %s: %s", module_name, result)
         return {"name": module_name, "result": result}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
