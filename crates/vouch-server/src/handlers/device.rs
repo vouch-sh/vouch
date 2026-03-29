@@ -75,7 +75,7 @@ fn hash_device_code(code: &str) -> String {
 #[allow(clippy::unused_async)]
 pub async fn device_code(
     State(state): State<Arc<AppState>>,
-    axum::Form(_req): axum::Form<DeviceCodeRequest>,
+    axum::Form(req): axum::Form<DeviceCodeRequest>,
 ) -> Result<Json<DeviceCodeResponse>, ServiceError> {
     tracing::info!("Device authorization request");
 
@@ -110,11 +110,12 @@ pub async fn device_code(
 
     let interval_seconds = i32::try_from(state.config().device_poll_interval_seconds).unwrap_or(5);
 
-    // Store in database
+    // Store in database (include client_id for HTTP signature key resolution)
     db::create_device_auth_request(
         &state.store,
         &device_code_hash,
         &user_code,
+        req.client_id.as_deref(),
         expires_at,
         interval_seconds,
     )
@@ -242,8 +243,10 @@ pub async fn device_token(
                 )
             })?;
 
-            // Use base_url as client_id (device flow does not carry a registered client_id)
-            let client_id = state.config().base_url.clone();
+            // Use the registered client_id from the device auth request.
+            let client_id = request
+                .client_id
+                .unwrap_or_else(|| state.config().base_url.clone());
             let now_secs = now.as_second();
 
             let session_result = create_oauth_access_token(
@@ -488,6 +491,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
+            None,
             expires_at,
             5,
         )
@@ -531,6 +535,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
+            None,
             expires_at,
             5,
         )
@@ -600,6 +605,7 @@ mod tests {
             &state.store,
             &device_code_hash,
             user_code,
+            None,
             expires_at,
             5,
         )

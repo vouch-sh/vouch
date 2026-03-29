@@ -176,9 +176,16 @@ async fn test_device_auth_request_lifecycle() {
     let expires_at: jiff::Timestamp = "2099-12-31T23:59:59Z".parse().unwrap();
     let interval = 5;
 
-    let id = create_device_auth_request(&store, device_code_hash, user_code, expires_at, interval)
-        .await
-        .expect("Failed to create device auth request");
+    let id = create_device_auth_request(
+        &store,
+        device_code_hash,
+        user_code,
+        None,
+        expires_at,
+        interval,
+    )
+    .await
+    .expect("Failed to create device auth request");
 
     assert!(!id.is_empty());
 
@@ -244,6 +251,7 @@ async fn test_device_auth_authorization_flow() {
         &store,
         device_code_hash,
         user_code,
+        None,
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -285,6 +293,7 @@ async fn test_device_auth_polling_rate_limit() {
         &store,
         device_code_hash,
         user_code,
+        None,
         "2099-12-31T23:59:59Z".parse().unwrap(),
         interval,
     )
@@ -333,6 +342,7 @@ async fn test_oidc_state_lifecycle() {
         &store,
         "device_hash_for_oidc",
         "OIDC-1234",
+        None,
         "2099-12-31T23:59:59Z".parse().unwrap(),
         5,
     )
@@ -1496,6 +1506,7 @@ async fn test_store_delete_expired_cleans_up_indexes() {
         &store,
         "expired-code-hash",
         "EXPR-0001",
+        None,
         "2020-01-01T00:00:00Z".parse().unwrap(), // past
         5,
     )

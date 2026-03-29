@@ -18,7 +18,7 @@ struct ClientAssertionClaims {
     iss: String,
     /// Subject — must equal the `client_id`.
     sub: String,
-    /// Audience — must be the token endpoint URL.
+    /// Audience — the authorization server's issuer URL (FAPI 2.0 Section 5.3.2.1-8).
     aud: String,
     /// JWT ID — prevents replay attacks.
     jti: String,
@@ -47,24 +47,27 @@ impl ClientAssertion {
 /// # Examples
 ///
 /// ```rust,ignore
-/// let assertion = ClientAssertionBuilder::new("my-client-id", "https://server.example.com/token")
+/// let assertion = ClientAssertionBuilder::new("my-client-id", "https://server.example.com")
 ///     .build(&client_key)?;
 /// // Use assertion.assertion and assertion.assertion_type in the token request
 /// ```
 pub struct ClientAssertionBuilder {
     /// OAuth 2.0 client ID.
     client_id: String,
-    /// Token endpoint URL (used as the audience).
-    token_endpoint_url: String,
+    /// Authorization server issuer URL (FAPI 2.0 Section 5.3.2.1-8).
+    audience: String,
 }
 
 impl ClientAssertionBuilder {
     /// Create a new client assertion builder.
+    ///
+    /// `audience` should be the authorization server's issuer URL (base URL),
+    /// not a specific endpoint URL, per FAPI 2.0 Section 5.3.2.1-8.
     #[must_use]
-    pub fn new(client_id: &str, token_endpoint_url: &str) -> Self {
+    pub fn new(client_id: &str, audience: &str) -> Self {
         Self {
             client_id: client_id.to_string(),
-            token_endpoint_url: token_endpoint_url.to_string(),
+            audience: audience.to_string(),
         }
     }
 
@@ -85,7 +88,7 @@ impl ClientAssertionBuilder {
         let claims = ClientAssertionClaims {
             iss: self.client_id.clone(),
             sub: self.client_id,
-            aud: self.token_endpoint_url,
+            aud: self.audience,
             jti: uuid::Uuid::now_v7().to_string(),
             iat: now,
             exp: now + 60,
@@ -133,10 +136,9 @@ mod tests {
     #[test]
     fn test_client_assertion_structure() {
         let key = ClientKey::generate().unwrap();
-        let assertion =
-            ClientAssertionBuilder::new("my-client-id", "https://server.example.com/oauth/token")
-                .build(&key)
-                .unwrap();
+        let assertion = ClientAssertionBuilder::new("my-client-id", "https://server.example.com")
+            .build(&key)
+            .unwrap();
 
         assert_eq!(assertion.assertion_type, ClientAssertion::TYPE);
         assert!(!assertion.assertion.is_empty());
@@ -149,10 +151,9 @@ mod tests {
     #[test]
     fn test_client_assertion_header() {
         let key = ClientKey::generate().unwrap();
-        let assertion =
-            ClientAssertionBuilder::new("my-client-id", "https://server.example.com/oauth/token")
-                .build(&key)
-                .unwrap();
+        let assertion = ClientAssertionBuilder::new("my-client-id", "https://server.example.com")
+            .build(&key)
+            .unwrap();
 
         let header = decode_jwt_header(&assertion.assertion);
         assert_eq!(header["alg"], "ES256");
@@ -162,15 +163,14 @@ mod tests {
     #[test]
     fn test_client_assertion_claims() {
         let key = ClientKey::generate().unwrap();
-        let assertion =
-            ClientAssertionBuilder::new("my-client-id", "https://server.example.com/oauth/token")
-                .build(&key)
-                .unwrap();
+        let assertion = ClientAssertionBuilder::new("my-client-id", "https://server.example.com")
+            .build(&key)
+            .unwrap();
 
         let claims = decode_jwt_payload(&assertion.assertion);
         assert_eq!(claims["iss"], "my-client-id");
         assert_eq!(claims["sub"], "my-client-id");
-        assert_eq!(claims["aud"], "https://server.example.com/oauth/token");
+        assert_eq!(claims["aud"], "https://server.example.com");
         assert!(claims.get("jti").is_some(), "must have jti");
         assert!(claims.get("iat").is_some(), "must have iat");
         assert!(claims.get("exp").is_some(), "must have exp");
@@ -193,10 +193,10 @@ mod tests {
     fn test_client_assertion_jti_is_unique() {
         let key = ClientKey::generate().unwrap();
 
-        let a1 = ClientAssertionBuilder::new("client", "https://example.com/token")
+        let a1 = ClientAssertionBuilder::new("client", "https://example.com")
             .build(&key)
             .unwrap();
-        let a2 = ClientAssertionBuilder::new("client", "https://example.com/token")
+        let a2 = ClientAssertionBuilder::new("client", "https://example.com")
             .build(&key)
             .unwrap();
 
@@ -206,6 +206,29 @@ mod tests {
         assert_ne!(
             claims1["jti"], claims2["jti"],
             "each assertion must have a unique jti"
+        );
+    }
+
+    #[test]
+    fn test_client_assertion_audience_is_issuer_url() {
+        // FAPI 2.0 Section 5.3.2.1-8: audience MUST be the issuer URL,
+        // not a specific endpoint URL. This prevents regression where the
+        // CLI was sending aud=token_endpoint_url which FAPI servers reject.
+        let key = ClientKey::generate().unwrap();
+        let issuer = "https://auth.example.com";
+        let assertion = ClientAssertionBuilder::new("client-1", issuer)
+            .build(&key)
+            .unwrap();
+
+        let claims = decode_jwt_payload(&assertion.assertion);
+        assert_eq!(
+            claims["aud"].as_str().unwrap(),
+            issuer,
+            "audience must be the issuer URL without any path suffix"
+        );
+        assert!(
+            !claims["aud"].as_str().unwrap().contains("/oauth/token"),
+            "audience must not contain /oauth/token endpoint path"
         );
     }
 }
