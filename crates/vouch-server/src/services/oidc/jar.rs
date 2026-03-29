@@ -155,14 +155,12 @@ fn parse_request_object_header(
     // Accept case-insensitively per MIME type rules, and also accept
     // "JWT" (the generic typ) or absent typ for interoperability.
     if let Some(typ) = &full_header.typ {
-        let is_valid = typ.eq_ignore_ascii_case(REQUEST_OBJECT_TYP)
-            || typ.eq_ignore_ascii_case("JWT");
+        let is_valid =
+            typ.eq_ignore_ascii_case(REQUEST_OBJECT_TYP) || typ.eq_ignore_ascii_case("JWT");
         if !is_valid {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidRequestObject,
-                format!(
-                    "Request Object typ must be '{REQUEST_OBJECT_TYP}' or 'JWT', got '{typ}'"
-                ),
+                format!("Request Object typ must be '{REQUEST_OBJECT_TYP}' or 'JWT', got '{typ}'"),
             ));
         }
     }
@@ -587,14 +585,15 @@ mod tests {
             &serde_json::json!({"alg": "ES256", "typ": "OAuth-Authz-Req+JWT"}),
         );
         let result = parse_request_object_header(&jwt);
-        assert!(result.is_ok(), "Case-insensitive typ must be accepted: {result:?}");
+        assert!(
+            result.is_ok(),
+            "Case-insensitive typ must be accepted: {result:?}"
+        );
     }
 
     #[test]
     fn test_jar_parse_header_rejects_invalid_typ() {
-        let jwt = make_jwt_with_header(
-            &serde_json::json!({"alg": "ES256", "typ": "at+jwt"}),
-        );
+        let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256", "typ": "at+jwt"}));
         let result = parse_request_object_header(&jwt);
         assert!(result.is_err(), "Invalid typ must be rejected");
     }
