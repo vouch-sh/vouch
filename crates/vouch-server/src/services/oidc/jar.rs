@@ -151,19 +151,18 @@ fn parse_request_object_header(
         )
     })?;
 
-    // RFC 8725: Validate typ header to prevent cross-JWT confusion
-    match &full_header.typ {
-        Some(typ) if typ == REQUEST_OBJECT_TYP => {}
-        Some(typ) => {
+    // RFC 9101 Section 10.2: typ SHOULD be "oauth-authz-req+jwt".
+    // Accept case-insensitively per MIME type rules, and also accept
+    // "JWT" (the generic typ) or absent typ for interoperability.
+    if let Some(typ) = &full_header.typ {
+        let is_valid = typ.eq_ignore_ascii_case(REQUEST_OBJECT_TYP)
+            || typ.eq_ignore_ascii_case("JWT");
+        if !is_valid {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidRequestObject,
-                format!("Request Object typ must be '{REQUEST_OBJECT_TYP}', got '{typ}'"),
-            ));
-        }
-        None => {
-            return Err(ServiceError::oauth(
-                OAuthErrorCode::InvalidRequestObject,
-                format!("Request Object must include typ header '{REQUEST_OBJECT_TYP}'"),
+                format!(
+                    "Request Object typ must be '{REQUEST_OBJECT_TYP}' or 'JWT', got '{typ}'"
+                ),
             ));
         }
     }
@@ -546,39 +545,38 @@ mod tests {
     }
 
     #[test]
-    fn test_jar_parse_header_rejects_wrong_typ() {
+    fn test_jar_parse_header_accepts_jwt_typ() {
+        // RFC 9101: typ "JWT" is the generic type and must be accepted.
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256", "typ": "JWT"}));
         let result = parse_request_object_header(&jwt);
-        assert!(result.is_err(), "typ=JWT must be rejected");
-        let err = result.unwrap_err();
-        let desc = oauth_error_description(&err);
-        assert!(
-            desc.contains("typ"),
-            "Error should mention typ, got: {desc}"
-        );
+        assert!(result.is_ok(), "typ=JWT must be accepted: {result:?}");
     }
 
     #[test]
-    fn test_jar_parse_header_rejects_missing_typ() {
+    fn test_jar_parse_header_accepts_missing_typ() {
+        // RFC 9101 Section 10.2: typ is RECOMMENDED, not required.
         let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256"}));
         let result = parse_request_object_header(&jwt);
-        assert!(result.is_err(), "Missing typ must be rejected");
-        let err = result.unwrap_err();
-        let desc = oauth_error_description(&err);
-        assert!(
-            desc.contains("typ"),
-            "Error should mention typ, got: {desc}"
-        );
+        assert!(result.is_ok(), "Missing typ must be accepted: {result:?}");
     }
 
     #[test]
-    fn test_jar_parse_header_rejects_wrong_typ_casing() {
-        // "OAuth-Authz-Req+JWT" is not the correct casing
+    fn test_jar_parse_header_accepts_case_insensitive_typ() {
+        // MIME types are case-insensitive.
         let jwt = make_jwt_with_header(
             &serde_json::json!({"alg": "ES256", "typ": "OAuth-Authz-Req+JWT"}),
         );
         let result = parse_request_object_header(&jwt);
-        assert!(result.is_err(), "Wrong case typ must be rejected");
+        assert!(result.is_ok(), "Case-insensitive typ must be accepted: {result:?}");
+    }
+
+    #[test]
+    fn test_jar_parse_header_rejects_invalid_typ() {
+        let jwt = make_jwt_with_header(
+            &serde_json::json!({"alg": "ES256", "typ": "at+jwt"}),
+        );
+        let result = parse_request_object_header(&jwt);
+        assert!(result.is_err(), "Invalid typ must be rejected");
     }
 
     // ========================================================================
@@ -903,7 +901,7 @@ mod tests {
 
     #[test]
     fn test_jar_error_code_is_invalid_request_object() {
-        let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256"}));
+        let jwt = make_jwt_with_header(&serde_json::json!({"alg": "ES256", "typ": "at+jwt"}));
         let result = parse_request_object_header(&jwt);
         assert!(result.is_err());
         let err = result.unwrap_err();
