@@ -802,10 +802,17 @@ pub(crate) fn authenticate_client_mtls(
             .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
         }
         crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth => {
-            // TODO: Implement x5c verification against client JWKS
-            Err(ClientAuthError::MtlsVerificationFailed(
-                "self_signed_tls_client_auth verification not yet implemented".to_string(),
-            ))
+            let jwks = client
+                .jwks
+                .as_ref()
+                .or(client.jwks_uri_cache.as_ref())
+                .ok_or_else(|| {
+                    ClientAuthError::MtlsVerificationFailed(
+                        "self_signed_tls_client_auth requires JWKS with x5c".to_string(),
+                    )
+                })?;
+            crate::services::oidc::mtls::verify_self_signed_tls_client_auth(cert, jwks)
+                .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
         }
         _ => Err(ClientAuthError::MtlsVerificationFailed(
             "client not registered for mTLS authentication".to_string(),
@@ -1486,26 +1493,89 @@ mod tests {
         );
     }
 
-    /// `SelfSignedTlsClientAuth` returns a specific "not yet implemented" error.
-    ///
-    /// The implementation is a TODO stub; this test pins the current behaviour
-    /// so that future implementors cannot accidentally merge a silent change.
+    /// `SelfSignedTlsClientAuth` succeeds when the client JWKS contains an x5c
+    /// entry matching the presented certificate (RFC 8705 Section 2.2).
     #[test]
-    fn test_authenticate_client_mtls_self_signed_not_implemented() {
-        let cert = make_cert_with_cn("self-signed-client");
-        let client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
+    fn test_authenticate_client_mtls_self_signed_matching() {
+        use base64::Engine;
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let cert_der = rt.block_on(async {
+            let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
+                .expect("CA generation");
+            ca.sign_client_cert("self-signed-client", 1)
+                .await
+                .expect("sign cert")
+        });
+
+        let cert =
+            crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
+
+        // Build JWKS with matching x5c (standard base64 per RFC 7517 §4.7)
+        let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&cert_der);
+        let jwks = serde_json::json!({
+            "keys": [{ "kty": "EC", "crv": "P-256", "x5c": [x5c_b64] }]
+        });
+
+        let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
+        client.jwks = Some(jwks);
 
         let result = authenticate_client_mtls(&client, &cert);
         assert!(
-            result.is_err(),
-            "SelfSignedTlsClientAuth must return an error until implemented"
+            result.is_ok(),
+            "matching x5c must authenticate successfully: {result:?}"
         );
-        let Err(ClientAuthError::MtlsVerificationFailed(msg)) = result else {
-            panic!("expected MtlsVerificationFailed, got a different variant");
-        };
+    }
+
+    /// `SelfSignedTlsClientAuth` fails when the client has no JWKS configured.
+    #[test]
+    fn test_authenticate_client_mtls_self_signed_no_jwks() {
+        let cert = make_cert_with_cn("self-signed-no-jwks");
+        let client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
+        // client.jwks is None (default from make_mtls_client)
+
+        let result = authenticate_client_mtls(&client, &cert);
         assert!(
-            msg.contains("not yet implemented"),
-            "error message must mention 'not yet implemented', got: {msg}"
+            matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
+            "missing JWKS must return MtlsVerificationFailed: {result:?}"
+        );
+    }
+
+    /// `SelfSignedTlsClientAuth` fails when the JWKS x5c contains a different cert.
+    #[test]
+    fn test_authenticate_client_mtls_self_signed_mismatch() {
+        use base64::Engine;
+
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let (cert, other_der) = rt.block_on(async {
+            let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
+                .expect("CA generation");
+            let cert_der = ca
+                .sign_client_cert("self-signed-cert", 1)
+                .await
+                .expect("sign cert");
+            let other_der = ca
+                .sign_client_cert("self-signed-other", 2)
+                .await
+                .expect("sign other cert");
+            let cert = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
+                .expect("parse cert");
+            (cert, other_der)
+        });
+
+        // JWKS contains the *other* cert's DER, not the presented cert
+        let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&other_der);
+        let jwks = serde_json::json!({
+            "keys": [{ "kty": "EC", "crv": "P-256", "x5c": [x5c_b64] }]
+        });
+
+        let mut client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
+        client.jwks = Some(jwks);
+
+        let result = authenticate_client_mtls(&client, &cert);
+        assert!(
+            matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
+            "non-matching x5c must return MtlsVerificationFailed: {result:?}"
         );
     }
 }

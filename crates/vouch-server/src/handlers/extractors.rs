@@ -232,11 +232,15 @@ fn extract_validated_header(headers: &HeaderMap, name: &str, max_len: usize) -> 
 
 /// Optional client certificate extracted from mTLS connection.
 ///
-/// Reads the [`PeerClientCert`] injected via [`axum::extract::ConnectInfo`]
-/// when the request arrives on the mTLS port, and parses the DER into a
-/// [`ClientCertificate`].
+/// Reads the certificate from one of two sources (in priority order):
 ///
-/// On the main (non-mTLS) port, this always yields `None`.
+/// 1. [`PeerClientCert`] injected via [`axum::extract::ConnectInfo`] when the
+///    request arrives on the mTLS port (direct TLS handshake).
+/// 2. `X-Ssl-Cert` header from a trusted reverse proxy (nginx `$ssl_client_cert`
+///    format: URL-encoded PEM). Only accepted when the peer IP is in
+///    `config.trusted_proxies`.
+///
+/// On the main (non-mTLS) port with no trusted proxy, this always yields `None`.
 #[derive(Debug, Clone)]
 pub struct OptionalClientCert(pub Option<crate::services::oidc::mtls::ClientCertificate>);
 
@@ -245,15 +249,41 @@ impl FromRequestParts<Arc<AppState>> for OptionalClientCert {
 
     async fn from_request_parts(
         parts: &mut Parts,
-        _state: &Arc<AppState>,
+        state: &Arc<AppState>,
     ) -> Result<Self, Self::Rejection> {
-        let cert = parts
+        // 1. Direct TLS handshake (production mTLS listener)
+        let from_tls = parts
             .extensions
             .get::<axum::extract::ConnectInfo<crate::infra::mtls_listener::PeerClientCert>>()
             .and_then(|ci| ci.0.0.as_ref())
             .and_then(|der| crate::services::oidc::mtls::parse_client_certificate(der).ok());
 
-        Ok(Self(cert))
+        if from_tls.is_some() {
+            return Ok(Self(from_tls));
+        }
+
+        // 2. X-Ssl-Cert header from trusted reverse proxy
+        let config = state.config.load();
+        if !config.trusted_proxies.is_empty() {
+            let peer_ip = parts
+                .extensions
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_canonical());
+
+            if let Some(peer) = peer_ip
+                && is_trusted(peer, &config.trusted_proxies)
+                && let Some(header_val) = parts
+                    .headers
+                    .get("x-ssl-cert")
+                    .and_then(|v| v.to_str().ok())
+            {
+                let from_header =
+                    crate::services::oidc::mtls::parse_client_certificate_pem(header_val).ok();
+                return Ok(Self(from_header));
+            }
+        }
+
+        Ok(Self(None))
     }
 }
 

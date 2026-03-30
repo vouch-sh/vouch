@@ -8,8 +8,9 @@
 //! - `self_signed_tls_client_auth` JWKS x5c matching (RFC 8705 Section 2.2.2)
 
 use base64::Engine;
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use der::{Decode, oid::ObjectIdentifier};
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use der::{Decode, Encode, oid::ObjectIdentifier};
+use subtle::ConstantTimeEq;
 use x509_cert::ext::pkix::SubjectAltName;
 use x509_cert::ext::pkix::name::GeneralName;
 
@@ -187,6 +188,76 @@ pub(crate) fn verify_tls_client_auth(
             expected: format!("IP:{expected}"),
             found: format!("IP:{}", cert.san_ip.join(",")),
         });
+    }
+
+    Err(MtlsError::CertificateNotRegistered)
+}
+
+/// Parse a client certificate from URL-encoded PEM (nginx `$ssl_client_cert`).
+///
+/// Nginx passes the client certificate as URL-encoded PEM in the
+/// `X-Ssl-Cert` header. This function URL-decodes, extracts DER from
+/// PEM, and parses the certificate.
+pub(crate) fn parse_client_certificate_pem(
+    url_encoded_pem: &str,
+) -> Result<ClientCertificate, MtlsError> {
+    // URL-decode (nginx encodes newlines as %0A, spaces as %20, etc.)
+    let pem = urlencoding::decode(url_encoded_pem)
+        .map_err(|e| MtlsError::InvalidCertificateFormat(format!("URL decode error: {e}")))?;
+
+    let pem = pem.trim();
+    if pem.is_empty() {
+        return Err(MtlsError::InvalidCertificateFormat("empty PEM".to_string()));
+    }
+
+    // Parse PEM to Certificate, then encode to DER for thumbprint computation.
+    // `x509_cert::der::DecodePem` is the `der` crate's PEM trait, re-exported
+    // by `x509_cert` when the `pem` feature is enabled.
+    use x509_cert::der::DecodePem;
+    let cert = x509_cert::Certificate::from_pem(pem)
+        .map_err(|e| MtlsError::InvalidCertificateFormat(format!("PEM parse error: {e}")))?;
+    let der = cert
+        .to_der()
+        .map_err(|e| MtlsError::InvalidCertificateFormat(format!("DER encode error: {e}")))?;
+
+    parse_client_certificate(&der)
+}
+
+/// Verify `self_signed_tls_client_auth` — match certificate against
+/// client's JWKS x5c entries (RFC 8705 Section 2.2).
+///
+/// The TLS handshake proves possession of the private key. This
+/// function verifies the presented certificate matches one registered
+/// in the client's JWKS via the x5c parameter.
+pub(crate) fn verify_self_signed_tls_client_auth(
+    cert: &ClientCertificate,
+    jwks: &serde_json::Value,
+) -> Result<(), MtlsError> {
+    // Parse JWKS keys array
+    let keys = jwks
+        .get("keys")
+        .and_then(|k| k.as_array())
+        .ok_or(MtlsError::CertificateNotRegistered)?;
+
+    // Check each key's x5c entries
+    for key in keys {
+        if let Some(x5c_array) = key.get("x5c").and_then(|v| v.as_array()) {
+            for x5c_entry in x5c_array {
+                if let Some(x5c_b64) = x5c_entry.as_str() {
+                    // x5c uses standard base64 (NOT base64url) per RFC 7517 Section 4.7
+                    if let Ok(x5c_der) = STANDARD.decode(x5c_b64) {
+                        let x5c_thumbprint = compute_cert_thumbprint(&x5c_der);
+                        let is_match: bool = x5c_thumbprint
+                            .as_bytes()
+                            .ct_eq(cert.thumbprint.as_bytes())
+                            .into();
+                        if is_match {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Err(MtlsError::CertificateNotRegistered)
@@ -586,6 +657,172 @@ mod tests {
                 .unwrap_or("")
                 .contains("test-all-sans"),
             "subject_dn should include CN"
+        );
+    }
+
+    // =========================================================================
+    // parse_client_certificate_pem
+    // =========================================================================
+
+    /// Generate a PEM-encoded certificate string from DER bytes.
+    fn der_to_pem(der: &[u8]) -> String {
+        use base64::Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(der);
+        // Wrap at 64 chars per line as standard PEM format requires
+        let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+        for chunk in b64.as_bytes().chunks(64) {
+            pem.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
+            pem.push('\n');
+        }
+        pem.push_str("-----END CERTIFICATE-----\n");
+        pem
+    }
+
+    #[test]
+    fn test_parse_client_certificate_pem_valid() {
+        let cert_der = make_test_cert("pem-parse-test");
+        let pem = der_to_pem(&cert_der);
+        let url_encoded = urlencoding::encode(&pem).into_owned();
+
+        let cert = parse_client_certificate_pem(&url_encoded).expect("should parse PEM cert");
+        let expected = parse_client_certificate(&cert_der).expect("parse DER");
+
+        assert_eq!(
+            cert.thumbprint, expected.thumbprint,
+            "thumbprint from PEM must match thumbprint from DER"
+        );
+    }
+
+    #[test]
+    fn test_parse_client_certificate_pem_invalid() {
+        let result = parse_client_certificate_pem("not%20valid%20pem");
+        assert!(result.is_err(), "garbage input must fail");
+        assert!(
+            matches!(result, Err(MtlsError::InvalidCertificateFormat(_))),
+            "must return InvalidCertificateFormat"
+        );
+    }
+
+    #[test]
+    fn test_parse_client_certificate_pem_empty() {
+        let result = parse_client_certificate_pem("");
+        assert!(
+            matches!(result, Err(MtlsError::InvalidCertificateFormat(_))),
+            "empty input must return InvalidCertificateFormat"
+        );
+    }
+
+    #[test]
+    fn test_parse_client_certificate_pem_url_encoded_newlines() {
+        // Nginx encodes newlines as %0A; verify URL decoding handles this correctly.
+        let cert_der = make_test_cert("pem-newlines-test");
+        let pem = der_to_pem(&cert_der);
+        // Manually URL-encode newlines to simulate nginx behavior
+        let url_encoded = pem.replace('\n', "%0A");
+
+        let cert =
+            parse_client_certificate_pem(&url_encoded).expect("should parse URL-encoded PEM");
+        let expected = parse_client_certificate(&cert_der).expect("parse DER");
+        assert_eq!(cert.thumbprint, expected.thumbprint);
+    }
+
+    // =========================================================================
+    // verify_self_signed_tls_client_auth
+    // =========================================================================
+
+    /// Build a JWKS JSON value with the cert's DER as an x5c entry.
+    fn make_jwks_with_x5c(cert_der: &[u8]) -> serde_json::Value {
+        use base64::Engine;
+        let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(cert_der);
+        serde_json::json!({
+            "keys": [
+                {
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "x5c": [x5c_b64]
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn test_verify_self_signed_tls_client_auth_matching() {
+        let cert_der = make_test_cert("self-signed-match");
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+        let jwks = make_jwks_with_x5c(&cert_der);
+
+        let result = verify_self_signed_tls_client_auth(&cert, &jwks);
+        assert!(
+            result.is_ok(),
+            "matching x5c entry must authenticate successfully: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_self_signed_tls_client_auth_no_match() {
+        let cert_a_der = make_test_cert("self-signed-cert-a");
+        let cert_b_der = make_test_cert("self-signed-cert-b");
+        let cert_a = parse_client_certificate(&cert_a_der).expect("parse cert A");
+
+        // JWKS contains cert B's DER, but cert A is presented
+        let jwks = make_jwks_with_x5c(&cert_b_der);
+
+        let result = verify_self_signed_tls_client_auth(&cert_a, &jwks);
+        assert!(
+            matches!(result, Err(MtlsError::CertificateNotRegistered)),
+            "non-matching cert must return CertificateNotRegistered: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_verify_self_signed_tls_client_auth_no_x5c() {
+        let cert_der = make_test_cert("self-signed-no-x5c");
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        // JWKS has keys but no x5c field
+        let jwks = serde_json::json!({
+            "keys": [
+                { "kty": "EC", "crv": "P-256", "x": "dGVzdA", "y": "dGVzdA" }
+            ]
+        });
+
+        let result = verify_self_signed_tls_client_auth(&cert, &jwks);
+        assert!(
+            matches!(result, Err(MtlsError::CertificateNotRegistered)),
+            "JWKS without x5c must return CertificateNotRegistered"
+        );
+    }
+
+    #[test]
+    fn test_verify_self_signed_tls_client_auth_invalid_base64() {
+        let cert_der = make_test_cert("self-signed-bad-b64");
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        // JWKS with garbage base64 in x5c — must not panic
+        let jwks = serde_json::json!({
+            "keys": [
+                { "kty": "EC", "x5c": ["not!!valid!!base64!!!"] }
+            ]
+        });
+
+        let result = verify_self_signed_tls_client_auth(&cert, &jwks);
+        assert!(
+            matches!(result, Err(MtlsError::CertificateNotRegistered)),
+            "invalid base64 in x5c must return CertificateNotRegistered, not panic"
+        );
+    }
+
+    #[test]
+    fn test_verify_self_signed_tls_client_auth_empty_keys() {
+        let cert_der = make_test_cert("self-signed-empty-keys");
+        let cert = parse_client_certificate(&cert_der).expect("parse");
+
+        let jwks = serde_json::json!({ "keys": [] });
+
+        let result = verify_self_signed_tls_client_auth(&cert, &jwks);
+        assert!(
+            matches!(result, Err(MtlsError::CertificateNotRegistered)),
+            "empty keys array must return CertificateNotRegistered"
         );
     }
 }
