@@ -642,6 +642,27 @@ pub async fn authenticate_client(
     // Determine if this client type requires a secret
     let requires_secret = client.application_type.requires_secret();
 
+    // RFC 8705: mTLS clients authenticate via certificate, not secret.
+    // When a confidential client uses tls_client_auth or self_signed_tls_client_auth,
+    // the secret is not required — the certificate is validated separately.
+    let is_mtls_auth = matches!(
+        client.token_endpoint_auth_method,
+        crate::db::TokenEndpointAuthMethod::TlsClientAuth
+            | crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+    );
+
+    if requires_secret && is_mtls_auth {
+        // mTLS client — skip secret validation, return as confidential.
+        // The certificate will be validated by authenticate_client_mtls().
+        if let Err(e) = db::update_oauth_client_last_used(&state.store, &client.id).await {
+            tracing::warn!("Failed to update OAuth client last_used: {e}");
+        }
+        return Ok(AuthenticatedClient {
+            client,
+            is_public: false,
+        });
+    }
+
     if requires_secret {
         // Secret is required - validate it
         let secret = credentials
