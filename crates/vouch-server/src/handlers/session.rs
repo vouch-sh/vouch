@@ -500,6 +500,53 @@ mod tests {
 
     use crate::test_utils::*;
 
+    /// Generate a self-signed DER certificate with the given CN for test use.
+    fn make_test_cert_der(cn: &str) -> Vec<u8> {
+        use der::{Decode, Encode};
+        use p256::ecdsa::SigningKey;
+        use spki::EncodePublicKey;
+        use x509_cert::builder::{Builder as _, CertificateBuilder, Profile};
+        use x509_cert::serial_number::SerialNumber;
+        use x509_cert::time::Validity;
+
+        let key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        let cn_oid = der::oid::ObjectIdentifier::new_unwrap("2.5.4.3");
+        let cn_value = der::asn1::Utf8StringRef::new(cn).expect("CN");
+        let atv = x509_cert::attr::AttributeTypeAndValue {
+            oid: cn_oid,
+            value: der::asn1::Any::from(cn_value),
+        };
+        let mut rdn = der::asn1::SetOfVec::new();
+        rdn.insert(atv).expect("rdn");
+        let subject = x509_cert::name::RdnSequence(vec![
+            x509_cert::name::RelativeDistinguishedName(rdn),
+        ]);
+        let validity =
+            Validity::from_now(core::time::Duration::from_secs(86400)).expect("validity");
+        let serial = SerialNumber::new(&[1u8]).expect("serial");
+        let spki_der = key.verifying_key().to_public_key_der().expect("spki");
+        let spki =
+            spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_ref()).expect("parse spki");
+
+        CertificateBuilder::new(
+            Profile::Leaf {
+                issuer: subject.clone(),
+                enable_key_agreement: false,
+                enable_key_encipherment: false,
+            },
+            serial,
+            validity,
+            subject,
+            spki,
+            &key,
+        )
+        .expect("builder")
+        .build::<p256::ecdsa::DerSignature>()
+        .expect("build")
+        .to_der()
+        .expect("der")
+    }
+
     /// Normal (non-DPoP) token via cookie should succeed.
     #[tokio::test]
     async fn test_cookie_session_normal_token_succeeds() {
@@ -602,13 +649,8 @@ mod tests {
         let user = create_test_user(&state.store, "mtls-match@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-        // Generate a real client cert via the ephemeral CA
-        let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
-            .expect("CA generation");
-        let cert_der = ca
-            .sign_client_cert("test-mtls", 1)
-            .await
-            .expect("sign cert");
+        // Generate a self-signed client certificate for binding
+        let cert_der = make_test_cert_der("test-mtls");
         let cert =
             crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
 
@@ -654,19 +696,10 @@ mod tests {
         let user = create_test_user(&state.store, "mtls-wrong@example.com").await;
         let auth_id = create_test_authenticator(&state.store, &user.id).await;
 
-        // Generate two separate certs — the token is bound to cert_a's thumbprint
-        // but we present cert_b
-        let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
-            .expect("CA generation");
-        let cert_a_der = ca
-            .sign_client_cert("client-a", 1)
-            .await
-            .expect("sign cert A");
-        let cert_b_der = ca
-            .sign_client_cert("client-b", 1)
-            .await
-            .expect("sign cert B");
-
+        // Generate two separate self-signed certs — the token is bound to cert_a's
+        // thumbprint but we present cert_b.
+        let cert_a_der = make_test_cert_der("client-a");
+        let cert_b_der = make_test_cert_der("client-b");
         let cert_a = crate::services::oidc::mtls::parse_client_certificate(&cert_a_der)
             .expect("parse cert A");
         let cert_b = crate::services::oidc::mtls::parse_client_certificate(&cert_b_der)

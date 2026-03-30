@@ -294,16 +294,8 @@ pub struct S3Config {
     /// AWS KMS key ID for HMAC state token signing.
     pub jwt_hmac_kms_key_id: Option<String>,
 
-    /// AWS KMS key ID for Client Certificate CA signing (P-256).
-    pub client_cert_ca_kms_key_id: Option<String>,
-    /// Client Certificate CA private key (PEM, P-256 ECDSA).
-    pub client_cert_ca_key: Option<String>,
-    /// Client Certificate CA certificate (PEM).
-    pub client_cert_ca_cert: Option<String>,
     /// mTLS listener port.
     pub mtls_port: Option<u16>,
-    /// Base URL for mTLS endpoint aliases.
-    pub mtls_base_url: Option<String>,
 
     // Cleanup settings
     /// Cleanup interval in minutes.
@@ -364,17 +356,7 @@ impl std::fmt::Debug for S3Config {
                 &self.oidc_rsa_signing_kms_key_id,
             )
             .field("jwt_hmac_kms_key_id", &self.jwt_hmac_kms_key_id)
-            .field("client_cert_ca_kms_key_id", &self.client_cert_ca_kms_key_id)
-            .field(
-                "client_cert_ca_key",
-                &self.client_cert_ca_key.as_ref().map(|_| "[REDACTED]"),
-            )
-            .field(
-                "client_cert_ca_cert",
-                &self.client_cert_ca_cert.as_ref().map(|_| "[PRESENT]"),
-            )
             .field("mtls_port", &self.mtls_port)
-            .field("mtls_base_url", &self.mtls_base_url)
             .field("cleanup_interval_minutes", &self.cleanup_interval_minutes)
             .field(
                 "auth_events_retention_days",
@@ -833,21 +815,9 @@ impl ServerConfig {
             self.jwt_hmac_kms_key_id = Some(v.clone());
         }
 
-        // Client Certificate CA (mTLS)
-        if let Some(v) = &s3.client_cert_ca_kms_key_id {
-            self.client_cert_ca_kms_key_id = Some(v.clone());
-        }
-        if let Some(v) = &s3.client_cert_ca_key {
-            self.client_cert_ca_key = Some(SecretString::from(v.clone()));
-        }
-        if let Some(v) = &s3.client_cert_ca_cert {
-            self.client_cert_ca_cert = Some(v.clone());
-        }
+        // mTLS port
         if let Some(v) = s3.mtls_port {
             self.mtls_port = v;
-        }
-        if let Some(v) = &s3.mtls_base_url {
-            self.mtls_base_url = Some(v.clone());
         }
 
         // Cleanup settings

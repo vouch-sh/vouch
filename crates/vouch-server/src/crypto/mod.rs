@@ -16,7 +16,6 @@ pub mod ber;
 #[cfg(not(any(test, feature = "test-utils")))]
 #[allow(unreachable_pub)]
 pub(crate) mod ber;
-pub(crate) mod client_cert_ca;
 pub mod cose;
 pub(crate) mod document_crypto;
 pub mod hash;

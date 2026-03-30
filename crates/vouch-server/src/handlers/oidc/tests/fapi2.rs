@@ -967,9 +967,9 @@ async fn test_fapi2_interaction_id_header_echoed() {
 }
 
 #[tokio::test]
-async fn test_discovery_mtls_aliases_absent_without_ca() {
-    // When no client_cert_ca is configured, mtls_endpoint_aliases must be absent
-    // from the discovery document (client_cert_ca is None in test_app()).
+async fn test_discovery_mtls_aliases_absent_without_tls() {
+    // When TLS is not configured, mtls_endpoint_aliases must be absent
+    // from the discovery document (test_app() has no TLS cert).
     let (app, _state) = test_app().await;
 
     let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
@@ -979,29 +979,32 @@ async fn test_discovery_mtls_aliases_absent_without_ca() {
 
     assert!(
         doc.get("mtls_endpoint_aliases").is_none(),
-        "mtls_endpoint_aliases must be absent when no CA configured, got: {:?}",
+        "mtls_endpoint_aliases must be absent when TLS is not configured, got: {:?}",
         doc.get("mtls_endpoint_aliases")
     );
     assert_eq!(
         doc["tls_client_certificate_bound_access_tokens"], false,
-        "tls_client_certificate_bound_access_tokens must be false when no CA configured"
+        "tls_client_certificate_bound_access_tokens must be false when TLS is not configured"
     );
 }
 
 #[tokio::test]
-async fn test_discovery_tls_client_auth_in_auth_methods_with_ca() {
-    // When a client_cert_ca IS configured, token_endpoint_auth_methods_supported
-    // must include tls_client_auth and self_signed_tls_client_auth.
+async fn test_discovery_tls_client_auth_in_auth_methods_with_tls() {
+    // When TLS is configured, token_endpoint_auth_methods_supported must include
+    // tls_client_auth and self_signed_tls_client_auth, and mtls_endpoint_aliases
+    // must be present.
     //
-    // Build a fresh AppState with a CA set — test_app() sets client_cert_ca: None
-    // so we construct AppState directly here.
+    // Build a fresh AppState with a TLS cert set — test_app() has tls_cert: None.
     use crate::services::oidc::discovery::build_discovery_document;
     use crate::test_utils::{test_config, test_db};
     use arc_swap::ArcSwap;
     use std::sync::Arc;
 
     let pool = test_db().await;
-    let config = test_config();
+    let mut config = test_config();
+    // Set a placeholder TLS cert to enable mTLS discovery advertisement.
+    config.tls_cert = Some("placeholder-cert".to_string());
+
     let rp_origin = url::Url::parse(&config.base_url).expect("base_url");
     let webauthn = webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)
         .expect("WebauthnBuilder")
@@ -1010,8 +1013,6 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_ca() {
         .expect("Webauthn");
 
     let oidc_key = crate::services::oidc::OidcSigningKey::generate().expect("oidc key");
-    let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
-        .expect("CA generation");
 
     let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
         Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
@@ -1025,7 +1026,6 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_ca() {
         config: Arc::new(ArcSwap::from_pointee(config)),
         webauthn,
         ssh_ca: None,
-        client_cert_ca: Some(ca),
         oidc_key,
         oidc_rsa_key: None,
         state_signer: crate::crypto::jwt::StateTokenSigner::local(
@@ -1041,7 +1041,7 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_ca() {
 
     assert!(
         doc.tls_client_certificate_bound_access_tokens,
-        "tls_client_certificate_bound_access_tokens must be true when CA is configured"
+        "tls_client_certificate_bound_access_tokens must be true when TLS is configured"
     );
     assert!(
         doc.token_endpoint_auth_methods_supported
@@ -1057,6 +1057,6 @@ async fn test_discovery_tls_client_auth_in_auth_methods_with_ca() {
     );
     assert!(
         doc.mtls_endpoint_aliases.is_some(),
-        "mtls_endpoint_aliases must be present when CA is configured"
+        "mtls_endpoint_aliases must be present when TLS is configured"
     );
 }

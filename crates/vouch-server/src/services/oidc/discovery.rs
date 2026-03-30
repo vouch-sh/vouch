@@ -185,7 +185,8 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
                 "client_secret_post".to_string(),
                 "private_key_jwt".to_string(),
             ];
-            if state.client_cert_ca.is_some() {
+            // mTLS client auth methods are available whenever TLS is configured.
+            if state.config().tls_cert.is_some() {
                 methods.push("tls_client_auth".to_string());
                 methods.push("self_signed_tls_client_auth".to_string());
             }
@@ -241,30 +242,33 @@ pub fn build_discovery_document(state: &Arc<AppState>) -> OidcDiscoveryDocument 
         require_signed_request_object: false,
         // RFC 9396 §11.3: Server accepts any authorization detail type (opaque)
         authorization_details_types_supported: None,
-        // RFC 8705: advertise mTLS support when CA is configured
-        tls_client_certificate_bound_access_tokens: state.client_cert_ca.is_some(),
+        // RFC 8705: advertise mTLS support when TLS is configured.
+        tls_client_certificate_bound_access_tokens: state.config().tls_cert.is_some(),
         mtls_endpoint_aliases: build_mtls_aliases(state, base_url),
     }
 }
 
-/// Build mTLS endpoint aliases if Client Certificate CA is configured.
+/// Build mTLS endpoint aliases when TLS is configured.
+///
+/// The mTLS base URL is always derived from `base_url` with the port replaced
+/// by `mtls_port` (default 8443). Returns `None` when TLS is not configured.
 fn build_mtls_aliases(state: &Arc<AppState>, base_url: &str) -> Option<MtlsEndpointAliases> {
-    state.client_cert_ca.as_ref()?;
-
     let config = state.config();
-    let mtls_base = config.mtls_base_url.clone().unwrap_or_else(|| {
-        // Derive from base_url by replacing the port with mtls_port
-        if let Ok(mut url) = url::Url::parse(base_url) {
-            let _ = url.set_port(Some(config.mtls_port));
-            url.to_string().trim_end_matches('/').to_string()
-        } else {
-            tracing::warn!(
-                "Could not parse base_url '{}' for mTLS aliases, using port append",
-                base_url
-            );
-            format!("{base_url}:{}", config.mtls_port)
-        }
-    });
+
+    // Only advertise mTLS aliases when TLS is active on this server.
+    config.tls_cert.as_ref()?;
+
+    // Derive mTLS base URL by replacing the port with mtls_port.
+    let mtls_base = if let Ok(mut url) = url::Url::parse(base_url) {
+        let _ = url.set_port(Some(config.mtls_port));
+        url.to_string().trim_end_matches('/').to_string()
+    } else {
+        tracing::warn!(
+            "Could not parse base_url '{}' for mTLS aliases, using port append",
+            base_url
+        );
+        format!("{base_url}:{}", config.mtls_port)
+    };
 
     Some(MtlsEndpointAliases {
         token_endpoint: format!("{mtls_base}/oauth/token"),

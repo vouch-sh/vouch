@@ -1433,13 +1433,57 @@ mod tests {
     }
 
     fn make_cert_with_cn(cn: &str) -> crate::services::oidc::mtls::ClientCertificate {
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        rt.block_on(async {
-            let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
-                .expect("CA generation");
-            let der = ca.sign_client_cert(cn, 1).await.expect("sign cert");
-            crate::services::oidc::mtls::parse_client_certificate(&der).expect("parse cert")
-        })
+        let der = make_self_signed_cert_der(cn);
+        crate::services::oidc::mtls::parse_client_certificate(&der).expect("parse cert")
+    }
+
+    /// Generate a self-signed DER certificate with the given CN.
+    fn make_self_signed_cert_der(cn: &str) -> Vec<u8> {
+        use der::{Decode, Encode};
+        use p256::ecdsa::SigningKey;
+        use spki::EncodePublicKey;
+        use x509_cert::builder::{Builder as _, CertificateBuilder, Profile};
+        use x509_cert::serial_number::SerialNumber;
+        use x509_cert::time::Validity;
+
+        let key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+        let cn_oid = der::oid::ObjectIdentifier::new_unwrap("2.5.4.3");
+        let cn_value = der::asn1::Utf8StringRef::new(cn).expect("CN");
+        let atv = x509_cert::attr::AttributeTypeAndValue {
+            oid: cn_oid,
+            value: der::asn1::Any::from(cn_value),
+        };
+        let mut rdn = der::asn1::SetOfVec::new();
+        rdn.insert(atv).expect("rdn");
+        let subject = x509_cert::name::RdnSequence(vec![
+            x509_cert::name::RelativeDistinguishedName(rdn),
+        ]);
+        let validity =
+            Validity::from_now(core::time::Duration::from_secs(86400)).expect("validity");
+        let serial = SerialNumber::new(&[1u8]).expect("serial");
+        let spki_der = key.verifying_key().to_public_key_der().expect("spki");
+        let spki =
+            spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_ref()).expect("parse spki");
+
+        let builder = CertificateBuilder::new(
+            Profile::Leaf {
+                issuer: subject.clone(),
+                enable_key_agreement: false,
+                enable_key_encipherment: false,
+            },
+            serial,
+            validity,
+            subject,
+            spki,
+            &key,
+        )
+        .expect("builder");
+
+        builder
+            .build::<p256::ecdsa::DerSignature>()
+            .expect("build")
+            .to_der()
+            .expect("der")
     }
 
     /// TlsClientAuth client with matching subject_dn must authenticate successfully.
@@ -1499,15 +1543,7 @@ mod tests {
     fn test_authenticate_client_mtls_self_signed_matching() {
         use base64::Engine;
 
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let cert_der = rt.block_on(async {
-            let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
-                .expect("CA generation");
-            ca.sign_client_cert("self-signed-client", 1)
-                .await
-                .expect("sign cert")
-        });
-
+        let cert_der = make_self_signed_cert_der("self-signed-client");
         let cert =
             crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
 
@@ -1546,22 +1582,10 @@ mod tests {
     fn test_authenticate_client_mtls_self_signed_mismatch() {
         use base64::Engine;
 
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let (cert, other_der) = rt.block_on(async {
-            let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
-                .expect("CA generation");
-            let cert_der = ca
-                .sign_client_cert("self-signed-cert", 1)
-                .await
-                .expect("sign cert");
-            let other_der = ca
-                .sign_client_cert("self-signed-other", 2)
-                .await
-                .expect("sign other cert");
-            let cert = crate::services::oidc::mtls::parse_client_certificate(&cert_der)
-                .expect("parse cert");
-            (cert, other_der)
-        });
+        let cert_der = make_self_signed_cert_der("self-signed-cert");
+        let other_der = make_self_signed_cert_der("self-signed-other");
+        let cert =
+            crate::services::oidc::mtls::parse_client_certificate(&cert_der).expect("parse cert");
 
         // JWKS contains the *other* cert's DER, not the presented cert
         let x5c_b64 = base64::engine::general_purpose::STANDARD.encode(&other_der);

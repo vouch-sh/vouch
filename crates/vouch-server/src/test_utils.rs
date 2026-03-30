@@ -81,11 +81,7 @@ pub fn test_config() -> ServerConfig {
         oidc_rsa_signing_key: None,
         oidc_rsa_signing_kms_key_id: None,
         jwt_hmac_kms_key_id: None,
-        client_cert_ca_kms_key_id: None,
-        client_cert_ca_key: None,
-        client_cert_ca_cert: None,
         mtls_port: 8443,
-        mtls_base_url: None,
         dpop_max_age_seconds: 300,
         cleanup_interval_minutes: 0, // Disabled for tests
         auth_events_retention_days: 90,
@@ -143,7 +139,6 @@ pub async fn test_app_state() -> Arc<AppState> {
         config: Arc::new(ArcSwap::from_pointee(config)),
         webauthn,
         ssh_ca: None,
-        client_cert_ca: None,
         oidc_key,
         oidc_rsa_key: None,
         state_signer: crate::crypto::jwt::StateTokenSigner::local(

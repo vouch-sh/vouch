@@ -6,7 +6,6 @@
 //! They are not part of the business logic or HTTP handler layers.
 
 pub mod cleanup;
-pub mod generate_client_cert_ca;
 pub mod generate_document_key;
 pub mod httpsig;
 pub mod metrics;

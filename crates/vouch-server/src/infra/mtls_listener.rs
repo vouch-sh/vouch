@@ -156,31 +156,24 @@ impl Listener for MtlsListener {
 
 /// Build a rustls `ServerConfig` for the mTLS listener.
 ///
-/// Uses the same server certificate as the main HTTPS listener, but
-/// adds a `WebPkiClientVerifier` that trusts our Client Certificate CA.
-/// `allow_unauthenticated()` is used so clients without certificates
-/// can still connect (application-layer auth handles the rest).
+/// Uses the same server certificate as the main HTTPS listener, with
+/// a custom client certificate verifier that **accepts any certificate**
+/// (including self-signed) and delegates identity validation to the
+/// application layer.
+///
+/// This is required for RFC 8705 Section 2.2 (`self_signed_tls_client_auth`),
+/// where clients present self-signed certificates that won't chain to any
+/// CA. The TLS handshake proves possession of the private key; the
+/// application layer verifies the certificate matches the client's
+/// registered JWKS `x5c`.
+///
+/// Clients may also connect without a certificate — the application
+/// layer handles unauthenticated connections.
 pub(crate) fn build_mtls_server_config(
     server_cert_der: Vec<rustls::pki_types::CertificateDer<'static>>,
     server_key_der: rustls::pki_types::PrivateKeyDer<'static>,
-    ca_cert_der: &[u8],
 ) -> anyhow::Result<Arc<rustls::ServerConfig>> {
-    use anyhow::Context;
-    use rustls::server::WebPkiClientVerifier;
-
-    // Build trust store with our CA cert
-    let mut root_store = rustls::RootCertStore::empty();
-    let ca_cert = rustls::pki_types::CertificateDer::from(ca_cert_der.to_vec());
-    root_store
-        .add(ca_cert)
-        .context("Failed to add CA cert to mTLS trust store")?;
-
-    // Build client verifier: trust our CA, but allow unauthenticated
-    // connections (for endpoints that don't require mTLS)
-    let client_verifier = WebPkiClientVerifier::builder(Arc::new(root_store))
-        .allow_unauthenticated()
-        .build()
-        .map_err(|e| anyhow::anyhow!("Failed to build mTLS client verifier: {e}"))?;
+    let client_verifier = Arc::new(AcceptAnyClientCert);
 
     let mut config = rustls::ServerConfig::builder()
         .with_client_cert_verifier(client_verifier)
@@ -191,6 +184,77 @@ pub(crate) fn build_mtls_server_config(
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
     Ok(Arc::new(config))
+}
+
+/// Client certificate verifier that accepts any certificate.
+///
+/// Delegates all identity validation to the application layer. The TLS
+/// handshake still proves the client possesses the private key for the
+/// presented certificate — this verifier simply skips chain validation.
+///
+/// This supports both:
+/// - `tls_client_auth` (RFC 8705 §2.1): app layer checks subject/SAN
+/// - `self_signed_tls_client_auth` (RFC 8705 §2.2): app layer checks x5c
+/// - Unauthenticated connections: app layer handles auth via other methods
+#[derive(Debug)]
+struct AcceptAnyClientCert;
+
+impl rustls::server::danger::ClientCertVerifier for AcceptAnyClientCert {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
+
+    fn root_hint_subjects(&self) -> &[rustls::DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::server::danger::ClientCertVerified, rustls::Error> {
+        // Accept any certificate — application layer validates identity.
+        Ok(rustls::server::danger::ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &rustls::crypto::aws_lc_rs::default_provider().signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::aws_lc_rs::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 #[cfg(test)]
@@ -267,44 +331,20 @@ mod tests {
         (cert_der, pkcs8_bytes)
     }
 
-    /// `build_mtls_server_config` with a valid CA cert and server cert/key must succeed.
+    /// `build_mtls_server_config` with a valid server cert/key must succeed.
     #[test]
     fn test_build_mtls_server_config_valid() {
-        // Generate a CA
-        let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
-            .expect("CA generation");
-        let ca_cert_der = ca.ca_cert_der();
-
-        // Generate a self-signed server cert and private key
         let (cert_der, pkcs8_der) = make_self_signed_server_cert();
 
         let server_cert = rustls::pki_types::CertificateDer::from(cert_der);
         let server_key = rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8_der.into());
 
-        let result = build_mtls_server_config(vec![server_cert], server_key, ca_cert_der);
+        let result = build_mtls_server_config(vec![server_cert], server_key);
 
         assert!(
             result.is_ok(),
-            "valid CA + server cert must succeed, got: {:?}",
+            "valid server cert must succeed, got: {:?}",
             result.err()
-        );
-    }
-
-    /// `build_mtls_server_config` with garbage CA cert bytes must return an error.
-    #[test]
-    fn test_build_mtls_server_config_invalid_ca() {
-        let (cert_der, pkcs8_der) = make_self_signed_server_cert();
-
-        let server_cert = rustls::pki_types::CertificateDer::from(cert_der);
-        let server_key = rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8_der.into());
-
-        // Pass garbage bytes as the CA cert — should fail to parse or add to trust store
-        let garbage_ca = b"this is not a valid certificate";
-        let result = build_mtls_server_config(vec![server_cert], server_key, garbage_ca);
-
-        assert!(
-            result.is_err(),
-            "garbage CA cert must cause build_mtls_server_config to fail"
         );
     }
 }

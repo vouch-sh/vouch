@@ -120,20 +120,14 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
             }
         });
 
-        // Start mTLS listener if Client Certificate CA is configured
-        let mtls_handle: Option<tokio::task::JoinHandle<()>> = if state.client_cert_ca.is_some() {
-            let mtls_port = state.config().mtls_port;
-            let mtls_addr: std::net::SocketAddr = format!("[::]:{mtls_port}")
-                .parse()
-                .context("Invalid mTLS listen address")?;
+        // Start mTLS listener whenever TLS is configured (mTLS port always has a value).
+        let mtls_port = config.mtls_port;
+        let mtls_addr: std::net::SocketAddr = format!("[::]:{mtls_port}")
+            .parse()
+            .context("Invalid mTLS listen address")?;
 
-            match start_mtls_listener(
-                &state,
-                &config,
-                mtls_addr,
-                app.clone(),
-                shutdown_token.clone(),
-            ) {
+        let mtls_handle: Option<tokio::task::JoinHandle<()>> =
+            match start_mtls_listener(&config, mtls_addr, app.clone(), shutdown_token.clone()) {
                 Ok(handle) => {
                     tracing::info!("mTLS listener started on port {}", mtls_port);
                     Some(handle)
@@ -141,10 +135,7 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
                 Err(e) => {
                     return Err(e.context("Failed to start mTLS listener"));
                 }
-            }
-        } else {
-            None
-        };
+            };
 
         // Create handle for graceful shutdown of HTTPS server
         let handle = axum_server::Handle::new();
@@ -287,9 +278,9 @@ async fn shutdown_signal() {
 /// Start the mTLS listener on a separate port.
 ///
 /// Uses the same server TLS certificate as the main HTTPS listener,
-/// plus a `WebPkiClientVerifier` trusting our Client Certificate CA.
+/// with a custom client cert verifier that accepts any certificate
+/// (including self-signed) and delegates validation to the application layer.
 fn start_mtls_listener(
-    state: &std::sync::Arc<crate::AppState>,
     config: &crate::config::ServerConfig,
     addr: std::net::SocketAddr,
     app: Router,
@@ -300,14 +291,7 @@ fn start_mtls_listener(
     // Parse server cert/key for the mTLS listener (same identity)
     let (certs, key) = super::tls::parse_server_cert_and_key(config)?;
 
-    // Get CA cert DER from the client cert CA
-    let ca_cert_der = state
-        .client_cert_ca
-        .as_ref()
-        .map(|ca| ca.ca_cert_der())
-        .ok_or_else(|| anyhow::anyhow!("Client Certificate CA not configured"))?;
-
-    let mtls_config = build_mtls_server_config(certs, key, ca_cert_der)?;
+    let mtls_config = build_mtls_server_config(certs, key)?;
     let mtls_config_swap = std::sync::Arc::new(arc_swap::ArcSwap::from(mtls_config));
 
     let handle = tokio::spawn(async move {

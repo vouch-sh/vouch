@@ -268,14 +268,9 @@ pub(crate) fn verify_self_signed_tls_client_auth(
 mod tests {
     use super::*;
 
-    /// Generate a test certificate with CN.
+    /// Generate a self-signed test certificate with the given CN.
     fn make_test_cert(cn: &str) -> Vec<u8> {
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        rt.block_on(async {
-            let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
-                .expect("CA generation");
-            ca.sign_client_cert(cn, 1).await.expect("sign cert")
-        })
+        make_self_signed_cert_with_san(cn, &[], &[], &[], &[])
     }
 
     #[test]
