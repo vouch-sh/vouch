@@ -113,6 +113,45 @@ fn build_server_config(cert_pem: &[u8], key_pem: &[u8]) -> Result<Arc<rustls::Se
     Ok(Arc::new(config))
 }
 
+/// Parse TLS certificate chain and private key from PEM bytes.
+///
+/// Used by the mTLS listener to reuse the same server identity as the
+/// main HTTPS listener.
+pub(crate) fn parse_server_cert_and_key(
+    config: &ServerConfig,
+) -> Result<(
+    Vec<rustls::pki_types::CertificateDer<'static>>,
+    rustls::pki_types::PrivateKeyDer<'static>,
+)> {
+    let cert_pem = config
+        .tls_cert
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("TLS certificate not configured"))?;
+    let key_secret = config
+        .tls_key
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("TLS private key not configured"))?;
+
+    let cert_bytes = crate::crypto::pem::decode_base64_pem(cert_pem)
+        .context("Failed to decode TLS certificate")?
+        .into_bytes();
+    let key_bytes =
+        crate::crypto::pem::decode_base64_pem(key_secret.expose_secret())
+            .context("Failed to decode TLS private key")?
+            .into_bytes();
+
+    let certs: Vec<rustls::pki_types::CertificateDer<'static>> =
+        rustls_pemfile::certs(&mut &*cert_bytes)
+            .collect::<Result<Vec<_>, _>>()
+            .context("Failed to parse PEM certificate chain")?;
+
+    let key = rustls_pemfile::private_key(&mut &*key_bytes)
+        .context("Failed to parse PEM private key")?
+        .ok_or_else(|| anyhow::anyhow!("No private key found in PEM data"))?;
+
+    Ok((certs, key))
+}
+
 /// Validate that PEM content contains expected type.
 fn validate_pem(pem_bytes: &[u8], expected_type: &str) -> Result<()> {
     let pem_str = std::str::from_utf8(pem_bytes).context("PEM content is not valid UTF-8")?;

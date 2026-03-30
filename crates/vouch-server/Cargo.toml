@@ -78,6 +78,7 @@ tempfile = { workspace = true }
 thiserror = { workspace = true }
 time = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "signal", "time"] }
+tokio-rustls = { workspace = true, features = ["aws-lc-rs"] }
 tokio-util = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 tower-http = { workspace = true, features = ["cors", "request-id", "set-header", "timeout"] }

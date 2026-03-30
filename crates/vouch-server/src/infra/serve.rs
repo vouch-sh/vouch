@@ -120,6 +120,40 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
             }
         });
 
+        // Start mTLS listener if Client Certificate CA is configured
+        let mtls_handle: Option<tokio::task::JoinHandle<()>> =
+            if state.client_cert_ca.is_some() {
+                let mtls_port = state.config().mtls_port;
+                let mtls_addr: std::net::SocketAddr =
+                    format!("[::]:{mtls_port}")
+                        .parse()
+                        .context("Invalid mTLS listen address")?;
+
+                match start_mtls_listener(
+                    &state,
+                    &config,
+                    mtls_addr,
+                    app.clone(),
+                    shutdown_token.clone(),
+                ) {
+                    Ok(handle) => {
+                        tracing::info!(
+                            "mTLS listener started on port {}",
+                            mtls_port
+                        );
+                        Some(handle)
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            "Failed to start mTLS listener: {e:#}"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
         // Create handle for graceful shutdown of HTTPS server
         let handle = axum_server::Handle::new();
         let handle_for_shutdown = handle.clone();
@@ -175,6 +209,11 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
 
         // Wait for HTTP redirect server to finish
         let _ = http_handle.await;
+
+        // Wait for mTLS listener to finish
+        if let Some(handle) = mtls_handle {
+            let _ = handle.await;
+        }
     } else {
         // Start S3 config polling task if configured (no TLS)
         if let (Some(client), Some(source), Some(etag)) = (s3_client, s3_source, initial_etag) {
@@ -251,4 +290,62 @@ async fn shutdown_signal() {
             tracing::info!("Received SIGTERM, initiating graceful shutdown");
         }
     }
+}
+
+/// Start the mTLS listener on a separate port.
+///
+/// Uses the same server TLS certificate as the main HTTPS listener,
+/// plus a `WebPkiClientVerifier` trusting our Client Certificate CA.
+fn start_mtls_listener(
+    state: &std::sync::Arc<crate::AppState>,
+    config: &crate::config::ServerConfig,
+    addr: std::net::SocketAddr,
+    app: Router,
+    shutdown_token: CancellationToken,
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    use super::mtls_listener::{
+        MtlsListener, PeerCertLayer, build_mtls_server_config,
+    };
+
+    // Parse server cert/key for the mTLS listener (same identity)
+    let (certs, key) = super::tls::parse_server_cert_and_key(config)?;
+
+    // Get CA cert DER from the client cert CA
+    let ca_cert_der = state
+        .client_cert_ca
+        .as_ref()
+        .map(|ca| ca.ca_cert_der())
+        .ok_or_else(|| {
+            anyhow::anyhow!("Client Certificate CA not configured")
+        })?;
+
+    let mtls_config =
+        build_mtls_server_config(certs, key, ca_cert_der)?;
+    let mtls_config_swap =
+        std::sync::Arc::new(arc_swap::ArcSwap::from(mtls_config));
+
+    // Apply peer cert middleware to the router
+    let mtls_app = app.layer(PeerCertLayer);
+
+    let handle = tokio::spawn(async move {
+        let tcp = match tokio::net::TcpListener::bind(addr).await {
+            Ok(listener) => listener,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to bind mTLS listener on {addr}: {e}"
+                );
+                return;
+            }
+        };
+
+        let listener = MtlsListener::new(tcp, mtls_config_swap);
+        if let Err(e) = axum::serve(listener, mtls_app)
+            .with_graceful_shutdown(shutdown_token.cancelled_owned())
+            .await
+        {
+            tracing::error!("mTLS server error: {e}");
+        }
+    });
+
+    Ok(handle)
 }
