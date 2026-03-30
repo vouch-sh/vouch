@@ -319,7 +319,7 @@ fn parse_and_verify_dpop_proof(proof: &str) -> Result<(DpopHeader, DpopClaims), 
 pub fn validate_dpop_claims(
     claims: &DpopClaims,
     expected_method: &str,
-    expected_uri: &str,
+    accepted_uris: &[String],
     max_age_seconds: i64,
     expected_nonce: Option<&str>,
     expected_ath: Option<&str>,
@@ -331,10 +331,12 @@ pub fn validate_dpop_claims(
         return Err(DpopError::MethodMismatch);
     }
 
-    // Check URI (normalize by removing query/fragment)
+    // Check URI against all accepted URIs (canonical + mTLS alias)
     let claims_uri = normalize_uri(&claims.htu);
-    let expected_uri = normalize_uri(expected_uri);
-    if claims_uri != expected_uri {
+    let uri_matches = accepted_uris
+        .iter()
+        .any(|uri| normalize_uri(uri) == claims_uri);
+    if !uri_matches {
         return Err(DpopError::UriMismatch);
     }
 
@@ -386,7 +388,8 @@ pub fn validate_dpop_claims(
 /// RFC 9449 Section 4.2: The `htu` claim should contain the HTTP target URI
 /// without query and fragment components.
 #[allow(clippy::string_slice)]
-fn normalize_uri(uri: &str) -> String {
+/// Normalize a URI by stripping query and fragment for comparison.
+pub fn normalize_uri(uri: &str) -> String {
     // Find the first occurrence of either '?' or '#' to handle all orderings
     // Safety: both `find('?')` and `find('#')` return byte offsets of ASCII
     // characters, so slicing at `end` is always at a valid char boundary.
@@ -446,7 +449,7 @@ fn build_decoding_key(jwk: &DpopJwk, alg: &str) -> Result<jsonwebtoken::Decoding
 async fn validate_dpop_common(
     proof: &str,
     expected_method: &str,
-    expected_uri: &str,
+    accepted_uris: &[String],
     store: &DocumentStore,
     config_max_age: i64,
     expected_ath: Option<&str>,
@@ -479,7 +482,7 @@ async fn validate_dpop_common(
     validate_dpop_claims(
         &claims,
         expected_method,
-        expected_uri,
+        accepted_uris,
         config_max_age,
         None,
         expected_ath,
@@ -515,14 +518,14 @@ async fn validate_dpop_common(
 pub async fn validate_dpop_proof(
     proof: &str,
     expected_method: &str,
-    expected_uri: &str,
+    accepted_uris: &[String],
     store: &DocumentStore,
     config_max_age: i64,
 ) -> Result<ValidatedDpopProof, DpopError> {
     validate_dpop_common(
         proof,
         expected_method,
-        expected_uri,
+        accepted_uris,
         store,
         config_max_age,
         None, // No access token hash for token endpoint
@@ -553,10 +556,11 @@ pub async fn validate_dpop_at_resource(
     config_max_age: i64,
 ) -> Result<ValidatedDpopProof, DpopError> {
     let expected_ath = compute_access_token_hash(access_token);
+    let accepted_uris = vec![uri.to_string()];
     validate_dpop_common(
         proof,
         method,
-        uri,
+        &accepted_uris,
         store,
         config_max_age,
         Some(&expected_ath),
@@ -628,16 +632,28 @@ mod tests {
     #[test]
     fn test_validate_dpop_claims_method_mismatch() {
         let claims = make_claims("GET", "https://example.com/token", now());
-        let result =
-            validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
+        let result = validate_dpop_claims(
+            &claims,
+            "POST",
+            &["https://example.com/token".into()],
+            60,
+            None,
+            None,
+        );
         assert!(matches!(result, Err(DpopError::MethodMismatch)));
     }
 
     #[test]
     fn test_validate_dpop_claims_uri_mismatch() {
         let claims = make_claims("POST", "https://other.com/token", now());
-        let result =
-            validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
+        let result = validate_dpop_claims(
+            &claims,
+            "POST",
+            &["https://example.com/token".into()],
+            60,
+            None,
+            None,
+        );
         assert!(matches!(result, Err(DpopError::UriMismatch)));
     }
 
@@ -645,8 +661,14 @@ mod tests {
     fn test_validate_dpop_claims_expired() {
         // iat older than max_age_seconds
         let claims = make_claims("POST", "https://example.com/token", now() - 120);
-        let result =
-            validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
+        let result = validate_dpop_claims(
+            &claims,
+            "POST",
+            &["https://example.com/token".into()],
+            60,
+            None,
+            None,
+        );
         assert!(matches!(result, Err(DpopError::Expired)));
     }
 
@@ -657,7 +679,7 @@ mod tests {
         let result = validate_dpop_claims(
             &claims,
             "POST",
-            "https://example.com/token",
+            &["https://example.com/token".into()],
             300,
             None,
             None,
@@ -673,7 +695,7 @@ mod tests {
         let result = validate_dpop_claims(
             &claims,
             "POST",
-            "https://example.com/token",
+            &["https://example.com/token".into()],
             60,
             None,
             Some(&correct_ath),
@@ -690,7 +712,7 @@ mod tests {
         let result = validate_dpop_claims(
             &claims,
             "POST",
-            "https://example.com/token",
+            &["https://example.com/token".into()],
             60,
             None,
             Some(&ath),
@@ -701,8 +723,14 @@ mod tests {
     #[test]
     fn test_validate_dpop_claims_valid_no_ath() {
         let claims = make_claims("POST", "https://example.com/token", now());
-        let result =
-            validate_dpop_claims(&claims, "POST", "https://example.com/token", 60, None, None);
+        let result = validate_dpop_claims(
+            &claims,
+            "POST",
+            &["https://example.com/token".into()],
+            60,
+            None,
+            None,
+        );
         assert!(result.is_ok());
     }
 

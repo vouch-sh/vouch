@@ -216,12 +216,24 @@ pub async fn register_client(
 
     // 12. FAPI 2.0 enforcement
     let dpop_bound = request.dpop_bound_access_tokens.unwrap_or(false);
-    let fapi_profile = if dpop_bound {
-        // Require FAPI constraints
-        if jwks_auth.auth_method != TokenEndpointAuthMethod::PrivateKeyJwt {
+    let cert_bound = request
+        .tls_client_certificate_bound_access_tokens
+        .unwrap_or(false);
+    let is_fapi2 = dpop_bound || cert_bound;
+    let fapi_profile = if is_fapi2 {
+        // Require FAPI-compliant auth method
+        let is_fapi_auth = matches!(
+            jwks_auth.auth_method,
+            TokenEndpointAuthMethod::PrivateKeyJwt
+                | TokenEndpointAuthMethod::TlsClientAuth
+                | TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+        );
+        if !is_fapi_auth {
             return Err(ServiceError::oauth(
                 OAuthErrorCode::InvalidClientMetadata,
-                "FAPI 2.0 requires token_endpoint_auth_method 'private_key_jwt'",
+                "FAPI 2.0 requires token_endpoint_auth_method \
+                 'private_key_jwt', 'tls_client_auth', or \
+                 'self_signed_tls_client_auth'",
             ));
         }
         if jwks_auth.jwks_value.is_none() && jwks_auth.jwks_uri.is_none() {

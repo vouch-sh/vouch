@@ -33,7 +33,7 @@ import os
 import sys
 from pathlib import Path
 
-from conformance import ConformanceClient, ConformanceError
+from conformance import ConformanceClient, ConformanceError, format_module_log
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +71,16 @@ def load_config(
         "{VERSION}": json_escape_fragment(version or "dev"),
         "{CLIENT_REG_TOKEN}": json_escape_fragment(os.environ.get("CLIENT_REG_TOKEN", "")),
         "{CLIENT2_REG_TOKEN}": json_escape_fragment(os.environ.get("CLIENT2_REG_TOKEN", "")),
+        "{MTLS_CERT}": json_escape_fragment(os.environ.get("MTLS_CERT", "")),
+        "{MTLS_KEY}": json_escape_fragment(os.environ.get("MTLS_KEY", "")),
+        "{MTLS2_CERT}": json_escape_fragment(os.environ.get("MTLS2_CERT", "")),
+        "{MTLS2_KEY}": json_escape_fragment(os.environ.get("MTLS2_KEY", "")),
+        "{TLS_CLIENT_AUTH_SUBJECT_DN}": json_escape_fragment(
+            os.environ.get("TLS_CLIENT_AUTH_SUBJECT_DN", "")
+        ),
+        "{TLS_CLIENT_AUTH_SUBJECT_DN2}": json_escape_fragment(
+            os.environ.get("TLS_CLIENT_AUTH_SUBJECT_DN2", "")
+        ),
     }
     for placeholder, value in substitutions.items():
         raw = raw.replace(placeholder, value)
@@ -90,6 +100,26 @@ def load_config(
         config["alias"] = client_alias
 
     return config, variant
+
+
+def dump_failure_log(
+    client: ConformanceClient, module_name: str, module_id: str
+) -> None:
+    """Fetch and print the detailed log for a failed module."""
+    print(f"\n{'─' * 70}")
+    print(f"FAILURE LOG: {module_name}")
+    print(f"Module ID:   {module_id}")
+    print(f"{'─' * 70}")
+    try:
+        entries = client.get_module_log(module_id)
+        output = format_module_log(entries)
+        if output:
+            print(output)
+        else:
+            print("  (no failure details in log)")
+    except ConformanceError as e:
+        print(f"  (could not fetch log: {e})")
+    print(f"{'─' * 70}\n")
 
 
 def print_summary(results: list[dict], plan_id: str, conformance_server: str) -> None:
@@ -140,6 +170,7 @@ def run_plan(
     def run_module(module: dict) -> dict:
         module_name = module.get("testModule") or module.get("name", "unknown")
         log.info("Running module: %s", module_name)
+        module_id = ""
         try:
             module_id = client.start_test_module(plan_id, module_name)
             info = client.wait_for_state(module_id, timeout=module_timeout)
@@ -151,12 +182,18 @@ def run_plan(
             log.info("Module %s: %s", module_name, result)
         else:
             log.error("Module %s: %s", module_name, result)
-        return {"name": module_name, "result": result}
+        return {"name": module_name, "result": result, "module_id": module_id}
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=parallel) as pool:
         results = list(pool.map(run_module, modules))
 
-    any_failed = any(r["result"] not in PASSING_RESULTS for r in results)
+    # Dump detailed logs for failed modules.
+    failed = [r for r in results if r["result"] not in PASSING_RESULTS]
+    for r in failed:
+        if r["module_id"]:
+            dump_failure_log(client, r["name"], r["module_id"])
+
+    any_failed = len(failed) > 0
 
     if publish and not any_failed:
         try:
@@ -220,8 +257,8 @@ def main() -> None:
     parser.add_argument(
         "--parallel",
         type=int,
-        default=3,
-        help="Number of modules to run in parallel (default: 3)",
+        default=1,
+        help="Number of modules to run in parallel (default: 1)",
     )
     parser.add_argument(
         "--module-timeout",

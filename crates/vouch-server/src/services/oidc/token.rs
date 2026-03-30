@@ -865,16 +865,27 @@ pub async fn validate_dpop_if_present(
         None => return Ok(None), // No DPoP header, use Bearer token
     };
 
-    // Construct the full URI for validation
-    let full_uri = format!("{}{}", state.config().base_url, uri);
+    // Construct valid URIs for DPoP htu validation. Clients may send
+    // the DPoP proof with htu pointing to either the canonical endpoint
+    // or the mtls_endpoint_aliases URL (RFC 8705 Section 4).
+    let config = state.config();
+    let canonical_uri = format!("{}{}", config.base_url, uri);
+    let mut accepted_uris = vec![canonical_uri.clone()];
+    if config.tls_configured()
+        && let Ok(mut url) = url::Url::parse(&config.base_url)
+    {
+        let _ = url.set_port(Some(config.mtls_port));
+        let mtls_uri = format!("{}{}", url.as_str().trim_end_matches('/'), uri);
+        accepted_uris.push(mtls_uri);
+    }
 
     // Validate the DPoP proof
     match dpop::validate_dpop_proof(
         dpop_proof,
         method,
-        &full_uri,
+        &accepted_uris,
         &state.store,
-        state.config().dpop_max_age_seconds,
+        config.dpop_max_age_seconds,
     )
     .await
     {
