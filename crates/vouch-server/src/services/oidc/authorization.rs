@@ -877,6 +877,12 @@ mod tests {
             registration_access_token_hash: None,
             registration_metadata: None,
             id_token_signed_response_alg: "RS256".to_string(),
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: false,
         }
     }
 
@@ -938,6 +944,12 @@ mod tests {
             registration_access_token_hash: None,
             registration_metadata: None,
             id_token_signed_response_alg: "RS256".to_string(),
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: false,
         }
     }
 

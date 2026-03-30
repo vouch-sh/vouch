@@ -51,6 +51,18 @@ pub struct OAuthClient {
     pub registration_access_token_hash: Option<String>,
     pub registration_metadata: Option<serde_json::Value>,
     pub id_token_signed_response_alg: String,
+    /// RFC 8705: mTLS subject DN for tls_client_auth.
+    pub tls_client_auth_subject_dn: Option<String>,
+    /// RFC 8705: mTLS SAN DNS name.
+    pub tls_client_auth_san_dns: Option<String>,
+    /// RFC 8705: mTLS SAN URI.
+    pub tls_client_auth_san_uri: Option<String>,
+    /// RFC 8705: mTLS SAN IP.
+    pub tls_client_auth_san_ip: Option<String>,
+    /// RFC 8705: mTLS SAN email.
+    pub tls_client_auth_san_email: Option<String>,
+    /// RFC 8705: certificate-bound access tokens.
+    pub tls_client_certificate_bound_access_tokens: bool,
 }
 
 impl From<Document<OAuthClientDoc>> for OAuthClient {
@@ -87,6 +99,14 @@ impl From<Document<OAuthClientDoc>> for OAuthClient {
             registration_access_token_hash: doc.data.registration_access_token_hash,
             registration_metadata: doc.data.registration_metadata,
             id_token_signed_response_alg: doc.data.id_token_signed_response_alg,
+            tls_client_auth_subject_dn: doc.data.tls_client_auth_subject_dn,
+            tls_client_auth_san_dns: doc.data.tls_client_auth_san_dns,
+            tls_client_auth_san_uri: doc.data.tls_client_auth_san_uri,
+            tls_client_auth_san_ip: doc.data.tls_client_auth_san_ip,
+            tls_client_auth_san_email: doc.data.tls_client_auth_san_email,
+            tls_client_certificate_bound_access_tokens: doc
+                .data
+                .tls_client_certificate_bound_access_tokens,
         }
     }
 }
@@ -134,6 +154,13 @@ pub struct CreateOAuthClientParams<'a> {
     pub registration_access_token_hash: Option<&'a str>,
     pub registration_metadata: Option<&'a serde_json::Value>,
     pub id_token_signed_response_alg: &'a str,
+    /// RFC 8705 mTLS fields.
+    pub tls_client_auth_subject_dn: Option<&'a str>,
+    pub tls_client_auth_san_dns: Option<&'a str>,
+    pub tls_client_auth_san_uri: Option<&'a str>,
+    pub tls_client_auth_san_ip: Option<&'a str>,
+    pub tls_client_auth_san_email: Option<&'a str>,
+    pub tls_client_certificate_bound_access_tokens: Option<bool>,
 }
 
 /// Create a new OAuth client application.
@@ -171,6 +198,14 @@ pub async fn create_oauth_client(
         registration_access_token_hash: params.registration_access_token_hash.map(String::from),
         registration_metadata: params.registration_metadata.cloned(),
         id_token_signed_response_alg: params.id_token_signed_response_alg.to_string(),
+        tls_client_auth_subject_dn: params.tls_client_auth_subject_dn.map(String::from),
+        tls_client_auth_san_dns: params.tls_client_auth_san_dns.map(String::from),
+        tls_client_auth_san_uri: params.tls_client_auth_san_uri.map(String::from),
+        tls_client_auth_san_ip: params.tls_client_auth_san_ip.map(String::from),
+        tls_client_auth_san_email: params.tls_client_auth_san_email.map(String::from),
+        tls_client_certificate_bound_access_tokens: params
+            .tls_client_certificate_bound_access_tokens
+            .unwrap_or(false),
     };
 
     let result = store.insert(&doc).await?;
@@ -999,6 +1034,12 @@ mod tests {
                 registration_access_token_hash: None,
                 registration_metadata: None,
                 id_token_signed_response_alg: "RS256",
+                tls_client_auth_subject_dn: None,
+                tls_client_auth_san_dns: None,
+                tls_client_auth_san_uri: None,
+                tls_client_auth_san_ip: None,
+                tls_client_auth_san_email: None,
+                tls_client_certificate_bound_access_tokens: None,
             },
         )
         .await

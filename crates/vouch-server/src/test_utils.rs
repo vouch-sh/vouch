@@ -636,6 +636,12 @@ pub async fn create_test_oauth_client(store: &DocumentStore, user_id: &str) -> T
             registration_access_token_hash: None,
             registration_metadata: None,
             id_token_signed_response_alg: "RS256",
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
         },
     )
     .await
@@ -694,6 +700,12 @@ pub async fn create_test_oauth_client_with_options(
             registration_access_token_hash: None,
             registration_metadata: None,
             id_token_signed_response_alg: "RS256",
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
         },
     )
     .await
@@ -745,6 +757,12 @@ pub async fn create_test_public_oauth_client(
             registration_access_token_hash: None,
             registration_metadata: None,
             id_token_signed_response_alg: "RS256",
+            tls_client_auth_subject_dn: None,
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: None,
         },
     )
     .await

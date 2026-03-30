@@ -72,7 +72,7 @@ const REGISTRATION_TOKEN_LENGTH: usize = 32;
 ///
 /// Per RFC 7591 Section 2: "The authorization server MUST ignore any
 /// metadata it does not understand", so we do NOT use `deny_unknown_fields`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct RegistrationRequest {
     /// RFC 7591 Section 2: Array of redirection URI strings.
     pub redirect_uris: Option<Vec<String>>,
@@ -110,6 +110,18 @@ pub struct RegistrationRequest {
     pub dpop_bound_access_tokens: Option<bool>,
     /// OIDC Core Section 3.1.3.7: ID token signing algorithm.
     pub id_token_signed_response_alg: Option<String>,
+    /// RFC 8705 Section 2.1.1: subject DN for tls_client_auth.
+    pub tls_client_auth_subject_dn: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN DNS name for tls_client_auth.
+    pub tls_client_auth_san_dns: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN URI for tls_client_auth.
+    pub tls_client_auth_san_uri: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN IP for tls_client_auth.
+    pub tls_client_auth_san_ip: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN email for tls_client_auth.
+    pub tls_client_auth_san_email: Option<String>,
+    /// RFC 8705 Section 3: certificate-bound access tokens.
+    pub tls_client_certificate_bound_access_tokens: Option<bool>,
 }
 
 /// RFC 7591 Section 3.2.1: Client Information Response.
@@ -316,6 +328,13 @@ pub async fn register_client(
             registration_access_token_hash: Some(&reg_token_hash),
             registration_metadata: Some(&registration_metadata),
             id_token_signed_response_alg: id_token_alg,
+            tls_client_auth_subject_dn: request.tls_client_auth_subject_dn.as_deref(),
+            tls_client_auth_san_dns: request.tls_client_auth_san_dns.as_deref(),
+            tls_client_auth_san_uri: request.tls_client_auth_san_uri.as_deref(),
+            tls_client_auth_san_ip: request.tls_client_auth_san_ip.as_deref(),
+            tls_client_auth_san_email: request.tls_client_auth_san_email.as_deref(),
+            tls_client_certificate_bound_access_tokens: request
+                .tls_client_certificate_bound_access_tokens,
         },
     )
     .await
@@ -1448,6 +1467,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1488,6 +1508,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1526,6 +1547,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1562,6 +1584,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
 
         let metadata = build_registration_metadata(&request);
@@ -1595,6 +1618,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
 
         let metadata = build_registration_metadata(&request);
@@ -2053,6 +2077,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         }
     }
 
@@ -2146,6 +2171,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         };
         let result = validate_grant_and_response_types(&mut req2);
         assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
@@ -2197,6 +2223,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         }
     }
 
@@ -2270,6 +2297,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         }
     }
 
@@ -2352,7 +2380,7 @@ mod tests {
     #[test]
     fn test_validate_jwks_and_auth_method_unknown_auth_method_rejected() {
         let mut req = make_request_with_jwks(None, None);
-        let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+        let result = validate_jwks_and_auth_method(&mut req, "unknown_method");
         assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
     }
 
@@ -2386,6 +2414,7 @@ mod tests {
             software_statement: None,
             dpop_bound_access_tokens: None,
             id_token_signed_response_alg: None,
+            ..Default::default()
         }
     }
 

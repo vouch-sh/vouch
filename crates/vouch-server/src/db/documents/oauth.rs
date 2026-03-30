@@ -164,6 +164,12 @@ pub enum TokenEndpointAuthMethod {
     PrivateKeyJwt,
     #[serde(rename = "none")]
     None,
+    /// RFC 8705 Section 2.1.1: mTLS with PKI certificate.
+    #[serde(rename = "tls_client_auth")]
+    TlsClientAuth,
+    /// RFC 8705 Section 2.2.2: mTLS with self-signed certificate.
+    #[serde(rename = "self_signed_tls_client_auth")]
+    SelfSignedTlsClientAuth,
 }
 
 impl TokenEndpointAuthMethod {
@@ -175,6 +181,8 @@ impl TokenEndpointAuthMethod {
             Self::ClientSecretPost => "client_secret_post",
             Self::PrivateKeyJwt => "private_key_jwt",
             Self::None => "none",
+            Self::TlsClientAuth => "tls_client_auth",
+            Self::SelfSignedTlsClientAuth => "self_signed_tls_client_auth",
         }
     }
 }
@@ -191,6 +199,10 @@ impl std::str::FromStr for TokenEndpointAuthMethod {
             Ok(Self::PrivateKeyJwt)
         } else if s.eq_ignore_ascii_case("none") {
             Ok(Self::None)
+        } else if s.eq_ignore_ascii_case("tls_client_auth") {
+            Ok(Self::TlsClientAuth)
+        } else if s.eq_ignore_ascii_case("self_signed_tls_client_auth") {
+            Ok(Self::SelfSignedTlsClientAuth)
         } else {
             Err(OAuthDocumentParseError::TokenEndpointAuthMethod(
                 s.to_string(),
@@ -293,6 +305,24 @@ pub struct OAuthClientDoc {
     /// that were created before RS256 support was added.
     #[serde(default = "default_id_token_alg")]
     pub id_token_signed_response_alg: String,
+    /// RFC 8705 Section 2.1.1: subject DN for tls_client_auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_subject_dn: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN DNS name for tls_client_auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_dns: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN URI for tls_client_auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_uri: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN IP for tls_client_auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_ip: Option<String>,
+    /// RFC 8705 Section 2.1.1: SAN email for tls_client_auth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tls_client_auth_san_email: Option<String>,
+    /// RFC 8705 Section 3: certificate-bound access tokens.
+    #[serde(default)]
+    pub tls_client_certificate_bound_access_tokens: bool,
 }
 
 fn default_id_token_alg() -> String {
