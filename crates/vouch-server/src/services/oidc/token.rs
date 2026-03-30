@@ -1455,9 +1455,8 @@ mod tests {
         };
         let mut rdn = der::asn1::SetOfVec::new();
         rdn.insert(atv).expect("rdn");
-        let subject = x509_cert::name::RdnSequence(vec![
-            x509_cert::name::RelativeDistinguishedName(rdn),
-        ]);
+        let subject =
+            x509_cert::name::RdnSequence(vec![x509_cert::name::RelativeDistinguishedName(rdn)]);
         let validity =
             Validity::from_now(core::time::Duration::from_secs(86400)).expect("validity");
         let serial = SerialNumber::new(&[1u8]).expect("serial");
