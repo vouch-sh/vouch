@@ -9,7 +9,7 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
-use der::{Decode, Encode, oid::ObjectIdentifier};
+use der::{Decode, oid::ObjectIdentifier};
 use subtle::ConstantTimeEq;
 use x509_cert::ext::pkix::SubjectAltName;
 use x509_cert::ext::pkix::name::GeneralName;
@@ -191,36 +191,6 @@ pub(crate) fn verify_tls_client_auth(
     }
 
     Err(MtlsError::CertificateNotRegistered)
-}
-
-/// Parse a client certificate from URL-encoded PEM (nginx `$ssl_client_cert`).
-///
-/// Nginx passes the client certificate as URL-encoded PEM in the
-/// `X-Ssl-Cert` header. This function URL-decodes, extracts DER from
-/// PEM, and parses the certificate.
-pub(crate) fn parse_client_certificate_pem(
-    url_encoded_pem: &str,
-) -> Result<ClientCertificate, MtlsError> {
-    // URL-decode (nginx encodes newlines as %0A, spaces as %20, etc.)
-    let pem = urlencoding::decode(url_encoded_pem)
-        .map_err(|e| MtlsError::InvalidCertificateFormat(format!("URL decode error: {e}")))?;
-
-    let pem = pem.trim();
-    if pem.is_empty() {
-        return Err(MtlsError::InvalidCertificateFormat("empty PEM".to_string()));
-    }
-
-    // Parse PEM to Certificate, then encode to DER for thumbprint computation.
-    // `x509_cert::der::DecodePem` is the `der` crate's PEM trait, re-exported
-    // by `x509_cert` when the `pem` feature is enabled.
-    use x509_cert::der::DecodePem;
-    let cert = x509_cert::Certificate::from_pem(pem)
-        .map_err(|e| MtlsError::InvalidCertificateFormat(format!("PEM parse error: {e}")))?;
-    let der = cert
-        .to_der()
-        .map_err(|e| MtlsError::InvalidCertificateFormat(format!("DER encode error: {e}")))?;
-
-    parse_client_certificate(&der)
 }
 
 /// Verify `self_signed_tls_client_auth` — match certificate against
@@ -657,70 +627,6 @@ mod tests {
 
     // =========================================================================
     // parse_client_certificate_pem
-    // =========================================================================
-
-    /// Generate a PEM-encoded certificate string from DER bytes.
-    fn der_to_pem(der: &[u8]) -> String {
-        use base64::Engine;
-        let b64 = base64::engine::general_purpose::STANDARD.encode(der);
-        // Wrap at 64 chars per line as standard PEM format requires
-        let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
-        for chunk in b64.as_bytes().chunks(64) {
-            pem.push_str(std::str::from_utf8(chunk).expect("base64 is ASCII"));
-            pem.push('\n');
-        }
-        pem.push_str("-----END CERTIFICATE-----\n");
-        pem
-    }
-
-    #[test]
-    fn test_parse_client_certificate_pem_valid() {
-        let cert_der = make_test_cert("pem-parse-test");
-        let pem = der_to_pem(&cert_der);
-        let url_encoded = urlencoding::encode(&pem).into_owned();
-
-        let cert = parse_client_certificate_pem(&url_encoded).expect("should parse PEM cert");
-        let expected = parse_client_certificate(&cert_der).expect("parse DER");
-
-        assert_eq!(
-            cert.thumbprint, expected.thumbprint,
-            "thumbprint from PEM must match thumbprint from DER"
-        );
-    }
-
-    #[test]
-    fn test_parse_client_certificate_pem_invalid() {
-        let result = parse_client_certificate_pem("not%20valid%20pem");
-        assert!(result.is_err(), "garbage input must fail");
-        assert!(
-            matches!(result, Err(MtlsError::InvalidCertificateFormat(_))),
-            "must return InvalidCertificateFormat"
-        );
-    }
-
-    #[test]
-    fn test_parse_client_certificate_pem_empty() {
-        let result = parse_client_certificate_pem("");
-        assert!(
-            matches!(result, Err(MtlsError::InvalidCertificateFormat(_))),
-            "empty input must return InvalidCertificateFormat"
-        );
-    }
-
-    #[test]
-    fn test_parse_client_certificate_pem_url_encoded_newlines() {
-        // Nginx encodes newlines as %0A; verify URL decoding handles this correctly.
-        let cert_der = make_test_cert("pem-newlines-test");
-        let pem = der_to_pem(&cert_der);
-        // Manually URL-encode newlines to simulate nginx behavior
-        let url_encoded = pem.replace('\n', "%0A");
-
-        let cert =
-            parse_client_certificate_pem(&url_encoded).expect("should parse URL-encoded PEM");
-        let expected = parse_client_certificate(&cert_der).expect("parse DER");
-        assert_eq!(cert.thumbprint, expected.thumbprint);
-    }
-
     // =========================================================================
     // verify_self_signed_tls_client_auth
     // =========================================================================
