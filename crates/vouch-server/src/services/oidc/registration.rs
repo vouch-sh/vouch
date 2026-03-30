@@ -621,6 +621,24 @@ fn validate_jwks_and_auth_method(
         ));
     }
 
+    // RFC 8705 Section 2.1.1: tls_client_auth requires at least one identity field
+    if auth_method == TokenEndpointAuthMethod::TlsClientAuth {
+        let has_identity = request.tls_client_auth_subject_dn.is_some()
+            || request.tls_client_auth_san_dns.is_some()
+            || request.tls_client_auth_san_email.is_some()
+            || request.tls_client_auth_san_uri.is_some()
+            || request.tls_client_auth_san_ip.is_some();
+        if !has_identity {
+            return Err(ServiceError::oauth(
+                OAuthErrorCode::InvalidClientMetadata,
+                "tls_client_auth requires at least one identity field \
+                 (tls_client_auth_subject_dn, tls_client_auth_san_dns, \
+                 tls_client_auth_san_email, tls_client_auth_san_uri, \
+                 or tls_client_auth_san_ip)",
+            ));
+        }
+    }
+
     Ok(ValidatedJwksAuth {
         jwks_value,
         jwks_uri,
@@ -2382,6 +2400,107 @@ mod tests {
         let mut req = make_request_with_jwks(None, None);
         let result = validate_jwks_and_auth_method(&mut req, "unknown_method");
         assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    // =========================================================================
+    // validate_jwks_and_auth_method — tls_client_auth (RFC 8705 Section 2.1.1)
+    // =========================================================================
+
+    /// tls_client_auth with a subject_dn identity field is accepted.
+    #[test]
+    fn test_validate_tls_client_auth_accepted() {
+        let mut req = RegistrationRequest {
+            tls_client_auth_subject_dn: Some("CN=test-client".to_string()),
+            ..Default::default()
+        };
+        let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+        let validated = result.expect("tls_client_auth + subject_dn must succeed");
+        assert_eq!(
+            validated.auth_method,
+            TokenEndpointAuthMethod::TlsClientAuth
+        );
+    }
+
+    /// tls_client_auth without any identity field must be rejected with invalid_client_metadata.
+    #[test]
+    fn test_validate_tls_client_auth_requires_identity_field() {
+        let mut req = RegistrationRequest {
+            // No tls_client_auth_* identity fields set
+            ..Default::default()
+        };
+        let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+        assert_oauth_error(result, OAuthErrorCode::InvalidClientMetadata);
+    }
+
+    /// tls_client_auth with san_dns identity field is accepted.
+    #[test]
+    fn test_validate_tls_client_auth_with_san_dns_accepted() {
+        let mut req = RegistrationRequest {
+            tls_client_auth_san_dns: Some("client.example.com".to_string()),
+            ..Default::default()
+        };
+        let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+        assert!(
+            result.is_ok(),
+            "tls_client_auth + san_dns must succeed, got: {result:?}"
+        );
+    }
+
+    /// tls_client_auth with san_email identity field is accepted (RFC 8705 Section 2.1.1).
+    #[test]
+    fn test_validate_tls_client_auth_with_san_email() {
+        let mut req = RegistrationRequest {
+            tls_client_auth_san_email: Some("client@example.com".to_string()),
+            ..Default::default()
+        };
+        let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+        let validated = result.expect("tls_client_auth + san_email must succeed");
+        assert_eq!(
+            validated.auth_method,
+            TokenEndpointAuthMethod::TlsClientAuth
+        );
+    }
+
+    /// tls_client_auth with san_uri identity field is accepted (RFC 8705 Section 2.1.1).
+    #[test]
+    fn test_validate_tls_client_auth_with_san_uri() {
+        let mut req = RegistrationRequest {
+            tls_client_auth_san_uri: Some("https://client.example.com/".to_string()),
+            ..Default::default()
+        };
+        let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+        let validated = result.expect("tls_client_auth + san_uri must succeed");
+        assert_eq!(
+            validated.auth_method,
+            TokenEndpointAuthMethod::TlsClientAuth
+        );
+    }
+
+    /// tls_client_auth with san_ip identity field is accepted (RFC 8705 Section 2.1.1).
+    #[test]
+    fn test_validate_tls_client_auth_with_san_ip() {
+        let mut req = RegistrationRequest {
+            tls_client_auth_san_ip: Some("192.0.2.1".to_string()),
+            ..Default::default()
+        };
+        let result = validate_jwks_and_auth_method(&mut req, "tls_client_auth");
+        let validated = result.expect("tls_client_auth + san_ip must succeed");
+        assert_eq!(
+            validated.auth_method,
+            TokenEndpointAuthMethod::TlsClientAuth
+        );
+    }
+
+    /// self_signed_tls_client_auth does not require identity fields — accepted without them.
+    #[test]
+    fn test_validate_self_signed_tls_client_auth_accepted_without_identity() {
+        let mut req = make_request_with_jwks(None, None);
+        let result = validate_jwks_and_auth_method(&mut req, "self_signed_tls_client_auth");
+        let validated = result.expect("self_signed_tls_client_auth must succeed without identity");
+        assert_eq!(
+            validated.auth_method,
+            TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+        );
     }
 
     // =========================================================================

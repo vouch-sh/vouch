@@ -563,6 +563,47 @@ pub async fn create_test_session_with_dpop(
     result.token.expose_secret().to_string()
 }
 
+/// Create an mTLS certificate-bound access token for testing.
+///
+/// The token includes `cnf.x5t#S256` set to `mtls_cert_thumbprint`, binding it to
+/// the certificate identified by that thumbprint per RFC 8705 Section 3.1.
+pub async fn create_test_session_with_mtls(
+    state: &AppState,
+    user_id: &str,
+    email: &str,
+    auth_id: &str,
+    mtls_cert_thumbprint: &str,
+) -> String {
+    use crate::services::auth::{CreateOAuthTokenParams, create_oauth_access_token};
+    use crate::services::oidc::scope::ScopeSet;
+    use secrecy::ExposeSecret;
+
+    let result = create_oauth_access_token(
+        state,
+        CreateOAuthTokenParams {
+            user_id,
+            email,
+            authenticator_id: Some(auth_id),
+            client_id: &state.config().base_url,
+            scope: Some(ScopeSet::all()),
+            dpop_jkt: None,
+            mtls_cert_thumbprint: Some(mtls_cert_thumbprint),
+            act: None,
+            audience: None,
+            auth_time: Some(jiff::Timestamp::now().as_second()),
+            amr: None,
+            acr: None,
+            hardware_verified: true,
+            session_purpose: crate::db::SessionPurpose::OAuthAccessToken,
+            authorization_details: None,
+        },
+    )
+    .await
+    .expect("Failed to create mTLS-bound test session");
+
+    result.token.expose_secret().to_string()
+}
+
 /// Create a SCIM bearer token for testing.
 pub async fn create_test_scim_token(store: &DocumentStore, description: &str) -> String {
     use aws_lc_rs::digest::{self, SHA256};

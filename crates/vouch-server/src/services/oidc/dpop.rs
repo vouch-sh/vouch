@@ -779,6 +779,92 @@ mod tests {
         );
     }
 
+    // =========================================================================
+    // CnfClaim serialization — RFC 8705 x5t#S256 rename
+    // =========================================================================
+
+    /// `x5t_s256` must serialize to the JSON key `"x5t#S256"` per RFC 8705 Section 3.1.
+    /// The serde rename is critical — wrong key name breaks certificate binding.
+    #[test]
+    fn test_cnf_claim_x5t_s256_serialization() {
+        let cnf = CnfClaim {
+            jkt: None,
+            x5t_s256: Some("thumbprint123".to_string()),
+        };
+        let json = serde_json::to_string(&cnf).unwrap();
+        assert!(
+            json.contains("\"x5t#S256\""),
+            "must serialize to x5t#S256 key, got: {json}"
+        );
+        assert!(
+            !json.contains("\"jkt\""),
+            "None jkt must be omitted from JSON, got: {json}"
+        );
+        assert!(
+            !json.contains("x5t_s256"),
+            "raw field name must not appear in JSON, got: {json}"
+        );
+    }
+
+    /// CnfClaim with both jkt and x5t_s256 serializes both fields correctly.
+    #[test]
+    fn test_cnf_claim_both_fields() {
+        let cnf = CnfClaim {
+            jkt: Some("jwk-thumbprint".to_string()),
+            x5t_s256: Some("cert-thumbprint".to_string()),
+        };
+        let json = serde_json::to_string(&cnf).unwrap();
+        assert!(
+            json.contains("\"jkt\""),
+            "jkt field must be present when Some, got: {json}"
+        );
+        assert!(
+            json.contains("\"x5t#S256\""),
+            "x5t#S256 field must be present when Some, got: {json}"
+        );
+        assert!(
+            json.contains("\"jwk-thumbprint\""),
+            "jkt value must be present, got: {json}"
+        );
+        assert!(
+            json.contains("\"cert-thumbprint\""),
+            "x5t_s256 value must be present, got: {json}"
+        );
+    }
+
+    /// CnfClaim with only x5t_s256 (jkt is None) must not include jkt in output.
+    #[test]
+    fn test_cnf_claim_only_x5t() {
+        let cnf = CnfClaim {
+            jkt: None,
+            x5t_s256: Some("only-cert-thumbprint".to_string()),
+        };
+        let value = serde_json::to_value(&cnf).unwrap();
+        assert!(
+            value.get("jkt").is_none(),
+            "jkt must be absent when None, got: {value}"
+        );
+        assert_eq!(
+            value.get("x5t#S256").and_then(|v| v.as_str()),
+            Some("only-cert-thumbprint"),
+            "x5t#S256 must contain thumbprint value"
+        );
+    }
+
+    /// CnfClaim with all None fields produces an empty JSON object.
+    #[test]
+    fn test_cnf_claim_all_none_is_empty_object() {
+        let cnf = CnfClaim {
+            jkt: None,
+            x5t_s256: None,
+        };
+        let json = serde_json::to_string(&cnf).unwrap();
+        assert_eq!(
+            json, "{}",
+            "all-None CnfClaim must serialize to empty object"
+        );
+    }
+
     #[test]
     fn test_parse_dpop_header_accepts_public_ec_jwk() {
         // A public EC JWK (no 'd' field) in the header must be accepted.
@@ -802,5 +888,54 @@ mod tests {
             result.is_ok(),
             "Public EC JWK without private key fields must be accepted, got: {result:?}"
         );
+    }
+
+    // =========================================================================
+    // CnfClaim deserialization roundtrip — x5t#S256
+    // =========================================================================
+
+    /// Serialize then deserialize a CnfClaim with x5t_s256 and verify the
+    /// JSON field name and value survive the roundtrip intact.
+    #[test]
+    fn test_cnf_claim_x5t_s256_deserialization_roundtrip() {
+        let original = CnfClaim {
+            jkt: None,
+            x5t_s256: Some("abc123thumbprint-xxxxxxxxxxxxxxxxxxxxxxxxx".to_string()),
+        };
+
+        // Serialize
+        let json = serde_json::to_string(&original).expect("serialization");
+
+        // Verify the wire name is correct
+        assert!(
+            json.contains("\"x5t#S256\""),
+            "must use x5t#S256 as JSON key, got: {json}"
+        );
+
+        // Deserialize back
+        let restored: CnfClaim = serde_json::from_str(&json).expect("deserialization");
+
+        assert_eq!(
+            restored.x5t_s256.as_deref(),
+            Some("abc123thumbprint-xxxxxxxxxxxxxxxxxxxxxxxxx"),
+            "x5t_s256 value must survive roundtrip"
+        );
+        assert!(
+            restored.jkt.is_none(),
+            "jkt must remain None after roundtrip"
+        );
+    }
+
+    /// Deserializing a JSON object with `x5t#S256` must populate `x5t_s256`.
+    #[test]
+    fn test_cnf_claim_x5t_s256_from_json() {
+        let json = r#"{"x5t#S256":"my-cert-thumbprint"}"#;
+        let cnf: CnfClaim = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(
+            cnf.x5t_s256.as_deref(),
+            Some("my-cert-thumbprint"),
+            "x5t_s256 must be populated from x5t#S256 JSON key"
+        );
+        assert!(cnf.jkt.is_none(), "jkt must be None when absent from JSON");
     }
 }

@@ -154,7 +154,7 @@ pub async fn toggle_preconfigured_policy(
     }
 
     let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     // Single read of active slugs — fixes TOCTOU from old handler
     let mut active_slugs = db::get_active_preconfigured_slugs(&state.store, &org_id)
@@ -264,7 +264,7 @@ pub async fn create_custom_policy(
 
     // Auth before CEL compilation (fixes security finding F-04)
     let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     // Validate CEL syntax
     if let Err(e) = posture::validate_cel_expression(&form.cel_expression) {
@@ -356,7 +356,7 @@ pub async fn update_custom_policy(
 
     // Auth before CEL compilation
     let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     if let Err(e) = posture::validate_cel_expression(&form.cel_expression) {
         return Ok(Redirect::to(&format!(
@@ -424,7 +424,7 @@ pub async fn delete_custom_policy(
     validate_origin(&headers, &state.config().base_url)?;
 
     let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     let deleted = db::delete_custom_policy(&state.store, &id, &org_id)
         .await
@@ -470,7 +470,7 @@ pub async fn toggle_custom_policy(
     validate_origin(&headers, &state.config().base_url)?;
 
     let (admin, org_id) =
-        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     let policy = db::get_custom_policy(&state.store, &id)
         .await
@@ -606,7 +606,8 @@ pub async fn validate_cel_api(
     Json(req): Json<ValidateRequest>,
 ) -> Result<Json<ValidateResponse>, ServiceError> {
     // Auth before CEL compilation (fixes security finding F-04)
-    let _auth = extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let _auth =
+        extract_org_admin(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     if req.cel_expression.is_empty() || req.cel_expression.len() > 1024 {
         return Ok(Json(ValidateResponse {

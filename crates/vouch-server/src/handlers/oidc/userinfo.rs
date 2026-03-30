@@ -215,7 +215,7 @@ pub async fn userinfo(
     if !is_dpop_scheme {
         let config = state.config();
         if let Some(decoded) = decode_token(&token, &state.oidc_key, &config.base_url)
-            && decoded.cnf().is_some()
+            && decoded.cnf().is_some_and(|cnf| cnf.jkt.is_some())
         {
             return oauth_error(
                 StatusCode::UNAUTHORIZED,

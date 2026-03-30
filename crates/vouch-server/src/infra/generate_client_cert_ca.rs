@@ -72,7 +72,7 @@ async fn run_kms(key_id: &str, args: &GenerateClientCertCaArgs) -> Result<()> {
     let kms_client = aws_sdk_kms::Client::new(&sdk_config);
 
     let signer = KmsSignerP256::new(kms_client, key_id.to_string()).await?;
-    let ca_cert_der = build_ca_cert_kms(&signer, &args.subject, args.validity_days)?;
+    let ca_cert_der = build_ca_cert_kms(&signer, &args.subject, args.validity_days).await?;
 
     let ca_cert_pem =
         cert_der_to_pem(&ca_cert_der).context("Failed to encode CA certificate as PEM")?;
@@ -101,7 +101,8 @@ fn run_local(args: &GenerateClientCertCaArgs) -> Result<()> {
 
     let ca_cert_pem =
         cert_der_to_pem(&ca_cert_der).context("Failed to encode CA certificate as PEM")?;
-    let key_pem = key_der_to_pem(pkcs8_der.as_bytes());
+    let key_pem =
+        key_der_to_pem(pkcs8_der.as_bytes()).context("Failed to encode CA private key as PEM")?;
 
     let output = serde_json::json!({
         "ca_cert": BASE64.encode(ca_cert_pem.as_bytes()),

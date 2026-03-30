@@ -447,6 +447,16 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_fapi_token_request_accepts_mtls() {
+        // mTLS certificate is a valid sender-constraint mechanism for FAPI 2.0.
+        let client = fapi_client();
+        assert!(
+            validate_fapi_token_request(&client, false, true).is_ok(),
+            "mTLS cert must be accepted as sender-constraint for FAPI token request"
+        );
+    }
+
+    #[test]
     fn test_validate_fapi_token_request_skips_non_fapi() {
         let client = standard_client();
         assert!(validate_fapi_token_request(&client, false, false).is_ok());
@@ -505,6 +515,42 @@ mod tests {
         assert!(
             validate_fapi_client_auth_method(&client, TokenEndpointAuthMethod::PrivateKeyJwt)
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn test_validate_fapi_client_auth_method_accepts_tls_client_auth() {
+        let client = fapi_client();
+        assert!(
+            validate_fapi_client_auth_method(&client, TokenEndpointAuthMethod::TlsClientAuth)
+                .is_ok(),
+            "TlsClientAuth must be accepted for FAPI clients"
+        );
+    }
+
+    #[test]
+    fn test_validate_fapi_client_auth_method_accepts_self_signed_tls() {
+        let client = fapi_client();
+        assert!(
+            validate_fapi_client_auth_method(
+                &client,
+                TokenEndpointAuthMethod::SelfSignedTlsClientAuth
+            )
+            .is_ok(),
+            "SelfSignedTlsClientAuth must be accepted for FAPI clients"
+        );
+    }
+
+    #[test]
+    fn test_validate_fapi_client_registration_accepts_tls_client_auth() {
+        // A FAPI client registered with TlsClientAuth (no JWKS required) must pass.
+        let mut client = fapi_client();
+        client.token_endpoint_auth_method = TokenEndpointAuthMethod::TlsClientAuth;
+        client.jwks = None;
+        client.jwks_uri = None;
+        assert!(
+            validate_fapi_client_registration(&client).is_ok(),
+            "TlsClientAuth FAPI client without JWKS must be valid (cert identity used instead)"
         );
     }
 

@@ -965,3 +965,98 @@ async fn test_fapi2_interaction_id_header_echoed() {
         "Server must echo the client-provided x-fapi-interaction-id"
     );
 }
+
+#[tokio::test]
+async fn test_discovery_mtls_aliases_absent_without_ca() {
+    // When no client_cert_ca is configured, mtls_endpoint_aliases must be absent
+    // from the discovery document (client_cert_ca is None in test_app()).
+    let (app, _state) = test_app().await;
+
+    let (status, body) = http_get(&app, "/.well-known/openid-configuration", &[]).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let doc: serde_json::Value = serde_json::from_str(&body).expect("valid JSON");
+
+    assert!(
+        doc.get("mtls_endpoint_aliases").is_none(),
+        "mtls_endpoint_aliases must be absent when no CA configured, got: {:?}",
+        doc.get("mtls_endpoint_aliases")
+    );
+    assert_eq!(
+        doc["tls_client_certificate_bound_access_tokens"], false,
+        "tls_client_certificate_bound_access_tokens must be false when no CA configured"
+    );
+}
+
+#[tokio::test]
+async fn test_discovery_tls_client_auth_in_auth_methods_with_ca() {
+    // When a client_cert_ca IS configured, token_endpoint_auth_methods_supported
+    // must include tls_client_auth and self_signed_tls_client_auth.
+    //
+    // Build a fresh AppState with a CA set — test_app() sets client_cert_ca: None
+    // so we construct AppState directly here.
+    use crate::services::oidc::discovery::build_discovery_document;
+    use crate::test_utils::{test_config, test_db};
+    use arc_swap::ArcSwap;
+    use std::sync::Arc;
+
+    let pool = test_db().await;
+    let config = test_config();
+    let rp_origin = url::Url::parse(&config.base_url).expect("base_url");
+    let webauthn = webauthn_rs::WebauthnBuilder::new(&config.rp_id, &rp_origin)
+        .expect("WebauthnBuilder")
+        .rp_name(&config.rp_name)
+        .build()
+        .expect("Webauthn");
+
+    let oidc_key = crate::services::oidc::OidcSigningKey::generate().expect("oidc key");
+    let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
+        .expect("CA generation");
+
+    let crypto: Arc<dyn crate::crypto::document_crypto::DocumentCrypto> =
+        Arc::new(crate::crypto::document_crypto::PlaintextDocumentCrypto);
+    let store = crate::db::store::DocumentStore::new(pool.clone(), crypto.clone());
+    let audit = crate::db::audit::AuditStore::new(pool.clone(), crypto);
+
+    let state = Arc::new(crate::AppState {
+        db: pool,
+        store,
+        audit,
+        config: Arc::new(ArcSwap::from_pointee(config)),
+        webauthn,
+        ssh_ca: None,
+        client_cert_ca: Some(ca),
+        oidc_key,
+        oidc_rsa_key: None,
+        state_signer: crate::crypto::jwt::StateTokenSigner::local(
+            b"test_jwt_secret_must_be_at_least_32_characters_long".to_vec(),
+        ),
+        github_app: None,
+        http_client: reqwest::Client::new(),
+        session_cache: crate::db::SessionCache::new(10_000, 30),
+        upstream_idp: None,
+    });
+
+    let doc = build_discovery_document(&state);
+
+    assert!(
+        doc.tls_client_certificate_bound_access_tokens,
+        "tls_client_certificate_bound_access_tokens must be true when CA is configured"
+    );
+    assert!(
+        doc.token_endpoint_auth_methods_supported
+            .iter()
+            .any(|m| m == "tls_client_auth"),
+        "tls_client_auth must appear in token_endpoint_auth_methods_supported"
+    );
+    assert!(
+        doc.token_endpoint_auth_methods_supported
+            .iter()
+            .any(|m| m == "self_signed_tls_client_auth"),
+        "self_signed_tls_client_auth must appear in token_endpoint_auth_methods_supported"
+    );
+    assert!(
+        doc.mtls_endpoint_aliases.is_some(),
+        "mtls_endpoint_aliases must be present when CA is configured"
+    );
+}

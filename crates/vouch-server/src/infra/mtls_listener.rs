@@ -23,10 +23,18 @@ use tokio_rustls::TlsAcceptor;
 
 /// DER-encoded peer client certificate extracted from TLS handshake.
 ///
-/// Injected into request extensions by the mTLS middleware layer so
+/// Injected as a connection extension via [`axum::extract::ConnectInfo`] so
 /// handlers can extract the client certificate for authentication.
 #[derive(Clone, Debug)]
-pub(crate) struct PeerClientCert(#[allow(dead_code)] pub Option<Vec<u8>>);
+pub(crate) struct PeerClientCert(pub Option<Vec<u8>>);
+
+impl axum::extract::connect_info::Connected<axum::serve::IncomingStream<'_, MtlsListener>>
+    for PeerClientCert
+{
+    fn connect_info(stream: axum::serve::IncomingStream<'_, MtlsListener>) -> Self {
+        Self(stream.io().peer_cert_der.clone())
+    }
+}
 
 /// TLS stream with extracted peer certificate.
 ///
@@ -36,27 +44,7 @@ pub(crate) struct PeerClientCert(#[allow(dead_code)] pub Option<Vec<u8>>);
 pub(crate) struct MtlsStream {
     inner: tokio_rustls::server::TlsStream<TcpStream>,
     /// DER-encoded leaf client certificate, if the client presented one.
-    #[allow(dead_code)]
     peer_cert_der: Option<Vec<u8>>,
-    /// Remote address for `ConnectInfo` compatibility.
-    #[allow(dead_code)]
-    remote_addr: SocketAddr,
-}
-
-impl MtlsStream {
-    /// Get the peer certificate DER bytes, if present.
-    #[must_use]
-    #[allow(dead_code)]
-    pub(crate) fn peer_cert_der(&self) -> Option<&[u8]> {
-        self.peer_cert_der.as_deref()
-    }
-
-    /// Get the remote socket address.
-    #[must_use]
-    #[allow(dead_code)]
-    pub(crate) fn remote_addr(&self) -> SocketAddr {
-        self.remote_addr
-    }
 }
 
 impl AsyncRead for MtlsStream {
@@ -155,7 +143,6 @@ impl Listener for MtlsListener {
             let stream = MtlsStream {
                 inner: tls_stream,
                 peer_cert_der,
-                remote_addr,
             };
 
             return (stream, remote_addr);
@@ -206,51 +193,6 @@ pub(crate) fn build_mtls_server_config(
     Ok(Arc::new(config))
 }
 
-/// Tower middleware layer that injects [`PeerClientCert`] into request
-/// extensions from the connection's [`MtlsStream`].
-///
-/// This is applied to the mTLS router so handlers can extract the
-/// client certificate via `Extension<PeerClientCert>`.
-#[derive(Clone)]
-pub(crate) struct PeerCertLayer;
-
-impl<S> tower::Layer<S> for PeerCertLayer {
-    type Service = PeerCertService<S>;
-
-    fn layer(&self, inner: S) -> Self::Service {
-        PeerCertService { inner }
-    }
-}
-
-/// Service that injects peer certificate from connection extensions.
-#[derive(Clone)]
-pub(crate) struct PeerCertService<S> {
-    inner: S,
-}
-
-impl<S, B> tower::Service<axum::http::Request<B>> for PeerCertService<S>
-where
-    S: tower::Service<axum::http::Request<B>>,
-{
-    type Response = S::Response;
-    type Error = S::Error;
-    type Future = S::Future;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, mut req: axum::http::Request<B>) -> Self::Future {
-        // The PeerClientCert extension is injected by the tap_io callback
-        // on the mTLS listener (see serve.rs integration).
-        // If not present, insert None so handlers always have the extension.
-        if req.extensions().get::<PeerClientCert>().is_none() {
-            req.extensions_mut().insert(PeerClientCert(None));
-        }
-        self.inner.call(req)
-    }
-}
-
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -265,5 +207,104 @@ mod tests {
         let empty = PeerClientCert(None);
         let cloned_empty = empty.clone();
         assert!(cloned_empty.0.is_none());
+    }
+
+    /// Build a self-signed server cert and PKCS#8 key for testing.
+    ///
+    /// Returns `(cert_der_bytes, pkcs8_der_bytes)`.
+    fn make_self_signed_server_cert() -> (Vec<u8>, Vec<u8>) {
+        use der::{Decode, Encode};
+        use p256::ecdsa::SigningKey;
+        use p256::pkcs8::EncodePrivateKey;
+        use spki::EncodePublicKey;
+        use x509_cert::builder::{Builder as _, CertificateBuilder, Profile};
+        use x509_cert::name::RdnSequence;
+        use x509_cert::serial_number::SerialNumber;
+        use x509_cert::time::Validity;
+
+        let key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+
+        // Build CN-only subject
+        let cn_oid = der::oid::ObjectIdentifier::new_unwrap("2.5.4.3");
+        let cn_value = der::asn1::Utf8StringRef::new("test.example.com").expect("CN");
+        let atv = x509_cert::attr::AttributeTypeAndValue {
+            oid: cn_oid,
+            value: der::asn1::Any::from(cn_value),
+        };
+        let mut rdn_set = der::asn1::SetOfVec::new();
+        rdn_set.insert(atv).expect("insert RDN");
+        let subject = RdnSequence(vec![x509_cert::name::RelativeDistinguishedName(rdn_set)]);
+
+        let validity =
+            Validity::from_now(core::time::Duration::from_secs(86400)).expect("validity");
+        let serial = SerialNumber::new(&[1u8]).expect("serial");
+        let spki_der = key.verifying_key().to_public_key_der().expect("spki DER");
+        let spki =
+            spki::SubjectPublicKeyInfoOwned::from_der(spki_der.as_ref()).expect("parse spki");
+
+        let builder = CertificateBuilder::new(
+            Profile::Leaf {
+                issuer: subject.clone(),
+                enable_key_agreement: false,
+                enable_key_encipherment: false,
+            },
+            serial,
+            validity,
+            subject,
+            spki,
+            &key,
+        )
+        .expect("builder");
+
+        let cert = builder
+            .build::<p256::ecdsa::DerSignature>()
+            .expect("build cert");
+        let cert_der = cert.to_der().expect("cert DER");
+
+        let pkcs8_der = key.to_pkcs8_der().expect("PKCS#8 DER");
+        let pkcs8_bytes = pkcs8_der.as_bytes().to_vec();
+
+        (cert_der, pkcs8_bytes)
+    }
+
+    /// `build_mtls_server_config` with a valid CA cert and server cert/key must succeed.
+    #[test]
+    fn test_build_mtls_server_config_valid() {
+        // Generate a CA
+        let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
+            .expect("CA generation");
+        let ca_cert_der = ca.ca_cert_der();
+
+        // Generate a self-signed server cert and private key
+        let (cert_der, pkcs8_der) = make_self_signed_server_cert();
+
+        let server_cert = rustls::pki_types::CertificateDer::from(cert_der);
+        let server_key = rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8_der.into());
+
+        let result = build_mtls_server_config(vec![server_cert], server_key, ca_cert_der);
+
+        assert!(
+            result.is_ok(),
+            "valid CA + server cert must succeed, got: {:?}",
+            result.err()
+        );
+    }
+
+    /// `build_mtls_server_config` with garbage CA cert bytes must return an error.
+    #[test]
+    fn test_build_mtls_server_config_invalid_ca() {
+        let (cert_der, pkcs8_der) = make_self_signed_server_cert();
+
+        let server_cert = rustls::pki_types::CertificateDer::from(cert_der);
+        let server_key = rustls::pki_types::PrivateKeyDer::Pkcs8(pkcs8_der.into());
+
+        // Pass garbage bytes as the CA cert — should fail to parse or add to trust store
+        let garbage_ca = b"this is not a valid certificate";
+        let result = build_mtls_server_config(vec![server_cert], server_key, garbage_ca);
+
+        assert!(
+            result.is_err(),
+            "garbage CA cert must cause build_mtls_server_config to fail"
+        );
     }
 }

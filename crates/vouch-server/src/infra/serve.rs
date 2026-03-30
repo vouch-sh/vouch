@@ -139,8 +139,7 @@ pub async fn serve(components: ServerComponents, app: Router) -> Result<()> {
                     Some(handle)
                 }
                 Err(e) => {
-                    tracing::error!("Failed to start mTLS listener: {e:#}");
-                    None
+                    return Err(e.context("Failed to start mTLS listener"));
                 }
             }
         } else {
@@ -296,7 +295,7 @@ fn start_mtls_listener(
     app: Router,
     shutdown_token: CancellationToken,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-    use super::mtls_listener::{MtlsListener, PeerCertLayer, build_mtls_server_config};
+    use super::mtls_listener::{MtlsListener, PeerClientCert, build_mtls_server_config};
 
     // Parse server cert/key for the mTLS listener (same identity)
     let (certs, key) = super::tls::parse_server_cert_and_key(config)?;
@@ -311,9 +310,6 @@ fn start_mtls_listener(
     let mtls_config = build_mtls_server_config(certs, key, ca_cert_der)?;
     let mtls_config_swap = std::sync::Arc::new(arc_swap::ArcSwap::from(mtls_config));
 
-    // Apply peer cert middleware to the router
-    let mtls_app = app.layer(PeerCertLayer);
-
     let handle = tokio::spawn(async move {
         let tcp = match tokio::net::TcpListener::bind(addr).await {
             Ok(listener) => listener,
@@ -324,9 +320,12 @@ fn start_mtls_listener(
         };
 
         let listener = MtlsListener::new(tcp, mtls_config_swap);
-        if let Err(e) = axum::serve(listener, mtls_app)
-            .with_graceful_shutdown(shutdown_token.cancelled_owned())
-            .await
+        if let Err(e) = axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<PeerClientCert>(),
+        )
+        .with_graceful_shutdown(shutdown_token.cancelled_owned())
+        .await
         {
             tracing::error!("mTLS server error: {e}");
         }

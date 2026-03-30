@@ -50,9 +50,15 @@ pub async fn issue_ssh_certificate(
     }
 
     // Validate token and get user email
-    let (_token, user_email) =
-        extract_resource_token_with_email(&state, &headers, &jar, method.as_str(), uri.path())
-            .await?;
+    let (_token, user_email) = extract_resource_token_with_email(
+        &state,
+        &headers,
+        &jar,
+        method.as_str(),
+        uri.path(),
+        None,
+    )
+    .await?;
 
     // Certificate validity matches session duration
     let valid_seconds = state.config().session_hours * 3600;
@@ -258,7 +264,8 @@ pub async fn get_aws_token(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AwsTokenResponse>, ServiceError> {
     // Single auth + user lookup (avoids duplicate get_user_by_id)
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token =
+        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     // Get user record once — extract both email and org_id
     let user = db::get_user_by_id(&state.store, &token.sub)
@@ -370,7 +377,8 @@ pub async fn get_kubernetes_token(
     State(state): State<Arc<AppState>>,
     Query(query): Query<K8sTokenQuery>,
 ) -> Result<Json<K8sTokenResponse>, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token =
+        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     let user = db::get_user_by_id(&state.store, &token.sub)
         .await
@@ -482,7 +490,8 @@ pub async fn get_github_status(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<GitHubStatusResponse>, ServiceError> {
     // Validate token
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token =
+        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     // Get user
     let user = db::get_user_by_id(&state.store, &token.sub)
@@ -558,7 +567,8 @@ pub async fn get_github_token(
     })?;
 
     // Validate token
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token =
+        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     // Get user
     let user = db::get_user_by_id(&state.store, &token.sub)

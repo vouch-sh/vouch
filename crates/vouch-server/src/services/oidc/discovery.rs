@@ -258,6 +258,10 @@ fn build_mtls_aliases(state: &Arc<AppState>, base_url: &str) -> Option<MtlsEndpo
             let _ = url.set_port(Some(config.mtls_port));
             url.to_string().trim_end_matches('/').to_string()
         } else {
+            tracing::warn!(
+                "Could not parse base_url '{}' for mTLS aliases, using port append",
+                base_url
+            );
             format!("{base_url}:{}", config.mtls_port)
         }
     });

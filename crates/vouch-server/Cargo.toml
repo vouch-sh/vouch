@@ -65,10 +65,10 @@ rustls-pemfile = { workspace = true, features = ["std"] }
 sea-query = { workspace = true, features = ["backend-sqlite", "backend-postgres", "derive"] }
 sea-query-binder = { workspace = true, features = ["sqlx-sqlite", "sqlx-postgres", "runtime-tokio"] }
 secrecy = { workspace = true, features = ["serde"] }
-sha2 = { workspace = true, features = ["oid"] }
 serde = { workspace = true, features = ["std", "derive"] }
 serde_json = { workspace = true, features = ["std"] }
 serde_urlencoded = { workspace = true }
+sha2 = { workspace = true, features = ["oid"] }
 signature = { workspace = true }
 spki = { workspace = true, features = ["std"] }
 sqlx = { workspace = true, features = ["runtime-tokio", "migrate", "derive", "macros", "sqlite", "postgres", "tls-rustls-aws-lc-rs"] }

@@ -22,8 +22,20 @@ use x509_cert::ext::pkix::BasicConstraints;
 use x509_cert::name::RdnSequence;
 use x509_cert::serial_number::SerialNumber;
 use x509_cert::time::Validity;
+use zeroize::Zeroizing;
 
 use super::kms_signer::KmsSignerP256;
+
+/// Common Name OID (2.5.4.3).
+const CN_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.4.3");
+/// ECDSA with SHA-256 algorithm OID (1.2.840.10045.4.3.2).
+const ECDSA_SHA256_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
+/// Basic Constraints extension OID (2.5.29.19).
+const BASIC_CONSTRAINTS_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("2.5.29.19");
+/// EC Public Key algorithm OID (1.2.840.10045.2.1).
+const EC_PUBLIC_KEY_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
+/// P-256 curve OID (1.2.840.10045.3.1.7).
+const P256_OID: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
 
 /// Client Certificate Authority.
 ///
@@ -35,8 +47,8 @@ pub enum ClientCertCa {
     Local {
         /// P-256 signing key (used for x509 certificate signing).
         signing_key: SigningKey,
-        /// PKCS#8 DER bytes (for serialization if needed).
-        pkcs8_der: Vec<u8>,
+        /// PKCS#8 DER bytes (zeroized on drop).
+        pkcs8_der: Zeroizing<Vec<u8>>,
         /// Self-signed CA certificate (DER-encoded).
         ca_cert_der: Vec<u8>,
     },
@@ -103,7 +115,7 @@ impl ClientCertCa {
                     decode_pem_cert(cert).context("Failed to decode client cert CA certificate")?;
                 Ok(Self::Local {
                     signing_key,
-                    pkcs8_der,
+                    pkcs8_der: Zeroizing::new(pkcs8_der),
                     ca_cert_der,
                 })
             }
@@ -119,7 +131,7 @@ impl ClientCertCa {
         let signing_key = SigningKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
         let pkcs8_der = p256::pkcs8::EncodePrivateKey::to_pkcs8_der(&signing_key)
             .map_err(|e| anyhow::anyhow!("Failed to encode CA key to PKCS#8: {e}"))?;
-        let pkcs8_bytes = pkcs8_der.as_bytes().to_vec();
+        let pkcs8_bytes = Zeroizing::new(pkcs8_der.as_bytes().to_vec());
 
         let ca_cert_der = build_ca_cert_local(&signing_key, "Vouch Client CA", 3650)?;
 
@@ -145,7 +157,7 @@ impl ClientCertCa {
     ///
     /// Creates an X.509 certificate for the given subject, signed by
     /// this CA.
-    pub fn sign_client_cert(&self, subject_cn: &str, validity_days: u32) -> Result<Vec<u8>> {
+    pub async fn sign_client_cert(&self, subject_cn: &str, validity_days: u32) -> Result<Vec<u8>> {
         let subject = build_dn(subject_cn)?;
         let validity = build_validity(validity_days)?;
         let serial = generate_serial()?;
@@ -166,7 +178,7 @@ impl ClientCertCa {
             } => {
                 let issuer_cert = x509_cert::Certificate::from_der(ca_cert_der)
                     .context("Failed to parse CA certificate")?;
-                sign_client_cert_kms(signer, &issuer_cert, subject, validity, serial)
+                sign_client_cert_kms(signer, &issuer_cert, subject, validity, serial).await
             }
         }
     }
@@ -213,7 +225,7 @@ pub(crate) fn build_ca_cert_local(
 /// Constructs the TBS certificate manually and signs with KMS,
 /// because `CertificateBuilder` requires `Keypair` which KMS
 /// signers cannot implement (no local key material).
-pub(crate) fn build_ca_cert_kms(
+pub(crate) async fn build_ca_cert_kms(
     signer: &KmsSignerP256,
     cn: &str,
     validity_days: u32,
@@ -233,6 +245,7 @@ pub(crate) fn build_ca_cert_kms(
         spki,
         true,
     )
+    .await
 }
 
 /// Encode a DER-encoded certificate as PEM.
@@ -244,16 +257,18 @@ pub(crate) fn cert_der_to_pem(der: &[u8]) -> Result<String> {
 }
 
 /// Encode PKCS#8 DER private key bytes as PEM.
-pub(crate) fn key_der_to_pem(der: &[u8]) -> String {
+pub(crate) fn key_der_to_pem(der: &[u8]) -> Result<String> {
     use base64::Engine;
     let b64 = base64::engine::general_purpose::STANDARD.encode(der);
     let mut pem = String::from("-----BEGIN PRIVATE KEY-----\n");
     for chunk in b64.as_bytes().chunks(64) {
-        pem.push_str(std::str::from_utf8(chunk).unwrap_or_default());
+        let s = std::str::from_utf8(chunk)
+            .map_err(|e| anyhow::anyhow!("Invalid UTF-8 in base64 output: {e}"))?;
+        pem.push_str(s);
         pem.push('\n');
     }
     pem.push_str("-----END PRIVATE KEY-----\n");
-    pem
+    Ok(pem)
 }
 
 // -----------------------------------------------------------------------
@@ -294,7 +309,7 @@ fn sign_client_cert_local(
 }
 
 /// Sign a client certificate using KMS.
-fn sign_client_cert_kms(
+async fn sign_client_cert_kms(
     signer: &KmsSignerP256,
     issuer_cert: &x509_cert::Certificate,
     subject: RdnSequence,
@@ -313,6 +328,7 @@ fn sign_client_cert_kms(
         client_spki,
         false,
     )
+    .await
 }
 
 // -----------------------------------------------------------------------
@@ -332,11 +348,10 @@ fn verifying_key_to_spki(
 
 /// Build a Distinguished Name with a Common Name.
 fn build_dn(cn: &str) -> Result<RdnSequence> {
-    let cn_oid = ObjectIdentifier::new_unwrap("2.5.4.3");
     let cn_value =
         der::asn1::Utf8StringRef::new(cn).map_err(|e| anyhow::anyhow!("Invalid CN value: {e}"))?;
     let atv = x509_cert::attr::AttributeTypeAndValue {
-        oid: cn_oid,
+        oid: CN_OID,
         value: der::asn1::Any::from(cn_value),
     };
     let mut rdn = SetOfVec::new();
@@ -377,7 +392,7 @@ fn generate_serial() -> Result<SerialNumber> {
 ///
 /// Constructs `TbsCertificate`, DER-encodes it, signs with KMS,
 /// and assembles the final `Certificate`.
-fn build_and_sign_cert_kms(
+async fn build_and_sign_cert_kms(
     signer: &KmsSignerP256,
     serial: SerialNumber,
     validity: Validity,
@@ -388,9 +403,8 @@ fn build_and_sign_cert_kms(
 ) -> Result<Vec<u8>> {
     use x509_cert::ext::Extension;
 
-    let ecdsa_sha256_oid = ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2");
     let sig_alg = spki::AlgorithmIdentifierOwned {
-        oid: ecdsa_sha256_oid,
+        oid: ECDSA_SHA256_OID,
         parameters: None,
     };
 
@@ -401,7 +415,7 @@ fn build_and_sign_cert_kms(
     };
     let bc_der = bc.to_der().context("Failed to encode basic constraints")?;
     let bc_ext = Extension {
-        extn_id: ObjectIdentifier::new_unwrap("2.5.29.19"),
+        extn_id: BASIC_CONSTRAINTS_OID,
         critical: true,
         extn_value: der::asn1::OctetString::new(bc_der)
             .map_err(|e| anyhow::anyhow!("Failed to wrap BC in OctetString: {e}"))?,
@@ -422,10 +436,9 @@ fn build_and_sign_cert_kms(
 
     let tbs_der = tbs.to_der().context("Failed to encode TBS certificate")?;
 
-    // Sign with KMS (blocking on async — acceptable for provisioning)
-    let handle = tokio::runtime::Handle::current();
-    let signature_bytes = handle
-        .block_on(signer.sign_raw(&tbs_der))
+    let signature_bytes = signer
+        .sign_raw(&tbs_der)
+        .await
         .context("KMS certificate signing failed")?;
 
     let signature = der::asn1::BitString::from_bytes(&signature_bytes)
@@ -445,12 +458,9 @@ fn build_and_sign_cert_kms(
 ///
 /// Used for KMS path where we only have the raw uncompressed point.
 fn build_ec_spki(uncompressed_point: &[u8]) -> Result<spki::SubjectPublicKeyInfoOwned> {
-    let ec_public_key_oid = ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
-    let p256_oid = ObjectIdentifier::new_unwrap("1.2.840.10045.3.1.7");
-
-    let ec_params = der::asn1::AnyRef::from(&p256_oid);
+    let ec_params = der::asn1::AnyRef::from(&P256_OID);
     let algorithm = spki::AlgorithmIdentifierOwned {
-        oid: ec_public_key_oid,
+        oid: EC_PUBLIC_KEY_OID,
         parameters: Some(der::asn1::Any::from(ec_params)),
     };
 
@@ -488,7 +498,12 @@ fn decode_pem_key(pem_content: &str) -> Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
+#[allow(
+    clippy::expect_used,
+    clippy::unwrap_used,
+    clippy::panic,
+    clippy::indexing_slicing
+)]
 mod tests {
     use super::*;
 
@@ -511,8 +526,9 @@ mod tests {
             .extensions
             .as_ref()
             .expect("CA cert should have extensions");
-        let bc_oid = ObjectIdentifier::new_unwrap("2.5.29.19");
-        let has_bc = extensions.iter().any(|ext| ext.extn_id == bc_oid);
+        let has_bc = extensions
+            .iter()
+            .any(|ext| ext.extn_id == BASIC_CONSTRAINTS_OID);
         assert!(has_bc, "CA cert should have basic constraints");
     }
 
@@ -523,11 +539,12 @@ mod tests {
         assert!(!ca.ca_cert_der().is_empty(), "CA cert should not be empty");
     }
 
-    #[test]
-    fn test_sign_client_cert() {
+    #[tokio::test]
+    async fn test_sign_client_cert() {
         let ca = ClientCertCa::generate().expect("CA generation");
         let cert_der = ca
             .sign_client_cert("test-client", 365)
+            .await
             .expect("Client cert signing failed");
 
         let cert =
@@ -540,9 +557,8 @@ mod tests {
 
         // Client cert should NOT be a CA
         if let Some(extensions) = &cert.tbs_certificate.extensions {
-            let bc_oid = ObjectIdentifier::new_unwrap("2.5.29.19");
             for ext in extensions {
-                if ext.extn_id == bc_oid {
+                if ext.extn_id == BASIC_CONSTRAINTS_OID {
                     let bc =
                         BasicConstraints::from_der(ext.extn_value.as_bytes()).expect("parse BC");
                     assert!(!bc.ca, "Client cert should not be CA");
@@ -578,5 +594,68 @@ mod tests {
 
         let decoded = decode_pem_cert(&pem).expect("PEM decode");
         assert_eq!(decoded, der);
+    }
+
+    /// Load a CA from exported PEM key and cert, then verify it can sign.
+    #[tokio::test]
+    async fn test_load_or_generate_from_pem() {
+        let ca = ClientCertCa::generate().expect("generate CA");
+        let cert_pem = cert_der_to_pem(ca.ca_cert_der()).expect("cert PEM");
+        let key_pem = match &ca {
+            ClientCertCa::Local { pkcs8_der, .. } => key_der_to_pem(pkcs8_der).expect("key PEM"),
+            _ => panic!("expected Local variant"),
+        };
+
+        // Reload from PEM
+        let loaded =
+            ClientCertCa::load_or_generate(Some(&key_pem), Some(&cert_pem)).expect("load from PEM");
+
+        // Verify the loaded CA can sign a new client cert
+        let client_cert = loaded
+            .sign_client_cert("pem-test", 1)
+            .await
+            .expect("sign cert");
+        assert!(!client_cert.is_empty(), "signed cert must not be empty");
+
+        // Verify the signed cert parses correctly
+        let parsed = x509_cert::Certificate::from_der(&client_cert).expect("parse client cert");
+        assert!(
+            parsed
+                .tbs_certificate
+                .subject
+                .to_string()
+                .contains("pem-test"),
+            "subject should contain CN"
+        );
+    }
+
+    /// Whitespace-only key PEM should fall through to ephemeral generation.
+    #[test]
+    fn test_load_or_generate_whitespace_key_generates() {
+        // key.trim().is_empty() triggers the generate() path
+        let ca = ClientCertCa::load_or_generate(Some("   "), Some("any-cert"))
+            .expect("should generate ephemeral CA");
+        assert!(
+            !ca.ca_cert_der().is_empty(),
+            "ephemeral CA cert must not be empty"
+        );
+    }
+
+    /// `key_der_to_pem` output must have the standard PEM markers.
+    #[test]
+    fn test_key_der_to_pem() {
+        let ca = ClientCertCa::generate().expect("generate CA");
+        let key_pem = match &ca {
+            ClientCertCa::Local { pkcs8_der, .. } => key_der_to_pem(pkcs8_der).expect("key PEM"),
+            _ => panic!("expected Local variant"),
+        };
+        assert!(
+            key_pem.starts_with("-----BEGIN PRIVATE KEY-----"),
+            "PEM must start with BEGIN header, got: {key_pem:.40}"
+        );
+        assert!(
+            key_pem.contains("-----END PRIVATE KEY-----"),
+            "PEM must contain END header"
+        );
     }
 }

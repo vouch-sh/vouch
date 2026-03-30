@@ -34,6 +34,7 @@ pub struct ClientCredentialsResult {
 /// * `state` - Application state
 /// * `client` - The authenticated OAuth client
 /// * `requested_scope` - Optional scope requested by the client
+/// * `mtls_cert_thumbprint` - RFC 8705 certificate thumbprint for token binding (if applicable)
 ///
 /// # Errors
 /// Returns `unauthorized_client` if the client does not have the
@@ -42,6 +43,7 @@ pub async fn exchange_client_credentials(
     state: &Arc<AppState>,
     client: &OAuthClient,
     requested_scope: Option<&str>,
+    mtls_cert_thumbprint: Option<&str>,
 ) -> ServiceResult<ClientCredentialsResult> {
     // Verify client has client_credentials in its registered grant_types
     let has_grant = client
@@ -74,7 +76,7 @@ pub async fn exchange_client_credentials(
             client_id: &client.client_id,
             scope: scope.clone(),
             dpop_jkt: None,
-            mtls_cert_thumbprint: None,
+            mtls_cert_thumbprint,
             act: None,
             audience: None,
             auth_time: None,
@@ -120,5 +122,82 @@ mod tests {
         let scope = ScopeSet::parse("openid");
         let filtered = scope.without_user_scopes();
         assert!(filtered.is_empty());
+    }
+
+    /// The issued access token must contain `cnf.x5t#S256` when
+    /// `mtls_cert_thumbprint` is supplied to `exchange_client_credentials`.
+    #[tokio::test]
+    async fn test_client_credentials_with_mtls_thumbprint() {
+        use crate::db::{CreateOAuthClientParams, RegistrationSource};
+        use crate::test_utils::test_app_state;
+
+        let state = test_app_state().await;
+
+        // Create an OAuth client with the client_credentials grant type
+        let (client_record, _client_id) = crate::db::create_oauth_client(
+            &state.store,
+            &CreateOAuthClientParams {
+                user_id: None,
+                name: "mtls-cc-test",
+                description: None,
+                application_type: crate::db::OAuthClientType::Web,
+                redirect_uris: &[],
+                access_scope: crate::db::AccessScope::Organization,
+                org_id: None,
+                resource_uris: &[],
+                token_endpoint_auth_method: None,
+                jwks: None,
+                jwks_uri: None,
+                fapi_profile: None,
+                dpop_bound_access_tokens: None,
+                grant_types: Some(&["client_credentials".to_string()]),
+                response_types: None,
+                software_id: None,
+                software_version: None,
+                registration_source: RegistrationSource::Manual,
+                registration_access_token_hash: None,
+                registration_metadata: None,
+                id_token_signed_response_alg: "ES256",
+                tls_client_auth_subject_dn: None,
+                tls_client_auth_san_dns: None,
+                tls_client_auth_san_uri: None,
+                tls_client_auth_san_ip: None,
+                tls_client_auth_san_email: None,
+                tls_client_certificate_bound_access_tokens: Some(true),
+            },
+        )
+        .await
+        .expect("create client");
+
+        let client = client_record;
+
+        let thumbprint = "test-mtls-thumbprint-xxxxxxxxxxxxxxxxxxxxxxxxxxx";
+        let result = exchange_client_credentials(&state, &client, None, Some(thumbprint))
+            .await
+            .expect("exchange_client_credentials");
+
+        // Decode the access token JWT and verify the cnf claim
+        let config = state.config();
+        let decoded = crate::services::auth::decode_token(
+            &result.access_token,
+            &state.oidc_key,
+            &config.base_url,
+        )
+        .expect("decode access token");
+
+        let cnf = match decoded {
+            crate::services::auth::DecodedToken::AccessToken(claims) => claims
+                .cnf
+                .expect("cnf claim must be present for mTLS-bound token"),
+        };
+        assert_eq!(
+            cnf.x5t_s256.as_deref(),
+            Some(thumbprint),
+            "cnf.x5t#S256 must match the supplied thumbprint"
+        );
+        assert!(
+            cnf.jkt.is_none(),
+            "cnf.jkt must be absent (DPoP not used here)"
+        );
     }
 }

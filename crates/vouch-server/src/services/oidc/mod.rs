@@ -62,7 +62,6 @@ pub mod introspection;
 pub mod jar;
 pub mod jwt_bearer;
 pub mod keys;
-#[allow(dead_code)]
 pub(crate) mod mtls;
 pub mod registration;
 pub mod resource;

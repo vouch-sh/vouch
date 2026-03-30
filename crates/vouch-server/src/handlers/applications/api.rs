@@ -40,7 +40,8 @@ pub async fn list_applications_api(
     jar: CookieJar,
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListApplicationsResponse>, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token =
+        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     let applications = db::get_oauth_clients_for_user(&state.store, &token.sub)
         .await
@@ -199,7 +200,8 @@ pub async fn create_application_api(
     }
 
     // ── Authentication — validated input is good, now check credentials ──
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token =
+        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     // Parse access scope (default to personal if not provided)
     let access_scope = req
@@ -345,7 +347,8 @@ pub async fn get_application_api(
     State(state): State<Arc<AppState>>,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<Json<ApplicationResponse>, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token =
+        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
@@ -462,7 +465,8 @@ pub async fn update_application_api(
     }
 
     // ── Authentication — validated input is good, now check credentials ──
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token =
+        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     // Get existing application
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -682,7 +686,8 @@ pub async fn delete_application_api(
     State(state): State<Arc<AppState>>,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token =
+        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
@@ -734,7 +739,8 @@ pub async fn add_secret_api(
     ValidPath(app_id): ValidPath<ValidUuid>,
     Json(req): Json<AddSecretRequest>,
 ) -> Result<(StatusCode, Json<AddSecretResponse>), ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token =
+        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
@@ -854,7 +860,8 @@ pub async fn list_secrets_api(
     State(state): State<Arc<AppState>>,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<Json<ListSecretsResponse>, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token =
+        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
@@ -916,7 +923,8 @@ pub async fn delete_secret_api(
     State(state): State<Arc<AppState>>,
     ValidPath((app_id, secret_id)): ValidPath<(ValidUuid, ValidUuid)>,
 ) -> Result<StatusCode, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token =
+        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     let client = db::get_oauth_client_by_id(&state.store, &app_id)
         .await
@@ -1037,7 +1045,8 @@ pub async fn revoke_tokens_api(
     State(state): State<Arc<AppState>>,
     ValidPath(app_id): ValidPath<ValidUuid>,
 ) -> Result<StatusCode, ServiceError> {
-    let token = extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path()).await?;
+    let token =
+        extract_resource_token(&state, &headers, &jar, method.as_str(), uri.path(), None).await?;
 
     // Verify ownership
     let client = db::get_oauth_client_by_id(&state.store, &app_id)

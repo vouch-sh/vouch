@@ -49,6 +49,9 @@ pub struct AuthCodeExchangeParams<'a> {
     pub resource: Option<&'a str>,
     /// RFC 9396 Section 6: Authorization details for downscoping.
     pub authorization_details: Option<&'a str>,
+    /// RFC 8705 Section 3: mTLS certificate thumbprint for token binding.
+    /// Only set when the client has `tls_client_certificate_bound_access_tokens = true`.
+    pub mtls_cert_thumbprint: Option<&'a str>,
 }
 
 /// Client credentials for authentication (RFC 6749 Section 2.3).
@@ -105,6 +108,8 @@ pub enum ClientAuthError {
     SecretRequired,
     /// Database error.
     DatabaseError(String),
+    /// mTLS certificate verification failed.
+    MtlsVerificationFailed(String),
 }
 
 impl ClientAuthError {
@@ -116,12 +121,13 @@ impl ClientAuthError {
                 OAuthErrorCode::InvalidRequest,
                 "Missing client_id parameter",
             ),
-            Self::InvalidClient | Self::InvalidCredentials | Self::SecretRequired => {
-                ServiceError::oauth(
-                    OAuthErrorCode::InvalidClient,
-                    "Client authentication failed",
-                )
-            }
+            Self::InvalidClient
+            | Self::InvalidCredentials
+            | Self::SecretRequired
+            | Self::MtlsVerificationFailed(_) => ServiceError::oauth(
+                OAuthErrorCode::InvalidClient,
+                "Client authentication failed",
+            ),
             Self::DatabaseError(msg) => ServiceError::Internal(msg),
         }
     }
@@ -236,7 +242,7 @@ pub async fn exchange_authorization_code(
             client_id: &auth_code.client_id,
             scope: Some(auth_code.scope.clone()),
             dpop_jkt,
-            mtls_cert_thumbprint: None,
+            mtls_cert_thumbprint: params.mtls_cert_thumbprint,
             act: None,
             audience: grants.audience.as_deref(),
             auth_time: Some(auth_code.auth_time.unwrap_or(auth_code.iat)),
@@ -775,6 +781,38 @@ async fn generate_id_token(
         .map_err(|e| ServiceError::Internal(format!("Failed to generate ID token: {e}")))
 }
 
+/// Authenticate a client using mTLS certificate (RFC 8705 Section 2).
+///
+/// Dispatches to the appropriate verification method based on the client's
+/// registered `token_endpoint_auth_method`.
+pub(crate) fn authenticate_client_mtls(
+    client: &crate::db::OAuthClient,
+    cert: &crate::services::oidc::mtls::ClientCertificate,
+) -> Result<(), ClientAuthError> {
+    match client.token_endpoint_auth_method {
+        crate::db::TokenEndpointAuthMethod::TlsClientAuth => {
+            crate::services::oidc::mtls::verify_tls_client_auth(
+                cert,
+                client.tls_client_auth_subject_dn.as_deref(),
+                client.tls_client_auth_san_dns.as_deref(),
+                client.tls_client_auth_san_email.as_deref(),
+                client.tls_client_auth_san_uri.as_deref(),
+                client.tls_client_auth_san_ip.as_deref(),
+            )
+            .map_err(|e| ClientAuthError::MtlsVerificationFailed(e.to_string()))
+        }
+        crate::db::TokenEndpointAuthMethod::SelfSignedTlsClientAuth => {
+            // TODO: Implement x5c verification against client JWKS
+            Err(ClientAuthError::MtlsVerificationFailed(
+                "self_signed_tls_client_auth verification not yet implemented".to_string(),
+            ))
+        }
+        _ => Err(ClientAuthError::MtlsVerificationFailed(
+            "client not registered for mTLS authentication".to_string(),
+        )),
+    }
+}
+
 /// Validate DPoP proof if present in the request.
 ///
 /// # Arguments
@@ -915,7 +953,7 @@ pub async fn validate_session_token(
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
 
@@ -1332,6 +1370,142 @@ mod tests {
             value.get("nonce").and_then(|v| v.as_str()),
             Some("test-nonce-value"),
             "nonce: Some should serialize as the nonce string"
+        );
+    }
+
+    // =========================================================================
+    // authenticate_client_mtls — RFC 8705 Section 2 mTLS client authentication
+    // =========================================================================
+
+    use crate::db::{AccessScope, FapiProfile, OAuthClientType, TokenEndpointAuthMethod};
+
+    fn make_mtls_client(
+        auth_method: TokenEndpointAuthMethod,
+        subject_dn: Option<&str>,
+    ) -> crate::db::OAuthClient {
+        let now = jiff::Timestamp::now();
+        crate::db::OAuthClient {
+            id: "test-mtls-id".to_string(),
+            user_id: Some("test-user".to_string()),
+            client_id: "mtls-client-id".to_string(),
+            name: "mTLS Test Client".to_string(),
+            description: None,
+            application_type: OAuthClientType::Service,
+            redirect_uris: vec![],
+            active: true,
+            created_at: now,
+            updated_at: now,
+            last_used_at: None,
+            access_scope: AccessScope::Organization,
+            org_id: None,
+            resource_uris: vec![],
+            jwks: None,
+            jwks_uri: None,
+            jwks_uri_cached_at: None,
+            jwks_uri_cache: None,
+            token_endpoint_auth_method: auth_method,
+            request_object_signing_alg: None,
+            require_signed_request_object: None,
+            fapi_profile: FapiProfile::None,
+            dpop_bound_access_tokens: false,
+            grant_types: None,
+            response_types: None,
+            software_id: None,
+            software_version: None,
+            registration_source: None,
+            registration_access_token_hash: None,
+            registration_metadata: None,
+            id_token_signed_response_alg: "RS256".to_string(),
+            tls_client_auth_subject_dn: subject_dn.map(String::from),
+            tls_client_auth_san_dns: None,
+            tls_client_auth_san_uri: None,
+            tls_client_auth_san_ip: None,
+            tls_client_auth_san_email: None,
+            tls_client_certificate_bound_access_tokens: false,
+        }
+    }
+
+    fn make_cert_with_cn(cn: &str) -> crate::services::oidc::mtls::ClientCertificate {
+        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        rt.block_on(async {
+            let ca = crate::crypto::client_cert_ca::ClientCertCa::load_or_generate(None, None)
+                .expect("CA generation");
+            let der = ca.sign_client_cert(cn, 1).await.expect("sign cert");
+            crate::services::oidc::mtls::parse_client_certificate(&der).expect("parse cert")
+        })
+    }
+
+    /// TlsClientAuth client with matching subject_dn must authenticate successfully.
+    #[test]
+    fn test_authenticate_client_mtls_tls_client_auth_matching() {
+        let cert = make_cert_with_cn("test-mtls-client");
+        let subject_dn = cert.subject_dn.as_deref().expect("cert has subject_dn");
+        let client = make_mtls_client(TokenEndpointAuthMethod::TlsClientAuth, Some(subject_dn));
+
+        let result = authenticate_client_mtls(&client, &cert);
+        assert!(
+            result.is_ok(),
+            "matching subject_dn must authenticate successfully, got: {result:?}"
+        );
+    }
+
+    /// TlsClientAuth client with non-matching subject_dn must fail authentication.
+    #[test]
+    fn test_authenticate_client_mtls_tls_client_auth_mismatch() {
+        let cert = make_cert_with_cn("actual-client");
+        let client = make_mtls_client(
+            TokenEndpointAuthMethod::TlsClientAuth,
+            Some("CN=expected-different-client"),
+        );
+
+        let result = authenticate_client_mtls(&client, &cert);
+        assert!(
+            result.is_err(),
+            "non-matching subject_dn must fail authentication"
+        );
+        assert!(
+            matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
+            "must return MtlsVerificationFailed, got: {result:?}"
+        );
+    }
+
+    /// Client with ClientSecretBasic auth method cannot use mTLS authentication.
+    #[test]
+    fn test_authenticate_client_mtls_wrong_method() {
+        let cert = make_cert_with_cn("wrong-method-client");
+        let client = make_mtls_client(TokenEndpointAuthMethod::ClientSecretBasic, None);
+
+        let result = authenticate_client_mtls(&client, &cert);
+        assert!(
+            result.is_err(),
+            "non-mTLS auth method must fail mTLS authentication"
+        );
+        assert!(
+            matches!(result, Err(ClientAuthError::MtlsVerificationFailed(_))),
+            "must return MtlsVerificationFailed for wrong auth method, got: {result:?}"
+        );
+    }
+
+    /// `SelfSignedTlsClientAuth` returns a specific "not yet implemented" error.
+    ///
+    /// The implementation is a TODO stub; this test pins the current behaviour
+    /// so that future implementors cannot accidentally merge a silent change.
+    #[test]
+    fn test_authenticate_client_mtls_self_signed_not_implemented() {
+        let cert = make_cert_with_cn("self-signed-client");
+        let client = make_mtls_client(TokenEndpointAuthMethod::SelfSignedTlsClientAuth, None);
+
+        let result = authenticate_client_mtls(&client, &cert);
+        assert!(
+            result.is_err(),
+            "SelfSignedTlsClientAuth must return an error until implemented"
+        );
+        let Err(ClientAuthError::MtlsVerificationFailed(msg)) = result else {
+            panic!("expected MtlsVerificationFailed, got a different variant");
+        };
+        assert!(
+            msg.contains("not yet implemented"),
+            "error message must mention 'not yet implemented', got: {msg}"
         );
     }
 }
