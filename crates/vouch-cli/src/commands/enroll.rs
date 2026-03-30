@@ -470,10 +470,11 @@ async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
     let challenge = start_resp.challenge.clone();
     let user_id = start_resp.user_id;
     let user_name = start_resp.user_name.clone();
-    let exclude_credentials = start_resp.exclude_credential_ids.clone();
 
     // Short timeout — the key should already be inserted from
     // the enrollment flow. Don't block the user for long.
+    // Note: exclude list is always empty here (non-empty returns
+    // early above), but we pass &[] explicitly for clarity.
     let result = fido2::spawn_fido2(move || {
         let key = YubiKey::wait_for_device(10)?;
         let pin = fido2::ensure_pin_configured(&key)?;
@@ -485,7 +486,7 @@ async fn register_current_key(server: &str, token: SecretString) -> Result<()> {
             user_id.as_bytes(),
             &user_name,
             pin.expose_secret(),
-            &exclude_credentials,
+            &[],
         )
     })
     .await?;
